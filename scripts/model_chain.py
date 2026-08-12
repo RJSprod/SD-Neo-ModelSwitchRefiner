@@ -1,0 +1,901 @@
+"""Model Chain -- cross-architecture two-stage generation for Forge Neo.
+
+Stage 1 completes an ordinary txt2img generation on the loaded checkpoint.
+Stage 2 re-encodes the finished *pixels* and runs an img2img refinement pass on
+a second checkpoint. Because the handoff is in pixel space rather than latent
+space, each model uses its own VAE and text encoder, so any A -> B pairing the
+WebUI can load will work -- SDXL -> Flux.2-Klein included.
+
+This is emphatically not a latent-space handoff, and it does not modify or
+replace the built-in Refiner, which switches the diffusion model mid-sampling
+and is therefore restricted to models sharing a latent space.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+import gradio as gr
+
+import mc_arch
+import mc_infotext
+import mc_memory
+import mc_styles
+from modules import errors, images, processing, scripts, shared
+from modules.processing import (
+    StableDiffusionProcessingImg2Img,
+    create_infotext,
+    process_images,
+)
+from modules.shared import opts, state
+from modules.ui_common import create_refresh_button, refresh_symbol
+from modules.ui_components import InputAccordion, ToolButton
+
+logger = logging.getLogger("model_chain")
+
+STAGE1_SUBFOLDER = "model-chain-stage1"
+
+_NO_MODEL = "None"
+
+
+# --------------------------------------------------------------------------- #
+# Settings
+# --------------------------------------------------------------------------- #
+
+shared.options_templates.update(
+    shared.options_section(
+        (None, "Model Chain"),
+        {
+            "model_chain_save_stage1": shared.OptionInfo(
+                False,
+                "Save Stage 1 intermediate images to disk",
+            ).info(
+                f'written to a "{STAGE1_SUBFOLDER}" subfolder of the output directory; '
+                "they never appear in the gallery"
+            ),
+            "model_chain_ram_budget_gb": shared.OptionInfo(
+                0.0,
+                "Max system RAM for model cache (GB)",
+                gr.Number,
+            ).info("0 uses a conservative default of one third of detected system RAM"),
+        },
+    )
+)
+
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+
+
+def _checkpoint_choices() -> list[str]:
+    try:
+        from modules_forge.main_entry import refresh_models
+
+        ckpts, _ = refresh_models()
+        return [_NO_MODEL] + list(ckpts)
+    except Exception:
+        logger.warning("Model Chain: failed to list checkpoints", exc_info=True)
+        return [_NO_MODEL]
+
+
+def _sampler_choices() -> list[str]:
+    from modules import sd_samplers
+
+    return [mc_infotext.INHERIT_SAMPLER] + [x.name for x in sd_samplers.visible_samplers()]
+
+
+def _resolution_note(width: int, height: int, multiplier: float, target: str) -> str:
+    """Live description of the Stage 2 output size (section 6.5)."""
+    try:
+        width, height = int(width), int(height)
+        multiplier = float(multiplier)
+    except (TypeError, ValueError):
+        return ""
+
+    if width <= 0 or height <= 0:
+        return ""
+
+    arch = mc_arch.detect_from_checkpoint_name(target)
+    out_w, out_h = mc_arch.scaled_size(width, height, multiplier, arch.alignment)
+
+    suffix = f"aligned to {arch.alignment}px"
+    if arch is not mc_arch.UNKNOWN:
+        suffix += f" for {arch.label}"
+    else:
+        suffix += " (architecture unknown)"
+
+    note = f"Stage 2 output: **{out_w} x {out_h}** — from {width} x {height}, {suffix}."
+
+    delta = mc_arch.aspect_ratio_delta((width, height), (out_w, out_h))
+    if delta > 0.01:
+        note += f" Aspect ratio shifts by {delta * 100:.1f}% to reach the grid."
+    return note
+
+
+def _architecture_notice(target: str) -> str:
+    """Warn about the Stage 1 -> Stage 2 architecture boundary (section 6.7)."""
+    if not target or target == _NO_MODEL:
+        return ""
+
+    stage2 = mc_arch.detect_from_checkpoint_name(target)
+    stage1 = mc_arch.detect_loaded()
+
+    if stage1 is mc_arch.UNKNOWN or stage2 is mc_arch.UNKNOWN or stage1.key == stage2.key:
+        return ""
+
+    return (
+        f"**Stage 1 is {stage1.label}, Stage 2 is {stage2.label}.** "
+        "LoRAs, embeddings and ControlNet units active in the main prompt are "
+        "Stage-1-architecture-specific and will **not** carry into Stage 2. "
+        "To use a LoRA during refinement, add it to the Stage 2 prompt using "
+        "`<lora:name:weight>` syntax."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Script
+# --------------------------------------------------------------------------- #
+
+
+class ScriptModelChain(scripts.Script):
+    """Two-stage pixel-space chain, registered as an alwayson script."""
+
+    def __init__(self):
+        super().__init__()
+        self._width_component = None
+        self._height_component = None
+        # Guards Stage 2's own process_images() call from re-entering this
+        # script. Stage 2 runs with p.scripts unset, so this is belt and
+        # braces -- but the cost of getting it wrong is an infinite chain.
+        self._in_stage_2 = False
+        self._armed = False
+        # Whether the host would have written this generation's images to disk,
+        # captured before Stage 1 saving is suppressed.
+        self._save_final_images = False
+
+    def title(self):
+        return "Model Chain"
+
+    def show(self, is_img2img):
+        # txt2img only: Stage 1 is a txt2img generation by definition.
+        return scripts.AlwaysVisible if not is_img2img else None
+
+    # -- UI --------------------------------------------------------------- #
+
+    def after_component(self, component, **kwargs):
+        """Capture the main width/height sliders to drive the live size readout."""
+        elem_id = kwargs.get("elem_id")
+        if elem_id == "txt2img_width":
+            self._width_component = component
+        elif elem_id == "txt2img_height":
+            self._height_component = component
+
+    def ui(self, is_img2img):
+        checkpoints = _checkpoint_choices()
+        samplers = _sampler_choices()
+        styles = mc_styles.available_styles()
+
+        with InputAccordion(False, label="Model Chain", elem_id=self.elem_id("enable")) as enabled:
+            gr.Markdown(
+                "Finishes Stage 1 on the loaded checkpoint, then re-encodes the "
+                "result and refines it with a second checkpoint. The handoff is in "
+                "**pixel space**, so the two models may use different architectures, "
+                "VAEs and text encoders."
+            )
+
+            with gr.Row():
+                target = gr.Dropdown(
+                    value=_NO_MODEL,
+                    label="Stage 2 checkpoint",
+                    choices=checkpoints,
+                    elem_id=self.elem_id("target"),
+                )
+                create_refresh_button(
+                    target,
+                    lambda: None,
+                    lambda: {"choices": _checkpoint_choices()},
+                    self.elem_id("target_refresh"),
+                )
+
+            architecture_notice = gr.Markdown("", elem_id=self.elem_id("arch_notice"))
+            residency_status = gr.Markdown("", elem_id=self.elem_id("residency"))
+
+            # -- prompt ---------------------------------------------------- #
+            with gr.Group():
+                prompt_mode = gr.Radio(
+                    choices=list(mc_infotext.PROMPT_MODES),
+                    value="Inherit",
+                    label="Stage 2 prompt",
+                    elem_id=self.elem_id("prompt_mode"),
+                )
+                gr.Markdown(
+                    "Flux-family models respond to natural-language phrasing rather "
+                    "than comma-separated tags, so a Stage 2 prompt often needs "
+                    "different wording than Stage 1. `<lora:name:weight>` tags here "
+                    "are applied against the Stage 2 model.",
+                    elem_id=self.elem_id("prompt_hint"),
+                )
+
+                prompt = gr.Textbox(
+                    label="Stage 2 positive",
+                    lines=2,
+                    placeholder="Added to (Append) or replacing (Replace) the Stage 1 prompt",
+                    elem_id=self.elem_id("prompt"),
+                    visible=False,
+                )
+                negative = gr.Textbox(
+                    label="Stage 2 negative",
+                    lines=2,
+                    elem_id=self.elem_id("negative"),
+                    visible=False,
+                )
+
+                with gr.Row():
+                    style_selection = gr.Dropdown(
+                        label="Stage 2 styles",
+                        choices=styles,
+                        value=[],
+                        multiselect=True,
+                        interactive=False,
+                        elem_id=self.elem_id("styles"),
+                        tooltip="Applied to the Stage 2 prompt; ignored in Inherit mode",
+                    )
+                    style_refresh = ToolButton(
+                        value=refresh_symbol,
+                        elem_id=self.elem_id("styles_refresh"),
+                        tooltip="Stage 2 styles: refresh",
+                    )
+
+            # -- sampling -------------------------------------------------- #
+            with gr.Group():
+                with gr.Row():
+                    denoise = gr.Slider(
+                        label="Denoise strength",
+                        minimum=0.0,
+                        maximum=1.0,
+                        step=0.01,
+                        value=0.35,
+                        elem_id=self.elem_id("denoise"),
+                        info="how much Stage 2 may alter the Stage 1 image",
+                    )
+                    size_multiplier = gr.Slider(
+                        label="Output size multiplier",
+                        minimum=1.0,
+                        maximum=2.0,
+                        step=0.05,
+                        value=1.0,
+                        elem_id=self.elem_id("size_multiplier"),
+                    )
+
+                size_note = gr.Markdown("", elem_id=self.elem_id("size_note"))
+
+                with gr.Row():
+                    steps = gr.Slider(
+                        label="Stage 2 steps",
+                        minimum=1,
+                        maximum=150,
+                        step=1,
+                        value=20,
+                        elem_id=self.elem_id("steps"),
+                    )
+                    cfg = gr.Slider(
+                        label="Stage 2 CFG scale",
+                        minimum=1.0,
+                        maximum=30.0,
+                        step=0.5,
+                        value=7.0,
+                        elem_id=self.elem_id("cfg"),
+                    )
+
+                sampler = gr.Dropdown(
+                    label="Stage 2 sampler",
+                    choices=samplers,
+                    value=mc_infotext.INHERIT_SAMPLER,
+                    elem_id=self.elem_id("sampler"),
+                )
+
+            # -- seed ------------------------------------------------------ #
+            with gr.Group():
+                seed_mode = gr.Radio(
+                    choices=list(mc_infotext.SEED_MODES),
+                    value="Inherit",
+                    label="Stage 2 seed",
+                    elem_id=self.elem_id("seed_mode"),
+                    info="Inherit reuses each image's own Stage 1 seed",
+                )
+                with gr.Row():
+                    seed_offset = gr.Number(
+                        label="Seed offset",
+                        value=0,
+                        precision=0,
+                        visible=False,
+                        elem_id=self.elem_id("seed_offset"),
+                    )
+                    fixed_seed = gr.Number(
+                        label="Fixed seed",
+                        value=-1,
+                        precision=0,
+                        visible=False,
+                        elem_id=self.elem_id("fixed_seed"),
+                    )
+
+        # -- wiring -------------------------------------------------------- #
+
+        def on_prompt_mode(mode):
+            uses_text = mode in ("Append", "Replace")
+            return (
+                gr.update(visible=uses_text),
+                gr.update(visible=uses_text),
+                # Inherit ignores styles entirely, so make that visible rather
+                # than silently dropping the selection (section 5.2).
+                gr.update(interactive=uses_text),
+            )
+
+        prompt_mode.change(
+            fn=on_prompt_mode,
+            inputs=[prompt_mode],
+            outputs=[prompt, negative, style_selection],
+            show_progress=False,
+        )
+
+        def on_seed_mode(mode):
+            return gr.update(visible=mode == "Offset"), gr.update(visible=mode == "Fixed")
+
+        seed_mode.change(
+            fn=on_seed_mode,
+            inputs=[seed_mode],
+            outputs=[seed_offset, fixed_seed],
+            show_progress=False,
+        )
+
+        def on_style_refresh(selected):
+            names = mc_styles.reload_styles()
+            kept, missing = mc_styles.prune_selection(selected)
+            if missing:
+                logger.info("Model Chain: dropped styles removed from the library: %s", ", ".join(missing))
+            return gr.update(choices=names, value=kept)
+
+        style_refresh.click(
+            fn=on_style_refresh,
+            inputs=[style_selection],
+            outputs=[style_selection],
+            show_progress=False,
+        )
+
+        def on_target_change(target_name, multiplier, width, height):
+            """Refresh the architecture notice, residency status and size readout."""
+            plan = mc_memory.plan(target_name)
+            status = plan.message
+            if plan.is_warning:
+                status = f"⚠️ {status}"
+
+            arch = mc_arch.detect_from_checkpoint_name(target_name)
+            cfg_update = gr.skip()
+            if arch is not mc_arch.UNKNOWN:
+                # Architecture-aware CFG default (section 6.4): defaulting a
+                # distilled Flux model to 7.0 produces poor output.
+                cfg_update = gr.update(value=arch.cfg)
+
+            return (
+                _architecture_notice(target_name),
+                status,
+                _resolution_note(width, height, multiplier, target_name),
+                cfg_update,
+            )
+
+        size_inputs = [target, size_multiplier]
+        if self._width_component is not None and self._height_component is not None:
+            size_inputs += [self._width_component, self._height_component]
+            target.change(
+                fn=on_target_change,
+                inputs=size_inputs,
+                outputs=[architecture_notice, residency_status, size_note, cfg],
+                show_progress=False,
+            )
+            for component in (size_multiplier, self._width_component, self._height_component):
+                component.change(
+                    fn=_resolution_note,
+                    inputs=[self._width_component, self._height_component, size_multiplier, target],
+                    outputs=[size_note],
+                    show_progress=False,
+                )
+        else:
+            # The main sliders were not found (a heavily customised UI); the
+            # size readout is simply omitted rather than showing wrong numbers.
+            logger.info("Model Chain: txt2img size sliders unavailable, live size readout disabled")
+            target.change(
+                fn=lambda name, mult: on_target_change(name, mult, 0, 0),
+                inputs=[target, size_multiplier],
+                outputs=[architecture_notice, residency_status, size_note, cfg],
+                show_progress=False,
+            )
+
+        components = {
+            "enabled": enabled,
+            "target": target,
+            "prompt_mode": prompt_mode,
+            "prompt": prompt,
+            "negative": negative,
+            "styles": style_selection,
+            "seed_mode": seed_mode,
+            "seed_offset": seed_offset,
+            "fixed_seed": fixed_seed,
+            "cfg": cfg,
+            "steps": steps,
+            "sampler": sampler,
+            "denoise": denoise,
+            "size_multiplier": size_multiplier,
+        }
+
+        try:
+            self.infotext_fields = mc_infotext.build_paste_fields(components)
+            self.paste_field_names = mc_infotext.paste_field_names()
+        except Exception:
+            errors.report("Model Chain: failed to register paste fields", exc_info=True)
+
+        return [
+            enabled,
+            target,
+            prompt_mode,
+            prompt,
+            negative,
+            style_selection,
+            seed_mode,
+            seed_offset,
+            fixed_seed,
+            cfg,
+            steps,
+            sampler,
+            denoise,
+            size_multiplier,
+        ]
+
+    # -- prompt assembly --------------------------------------------------- #
+
+    def _resolve_prompts(self, stage1_positive, stage1_negative, mode, extra_positive, extra_negative, styles):
+        """Assemble one Stage 2 prompt pair.
+
+        Order is prompt assembly -> style expansion -> (host) extra-networks
+        parsing, per section 5.4. Extra-network tags are never touched here:
+        the assembled string is handed to the normal processing pipeline, which
+        parses and strips them exactly as it does for the main prompt box.
+        """
+        if mode == "Replace":
+            positive, negative = extra_positive, extra_negative
+        elif mode == "Append":
+            positive = ", ".join(x for x in (stage1_positive.strip(), extra_positive.strip()) if x)
+            negative = ", ".join(x for x in (stage1_negative.strip(), extra_negative.strip()) if x)
+        else:  # Inherit
+            return stage1_positive, stage1_negative
+
+        return mc_styles.apply(positive, negative, styles)
+
+    # -- hooks ------------------------------------------------------------- #
+
+    def before_process(self, p, enabled, target, *args):
+        # Always reinstate a checkpoint we ourselves left swapped out, even when
+        # the extension has since been disabled -- that is cleanup of our own
+        # state, not extension behaviour.
+        try:
+            mc_memory.reinstate_pending()
+        except Exception:
+            errors.report("Model Chain: failed to reinstate the cached checkpoint", exc_info=True)
+
+        self._armed = False
+
+        if self._in_stage_2 or not enabled:
+            return
+
+        if not target or target == _NO_MODEL:
+            logger.warning("Model Chain: enabled but no Stage 2 checkpoint is selected — skipping")
+            return
+
+        if mc_memory.checkpoint_info(target) is None:
+            logger.warning('Model Chain: Stage 2 checkpoint "%s" was not found — skipping', target)
+            p.comment(f'Model Chain: checkpoint "{target}" was not found; Stage 2 was skipped.')
+            return
+
+        # The built-in Refiner swaps the UNet mid-sampling and restores the
+        # original weights in its own postprocess(), which runs after ours.
+        # If we had swapped checkpoints by then it would write Model A's UNet
+        # state dict into Model B. Refuse the combination rather than corrupt
+        # the loaded model.
+        if getattr(p, "refiner_checkpoint", None) not in (None, "", "None", "none"):
+            message = (
+                "Model Chain: the built-in Refiner is also enabled. The two cannot run "
+                "together — Model Chain was skipped for this generation."
+            )
+            logger.warning(message)
+            p.comment(message)
+            return
+
+        plan = mc_memory.plan(target)
+        logger.info("Model Chain: %s", plan.message)
+        self._armed = True
+
+    def process(
+        self,
+        p,
+        enabled,
+        target,
+        prompt_mode,
+        prompt,
+        negative,
+        styles,
+        seed_mode,
+        seed_offset,
+        fixed_seed,
+        cfg,
+        steps,
+        sampler,
+        denoise,
+        size_multiplier,
+        **kwargs,
+    ):
+        if not self._armed:
+            return
+
+        styles = list(styles or [])
+        if prompt_mode == "Inherit":
+            styles = []
+
+        # Per-image resolved prompts. create_infotext indexes list values by
+        # image index, so a prompt that varies across the batch is recorded
+        # accurately for each image rather than collapsing to image 0's.
+        total = len(p.all_prompts or [p.prompt])
+        resolved_positive, resolved_negative = [], []
+        for i in range(total):
+            stage1_positive = p.all_prompts[i] if p.all_prompts else p.prompt
+            stage1_negative = p.all_negative_prompts[i] if p.all_negative_prompts else p.negative_prompt
+            pos, neg = self._resolve_prompts(
+                stage1_positive, stage1_negative, prompt_mode, prompt, negative, styles
+            )
+            resolved_positive.append(pos)
+            resolved_negative.append(neg)
+
+        p.extra_generation_params.update(
+            mc_infotext.build_params(
+                target=target,
+                prompt_mode=prompt_mode,
+                prompt=resolved_positive,
+                negative=resolved_negative,
+                styles=styles,
+                seed_mode=seed_mode,
+                seed_offset=seed_offset,
+                fixed_seed=fixed_seed,
+                cfg=cfg,
+                steps=steps,
+                sampler=sampler,
+                denoise=denoise,
+                size_multiplier=size_multiplier,
+                stage1_size=f"{p.width}x{p.height}",
+            )
+        )
+
+        # Stage 1 output is an intermediate: keep it out of the gallery and out
+        # of the normal output folder (section 3.4). Saving is taken over by
+        # postprocess() so the refined images carry the right infotext.
+        self._save_final_images = p.save_samples()
+        p.do_not_save_samples = True
+        p.do_not_save_grid = True
+
+    # -- Stage 2 ----------------------------------------------------------- #
+
+    def postprocess(
+        self,
+        p,
+        processed,
+        enabled,
+        target,
+        prompt_mode,
+        prompt,
+        negative,
+        styles,
+        seed_mode,
+        seed_offset,
+        fixed_seed,
+        cfg,
+        steps,
+        sampler,
+        denoise,
+        size_multiplier,
+        **kwargs,
+    ):
+        if not self._armed or self._in_stage_2:
+            return
+
+        self._armed = False
+
+        try:
+            self._run_stage_2(
+                p,
+                processed,
+                target=target,
+                prompt_mode=prompt_mode,
+                extra_positive=prompt,
+                extra_negative=negative,
+                styles=list(styles or []),
+                seed_mode=seed_mode,
+                seed_offset=int(seed_offset or 0),
+                fixed_seed=int(fixed_seed if fixed_seed is not None else -1),
+                cfg=float(cfg),
+                steps=int(steps),
+                sampler=sampler,
+                denoise=float(denoise),
+                size_multiplier=float(size_multiplier),
+            )
+        except Exception:
+            errors.report("Model Chain: Stage 2 failed; returning the unrefined Stage 1 images", exc_info=True)
+            processed.comments += "\nModel Chain: Stage 2 failed — these images are unrefined Stage 1 output."
+            self._save_as_final(p, processed)
+
+    def _collect_stage_1(self, processed) -> list:
+        """The N real Stage 1 images, excluding any grid."""
+        start = processed.index_of_first_image
+        count = len(processed.all_seeds)
+        return list(processed.images[start : start + count])
+
+    def _run_stage_2(
+        self,
+        p,
+        processed,
+        *,
+        target,
+        prompt_mode,
+        extra_positive,
+        extra_negative,
+        styles,
+        seed_mode,
+        seed_offset,
+        fixed_seed,
+        cfg,
+        steps,
+        sampler,
+        denoise,
+        size_multiplier,
+    ):
+        stage1_images = self._collect_stage_1(processed)
+        if not stage1_images:
+            return
+
+        if prompt_mode == "Inherit":
+            styles = []
+
+        # Interrupted during Stage 1: abort before any model switch and hand
+        # back what Stage 1 produced, clearly labelled (section 3.5).
+        if state.interrupted or state.stopping_generation:
+            logger.info("Model Chain: interrupted during Stage 1 — no model switch performed")
+            processed.comments += "\nModel Chain: interrupted during Stage 1 — these images are unrefined."
+            self._save_as_final(p, processed)
+            return
+
+        # Build every Stage 2 infotext now, while Model A is still loaded:
+        # create_infotext reads live model attributes, and after the switch
+        # those would describe Model B.
+        infotexts = [
+            create_infotext(p, processed.all_prompts, processed.all_seeds, processed.all_subseeds, index=i)
+            for i in range(len(stage1_images))
+        ]
+
+        if shared.opts.model_chain_save_stage1:
+            self._save_stage_1(p, processed, stage1_images, infotexts)
+
+        arch = mc_arch.detect_from_checkpoint_name(target)
+
+        # -- the one and only checkpoint switch (section 3.1) -------------- #
+        previous_checkpoint = shared.opts.sd_model_checkpoint
+        transition = mc_memory.ensure_resident(target)
+        logger.info(
+            "Model Chain: switched to %s (%s load) for %d image%s",
+            target,
+            transition,
+            len(stage1_images),
+            "" if len(stage1_images) == 1 else "s",
+        )
+
+        state.job_count = (state.job_count or 0) + len(stage1_images)
+
+        refined: list = []
+        self._in_stage_2 = True
+        try:
+            for index, image in enumerate(stage1_images):
+                if state.interrupted or state.stopping_generation:
+                    break
+                if state.skipped:
+                    state.skipped = False
+
+                state.job = f"Model Chain refine {index + 1}/{len(stage1_images)}"
+
+                seed = self._stage_2_seed(processed.all_seeds[index], seed_mode, seed_offset, fixed_seed)
+                positive, negative = self._resolve_prompts(
+                    processed.all_prompts[index],
+                    processed.all_negative_prompts[index],
+                    prompt_mode,
+                    extra_positive,
+                    extra_negative,
+                    styles,
+                )
+                width, height = mc_arch.scaled_size(
+                    image.width, image.height, size_multiplier, arch.alignment
+                )
+
+                result = self._refine_one(
+                    p,
+                    image=image,
+                    positive=positive,
+                    negative=negative,
+                    seed=seed,
+                    width=width,
+                    height=height,
+                    cfg=cfg,
+                    steps=steps,
+                    sampler=sampler,
+                    denoise=denoise,
+                )
+                refined.append(result if result is not None else image)
+        finally:
+            self._in_stage_2 = False
+            # Put the selection back so the next generation starts on Model A.
+            # Only the selection: reloading here would be a second switch.
+            mc_memory.restore_selection(previous_checkpoint)
+
+        self._finish(p, processed, stage1_images, refined, infotexts)
+
+    def _stage_2_seed(self, stage1_seed: int, mode: str, offset: int, fixed: int) -> int:
+        """Per-image seed for the refine pass (section 6.3).
+
+        Inheriting each image's own Stage 1 seed is the default and is what the
+        user gets without touching anything.
+        """
+        if mode == "Fixed":
+            return int(fixed)
+        if mode == "Offset":
+            return int(stage1_seed) + int(offset)
+        return int(stage1_seed)
+
+    def _refine_one(self, p, *, image, positive, negative, seed, width, height, cfg, steps, sampler, denoise):
+        p2 = StableDiffusionProcessingImg2Img(
+            outpath_samples=p.outpath_samples,
+            outpath_grids=p.outpath_grids,
+            prompt=positive,
+            negative_prompt=negative,
+            # Styles are already expanded into the prompt above; passing them
+            # again here would apply them twice.
+            styles=[],
+            seed=seed,
+            subseed=-1,
+            sampler_name=p.sampler_name if sampler == mc_infotext.INHERIT_SAMPLER else sampler,
+            scheduler=p.scheduler,
+            batch_size=1,
+            n_iter=1,
+            steps=steps,
+            cfg_scale=cfg,
+            width=width,
+            height=height,
+            init_images=[image],
+            denoising_strength=denoise,
+            resize_mode=0,
+        )
+
+        # Stage 2 is an independent generation, not a nested script run: no
+        # alwayson script from the Stage 1 pass carries over. Extra networks are
+        # unaffected by this -- they are handled by the core processing loop,
+        # which is exactly how <lora:...> tags in the Stage 2 prompt get parsed,
+        # applied against Model B, and deactivated afterwards.
+        p2.scripts = None
+        p2.script_args = []
+
+        # This script writes the final files itself, using Stage-1-derived
+        # infotext, so the inner call must not save anything.
+        p2.do_not_save_samples = True
+        p2.do_not_save_grid = True
+
+        try:
+            result = process_images(p2)
+        except Exception:
+            errors.report("Model Chain: a Stage 2 refine pass failed", exc_info=True)
+            return None
+        finally:
+            p2.close()
+
+        if not result.images:
+            return None
+        return result.images[result.index_of_first_image]
+
+    # -- output ------------------------------------------------------------ #
+
+    def _finish(self, p, processed, stage1_images, refined, infotexts):
+        """Assemble the final result set and write it to disk."""
+        count = len(stage1_images)
+        mixed = len(refined) < count
+
+        if mixed:
+            # Never silently return a short batch (section 3.5): pad with the
+            # unrefined remainder and say so.
+            missing = count - len(refined)
+            refined = refined + stage1_images[len(refined) :]
+            message = (
+                f"Model Chain: interrupted during Stage 2 — {len(refined) - missing} of {count} "
+                f"images were refined, the remaining {missing} are unrefined Stage 1 output."
+            )
+            logger.warning(message)
+            processed.comments += f"\n{message}"
+
+        for index, image in enumerate(refined):
+            info = infotexts[index]
+            if opts.enable_pnginfo:
+                image.info["parameters"] = info
+            if self._save_final_images:
+                images.save_image(
+                    image,
+                    p.outpath_samples,
+                    "",
+                    processed.all_seeds[index],
+                    processed.all_prompts[index],
+                    opts.samples_format,
+                    info=info,
+                    p=p,
+                )
+
+        start = processed.index_of_first_image
+        processed.images[start : start + count] = refined
+        processed.infotexts[start : start + count] = infotexts
+        if processed.infotexts:
+            processed.info = processed.infotexts[start] if len(processed.infotexts) > start else infotexts[0]
+
+    def _save_as_final(self, p, processed):
+        """Write Stage 1 images out as the final result of an aborted chain."""
+        if not self._save_final_images:
+            return
+
+        start = processed.index_of_first_image
+        for index in range(len(processed.all_seeds)):
+            position = start + index
+            if position >= len(processed.images):
+                break
+            info = processed.infotexts[position] if position < len(processed.infotexts) else ""
+            try:
+                images.save_image(
+                    processed.images[position],
+                    p.outpath_samples,
+                    "",
+                    processed.all_seeds[index],
+                    processed.all_prompts[index],
+                    opts.samples_format,
+                    info=info,
+                    p=p,
+                )
+            except Exception:
+                errors.report("Model Chain: failed to save a Stage 1 image", exc_info=True)
+
+    def _save_stage_1(self, p, processed, stage1_images, infotexts):
+        """Write Stage 1 intermediates to their own subfolder (section 3.4)."""
+        directory = os.path.join(p.outpath_samples, STAGE1_SUBFOLDER)
+        for index, image in enumerate(stage1_images):
+            try:
+                images.save_image(
+                    image,
+                    directory,
+                    "",
+                    processed.all_seeds[index],
+                    processed.all_prompts[index],
+                    opts.samples_format,
+                    info=infotexts[index],
+                    p=p,
+                )
+            except Exception:
+                errors.report("Model Chain: failed to save a Stage 1 intermediate", exc_info=True)
+
+
+def _on_script_unloaded():
+    mc_memory.release_all()
+
+
+try:
+    from modules import script_callbacks
+
+    script_callbacks.on_script_unloaded(_on_script_unloaded)
+except Exception:
+    errors.report("Model Chain: failed to register the unload callback", exc_info=True)
