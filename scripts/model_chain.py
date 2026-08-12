@@ -1081,6 +1081,15 @@ class ScriptModelChain(scripts.Script):
         state.job_count = (state.job_count or 0) + len(stage1_images)
         self._extend_progress_total(len(stage1_images) * int(steps))
 
+        # Every image in the batch is refined at the same size, so one look at
+        # the first is enough to size the pass -- and this has to happen before
+        # the loop, while there is still something to evict.
+        first = stage1_images[0]
+        stage_2_width, stage_2_height = mc_arch.scaled_size(
+            first.width, first.height, size_multiplier, arch.alignment
+        )
+        mc_memory.make_vram_room(target, modules, stage_2_width, stage_2_height)
+
         # Model B is loaded now, so its edit-mode state can finally be checked
         # against reality rather than against the dropdown's guess.
         edit_active = mc_arch.edit_is_active(arch, edit_mode)

@@ -79,7 +79,26 @@ _MAX_SLOTS = 2
 _GB = 1024**3
 
 VRAM_HEADROOM_BYTES = 1 * _GB
-"""Spare VRAM kept free for activations when judging whether two models fit."""
+"""Baseline spare VRAM kept free for activations when judging whether two models fit."""
+
+VRAM_HEADROOM_PER_MEGAPIXEL = 0.75 * _GB
+"""Additional activation allowance per megapixel of output.
+
+A flat allowance badly under-estimates a large pass: attention activations grow
+with pixel count, so a 2048x2048 refine needs several times what 1024x1024
+does. Getting this wrong is not a graceful failure -- on Windows the driver
+silently spills the overflow to system RAM over PCIe, and sampling drops from
+sub-second to tens of seconds per step with no error to explain it.
+"""
+
+
+def vram_headroom_bytes(width: int = 0, height: int = 0) -> int:
+    """Activation headroom to keep free for a pass at the given size."""
+    if width <= 0 or height <= 0:
+        return int(VRAM_HEADROOM_BYTES)
+
+    megapixels = (width * height) / 1_000_000
+    return int(VRAM_HEADROOM_BYTES + VRAM_HEADROOM_PER_MEGAPIXEL * max(megapixels - 1.0, 0.0))
 
 RAM_RESERVE_BYTES = 2 * _GB
 """System RAM never handed to the cache, so the host process cannot be OOM-killed."""
@@ -750,6 +769,73 @@ def reinstate_pending() -> bool:
 def last_refusal() -> str | None:
     """Name of the last model the cache refused, or None."""
     return _last_refusal
+
+
+def make_vram_room(target_name: str, modules=None, width: int = 0, height: int = 0) -> int:
+    """Evict other models from VRAM if the Stage 2 pass will not otherwise fit.
+
+    This is the "demote only under pressure" half of the residency policy, and
+    the warm-swap path is where it has to be applied explicitly. A warm swap
+    deliberately skips ``unload_all_models()`` so both checkpoints can stay hot
+    -- but when the incoming model plus its activations do *not* fit alongside
+    the outgoing one, leaving the outgoing one resident is actively harmful:
+    the host only frees what each individual ``load_models_gpu`` call asks for,
+    which is far less than the whole pass needs.
+
+    Freeing here goes through ``memory_management.free_memory``, which moves
+    weights to their offload device rather than discarding them, so the evicted
+    model stays in this cache and switching back to it is still warm.
+
+    Returns the number of bytes freed (0 when nothing needed doing).
+    """
+    required = file_size_bytes(target_name, modules) + vram_headroom_bytes(width, height)
+    free = free_vram_bytes()
+
+    if free <= 0:
+        return 0  # cannot query VRAM; leave the host's own management alone
+
+    if free >= required:
+        logger.info(
+            "Model Chain: %.1f GB VRAM free, %.1f GB needed — keeping both models resident",
+            free / _GB,
+            required / _GB,
+        )
+        return 0
+
+    try:
+        from backend import memory_management
+
+        evicted = memory_management.free_memory(required, memory_management.get_torch_device())
+    except Exception:
+        logger.warning("Model Chain: failed to free VRAM for Stage 2", exc_info=True)
+        return 0
+
+    after = free_vram_bytes()
+    freed = max(after - free, 0)
+    names = [type(getattr(m, "model", m)).__name__ for m in (evicted or [])]
+
+    logger.info(
+        "Model Chain: freed %.1f GB VRAM for Stage 2 (%.1f GB -> %.1f GB free, %.1f GB needed)%s",
+        freed / _GB,
+        free / _GB,
+        after / _GB,
+        required / _GB,
+        f"; offloaded {', '.join(names)}" if names else "",
+    )
+
+    if after < required:
+        logger.warning(
+            "Model Chain: still only %.1f GB VRAM free against %.1f GB needed for a "
+            "%dx%d pass. Expect the driver to spill into system memory, which is "
+            "very slow. A smaller Stage 2 size multiplier, a lower Hires. fix "
+            "upscale, or a more heavily quantised Stage 2 model would each help.",
+            after / _GB,
+            required / _GB,
+            width,
+            height,
+        )
+
+    return freed
 
 
 def clear_references() -> None:

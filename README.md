@@ -401,6 +401,25 @@ Klein checkpoint with a Qwen3 text encoder is roughly 14 GB resident, so the
 budget has to clear that. The default is 60% of system RAM, and the live
 free-RAM check still refuses anything that would push the machine into swap.
 
+**If sampling itself crawls** — tens of seconds per step where it was
+sub-second — VRAM is over-committed and the driver is spilling into system
+memory. On Windows that happens silently: no error, just a 50x slowdown. The
+console shows it as `0.00 MB usable` on a load, or `lowvram patches: N` on a
+model that should have fit. Model Chain evicts the other model from VRAM before
+Stage 2 when the pass will not fit alongside it, and warns when even that is not
+enough:
+
+```
+Model Chain: still only 2.1 GB VRAM free against 17.2 GB needed for a
+             2048x2048 pass. Expect the driver to spill into system memory...
+```
+
+Hires. fix makes this much more likely, because Stage 2 then refines at the
+upscaled size — a 2x hires pass quadruples the pixels Stage 2 has to work on,
+and attention activations grow with them. A smaller Stage 2 size multiplier, a
+lower hires upscale, or a more heavily quantised Stage 2 model each reduce the
+pressure.
+
 **If the switch is warm but still takes ten seconds**, that is weights crossing
 PCIe, and the fix is elsewhere:
 

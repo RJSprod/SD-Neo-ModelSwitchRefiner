@@ -399,6 +399,10 @@ def _install_modules() -> None:
     memory_management.get_free_memory = lambda dev=None: 8 * 1024**3
     memory_management.get_torch_device = lambda: "cuda"
     memory_management.soft_empty_cache = lambda force=False: None
+    memory_management.freed = []
+    memory_management.free_memory = (
+        lambda required, device, keep_loaded=[]: memory_management.freed.append(required) or []
+    )
     backend.memory_management = memory_management
 
     for name, module in {

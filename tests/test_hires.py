@@ -258,3 +258,124 @@ class TestProgressAccounting:
         run_chain(chain, host, p, processed, steps=4)
 
         assert host.shared.total_tqdm._tqdm.total == 0
+
+
+class TestVramHeadroom:
+    """Activation headroom has to follow the output size.
+
+    A flat allowance under-estimates a large pass badly, and on Windows the
+    overflow is spilled to system RAM rather than raising -- sampling drops
+    from sub-second to tens of seconds per step with nothing in the log to
+    explain it.
+    """
+
+    def test_a_one_megapixel_pass_uses_the_baseline(self):
+        import mc_memory
+
+        assert mc_memory.vram_headroom_bytes(1024, 1024) == pytest.approx(
+            mc_memory.VRAM_HEADROOM_BYTES, rel=0.05
+        )
+
+    def test_headroom_grows_with_the_pass_size(self):
+        import mc_memory
+
+        small = mc_memory.vram_headroom_bytes(1024, 1024)
+        large = mc_memory.vram_headroom_bytes(2048, 2048)
+        assert large > small * 2
+
+    def test_an_unknown_size_falls_back_to_the_baseline(self):
+        import mc_memory
+
+        assert mc_memory.vram_headroom_bytes(0, 0) == mc_memory.VRAM_HEADROOM_BYTES
+
+
+def memory_management_fake():
+    from backend import memory_management
+
+    return memory_management
+
+
+class TestMakeVramRoom:
+    @pytest.fixture(autouse=True)
+    def sized(self, host, monkeypatch):
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "file_size_bytes", lambda name, mods=None: 14 * 1024**3)
+        memory_management_fake().freed.clear()
+
+    def test_ample_vram_leaves_both_models_resident(self, host, monkeypatch):
+        """VRAM-first: nothing is evicted when the pass fits alongside."""
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 22 * 1024**3)
+
+        assert mc_memory.make_vram_room("klein", None, 1024, 1024) == 0
+        assert memory_management_fake().freed == []
+
+    def test_tight_vram_evicts_to_make_the_pass_fit(self, host, monkeypatch):
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 8 * 1024**3)
+
+        mc_memory.make_vram_room("klein", None, 2048, 2048)
+
+        assert memory_management_fake().freed, "nothing was evicted for a pass that does not fit"
+
+    def test_the_request_accounts_for_the_pass_size(self, host, monkeypatch):
+        """A hires-sized refine must ask for more than a 1 MP one."""
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 1 * 1024**3)
+
+        mc_memory.make_vram_room("klein", None, 1024, 1024)
+        small = memory_management_fake().freed[-1]
+
+        mc_memory.make_vram_room("klein", None, 2048, 2048)
+        large = memory_management_fake().freed[-1]
+
+        assert large > small
+
+    def test_an_unqueryable_card_is_left_to_the_host(self, host, monkeypatch):
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 0)
+
+        assert mc_memory.make_vram_room("klein", None, 2048, 2048) == 0
+        assert memory_management_fake().freed == []
+
+
+class TestStageTwoMakesRoom:
+    def test_room_is_made_once_before_the_loop(self, chain, host, image_factory, monkeypatch):
+        import mc_memory
+
+        calls = []
+        monkeypatch.setattr(
+            mc_memory, "make_vram_room",
+            lambda name, mods=None, w=0, h=0: calls.append((name, w, h)) or 0,
+        )
+
+        p = make_hires_p(host, batch_size=4)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed)
+
+        assert len(calls) == 1, "VRAM should be sized once per switch, not per image"
+
+    def test_the_size_matches_what_stage_2_will_run(self, chain, host, image_factory, monkeypatch):
+        import mc_memory
+
+        calls = []
+        monkeypatch.setattr(
+            mc_memory, "make_vram_room",
+            lambda name, mods=None, w=0, h=0: calls.append((name, w, h)) or 0,
+        )
+
+        p = make_hires_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+        processed.images = [image_factory(2048, 2048)]
+
+        run_chain(chain, host, p, processed, size_multiplier=1.0)
+
+        _, width, height = calls[0]
+        call = chain.refine_calls[0]
+        assert (width, height) == (call.width, call.height)
