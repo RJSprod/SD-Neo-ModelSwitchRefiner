@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import gradio as gr
 
 import mc_arch
 import mc_infotext
 import mc_memory
+import mc_presets
 import mc_styles
 from modules import errors, images, processing, scripts, shared
 from modules.processing import (
@@ -32,11 +34,18 @@ from modules.shared import opts, state
 from modules.ui_common import refresh_symbol
 from modules.ui_components import InputAccordion, ToolButton
 
-logger = logging.getLogger("model_chain")
+logger = mc_memory.logger
+"""Shared with the helper modules; mc_memory attaches the console handler."""
 
 STAGE1_SUBFOLDER = "model-chain-stage1"
 
 _NO_MODEL = "None"
+
+_TRANSITION_DESCRIPTIONS = {
+    "warm": "warm swap from the RAM cache, no disk read",
+    "cold": "cold load from disk",
+    "unchanged": "already loaded",
+}
 
 DEFAULT_DENOISE = 1.0
 """Full-strength Stage 2 pass by default.
@@ -65,7 +74,10 @@ shared.options_templates.update(
                 0.0,
                 "Max system RAM for model cache (GB)",
                 gr.Number,
-            ).info("0 uses a conservative default of one third of detected system RAM"),
+            ).info(
+                "0 uses a default of 60% of detected system RAM. The live free-RAM "
+                "check is the real guard, so this is a ceiling rather than a reservation"
+            ),
         },
     )
 )
@@ -240,6 +252,31 @@ class ScriptModelChain(scripts.Script):
                 "**pixel space**, so the two models may use different architectures, "
                 "VAEs and text encoders."
             )
+
+            # -- presets --------------------------------------------------- #
+            with gr.Row():
+                preset = gr.Dropdown(
+                    value=mc_presets.NONE,
+                    label="Preset",
+                    choices=mc_presets.choices(),
+                    elem_id=self.elem_id("preset"),
+                    info="selecting a preset applies it immediately",
+                )
+                preset_refresh = ToolButton(
+                    value=refresh_symbol,
+                    elem_id=self.elem_id("preset_refresh"),
+                    tooltip="Presets: refresh",
+                )
+            with gr.Row():
+                preset_name = gr.Textbox(
+                    label="Preset name",
+                    placeholder="name to save the current Stage 2 settings under",
+                    elem_id=self.elem_id("preset_name"),
+                    scale=3,
+                )
+                preset_save = gr.Button("Save", elem_id=self.elem_id("preset_save"), scale=1)
+                preset_delete = gr.Button("Delete", elem_id=self.elem_id("preset_delete"), scale=1)
+            preset_status = gr.Markdown("", elem_id=self.elem_id("preset_status"))
 
             with gr.Row():
                 target = gr.Dropdown(
@@ -571,6 +608,85 @@ class ScriptModelChain(scripts.Script):
             "edit_mode": edit_mode,
         }
 
+        # -- preset wiring ------------------------------------------------- #
+        #
+        # Ordered to match mc_presets.FIELDS so a preset's values map onto the
+        # controls positionally, the same contract ui()'s return value has with
+        # the processing hooks.
+        preset_controls = [components[name] for name in mc_presets.FIELDS]
+        preset_defaults = {name: components[name].value for name in mc_presets.FIELDS}
+
+        def on_preset_selected(name):
+            if not name or name == mc_presets.NONE:
+                return ["", *([gr.skip()] * len(preset_controls))]
+
+            values = mc_presets.get(name)
+            if values is None:
+                return [
+                    f'⚠️ Preset "{name}" no longer exists — refresh the list.',
+                    *([gr.skip()] * len(preset_controls)),
+                ]
+
+            resolved = mc_presets.apply_defaults(values, preset_defaults)
+            logger.info("Model Chain: applied preset %r", name)
+            return [
+                f'Applied preset "{name}".',
+                *[gr.update(value=resolved[field]) for field in mc_presets.FIELDS],
+            ]
+
+        preset.change(
+            fn=on_preset_selected,
+            inputs=[preset],
+            outputs=[preset_status, *preset_controls],
+            show_progress=False,
+        )
+
+        def on_preset_save(name, *values):
+            try:
+                saved = mc_presets.save(name, dict(zip(mc_presets.FIELDS, values)))
+            except mc_presets.PresetError as exc:
+                return f"⚠️ {exc}", gr.skip()
+            return (
+                f'Saved preset "{name.strip()}".',
+                gr.update(choices=[mc_presets.NONE] + saved, value=name.strip()),
+            )
+
+        preset_save.click(
+            fn=on_preset_save,
+            inputs=[preset_name, *preset_controls],
+            outputs=[preset_status, preset],
+            show_progress=False,
+        )
+
+        def on_preset_delete(name):
+            try:
+                remaining = mc_presets.delete(name)
+            except mc_presets.PresetError as exc:
+                return f"⚠️ {exc}", gr.skip()
+            return (
+                f'Deleted preset "{name}".',
+                gr.update(choices=[mc_presets.NONE] + remaining, value=mc_presets.NONE),
+            )
+
+        preset_delete.click(
+            fn=on_preset_delete,
+            inputs=[preset],
+            outputs=[preset_status, preset],
+            show_progress=False,
+        )
+
+        def on_preset_refresh(current):
+            available = mc_presets.names()
+            keep = current if current in available else mc_presets.NONE
+            return gr.update(choices=[mc_presets.NONE] + available, value=keep)
+
+        preset_refresh.click(
+            fn=on_preset_refresh,
+            inputs=[preset],
+            outputs=[preset],
+            show_progress=False,
+        )
+
         try:
             self.infotext_fields = mc_infotext.build_paste_fields(components)
             self.paste_field_names = mc_infotext.paste_field_names()
@@ -851,15 +967,26 @@ class ScriptModelChain(scripts.Script):
         previous_checkpoint = shared.opts.sd_model_checkpoint
         previous_modules = mc_memory.current_modules()
 
+        started = time.perf_counter()
         transition = mc_memory.ensure_resident(target, modules)
+        elapsed = time.perf_counter() - started
+
         logger.info(
-            "Model Chain: switched to %s%s (%s load) for %d image%s",
+            "Model Chain: switched to %s%s in %.1fs (%s) for %d image%s",
             target,
             self._describe_modules(modules),
-            transition,
+            elapsed,
+            _TRANSITION_DESCRIPTIONS.get(transition, transition),
             len(stage1_images),
             "" if len(stage1_images) == 1 else "s",
         )
+        if transition == "cold":
+            logger.info(
+                "Model Chain: %s was not in the RAM cache. If every switch reads from "
+                "disk, the cache is refusing it — check the warning above and raise "
+                '"Model Chain: max system RAM for model cache (GB)" in Settings.',
+                target,
+            )
 
         state.job_count = (state.job_count or 0) + len(stage1_images)
 

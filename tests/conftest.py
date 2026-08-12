@@ -293,6 +293,9 @@ def _install_modules() -> None:
     ui_components.InputAccordion = type("InputAccordion", (_Component,), {})
     ui_components.ToolButton = type("ToolButton", (_Component,), {})
 
+    paths = types.ModuleType("modules.paths")
+    paths.data_path = "."
+
     sd_models = types.ModuleType("modules.sd_models")
     sd_models.get_closet_checkpoint_match = lambda name: None
     sd_models.model_data = types.SimpleNamespace(
@@ -323,6 +326,7 @@ def _install_modules() -> None:
     modules.infotext_utils = infotext_utils
     modules.ui_common = ui_common
     modules.ui_components = ui_components
+    modules.paths = paths
     modules.sd_models = sd_models
     modules.sd_samplers = sd_samplers
     modules.sd_schedulers = sd_schedulers
@@ -396,6 +400,7 @@ def _install_modules() -> None:
         "modules.infotext_utils": infotext_utils,
         "modules.ui_common": ui_common,
         "modules.ui_components": ui_components,
+        "modules.paths": paths,
         "modules.sd_models": sd_models,
         "modules.sd_samplers": sd_samplers,
         "modules.sd_schedulers": sd_schedulers,

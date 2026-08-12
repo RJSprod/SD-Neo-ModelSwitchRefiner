@@ -1115,6 +1115,19 @@ class TestUiContract:
         actual = [c.elem_id.removeprefix("script_modelchain_") for c in returned]
         assert tuple(actual) == self.EXPECTED_IDS
 
+    def test_presets_cover_every_stage_2_control(self, chain):
+        """A control the preset field list misses would silently not be saved."""
+        import mc_presets
+
+        chain.script.ui(is_img2img=False)
+        assert set(mc_presets.FIELDS) == set(UI_ORDER)
+
+    def test_preset_field_order_matches_the_ui(self, chain):
+        """Preset values map onto controls positionally, so order matters."""
+        import mc_presets
+
+        assert tuple(mc_presets.FIELDS) == UI_ORDER
+
     def test_every_control_is_registered_for_pasting(self, chain):
         chain.script.ui(is_img2img=False)
         registered = {field.api for field in chain.script.infotext_fields}

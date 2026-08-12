@@ -45,6 +45,23 @@ The panel appears as a **Model Chain** accordion on the txt2img tab.
 The gallery shows only the refined Stage 2 outputs, one per image your batch
 settings would normally have produced.
 
+### Presets
+
+**Preset** saves and recalls a complete Stage 2 configuration — checkpoint, VAE
+and text encoder, prompt mode and text, styles, seed handling, sampling, size and
+edit mode, plus the enable toggle itself.
+
+Type a name, hit **Save**, and it appears in the dropdown. Selecting a preset
+applies it immediately; **Delete** removes it. The refresh button re-reads the
+file, so presets saved in another tab show up without a restart.
+
+Presets live in `model_chain_presets.json` in your WebUI data directory, not in
+the extension folder, so updating or reinstalling the extension keeps them.
+Writes go through a temporary file and an atomic replace: a crash mid-save
+leaves the previous file intact rather than a truncated one. A preset saved
+before a control existed falls back to that control's default rather than
+blanking it.
+
 ### VAE / text encoder
 
 Flux-family and Krea 2 checkpoints keep their VAE and text encoder in **separate
@@ -204,8 +221,10 @@ Under **Settings → Model Chain**:
 - **Save Stage 1 intermediate images to disk** (default off) — writes the
   unrefined Stage 1 images to a `model-chain-stage1/` subfolder of your output
   directory. They never appear in the gallery.
-- **Max system RAM for model cache (GB)** (default 0 = one third of detected
-  system RAM) — the ceiling on RAM held by the residency cache.
+- **Max system RAM for model cache (GB)** (default 0 = 60% of detected system
+  RAM) — the ceiling on RAM held by the residency cache. This is a ceiling, not
+  a reservation: the live free-RAM check is the real guard. Raise it if the
+  console reports a model being refused.
 
 ## How it behaves
 
@@ -326,6 +345,56 @@ Values containing commas, colons or newlines are quoted by the host's own
 `infotext_utils.quote()` and unquoted on parse, which is what keeps
 `<lora:name:weight>` tags intact across the round trip.
 
+### Why a switch is slow, and what to check
+
+Read the console. Every transition is now logged, for example:
+
+```
+Model Chain: switched to klein.safetensors (VAE/TE: flux2_vae.safetensors, Qwen3-8B.gguf)
+             in 1.2s (warm swap from the RAM cache, no disk read) for 1 image
+```
+
+A switch has three possible costs, in increasing order:
+
+1. **Warm swap** — a pointer swap, effectively free. The model is in the RAM
+   cache and the weights just move back to VRAM on demand.
+2. **VRAM movement** — the weights themselves crossing PCIe. Unavoidable when
+   both models cannot sit in VRAM together.
+3. **Cold load** — reading the checkpoint from disk *and* the host tearing down
+   the outgoing model first. This is the expensive one, typically 20s+.
+
+**If every switch is a cold load**, the cache is refusing the model. The console
+says so explicitly:
+
+```
+Model Chain: not enough system RAM to cache klein.safetensors
+             (14.0 GB needed, 10.6 GB available to the cache)
+             — it will reload from disk on every switch.
+```
+
+Raise **Settings → Model Chain → Max system RAM for model cache (GB)**. A Flux.2
+Klein checkpoint with a Qwen3 text encoder is roughly 14 GB resident, so the
+budget has to clear that. The default is 60% of system RAM, and the live
+free-RAM check still refuses anything that would push the machine into swap.
+
+**If the switch is warm but still takes ten seconds**, that is weights crossing
+PCIe, and the fix is elsewhere:
+
+- The two models have to fit in VRAM *together* to avoid movement entirely.
+  SDXL (~7.5 GB) plus Flux.2 Klein 9B with a Qwen3 encoder (~14 GB) is ~21.5 GB,
+  which does not leave activation headroom on a 24 GB card — expect movement.
+  A more heavily quantised Stage 2 build is what buys dual residency there.
+- Launch the WebUI with `--pin-shared-memory`. Pinned host memory roughly
+  doubles transfer speed; without it, ~1 GB/s is typical.
+- Launch with `--cuda-stream 2` to overlap weight transfer with compute.
+
+Neither flag is something this extension can set for you — they are host launch
+options — but both target exactly the "Moving model(s) has taken N seconds"
+lines.
+
+The pre-flight status line in the panel predicts which of these you are in for
+before you generate.
+
 ### Interaction with the built-in Refiner
 
 They cannot run in the same generation. The Refiner restores Model A's UNet
@@ -340,6 +409,7 @@ generation and says so rather than corrupting the loaded model.
 mc_arch.py            architecture detection + per-architecture geometry
 mc_memory.py          model residency / cache management
 mc_infotext.py        infotext write + paste-field registration
+mc_presets.py         named Stage 2 configurations
 mc_styles.py          style library integration helpers
 scripts/model_chain.py  Script class, UI, orchestration
 tests/                pytest suite (runs without a WebUI)
@@ -354,8 +424,9 @@ Neo loads extensions:
   identities — fatal for a module holding cache state. The extension root is what
   gets added to `sys.path`, so root-level helpers import cleanly as top-level
   modules. This is the same structure the bundled `sd_forge_lora` extension uses.
-- **`mc_arch.py` is an additional module**, because architecture detection and
-  the alignment table are needed by both the UI and the orchestration code.
+- **`mc_arch.py` and `mc_presets.py` are additional modules**, for architecture
+  detection (needed by both the UI and the orchestration code) and for preset
+  storage.
 
 `mc_memory.py`'s two-slot cache is private to that module. `ensure_resident()` /
 `get_model()` expose no slot count, so swapping in an LRU pool for 3+ models
@@ -375,8 +446,9 @@ inheritance, prompt and style resolution, LoRA tag pass-through, sampler and
 schedule-type overrides, aspect-ratio preservation and grid alignment, infotext
 round-tripping, the residency cascade and RAM budget, per-checkpoint
 VAE/text-encoder selection and its cache keying, model-flag restoration across a
-warm swap, edit-mode scoping and polarity, interruption handling, the UI's
-control-order contract, and inertness when disabled.
+warm swap, edit-mode scoping and polarity, preset round-tripping and recovery
+from a damaged store, interruption handling, the UI's control-order contract,
+and inertness when disabled.
 
 The criteria that need real hardware — that an SDXL → Flux.2-Klein chain
 produces coherent output, that a Krea 2 Edit refine responds to its Edit LoRA,

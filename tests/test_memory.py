@@ -113,7 +113,23 @@ class TestBudget:
     def test_zero_falls_back_to_a_fraction_of_system_ram(self, host, monkeypatch):
         host.shared.opts.model_chain_ram_budget_gb = 0
         monkeypatch.setattr(mc_memory, "total_ram_bytes", lambda: 96 * GB)
-        assert mc_memory.cache_budget_bytes() == pytest.approx(32 * GB, rel=0.01)
+        expected = 96 * GB * mc_memory.DEFAULT_BUDGET_FRACTION
+        assert mc_memory.cache_budget_bytes() == pytest.approx(expected, rel=0.01)
+
+    @pytest.mark.parametrize("total_gb", [32, 48, 64, 128])
+    def test_a_flux_klein_sized_model_fits_the_default_budget(self, host, monkeypatch, total_gb):
+        """Regression: the default used to be a third of system RAM.
+
+        A Flux.2 Klein checkpoint with a Qwen3 text encoder is roughly 14 GB
+        resident, which exceeded a 32 GB machine's 10.6 GB budget -- the model
+        was refused outright and every switch cold-loaded from disk, which is
+        the exact cost this cache exists to avoid.
+        """
+        host.shared.opts.model_chain_ram_budget_gb = 0
+        monkeypatch.setattr(mc_memory, "total_ram_bytes", lambda: total_gb * GB)
+
+        klein_resident = 14 * GB
+        assert mc_memory.cache_budget_bytes() >= klein_resident
 
     def test_default_suggestion_is_conservative(self, monkeypatch):
         monkeypatch.setattr(mc_memory, "total_ram_bytes", lambda: 64 * GB)

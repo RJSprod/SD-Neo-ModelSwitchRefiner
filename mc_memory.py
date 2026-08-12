@@ -53,7 +53,25 @@ import os
 import time
 from dataclasses import dataclass, field
 
-logger = logging.getLogger("model_chain")
+def _make_logger() -> logging.Logger:
+    """Console logger using the host's Rich formatting.
+
+    ``logging.getLogger`` alone yields a logger with no handler, so every
+    diagnostic this extension emits would be swallowed -- including the cache
+    decisions that explain why a switch was slow. ``setup_logger`` attaches the
+    same handler the host's own modules use.
+    """
+    log = logging.getLogger("model_chain")
+    try:
+        from backend.logging import setup_logger
+
+        setup_logger(log)
+    except Exception:
+        log.setLevel(logging.INFO)
+    return log
+
+
+logger = _make_logger()
 
 _MAX_SLOTS = 2
 """v1 holds Model A and Model B. See the forward-compatibility note above."""
@@ -367,8 +385,25 @@ def total_ram_bytes() -> int:
         return 0
 
 
+DEFAULT_BUDGET_FRACTION = 0.6
+"""Share of system RAM the cache may hold by default.
+
+This is a *ceiling*, not a reservation. The real guard is the live free-RAM
+check in ``_stash_current``, which refuses an entry that would push available
+memory below ``RAM_RESERVE_BYTES``.
+
+An earlier default of one third was too tight to be useful: a Flux.2 Klein
+checkpoint with a Qwen3 text encoder occupies roughly 14 GB resident, so on a
+32 GB machine the budget came to 10.6 GB and the model was refused outright --
+every switch then cold-loaded from disk, which is exactly the cost this cache
+exists to avoid. Because weights are *moved* between devices rather than
+copied, the cache mostly holds whichever model is not currently in VRAM, so a
+ceiling near a large model's full size is the useful setting.
+"""
+
+
 def cache_budget_bytes() -> int:
-    """Configured ceiling for RAM held by the cache (section 4.5)."""
+    """Ceiling for RAM held by the cache (section 4.5)."""
     from modules import shared
 
     configured = getattr(shared.opts, "model_chain_ram_budget_gb", 0) or 0
@@ -386,8 +421,7 @@ def cache_budget_bytes() -> int:
         )
         return 0
 
-    # Conservative default: a third of detected system RAM.
-    return int(total / 3)
+    return int(total * DEFAULT_BUDGET_FRACTION)
 
 
 def default_ram_budget_gb() -> float:
@@ -518,7 +552,13 @@ def _stash_current() -> None:
     name = info.name_for_extra if info is not None else "(unknown)"
     size = loaded_size_bytes(model) or file_size_bytes(name)
 
-    budget = min(cache_budget_bytes(), max(free_ram_bytes() - RAM_RESERVE_BYTES, 0) + size)
+    # What the cache may grow to right now: whatever it already holds, plus the
+    # RAM actually free beyond the reserve. Expressing it this way lets admit()
+    # evict older entries to make room instead of refusing outright, and keeps
+    # the ceiling honest as free memory changes.
+    headroom = max(free_ram_bytes() - RAM_RESERVE_BYTES, 0)
+    budget = min(cache_budget_bytes(), _cache.total_bytes() + headroom)
+
     entry = _Entry(
         key=key,
         checkpoint_name=name,
@@ -528,11 +568,21 @@ def _stash_current() -> None:
     )
 
     if _cache.admit(entry, budget):
-        logger.info("Model Chain: holding %s in the RAM cache (%.1f GB)", name, size / _GB)
+        logger.info(
+            "Model Chain: holding %s in the RAM cache (%.1f GB; cache now %.1f GB of %.1f GB budget)",
+            name,
+            size / _GB,
+            _cache.total_bytes() / _GB,
+            budget / _GB,
+        )
     else:
         logger.warning(
-            "Model Chain: not enough system RAM to cache %s — it will reload from disk next time",
+            "Model Chain: not enough system RAM to cache %s (%.1f GB needed, %.1f GB available to the cache) "
+            "— it will reload from disk on every switch. Raise "
+            '"Model Chain: max system RAM for model cache (GB)" in Settings if you have the RAM.',
             name,
+            size / _GB,
+            budget / _GB,
         )
 
 
