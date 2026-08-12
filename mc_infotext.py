@@ -36,6 +36,7 @@ without it, so "Fixed" mode would not survive the round trip."""
 CFG = "Model Chain CFG"
 STEPS = "Model Chain Steps"
 SAMPLER = "Model Chain Sampler"
+SCHEDULER = "Model Chain Scheduler"
 DENOISE = "Model Chain Denoise"
 SIZE_MULTIPLIER = "Model Chain Size Multiplier"
 STAGE1_SIZE = "Model Chain Stage1 Size"
@@ -55,7 +56,11 @@ BUILTIN_MODULES = "Built-in"
 PROMPT_MODES = ("Inherit", "Append", "Replace")
 SEED_MODES = ("Inherit", "Offset", "Fixed")
 
-INHERIT_SAMPLER = "Same as Stage 1"
+INHERIT = "Same as Stage 1"
+"""Sentinel for the sampler and schedule-type dropdowns."""
+
+# Kept as an alias: the sampler control shipped with this name.
+INHERIT_SAMPLER = INHERIT
 
 
 def build_params(
@@ -74,6 +79,7 @@ def build_params(
     denoise: float,
     size_multiplier: float,
     stage1_size: str,
+    scheduler: str = INHERIT,
     edit_mode: str = "Auto",
     modules=None,
 ) -> dict:
@@ -107,8 +113,11 @@ def build_params(
     if seed_mode == "Fixed":
         params[SEED_FIXED] = int(fixed_seed)
 
-    if sampler and sampler != INHERIT_SAMPLER:
+    if sampler and sampler != INHERIT:
         params[SAMPLER] = sampler
+
+    if scheduler and scheduler != INHERIT:
+        params[SCHEDULER] = scheduler
 
     # Omitted at its default so a chain that does not touch edit mode keeps the
     # same infotext it had before the feature existed.
@@ -300,6 +309,7 @@ def build_paste_fields(components: dict) -> list:
         PasteField(components["cfg"], CFG, api="model_chain_cfg"),
         PasteField(components["steps"], STEPS, api="model_chain_steps"),
         PasteField(components["sampler"], SAMPLER, api="model_chain_sampler"),
+        PasteField(components["scheduler"], SCHEDULER, api="model_chain_scheduler"),
         PasteField(components["denoise"], DENOISE, api="model_chain_denoise"),
         PasteField(components["size_multiplier"], SIZE_MULTIPLIER, api="model_chain_size_multiplier"),
         PasteField(components["edit_mode"], edit_mode_from, api="model_chain_edit_mode"),
@@ -324,6 +334,7 @@ def paste_field_names() -> list[str]:
         CFG,
         STEPS,
         SAMPLER,
+        SCHEDULER,
         DENOISE,
         SIZE_MULTIPLIER,
         STAGE1_SIZE,

@@ -38,8 +38,12 @@ STAGE1_SUBFOLDER = "model-chain-stage1"
 
 _NO_MODEL = "None"
 
-DEFAULT_DENOISE = 0.35
-"""Low-ish default so first-run results resemble the Stage 1 composition."""
+DEFAULT_DENOISE = 1.0
+"""Full-strength Stage 2 pass by default.
+
+Lower it to keep more of the Stage 1 composition. It also matches what
+reference/edit conditioning expects, so enabling edit mode needs no
+adjustment."""
 
 
 # --------------------------------------------------------------------------- #
@@ -91,7 +95,15 @@ def _model_choices() -> tuple[list[str], list[str]]:
 def _sampler_choices() -> list[str]:
     from modules import sd_samplers
 
-    return [mc_infotext.INHERIT_SAMPLER] + [x.name for x in sd_samplers.visible_samplers()]
+    return [mc_infotext.INHERIT] + list(sd_samplers.visible_sampler_names())
+
+
+def _scheduler_choices() -> list[str]:
+    from modules import sd_schedulers
+
+    # Labels, not names -- that is what the host's own schedule-type dropdowns
+    # offer, and schedulers_map accepts either.
+    return [mc_infotext.INHERIT] + [x.label for x in sd_schedulers.schedulers]
 
 
 def _resolution_note(width: int, height: int, multiplier: float, target: str) -> str:
@@ -218,6 +230,7 @@ class ScriptModelChain(scripts.Script):
     def ui(self, is_img2img):
         checkpoints, module_choices = _model_choices()
         samplers = _sampler_choices()
+        schedulers = _scheduler_choices()
         styles = mc_styles.available_styles()
 
         with InputAccordion(False, label="Model Chain", elem_id=self.elem_id("enable")) as enabled:
@@ -344,12 +357,19 @@ class ScriptModelChain(scripts.Script):
                         elem_id=self.elem_id("cfg"),
                     )
 
-                sampler = gr.Dropdown(
-                    label="Stage 2 sampler",
-                    choices=samplers,
-                    value=mc_infotext.INHERIT_SAMPLER,
-                    elem_id=self.elem_id("sampler"),
-                )
+                with gr.Row():
+                    sampler = gr.Dropdown(
+                        label="Stage 2 sampling method",
+                        choices=samplers,
+                        value=mc_infotext.INHERIT,
+                        elem_id=self.elem_id("sampler"),
+                    )
+                    scheduler = gr.Dropdown(
+                        label="Stage 2 schedule type",
+                        choices=schedulers,
+                        value=mc_infotext.INHERIT,
+                        elem_id=self.elem_id("scheduler"),
+                    )
 
             # -- edit / reference conditioning ----------------------------- #
             with gr.Group():
@@ -505,22 +525,22 @@ class ScriptModelChain(scripts.Script):
                 )
 
         def on_edit_mode(target_name, mode, current_denoise):
-            """Track the denoise strength edit conditioning expects.
+            """Raise denoise to what edit conditioning expects, if it was lowered.
 
             Edit mode hands the model a reference rather than a starting image,
-            so a low denoise -- the right default for ordinary refinement -- is
-            the wrong one here. The slider is moved rather than silently
-            overridden at generate time, so the value stays visible and the
-            user can still choose their own.
+            so the reference carries the content and a lowered denoise is the
+            wrong control. The slider is moved rather than silently overridden
+            at generate time, so the value stays visible.
+
+            Turning edit mode *off* deliberately leaves the slider alone: the
+            default is already a full pass, so there is nothing to restore, and
+            a value the user chose themselves should survive the toggle.
             """
             arch = mc_arch.detect_from_checkpoint_name(target_name)
             denoise_update = gr.skip()
 
-            if arch.supports_edit:
-                if mc_arch.edit_is_active(arch, mode):
-                    denoise_update = gr.update(value=arch.edit_denoise)
-                elif mode == mc_arch.EDIT_DISABLE and current_denoise >= arch.edit_denoise:
-                    denoise_update = gr.update(value=DEFAULT_DENOISE)
+            if mc_arch.edit_is_active(arch, mode) and current_denoise < arch.edit_denoise:
+                denoise_update = gr.update(value=arch.edit_denoise)
 
             return _edit_notice(target_name, mode), denoise_update
 
@@ -545,6 +565,7 @@ class ScriptModelChain(scripts.Script):
             "cfg": cfg,
             "steps": steps,
             "sampler": sampler,
+            "scheduler": scheduler,
             "denoise": denoise,
             "size_multiplier": size_multiplier,
             "edit_mode": edit_mode,
@@ -570,6 +591,7 @@ class ScriptModelChain(scripts.Script):
             cfg,
             steps,
             sampler,
+            scheduler,
             denoise,
             size_multiplier,
             edit_mode,
@@ -654,6 +676,7 @@ class ScriptModelChain(scripts.Script):
         cfg,
         steps,
         sampler,
+        scheduler,
         denoise,
         size_multiplier,
         edit_mode=mc_arch.EDIT_AUTO,
@@ -693,6 +716,7 @@ class ScriptModelChain(scripts.Script):
                 cfg=cfg,
                 steps=steps,
                 sampler=sampler,
+                scheduler=scheduler,
                 denoise=denoise,
                 size_multiplier=size_multiplier,
                 stage1_size=f"{p.width}x{p.height}",
@@ -727,6 +751,7 @@ class ScriptModelChain(scripts.Script):
         cfg,
         steps,
         sampler,
+        scheduler,
         denoise,
         size_multiplier,
         edit_mode=mc_arch.EDIT_AUTO,
@@ -753,6 +778,7 @@ class ScriptModelChain(scripts.Script):
                 cfg=float(cfg),
                 steps=int(steps),
                 sampler=sampler,
+                scheduler=scheduler,
                 denoise=float(denoise),
                 size_multiplier=float(size_multiplier),
                 edit_mode=edit_mode,
@@ -785,6 +811,7 @@ class ScriptModelChain(scripts.Script):
         cfg,
         steps,
         sampler,
+        scheduler,
         denoise,
         size_multiplier,
         edit_mode,
@@ -877,6 +904,7 @@ class ScriptModelChain(scripts.Script):
                     cfg=cfg,
                     steps=steps,
                     sampler=sampler,
+                    scheduler=scheduler,
                     denoise=denoise,
                     override_settings=dict(edit_override),
                 )
@@ -965,7 +993,7 @@ class ScriptModelChain(scripts.Script):
 
     def _refine_one(
         self, p, *, image, positive, negative, seed, width, height, cfg, steps, sampler,
-        denoise, override_settings=None,
+        scheduler, denoise, override_settings=None,
     ):
         p2 = StableDiffusionProcessingImg2Img(
             outpath_samples=p.outpath_samples,
@@ -977,8 +1005,8 @@ class ScriptModelChain(scripts.Script):
             styles=[],
             seed=seed,
             subseed=-1,
-            sampler_name=p.sampler_name if sampler == mc_infotext.INHERIT_SAMPLER else sampler,
-            scheduler=p.scheduler,
+            sampler_name=p.sampler_name if sampler == mc_infotext.INHERIT else sampler,
+            scheduler=p.scheduler if scheduler == mc_infotext.INHERIT else scheduler,
             batch_size=1,
             n_iter=1,
             steps=steps,

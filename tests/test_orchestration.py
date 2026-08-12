@@ -15,7 +15,7 @@ import mc_memory
 
 UI_ORDER = (
     "enabled", "target", "modules", "prompt_mode", "prompt", "negative", "styles",
-    "seed_mode", "seed_offset", "fixed_seed", "cfg", "steps", "sampler",
+    "seed_mode", "seed_offset", "fixed_seed", "cfg", "steps", "sampler", "scheduler",
     "denoise", "size_multiplier", "edit_mode",
 )
 
@@ -32,7 +32,8 @@ DEFAULTS = dict(
     fixed_seed=-1,
     cfg=1.0,
     steps=20,
-    sampler=mc_infotext.INHERIT_SAMPLER,
+    sampler=mc_infotext.INHERIT,
+    scheduler=mc_infotext.INHERIT,
     denoise=0.35,
     size_multiplier=1.0,
     edit_mode=mc_arch.EDIT_AUTO,
@@ -1021,3 +1022,145 @@ class TestStageTwoModules:
         run_chain(chain, host, p, processed, modules=[])
 
         assert p.extra_generation_params["Model Chain Module 1"] == "Built-in"
+
+
+class TestSamplingSelection:
+    """Sampling method and schedule type are chosen independently for Stage 2."""
+
+    def test_both_inherit_stage_1_by_default(self, chain, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed)
+
+        call = chain.refine_calls[0]
+        assert call.sampler_name == p.sampler_name
+        assert call.scheduler == p.scheduler
+
+    def test_sampler_override_reaches_stage_2(self, chain, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, sampler="DPM++ 2M")
+
+        assert chain.refine_calls[0].sampler_name == "DPM++ 2M"
+
+    def test_scheduler_override_reaches_stage_2(self, chain, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, scheduler="Karras")
+
+        assert chain.refine_calls[0].scheduler == "Karras"
+
+    def test_either_can_be_overridden_without_the_other(self, chain, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, sampler="Euler")
+
+        call = chain.refine_calls[0]
+        assert call.sampler_name == "Euler"
+        assert call.scheduler == p.scheduler  # still inherited
+
+    def test_both_are_uniform_across_the_batch(self, chain, host, image_factory):
+        """Section 3.3: Stage 2 settings apply uniformly."""
+        p = make_p(host, batch_size=4)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, sampler="Euler", scheduler="Beta")
+
+        assert {(c.sampler_name, c.scheduler) for c in chain.refine_calls} == {("Euler", "Beta")}
+
+    def test_overrides_are_recorded_in_infotext(self, chain, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, sampler="Euler", scheduler="Karras")
+
+        assert p.extra_generation_params[mc_infotext.SAMPLER] == "Euler"
+        assert p.extra_generation_params[mc_infotext.SCHEDULER] == "Karras"
+
+    def test_inherited_values_are_not_recorded(self, chain, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed)
+
+        assert mc_infotext.SAMPLER not in p.extra_generation_params
+        assert mc_infotext.SCHEDULER not in p.extra_generation_params
+
+
+class TestUiContract:
+    """The UI's return order *is* the hook signature order.
+
+    Gradio passes these positionally, so a control inserted in ui() without a
+    matching change to process()/postprocess() silently shifts every argument
+    after it -- the prompt would arrive as the seed mode. UI_ORDER is what the
+    rest of this file drives the hooks with, so pinning it here keeps the
+    tests honest too.
+    """
+
+    # elem_id per position; "enabled" is the accordion, whose id is "enable".
+    EXPECTED_IDS = (
+        "enable", "target", "modules", "prompt_mode", "prompt", "negative",
+        "styles", "seed_mode", "seed_offset", "fixed_seed", "cfg", "steps",
+        "sampler", "scheduler", "denoise", "size_multiplier", "edit_mode",
+    )
+
+    def test_returned_controls_match_the_documented_order(self, chain):
+        returned = chain.script.ui(is_img2img=False)
+
+        assert len(returned) == len(UI_ORDER)
+        actual = [c.elem_id.removeprefix("script_modelchain_") for c in returned]
+        assert tuple(actual) == self.EXPECTED_IDS
+
+    def test_every_control_is_registered_for_pasting(self, chain):
+        chain.script.ui(is_img2img=False)
+        registered = {field.api for field in chain.script.infotext_fields}
+        for name in ("model_chain_sampler", "model_chain_scheduler", "model_chain_denoise"):
+            assert name in registered
+
+
+class TestDenoiseDefault:
+    def test_default_is_a_full_pass(self, chain):
+        import model_chain
+
+        assert model_chain.DEFAULT_DENOISE == 1.0
+
+    def test_the_slider_ships_at_the_default(self, chain):
+        """The control's own value, not just the constant."""
+        import model_chain
+
+        returned = chain.script.ui(is_img2img=False)
+        denoise = returned[UI_ORDER.index("denoise")]
+        assert denoise.value == model_chain.DEFAULT_DENOISE
+
+    def test_default_needs_no_adjustment_for_edit_mode(self, chain, host, image_factory, monkeypatch):
+        """Krea 2 edit expects 1.0, which is now what the slider already holds."""
+        monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name", lambda name: mc_arch.by_key("krea2"))
+        import model_chain
+
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(
+            chain, host, p, processed,
+            edit_mode="Enable", denoise=model_chain.DEFAULT_DENOISE,
+            prompt_mode="Replace", prompt="a lake <lora:krea2_edit:1.0>",
+        )
+
+        assert processed.comments == ""
+
+    def test_a_lowered_denoise_is_still_warned_about_in_edit_mode(self, chain, host, image_factory, monkeypatch):
+        monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name", lambda name: mc_arch.by_key("krea2"))
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(
+            chain, host, p, processed,
+            edit_mode="Enable", denoise=0.3,
+            prompt_mode="Replace", prompt="a lake <lora:krea2_edit:1.0>",
+        )
+
+        assert "denoise 0.3 is" in processed.comments

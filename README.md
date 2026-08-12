@@ -38,8 +38,8 @@ The panel appears as a **Model Chain** accordion on the txt2img tab.
 3. If the Stage 2 model needs its own VAE / text encoder files, select them in
    **Stage 2 VAE / Text Encoder**. Flux.2 Klein and Krea 2 do.
 4. Set **Denoise strength**. This is the key control: it governs how much
-   Model B may alter the Stage 1 image. The default of `0.35` keeps the Stage 1
-   composition; higher values give Model B more freedom.
+   Model B may alter the Stage 1 image. It defaults to `1.0`, a full Stage 2
+   pass; lower it to keep more of the Stage 1 composition.
 5. Generate.
 
 The gallery shows only the refined Stage 2 outputs, one per image your batch
@@ -141,8 +141,9 @@ To refine with Krea 2 Edit:
    `<lora:your_krea2_edit_lora:1.0>`. Krea 2's edit behaviour comes from that
    LoRA — the base checkpoint alone will not do it, and the panel warns if no
    extra-network tag is present.
-4. Leave denoise at **1.0**. In edit mode the reference carries the content, so
-   a low denoise is the wrong control; ticking Enable moves the slider for you.
+4. Leave denoise at **1.0** — the default. In edit mode the reference carries
+   the content, so a lowered denoise is the wrong control; if you have lowered
+   it, ticking Enable raises it back.
 
 The underlying toggles (`krea2_do_reference`, `anima_do_reference`,
 `klein_no_reference`) are **global** settings. Enable and Disable are applied
@@ -168,6 +169,17 @@ refine would silently reuse image 1's reference for the whole set.
 Stale references are cleared before Stage 2 runs. A cached model keeps its engine
 object — and its reference list — across generations, and ImageStitch cannot
 clear it because Stage 2 runs with scripts disabled.
+
+### Sampling
+
+**Stage 2 sampling method** and **Stage 2 schedule type** are selected
+independently of Stage 1. Both default to **Same as Stage 1**, and either can be
+overridden without touching the other — a Flux Stage 2 often wants Euler + Beta
+regardless of what an SDXL Stage 1 used.
+
+Whatever you pick goes through the host's own
+`fix_p_invalid_sampler_and_scheduler`, so an incompatible pairing is corrected
+rather than failing the pass.
 
 ### Seeds
 
@@ -359,11 +371,12 @@ python -m pytest tests/
 The suite stubs the host, so it runs without a WebUI checkout or any model
 files. It covers the acceptance criteria that can be verified without a GPU:
 N-in/N-out batch behaviour, exactly-one-switch sequencing, per-image seed
-inheritance, prompt and style resolution, LoRA tag pass-through, aspect-ratio
-preservation and grid alignment, infotext round-tripping, the residency cascade
-and RAM budget, per-checkpoint VAE/text-encoder selection and its cache keying,
-model-flag restoration across a warm swap, edit-mode scoping and polarity,
-interruption handling, and inertness when disabled.
+inheritance, prompt and style resolution, LoRA tag pass-through, sampler and
+schedule-type overrides, aspect-ratio preservation and grid alignment, infotext
+round-tripping, the residency cascade and RAM budget, per-checkpoint
+VAE/text-encoder selection and its cache keying, model-flag restoration across a
+warm swap, edit-mode scoping and polarity, interruption handling, the UI's
+control-order contract, and inertness when disabled.
 
 The criteria that need real hardware — that an SDXL → Flux.2-Klein chain
 produces coherent output, that a Krea 2 Edit refine responds to its Edit LoRA,

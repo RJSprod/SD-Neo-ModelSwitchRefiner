@@ -34,9 +34,11 @@ sys.path.insert(0, str(EXTENSION_ROOT / "scripts"))
 
 
 class _Component:
-    def __init__(self, **kwargs):
+    def __init__(self, *args, **kwargs):
+        # Several host components take their value positionally
+        # (InputAccordion(False, ...), gr.Markdown("text")).
         self.__dict__.update(kwargs)
-        self.value = kwargs.get("value")
+        self.value = kwargs.get("value", args[0] if args else None)
         self.label = kwargs.get("label")
         self.elem_id = kwargs.get("elem_id")
         self._callbacks = []
@@ -300,7 +302,15 @@ def _install_modules() -> None:
     sd_models.forge_model_reload = lambda: (None, True)
 
     sd_samplers = types.ModuleType("modules.sd_samplers")
-    sd_samplers.visible_samplers = lambda: [types.SimpleNamespace(name="Euler"), types.SimpleNamespace(name="DPM++ 2M")]
+    sd_samplers.visible_sampler_names = lambda: ["Euler", "DPM++ 2M"]
+    sd_samplers.visible_samplers = lambda: [types.SimpleNamespace(name=n) for n in sd_samplers.visible_sampler_names()]
+
+    sd_schedulers = types.ModuleType("modules.sd_schedulers")
+    sd_schedulers.schedulers = [
+        types.SimpleNamespace(name="automatic", label="Automatic"),
+        types.SimpleNamespace(name="karras", label="Karras"),
+        types.SimpleNamespace(name="beta", label="Beta"),
+    ]
 
     script_callbacks = types.ModuleType("modules.script_callbacks")
     script_callbacks.on_script_unloaded = lambda cb, **k: None
@@ -315,6 +325,7 @@ def _install_modules() -> None:
     modules.ui_components = ui_components
     modules.sd_models = sd_models
     modules.sd_samplers = sd_samplers
+    modules.sd_schedulers = sd_schedulers
     modules.script_callbacks = script_callbacks
 
     modules_forge = types.ModuleType("modules_forge")
@@ -387,6 +398,7 @@ def _install_modules() -> None:
         "modules.ui_components": ui_components,
         "modules.sd_models": sd_models,
         "modules.sd_samplers": sd_samplers,
+        "modules.sd_schedulers": sd_schedulers,
         "modules.script_callbacks": script_callbacks,
         "modules_forge": modules_forge,
         "modules_forge.main_entry": main_entry,

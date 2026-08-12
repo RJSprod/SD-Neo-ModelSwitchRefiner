@@ -20,7 +20,8 @@ def build(**overrides):
         fixed_seed=-1,
         cfg=1.0,
         steps=20,
-        sampler=mc_infotext.INHERIT_SAMPLER,
+        sampler=mc_infotext.INHERIT,
+        scheduler=mc_infotext.INHERIT,
         denoise=0.35,
         size_multiplier=1.5,
         stage1_size="1024x1024",
@@ -64,8 +65,17 @@ class TestBuildParams:
         assert build(seed_mode="Fixed", fixed_seed=12345)[mc_infotext.SEED_FIXED] == 12345
 
     def test_inherited_sampler_is_not_recorded(self):
-        assert mc_infotext.SAMPLER not in build(sampler=mc_infotext.INHERIT_SAMPLER)
+        assert mc_infotext.SAMPLER not in build(sampler=mc_infotext.INHERIT)
         assert build(sampler="Euler")[mc_infotext.SAMPLER] == "Euler"
+
+    def test_inherited_scheduler_is_not_recorded(self):
+        assert mc_infotext.SCHEDULER not in build(scheduler=mc_infotext.INHERIT)
+        assert build(scheduler="Karras")[mc_infotext.SCHEDULER] == "Karras"
+
+    def test_sampler_and_scheduler_are_independent(self):
+        params = build(sampler="Euler", scheduler=mc_infotext.INHERIT)
+        assert params[mc_infotext.SAMPLER] == "Euler"
+        assert mc_infotext.SCHEDULER not in params
 
     def test_styles_are_recorded_as_names_for_readability(self):
         assert build(styles=["Cinematic", "Detailed"])[mc_infotext.STYLES] == "Cinematic, Detailed"
@@ -149,6 +159,6 @@ class TestParseStyles:
 
 class TestPasteFieldNames:
     def test_covers_every_written_key(self):
-        written = set(build(seed_mode="Fixed", fixed_seed=1, sampler="Euler"))
+        written = set(build(seed_mode="Fixed", fixed_seed=1, sampler="Euler", scheduler="Karras"))
         declared = set(mc_infotext.paste_field_names())
         assert written <= declared, f"keys written but never pasted: {written - declared}"

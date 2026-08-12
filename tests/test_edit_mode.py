@@ -110,7 +110,8 @@ class TestInfotext:
         params = dict(
             target="krea2.safetensors", prompt_mode="Replace", prompt="a lake",
             negative="", styles=[], seed_mode="Inherit", seed_offset=0, fixed_seed=-1,
-            cfg=1.0, steps=8, sampler=mc_infotext.INHERIT_SAMPLER, denoise=1.0,
+            cfg=1.0, steps=8, sampler=mc_infotext.INHERIT,
+            scheduler=mc_infotext.INHERIT, denoise=1.0,
             size_multiplier=1.0, stage1_size="1024x1024",
         )
         params.update(overrides)
