@@ -253,7 +253,18 @@ def _install_modules() -> None:
     shared.OptionInfo = FakeOptionInfo
     shared.options_templates = {}
     shared.options_section = lambda section, options: options
-    shared.cmd_opts = types.SimpleNamespace()
+    shared.cmd_opts = types.SimpleNamespace(disable_console_progressbars=False)
+
+    class FakeTotalTqdm:
+        """Enough of TotalTQDM to check the Stage 2 steps are accounted for."""
+
+        def __init__(self):
+            self._tqdm = types.SimpleNamespace(total=0)
+
+        def updateTotal(self, new_total):
+            self._tqdm.total = new_total
+
+    shared.total_tqdm = FakeTotalTqdm()
 
     scripts_mod = types.ModuleType("modules.scripts")
     scripts_mod.Script = FakeScript
@@ -500,3 +511,63 @@ def image_factory():
         return Image.new("RGB", (width, height), color)
 
     return make
+
+
+@pytest.fixture
+def chain(host, style_store, monkeypatch, image_factory):
+    """A ScriptModelChain wired to fakes, with a recording Stage 2.
+
+    Shared because more than one module drives full generations through it.
+    """
+    import types
+
+    import mc_memory
+
+    """A ScriptModelChain wired to fakes, with a recording Stage 2."""
+    import model_chain
+
+    monkeypatch.setattr(
+        host.sd_models,
+        "get_closet_checkpoint_match",
+        lambda name: None
+        if not name or name == "None"
+        else types.SimpleNamespace(
+            filename=f"/models/{name}", name_for_extra=name.split(".")[0], title=name, sha256="abc123"
+        ),
+    )
+    monkeypatch.setattr(mc_memory, "plan", lambda name, mods=None: mc_memory.ResidencyPlan("dual", "both fit"))
+
+    switches: list[str] = []
+    monkeypatch.setattr(
+        mc_memory, "ensure_resident",
+        lambda name, mods=None: (switches.append((name, mods)), "cold")[1],
+    )
+
+    restores: list[str] = []
+    monkeypatch.setattr(
+        mc_memory, "restore_selection",
+        lambda name, mods=None: restores.append((name, mods)),
+    )
+    monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: False)
+
+    refine_calls: list = []
+
+    def fake_process_images(p2):
+        refine_calls.append(p2)
+        image = image_factory(p2.width, p2.height)
+        return types.SimpleNamespace(images=[image], index_of_first_image=0)
+
+    monkeypatch.setattr(model_chain, "process_images", fake_process_images)
+    monkeypatch.setattr(
+        model_chain, "create_infotext",
+        lambda p, prompts, seeds, subseeds, index=None, **kw: f"infotext#{index} seed={seeds[index]}",
+    )
+
+    script = model_chain.ScriptModelChain()
+    return types.SimpleNamespace(
+        script=script,
+        switches=switches,
+        restores=restores,
+        refine_calls=refine_calls,
+        module=model_chain,
+    )

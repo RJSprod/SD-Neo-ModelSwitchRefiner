@@ -41,6 +41,9 @@ STAGE1_SUBFOLDER = "model-chain-stage1"
 
 _NO_MODEL = "None"
 
+_REFINED_MARKER = "_model_chain_refined"
+"""Set on a Processed once Stage 2 has run over it."""
+
 _TRANSITION_DESCRIPTIONS = {
     "warm": "warm swap from the RAM cache, no disk read",
     "cold": "cold load from disk",
@@ -118,8 +121,22 @@ def _scheduler_choices() -> list[str]:
     return [mc_infotext.INHERIT] + [x.label for x in sd_schedulers.schedulers]
 
 
-def _resolution_note(width: int, height: int, multiplier: float, target: str) -> str:
-    """Live description of the Stage 2 output size (section 6.5)."""
+def _resolution_note(
+    width: int,
+    height: int,
+    multiplier: float,
+    target: str,
+    hires: bool = False,
+    hr_scale: float = 2.0,
+    hr_resize_x: int = 0,
+    hr_resize_y: int = 0,
+) -> str:
+    """Live description of the Stage 2 output size (section 6.5).
+
+    The main width/height sliders describe the *first pass*. With hires fix on,
+    Stage 2 receives the upscaled image, so the readout has to follow the
+    upscale or it describes an image that never reaches Stage 2.
+    """
     try:
         width, height = int(width), int(height)
         multiplier = float(multiplier)
@@ -128,6 +145,16 @@ def _resolution_note(width: int, height: int, multiplier: float, target: str) ->
 
     if width <= 0 or height <= 0:
         return ""
+
+    source_note = ""
+    if hires:
+        try:
+            width, height = mc_arch.hires_target_size(
+                width, height, float(hr_scale or 2.0), int(hr_resize_x or 0), int(hr_resize_y or 0)
+            )
+            source_note = " after Hires. fix"
+        except (TypeError, ValueError, ZeroDivisionError):
+            return ""
 
     arch = mc_arch.detect_from_checkpoint_name(target)
     out_w, out_h = mc_arch.scaled_size(width, height, multiplier, arch.alignment)
@@ -138,7 +165,10 @@ def _resolution_note(width: int, height: int, multiplier: float, target: str) ->
     else:
         suffix += " (architecture unknown)"
 
-    note = f"Stage 2 output: **{out_w} x {out_h}** — from {width} x {height}, {suffix}."
+    note = (
+        f"Stage 2 output: **{out_w} x {out_h}** — from {width} x {height}"
+        f"{source_note}, {suffix}."
+    )
 
     delta = mc_arch.aspect_ratio_delta((width, height), (out_w, out_h))
     if delta > 0.01:
@@ -213,6 +243,10 @@ class ScriptModelChain(scripts.Script):
         super().__init__()
         self._width_component = None
         self._height_component = None
+        self._hires_component = None
+        self._hr_scale_component = None
+        self._hr_resize_x_component = None
+        self._hr_resize_y_component = None
         # Guards Stage 2's own process_images() call from re-entering this
         # script. Stage 2 runs with p.scripts unset, so this is belt and
         # braces -- but the cost of getting it wrong is an infinite chain.
@@ -231,13 +265,22 @@ class ScriptModelChain(scripts.Script):
 
     # -- UI --------------------------------------------------------------- #
 
+    # Main-tab controls the size readout depends on. The hires ones matter
+    # because Stage 2 refines the *upscaled* image, not the first pass.
+    _TRACKED_COMPONENTS = {
+        "txt2img_width": "_width_component",
+        "txt2img_height": "_height_component",
+        "txt2img_hr-checkbox": "_hires_component",
+        "txt2img_hr_scale": "_hr_scale_component",
+        "txt2img_hr_resize_x": "_hr_resize_x_component",
+        "txt2img_hr_resize_y": "_hr_resize_y_component",
+    }
+
     def after_component(self, component, **kwargs):
-        """Capture the main width/height sliders to drive the live size readout."""
-        elem_id = kwargs.get("elem_id")
-        if elem_id == "txt2img_width":
-            self._width_component = component
-        elif elem_id == "txt2img_height":
-            self._height_component = component
+        """Capture main-tab controls that drive the live size readout."""
+        attribute = self._TRACKED_COMPONENTS.get(kwargs.get("elem_id"))
+        if attribute is not None:
+            setattr(self, attribute, component)
 
     def ui(self, is_img2img):
         checkpoints, module_choices = _model_choices()
@@ -504,7 +547,7 @@ class ScriptModelChain(scripts.Script):
             show_progress=False,
         )
 
-        def on_target_change(target_name, multiplier, mode, selected_modules, width, height):
+        def on_target_change(target_name, multiplier, mode, selected_modules, width, height, *hires):
             """Refresh the architecture notice, residency status and size readout."""
             # The module selection changes the footprint and the cache key, so
             # the residency prediction has to account for it.
@@ -523,29 +566,56 @@ class ScriptModelChain(scripts.Script):
             return (
                 _architecture_notice(target_name),
                 status,
-                _resolution_note(width, height, multiplier, target_name),
+                _resolution_note(width, height, multiplier, target_name, *hires),
                 cfg_update,
                 _edit_notice(target_name, mode),
             )
 
         target_outputs = [architecture_notice, residency_status, size_note, cfg, edit_notice]
 
-        if self._width_component is not None and self._height_component is not None:
-            target_inputs = [
-                target, size_multiplier, edit_mode, modules,
-                self._width_component, self._height_component,
-            ]
+        # Controls the size readout reads. The hires ones are optional: a
+        # heavily customised UI may not expose them, and the readout degrades
+        # to the first-pass size rather than showing nothing.
+        hires_components = [
+            self._hires_component,
+            self._hr_scale_component,
+            self._hr_resize_x_component,
+            self._hr_resize_y_component,
+        ]
+        have_hires = all(component is not None for component in hires_components)
+        have_size = self._width_component is not None and self._height_component is not None
+
+        def size_inputs():
+            base = [self._width_component, self._height_component, size_multiplier, target]
+            return base + hires_components if have_hires else base
+
+        if have_size:
+            target_inputs = [target, size_multiplier, edit_mode, modules,
+                             self._width_component, self._height_component]
+            if have_hires:
+                target_inputs += hires_components
+
+            def on_target(*values):
+                # Positional to stay in step with target_inputs, which grows
+                # when the hires controls are available.
+                name, mult, mode, mods, width, height = values[:6]
+                return on_target_change(name, mult, mode, mods, width, height, *values[6:])
+
             for trigger in (target, modules):
                 trigger.change(
-                    fn=on_target_change,
+                    fn=on_target,
                     inputs=target_inputs,
                     outputs=target_outputs,
                     show_progress=False,
                 )
-            for component in (size_multiplier, self._width_component, self._height_component):
+
+            watched = [size_multiplier, self._width_component, self._height_component]
+            if have_hires:
+                watched += hires_components
+            for component in watched:
                 component.change(
                     fn=_resolution_note,
-                    inputs=[self._width_component, self._height_component, size_multiplier, target],
+                    inputs=size_inputs(),
                     outputs=[size_note],
                     show_progress=False,
                 )
@@ -835,7 +905,7 @@ class ScriptModelChain(scripts.Script):
                 scheduler=scheduler,
                 denoise=denoise,
                 size_multiplier=size_multiplier,
-                stage1_size=f"{p.width}x{p.height}",
+                stage1_size="%dx%d" % mc_arch.stage1_size(p),
                 edit_mode=edit_mode,
                 modules=modules,
             )
@@ -875,6 +945,16 @@ class ScriptModelChain(scripts.Script):
     ):
         if not self._armed or self._in_stage_2:
             return
+
+        # Refine each result set once. postprocess() is normally called once per
+        # generation, but a wrapper extension that retries a failed pass -- or
+        # any other second invocation -- would otherwise re-refine images that
+        # have already been through Stage 2, doubling the work and compounding
+        # the effect on the output.
+        if getattr(processed, _REFINED_MARKER, False):
+            logger.info("Model Chain: this result set was already refined; skipping Stage 2")
+            return
+        setattr(processed, _REFINED_MARKER, True)
 
         self._armed = False
 
@@ -999,6 +1079,7 @@ class ScriptModelChain(scripts.Script):
                 )
 
         state.job_count = (state.job_count or 0) + len(stage1_images)
+        self._extend_progress_total(len(stage1_images) * int(steps))
 
         # Model B is loaded now, so its edit-mode state can finally be checked
         # against reality rather than against the dropdown's guess.
@@ -1054,6 +1135,24 @@ class ScriptModelChain(scripts.Script):
             mc_memory.restore_selection(previous_checkpoint, previous_modules)
 
         self._finish(p, processed, stage1_images, refined, infotexts)
+
+    @staticmethod
+    def _extend_progress_total(extra_steps: int) -> None:
+        """Add Stage 2's steps to the "Total progress" bar.
+
+        Stage 1 sizes that bar for its own passes only -- and hires fix resizes
+        it again for its second pass -- so Stage 2's steps would overflow it,
+        making the bar wrap and re-render as though the work were repeating.
+        Purely cosmetic, hence best-effort.
+        """
+        if extra_steps <= 0:
+            return
+        try:
+            bar = shared.total_tqdm._tqdm
+            if bar is not None and bar.total:
+                shared.total_tqdm.updateTotal(bar.total + extra_steps)
+        except Exception:
+            pass
 
     @staticmethod
     def _describe_modules(modules) -> str:
@@ -1167,6 +1266,13 @@ class ScriptModelChain(scripts.Script):
         # applied against Model B, and deactivated afterwards.
         p2.scripts = None
         p2.script_args = []
+
+        # Stage 2 is a single img2img pass over whatever Stage 1 produced.
+        # If Stage 1 used hires fix, that upscale is already baked into the
+        # image; re-running it here would upscale twice and cost a second
+        # sampling pass. img2img has no hires fix of its own, so this is
+        # belt and braces against anything copying the flag across.
+        p2.enable_hr = False
 
         # This script writes the final files itself, using Stage-1-derived
         # infotext, so the inner call must not save anything.

@@ -40,58 +40,6 @@ DEFAULTS = dict(
 )
 
 
-@pytest.fixture
-def chain(host, style_store, monkeypatch, image_factory):
-    """A ScriptModelChain wired to fakes, with a recording Stage 2."""
-    import model_chain
-
-    monkeypatch.setattr(
-        host.sd_models,
-        "get_closet_checkpoint_match",
-        lambda name: None
-        if not name or name == "None"
-        else types.SimpleNamespace(
-            filename=f"/models/{name}", name_for_extra=name.split(".")[0], title=name, sha256="abc123"
-        ),
-    )
-    monkeypatch.setattr(mc_memory, "plan", lambda name, mods=None: mc_memory.ResidencyPlan("dual", "both fit"))
-
-    switches: list[str] = []
-    monkeypatch.setattr(
-        mc_memory, "ensure_resident",
-        lambda name, mods=None: (switches.append((name, mods)), "cold")[1],
-    )
-
-    restores: list[str] = []
-    monkeypatch.setattr(
-        mc_memory, "restore_selection",
-        lambda name, mods=None: restores.append((name, mods)),
-    )
-    monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: False)
-
-    refine_calls: list = []
-
-    def fake_process_images(p2):
-        refine_calls.append(p2)
-        image = image_factory(p2.width, p2.height)
-        return types.SimpleNamespace(images=[image], index_of_first_image=0)
-
-    monkeypatch.setattr(model_chain, "process_images", fake_process_images)
-    monkeypatch.setattr(
-        model_chain, "create_infotext",
-        lambda p, prompts, seeds, subseeds, index=None, **kw: f"infotext#{index} seed={seeds[index]}",
-    )
-
-    script = model_chain.ScriptModelChain()
-    return types.SimpleNamespace(
-        script=script,
-        switches=switches,
-        restores=restores,
-        refine_calls=refine_calls,
-        module=model_chain,
-    )
-
-
 def make_p(host, batch_size=1, n_iter=1, prompt="a castle", negative="lowres", width=1024, height=1024):
     total = batch_size * n_iter
     return types.SimpleNamespace(

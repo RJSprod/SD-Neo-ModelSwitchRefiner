@@ -95,6 +95,21 @@ with the checkpoint. Restoring only half of the pair would silently change what
 Stage 1 loads on your next generation, and would leave the main VAE/TE dropdown
 showing Stage 2's files.
 
+### Hires. fix
+
+Hires fix runs *inside* Stage 1: the first pass is generated, upscaled and
+re-sampled, and only that upscaled result reaches Stage 2. Stage 2 then refines
+it **once**.
+
+Nothing from the hires pass carries into Stage 2 — not its steps, not its
+denoise, not a second upscale. Stage 2 uses its own controls throughout, and the
+size multiplier applies to the image it actually receives, so `1.0x` after a 2x
+hires pass means "keep the 2x result", not "upscale again".
+
+The panel's size readout follows the hires upscale, so it shows the size Stage 2
+will produce rather than the first-pass size. `Model Chain Stage1 Size` in the
+infotext likewise records the upscaled size — the image Stage 2 was handed.
+
 ### Prompt modes
 
 | Mode | Stage 2 prompt |

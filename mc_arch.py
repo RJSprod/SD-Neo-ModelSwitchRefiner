@@ -242,6 +242,76 @@ def scaled_size(width: int, height: int, multiplier: float, alignment: int) -> t
     )
 
 
+def resolution_step(default: int = 64) -> int:
+    """The host's resolution snapping step (``Settings -> Resolution Step``)."""
+    try:
+        from modules import shared
+
+        return max(int(shared.opts.res_step), 1)
+    except Exception:
+        return default
+
+
+def hires_target_size(
+    width: int,
+    height: int,
+    scale: float = 2.0,
+    resize_x: int = 0,
+    resize_y: int = 0,
+    step: int | None = None,
+) -> tuple[int, int]:
+    """Size hires fix will upscale a first pass to.
+
+    Mirrors ``StableDiffusionProcessingTxt2Img.calculate_target_resolution``:
+    ``hr_resize_x``/``hr_resize_y`` of 0 mean "use the scale factor", a single
+    non-zero value drives the other axis by aspect ratio, and both results are
+    snapped with the host's rounding.
+
+    This matters because ``p.width``/``p.height`` keep describing the *first
+    pass* when hires fix is on -- the image Stage 2 actually receives is this
+    size.
+    """
+    step = resolution_step() if step is None else step
+
+    if not resize_x and not resize_y:
+        return snap_dimension(width * scale, step), snap_dimension(height * scale, step)
+
+    if not resize_y:
+        return snap_dimension(resize_x, step), snap_dimension(resize_x * (height / width), step)
+
+    if not resize_x:
+        return snap_dimension(resize_y * (width / height), step), snap_dimension(resize_y, step)
+
+    return snap_dimension(resize_x, step), snap_dimension(resize_y, step)
+
+
+def stage1_size(p) -> tuple[int, int]:
+    """Pixel size of the image Stage 2 will receive.
+
+    With hires fix enabled that is the upscaled size, not ``p.width``/
+    ``p.height`` -- those still describe the first pass.
+    """
+    width, height = int(getattr(p, "width", 0) or 0), int(getattr(p, "height", 0) or 0)
+
+    if not getattr(p, "enable_hr", False):
+        return width, height
+
+    # The host computes these in init(); prefer them when present, since they
+    # already account for the old-hires-fix compatibility option.
+    target_x = getattr(p, "hr_upscale_to_x", 0) or 0
+    target_y = getattr(p, "hr_upscale_to_y", 0) or 0
+    if target_x and target_y:
+        return int(target_x), int(target_y)
+
+    return hires_target_size(
+        width,
+        height,
+        scale=float(getattr(p, "hr_scale", 2.0) or 2.0),
+        resize_x=int(getattr(p, "hr_resize_x", 0) or 0),
+        resize_y=int(getattr(p, "hr_resize_y", 0) or 0),
+    )
+
+
 def aspect_ratio_delta(src: tuple[int, int], dst: tuple[int, int]) -> float:
     """Relative aspect-ratio error introduced by snapping, as a fraction."""
     src_ratio = src[0] / src[1]
