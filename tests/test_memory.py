@@ -15,9 +15,11 @@ GB = 1024**3
 def fresh_cache():
     mc_memory._cache = mc_memory._Cache()
     mc_memory._pending_restore = None
+    mc_memory._last_refusal = None
     yield
     mc_memory._cache = mc_memory._Cache()
     mc_memory._pending_restore = None
+    mc_memory._last_refusal = None
 
 
 def make_entry(name, size_gb, key=None):
@@ -493,3 +495,100 @@ class TestClearReferences:
     def test_tolerates_a_model_without_reference_support(self, host):
         host.shared.sd_model = object()
         mc_memory.clear_references()  # must not raise
+
+
+class TestStashKeying:
+    """The outgoing model must be filed under *its own* key.
+
+    forge_loading_parameters describes the selection, which runs ahead of the
+    loaded model: restore_selection points it back at Stage 1 while Stage 2's
+    model is still resident. Keying a stash off the selection there files the
+    outgoing model under the incoming one's key -- and because that key is
+    already cached, the stash is skipped and the model silently dropped.
+    """
+
+    def test_a_full_generation_cycle_caches_both_models(self, residency):
+        """Reproduces the observed A -> B -> (restore) -> A -> B sequence."""
+        model_a = residency.model_data.sd_model
+
+        # Generation 1: switch to B, then hand the selection back to A.
+        mc_memory.ensure_resident("B")
+        model_b = residency.model_data.sd_model
+        mc_memory.restore_selection("A")
+
+        # Generation 2 begins: A is swapped back in, and B must be kept.
+        assert mc_memory.reinstate_pending() is True
+        assert residency.model_data.sd_model is model_a
+
+        assert sorted(mc_memory.cached_names()) == ["A", "B"], (
+            "B was dropped on the way back to A"
+        )
+
+        # ...so the second switch to B is warm rather than another disk read.
+        reloads = residency.state.reloads
+        assert mc_memory.ensure_resident("B") == "warm"
+        assert residency.state.reloads == reloads
+        assert residency.model_data.sd_model is model_b
+
+    def test_repeated_cycles_never_read_from_disk_again(self, residency):
+        mc_memory.ensure_resident("B")
+        mc_memory.restore_selection("A")
+        mc_memory.reinstate_pending()
+        baseline = residency.state.reloads
+
+        for _ in range(3):
+            assert mc_memory.ensure_resident("B") == "warm"
+            mc_memory.restore_selection("A")
+            assert mc_memory.reinstate_pending() is True
+
+        assert residency.state.reloads == baseline
+
+    def test_the_stash_key_follows_the_loaded_model_not_the_selection(self, residency):
+        mc_memory.ensure_resident("B")
+        loaded_key = residency.model_data.forge_hash
+
+        # Point the selection elsewhere without touching the loaded model.
+        mc_memory.restore_selection("A")
+        assert residency.model_data.forge_hash == loaded_key
+        assert mc_memory._loaded_model_key() == loaded_key
+        assert mc_memory._loading_parameters_key() != loaded_key
+
+    def test_an_unidentifiable_model_is_not_cached_under_a_wrong_key(self, residency):
+        residency.model_data.forge_hash = ""
+        before = list(mc_memory.cached_names())
+
+        mc_memory._stash_current()
+
+        assert mc_memory.cached_names() == before
+
+
+class TestRefusalTracking:
+    """A cold load is only actionable when the cache actually refused a model.
+
+    Reporting every cold load as a cache problem sent the user chasing a RAM
+    setting when the real cause was a keying bug.
+    """
+
+    def test_no_refusal_recorded_when_caching_succeeds(self, residency):
+        mc_memory.ensure_resident("B")
+        assert mc_memory.last_refusal() is None
+
+    def test_a_refusal_is_recorded_and_named(self, residency, monkeypatch):
+        monkeypatch.setattr(mc_memory, "cache_budget_bytes", lambda: 1 * GB)
+        monkeypatch.setattr(mc_memory, "loaded_size_bytes", lambda model: 20 * GB)
+
+        mc_memory.ensure_resident("B")
+
+        assert mc_memory.last_refusal() == "A"
+
+    def test_a_later_success_clears_the_refusal(self, residency, monkeypatch):
+        monkeypatch.setattr(mc_memory, "cache_budget_bytes", lambda: 1 * GB)
+        monkeypatch.setattr(mc_memory, "loaded_size_bytes", lambda model: 20 * GB)
+        mc_memory.ensure_resident("B")
+        assert mc_memory.last_refusal() is not None
+
+        monkeypatch.setattr(mc_memory, "cache_budget_bytes", lambda: 64 * GB)
+        monkeypatch.setattr(mc_memory, "loaded_size_bytes", lambda model: 7 * GB)
+        mc_memory.ensure_resident("A")
+
+        assert mc_memory.last_refusal() is None

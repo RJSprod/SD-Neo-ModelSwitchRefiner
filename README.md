@@ -363,8 +363,17 @@ A switch has three possible costs, in increasing order:
 3. **Cold load** — reading the checkpoint from disk *and* the host tearing down
    the outgoing model first. This is the expensive one, typically 20s+.
 
-**If every switch is a cold load**, the cache is refusing the model. The console
-says so explicitly:
+A cold load on the *first* switch to a model in a session is expected and
+unavoidable — the host's loader has to read it once. The console says which case
+you are in:
+
+```
+Model Chain: first load of klein.safetensors this session; later switches to it
+             should be warm swaps from the RAM cache.
+```
+
+**If every switch is a cold load**, the cache is refusing the model, and the
+console names it:
 
 ```
 Model Chain: not enough system RAM to cache klein.safetensors

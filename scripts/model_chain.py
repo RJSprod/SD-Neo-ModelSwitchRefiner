@@ -981,12 +981,22 @@ class ScriptModelChain(scripts.Script):
             "" if len(stage1_images) == 1 else "s",
         )
         if transition == "cold":
-            logger.info(
-                "Model Chain: %s was not in the RAM cache. If every switch reads from "
-                "disk, the cache is refusing it — check the warning above and raise "
-                '"Model Chain: max system RAM for model cache (GB)" in Settings.',
-                target,
-            )
+            # Distinguish the one unavoidable first load from a model the cache
+            # keeps refusing -- only the latter is something the user can act on.
+            refused = mc_memory.last_refusal()
+            if refused:
+                logger.warning(
+                    "Model Chain: this was a disk load because %s could not be cached. "
+                    'Raise "Model Chain: max system RAM for model cache (GB)" in Settings '
+                    "to make later switches warm.",
+                    refused,
+                )
+            else:
+                logger.info(
+                    "Model Chain: first load of %s this session; later switches to it "
+                    "should be warm swaps from the RAM cache.",
+                    target,
+                )
 
         state.job_count = (state.job_count or 0) + len(stage1_images)
 

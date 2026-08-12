@@ -228,6 +228,14 @@ _pending_restore: str | None = None
 """Checkpoint the extension owes a switch back to, set when Stage 2 leaves
 Model B loaded while the UI selection has been put back to Model A."""
 
+_last_refusal: str | None = None
+"""Most recent model the cache could not take, if any.
+
+Lets a cold load say whether it was a first load (expected, once) or the
+consequence of a refused cache entry (actionable), instead of pointing at the
+RAM setting every time.
+"""
+
 
 # --------------------------------------------------------------------------- #
 # Host helpers
@@ -235,9 +243,30 @@ Model B loaded while the UI selection has been put back to Model A."""
 
 
 def _loading_parameters_key() -> str:
+    """Cache key for whatever the loading parameters currently *select*."""
     from modules.sd_models import model_data
 
     return str(model_data.forge_loading_parameters)
+
+
+def _loaded_model_key() -> str:
+    """Cache key for the model that is actually loaded right now.
+
+    Deliberately not ``_loading_parameters_key()``. ``forge_loading_parameters``
+    describes the *selection*, which routinely runs ahead of the loaded model:
+    ``restore_selection`` points it back at Stage 1 while Stage 2's model is
+    still the one in memory. Keying a stash off the selection there would file
+    the outgoing model under the incoming model's key -- and since that key is
+    already in the cache, the stash would be skipped entirely and the model
+    dropped.
+
+    ``forge_hash`` is by definition the loading-parameter string that produced
+    the resident model, which is exactly what a later lookup will compare
+    against.
+    """
+    from modules.sd_models import model_data
+
+    return str(getattr(model_data, "forge_hash", "") or "")
 
 
 def _is_real_model(model) -> bool:
@@ -543,7 +572,13 @@ def _stash_current() -> None:
     if not _is_real_model(model):
         return
 
-    key = _loading_parameters_key()
+    key = _loaded_model_key()
+    if not key:
+        logger.warning(
+            "Model Chain: cannot identify the loaded checkpoint, so it will not be cached"
+        )
+        return
+
     if _cache.has(key):
         _cache.get(key)  # refresh recency
         return
@@ -567,7 +602,10 @@ def _stash_current() -> None:
         model_flags=snapshot_model_flags(),
     )
 
+    global _last_refusal
+
     if _cache.admit(entry, budget):
+        _last_refusal = None
         logger.info(
             "Model Chain: holding %s in the RAM cache (%.1f GB; cache now %.1f GB of %.1f GB budget)",
             name,
@@ -576,6 +614,7 @@ def _stash_current() -> None:
             budget / _GB,
         )
     else:
+        _last_refusal = name
         logger.warning(
             "Model Chain: not enough system RAM to cache %s (%.1f GB needed, %.1f GB available to the cache) "
             "— it will reload from disk on every switch. Raise "
@@ -706,6 +745,11 @@ def reinstate_pending() -> bool:
     logger.info("Model Chain: restored %s from the RAM cache", entry.checkpoint_name)
     _pending_restore = None
     return True
+
+
+def last_refusal() -> str | None:
+    """Name of the last model the cache refused, or None."""
+    return _last_refusal
 
 
 def clear_references() -> None:
