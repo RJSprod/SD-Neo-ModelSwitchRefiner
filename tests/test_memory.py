@@ -145,8 +145,8 @@ class TestPlan:
             else types.SimpleNamespace(filename=f"/models/{name}", name_for_extra="flux"),
         )
         monkeypatch.setattr(mc_memory, "loaded_size_bytes", lambda model: 7 * GB)
-        monkeypatch.setattr(mc_memory, "file_size_bytes", lambda name: 19 * GB)
-        monkeypatch.setattr(mc_memory, "_target_key_for", lambda name: "key::uncached")
+        monkeypatch.setattr(mc_memory, "file_size_bytes", lambda name, mods=None: 19 * GB)
+        monkeypatch.setattr(mc_memory, "_target_key_for", lambda name, mods=None: "key::uncached")
         # Pinned so the prediction does not depend on the test machine's RAM.
         monkeypatch.setattr(mc_memory, "cache_budget_bytes", lambda: 32 * GB)
 
@@ -181,7 +181,7 @@ class TestPlan:
         assert result.is_warning
 
     def test_a_cached_model_predicts_a_warm_swap(self, monkeypatch):
-        monkeypatch.setattr(mc_memory, "_target_key_for", lambda name: "key::cached")
+        monkeypatch.setattr(mc_memory, "_target_key_for", lambda name, mods=None: "key::cached")
         mc_memory._cache.admit(make_entry("flux", 19, key="key::cached"), 64 * GB)
 
         result = mc_memory.plan("flux.safetensors")
@@ -244,7 +244,7 @@ def residency(host, monkeypatch):
     monkeypatch.setattr(main_entry, "refresh_model_loading_parameters", lambda **k: None)
 
     monkeypatch.setattr(mc_memory, "loaded_size_bytes", lambda model: 7 * GB)
-    monkeypatch.setattr(mc_memory, "file_size_bytes", lambda name: 7 * GB)
+    monkeypatch.setattr(mc_memory, "file_size_bytes", lambda name, mods=None: 7 * GB)
     monkeypatch.setattr(mc_memory, "free_ram_bytes", lambda: 128 * GB)
     monkeypatch.setattr(mc_memory, "cache_budget_bytes", lambda: 64 * GB)
 

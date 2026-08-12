@@ -35,13 +35,48 @@ The panel appears as a **Model Chain** accordion on the txt2img tab.
 1. Set up your txt2img generation as usual — that is Stage 1.
 2. Open **Model Chain**, tick the accordion, and pick a **Stage 2 checkpoint**.
    The detected architecture is shown beside the residency status.
-3. Set **Denoise strength**. This is the key control: it governs how much
+3. If the Stage 2 model needs its own VAE / text encoder files, select them in
+   **Stage 2 VAE / Text Encoder**. Flux.2 Klein and Krea 2 do.
+4. Set **Denoise strength**. This is the key control: it governs how much
    Model B may alter the Stage 1 image. The default of `0.35` keeps the Stage 1
    composition; higher values give Model B more freedom.
-4. Generate.
+5. Generate.
 
 The gallery shows only the refined Stage 2 outputs, one per image your batch
 settings would normally have produced.
+
+### VAE / text encoder
+
+Flux-family and Krea 2 checkpoints keep their VAE and text encoder in **separate
+files**, selected in Forge Neo as "additional modules". The **Stage 2 VAE / Text
+Encoder** dropdown selects those independently of Stage 1's:
+
+| Selection | Effect |
+| --- | --- |
+| **Use same choices** (default) | keep Stage 1's VAE / text encoder |
+| specific files | load those for the Stage 2 checkpoint |
+| cleared (empty) | use the checkpoint's built-in VAE / text encoder |
+
+This is what makes a genuinely cross-architecture chain work. An SDXL → Flux.2
+Klein chain needs Klein's own VAE and Qwen3 text encoder for Stage 2 — inheriting
+SDXL's encoder stack is not merely suboptimal, it is the wrong model. The
+sentinel and the semantics mirror the host's own **Hires VAE / Text Encoder**
+dropdown, so the control should read familiarly.
+
+**Both models keep their own encoders resident.** The host folds the module list
+into `forge_loading_parameters`, so a checkpoint paired with a particular VAE and
+text encoder is a distinct cache key. Stage 1's pairing and Stage 2's pairing
+each occupy their own cache slot, and switching between them is a warm pointer
+swap that brings the matching encoders back with the model — no disk read, no
+re-encode of the text encoder.
+
+The refresh button next to the Stage 2 checkpoint rescans both lists and keeps
+any selection that still exists.
+
+Stage 1's selection is captured before the switch and restored afterwards along
+with the checkpoint. Restoring only half of the pair would silently change what
+Stage 1 loads on your next generation, and would leave the main VAE/TE dropdown
+showing Stage 2's files.
 
 ### Prompt modes
 
@@ -99,7 +134,8 @@ The **Stage 2 edit mode** control has three settings:
 
 To refine with Krea 2 Edit:
 
-1. Pick your Krea 2 checkpoint as the Stage 2 model.
+1. Pick your Krea 2 checkpoint as the Stage 2 model, and select Krea 2's VAE
+   and text encoder in **Stage 2 VAE / Text Encoder**.
 2. Set edit mode to **Enable**.
 3. Use **Append** or **Replace** prompt mode and add the Krea 2 Edit LoRA:
    `<lora:your_krea2_edit_lora:1.0>`. Krea 2's edit behaviour comes from that
@@ -325,8 +361,9 @@ files. It covers the acceptance criteria that can be verified without a GPU:
 N-in/N-out batch behaviour, exactly-one-switch sequencing, per-image seed
 inheritance, prompt and style resolution, LoRA tag pass-through, aspect-ratio
 preservation and grid alignment, infotext round-tripping, the residency cascade
-and RAM budget, model-flag restoration across a warm swap, edit-mode scoping and
-polarity, interruption handling, and inertness when disabled.
+and RAM budget, per-checkpoint VAE/text-encoder selection and its cache keying,
+model-flag restoration across a warm swap, edit-mode scoping and polarity,
+interruption handling, and inertness when disabled.
 
 The criteria that need real hardware — that an SDXL → Flux.2-Klein chain
 produces coherent output, that a Krea 2 Edit refine responds to its Edit LoRA,

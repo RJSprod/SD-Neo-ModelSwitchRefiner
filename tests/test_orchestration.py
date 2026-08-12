@@ -14,7 +14,7 @@ import mc_infotext
 import mc_memory
 
 UI_ORDER = (
-    "enabled", "target", "prompt_mode", "prompt", "negative", "styles",
+    "enabled", "target", "modules", "prompt_mode", "prompt", "negative", "styles",
     "seed_mode", "seed_offset", "fixed_seed", "cfg", "steps", "sampler",
     "denoise", "size_multiplier", "edit_mode",
 )
@@ -22,6 +22,7 @@ UI_ORDER = (
 DEFAULTS = dict(
     enabled=True,
     target="fluxKlein9B.safetensors",
+    modules=[mc_memory.INHERIT_MODULES],
     prompt_mode="Inherit",
     prompt="",
     negative="",
@@ -52,13 +53,19 @@ def chain(host, style_store, monkeypatch, image_factory):
             filename=f"/models/{name}", name_for_extra=name.split(".")[0], title=name, sha256="abc123"
         ),
     )
-    monkeypatch.setattr(mc_memory, "plan", lambda name: mc_memory.ResidencyPlan("dual", "both fit"))
+    monkeypatch.setattr(mc_memory, "plan", lambda name, mods=None: mc_memory.ResidencyPlan("dual", "both fit"))
 
     switches: list[str] = []
-    monkeypatch.setattr(mc_memory, "ensure_resident", lambda name: (switches.append(name), "cold")[1])
+    monkeypatch.setattr(
+        mc_memory, "ensure_resident",
+        lambda name, mods=None: (switches.append((name, mods)), "cold")[1],
+    )
 
     restores: list[str] = []
-    monkeypatch.setattr(mc_memory, "restore_selection", lambda name: restores.append(name))
+    monkeypatch.setattr(
+        mc_memory, "restore_selection",
+        lambda name, mods=None: restores.append((name, mods)),
+    )
     monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: False)
 
     refine_calls: list = []
@@ -179,7 +186,7 @@ class TestBatchSequencing:
 
         run_chain(chain, host, p, processed)
 
-        assert chain.switches == ["fluxKlein9B.safetensors"]
+        assert chain.switches == [("fluxKlein9B.safetensors", [mc_memory.INHERIT_MODULES])]
 
     def test_model_b_stays_resident_for_the_whole_loop(self, chain, host, image_factory):
         """The switch must happen before the loop, not inside it."""
@@ -198,7 +205,7 @@ class TestBatchSequencing:
 
         run_chain(chain, host, p, processed)
 
-        assert chain.restores == [host.shared.opts.sd_model_checkpoint]
+        assert chain.restores == [(host.shared.opts.sd_model_checkpoint, [])]
 
     def test_gallery_holds_only_refined_output(self, chain, host, image_factory):
         """Acceptance: Stage 1 images absent from the gallery."""
@@ -568,7 +575,7 @@ class TestFailureHandling:
         processed = make_processed(host, p, image_factory)
         stage1 = list(processed.images)
 
-        def boom(name):
+        def boom(name, mods=None):
             raise mc_memory.ModelChainError("no such checkpoint")
 
         monkeypatch.setattr(mc_memory, "ensure_resident", boom)
@@ -954,3 +961,63 @@ class TestKleinDefaultReferences:
         run_chain(chain, host, p, processed, edit_mode="Auto", denoise=0.35)
 
         assert "denoise 0.35 is" in processed.comments
+
+
+class TestStageTwoModules:
+    """The Stage 2 VAE / text encoder selection reaches the model transition."""
+
+    def test_selection_is_passed_to_the_switch(self, chain, host, image_factory):
+        p = make_p(host, batch_size=2)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, modules=["flux2_vae.safetensors", "qwen3_8b.safetensors"])
+
+        assert chain.switches == [
+            ("fluxKlein9B.safetensors", ["flux2_vae.safetensors", "qwen3_8b.safetensors"])
+        ]
+
+    def test_switch_still_happens_exactly_once(self, chain, host, image_factory):
+        p = make_p(host, batch_size=4, n_iter=2)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, modules=["flux2_vae.safetensors"])
+
+        assert len(chain.switches) == 1
+        assert len(chain.refine_calls) == 8
+
+    def test_stage_1_modules_are_captured_and_restored(self, chain, host, image_factory):
+        """Restoring the checkpoint without its encoders would change what
+        Stage 1 loads on the next generation."""
+        host.shared.opts.forge_additional_modules = ["/models/VAE/sdxl_vae.safetensors"]
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, modules=["flux2_vae.safetensors"])
+
+        assert chain.restores == [
+            (host.shared.opts.sd_model_checkpoint, ["/models/VAE/sdxl_vae.safetensors"])
+        ]
+
+    def test_selection_is_recorded_in_infotext(self, chain, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, modules=["flux2_vae.safetensors"])
+
+        assert p.extra_generation_params["Model Chain Module 1"] == "flux2_vae"
+
+    def test_inheriting_records_nothing(self, chain, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, modules=[mc_memory.INHERIT_MODULES])
+
+        assert not any(k.startswith("Model Chain Module") for k in p.extra_generation_params)
+
+    def test_built_in_selection_is_recorded(self, chain, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, modules=[])
+
+        assert p.extra_generation_params["Model Chain Module 1"] == "Built-in"

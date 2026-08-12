@@ -29,7 +29,7 @@ from modules.processing import (
     process_images,
 )
 from modules.shared import opts, state
-from modules.ui_common import create_refresh_button, refresh_symbol
+from modules.ui_common import refresh_symbol
 from modules.ui_components import InputAccordion, ToolButton
 
 logger = logging.getLogger("model_chain")
@@ -72,15 +72,20 @@ shared.options_templates.update(
 # --------------------------------------------------------------------------- #
 
 
-def _checkpoint_choices() -> list[str]:
+def _model_choices() -> tuple[list[str], list[str]]:
+    """Checkpoint and VAE/text-encoder choices, rescanned from disk.
+
+    Module choices carry the same "Use same choices" sentinel the host's own
+    Hires VAE/TE dropdown uses.
+    """
     try:
         from modules_forge.main_entry import refresh_models
 
-        ckpts, _ = refresh_models()
-        return [_NO_MODEL] + list(ckpts)
+        ckpts, modules = refresh_models()
+        return [_NO_MODEL] + list(ckpts), [mc_memory.INHERIT_MODULES] + list(modules)
     except Exception:
         logger.warning("Model Chain: failed to list checkpoints", exc_info=True)
-        return [_NO_MODEL]
+        return [_NO_MODEL], [mc_memory.INHERIT_MODULES]
 
 
 def _sampler_choices() -> list[str]:
@@ -211,7 +216,7 @@ class ScriptModelChain(scripts.Script):
             self._height_component = component
 
     def ui(self, is_img2img):
-        checkpoints = _checkpoint_choices()
+        checkpoints, module_choices = _model_choices()
         samplers = _sampler_choices()
         styles = mc_styles.available_styles()
 
@@ -230,11 +235,23 @@ class ScriptModelChain(scripts.Script):
                     choices=checkpoints,
                     elem_id=self.elem_id("target"),
                 )
-                create_refresh_button(
-                    target,
-                    lambda: None,
-                    lambda: {"choices": _checkpoint_choices()},
-                    self.elem_id("target_refresh"),
+                target_refresh = ToolButton(
+                    value=refresh_symbol,
+                    elem_id=self.elem_id("target_refresh"),
+                    tooltip="Stage 2 checkpoint and modules: refresh",
+                )
+
+            with gr.Row():
+                modules = gr.Dropdown(
+                    value=[mc_memory.INHERIT_MODULES],
+                    label="Stage 2 VAE / Text Encoder",
+                    choices=module_choices,
+                    multiselect=True,
+                    elem_id=self.elem_id("modules"),
+                    info=(
+                        f'"{mc_memory.INHERIT_MODULES}" keeps Stage 1\'s selection; '
+                        "clear it entirely to use the checkpoint's built-in modules"
+                    ),
                 )
 
             architecture_notice = gr.Markdown("", elem_id=self.elem_id("arch_notice"))
@@ -399,6 +416,23 @@ class ScriptModelChain(scripts.Script):
             show_progress=False,
         )
 
+        def on_model_refresh(selected_modules):
+            """Rescan checkpoints and modules, keeping selections that survive."""
+            checkpoint_choices, refreshed_modules = _model_choices()
+            kept = [m for m in (selected_modules or []) if m in refreshed_modules]
+            if not kept:
+                kept = [mc_memory.INHERIT_MODULES]
+            return gr.update(choices=checkpoint_choices), gr.update(
+                choices=refreshed_modules, value=kept
+            )
+
+        target_refresh.click(
+            fn=on_model_refresh,
+            inputs=[modules],
+            outputs=[target, modules],
+            show_progress=False,
+        )
+
         def on_style_refresh(selected):
             names = mc_styles.reload_styles()
             kept, missing = mc_styles.prune_selection(selected)
@@ -413,9 +447,11 @@ class ScriptModelChain(scripts.Script):
             show_progress=False,
         )
 
-        def on_target_change(target_name, multiplier, mode, width, height):
+        def on_target_change(target_name, multiplier, mode, selected_modules, width, height):
             """Refresh the architecture notice, residency status and size readout."""
-            plan = mc_memory.plan(target_name)
+            # The module selection changes the footprint and the cache key, so
+            # the residency prediction has to account for it.
+            plan = mc_memory.plan(target_name, selected_modules)
             status = plan.message
             if plan.is_warning:
                 status = f"⚠️ {status}"
@@ -438,12 +474,17 @@ class ScriptModelChain(scripts.Script):
         target_outputs = [architecture_notice, residency_status, size_note, cfg, edit_notice]
 
         if self._width_component is not None and self._height_component is not None:
-            target.change(
-                fn=on_target_change,
-                inputs=[target, size_multiplier, edit_mode, self._width_component, self._height_component],
-                outputs=target_outputs,
-                show_progress=False,
-            )
+            target_inputs = [
+                target, size_multiplier, edit_mode, modules,
+                self._width_component, self._height_component,
+            ]
+            for trigger in (target, modules):
+                trigger.change(
+                    fn=on_target_change,
+                    inputs=target_inputs,
+                    outputs=target_outputs,
+                    show_progress=False,
+                )
             for component in (size_multiplier, self._width_component, self._height_component):
                 component.change(
                     fn=_resolution_note,
@@ -455,12 +496,13 @@ class ScriptModelChain(scripts.Script):
             # The main sliders were not found (a heavily customised UI); the
             # size readout is simply omitted rather than showing wrong numbers.
             logger.info("Model Chain: txt2img size sliders unavailable, live size readout disabled")
-            target.change(
-                fn=lambda name, mult, mode: on_target_change(name, mult, mode, 0, 0),
-                inputs=[target, size_multiplier, edit_mode],
-                outputs=target_outputs,
-                show_progress=False,
-            )
+            for trigger in (target, modules):
+                trigger.change(
+                    fn=lambda name, mult, mode, mods: on_target_change(name, mult, mode, mods, 0, 0),
+                    inputs=[target, size_multiplier, edit_mode, modules],
+                    outputs=target_outputs,
+                    show_progress=False,
+                )
 
         def on_edit_mode(target_name, mode, current_denoise):
             """Track the denoise strength edit conditioning expects.
@@ -492,6 +534,7 @@ class ScriptModelChain(scripts.Script):
         components = {
             "enabled": enabled,
             "target": target,
+            "modules": modules,
             "prompt_mode": prompt_mode,
             "prompt": prompt,
             "negative": negative,
@@ -516,6 +559,7 @@ class ScriptModelChain(scripts.Script):
         return [
             enabled,
             target,
+            modules,
             prompt_mode,
             prompt,
             negative,
@@ -553,7 +597,7 @@ class ScriptModelChain(scripts.Script):
 
     # -- hooks ------------------------------------------------------------- #
 
-    def before_process(self, p, enabled, target, *args):
+    def before_process(self, p, enabled, target, modules=None, *args):
         # Always reinstate a checkpoint we ourselves left swapped out, even when
         # the extension has since been disabled -- that is cleanup of our own
         # state, not extension behaviour.
@@ -590,7 +634,7 @@ class ScriptModelChain(scripts.Script):
             p.comment(message)
             return
 
-        plan = mc_memory.plan(target)
+        plan = mc_memory.plan(target, modules)
         logger.info("Model Chain: %s", plan.message)
         self._armed = True
 
@@ -599,6 +643,7 @@ class ScriptModelChain(scripts.Script):
         p,
         enabled,
         target,
+        modules,
         prompt_mode,
         prompt,
         negative,
@@ -652,6 +697,7 @@ class ScriptModelChain(scripts.Script):
                 size_multiplier=size_multiplier,
                 stage1_size=f"{p.width}x{p.height}",
                 edit_mode=edit_mode,
+                modules=modules,
             )
         )
 
@@ -670,6 +716,7 @@ class ScriptModelChain(scripts.Script):
         processed,
         enabled,
         target,
+        modules,
         prompt_mode,
         prompt,
         negative,
@@ -695,6 +742,7 @@ class ScriptModelChain(scripts.Script):
                 p,
                 processed,
                 target=target,
+                modules=modules,
                 prompt_mode=prompt_mode,
                 extra_positive=prompt,
                 extra_negative=negative,
@@ -726,6 +774,7 @@ class ScriptModelChain(scripts.Script):
         processed,
         *,
         target,
+        modules,
         prompt_mode,
         extra_positive,
         extra_negative,
@@ -770,11 +819,16 @@ class ScriptModelChain(scripts.Script):
         edit_override = mc_arch.edit_override(arch, edit_mode)
 
         # -- the one and only checkpoint switch (section 3.1) -------------- #
+        # Both halves of Stage 1's pair are captured: restoring the checkpoint
+        # without its VAE/text encoder would change what Stage 1 loads next time.
         previous_checkpoint = shared.opts.sd_model_checkpoint
-        transition = mc_memory.ensure_resident(target)
+        previous_modules = mc_memory.current_modules()
+
+        transition = mc_memory.ensure_resident(target, modules)
         logger.info(
-            "Model Chain: switched to %s (%s load) for %d image%s",
+            "Model Chain: switched to %s%s (%s load) for %d image%s",
             target,
+            self._describe_modules(modules),
             transition,
             len(stage1_images),
             "" if len(stage1_images) == 1 else "s",
@@ -829,11 +883,23 @@ class ScriptModelChain(scripts.Script):
                 refined.append(result if result is not None else image)
         finally:
             self._in_stage_2 = False
-            # Put the selection back so the next generation starts on Model A.
-            # Only the selection: reloading here would be a second switch.
-            mc_memory.restore_selection(previous_checkpoint)
+            # Put the selection back so the next generation starts on Model A
+            # with Model A's own VAE and text encoder. Only the selection:
+            # reloading here would be a second switch.
+            mc_memory.restore_selection(previous_checkpoint, previous_modules)
 
         self._finish(p, processed, stage1_images, refined, infotexts)
+
+    @staticmethod
+    def _describe_modules(modules) -> str:
+        """Short console description of the Stage 2 VAE / text encoder choice."""
+        resolved = mc_memory.resolve_modules(modules)
+        if resolved is None:
+            return ""
+        if not resolved:
+            return " (built-in VAE/TE)"
+        names = ", ".join(os.path.basename(m) for m in resolved)
+        return f" (VAE/TE: {names})"
 
     def _stage_2_seed(self, stage1_seed: int, mode: str, offset: int, fixed: int) -> int:
         """Per-image seed for the refine pass (section 6.3).

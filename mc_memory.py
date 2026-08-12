@@ -237,15 +237,62 @@ def checkpoint_info(name: str):
     return sd_models.get_closet_checkpoint_match(name)
 
 
-def file_size_bytes(name: str) -> int:
+INHERIT_MODULES = "Use same choices"
+"""Sentinel meaning "keep Stage 1's VAE / text encoder selection".
+
+Same spelling the host's own Hires VAE/TE dropdown uses, so the control reads
+familiarly and infotext written by either is interchangeable.
+"""
+
+
+def resolve_modules(values) -> list[str] | None:
+    """Turn a VAE/TE selection into the list of module paths to load.
+
+    Returns None when Stage 1's selection should be inherited. An empty list is
+    meaningful and distinct from None: it means "no additional modules", i.e.
+    use whatever VAE and text encoder are built into the checkpoint.
+
+    Resolution mirrors ``main_entry.modules_change``: names are looked up in the
+    host's module list and the result is sorted, so a selection compares equal
+    to what the host will actually store.
+    """
+    if values is None:
+        return None
+    if isinstance(values, str):
+        values = [values]
+    if INHERIT_MODULES in values:
+        return None
+
+    from modules_forge.main_entry import module_list
+
+    resolved = []
+    for value in values:
+        name = os.path.basename(str(value))
+        if name in module_list:
+            resolved.append(module_list[name])
+        else:
+            logger.warning("Model Chain: VAE/text encoder module %r was not found", value)
+
+    return sorted(resolved)
+
+
+def current_modules() -> list[str]:
+    from modules import shared
+
+    return list(getattr(shared.opts, "forge_additional_modules", []) or [])
+
+
+def file_size_bytes(name: str, modules=None) -> int:
     """Disk footprint of a checkpoint plus the additional modules loaded with it.
 
     Used to size a model that is not currently loaded. The VAE and text encoders
     of Flux-family models live in separate files selected as additional modules,
-    so a checkpoint file size alone would badly under-count them.
-    """
-    from modules import shared
+    so a checkpoint file size alone would badly under-count them -- a Flux.2
+    text encoder is several GB on its own.
 
+    ``modules`` sizes a specific selection; None falls back to whatever is
+    currently selected.
+    """
     total = 0
     info = checkpoint_info(name)
     if info is not None:
@@ -254,7 +301,11 @@ def file_size_bytes(name: str) -> int:
         except OSError:
             pass
 
-    for module in getattr(shared.opts, "forge_additional_modules", []) or []:
+    resolved = resolve_modules(modules)
+    if resolved is None:
+        resolved = current_modules()
+
+    for module in resolved:
         try:
             total += os.path.getsize(module)
         except OSError:
@@ -362,7 +413,7 @@ class ResidencyPlan:
         return self.kind in ("disk", "unavailable")
 
 
-def plan(target_name: str) -> ResidencyPlan:
+def plan(target_name: str, modules=None) -> ResidencyPlan:
     """Predict what the switch to ``target_name`` will cost, for the UI status line."""
     if not target_name or target_name in ("None", "none"):
         return ResidencyPlan("unavailable", "No Stage 2 model selected.")
@@ -375,9 +426,9 @@ def plan(target_name: str) -> ResidencyPlan:
 
     current = shared.sd_model
     current_size = loaded_size_bytes(current)
-    target_size = file_size_bytes(target_name)
+    target_size = file_size_bytes(target_name, modules)
 
-    if _cache.has(_target_key_for(target_name)):
+    if _cache.has(_target_key_for(target_name, modules)):
         return ResidencyPlan(
             "warm",
             f"{info.name_for_extra} is cached in RAM — switch is a warm swap, no disk read.",
@@ -413,12 +464,13 @@ def plan(target_name: str) -> ResidencyPlan:
     )
 
 
-def _target_key_for(name: str) -> str:
+def _target_key_for(name: str, modules=None) -> str:
     """Best-effort cache key for a checkpoint that is not currently selected.
 
     Mirrors how ``main_entry.refresh_model_loading_parameters`` builds
-    ``forge_loading_parameters`` so the prediction matches the real key without
-    mutating any global state.
+    ``forge_loading_parameters`` -- same keys, same order, same sorted module
+    list -- so the prediction matches the real key without mutating any global
+    state.
     """
     try:
         from modules import shared
@@ -430,10 +482,13 @@ def _target_key_for(name: str) -> str:
         unet_storage_dtype, _ = forge_unet_storage_dtype_options.get(
             shared.opts.forge_unet_storage_dtype, (None, False)
         )
+        resolved = resolve_modules(modules)
+        if resolved is None:
+            resolved = current_modules()
         return str(
             dict(
                 checkpoint_info=info,
-                additional_modules=shared.opts.forge_additional_modules,
+                additional_modules=resolved,
                 unet_storage_dtype=unet_storage_dtype,
             )
         )
@@ -481,8 +536,14 @@ def _stash_current() -> None:
         )
 
 
-def ensure_resident(name: str) -> str:
+def ensure_resident(name: str, modules=None) -> str:
     """Make ``name`` the loaded checkpoint, and report how it got there.
+
+    ``modules`` is the VAE / text encoder selection for this checkpoint; None
+    inherits whatever is currently selected. Because the host folds the module
+    list into ``forge_loading_parameters``, a checkpoint paired with its own
+    VAE and text encoder is a distinct cache entry -- which is what lets Stage 1
+    and Stage 2 hold different encoders in memory at the same time.
 
     Returns ``"unchanged"``, ``"warm"`` (restored from the RAM cache) or
     ``"cold"`` (read from disk). This is the only entry point the orchestration
@@ -496,19 +557,26 @@ def ensure_resident(name: str) -> str:
     if info is None:
         raise ModelChainError(f'Stage 2 checkpoint "{name}" was not found.')
 
+    resolved_modules = resolve_modules(modules)
+
     if _is_real_model(model_data.sd_model):
         current_info = getattr(model_data.sd_model, "sd_checkpoint_info", None)
-        if current_info is not None and current_info.filename == info.filename:
+        same_checkpoint = current_info is not None and current_info.filename == info.filename
+        same_modules = resolved_modules is None or resolved_modules == current_modules()
+        if same_checkpoint and same_modules:
             return "unchanged"
 
     _stash_current()
 
     # Let the host recompute loading parameters, dynamic LoRA flags and the
     # checkpoint selection. save=False keeps this transient switch out of the
-    # user's config.json.
-    main_entry.checkpoint_change(name, None, save=False, refresh=True)
-    if str(model_data.forge_loading_parameters.get("checkpoint_info", "")) != str(info):
-        main_entry.refresh_model_loading_parameters()
+    # user's config.json. Both changes are made with refresh=False and followed
+    # by a single refresh, the same way the host's own hires-fix pass swaps
+    # checkpoint and modules together.
+    main_entry.checkpoint_change(name, None, save=False, refresh=False)
+    if resolved_modules is not None:
+        main_entry.modules_change(resolved_modules, None, save=False, refresh=False)
+    main_entry.refresh_model_loading_parameters()
 
     target_key = _loading_parameters_key()
     entry = _cache.get(target_key)
@@ -529,8 +597,12 @@ def ensure_resident(name: str) -> str:
     return "cold"
 
 
-def restore_selection(name: str) -> None:
-    """Point the UI selection and loading parameters back at ``name``.
+def restore_selection(name: str, modules=None) -> None:
+    """Point the UI selection and loading parameters back at Stage 1's pair.
+
+    Both halves have to go back: restoring the checkpoint but leaving Stage 2's
+    VAE and text encoder selected would silently change what Stage 1 loads next
+    time, and would leave the user's VAE/TE dropdown showing Stage 2's files.
 
     Deliberately does *not* reload. Section 3.1 allows exactly one checkpoint
     switch per Generate click, so the swap back to Model A is deferred to the
@@ -545,7 +617,10 @@ def restore_selection(name: str) -> None:
 
     from modules_forge import main_entry
 
-    main_entry.checkpoint_change(name, None, save=False, refresh=True)
+    main_entry.checkpoint_change(name, None, save=False, refresh=False)
+    if modules is not None:
+        main_entry.modules_change(modules, None, save=False, refresh=False)
+    main_entry.refresh_model_loading_parameters()
     _pending_restore = name
 
 

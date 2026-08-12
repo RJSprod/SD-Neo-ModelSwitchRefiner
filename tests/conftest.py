@@ -320,8 +320,14 @@ def _install_modules() -> None:
     modules_forge = types.ModuleType("modules_forge")
     modules_forge.__path__ = []
     main_entry = types.ModuleType("modules_forge.main_entry")
-    main_entry.refresh_models = lambda: ([], [])
+    main_entry.module_list = {
+        "flux2_vae.safetensors": "/models/VAE/flux2_vae.safetensors",
+        "qwen3_8b.safetensors": "/models/text_encoder/qwen3_8b.safetensors",
+        "sdxl_vae.safetensors": "/models/VAE/sdxl_vae.safetensors",
+    }
+    main_entry.refresh_models = lambda: ([], sorted(main_entry.module_list))
     main_entry.checkpoint_change = lambda *a, **k: True
+    main_entry.modules_change = lambda *a, **k: True
     main_entry.refresh_model_loading_parameters = lambda **k: None
     main_entry.forge_unet_storage_dtype_options = {"Automatic": (None, False)}
     modules_forge.main_entry = main_entry

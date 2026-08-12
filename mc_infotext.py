@@ -42,6 +42,16 @@ STAGE1_SIZE = "Model Chain Stage1 Size"
 EDIT_MODE = "Model Chain Edit Mode"
 """Auto | Enable | Disable -- Stage 2 reference/edit conditioning."""
 
+MODULE_PREFIX = "Model Chain Module "
+"""Numbered VAE / text encoder keys: "Model Chain Module 1", "... 2", and so on.
+
+Mirrors how the host records its own ``Module N`` and ``Hires Module N``
+entries, including the ``Use same choices`` / ``Built-in`` sentinels in slot 1.
+"""
+
+INHERIT_MODULES = "Use same choices"
+BUILTIN_MODULES = "Built-in"
+
 PROMPT_MODES = ("Inherit", "Append", "Replace")
 SEED_MODES = ("Inherit", "Offset", "Fixed")
 
@@ -65,6 +75,7 @@ def build_params(
     size_multiplier: float,
     stage1_size: str,
     edit_mode: str = "Auto",
+    modules=None,
 ) -> dict:
     """Build the ``extra_generation_params`` entries for an enabled chain.
 
@@ -104,7 +115,87 @@ def build_params(
     if edit_mode and edit_mode != "Auto":
         params[EDIT_MODE] = edit_mode
 
+    params.update(build_module_params(modules))
+
     return {k: v for k, v in params.items() if v not in (None, "")}
+
+
+def build_module_params(modules) -> dict:
+    """Record the Stage 2 VAE / text encoder selection.
+
+    Follows the host's own convention for ``Hires Module N``: the sentinel goes
+    in slot 1 when the selection is inherited or empty, otherwise each module is
+    recorded by its extension-less basename.
+    """
+    import os
+
+    if modules is None:
+        return {}
+    if isinstance(modules, str):
+        modules = [modules]
+
+    if INHERIT_MODULES in modules:
+        # Inheriting is the default; recording it would add noise to every
+        # infotext for a setting the user never touched.
+        return {}
+    if not modules:
+        return {f"{MODULE_PREFIX}1": BUILTIN_MODULES}
+
+    return {
+        f"{MODULE_PREFIX}{i + 1}": os.path.splitext(os.path.basename(str(m)))[0]
+        for i, m in enumerate(modules)
+    }
+
+
+def parse_modules(params: dict) -> list[str] | None:
+    """Collect ``Model Chain Module N`` keys back into a selection.
+
+    Returns None when the infotext records no selection, which restores the
+    inherit default. Names are matched against the host's live module list the
+    same way the host resolves its own ``Module N`` keys, so a module that has
+    since been removed is dropped rather than breaking the paste.
+    """
+    import os
+
+    numbered = []
+    for key, value in params.items():
+        if not key.startswith(MODULE_PREFIX):
+            continue
+        suffix = key[len(MODULE_PREFIX) :].strip()
+        if suffix.isdigit():
+            numbered.append((int(suffix), value))
+
+    if not numbered:
+        return None
+
+    numbered.sort()
+    values = [value for _, value in numbered]
+
+    if values[0] == INHERIT_MODULES:
+        return [INHERIT_MODULES]
+    if values[0] == BUILTIN_MODULES:
+        return []
+
+    try:
+        from modules_forge.main_entry import module_list
+
+        known = {os.path.splitext(name)[0]: name for name in module_list}
+    except Exception:
+        return None
+
+    resolved, missing = [], []
+    for value in values:
+        name = known.get(str(value))
+        (resolved if name else missing).append(name or value)
+
+    if missing:
+        logger.warning(
+            "Model Chain: VAE/text encoder modules from this infotext are not "
+            "installed: %s",
+            ", ".join(str(m) for m in missing),
+        )
+
+    return resolved
 
 
 def parse_styles(value) -> list[str]:
@@ -184,6 +275,12 @@ def build_paste_fields(components: dict) -> list:
             return None
         return resolved
 
+    def modules_from(params):
+        selection = parse_modules(params)
+        if selection is None:
+            return gr.update(value=[INHERIT_MODULES])
+        return gr.update(value=selection)
+
     def edit_mode_from(params):
         # Absent means the image predates the feature, or was made in Auto.
         # Restoring Auto is right in both cases; returning None would leave
@@ -206,6 +303,7 @@ def build_paste_fields(components: dict) -> list:
         PasteField(components["denoise"], DENOISE, api="model_chain_denoise"),
         PasteField(components["size_multiplier"], SIZE_MULTIPLIER, api="model_chain_size_multiplier"),
         PasteField(components["edit_mode"], edit_mode_from, api="model_chain_edit_mode"),
+        PasteField(components["modules"], modules_from, api="model_chain_modules"),
     ]
 
     return fields
@@ -230,4 +328,7 @@ def paste_field_names() -> list[str]:
         SIZE_MULTIPLIER,
         STAGE1_SIZE,
         EDIT_MODE,
+        # A generous fixed span: the host forwards keys by exact name, and a
+        # chain realistically selects a VAE plus one or two text encoders.
+        *(f"{MODULE_PREFIX}{i}" for i in range(1, 9)),
     ]
