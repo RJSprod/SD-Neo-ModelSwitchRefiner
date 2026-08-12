@@ -367,3 +367,113 @@ class TestRelease:
 
         mc_memory.release_all()
         assert mc_memory.cached_names() == []
+
+
+# --------------------------------------------------------------------------- #
+# Model flags across a warm swap
+# --------------------------------------------------------------------------- #
+
+
+class TestModelFlags:
+    """forge_loader sets dynamic_args flags on every load; a warm pointer swap
+    never runs the loader, so the cache has to carry them.
+
+    Leaving them describing the previously loaded checkpoint is not cosmetic:
+    ``nunchaku`` selects a different LoRA application path, ``kontext`` and
+    ``edit`` decide whether Flux.1 and Qwen-Image use reference conditioning,
+    ``klein`` changes sampling and ``pid`` changes the latent shape.
+    """
+
+    @pytest.fixture
+    def flags(self):
+        from backend.args import dynamic_args
+
+        return dynamic_args
+
+    def test_snapshot_captures_every_loader_set_flag(self, host, flags):
+        flags.krea2 = True
+        flags.nunchaku = True
+
+        captured = mc_memory.snapshot_model_flags()
+
+        assert set(captured) == set(mc_memory.MODEL_FLAGS)
+        assert captured["krea2"] is True
+        assert captured["nunchaku"] is True
+        assert captured["kontext"] is False
+
+    def test_warm_swap_restores_the_flags_of_the_model_being_restored(self, residency, flags):
+        # Model A is a plain checkpoint.
+        flags.krea2 = False
+        flags.nunchaku = False
+        model_a = residency.model_data.sd_model
+
+        # Switching to Model B, which the loader would mark as Krea 2.
+        mc_memory.ensure_resident("B")
+        flags.krea2 = True
+
+        # Switching back must not leave B's flags describing A.
+        assert mc_memory.ensure_resident("A") == "warm"
+        assert residency.model_data.sd_model is model_a
+        assert flags.krea2 is False
+
+    def test_warm_swap_forward_restores_the_target_flags(self, residency, flags):
+        mc_memory.ensure_resident("B")
+        flags.krea2 = True
+        mc_memory.ensure_resident("A")
+
+        # Back to B: its Krea 2 flag must come back with it.
+        assert mc_memory.ensure_resident("B") == "warm"
+        assert flags.krea2 is True
+
+    def test_warm_swap_clears_per_generation_latent_state(self, residency, flags):
+        """forge_loader calls dynamic_args.reset(); the warm path must too."""
+        mc_memory.ensure_resident("B")
+        flags.ref_latents.append("stale reference")
+
+        mc_memory.ensure_resident("A")
+
+        assert flags.ref_latents == []
+
+    def test_reinstating_a_deferred_switch_also_restores_flags(self, residency, flags):
+        mc_memory.ensure_resident("B")
+        flags.krea2 = True
+        mc_memory.restore_selection("A")
+
+        assert mc_memory.reinstate_pending() is True
+        assert flags.krea2 is False
+
+    def test_repeated_switching_keeps_flags_in_step_with_the_model(self, residency, flags):
+        mc_memory.ensure_resident("B")
+        flags.krea2 = True
+
+        for _ in range(3):
+            mc_memory.ensure_resident("A")
+            assert flags.krea2 is False
+            mc_memory.ensure_resident("B")
+            assert flags.krea2 is True
+
+
+class TestClearReferences:
+    def test_clears_engine_and_dynamic_args_state(self, host):
+        from backend.args import dynamic_args
+
+        cleared = {"called": False}
+
+        class FakeEngine:
+            ini_latent = "an image"
+
+            def clear_references(self):
+                cleared["called"] = True
+
+        host.shared.sd_model = FakeEngine()
+        dynamic_args.ref_latents.append("stale")
+
+        mc_memory.clear_references()
+
+        assert cleared["called"] is True
+        assert host.shared.sd_model.ini_latent is None
+        assert dynamic_args.ref_latents == []
+
+    def test_tolerates_a_model_without_reference_support(self, host):
+        host.shared.sd_model = object()
+        mc_memory.clear_references()  # must not raise

@@ -39,6 +39,8 @@ SAMPLER = "Model Chain Sampler"
 DENOISE = "Model Chain Denoise"
 SIZE_MULTIPLIER = "Model Chain Size Multiplier"
 STAGE1_SIZE = "Model Chain Stage1 Size"
+EDIT_MODE = "Model Chain Edit Mode"
+"""Auto | Enable | Disable -- Stage 2 reference/edit conditioning."""
 
 PROMPT_MODES = ("Inherit", "Append", "Replace")
 SEED_MODES = ("Inherit", "Offset", "Fixed")
@@ -62,6 +64,7 @@ def build_params(
     denoise: float,
     size_multiplier: float,
     stage1_size: str,
+    edit_mode: str = "Auto",
 ) -> dict:
     """Build the ``extra_generation_params`` entries for an enabled chain.
 
@@ -95,6 +98,11 @@ def build_params(
 
     if sampler and sampler != INHERIT_SAMPLER:
         params[SAMPLER] = sampler
+
+    # Omitted at its default so a chain that does not touch edit mode keeps the
+    # same infotext it had before the feature existed.
+    if edit_mode and edit_mode != "Auto":
+        params[EDIT_MODE] = edit_mode
 
     return {k: v for k, v in params.items() if v not in (None, "")}
 
@@ -176,6 +184,12 @@ def build_paste_fields(components: dict) -> list:
             return None
         return resolved
 
+    def edit_mode_from(params):
+        # Absent means the image predates the feature, or was made in Auto.
+        # Restoring Auto is right in both cases; returning None would leave
+        # whatever the control happened to be showing.
+        return params.get(EDIT_MODE, "Auto")
+
     fields = [
         PasteField(components["enabled"], lambda d: ENABLED in d, api="model_chain_enabled"),
         PasteField(components["target"], target_from, api="model_chain_target"),
@@ -191,6 +205,7 @@ def build_paste_fields(components: dict) -> list:
         PasteField(components["sampler"], SAMPLER, api="model_chain_sampler"),
         PasteField(components["denoise"], DENOISE, api="model_chain_denoise"),
         PasteField(components["size_multiplier"], SIZE_MULTIPLIER, api="model_chain_size_multiplier"),
+        PasteField(components["edit_mode"], edit_mode_from, api="model_chain_edit_mode"),
     ]
 
     return fields
@@ -214,4 +229,5 @@ def paste_field_names() -> list[str]:
         DENOISE,
         SIZE_MULTIPLIER,
         STAGE1_SIZE,
+        EDIT_MODE,
     ]

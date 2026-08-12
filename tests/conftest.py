@@ -145,6 +145,11 @@ class FakeOptions:
         self.forge_additional_modules = []
         self.forge_unet_storage_dtype = "Automatic"
         self.sd_model_checkpoint = "modelA.safetensors"
+        # Per-architecture reference/edit toggles. Note the inverted polarity of
+        # the Klein one, which mirrors the host.
+        self.krea2_do_reference = False
+        self.anima_do_reference = False
+        self.klein_no_reference = False
         self.data = {}
 
     def set(self, key, value):
@@ -323,6 +328,41 @@ def _install_modules() -> None:
 
     backend = types.ModuleType("backend")
     backend.__path__ = []
+
+    backend_args = types.ModuleType("backend.args")
+
+    class dynamic_args:
+        """Mirrors the host's per-model flags and per-generation latent state."""
+
+        kontext = False
+        edit = False
+        nunchaku = False
+        klein = False
+        wan = False
+        pid = False
+        anima = False
+        krea2 = False
+        ref_latents = []
+        concat_latent = None
+        lq_latent = [None, None]
+        context_handler = None
+        is_referencing = False
+        loading_refiner = False
+        resets = 0
+
+        @classmethod
+        def reset(cls):
+            if cls.loading_refiner:
+                return
+            cls.resets += 1
+            cls.ref_latents.clear()
+            cls.concat_latent = None
+            cls.lq_latent = [None, None]
+            cls.context_handler = None
+
+    backend_args.dynamic_args = dynamic_args
+    backend.args = backend_args
+
     memory_management = types.ModuleType("backend.memory_management")
     memory_management.get_free_memory = lambda dev=None: 8 * 1024**3
     memory_management.get_torch_device = lambda: "cuda"
@@ -345,6 +385,7 @@ def _install_modules() -> None:
         "modules_forge": modules_forge,
         "modules_forge.main_entry": main_entry,
         "backend": backend,
+        "backend.args": backend_args,
         "backend.memory_management": memory_management,
     }.items():
         sys.modules[name] = module
@@ -374,6 +415,14 @@ def host():
     modules.shared.state.__dict__.update(FakeState().__dict__)
     modules.images.saved.clear()
     modules.processing.need_global_unload = False
+
+    from backend.args import dynamic_args
+
+    for name in ("kontext", "edit", "nunchaku", "klein", "wan", "pid", "anima", "krea2"):
+        setattr(dynamic_args, name, False)
+    dynamic_args.ref_latents.clear()
+    dynamic_args.resets = 0
+
     return modules
 
 

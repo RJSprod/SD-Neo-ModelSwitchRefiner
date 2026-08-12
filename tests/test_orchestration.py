@@ -16,7 +16,7 @@ import mc_memory
 UI_ORDER = (
     "enabled", "target", "prompt_mode", "prompt", "negative", "styles",
     "seed_mode", "seed_offset", "fixed_seed", "cfg", "steps", "sampler",
-    "denoise", "size_multiplier",
+    "denoise", "size_multiplier", "edit_mode",
 )
 
 DEFAULTS = dict(
@@ -34,6 +34,7 @@ DEFAULTS = dict(
     sampler=mc_infotext.INHERIT_SAMPLER,
     denoise=0.35,
     size_multiplier=1.0,
+    edit_mode=mc_arch.EDIT_AUTO,
 )
 
 
@@ -695,3 +696,261 @@ class TestInfotextIntegration:
         run_chain(chain, host, p, processed)
 
         assert processed.infotexts == ["infotext#0 seed=900", "infotext#1 seed=901"]
+
+
+# --------------------------------------------------------------------------- #
+# Edit / reference conditioning
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def krea2_target(chain, monkeypatch):
+    """Point the Stage 2 target at a Krea 2 checkpoint."""
+    monkeypatch.setattr(
+        mc_arch, "detect_from_checkpoint_name", lambda name: mc_arch.by_key("krea2")
+    )
+    return chain
+
+
+class TestEditModeOrchestration:
+    def test_enable_scopes_the_toggle_to_the_stage_2_pass(self, krea2_target, host, image_factory):
+        """The toggle is global, so it must ride on override_settings.
+
+        That way the host applies it for this generation and restores the
+        user's value afterwards instead of leaving it flipped.
+        """
+        p = make_p(host, batch_size=2)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(krea2_target, host, p, processed, edit_mode="Enable", denoise=1.0)
+
+        for call in krea2_target.refine_calls:
+            assert call.override_settings == {"krea2_do_reference": True}
+
+    def test_the_global_setting_is_not_mutated_directly(self, krea2_target, host, image_factory):
+        p = make_p(host, batch_size=2)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(krea2_target, host, p, processed, edit_mode="Enable", denoise=1.0)
+
+        assert host.shared.opts.krea2_do_reference is False
+
+    def test_disable_forces_plain_img2img_for_stage_2(self, krea2_target, host, image_factory):
+        host.shared.opts.krea2_do_reference = True
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(krea2_target, host, p, processed, edit_mode="Disable")
+
+        assert krea2_target.refine_calls[0].override_settings == {"krea2_do_reference": False}
+
+    def test_auto_leaves_the_users_setting_alone(self, krea2_target, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(krea2_target, host, p, processed, edit_mode="Auto")
+
+        assert krea2_target.refine_calls[0].override_settings == {}
+
+    def test_an_architecture_without_edit_mode_gets_no_override(self, chain, host, image_factory, monkeypatch):
+        monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name", lambda name: mc_arch.by_key("sdxl"))
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, edit_mode="Enable")
+
+        assert chain.refine_calls[0].override_settings == {}
+
+    def test_klein_polarity_is_inverted_end_to_end(self, chain, host, image_factory, monkeypatch):
+        monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name", lambda name: mc_arch.by_key("flux2_9b"))
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, edit_mode="Enable", denoise=1.0)
+
+        assert chain.refine_calls[0].override_settings == {"klein_no_reference": False}
+
+    def test_stale_references_are_cleared_before_refining(self, krea2_target, host, image_factory, monkeypatch):
+        """A cached model keeps its engine -- and its reference list -- around."""
+        cleared = []
+        monkeypatch.setattr(mc_memory, "clear_references", lambda: cleared.append(True))
+
+        p = make_p(host, batch_size=2)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(krea2_target, host, p, processed, edit_mode="Enable", denoise=1.0)
+
+        assert cleared, "references must be cleared before Stage 2 in edit mode"
+
+    def test_each_image_is_refined_singly_so_it_is_its_own_reference(self, krea2_target, host, image_factory):
+        """Krea 2 captures only x[0] as the reference, so batches must be 1."""
+        p = make_p(host, batch_size=4)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(krea2_target, host, p, processed, edit_mode="Enable", denoise=1.0)
+
+        assert len(krea2_target.refine_calls) == 4
+        for call in krea2_target.refine_calls:
+            assert call.batch_size == 1
+            assert len(call.init_images) == 1
+
+    def test_reference_is_the_matching_stage_1_image(self, krea2_target, host, image_factory):
+        p = make_p(host, batch_size=3)
+        processed = make_processed(host, p, image_factory)
+        stage1 = list(processed.images)
+
+        run_chain(krea2_target, host, p, processed, edit_mode="Enable", denoise=1.0)
+
+        for index, call in enumerate(krea2_target.refine_calls):
+            assert call.init_images[0] is stage1[index]
+
+
+class TestEditModeWarnings:
+    def test_low_denoise_is_flagged(self, krea2_target, host, image_factory):
+        """The reference carries the content, so a low denoise is a mistake."""
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(krea2_target, host, p, processed, edit_mode="Enable", denoise=0.35)
+
+        assert "denoise 0.35 is" in processed.comments
+
+    def test_expected_denoise_is_not_flagged(self, krea2_target, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(krea2_target, host, p, processed, edit_mode="Enable", denoise=1.0)
+
+        assert "denoise" not in processed.comments
+
+    def test_missing_edit_lora_is_flagged(self, krea2_target, host, image_factory):
+        """Krea 2 edit mode is documented as requiring a specific Edit LoRA."""
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(
+            krea2_target, host, p, processed,
+            edit_mode="Enable", denoise=1.0, prompt_mode="Replace", prompt="a lake",
+        )
+
+        assert "Edit LoRA" in processed.comments
+
+    def test_a_lora_tag_satisfies_the_check(self, krea2_target, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(
+            krea2_target, host, p, processed,
+            edit_mode="Enable", denoise=1.0, prompt_mode="Replace",
+            prompt="a lake <lora:krea2_edit:1.0>",
+        )
+
+        assert "Edit LoRA" not in processed.comments
+
+    def test_a_lora_from_a_style_satisfies_the_check(self, krea2_target, host, image_factory, style_store):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(
+            krea2_target, host, p, processed,
+            edit_mode="Enable", denoise=1.0, prompt_mode="Replace",
+            prompt="a lake", styles=["WithLora"],
+        )
+
+        assert "Edit LoRA" not in processed.comments
+
+    def test_inherit_mode_without_a_lora_is_flagged(self, krea2_target, host, image_factory):
+        """Inherit offers no way to add the tag, which is worth saying out loud."""
+        p = make_p(host, prompt="a castle", batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(krea2_target, host, p, processed, edit_mode="Enable", denoise=1.0)
+
+        assert "Edit LoRA" in processed.comments
+
+    def test_klein_does_not_demand_a_lora(self, chain, host, image_factory, monkeypatch):
+        monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name", lambda name: mc_arch.by_key("flux2_9b"))
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, edit_mode="Enable", denoise=1.0)
+
+        assert "Edit LoRA" not in processed.comments
+
+    def test_no_warnings_when_edit_mode_is_off(self, krea2_target, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(krea2_target, host, p, processed, edit_mode="Disable", denoise=0.35)
+
+        assert processed.comments == ""
+
+
+class TestEditModeInfotext:
+    def test_explicit_mode_is_recorded(self, krea2_target, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(krea2_target, host, p, processed, edit_mode="Enable", denoise=1.0)
+
+        assert p.extra_generation_params[mc_infotext.EDIT_MODE] == "Enable"
+
+    def test_auto_is_absent_so_existing_infotext_is_unchanged(self, chain, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, edit_mode="Auto")
+
+        assert mc_infotext.EDIT_MODE not in p.extra_generation_params
+
+
+class TestKleinDefaultReferences:
+    """Klein sees the input image as a reference *and* as an img2img init, so
+    an ordinary low-denoise refine is valid and must not be second-guessed."""
+
+    @pytest.fixture
+    def klein(self, chain, monkeypatch):
+        monkeypatch.setattr(
+            mc_arch, "detect_from_checkpoint_name", lambda name: mc_arch.by_key("flux2_9b")
+        )
+        return chain
+
+    def test_default_klein_chain_is_not_warned_about_denoise(self, klein, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(klein, host, p, processed, edit_mode="Auto", denoise=0.35)
+
+        assert processed.comments == ""
+
+    def test_explicitly_enabling_klein_edit_does_warn(self, klein, host, image_factory):
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(klein, host, p, processed, edit_mode="Enable", denoise=0.35)
+
+        assert "denoise 0.35 is" in processed.comments
+
+    def test_stale_references_are_still_cleared_on_the_default_path(self, klein, host, image_factory, monkeypatch):
+        """Not warning is a judgement call; not clearing would be a bug."""
+        cleared = []
+        monkeypatch.setattr(mc_memory, "clear_references", lambda: cleared.append(True))
+
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(klein, host, p, processed, edit_mode="Auto", denoise=0.35)
+
+        assert cleared
+
+    def test_krea2_left_on_the_global_toggle_still_warns(self, chain, host, image_factory, monkeypatch):
+        """Krea 2 edit mode is opt-in, so having it on is always deliberate."""
+        monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name", lambda name: mc_arch.by_key("krea2"))
+        host.shared.opts.krea2_do_reference = True
+
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, edit_mode="Auto", denoise=0.35)
+
+        assert "denoise 0.35 is" in processed.comments

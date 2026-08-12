@@ -38,6 +38,9 @@ STAGE1_SUBFOLDER = "model-chain-stage1"
 
 _NO_MODEL = "None"
 
+DEFAULT_DENOISE = 0.35
+"""Low-ish default so first-run results resemble the Stage 1 composition."""
+
 
 # --------------------------------------------------------------------------- #
 # Settings
@@ -111,6 +114,41 @@ def _resolution_note(width: int, height: int, multiplier: float, target: str) ->
     delta = mc_arch.aspect_ratio_delta((width, height), (out_w, out_h))
     if delta > 0.01:
         note += f" Aspect ratio shifts by {delta * 100:.1f}% to reach the grid."
+    return note
+
+
+def _edit_notice(target: str, mode: str) -> str:
+    """Explain what edit mode will do for the selected Stage 2 model."""
+    if not target or target == _NO_MODEL:
+        return ""
+
+    arch = mc_arch.detect_from_checkpoint_name(target)
+
+    if not arch.supports_edit:
+        if mode == mc_arch.EDIT_AUTO:
+            return ""
+        label = arch.label if arch is not mc_arch.UNKNOWN else "This model"
+        return f"⚠️ {label} has no edit/reference mode — this setting will be ignored."
+
+    if not mc_arch.edit_is_active(arch, mode):
+        return (
+            f"Stage 2 runs as plain img2img. {arch.label} can instead take the Stage 1 "
+            f'image as an *edit reference* — set this to "Enable".'
+        )
+
+    note = (
+        f"**{arch.label} edit mode.** The Stage 1 image is passed as an edit "
+        f"reference (vision conditioning + reference latents) rather than as an "
+        f"img2img starting point, so denoise should be at or near "
+        f"{arch.edit_denoise:g}."
+    )
+    if arch.edit_needs_lora:
+        note += (
+            f" {arch.label} needs its Edit LoRA for this to work — add it to the "
+            "Stage 2 prompt with `<lora:name:weight>` in Append or Replace mode."
+        )
+    if mode == mc_arch.EDIT_AUTO:
+        note += " (Currently on via the global Settings toggle.)"
     return note
 
 
@@ -256,7 +294,7 @@ class ScriptModelChain(scripts.Script):
                         minimum=0.0,
                         maximum=1.0,
                         step=0.01,
-                        value=0.35,
+                        value=DEFAULT_DENOISE,
                         elem_id=self.elem_id("denoise"),
                         info="how much Stage 2 may alter the Stage 1 image",
                     )
@@ -295,6 +333,17 @@ class ScriptModelChain(scripts.Script):
                     value=mc_infotext.INHERIT_SAMPLER,
                     elem_id=self.elem_id("sampler"),
                 )
+
+            # -- edit / reference conditioning ----------------------------- #
+            with gr.Group():
+                edit_mode = gr.Radio(
+                    choices=list(mc_arch.EDIT_MODES),
+                    value=mc_arch.EDIT_AUTO,
+                    label="Stage 2 edit mode",
+                    elem_id=self.elem_id("edit_mode"),
+                    info="Auto follows the global Settings toggle for the model",
+                )
+                edit_notice = gr.Markdown("", elem_id=self.elem_id("edit_notice"))
 
             # -- seed ------------------------------------------------------ #
             with gr.Group():
@@ -364,7 +413,7 @@ class ScriptModelChain(scripts.Script):
             show_progress=False,
         )
 
-        def on_target_change(target_name, multiplier, width, height):
+        def on_target_change(target_name, multiplier, mode, width, height):
             """Refresh the architecture notice, residency status and size readout."""
             plan = mc_memory.plan(target_name)
             status = plan.message
@@ -383,15 +432,16 @@ class ScriptModelChain(scripts.Script):
                 status,
                 _resolution_note(width, height, multiplier, target_name),
                 cfg_update,
+                _edit_notice(target_name, mode),
             )
 
-        size_inputs = [target, size_multiplier]
+        target_outputs = [architecture_notice, residency_status, size_note, cfg, edit_notice]
+
         if self._width_component is not None and self._height_component is not None:
-            size_inputs += [self._width_component, self._height_component]
             target.change(
                 fn=on_target_change,
-                inputs=size_inputs,
-                outputs=[architecture_notice, residency_status, size_note, cfg],
+                inputs=[target, size_multiplier, edit_mode, self._width_component, self._height_component],
+                outputs=target_outputs,
                 show_progress=False,
             )
             for component in (size_multiplier, self._width_component, self._height_component):
@@ -406,11 +456,38 @@ class ScriptModelChain(scripts.Script):
             # size readout is simply omitted rather than showing wrong numbers.
             logger.info("Model Chain: txt2img size sliders unavailable, live size readout disabled")
             target.change(
-                fn=lambda name, mult: on_target_change(name, mult, 0, 0),
-                inputs=[target, size_multiplier],
-                outputs=[architecture_notice, residency_status, size_note, cfg],
+                fn=lambda name, mult, mode: on_target_change(name, mult, mode, 0, 0),
+                inputs=[target, size_multiplier, edit_mode],
+                outputs=target_outputs,
                 show_progress=False,
             )
+
+        def on_edit_mode(target_name, mode, current_denoise):
+            """Track the denoise strength edit conditioning expects.
+
+            Edit mode hands the model a reference rather than a starting image,
+            so a low denoise -- the right default for ordinary refinement -- is
+            the wrong one here. The slider is moved rather than silently
+            overridden at generate time, so the value stays visible and the
+            user can still choose their own.
+            """
+            arch = mc_arch.detect_from_checkpoint_name(target_name)
+            denoise_update = gr.skip()
+
+            if arch.supports_edit:
+                if mc_arch.edit_is_active(arch, mode):
+                    denoise_update = gr.update(value=arch.edit_denoise)
+                elif mode == mc_arch.EDIT_DISABLE and current_denoise >= arch.edit_denoise:
+                    denoise_update = gr.update(value=DEFAULT_DENOISE)
+
+            return _edit_notice(target_name, mode), denoise_update
+
+        edit_mode.change(
+            fn=on_edit_mode,
+            inputs=[target, edit_mode, denoise],
+            outputs=[edit_notice, denoise],
+            show_progress=False,
+        )
 
         components = {
             "enabled": enabled,
@@ -427,6 +504,7 @@ class ScriptModelChain(scripts.Script):
             "sampler": sampler,
             "denoise": denoise,
             "size_multiplier": size_multiplier,
+            "edit_mode": edit_mode,
         }
 
         try:
@@ -450,6 +528,7 @@ class ScriptModelChain(scripts.Script):
             sampler,
             denoise,
             size_multiplier,
+            edit_mode,
         ]
 
     # -- prompt assembly --------------------------------------------------- #
@@ -532,6 +611,7 @@ class ScriptModelChain(scripts.Script):
         sampler,
         denoise,
         size_multiplier,
+        edit_mode=mc_arch.EDIT_AUTO,
         **kwargs,
     ):
         if not self._armed:
@@ -571,6 +651,7 @@ class ScriptModelChain(scripts.Script):
                 denoise=denoise,
                 size_multiplier=size_multiplier,
                 stage1_size=f"{p.width}x{p.height}",
+                edit_mode=edit_mode,
             )
         )
 
@@ -601,6 +682,7 @@ class ScriptModelChain(scripts.Script):
         sampler,
         denoise,
         size_multiplier,
+        edit_mode=mc_arch.EDIT_AUTO,
         **kwargs,
     ):
         if not self._armed or self._in_stage_2:
@@ -625,6 +707,7 @@ class ScriptModelChain(scripts.Script):
                 sampler=sampler,
                 denoise=float(denoise),
                 size_multiplier=float(size_multiplier),
+                edit_mode=edit_mode,
             )
         except Exception:
             errors.report("Model Chain: Stage 2 failed; returning the unrefined Stage 1 images", exc_info=True)
@@ -655,6 +738,7 @@ class ScriptModelChain(scripts.Script):
         sampler,
         denoise,
         size_multiplier,
+        edit_mode,
     ):
         stage1_images = self._collect_stage_1(processed)
         if not stage1_images:
@@ -683,6 +767,7 @@ class ScriptModelChain(scripts.Script):
             self._save_stage_1(p, processed, stage1_images, infotexts)
 
         arch = mc_arch.detect_from_checkpoint_name(target)
+        edit_override = mc_arch.edit_override(arch, edit_mode)
 
         # -- the one and only checkpoint switch (section 3.1) -------------- #
         previous_checkpoint = shared.opts.sd_model_checkpoint
@@ -696,6 +781,12 @@ class ScriptModelChain(scripts.Script):
         )
 
         state.job_count = (state.job_count or 0) + len(stage1_images)
+
+        # Model B is loaded now, so its edit-mode state can finally be checked
+        # against reality rather than against the dropdown's guess.
+        edit_active = mc_arch.edit_is_active(arch, edit_mode)
+        if edit_active:
+            self._prepare_edit_mode(p, processed, arch, denoise, edit_override, edit_mode)
 
         refined: list = []
         self._in_stage_2 = True
@@ -733,6 +824,7 @@ class ScriptModelChain(scripts.Script):
                     steps=steps,
                     sampler=sampler,
                     denoise=denoise,
+                    override_settings=dict(edit_override),
                 )
                 refined.append(result if result is not None else image)
         finally:
@@ -755,7 +847,60 @@ class ScriptModelChain(scripts.Script):
             return int(stage1_seed) + int(offset)
         return int(stage1_seed)
 
-    def _refine_one(self, p, *, image, positive, negative, seed, width, height, cfg, steps, sampler, denoise):
+    def _prepare_edit_mode(self, p, processed, arch, denoise, edit_override, mode):
+        """Set up and sanity-check reference conditioning for the Stage 2 pass."""
+        # A cached model keeps its engine object -- and its reference list --
+        # across generations, and ImageStitch cannot clear it because Stage 2
+        # runs with scripts disabled. Anything still in there is stale. This
+        # applies whenever references will be used at all, deliberate or not.
+        mc_memory.clear_references()
+
+        logger.info(
+            "Model Chain: %s reference conditioning active%s",
+            arch.label,
+            f" ({arch.edit_option} overridden for Stage 2)" if edit_override else "",
+        )
+
+        if not arch.edit_is_deliberate(mode):
+            # Klein left on its default: references are simply how it works, and
+            # an ordinary low-denoise refine is valid. Warning here would fire on
+            # every Klein chain and assert something the host itself does not.
+            return
+
+        if denoise < arch.edit_denoise - 0.1:
+            message = (
+                f"Model Chain: {arch.label} edit mode uses the Stage 1 image as a "
+                f"reference rather than a starting image, so denoise {denoise:g} is "
+                f"low — {arch.edit_denoise:g} is the expected value."
+            )
+            logger.warning(message)
+            processed.comments += f"\n{message}"
+
+        if arch.edit_needs_lora and not self._stage_2_has_lora(p):
+            message = (
+                f"Model Chain: {arch.label} edit mode needs its Edit LoRA, but no "
+                "extra-network tag was found in the Stage 2 prompt. Add it with "
+                "<lora:name:weight> in Append or Replace mode."
+            )
+            logger.warning(message)
+            processed.comments += f"\n{message}"
+
+    @staticmethod
+    def _stage_2_has_lora(p) -> bool:
+        """Whether the resolved Stage 2 prompt carries any extra-network tag.
+
+        Deliberately a presence check, not a parse: the extension must not
+        interpret extra-network syntax itself (section 5.4). It only needs to
+        know whether the user supplied one at all.
+        """
+        recorded = p.extra_generation_params.get(mc_infotext.PROMPT, "")
+        prompts = recorded if isinstance(recorded, list) else [recorded]
+        return any("<lora:" in str(text) or "<lyco:" in str(text) for text in prompts)
+
+    def _refine_one(
+        self, p, *, image, positive, negative, seed, width, height, cfg, steps, sampler,
+        denoise, override_settings=None,
+    ):
         p2 = StableDiffusionProcessingImg2Img(
             outpath_samples=p.outpath_samples,
             outpath_grids=p.outpath_grids,
@@ -777,6 +922,11 @@ class ScriptModelChain(scripts.Script):
             init_images=[image],
             denoising_strength=denoise,
             resize_mode=0,
+            # Reference/edit conditioning is gated by a *global* Settings
+            # toggle. Routing it through override_settings scopes it to this
+            # generation and lets the host restore the user's value afterwards,
+            # rather than leaving it flipped for everything they do next.
+            override_settings=override_settings or {},
         )
 
         # Stage 2 is an independent generation, not a nested script run: no

@@ -41,6 +41,11 @@ architecture in the table; guessing 8 for an unknown model would not be."""
 
 _UNKNOWN_CFG = 7.0
 
+EDIT_AUTO = "Auto"
+EDIT_ENABLE = "Enable"
+EDIT_DISABLE = "Disable"
+EDIT_MODES = (EDIT_AUTO, EDIT_ENABLE, EDIT_DISABLE)
+
 
 @dataclass(frozen=True)
 class Architecture:
@@ -53,6 +58,44 @@ class Architecture:
     cfg: float
     """Sensible default CFG scale for this architecture."""
 
+    # -- edit / reference conditioning ------------------------------------ #
+    #
+    # Some architectures can take the input image as an *edit reference* --
+    # vision-conditioning the text encoder and concatenating reference latents
+    # in the DiT -- instead of using it as an img2img init latent. Forge Neo
+    # gates this per architecture behind a global Settings toggle, and the
+    # polarity is not consistent: Krea 2 and Anima opt *in*, while Flux.2 Klein
+    # uses references by default and opts *out*.
+    edit_option: str | None = None
+    """``shared.opts`` key gating reference conditioning, if the architecture has one."""
+    edit_on_value: bool = True
+    """Value of ``edit_option`` that turns reference conditioning ON."""
+    edit_needs_lora: bool = False
+    """Whether the architecture needs a separate Edit LoRA for this to work."""
+    edit_denoise: float = 1.0
+    """Denoise strength edit conditioning expects; the reference carries the content."""
+    edit_is_default: bool = False
+    """True when reference conditioning is simply how the architecture works.
+
+    Klein always sees the input image as a reference *in addition to* using it
+    as an img2img init latent, so an ordinary low-denoise refine is perfectly
+    valid there. Krea 2 and Anima are the opposite: edit mode is a deliberate
+    mode switch away from img2img. Only the deliberate case earns a warning
+    about denoise strength.
+    """
+
+    @property
+    def supports_edit(self) -> bool:
+        return self.edit_option is not None
+
+    def edit_is_deliberate(self, mode: str) -> bool:
+        """Whether ``mode`` represents the user actively choosing edit semantics."""
+        if not self.supports_edit:
+            return False
+        if mode == EDIT_ENABLE:
+            return True
+        return not self.edit_is_default
+
 
 _ARCHITECTURES: tuple[Architecture, ...] = (
     Architecture("sd15", "SD 1.5", 8, 7.0),
@@ -61,15 +104,31 @@ _ARCHITECTURES: tuple[Architecture, ...] = (
     Architecture("mugen", "Mugen", 8, 7.0),
     Architecture("flux", "Flux.1", 16, 1.0),
     Architecture("flux_schnell", "Flux.1 Schnell", 16, 1.0),
-    Architecture("flux2_4b", "Flux.2 Klein 4B", 16, 1.0),
-    Architecture("flux2_9b", "Flux.2 Klein 9B", 16, 1.0),
+    # Klein is reference-conditioned by default; the option disables it.
+    Architecture(
+        "flux2_4b", "Flux.2 Klein 4B", 16, 1.0,
+        edit_option="klein_no_reference", edit_on_value=False, edit_needs_lora=False,
+        edit_is_default=True,
+    ),
+    Architecture(
+        "flux2_9b", "Flux.2 Klein 9B", 16, 1.0,
+        edit_option="klein_no_reference", edit_on_value=False, edit_needs_lora=False,
+        edit_is_default=True,
+    ),
     Architecture("chroma", "Chroma", 16, 1.0),
     Architecture("lumina2", "Lumina 2", 16, 4.0),
     Architecture("zimage", "Z-Image", 16, 1.0),
-    Architecture("anima", "Anima", 16, 1.0),
+    Architecture(
+        "anima", "Anima", 16, 1.0,
+        edit_option="anima_do_reference", edit_on_value=True, edit_needs_lora=True,
+    ),
     Architecture("wan", "Wan", 16, 1.0),
     Architecture("qwen", "Qwen-Image", 16, 1.0),
-    Architecture("krea2", "Krea 2", 16, 1.0),
+    # Krea 2: VAE downscales 8x and the transformer patchifies 2x2 -> 16.
+    Architecture(
+        "krea2", "Krea 2", 16, 1.0,
+        edit_option="krea2_do_reference", edit_on_value=True, edit_needs_lora=True,
+    ),
     Architecture("ernie", "ERNIE-Image", 16, 1.0),
     Architecture("pid", "PiD", 8, 7.0),
 )
@@ -104,6 +163,50 @@ _GUESS_CLASS_TO_KEY = {
 def by_key(key: str) -> Architecture:
     """Look an architecture up by its stable key, falling back to UNKNOWN."""
     return _BY_KEY.get(key, UNKNOWN)
+
+
+# --------------------------------------------------------------------------- #
+# Edit / reference mode
+# --------------------------------------------------------------------------- #
+
+def edit_override(arch: Architecture, mode: str) -> dict:
+    """Settings override that forces reference conditioning on or off for Stage 2.
+
+    Returned as a ``p.override_settings`` fragment so the host applies it for
+    the Stage 2 generation and restores the user's value afterwards -- the
+    underlying toggle is global, and silently leaving it flipped would change
+    the behaviour of every later generation.
+
+    ``Auto`` returns an empty dict, leaving the user's global setting alone.
+    """
+    if mode == EDIT_AUTO or not arch.supports_edit:
+        return {}
+
+    want_on = mode == EDIT_ENABLE
+    # edit_on_value encodes the polarity, so this handles both the opt-in
+    # (krea2/anima) and opt-out (klein) options without special-casing.
+    return {arch.edit_option: arch.edit_on_value if want_on else not arch.edit_on_value}
+
+
+def edit_is_active(arch: Architecture, mode: str) -> bool:
+    """Whether reference conditioning will be on for Stage 2 under ``mode``.
+
+    In ``Auto`` this reads the user's current global setting, so warnings and
+    defaults match what will actually happen.
+    """
+    if not arch.supports_edit:
+        return False
+    if mode == EDIT_ENABLE:
+        return True
+    if mode == EDIT_DISABLE:
+        return False
+
+    try:
+        from modules import shared
+
+        return bool(getattr(shared.opts, arch.edit_option, None)) == arch.edit_on_value
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------- #

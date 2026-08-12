@@ -82,6 +82,57 @@ byte-for-byte the same path as typing the tag into the main prompt box.
 so are embeddings and ControlNet units. When Model Chain detects that the two
 stages use different architectures it says so in the panel.
 
+### Edit mode (Krea 2, Anima, Flux.2 Klein)
+
+Some architectures can take the Stage 1 image as an **edit reference** —
+vision-conditioning the text encoder and concatenating reference latents — rather
+than using it as an img2img starting point. That is how you refine with **Krea 2
+Edit**.
+
+The **Stage 2 edit mode** control has three settings:
+
+| Setting | Effect |
+| --- | --- |
+| **Auto** (default) | follows the model's global Settings toggle |
+| **Enable** | forces reference conditioning on, for the Stage 2 pass only |
+| **Disable** | forces plain img2img, for the Stage 2 pass only |
+
+To refine with Krea 2 Edit:
+
+1. Pick your Krea 2 checkpoint as the Stage 2 model.
+2. Set edit mode to **Enable**.
+3. Use **Append** or **Replace** prompt mode and add the Krea 2 Edit LoRA:
+   `<lora:your_krea2_edit_lora:1.0>`. Krea 2's edit behaviour comes from that
+   LoRA — the base checkpoint alone will not do it, and the panel warns if no
+   extra-network tag is present.
+4. Leave denoise at **1.0**. In edit mode the reference carries the content, so
+   a low denoise is the wrong control; ticking Enable moves the slider for you.
+
+The underlying toggles (`krea2_do_reference`, `anima_do_reference`,
+`klein_no_reference`) are **global** settings. Enable and Disable are applied
+through the host's per-generation `override_settings`, so they are scoped to the
+Stage 2 pass and your global value is restored afterwards — the extension never
+leaves a global toggle flipped behind your back. Auto touches nothing.
+
+Two details worth knowing:
+
+- **The polarity differs between architectures.** Krea 2 and Anima opt *in*
+  (`*_do_reference = True` enables edit mode); Flux.2 Klein opts *out*
+  (`klein_no_reference = True` disables it). The control normalises this — Enable
+  means "references on" regardless of which way the underlying option runs.
+- **Klein is reference-conditioned by default**, and still uses the image as an
+  img2img init as well, so an ordinary low-denoise Klein refine is perfectly
+  valid and is not warned about. Krea 2 and Anima edit mode is a deliberate mode
+  switch away from img2img, so there the denoise and Edit-LoRA warnings do apply.
+
+Each image is refined on its own (batch size 1 per pass), which matters here:
+Krea 2 captures only the *first* image of a batch as its reference, so a batched
+refine would silently reuse image 1's reference for the whole set.
+
+Stale references are cleared before Stage 2 runs. A cached model keeps its engine
+object — and its reference list — across generations, and ImageStitch cannot
+clear it because Stage 2 runs with scripts disabled.
+
 ### Seeds
 
 Each refine pass reuses the seed from its own Stage 1 image, so
@@ -173,6 +224,21 @@ cold disk load actually come from. Avoiding the first-switch unload would mean
 replacing the host's loader, which is a bigger and more fragile change than this
 extension should make.
 
+#### Model flags travel with the cached model
+
+`forge_loader` sets a group of `dynamic_args` flags on every load — `kontext`,
+`edit`, `nunchaku`, `klein`, `wan`, `pid`, `anima`, `krea2` — that describe
+*which model is loaded*. A warm pointer swap never runs the loader, so the cache
+snapshots those flags alongside each model and re-applies them (plus
+`dynamic_args.reset()`) on reinstatement.
+
+This is not cosmetic. `nunchaku` selects a different LoRA application path,
+`kontext` and `edit` decide whether Flux.1 and Qwen-Image use reference
+conditioning, `klein` changes sampling, and `pid` changes the latent shape.
+Leaving them describing the previously loaded checkpoint would corrupt
+generation — and it would show up exactly when chaining two architecturally
+different models, which is the whole point of the extension.
+
 The RAM budget check is fail-safe rather than best-effort: host RAM exhaustion
 can hang or kill the whole process, so a model that would breach the budget is
 released instead of cached, and if system RAM cannot be detected at all the cache
@@ -259,9 +325,10 @@ files. It covers the acceptance criteria that can be verified without a GPU:
 N-in/N-out batch behaviour, exactly-one-switch sequencing, per-image seed
 inheritance, prompt and style resolution, LoRA tag pass-through, aspect-ratio
 preservation and grid alignment, infotext round-tripping, the residency cascade
-and RAM budget, interruption handling, and inertness when disabled.
+and RAM budget, model-flag restoration across a warm swap, edit-mode scoping and
+polarity, interruption handling, and inertness when disabled.
 
 The criteria that need real hardware — that an SDXL → Flux.2-Klein chain
-produces coherent output, that a LoRA visibly affects the refined image, that a
-warm switch is measurably faster than a cold disk load — are left to manual
-verification.
+produces coherent output, that a Krea 2 Edit refine responds to its Edit LoRA,
+that a LoRA visibly affects the refined image, that a warm switch is measurably
+faster than a cold disk load — are left to manual verification.

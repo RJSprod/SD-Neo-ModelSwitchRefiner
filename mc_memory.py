@@ -76,6 +76,46 @@ class ModelChainError(RuntimeError):
 # --------------------------------------------------------------------------- #
 
 
+MODEL_FLAGS = ("kontext", "edit", "nunchaku", "klein", "wan", "pid", "anima", "krea2")
+"""``backend.args.dynamic_args`` fields that describe *which model is loaded*.
+
+``forge_loader`` sets these every time it loads a checkpoint, but a warm swap
+never runs the loader, so they have to be carried with the cached model.
+Leaving them describing the previously loaded checkpoint is not cosmetic:
+``nunchaku`` selects a different LoRA application path, ``kontext`` and ``edit``
+decide whether Flux.1 and Qwen-Image use reference conditioning, ``klein``
+changes sampling, and ``pid`` changes the latent shape.
+"""
+
+
+def snapshot_model_flags() -> dict:
+    """Capture the loader-set flags describing the currently loaded model."""
+    try:
+        from backend.args import dynamic_args
+
+        return {name: getattr(dynamic_args, name, False) for name in MODEL_FLAGS}
+    except Exception:
+        return {}
+
+
+def _apply_model_flags(flags: dict) -> None:
+    """Re-apply captured flags and clear per-generation latent state.
+
+    Mirrors what ``forge_loader`` does after a real load: ``dynamic_args.reset()``
+    followed by assigning each model flag.
+    """
+    if not flags:
+        return
+    try:
+        from backend.args import dynamic_args
+
+        dynamic_args.reset()
+        for name, value in flags.items():
+            setattr(dynamic_args, name, value)
+    except Exception:
+        logger.warning("Model Chain: failed to restore model flags on warm swap", exc_info=True)
+
+
 @dataclass
 class _Entry:
     key: str
@@ -83,6 +123,8 @@ class _Entry:
     checkpoint_name: str
     sd_model: object
     size_bytes: int
+    model_flags: dict = field(default_factory=dict)
+    """``dynamic_args`` state as of this model's load; see ``MODEL_FLAGS``."""
     last_used: float = field(default_factory=time.monotonic)
 
 
@@ -422,7 +464,13 @@ def _stash_current() -> None:
     size = loaded_size_bytes(model) or file_size_bytes(name)
 
     budget = min(cache_budget_bytes(), max(free_ram_bytes() - RAM_RESERVE_BYTES, 0) + size)
-    entry = _Entry(key=key, checkpoint_name=name, sd_model=model, size_bytes=size)
+    entry = _Entry(
+        key=key,
+        checkpoint_name=name,
+        sd_model=model,
+        size_bytes=size,
+        model_flags=snapshot_model_flags(),
+    )
 
     if _cache.admit(entry, budget):
         logger.info("Model Chain: holding %s in the RAM cache (%.1f GB)", name, size / _GB)
@@ -471,6 +519,8 @@ def ensure_resident(name: str) -> str:
         model_data.set_sd_model(entry.sd_model)
         model_data.forge_hash = target_key
         shared.opts.data["sd_checkpoint_hash"] = entry.sd_model.sd_checkpoint_info.sha256
+        # The loader did not run, so re-apply the model flags it would have set.
+        _apply_model_flags(entry.model_flags)
         processing.need_global_unload = False
         logger.info("Model Chain: restored %s from the RAM cache", entry.checkpoint_name)
         return "warm"
@@ -526,10 +576,35 @@ def reinstate_pending() -> bool:
     _stash_current()
     model_data.set_sd_model(entry.sd_model)
     model_data.forge_hash = key
+    _apply_model_flags(entry.model_flags)
     processing.need_global_unload = False
     logger.info("Model Chain: restored %s from the RAM cache", entry.checkpoint_name)
     _pending_restore = None
     return True
+
+
+def clear_references() -> None:
+    """Drop reference latents held by the loaded model.
+
+    Edit-capable engines build their reference list from the engine's own
+    ``ref_latents`` (populated by ImageStitch) plus the img2img input. Stage 2
+    runs with scripts disabled, so ImageStitch never gets to refresh or clear
+    that list -- and because a cached model keeps its engine object across
+    generations, entries from an earlier run would otherwise be silently mixed
+    into every refined image.
+    """
+    try:
+        from backend.args import dynamic_args
+        from modules import shared
+
+        model = shared.sd_model
+        if hasattr(model, "clear_references"):
+            model.clear_references()
+        if getattr(model, "ini_latent", None) is not None:
+            model.ini_latent = None
+        dynamic_args.ref_latents.clear()
+    except Exception:
+        logger.warning("Model Chain: failed to clear stale references", exc_info=True)
 
 
 def get_model(name: str):
