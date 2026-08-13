@@ -401,6 +401,16 @@ Klein checkpoint with a Qwen3 text encoder is roughly 14 GB resident, so the
 budget has to clear that. The default is 60% of system RAM, and the live
 free-RAM check still refuses anything that would push the machine into swap.
 
+**Both stages get a clean VRAM budget.** When the two models cannot sit in
+VRAM together, whichever one is about to run is given room first — Stage 2
+before its refine loop, Stage 1 after its model is swapped back in. Without
+that, the incoming model loads into whatever the other one left behind and the
+host makes room the slow way, partially unloading in small chunks while it
+loads. Measured on a Krea 2 → Flux.2 chain, the same ~8 GB UNet took **11.5s**
+squeezed into 900 MB of spare VRAM against **0.8s** with 7 GB spare.
+
+When both models genuinely fit, nothing is evicted and both stay hot.
+
 **If sampling itself crawls** — tens of seconds per step where it was
 sub-second — VRAM is over-committed and the driver is spilling into system
 memory. On Windows that happens silently: no error, just a 50x slowdown. The

@@ -810,7 +810,8 @@ class ScriptModelChain(scripts.Script):
         # the extension has since been disabled -- that is cleanup of our own
         # state, not extension behaviour.
         try:
-            mc_memory.reinstate_pending()
+            if mc_memory.reinstate_pending():
+                self._make_room_for_stage_1(p)
         except Exception:
             errors.report("Model Chain: failed to reinstate the cached checkpoint", exc_info=True)
 
@@ -845,6 +846,34 @@ class ScriptModelChain(scripts.Script):
         plan = mc_memory.plan(target, modules)
         logger.info("Model Chain: %s", plan.message)
         self._armed = True
+
+    @staticmethod
+    def _make_room_for_stage_1(p) -> None:
+        """Give Stage 1 a clean VRAM budget after swapping its model back in.
+
+        The previous generation ended with Stage 2's model in VRAM, and a warm
+        swap does not evict it -- so Stage 1 would load into whatever is left.
+        The host then makes room the hard way, partially unloading in small
+        chunks while it loads, and that path is dramatically slower than a
+        clean load: measured on a Krea 2 -> Flux.2 chain, the same ~8 GB UNet
+        took 11.5s squeezed into 900 MB of spare VRAM against 0.8s with 7 GB
+        spare.
+
+        Stage 2 has had this since the pass-size fix; Stage 1 needs it for the
+        same reason. When both models genuinely fit, make_vram_room() checks
+        first and does nothing.
+        """
+        try:
+            width, height = mc_arch.stage1_size(p)
+            mc_memory.make_vram_room(
+                shared.opts.sd_model_checkpoint,
+                mc_memory.current_modules(),
+                width,
+                height,
+                stage="Stage 1",
+            )
+        except Exception:
+            errors.report("Model Chain: failed to free VRAM for Stage 1", exc_info=True)
 
     def process(
         self,

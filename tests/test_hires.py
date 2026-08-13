@@ -379,3 +379,83 @@ class TestStageTwoMakesRoom:
         _, width, height = calls[0]
         call = chain.refine_calls[0]
         assert (width, height) == (call.width, call.height)
+
+
+class TestStageOneMakesRoom:
+    """Stage 1 needs the same clean VRAM budget Stage 2 already gets.
+
+    The previous generation ends with Stage 2's model in VRAM, and a warm swap
+    does not evict it -- so Stage 1 loads into whatever is left and the host
+    makes room the slow way, partially unloading while it loads.
+    """
+
+    def test_room_is_made_after_swapping_stage_1_back_in(self, chain, host, image_factory, monkeypatch):
+        import mc_memory
+
+        calls = []
+        monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: True)
+        monkeypatch.setattr(
+            mc_memory, "make_vram_room",
+            lambda name, mods=None, w=0, h=0, stage="Stage 2": calls.append(stage) or 0,
+        )
+
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed)
+
+        assert "Stage 1" in calls
+
+    def test_nothing_is_freed_when_no_swap_was_owed(self, chain, host, image_factory, monkeypatch):
+        """A generation that did not follow a chain leaves VRAM alone."""
+        import mc_memory
+
+        calls = []
+        monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: False)
+        monkeypatch.setattr(
+            mc_memory, "make_vram_room",
+            lambda name, mods=None, w=0, h=0, stage="Stage 2": calls.append(stage) or 0,
+        )
+
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed)
+
+        assert "Stage 1" not in calls
+
+    def test_the_hires_size_is_used_when_hires_is_on(self, chain, host, image_factory, monkeypatch):
+        """Stage 1's hires pass is the one that needs the activation headroom."""
+        import mc_memory
+
+        sizes = []
+        monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: True)
+        monkeypatch.setattr(
+            mc_memory, "make_vram_room",
+            lambda name, mods=None, w=0, h=0, stage="Stage 2": sizes.append((stage, w, h)) or 0,
+        )
+
+        p = make_hires_p(host, batch_size=1, width=1024, height=1024)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed)
+
+        stage1 = [s for s in sizes if s[0] == "Stage 1"]
+        assert stage1 and stage1[0][1:] == (2048, 2048)
+
+    def test_a_failure_does_not_break_the_generation(self, chain, host, image_factory, monkeypatch):
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: True)
+
+        def boom(*a, **k):
+            raise RuntimeError("driver said no")
+
+        monkeypatch.setattr(mc_memory, "make_vram_room", boom)
+
+        p = make_p(host, batch_size=1)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed)  # must not raise
+
+        assert len(processed.images) == 1

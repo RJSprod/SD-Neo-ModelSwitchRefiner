@@ -771,7 +771,7 @@ def last_refusal() -> str | None:
     return _last_refusal
 
 
-def make_vram_room(target_name: str, modules=None, width: int = 0, height: int = 0) -> int:
+def make_vram_room(target_name: str, modules=None, width: int = 0, height: int = 0, stage: str = "Stage 2") -> int:
     """Evict other models from VRAM if the Stage 2 pass will not otherwise fit.
 
     This is the "demote only under pressure" half of the residency policy, and
@@ -796,7 +796,8 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
 
     if free >= required:
         logger.info(
-            "Model Chain: %.1f GB VRAM free, %.1f GB needed — keeping both models resident",
+            "Model Chain: %s has %.1f GB VRAM free against %.1f GB needed — keeping both models resident",
+            stage,
             free / _GB,
             required / _GB,
         )
@@ -807,7 +808,7 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
 
         evicted = memory_management.free_memory(required, memory_management.get_torch_device())
     except Exception:
-        logger.warning("Model Chain: failed to free VRAM for Stage 2", exc_info=True)
+        logger.warning("Model Chain: failed to free VRAM for %s", stage, exc_info=True)
         return 0
 
     after = free_vram_bytes()
@@ -815,8 +816,9 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
     names = [type(getattr(m, "model", m)).__name__ for m in (evicted or [])]
 
     logger.info(
-        "Model Chain: freed %.1f GB VRAM for Stage 2 (%.1f GB -> %.1f GB free, %.1f GB needed)%s",
+        "Model Chain: freed %.1f GB VRAM for %s (%.1f GB -> %.1f GB free, %.1f GB needed)%s",
         freed / _GB,
+        stage,
         free / _GB,
         after / _GB,
         required / _GB,
