@@ -108,7 +108,12 @@ hires pass means "keep the 2x result", not "upscale again".
 
 The panel's size readout follows the hires upscale, so it shows the size Stage 2
 will produce rather than the first-pass size. `Model Chain Stage1 Size` in the
-infotext likewise records the upscaled size — the image Stage 2 was handed.
+infotext records the upscaled size — the image Stage 2 was handed.
+
+That key is *measured*, not predicted. The readout has to work from the width
+and height sliders, because it runs while you are still setting up; the recorded
+value is read off the finished image. If the two disagree, the infotext is the
+one to believe, and the console says so.
 
 ### Prompt modes
 
@@ -249,6 +254,22 @@ SD 1.5 and SDXL, 16 for the Flux, Wan, Qwen and Lumina families. The panel shows
 the resulting resolution live as you move the slider. Unrecognised
 architectures fall back to 16, which is a multiple of 8 and therefore valid for
 an 8-aligned model too.
+
+The multiplier scales **the image Stage 2 was handed**, not the width and height
+sliders. Those two are usually the same number, but not always: hires fix
+changes it, and so does anything that adjusts the pass dimensions before
+sampling. Every generation logs the whole chain of sizes at INFO, so when the
+output is not the size you expected the console tells you where it changed:
+
+```
+Model Chain: Stage 2 refines 960x1280 at 1.00x — requesting 960x1280, aligned to 16px for Flux.2 Klein 9B
+```
+
+If Stage 1 produced something other than the sliders asked for, a line above
+that one names both sizes. And if the refine pass returns a size other than the
+one it was asked for, that is reported as a warning and added to the image's
+comments rather than shipped silently — the extension chooses what to
+*request*, but the pass decides what comes back.
 
 ### Settings
 

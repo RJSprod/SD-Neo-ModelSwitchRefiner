@@ -408,6 +408,77 @@ class TestOutputSize:
         sizes = {(c.width, c.height) for c in chain.refine_calls}
         assert len(sizes) == 1
 
+    def test_the_multiplier_applies_to_the_image_not_the_sliders(self, chain, host, image_factory):
+        """p.width/p.height are a request; the image is the fact.
+
+        The host may hand Stage 2 something other than the requested size --
+        hires fix does, and so does any host-side adjustment of the pass
+        dimensions. The multiplier scales what actually arrived.
+        """
+        p = make_p(host, width=960, height=1280)
+        processed = make_processed(host, p, image_factory)
+        processed.images = [image_factory(480, 640)]
+
+        run_chain(chain, host, p, processed, size_multiplier=1.0)
+
+        call = chain.refine_calls[0]
+        assert (call.width, call.height) == (480, 640)
+
+
+class TestDeliveredSize:
+    """Stage 2 requests a size; it does not control what comes back."""
+
+    def test_a_pass_that_honours_the_request_says_nothing(self, chain, host, image_factory):
+        p = make_p(host, width=960, height=1280)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, size_multiplier=1.0)
+
+        assert "did not honour" not in processed.comments
+
+    def test_a_short_result_is_reported(self, chain, host, image_factory, monkeypatch):
+        """The exact symptom this guards: a silent halving of the output."""
+        import types
+
+        import model_chain
+
+        def half_size(p2):
+            return types.SimpleNamespace(
+                images=[image_factory(p2.width // 2, p2.height // 2)], index_of_first_image=0
+            )
+
+        monkeypatch.setattr(model_chain, "process_images", half_size)
+
+        p = make_p(host, width=960, height=1280)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, size_multiplier=1.0)
+
+        assert "960x1280" in processed.comments
+        assert "480x640" in processed.comments
+
+    def test_the_images_are_still_returned(self, chain, host, image_factory, monkeypatch):
+        """Reporting a mismatch must not cost the user their images."""
+        import types
+
+        import model_chain
+
+        monkeypatch.setattr(
+            model_chain,
+            "process_images",
+            lambda p2: types.SimpleNamespace(
+                images=[image_factory(p2.width // 2, p2.height // 2)], index_of_first_image=0
+            ),
+        )
+
+        p = make_p(host, batch_size=2, width=960, height=1280)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, size_multiplier=1.0)
+
+        assert len(processed.images) == 2
+        assert all(image.size == (480, 640) for image in processed.images)
+
 
 # --------------------------------------------------------------------------- #
 # Interruption (section 3.5)

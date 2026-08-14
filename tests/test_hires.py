@@ -210,10 +210,27 @@ class TestStageOneSizeInfotext:
         """Stage 1's recorded size must name the image Stage 2 received."""
         p = make_hires_p(host, batch_size=1, width=1024, height=1024)
         processed = make_processed(host, p, image_factory)
+        # postprocess sees the upscaled images, not the first pass.
+        processed.images = [image_factory(2048, 2048)]
 
         run_chain(chain, host, p, processed)
 
         assert p.extra_generation_params[mc_infotext.STAGE1_SIZE] == "2048x2048"
+
+    def test_records_the_size_actually_produced(self, chain, host, image_factory):
+        """Observation beats prediction: the key names the real image.
+
+        p.width/p.height describe what was asked for, and the host may adjust
+        them before sampling. Recording the prediction would name an image
+        nobody ever saw.
+        """
+        p = make_hires_p(host, batch_size=1, width=1024, height=1024)
+        processed = make_processed(host, p, image_factory)
+        processed.images = [image_factory(960, 1280)]
+
+        run_chain(chain, host, p, processed)
+
+        assert p.extra_generation_params[mc_infotext.STAGE1_SIZE] == "960x1280"
 
     def test_records_the_plain_size_without_hires(self, chain, host, image_factory):
         p = make_p(host, batch_size=1, width=1216, height=832)
