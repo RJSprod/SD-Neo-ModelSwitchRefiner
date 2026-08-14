@@ -451,6 +451,47 @@ class TestStageOneSize:
 
         assert "was requested" not in processed.comments
 
+    def test_the_latent_is_measured_for_the_report(self, chain, host, image_factory):
+        """The measurement between "asked for" and "arrived"."""
+        import types
+
+        p = make_p(host, width=640, height=960)
+        processed = make_processed(host, p, image_factory)
+        processed.images = [image_factory(320, 480)]
+
+        settings = {**DEFAULTS, "size_multiplier": 1.0}
+        args = [settings[name] for name in UI_ORDER]
+
+        chain.script.before_process(p, *args)
+        chain.script.process(p, *args)
+        chain.script.process_before_every_sampling(
+            p, *args, noise=types.SimpleNamespace(shape=(1, 16, 1, 60, 40))
+        )
+        chain.script.postprocess(p, processed, *args)
+
+        assert chain.script._stage1_latent == "1x16x1x60x40"
+        assert chain.script._stage1_requested == (640, 960)
+
+    def test_stage_2_never_reports_its_own_latent(self, chain, host, image_factory):
+        """Stage 2 runs with scripts unset; the hook describes Stage 1 only."""
+        import types
+
+        p = make_p(host, width=640, height=960)
+        processed = make_processed(host, p, image_factory)
+
+        settings = {**DEFAULTS}
+        args = [settings[name] for name in UI_ORDER]
+
+        chain.script.before_process(p, *args)
+        chain.script.process(p, *args)
+        chain.script._in_stage_2 = True
+        chain.script.process_before_every_sampling(
+            p, *args, noise=types.SimpleNamespace(shape=(1, 128, 30, 20))
+        )
+        chain.script._in_stage_2 = False
+
+        assert chain.script._stage1_latent == ""
+
     def test_the_multiplier_is_not_blamed_for_it(self, chain, host, image_factory):
         """Stage 2 still refines at 1.0x of what it was handed."""
         p = make_p(host, width=640, height=960)
