@@ -140,14 +140,35 @@ Write `<lora:name:weight>` into the Stage 2 prompt boxes and it applies against
 **Model B**, after the switch. Tags inside a saved style work too — styles expand
 first, then the expanded prompt goes through the host's extra-networks parser.
 
-The extension never strips, sanitises or pre-parses these tags. The assembled
-prompt is handed to the standard processing pipeline, which parses them, applies
-them, strips them before the text encoder, and deactivates them afterwards —
-byte-for-byte the same path as typing the tag into the main prompt box.
+Tags you write in the Stage 2 boxes are never stripped, sanitised or pre-parsed.
+The assembled prompt is handed to the standard processing pipeline, which parses
+them, applies them, strips them before the text encoder, and deactivates them
+afterwards — byte-for-byte the same path as typing the tag into the main prompt
+box.
 
-**Stage 1 LoRAs do not carry over.** They are Stage-1-architecture-specific, and
-so are embeddings and ControlNet units. When Model Chain detects that the two
-stages use different architectures it says so in the panel.
+**Stage 1 LoRAs do not carry over**, and this is enforced rather than assumed.
+Inherit and Append modes take their text from the Stage 1 prompt, and that prompt
+still holds its extra-network tags — the host strips them from a *copy* on the
+way to the text encoder, which is why they survive into infotext. Inherited
+verbatim, they would be parsed again by the Stage 2 pass and applied against
+Model B. So the inherited half of the prompt has its tags removed before it is
+used, and the console says which ones:
+
+```
+Model Chain: <lora:sdxl_detail:0.8> in the Stage 1 prompt was not carried into
+             Stage 2 — they are Stage-1-architecture-specific. Add a Stage 2 LoRA
+             with <lora:name:weight> in Append or Replace mode.
+```
+
+This matters most in exactly the case the extension exists for. A LoRA trained
+for Stage 1's architecture applied to a different Stage 2 architecture either
+fails to load or lands on the wrong tensors, and neither produces an error you
+would connect to the prompt. Embeddings and ControlNet units are
+architecture-specific in the same way; when Model Chain detects that the two
+stages differ it says so in the panel.
+
+To use a LoRA during refinement, put it in the **Stage 2** prompt box, in Append
+or Replace mode.
 
 ### Edit mode (Krea 2, Anima, Flux.2 Klein)
 
@@ -244,6 +265,16 @@ Under **Settings → Model Chain**:
   see [Preloading Stage 1](#preloading-stage-1-experimental-off-by-default).
 - **Keep Stage 1's text encoder and VAE in VRAM during Stage 2** (default on) —
   see [Pinning Stage 1's encoders](#pinning-stage-1s-encoders).
+- **Use leftover VRAM to keep Stage 2 warm between generations** (default on) —
+  see [Spending what is left](#spending-what-is-left).
+- **Minimum VRAM reserve (GB)** (default 0 = automatic) — a floor under the
+  automatically sized reserve. Model Chain never warms anything into it, and
+  never undercuts VRAM Forge itself has set aside. See
+  [The reserve](#the-reserve).
+- **Reuse a prepared LoRA state when a cached model comes back** (default on) —
+  see [Prepared LoRA state](#prepared-lora-state). Turn it off if a LoRA
+  misbehaves after a switch; every restored model then rebuilds its LoRA state
+  from scratch, which is slower but leaves nothing to be wrong about.
 
 ## How it behaves
 
@@ -352,6 +383,47 @@ Two conditions have to hold, and both fail quietly and visibly in the log:
   down regardless. From the second generation onward the switch is warm and the
   pin applies.
 
+#### Prepared LoRA state
+
+Forge's LoRA loader does not patch weights on every generation. It builds a
+patched clone of `forge_objects` once and records what produced it in
+`sd_model.current_lora_hash` — a string built from the network names, their
+text-encoder and UNet multipliers and any dynamic dimensions. The next call
+compares that string and returns early when it matches.
+
+Because this extension caches whole `sd_model` objects rather than reloading
+them, that hash travels with the cached model, and the early return keeps
+working across a warm swap. **So there is nothing here that reapplies a LoRA, and
+nothing that moves patched state around by hand.** Preserving the prepared state
+is a matter of not breaking the host's own mechanism, and the work is entirely in
+knowing when preserving it would be wrong:
+
+- **The other stage never inherits it.** Each entry records which stage prepared
+  it. Two different checkpoints are two different cache entries and the question
+  never arises, but one checkpoint used by both stages carries a single prepared
+  state belonging to whichever stage ran last — and handing that to the other one
+  is the same cross-stage leak the prompt stripping prevents.
+- **A state that changed while the model sat in the cache is not trusted.** The
+  recorded hash and the live one are compared on the way back in.
+- **Backends that rebuild rather than move are excluded.** Nunchaku folds LoRA
+  weights into a quantised kernel instead of a patcher clone, so its prepared
+  state is not the movable object the rest of this assumes. Those models fall
+  back to the host's normal path and the console says so.
+- **A failed refine invalidates it.** A pass that raised part way through LoRA
+  application leaves the host believing a state is applied that partly is not.
+  In a stock session that belief dies with the next checkpoint load; here the
+  model object is kept, so the belief would outlive the job that created it.
+  Throwing it away costs one reapplication.
+
+Changing the LoRA name, its weight, the on-the-fly patching mode or the model
+needs none of this: those all change the host's own hash, so the host reapplies
+without being asked to. What is above is only about the cases where the hash
+would *match* and should not be believed.
+
+Invalidation is always the conservative direction — the worst it can do is make
+the host redo work it could have skipped. Nothing here ever writes a hash, only
+clears one.
+
 #### Preloading Stage 1 (experimental, off by default)
 
 Restoring Stage 1 is two costs. The pointer swap out of the RAM cache is cheap;
@@ -365,14 +437,55 @@ inline would gain nothing — `postprocess` runs before the generation call
 returns, so an inline preload would just move the same wait to before the
 gallery appears.
 
-Nothing depends on it completing. The next generation joins the thread before
-touching any model, so the worst case is exactly the wait you would have had
-anyway, and if the preload failed or never started, that generation loads Stage 1
-the way it always did. Changing checkpoint in the UI between generations is
-handled too: the preload re-reads the live selection, so it either warms the
-model you actually picked or does nothing.
+**"Preloaded" means ready to sample, not "a thread ran".** The worker swaps
+Stage 1 back in, budgets VRAM for it, moves its weights through the host's own
+`load_models_gpu`, and then *measures* how much of the model the host reports
+resident. A preload that ran out of room reports partial rather than success,
+and every generation opens with a line saying which it got:
 
-**It ships off, and that is deliberate.** It is the only part of this extension
+```
+Model Chain: Stage 1 is warm — 12.4 GB already in VRAM (preloaded in 8.5s).
+Model Chain: Stage 1 is partially warm — 7.2 GB of 12.4 GB in VRAM, the rest
+             moves on demand (preloaded in 5.1s).
+Model Chain: Stage 1 is cold — 12.4 GB still to move from system RAM (preload off).
+```
+
+That line is measured against the host's live view every time, not reported from
+what the preload believed it achieved.
+
+##### What happens when it goes wrong
+
+Nothing downstream depends on it completing, and the failure behaviour is the
+part worth trusting:
+
+- **A Generate that arrives mid-preload waits, and the wait is never wasted.**
+  The next generation joins the thread before touching any model and then takes
+  the same lock, so the worst case is exactly the wait you would have had anyway.
+  A wait long enough to notice is logged, so a slow first click has a visible
+  explanation rather than looking like a hang.
+- **A single failure costs one generation, not the session.** If the swap never
+  happened, nothing moved. If it did, Stage 1 *is* the loaded model with its
+  weights in RAM — which is precisely the state an ordinary generation starts
+  from, so the host's synchronous path takes over with nothing to undo. The next
+  generation still budgets VRAM for it, which is the difference between the
+  normal load and the pathological one that squeezes a UNet into 900 MB of spare.
+- **Nothing survives that might no longer be true.** A failure drops the pinned
+  encoders and invalidates the prepared LoRA state rather than trusting either.
+- **Repeated failure retires the feature.** Two consecutive failures take the
+  preload out of service for the rest of the session, with a line in the console
+  saying so. Enabling it can cost you a generation; it cannot cost you every
+  generation. Toggling the setting off and on gives it another chance without a
+  restart.
+- **A checkpoint change supersedes it.** The preload records what it warmed, and
+  a change of checkpoint, VAE, text encoder or storage dtype since then means the
+  result is discarded and the current selection loads normally.
+
+**It still ships off, and that is deliberate.** See the reasoning below — the
+failure handling above changes what a bad outcome costs, not how likely it is.
+
+##### Why it is still off by default
+
+It is the only part of this extension
 that touches models away from the generation thread, and that turns out to be
 sharper than it looks. `torch.inference_mode()` is thread-local and the host
 holds it for a whole generation, so every model the host loads yields *inference
@@ -387,9 +500,11 @@ just move them.
 
 The asymmetry is what decides the default. Pinning and the VRAM sizing *remove*
 work; the preload only moves the same work earlier. A machine where it
-misbehaves loses far more than a machine where it is off gains. Turn it on in
-**Settings → Model Chain** once you have confirmed it is safe on yours — and if
-you are chasing a problem, turn off on-the-fly LoRA patching first.
+misbehaves loses far more than a machine where it is off gains, and the failure
+handling above changes what a bad outcome costs without changing how likely one
+is. Turn it on in **Settings → Model Chain** once you have confirmed it is safe
+on yours — and if you are chasing a problem, turn off on-the-fly LoRA patching
+first.
 
 #### Sizing the VRAM budget
 
@@ -413,6 +528,73 @@ evictable thing on the card, so asking to free the whole requirement evicts
 exactly the weights the next pass is about to use, and the load happens twice.
 That was a real bug — the preload's 8.5s of work was being discarded and redone
 on every Generate click.
+
+#### The reserve
+
+Every eviction decision is a subtraction from free VRAM, and the thing being
+subtracted is the reserve: what has to stay free for the pass to run without the
+driver quietly spilling into system memory. Four figures answer that question,
+and **the largest of them wins**:
+
+| Floor | Where it comes from |
+| --- | --- |
+| Static estimate | 1 GB plus 0.75 GB per megapixel above the first |
+| Observed peak | the largest activation peak measured this session, plus 15% |
+| Manual reserve | your **Minimum VRAM reserve (GB)** setting, if you set one |
+| Host reservation | whatever Forge itself reports set aside for inference |
+
+Taking the maximum rather than a sum is the point: each is an answer to the same
+question, so the strongest answer is the useful one and none of them may be
+undercut by the others. In particular a manual reserve is a *floor*, not an
+override — setting 2 GB does not permit a 4096×4096 pass to run on 2 GB — and
+Forge's own reservation is never cancelled or reduced by this extension.
+
+**Automatic mode learns.** The static estimate cannot know your sampler, your
+batch size, or what else is hooked into the UNet, so after each pass the peak
+allocation is compared against the weights resident at the time and the
+difference is folded in as bytes-per-megapixel. The figure only ever moves
+upward: a pass that happened to be cheap is not evidence that the next one will
+be, and an under-reserve is the failure with no error message attached. A
+reading that comes in wildly high — which is what a pass that evicted a model
+mid-flight looks like — is capped rather than believed.
+
+#### Spending what is left
+
+Stage 1 comes first and always. But a 24 GB card running a pair of quantised
+models is routinely left with several GB doing nothing once Stage 1 is back, and
+that capacity has an obvious use: Stage 2's components, which the *following*
+generation wants and would otherwise drag back across PCIe from scratch.
+
+So once Stage 1 is warm, anything still spare beyond the reserve is spent on
+Stage 2. This does not need the preload: both the preload and an ordinary
+Generate reach it through the same swap back to Stage 1, which is where Stage 2's
+components are captured and after which "how much is genuinely spare" first has
+an answer. The preload moves the work earlier, it is not what makes it correct.
+
+```
+Model Chain: kept 2 of Stage 2's 3 components warm in VRAM (3.0 GB moved,
+             1.4 GB free, 1.0 GB reserved) — a Stage 2 retry starts sooner
+```
+
+Three rules keep this from becoming the problem it is trying to solve:
+
+- **Free VRAM is not the budget.** Free VRAM *minus the reserve* is, and there
+  is a further half-gigabyte of slack on top — speculative work should only
+  happen where there is room to be wrong about it. On a card that is tight for
+  the pair, nothing is warmed and the console says why.
+- **Components are dropped largest-first.** A UNet that does not fit must not
+  mean nothing is kept: Stage 2's text encoder and VAE are small and a
+  disproportionate share of a switch's cost, so they are what remains when the
+  UNet is dropped.
+- **Warm components are the first thing released under pressure.** They are in
+  no keep-list, so the next pass that needs room takes their VRAM back through
+  the ordinary eviction path without anything special happening.
+
+One limitation worth stating: whether keeping a given component warm is
+genuinely faster than releasing and reloading it is decided here by whether it
+fits, not by measurement. Measuring it properly needs per-component movement
+timings that this extension does not yet collect, so the conservative rule — only
+ever use capacity that is provably spare — stands in for the measurement.
 
 ### Interruption
 
@@ -549,12 +731,19 @@ generation and says so rather than corrupting the loaded model.
 ```
 mc_arch.py            architecture detection + per-architecture geometry
 mc_memory.py          model residency / cache management
+mc_lora.py            prepared LoRA state + stage isolation
 mc_infotext.py        infotext write + paste-field registration
 mc_presets.py         named Stage 2 configurations
 mc_styles.py          style library integration helpers
 scripts/model_chain.py  Script class, UI, orchestration
 tests/                pytest suite (runs without a WebUI)
 ```
+
+`mc_lora.py` deliberately depends on nothing else in the extension. It is a
+description of two host mechanisms — the extra-network tag syntax and the LoRA
+hash on `sd_model` — and keeping it free of settings lookups and cache
+internals is what makes it testable against the host's behaviour rather than
+against ours.
 
 Two deviations from the layout in the design document, both forced by how Forge
 Neo loads extensions:
@@ -589,10 +778,27 @@ round-tripping, the residency cascade and RAM budget, per-checkpoint
 VAE/text-encoder selection and its cache keying, model-flag restoration across a
 warm swap, edit-mode scoping and polarity, preset round-tripping and recovery
 from a damaged store, encoder pinning and its fallbacks, the background Stage 1
-preload, interruption handling, the UI's control-order contract, and inertness
-when disabled.
+preload and its failure handling, prepared-LoRA-state reuse and every case that
+invalidates it, stage isolation of extra-network tags, the VRAM reserve and its
+four floors, speculative warming of Stage 2, interruption handling, the UI's
+control-order contract, and inertness when disabled.
+
+Three of those files are lopsided on purpose, because their failure modes are:
+
+```
+tests/test_lora_state.py       reusing prepared state that is no longer valid
+                               produces a wrong image and no error anywhere,
+                               so the invalidation cases outnumber the
+                               preservation ones
+tests/test_warming.py          warming into the reserve costs an OOM or, worse,
+                               a silent spill to system RAM, so most of the file
+                               is about warming *not* happening
+tests/test_residency_speed.py  a preload that fails must cost one generation
+                               rather than every one
+```
 
 The criteria that need real hardware — that an SDXL → Flux.2-Klein chain
 produces coherent output, that a Krea 2 Edit refine responds to its Edit LoRA,
 that a LoRA visibly affects the refined image, that a warm switch is measurably
-faster than a cold disk load — are left to manual verification.
+faster than a cold disk load, that a preserved LoRA state survives 20–50
+alternating jobs without drift — are left to manual verification.

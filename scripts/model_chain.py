@@ -21,6 +21,7 @@ import gradio as gr
 
 import mc_arch
 import mc_infotext
+import mc_lora
 import mc_memory
 import mc_presets
 import mc_styles
@@ -114,6 +115,33 @@ shared.options_templates.update(
             ).info(
                 "so switching back only has to move the UNet. Applied only when Stage 2 "
                 "still fits alongside them; otherwise it is skipped automatically and logged"
+            ),
+            mc_memory.OPT_WARM_STAGE_2: shared.OptionInfo(
+                True,
+                "Use leftover VRAM to keep Stage 2 warm between generations",
+            ).info(
+                "after Stage 1 is back and the reserve below is honoured, anything still "
+                "spare is spent on Stage 2's components so the next refine starts sooner. "
+                "Never at Stage 1's expense, and the first thing released under pressure"
+            ),
+            mc_memory.OPT_VRAM_RESERVE: shared.OptionInfo(
+                0.0,
+                "Minimum VRAM reserve (GB)",
+                gr.Number,
+            ).info(
+                "0 sizes the reserve automatically from the pass and from the activation "
+                "peaks actually observed this session. Set a number to put a floor under "
+                "that estimate — Model Chain never warms anything into the reserve, and "
+                "never undercuts VRAM Forge has already set aside for itself"
+            ),
+            mc_memory.OPT_PRESERVE_LORA: shared.OptionInfo(
+                True,
+                "Reuse a prepared LoRA state when a cached model comes back",
+            ).info(
+                "a warm swap keeps the model object, so an unchanged LoRA does not have to "
+                "be reapplied. Turn this off to make every restored model rebuild its LoRA "
+                "state from scratch — slower, and worth trying if a LoRA misbehaves after "
+                "a switch"
             ),
         },
     )
@@ -289,6 +317,9 @@ class ScriptModelChain(scripts.Script):
         # Whether the host would have written this generation's images to disk,
         # captured before Stage 1 saving is suppressed.
         self._save_final_images = False
+        # Extra-network tags last dropped from an inherited prompt, so the
+        # console says so once per generation rather than once per image.
+        self._dropped_networks: list[str] = []
 
     def title(self):
         return "Model Chain"
@@ -823,19 +854,61 @@ class ScriptModelChain(scripts.Script):
         """Assemble one Stage 2 prompt pair.
 
         Order is prompt assembly -> style expansion -> (host) extra-networks
-        parsing, per section 5.4. Extra-network tags are never touched here:
-        the assembled string is handed to the normal processing pipeline, which
-        parses and strips them exactly as it does for the main prompt box.
+        parsing, per section 5.4. Tags the user wrote into the Stage 2 boxes are
+        never touched here: the assembled string is handed to the normal
+        processing pipeline, which parses and strips them exactly as it does for
+        the main prompt box.
+
+        The Stage 1 half is the exception, and is stripped of extra-network tags
+        before it is used. ``all_prompts`` holds the prompt as typed, tags
+        included -- the host strips them from a copy on the way to the text
+        encoder, which is why they survive into infotext -- so inheriting it
+        verbatim would apply Stage 1's LoRAs against Model B. That is at its
+        worst in exactly the case this extension exists for, where the two
+        models are different architectures and the LoRA lands on the wrong
+        tensors or fails outright.
         """
         if mode == "Replace":
             positive, negative = extra_positive, extra_negative
-        elif mode == "Append":
-            positive = ", ".join(x for x in (stage1_positive.strip(), extra_positive.strip()) if x)
-            negative = ", ".join(x for x in (stage1_negative.strip(), extra_negative.strip()) if x)
-        else:  # Inherit
-            return stage1_positive, stage1_negative
+        else:
+            inherited_positive, dropped = mc_lora.strip_networks(stage1_positive)
+            inherited_negative, dropped_negative = mc_lora.strip_networks(stage1_negative)
+            self._note_dropped_networks(dropped + dropped_negative)
+
+            if mode == "Append":
+                positive = ", ".join(
+                    x for x in (inherited_positive.strip(), extra_positive.strip()) if x
+                )
+                negative = ", ".join(
+                    x for x in (inherited_negative.strip(), extra_negative.strip()) if x
+                )
+            else:  # Inherit
+                return inherited_positive, inherited_negative
 
         return mc_styles.apply(positive, negative, styles)
+
+    def _note_dropped_networks(self, dropped) -> None:
+        """Say once per generation which Stage 1 tags did not travel.
+
+        Once, not once per image: a batch of eight would otherwise repeat the
+        same line eight times, and the interesting fact is which tags were
+        dropped, not how many prompts contained them.
+        """
+        if not dropped:
+            return
+
+        unique = sorted(set(dropped))
+        if unique == self._dropped_networks:
+            return
+
+        self._dropped_networks = unique
+        logger.info(
+            "Model Chain: %s in the Stage 1 prompt %s not carried into Stage 2 — they are "
+            "Stage-1-architecture-specific. Add a Stage 2 LoRA with <lora:name:weight> in "
+            "Append or Replace mode.",
+            ", ".join(unique),
+            "was" if len(unique) == 1 else "were",
+        )
 
     # -- hooks ------------------------------------------------------------- #
 
@@ -851,12 +924,16 @@ class ScriptModelChain(scripts.Script):
             # Either branch means Stage 1 was swapped in from the cache; the
             # preload sized its VRAM budget from the *previous* generation, so
             # re-check it here against the size actually about to be sampled.
-            if mc_memory.reinstate_pending() or mc_memory.consume_preload():
+            swapped = mc_memory.reinstate_pending() or mc_memory.consume_preload()
+            if swapped:
                 self._make_room_for_stage_1(p)
+            if swapped or enabled:
+                self._report_readiness()
         except Exception:
             errors.report("Model Chain: failed to reinstate the cached checkpoint", exc_info=True)
 
         self._armed = False
+        self._dropped_networks = []
 
         if self._in_stage_2 or not enabled:
             return
@@ -889,6 +966,26 @@ class ScriptModelChain(scripts.Script):
         self._armed = True
 
     @staticmethod
+    def _report_readiness() -> None:
+        """Say how much of Stage 1 this generation starts with already in VRAM.
+
+        The one line that makes the whole residency story checkable from the
+        console: warm means the preload did its job, partially warm means it ran
+        out of room, and cold means the next few seconds are model movement.
+
+        Logged for chained generations and for the plain Generate that follows
+        one -- the latter being the interesting case, since that is the
+        generation the whole preload exists for. Not logged otherwise: someone
+        who never enables Model Chain should never see a line from it.
+        """
+        try:
+            _, message = mc_memory.stage_1_readiness()
+        except Exception:
+            return
+
+        logger.info("%s", message)
+
+    @staticmethod
     def _make_room_for_stage_1(p) -> None:
         """Give Stage 1 a clean VRAM budget after swapping its model back in.
 
@@ -903,6 +1000,11 @@ class ScriptModelChain(scripts.Script):
         Stage 2 has had this since the pass-size fix; Stage 1 needs it for the
         same reason. When both models genuinely fit, make_vram_room() checks
         first and does nothing.
+
+        Loading Stage 1 the rest of the way is then the same work the sampler
+        would trigger moments later, done at the one point where "how much VRAM
+        is genuinely spare" has an answer -- which is what lets whatever is left
+        over be spent on keeping Stage 2 warm.
         """
         try:
             width, height = mc_arch.stage1_size(p)
@@ -913,6 +1015,7 @@ class ScriptModelChain(scripts.Script):
                 height,
                 stage="Stage 1",
             )
+            mc_memory.warm_for_next_pass(width, height)
         except Exception:
             errors.report("Model Chain: failed to free VRAM for Stage 1", exc_info=True)
 
@@ -940,6 +1043,12 @@ class ScriptModelChain(scripts.Script):
     ):
         if not self._armed:
             return
+
+        # Start the activation measurement here rather than in before_process:
+        # this is the first point that is reached only for a chained generation,
+        # and resetting the CUDA peak counters is the host's own instrumentation
+        # to reset on every other one.
+        mc_memory.begin_pass_observation()
 
         styles = list(styles or [])
         if prompt_mode == "Inherit":
@@ -1086,6 +1195,11 @@ class ScriptModelChain(scripts.Script):
         if not stage1_images:
             return
 
+        # Stage 1 has finished sampling and Stage 2's model is not loaded yet,
+        # so this is the one moment the peak reading describes Stage 1's pass
+        # alone. It feeds the automatic VRAM reserve.
+        mc_memory.observe_activation_peak(*mc_arch.stage1_size(p), stage=mc_memory.STAGE_1)
+
         if prompt_mode == "Inherit":
             styles = []
 
@@ -1163,6 +1277,7 @@ class ScriptModelChain(scripts.Script):
             first.width, first.height, size_multiplier, arch.alignment
         )
         mc_memory.make_vram_room(target, modules, stage_2_width, stage_2_height)
+        mc_memory.begin_pass_observation()
 
         # Model B is loaded now, so its edit-mode state can finally be checked
         # against reality rather than against the dropdown's guess.
@@ -1212,6 +1327,9 @@ class ScriptModelChain(scripts.Script):
                 refined.append(result if result is not None else image)
         finally:
             self._in_stage_2 = False
+            mc_memory.observe_activation_peak(
+                stage_2_width, stage_2_height, stage=mc_memory.STAGE_2
+            )
             # Put the selection back so the next generation starts on Model A
             # with Model A's own VAE and text encoder. Only the selection:
             # reloading here would be a second switch.
@@ -1387,6 +1505,12 @@ class ScriptModelChain(scripts.Script):
             result = process_images(p2)
         except Exception:
             errors.report("Model Chain: a Stage 2 refine pass failed", exc_info=True)
+            # The pass may have failed *during* LoRA application, which would
+            # leave the host believing a state is applied that partly is not.
+            # This model is cached rather than reloaded, so that belief would
+            # outlive the job that created it and quietly affect every later
+            # generation on Model B. Throwing it away costs one reapplication.
+            mc_memory.invalidate_prepared_state("a Stage 2 refine pass failed")
             return None
         finally:
             p2.close()

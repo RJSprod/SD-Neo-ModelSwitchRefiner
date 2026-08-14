@@ -54,6 +54,9 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+import mc_lora
+
+
 def _make_logger() -> logging.Logger:
     """Console logger using the host's Rich formatting.
 
@@ -85,6 +88,9 @@ Re-entrant because the preload calls several of those entry points itself.
 
 OPT_PIN_ENCODERS = "model_chain_pin_stage1_encoders"
 OPT_PRELOAD = "model_chain_preload_stage1"
+OPT_PRESERVE_LORA = "model_chain_preserve_lora"
+OPT_VRAM_RESERVE = "model_chain_vram_reserve_gb"
+OPT_WARM_STAGE_2 = "model_chain_warm_stage_2"
 
 PRELOAD_DEFAULT = False
 """Off by default: the preload is the one mechanism here that leaves the
@@ -94,7 +100,14 @@ generation outright rather than merely slow one down.
 It is also the least valuable of the three. Pinning and the VRAM sizing remove
 work; the preload only moves the same work earlier, so the cost of having it
 wrong is out of all proportion to the benefit of having it right. Opt in per
-machine, once it is known to be safe there."""
+machine, once it is known to be safe there.
+
+What changed since that judgement was made is the *failure* behaviour, not the
+success behaviour: a preload that goes wrong now falls back to the host's
+synchronous load path, and two consecutive failures take the feature out for the
+rest of the session rather than letting it fail on every generation. The default
+stays off regardless -- a machine where it misbehaves still loses more than a
+machine where it is off gains."""
 
 
 def option(name: str, default):
@@ -150,13 +163,190 @@ might have fitted, and that model is still warm in the RAM cache.
 """
 
 
+PEAK_MARGIN = 1.15
+"""Safety factor on an observed activation peak before it is trusted as a reserve.
+
+A peak is the largest thing that happened, not the largest thing that can
+happen: a different sampler, a ControlNet unit or one more image in the batch
+all push past it. The margin is the difference between "what we saw" and "what
+we are prepared to be surprised by".
+"""
+
+PEAK_CEILING = 4.0
+"""How far an observation may exceed the static estimate before it is capped.
+
+Observed peaks are measured against currently resident weights, so a pass that
+evicted a model half way through attributes the evicted weights to activations
+and reads far too high. Over-reserving is not free -- it evicts models that
+would have fitted -- so a wild reading is clamped rather than believed.
+"""
+
+
 def vram_headroom_bytes(width: int = 0, height: int = 0) -> int:
-    """Activation headroom to keep free for a pass at the given size."""
+    """VRAM to keep free for a pass at the given size.
+
+    Four floors, and the largest of them wins:
+
+    * the static estimate below, which scales with pixel count,
+    * the largest activation peak actually observed this session, plus a margin,
+    * the user's manual reserve, if they set one,
+    * whatever Forge has already reserved for its own inference.
+
+    Taking the maximum rather than a sum is the point. Each is an answer to the
+    same question -- how much has to stay free for this pass to run without the
+    driver spilling into system memory -- so the strongest answer is the useful
+    one, and none of them may be undercut by the others.
+    """
+    return int(max(_static_headroom_bytes(width, height),
+                   _observed_headroom_bytes(width, height),
+                   manual_reserve_bytes(),
+                   host_reserved_bytes()))
+
+
+def _static_headroom_bytes(width: int, height: int) -> int:
+    """The a-priori estimate, from pass size alone."""
     if width <= 0 or height <= 0:
         return int(VRAM_HEADROOM_BYTES)
 
     megapixels = (width * height) / 1_000_000
     return int(VRAM_HEADROOM_BYTES + VRAM_HEADROOM_PER_MEGAPIXEL * max(megapixels - 1.0, 0.0))
+
+
+def manual_reserve_bytes() -> int:
+    """The user's minimum-VRAM-reserve setting, if they set one.
+
+    Speculative warming may never eat into this, which is the whole reason the
+    setting exists: automatic sizing is an estimate, and a user who knows their
+    workload needs a way to say so that an estimate cannot argue with.
+    """
+    try:
+        configured = float(option(OPT_VRAM_RESERVE, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0
+    return int(max(configured, 0.0) * _GB)
+
+
+def host_reserved_bytes() -> int:
+    """VRAM Forge has already set aside for its own inference.
+
+    Forge Neo exposes this under more than one name depending on build -- the
+    "GPU Weights" slider becomes ``current_inference_memory``, and there are
+    ``minimum_inference_memory()`` and ``extra_reserved_memory()`` helpers. The
+    largest figure any of them reports is taken, because the failure mode is
+    asymmetric: reserving more than the host asked for costs an eviction, and
+    reserving less silently cancels a reservation the user made in the host's
+    own settings.
+    """
+    try:
+        from backend import memory_management
+    except Exception:
+        return 0
+
+    reserved = 0
+    for name in ("minimum_inference_memory", "extra_reserved_memory", "current_inference_memory"):
+        source = getattr(memory_management, name, None)
+        try:
+            value = int(source() if callable(source) else source)
+        except Exception:
+            continue
+        reserved = max(reserved, value)
+
+    return max(reserved, 0)
+
+
+# -- observed activation peaks --------------------------------------------- #
+#
+# The static estimate is a starting heuristic and was always documented as one.
+# It cannot know the sampler, the batch size, or what else is hooked into the
+# UNet on this machine. Watching what passes actually cost is how automatic mode
+# stops being a guess.
+#
+# Only ever upward: the running figure is a maximum, not an average. A pass that
+# happened to be cheap is not evidence that the next one will be, and the cost
+# of an under-reserve -- the driver spilling into system RAM, sampling dropping
+# from sub-second to tens of seconds per step, with no error to explain it -- is
+# far worse than the cost of one unnecessary eviction.
+
+_peak_bytes_per_megapixel = 0.0
+_peak_observations = 0
+
+
+def begin_pass_observation() -> None:
+    """Start a measurement window for the pass about to run."""
+    try:
+        import torch
+
+        from backend import memory_management
+
+        torch.cuda.reset_peak_memory_stats(memory_management.get_torch_device())
+    except Exception:
+        pass
+
+
+def observe_activation_peak(width: int, height: int, stage: str = "") -> int:
+    """Fold the pass that just ran into the automatic reserve estimate.
+
+    What is measured is the peak allocation minus the weights resident at the
+    end of the pass, which is an estimate of the activations rather than a
+    reading of them -- there is no host API that separates the two. It is used
+    only as a *floor* on the reserve and only when it exceeds the static
+    estimate, so an under-reading changes nothing and an over-reading is capped.
+
+    Returns the bytes-per-megapixel figure now in force, or 0 if nothing could
+    be measured.
+    """
+    global _peak_bytes_per_megapixel, _peak_observations
+
+    if width <= 0 or height <= 0:
+        return 0
+
+    try:
+        import torch
+
+        from backend import memory_management
+
+        device = memory_management.get_torch_device()
+        peak = int(torch.cuda.max_memory_allocated(device))
+    except Exception:
+        return 0
+
+    if peak <= 0:
+        return 0
+
+    weights = _all_resident_bytes()
+    megapixels = max((width * height) / 1_000_000, 0.05)
+    per_megapixel = max(peak - weights, 0) / megapixels
+
+    ceiling = PEAK_CEILING * _static_headroom_bytes(width, height) / megapixels
+    per_megapixel = min(per_megapixel, ceiling)
+
+    _peak_observations += 1
+    if per_megapixel > _peak_bytes_per_megapixel:
+        _peak_bytes_per_megapixel = per_megapixel
+        logger.debug(
+            "Model Chain: observed %.2f GB of activations for a %dx%d %s pass; "
+            "the automatic VRAM reserve now allows for it",
+            (peak - weights) / _GB,
+            width,
+            height,
+            stage or "generation",
+        )
+
+    return int(_peak_bytes_per_megapixel)
+
+
+def _observed_headroom_bytes(width: int, height: int) -> int:
+    """What the observed peaks say this pass needs free, or 0 before any."""
+    if _peak_bytes_per_megapixel <= 0 or width <= 0 or height <= 0:
+        return 0
+
+    megapixels = max((width * height) / 1_000_000, 0.05)
+    return int(_peak_bytes_per_megapixel * megapixels * PEAK_MARGIN)
+
+
+def observed_peaks() -> tuple[int, int]:
+    """Bytes-per-megapixel currently in force, and how many passes fed it."""
+    return int(_peak_bytes_per_megapixel), _peak_observations
 
 
 def vram_required_bytes(name: str, modules=None, width: int = 0, height: int = 0) -> int:
@@ -227,6 +417,26 @@ class _Entry:
     model_flags: dict = field(default_factory=dict)
     """``dynamic_args`` state as of this model's load; see ``MODEL_FLAGS``."""
     last_used: float = field(default_factory=time.monotonic)
+
+    lora_state: str | None = None
+    """``current_lora_hash`` as of the moment this model was put away.
+
+    Recorded so restoring it can tell "the prepared state is the one we left"
+    from "something changed it while it was in the cache". Only the first is
+    safe to hand back to the host as-is.
+    """
+    lora_preservable: bool = True
+    """Whether this backend's LoRA path survives being cached; see mc_lora."""
+    stage: str = ""
+    """Which stage prepared this state.
+
+    The prepared state is only ever reused for the stage that built it. Model
+    Chain's two stages are separate cache entries whenever they use different
+    checkpoints, so this normally decides nothing -- but when a model is used by
+    Stage 1 in one job and Stage 2 in another, its prepared LoRA state belongs
+    to whichever stage last ran, and reusing it for the other one is precisely
+    the leak the extension is supposed to prevent.
+    """
 
 
 class _Cache:
@@ -673,8 +883,12 @@ def _target_key_for(name: str, modules=None) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _stash_current() -> None:
-    """Move the currently loaded model into the cache before it is displaced."""
+def _stash_current(stage: str = "") -> None:
+    """Move the currently loaded model into the cache before it is displaced.
+
+    ``stage`` is which stage this model was serving, and is carried on the entry
+    so its prepared LoRA state is only ever offered back to the same stage.
+    """
     from modules.sd_models import model_data
 
     model = model_data.sd_model
@@ -688,13 +902,28 @@ def _stash_current() -> None:
         )
         return
 
+    flags = snapshot_model_flags()
+    preservable, unpreservable_because = mc_lora.is_preservable(flags)
+    lora_state = mc_lora.state_of(model)
+
     if _cache.has(key):
-        _cache.get(key)  # refresh recency
+        existing = _cache.get(key)  # refresh recency
+        # The same object can come back through here having been used by the
+        # other stage, or with a different LoRA applied. The entry describes
+        # what is being put away *now*, not what was put away last time.
+        existing.lora_state = lora_state
+        existing.lora_preservable = preservable
+        existing.stage = stage or existing.stage
         return
 
     info = getattr(model, "sd_checkpoint_info", None)
     name = info.name_for_extra if info is not None else "(unknown)"
     size = loaded_size_bytes(model) or file_size_bytes(name)
+
+    if lora_state and not preservable:
+        logger.info(
+            "Model Chain: %s keeps no reusable LoRA state — %s", name, unpreservable_because
+        )
 
     # What the cache may grow to right now: whatever it already holds, plus the
     # RAM actually free beyond the reserve. Expressing it this way lets admit()
@@ -708,7 +937,10 @@ def _stash_current() -> None:
         checkpoint_name=name,
         sd_model=model,
         size_bytes=size,
-        model_flags=snapshot_model_flags(),
+        model_flags=flags,
+        lora_state=lora_state,
+        lora_preservable=preservable,
+        stage=stage,
     )
 
     global _last_refusal
@@ -734,6 +966,76 @@ def _stash_current() -> None:
         )
 
 
+def _restore_prepared_state(entry: _Entry, stage: str) -> str:
+    """Decide whether a restored model may keep its prepared LoRA state.
+
+    Preserving is the default and costs nothing to do -- the host's own early
+    return handles it, and this function's whole job is to spot the cases where
+    that early return would be wrong and take it away.
+
+    Returns ``"preserved"``, ``"rebuilt"`` or ``"none"`` (there was no LoRA
+    state either way), which is what the caller logs.
+    """
+    model = entry.sd_model
+    live = mc_lora.state_of(model)
+
+    if live is None and entry.lora_state is None:
+        return "none"
+
+    def rebuild(reason: str) -> str:
+        mc_lora.invalidate(model, f"{entry.checkpoint_name}: {reason}")
+        return "rebuilt"
+
+    if not option(OPT_PRESERVE_LORA, True):
+        return rebuild("preserving prepared LoRA state is disabled in Settings")
+
+    if not entry.lora_preservable:
+        return rebuild("this backend rebuilds its LoRA state rather than moving it")
+
+    if entry.stage and stage and entry.stage != stage:
+        # Same checkpoint on both stages. The state on the object belongs to
+        # whichever stage last ran; handing it to the other one is exactly the
+        # cross-stage leak this extension must not have.
+        return rebuild(f"the prepared state belongs to {entry.stage}, not {stage}")
+
+    if live != entry.lora_state:
+        # Something moved the hash on while the model sat in the cache. We do
+        # not know what, so we do not trust it.
+        return rebuild("its LoRA state changed while it was cached")
+
+    return "preserved"
+
+
+def _log_restored(entry: _Entry, prepared: str) -> None:
+    """One line saying what came back and whether its LoRA state came with it."""
+    if prepared == "preserved":
+        detail = " with its prepared LoRA state intact"
+    elif prepared == "rebuilt":
+        detail = "; its LoRA state will be rebuilt"
+    else:
+        detail = ""
+
+    logger.info("Model Chain: restored %s from the RAM cache%s", entry.checkpoint_name, detail)
+
+
+def invalidate_prepared_state(reason: str = "") -> bool:
+    """Force the loaded model's LoRA state to be rebuilt before it is next used.
+
+    The failure valve for section 4.5's "never poison a cached model" rule. A
+    LoRA that raised half way through application leaves the host believing a
+    state is applied that partly is not, and because Model Chain keeps the model
+    object rather than reloading it, that belief would outlive the job that
+    caused it. Throwing the belief away costs one re-application.
+    """
+    try:
+        from modules.sd_models import model_data
+
+        return mc_lora.invalidate(model_data.sd_model, reason)
+    except Exception:
+        logger.debug("Model Chain: could not invalidate the prepared LoRA state", exc_info=True)
+        return False
+
+
 def ensure_resident(name: str, modules=None) -> str:
     """Make ``name`` the loaded checkpoint, and report how it got there.
 
@@ -752,51 +1054,60 @@ def ensure_resident(name: str, modules=None) -> str:
     from modules_forge import main_entry
 
     # A preload may still be moving Stage 1's weights. Never move models
-    # underneath it -- wait, then proceed against a settled state.
+    # underneath it -- wait, then proceed against a settled state. The lock is
+    # belt and braces on top of the join: joining a thread that has already
+    # finished starting a *second* one would otherwise be a race, and this way
+    # serialisation does not depend on getting that ordering right.
     join_preload()
 
     info = checkpoint_info(name)
     if info is None:
         raise ModelChainError(f'Stage 2 checkpoint "{name}" was not found.')
 
-    resolved_modules = resolve_modules(modules)
+    with _model_lock:
+        resolved_modules = resolve_modules(modules)
 
-    if _is_real_model(model_data.sd_model):
-        current_info = getattr(model_data.sd_model, "sd_checkpoint_info", None)
-        same_checkpoint = current_info is not None and current_info.filename == info.filename
-        same_modules = resolved_modules is None or resolved_modules == current_modules()
-        if same_checkpoint and same_modules:
-            return "unchanged"
+        if _is_real_model(model_data.sd_model):
+            current_info = getattr(model_data.sd_model, "sd_checkpoint_info", None)
+            same_checkpoint = current_info is not None and current_info.filename == info.filename
+            same_modules = resolved_modules is None or resolved_modules == current_modules()
+            if same_checkpoint and same_modules:
+                # Both stages on one checkpoint. There is no swap and therefore
+                # no cache entry involved, so the host's own hash comparison is
+                # the only thing deciding what happens to the LoRA state -- which
+                # is correct, and is why nothing here interferes with it.
+                return "unchanged"
 
-    _stash_current()
+        _stash_current(stage=STAGE_1)
 
-    # Let the host recompute loading parameters, dynamic LoRA flags and the
-    # checkpoint selection. save=False keeps this transient switch out of the
-    # user's config.json. Both changes are made with refresh=False and followed
-    # by a single refresh, the same way the host's own hires-fix pass swaps
-    # checkpoint and modules together.
-    main_entry.checkpoint_change(name, None, save=False, refresh=False)
-    if resolved_modules is not None:
-        main_entry.modules_change(resolved_modules, None, save=False, refresh=False)
-    main_entry.refresh_model_loading_parameters()
+        # Let the host recompute loading parameters, dynamic LoRA flags and the
+        # checkpoint selection. save=False keeps this transient switch out of the
+        # user's config.json. Both changes are made with refresh=False and followed
+        # by a single refresh, the same way the host's own hires-fix pass swaps
+        # checkpoint and modules together.
+        main_entry.checkpoint_change(name, None, save=False, refresh=False)
+        if resolved_modules is not None:
+            main_entry.modules_change(resolved_modules, None, save=False, refresh=False)
+        main_entry.refresh_model_loading_parameters()
 
-    target_key = _loading_parameters_key()
-    entry = _cache.get(target_key)
+        target_key = _loading_parameters_key()
+        entry = _cache.get(target_key)
 
-    if entry is not None and _is_real_model(entry.sd_model):
-        # Warm path: pointer swap. forge_model_reload() will return early, so no
-        # unload_all_models() runs and VRAM is reclaimed only on demand.
-        model_data.set_sd_model(entry.sd_model)
-        model_data.forge_hash = target_key
-        shared.opts.data["sd_checkpoint_hash"] = entry.sd_model.sd_checkpoint_info.sha256
-        # The loader did not run, so re-apply the model flags it would have set.
-        _apply_model_flags(entry.model_flags)
-        processing.need_global_unload = False
-        logger.info("Model Chain: restored %s from the RAM cache", entry.checkpoint_name)
-        return "warm"
+        if entry is not None and _is_real_model(entry.sd_model):
+            # Warm path: pointer swap. forge_model_reload() will return early, so no
+            # unload_all_models() runs and VRAM is reclaimed only on demand.
+            model_data.set_sd_model(entry.sd_model)
+            model_data.forge_hash = target_key
+            shared.opts.data["sd_checkpoint_hash"] = entry.sd_model.sd_checkpoint_info.sha256
+            # The loader did not run, so re-apply the model flags it would have set.
+            _apply_model_flags(entry.model_flags)
+            prepared = _restore_prepared_state(entry, STAGE_2)
+            processing.need_global_unload = False
+            _log_restored(entry, prepared)
+            return "warm"
 
-    sd_models.forge_model_reload()
-    return "cold"
+        sd_models.forge_model_reload()
+        return "cold"
 
 
 def restore_selection(name: str, modules=None) -> None:
@@ -851,12 +1162,16 @@ def reinstate_pending() -> bool:
             _pending_restore = None
             return False
 
-        _stash_current()
+        # The outgoing model is Stage 2's, and this is the last moment it is
+        # reachable. Both the preload and an ordinary Generate come through here.
+        capture_stage_2_components()
+        _stash_current(stage=STAGE_2)
         model_data.set_sd_model(entry.sd_model)
         model_data.forge_hash = key
         _apply_model_flags(entry.model_flags)
+        prepared = _restore_prepared_state(entry, STAGE_1)
         processing.need_global_unload = False
-        logger.info("Model Chain: restored %s from the RAM cache", entry.checkpoint_name)
+        _log_restored(entry, prepared)
         _pending_restore = None
         return True
 
@@ -883,9 +1198,82 @@ def last_refusal() -> str | None:
 # The thread is joined by every entry point of this module that touches models,
 # so the extension can never race itself: the worst case is that the user clicks
 # Generate immediately and waits exactly as long as they would have anyway.
+#
+# "Preloaded" has to mean generation-ready, not "a thread ran". The worker
+# therefore does three things and checks the third: it swaps Stage 1 back in, it
+# makes room for it, and it moves its weights -- and then measures how much of
+# the model the host actually reports resident, so the next generation can say
+# warm, partially warm or cold and mean it.
+#
+# And a preload that goes wrong must cost one generation, not every generation.
+# Two consecutive failures retire the feature for the session; a single failure
+# leaves the model exactly where the host's own synchronous path expects to find
+# it, which is the path the next Generate then takes.
 
 _preload_thread: threading.Thread | None = None
 _preload_reinstated = False
+
+PRELOAD_FAILURE_LIMIT = 2
+"""Consecutive failures before the preload takes itself out of service.
+
+One failure is a bad moment -- a driver hiccup, a model that had just been
+evicted underneath it. Two in a row is a machine where this does not work, and
+continuing to try on every generation would be a failure loop: the user would
+pay the exception, the log noise and the fallback on every click, forever.
+"""
+
+READY_FRACTION = 0.98
+"""Share of the model that must be on the GPU to call a preload "ready".
+
+Not 1.0. ``model_size()`` and what the host reports loaded are computed
+differently enough that an exactly-full model can read a hair under, and a
+preload that did its whole job should not be reported as partial because of a
+rounding difference.
+"""
+
+_preload_failures = 0
+_preload_disabled_reason: str | None = None
+_preload_option_seen: bool | None = None
+
+
+@dataclass(frozen=True)
+class PreloadResult:
+    """What the last preload achieved, in the terms the next generation needs."""
+
+    state: str
+    """``ready``, ``partial``, ``nothing`` or ``failed``."""
+    key: str = ""
+    """Loading-parameter key the preload warmed, for detecting a stale result."""
+    checkpoint: str = ""
+    moved_bytes: int = 0
+    resident_bytes: int = 0
+    model_bytes: int = 0
+    seconds: float = 0.0
+    detail: str = ""
+
+
+_preload_result: PreloadResult | None = None
+
+
+def preload_enabled() -> bool:
+    """Whether a preload may start, honouring the setting and the failure limit.
+
+    Flipping the setting off and on again clears the failure count. That is the
+    only in-session way back from the circuit breaker, and it is the obvious
+    one: a user who has just changed something and wants to retry reaches for
+    the switch, not for a restart.
+    """
+    global _preload_failures, _preload_disabled_reason, _preload_option_seen
+
+    enabled = bool(option(OPT_PRELOAD, PRELOAD_DEFAULT))
+    if enabled and _preload_option_seen is False:
+        _preload_failures = 0
+        _preload_disabled_reason = None
+    _preload_option_seen = enabled
+
+    if not enabled:
+        return False
+    return _preload_disabled_reason is None
 
 
 def preload_async(width: int = 0, height: int = 0) -> bool:
@@ -898,14 +1286,15 @@ def preload_async(width: int = 0, height: int = 0) -> bool:
 
     Returns True if a preload was started.
     """
-    global _preload_thread
+    global _preload_thread, _preload_result
 
-    if not option(OPT_PRELOAD, PRELOAD_DEFAULT):
+    if not preload_enabled():
         return False
     if _pending_restore is None:
         return False  # nothing was swapped out, so nothing to swap back
 
     join_preload()
+    _preload_result = None
     _preload_thread = threading.Thread(
         target=_preload_worker,
         args=(width, height),
@@ -917,16 +1306,36 @@ def preload_async(width: int = 0, height: int = 0) -> bool:
 
 
 def join_preload(timeout: float | None = None) -> None:
-    """Wait for any in-flight preload to finish."""
+    """Wait for any in-flight preload to finish.
+
+    Waiting is always the right answer, even when it is the user's Generate
+    click doing the waiting: the work being waited on is work that click needs
+    doing anyway, so the wait is never wasted. It is logged when it is long
+    enough to notice, so a slow first generation has a visible explanation.
+    """
     global _preload_thread
 
     thread = _preload_thread
     if thread is None or thread is threading.current_thread():
         return
 
+    started = time.perf_counter()
     thread.join(timeout)
+    waited = time.perf_counter() - started
+
     if not thread.is_alive():
         _preload_thread = None
+        if waited > 0.5:
+            logger.info(
+                "Model Chain: waited %.1fs for the Stage 1 preload to finish before continuing",
+                waited,
+            )
+    elif timeout is not None:
+        logger.warning(
+            "Model Chain: the Stage 1 preload is still running after %.1fs; "
+            "this generation will wait for the model lock rather than race it",
+            waited,
+        )
 
 
 def consume_preload() -> bool:
@@ -934,11 +1343,48 @@ def consume_preload() -> bool:
 
     Lets ``before_process`` tell "nothing to do" apart from "already done", so
     the VRAM budget still gets checked against this generation's real size.
+
+    A preload whose result no longer describes the selected checkpoint does not
+    count. Changing checkpoint, VAE, text encoder or storage dtype in the UI
+    after the last job supersedes the preloaded state, and claiming the swap
+    happened would skip the VRAM budgeting for a model the host is about to load
+    from scratch.
     """
-    global _preload_reinstated
+    global _preload_reinstated, _preload_result
 
     was_reinstated, _preload_reinstated = _preload_reinstated, False
+
+    if was_reinstated and _stale_preload():
+        logger.info(
+            "Model Chain: the Stage 1 preload was superseded by a checkpoint or "
+            "module change; loading the current selection instead"
+        )
+        _preload_result = None
+        return False
+
     return was_reinstated
+
+
+def _stale_preload() -> bool:
+    """Whether the last preload warmed something other than what is now selected."""
+    result = _preload_result
+    if result is None or not result.key:
+        return False
+
+    try:
+        return result.key != _loading_parameters_key()
+    except Exception:
+        return False
+
+
+def preload_result() -> PreloadResult | None:
+    """The last preload's outcome, or None if none has run since the last job."""
+    return _preload_result
+
+
+def preload_disabled_reason() -> str | None:
+    """Why the preload took itself out of service this session, if it did."""
+    return _preload_disabled_reason
 
 
 def _host_torch_context():
@@ -969,7 +1415,7 @@ def _host_torch_context():
 
 
 def _preload_worker(width: int, height: int) -> None:
-    global _preload_reinstated
+    global _preload_reinstated, _preload_result, _preload_failures
 
     started = time.perf_counter()
     try:
@@ -979,35 +1425,138 @@ def _preload_worker(width: int, height: int) -> None:
             # here: either it is cached and gets swapped in, or this returns
             # False and the next generation loads it from disk as usual.
             if not reinstate_pending():
+                _preload_result = PreloadResult(
+                    "nothing", detail="Stage 1 was already the loaded model"
+                )
                 return
 
+            # Set before anything can fail. It means "the swap happened", and
+            # after it has, the next generation must still budget VRAM for
+            # Stage 1 -- especially if the rest of this went wrong.
             _preload_reinstated = True
 
             from modules import shared
 
             name = shared.opts.sd_model_checkpoint
             make_vram_room(name, current_modules(), width, height, stage=STAGE_1)
-            moved = _load_current_to_gpu()
+            moved = _load_current_to_gpu(width, height)
+
+            resident, total = _loaded_residency()
+            ready = total > 0 and resident >= total * READY_FRACTION
+            _preload_result = PreloadResult(
+                state="ready" if ready else "partial",
+                key=_loading_parameters_key(),
+                checkpoint=name,
+                moved_bytes=moved,
+                resident_bytes=resident,
+                model_bytes=total,
+                seconds=time.perf_counter() - started,
+                detail=mc_lora.describe(mc_lora.state_of(model_data_sd_model())),
+            )
+
+            # Whatever is left over after Stage 1 is safely warm belongs to
+            # Stage 2, not to the driver.
+            warm_secondary(width, height)
+    except Exception as exc:
+        _record_preload_failure(exc)
+        return
+
+    _preload_failures = 0
+    _log_preload_result(_preload_result)
+
+
+def model_data_sd_model():
+    """The loaded ``sd_model``, or None if the host cannot be reached."""
+    try:
+        from modules.sd_models import model_data
+
+        return model_data.sd_model
     except Exception:
-        logger.warning("Model Chain: Stage 1 preload failed", exc_info=True)
+        return None
+
+
+def _record_preload_failure(exc: BaseException) -> None:
+    """Leave a failed preload in a state the next generation can simply ignore.
+
+    Three things have to be true afterwards, and none of them involve retrying:
+
+    * the model is somewhere the host's normal synchronous path can find it.
+      It is: either the swap never happened, in which case nothing moved, or it
+      did, in which case Stage 1 is the loaded model with its weights in RAM --
+      exactly the state a generation starts from without any of this.
+    * nothing carries a claim that is no longer true. The pinned encoders are
+      dropped, and the prepared LoRA state is invalidated rather than trusted,
+      because a load that raised part way through is precisely the case where
+      the host's belief about what is applied may have outrun what is.
+    * a machine where this keeps failing stops doing it.
+    """
+    global _preload_failures, _preload_disabled_reason, _preload_result
+
+    logger.warning("Model Chain: Stage 1 preload failed", exc_info=True)
+
+    clear_pinned_encoders()
+    clear_stage_2_components()
+    invalidate_prepared_state("a Stage 1 preload failed part-way through")
+
+    _preload_failures += 1
+    _preload_result = PreloadResult(
+        "failed", detail=str(exc) or type(exc).__name__
+    )
+
+    if _preload_failures >= PRELOAD_FAILURE_LIMIT:
+        _preload_disabled_reason = (
+            f"it failed {_preload_failures} times in a row"
+        )
+        logger.warning(
+            "Model Chain: the Stage 1 preload has failed %d times in a row and is now off "
+            "for the rest of this session. Generations continue normally on the host's own "
+            'load path. Toggle "%s" in Settings off and on to try again.',
+            _preload_failures,
+            OPT_PRELOAD,
+        )
+
+
+def _log_preload_result(result: PreloadResult | None) -> None:
+    if result is None:
+        return
+
+    if result.state == "nothing":
+        logger.debug("Model Chain: nothing to preload; %s", result.detail)
+        return
+
+    if result.state == "ready":
+        logger.info(
+            "Model Chain: preloaded %s into VRAM in %.1fs (%.1f GB moved, %s) — "
+            "the next generation starts sampling immediately",
+            result.checkpoint,
+            result.seconds,
+            result.moved_bytes / _GB,
+            result.detail,
+        )
         return
 
     logger.info(
-        "Model Chain: preloaded %s into VRAM in %.1fs — the next generation starts sampling immediately",
-        name,
-        time.perf_counter() - started,
+        "Model Chain: preloaded %.1f GB of %.1f GB of %s in %.1fs — the next generation "
+        "will move the rest on demand",
+        result.resident_bytes / _GB,
+        result.model_bytes / _GB,
+        result.checkpoint,
+        result.seconds,
     )
-    if not moved:
-        logger.debug("Model Chain: preload moved no weights; they were already resident")
 
 
-def _load_current_to_gpu() -> int:
+def _load_current_to_gpu(width: int = 0, height: int = 0) -> int:
     """Move the loaded checkpoint's weights onto the GPU now.
 
     This is exactly the work the sampler would otherwise trigger on the next
     Generate click, done through the host's own entry point so the model ends
     up in the state normal sampling produces rather than one this extension
     invented. Returns the bytes moved, as best as free VRAM can report it.
+
+    The reserve is handed to the host rather than assumed: a load that filled
+    the card would be undone moments later by the host partially unloading to
+    make room for its own activations, which is the thrash this module exists
+    to avoid.
     """
     from backend import memory_management
     from modules.sd_models import model_data
@@ -1017,7 +1566,10 @@ def _load_current_to_gpu() -> int:
         return 0
 
     before = free_vram_bytes()
-    memory_management.load_models_gpu(patchers)
+    try:
+        memory_management.load_models_gpu(patchers, memory_required=vram_headroom_bytes(width, height))
+    except TypeError:
+        memory_management.load_models_gpu(patchers)
     return max(before - free_vram_bytes(), 0)
 
 
@@ -1110,6 +1662,46 @@ def _entry_vram_bytes(entry) -> int:
         return int(entry.model.model_size())
     except Exception:
         return 0
+
+
+def _all_resident_bytes() -> int:
+    """VRAM held by every model the host currently has loaded."""
+    try:
+        from backend import memory_management
+
+        registry = list(getattr(memory_management, "current_loaded_models", []))
+    except Exception:
+        return 0
+
+    return sum(_entry_vram_bytes(entry) for entry in registry)
+
+
+def _patcher_bytes(patchers: list) -> int:
+    """Total size of those patchers, resident or not."""
+    total = 0
+    for patcher in patchers:
+        try:
+            total += int(patcher.model_size())
+        except Exception:
+            continue
+    return total
+
+
+def _residency_of(patchers: list) -> tuple[int, int]:
+    """How much of those patchers is on the GPU, and how much there is in total."""
+    return _resident_bytes(patchers), _patcher_bytes(patchers)
+
+
+def _loaded_residency() -> tuple[int, int]:
+    """The same, for whatever checkpoint is loaded right now.
+
+    This is the measurement that lets "preloaded" mean generation-ready. The
+    host reports partially loaded models honestly -- ``model_loaded_memory()``
+    is the share actually on the card -- so comparing it against the patchers'
+    full size distinguishes a model that is ready to sample from one that will
+    still be moving weights when the first step runs.
+    """
+    return _residency_of(model_patchers(model_data_sd_model()))
 
 
 def _loaded_target_patchers(target_name: str) -> list:
@@ -1295,6 +1887,241 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
     return freed
 
 
+# --------------------------------------------------------------------------- #
+# Speed-first warming of what is left (section 4.2)
+# --------------------------------------------------------------------------- #
+#
+# Stage 1 comes first and always: it is what the next Generate click needs, and
+# nothing else may be warmed at its expense. But a 24 GB card running a pair of
+# quantised models is routinely left with several GB doing nothing once Stage 1
+# is back, and that spare capacity has an obvious use -- Stage 2's components,
+# which the *following* generation will want and which are otherwise moved back
+# across PCIe from scratch.
+#
+# The rule that makes this safe rather than greedy is that speculative warming
+# never touches the reserve. Free VRAM is not the budget; free VRAM minus the
+# reserve is, and the reserve already accounts for activations, the user's
+# manual floor and anything Forge set aside for itself. Under pressure the warm
+# components are simply the first thing make_vram_room() evicts -- they are not
+# in any keep list -- so the next large pass reclaims them without ceremony.
+
+_stage_2_patchers: list = []
+"""Stage 2's patchers, captured while it is still the loaded model."""
+
+WARM_MARGIN_BYTES = int(0.5 * _GB)
+"""Slack a component must fit inside *on top of* the reserve to be warmed.
+
+Warming right up to the boundary would make the reserve a number that is
+technically respected and practically gone, and the next thing to allocate would
+push the driver into system memory. Speculative work should only happen when
+there is room to be wrong about it.
+"""
+
+
+def capture_stage_2_components() -> int:
+    """Remember Stage 2's patchers before the swap back to Stage 1 hides them.
+
+    Called on the generation thread at the end of Stage 2, for the same reason
+    the encoders are captured before the switch into it: once the pointer moves,
+    ``model_data.sd_model`` describes the other stage and these are unreachable.
+    """
+    global _stage_2_patchers
+
+    _stage_2_patchers = []
+    if not option(OPT_WARM_STAGE_2, True):
+        return 0
+
+    try:
+        _stage_2_patchers = model_patchers(model_data_sd_model())
+    except Exception:
+        logger.debug("Model Chain: could not capture Stage 2's components", exc_info=True)
+        _stage_2_patchers = []
+
+    return len(_stage_2_patchers)
+
+
+def clear_stage_2_components() -> None:
+    """Stop trying to keep Stage 2 warm."""
+    global _stage_2_patchers
+
+    _stage_2_patchers = []
+
+
+def warm_secondary(width: int = 0, height: int = 0) -> int:
+    """Spend VRAM left over after Stage 1 on keeping Stage 2 warm.
+
+    Returns the bytes moved, which is 0 whenever there was nothing to spare --
+    the common case on a card that is tight for the pair, and not a failure.
+
+    Components are dropped largest-first until the rest fit, so a card with a
+    few GB spare keeps Stage 2's text encoder and VAE (small, and a
+    disproportionate share of the switch's cost) rather than nothing at all
+    because its UNet did not fit.
+    """
+    patchers = [p for p in _stage_2_patchers if p]
+    if not patchers:
+        return 0
+
+    if not option(OPT_WARM_STAGE_2, True):
+        return 0
+
+    reserve = vram_headroom_bytes(width, height)
+    free = free_vram_bytes()
+    if free <= 0:
+        return 0
+
+    spare = free - reserve - WARM_MARGIN_BYTES
+    if spare <= 0:
+        logger.info(
+            "Model Chain: no VRAM to spare for Stage 2 after Stage 1 (%.1f GB free, "
+            "%.1f GB reserved) — it stays in system RAM",
+            free / _GB,
+            reserve / _GB,
+        )
+        return 0
+
+    chosen = list(patchers)
+    while chosen and _pending_bytes(chosen) > spare:
+        largest = max(chosen, key=lambda p: _patcher_bytes([p]))
+        chosen = [p for p in chosen if p is not largest]
+
+    if not chosen:
+        logger.info(
+            "Model Chain: Stage 2 does not fit in the %.1f GB spare beyond the reserve — "
+            "it stays in system RAM",
+            spare / _GB,
+        )
+        return 0
+
+    before = free
+    try:
+        from backend import memory_management
+
+        try:
+            memory_management.load_models_gpu(chosen, memory_required=reserve)
+        except TypeError:
+            # A host without memory_required still honours its own reserve; ours
+            # is then advisory rather than enforced, which is why the components
+            # were sized to fit before the call rather than during it.
+            memory_management.load_models_gpu(chosen)
+    except Exception:
+        logger.debug("Model Chain: could not warm Stage 2's components", exc_info=True)
+        return 0
+
+    moved = max(before - free_vram_bytes(), 0)
+    logger.info(
+        "Model Chain: kept %d of Stage 2's %d components warm in VRAM (%.1f GB moved, "
+        "%.1f GB free, %.1f GB reserved) — a Stage 2 retry starts sooner",
+        len(chosen),
+        len(patchers),
+        moved / _GB,
+        free_vram_bytes() / _GB,
+        reserve / _GB,
+    )
+    return moved
+
+
+def _pending_bytes(patchers: list) -> int:
+    """What warming those patchers would still have to move."""
+    resident, total = _residency_of(patchers)
+    return max(total - resident, 0)
+
+
+def warm_for_next_pass(width: int = 0, height: int = 0) -> int:
+    """Put Stage 1 in VRAM now, then spend anything left over on Stage 2.
+
+    The order is the policy. Stage 1 is what the pass about to run needs, so it
+    loads first and against the full budget; Stage 2 sees only what is spare
+    afterwards. Doing it the other way round -- warming Stage 2 while Stage 1 is
+    still in system RAM -- would read the card as empty and hand Stage 2 room
+    that Stage 1 is about to need.
+
+    Called on the generation thread immediately after room has been made, which
+    is the same work the sampler would trigger a moment later and the only point
+    at which "how much is genuinely spare" has an answer. That it does not need
+    the background preload to be enabled is deliberate: the preload moves this
+    earlier, it is not what makes it correct.
+    """
+    moved = _load_current_to_gpu(width, height)
+    return moved + warm_secondary(width, height)
+
+
+# --------------------------------------------------------------------------- #
+# Readiness reporting
+# --------------------------------------------------------------------------- #
+
+WARM = "warm"
+PARTIAL = "partially warm"
+COLD = "cold"
+
+
+def stage_1_readiness() -> tuple[str, str]:
+    """How ready Stage 1 is for the generation about to start.
+
+    Returns the state -- ``warm``, ``partially warm`` or ``cold`` -- and a line
+    saying so in a form worth putting in the console. Deliberately measured
+    against the host's live view rather than reported from what the preload
+    believed it achieved: the preload's own record is used only to explain the
+    measurement, never to stand in for it.
+    """
+    result = _preload_result
+    because = _readiness_explanation(result)
+
+    model = model_data_sd_model()
+    if not _is_real_model(model):
+        return COLD, f"Model Chain: Stage 1 will load from disk{because}."
+
+    try:
+        selection, loaded = _loading_parameters_key(), _loaded_model_key()
+    except Exception:
+        selection = loaded = ""
+
+    if selection and loaded and selection != loaded:
+        return COLD, (
+            f"Model Chain: Stage 1 is a cold load — the selected checkpoint is not "
+            f"the loaded one{because}."
+        )
+
+    resident, total = _loaded_residency()
+    if total <= 0:
+        return COLD, f"Model Chain: Stage 1 residency is unknown{because}."
+
+    if resident >= total * READY_FRACTION:
+        return WARM, (
+            f"Model Chain: Stage 1 is warm — {total / _GB:.1f} GB already in VRAM"
+            f"{because}."
+        )
+
+    if resident > 0:
+        return PARTIAL, (
+            f"Model Chain: Stage 1 is partially warm — {resident / _GB:.1f} GB of "
+            f"{total / _GB:.1f} GB in VRAM, the rest moves on demand{because}."
+        )
+
+    return COLD, (
+        f"Model Chain: Stage 1 is cold — {total / _GB:.1f} GB still to move from "
+        f"system RAM{because}."
+    )
+
+
+def _readiness_explanation(result: PreloadResult | None) -> str:
+    """The ", because ..." half of the readiness line."""
+    retired = preload_disabled_reason()
+    if retired is not None:
+        return f" (the preload is off for this session: {retired})"
+
+    if result is None:
+        return "" if option(OPT_PRELOAD, PRELOAD_DEFAULT) else " (preload off)"
+
+    if result.state == "failed":
+        return f" (the preload failed: {result.detail})"
+    if result.state == "nothing":
+        return ""
+    if _stale_preload():
+        return " (the preload was superseded by a checkpoint or module change)"
+    return f" (preloaded in {result.seconds:.1f}s)"
+
+
 def clear_references() -> None:
     """Drop reference latents held by the loaded model.
 
@@ -1331,13 +2158,15 @@ def cached_names() -> list[str]:
 
 def release_all() -> None:
     """Drop every cached model. Next use of any of them reloads from disk."""
-    global _pending_restore, _preload_reinstated
+    global _pending_restore, _preload_reinstated, _preload_result
 
     join_preload()
 
     _pending_restore = None
     _preload_reinstated = False
+    _preload_result = None
     clear_pinned_encoders()
+    clear_stage_2_components()
     _cache.clear()
 
     try:
