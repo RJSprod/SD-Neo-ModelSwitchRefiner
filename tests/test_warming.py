@@ -65,7 +65,13 @@ def warming(host, monkeypatch):
 
 
 def capture(warming, host):
-    """Capture Stage 2's patchers the way the end of a refine does."""
+    """Capture Stage 2's patchers the way the swap back to Stage 1 does.
+
+    Opts the preload in, because warming only ever runs on its thread -- see
+    TestWarmingIsConfinedToThePreload for why, and for the test that holds that
+    boundary in place.
+    """
+    host.shared.opts.model_chain_preload_stage1 = True
     host.sd_models.model_data.sd_model = warming.stage_2
     count = mc_memory.capture_stage_2_components()
     host.sd_models.model_data.sd_model = warming.stage_1
@@ -383,21 +389,6 @@ class TestStage1KeepsPriority:
         assert "B-unet" not in spared
         assert spared == {"A-unet", "A-clip", "A-vae"}
 
-    def test_stage_1_is_loaded_before_anything_is_called_spare(self, warming, host, monkeypatch):
-        """Reading the card while Stage 1 is still in system RAM would report
-        room that Stage 1 is about to need."""
-        order = []
-        monkeypatch.setattr(
-            mc_memory, "_load_current_to_gpu", lambda w=0, h=0: order.append("stage 1") or 0
-        )
-        monkeypatch.setattr(
-            mc_memory, "warm_secondary", lambda w=0, h=0: order.append("stage 2") or 0
-        )
-
-        mc_memory.warm_for_next_pass(1024, 1024)
-
-        assert order == ["stage 1", "stage 2"]
-
     def test_the_load_tells_the_host_what_to_keep_free(self, warming, host, monkeypatch):
         """Filling the card would be undone moments later by a partial unload."""
         calls = []
@@ -419,13 +410,40 @@ class TestStage1KeepsPriority:
         assert calls, "losing the hint must not lose the load"
 
 
-class TestWarmingWithoutThePreload:
-    """The preload ships off, so warming must not depend on it.
+class TestWarmingIsConfinedToThePreload:
+    """Regression, from a real crash: warming may only run on the preload thread.
 
-    The preload moves this work earlier; it is not what makes it correct. Both
-    paths reach it through the same swap-back, which is where Stage 2's
-    components are captured.
+    Loading weights *in* rewrites and re-patches them. Done from a script hook
+    rather than from inside the sampler, that left the model in a state the very
+    next sampling step rejected outright:
+
+        RuntimeError: Inference tensors do not track version counter
+
+    -- the same failure the preload's own notes describe, reached on the path
+    that had opted *out* of the preload. The preload has a deliberate answer to
+    it, an opt-in switch and a circuit breaker; a hook on the generation thread
+    has none of the three. So the boundary is: this module frees VRAM from
+    anywhere and fills it from one place only.
     """
+
+    def test_before_process_never_initiates_a_gpu_load(self, warming, chain, host, monkeypatch):
+        """The crash, as a test. Freeing is fine; loading is not."""
+        from test_orchestration import make_p
+
+        monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: True)
+        monkeypatch.setattr(mc_memory, "make_vram_room", lambda *a, **k: 0)
+
+        chain.script.before_process(make_p(host), False, "None")
+
+        assert warming.mm.loaded_to_gpu == [], "before_process must not move weights in"
+
+    def test_nothing_is_captured_when_the_preload_is_off(self, warming, host):
+        """Otherwise gigabytes stay alive for a warm-up that never runs."""
+        host.shared.opts.model_chain_preload_stage1 = False
+        host.sd_models.model_data.sd_model = warming.stage_2
+
+        assert mc_memory.capture_stage_2_components() == 0
+        assert mc_memory._stage_2_patchers == []
 
     @pytest.fixture
     def swapped_back(self, warming, host, monkeypatch):
@@ -451,17 +469,20 @@ class TestWarmingWithoutThePreload:
         mc_memory._cache.clear()
 
     def test_the_swap_back_captures_stage_2(self, swapped_back, host):
+        host.shared.opts.model_chain_preload_stage1 = True
+
         assert mc_memory.reinstate_pending() is True
         assert {p.label for p in mc_memory._stage_2_patchers} == {"B-unet", "B-clip", "B-vae"}
 
-    def test_it_captures_them_with_the_preload_off(self, swapped_back, host):
+    def test_the_swap_back_captures_nothing_with_the_preload_off(self, swapped_back, host):
         host.shared.opts.model_chain_preload_stage1 = False
 
         mc_memory.reinstate_pending()
 
-        assert mc_memory._stage_2_patchers
+        assert mc_memory._stage_2_patchers == []
 
     def test_the_setting_still_governs_it(self, swapped_back, host):
+        host.shared.opts.model_chain_preload_stage1 = True
         host.shared.opts.model_chain_warm_stage_2 = False
 
         mc_memory.reinstate_pending()

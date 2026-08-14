@@ -265,8 +265,9 @@ Under **Settings → Model Chain**:
   see [Preloading Stage 1](#preloading-stage-1-experimental-off-by-default).
 - **Keep Stage 1's text encoder and VAE in VRAM during Stage 2** (default on) —
   see [Pinning Stage 1's encoders](#pinning-stage-1s-encoders).
-- **Use leftover VRAM to keep Stage 2 warm between generations** (default on) —
-  see [Spending what is left](#spending-what-is-left).
+- **Use leftover VRAM to keep Stage 2 warm between generations** (default on,
+  but only takes effect when the preload above is enabled) — see
+  [Spending what is left](#spending-what-is-left).
 - **Minimum VRAM reserve (GB)** (default 0 = automatic) — a floor under the
   automatically sized reserve. Model Chain never warms anything into it, and
   never undercuts VRAM Forge itself has set aside. See
@@ -566,17 +567,26 @@ that capacity has an obvious use: Stage 2's components, which the *following*
 generation wants and would otherwise drag back across PCIe from scratch.
 
 So once Stage 1 is warm, anything still spare beyond the reserve is spent on
-Stage 2. This does not need the preload: both the preload and an ordinary
-Generate reach it through the same swap back to Stage 1, which is where Stage 2's
-components are captured and after which "how much is genuinely spare" first has
-an answer. The preload moves the work earlier, it is not what makes it correct.
+Stage 2:
 
 ```
 Model Chain: kept 2 of Stage 2's 3 components warm in VRAM (3.0 GB moved,
              1.4 GB free, 1.0 GB reserved) — a Stage 2 retry starts sooner
 ```
 
-Three rules keep this from becoming the problem it is trying to solve:
+**This runs on the preload's thread and nowhere else, so it needs the preload
+enabled.** That boundary was learned the hard way and is worth stating plainly.
+Model Chain frees VRAM from anywhere — `free_memory` moves weights *out*, which
+is what the host does on every eviction anyway — but it fills VRAM from exactly
+one place. Loading weights *in* rewrites and re-patches them, and doing that
+from a script hook rather than from inside the sampler left the model in a state
+the very next sampling step rejected outright with `RuntimeError: Inference
+tensors do not track version counter`. The preload has a deliberate answer to
+that, an opt-in switch and a circuit breaker; a hook on the generation thread
+has none of the three. With the preload off, nothing is captured and nothing is
+warmed.
+
+Four rules keep the rest from becoming the problem it is trying to solve:
 
 - **Free VRAM is not the budget.** Free VRAM *minus the reserve* is, and there
   is a further half-gigabyte of slack on top — speculative work should only
@@ -589,6 +599,9 @@ Three rules keep this from becoming the problem it is trying to solve:
 - **Warm components are the first thing released under pressure.** They are in
   no keep-list, so the next pass that needs room takes their VRAM back through
   the ordinary eviction path without anything special happening.
+- **Nothing is held when nothing can use it.** The captured components are
+  references to real weights, so with the preload off they are not captured at
+  all rather than keeping gigabytes alive for a warm-up that will never run.
 
 One limitation worth stating: whether keeping a given component warm is
 genuinely faster than releasing and reloading it is decided here by whether it

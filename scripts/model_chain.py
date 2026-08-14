@@ -122,7 +122,9 @@ shared.options_templates.update(
             ).info(
                 "after Stage 1 is back and the reserve below is honoured, anything still "
                 "spare is spent on Stage 2's components so the next refine starts sooner. "
-                "Never at Stage 1's expense, and the first thing released under pressure"
+                "Never at Stage 1's expense, and the first thing released under pressure. "
+                "Requires the preload above: filling VRAM is only safe on that thread, so "
+                "with the preload off this does nothing"
             ),
             mc_memory.OPT_VRAM_RESERVE: shared.OptionInfo(
                 0.0,
@@ -1001,10 +1003,14 @@ class ScriptModelChain(scripts.Script):
         same reason. When both models genuinely fit, make_vram_room() checks
         first and does nothing.
 
-        Loading Stage 1 the rest of the way is then the same work the sampler
-        would trigger moments later, done at the one point where "how much VRAM
-        is genuinely spare" has an answer -- which is what lets whatever is left
-        over be spent on keeping Stage 2 warm.
+        Freeing is all that happens here, and that boundary is deliberate.
+        ``free_memory`` moves weights *out* to their offload device; loading
+        them *in* rewrites and re-patches them, and doing that from here -- a
+        hook, not the sampler -- proved able to leave the model in a torch
+        state the following sampling step rejects outright with
+        ``RuntimeError: Inference tensors do not track version counter``.
+        The host's own lazy load, driven from inside the sampler, is in the
+        right context by construction. Nothing is gained by beating it to it.
         """
         try:
             width, height = mc_arch.stage1_size(p)
@@ -1015,7 +1021,6 @@ class ScriptModelChain(scripts.Script):
                 height,
                 stage="Stage 1",
             )
-            mc_memory.warm_for_next_pass(width, height)
         except Exception:
             errors.report("Model Chain: failed to free VRAM for Stage 1", exc_info=True)
 
