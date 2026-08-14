@@ -208,6 +208,20 @@ _GUESS_CLASS_TO_KEY = {
 }
 
 
+_ENGINE_CLASS_TO_KEY = {
+    "Flux": "flux",
+    "Krea2": "krea2",
+    "Anima": "anima",
+    "QwenImage": "qwen",
+    "Wan": "wan",
+}
+"""Forge Neo diffusion-engine class -> our table.
+
+A last resort, for a loaded model that does not carry a recognisable
+``model_config``. ``Flux2`` serves both Klein sizes and is resolved separately.
+"""
+
+
 def by_key(key: str) -> Architecture:
     """Look an architecture up by its stable key, falling back to UNKNOWN."""
     return _BY_KEY.get(key, UNKNOWN)
@@ -456,7 +470,29 @@ def _state_dict_stub(header: dict) -> dict[str, _TensorStub]:
         if shape is None:
             continue
         stub[key] = _TensorStub(shape, info.get("dtype"))
-    return stub
+    return _prefix_bare_keys(stub)
+
+
+_UNET_PREFIXES = ("model.diffusion_model.", "net.")
+
+
+def _prefix_bare_keys(stub: dict) -> dict:
+    """Mirror ``forge_loader``'s own key preparation before it guesses.
+
+    ``preprocess_state_dict`` prefixes a bare state dict with
+    ``model.diffusion_model.``, and only then does the host run the detector.
+    That step is not cosmetic: ``unet_prefix_from_state_dict`` falls back to
+    ``model.`` when it recognises nothing, so a checkpoint whose UNet keys are
+    stored bare -- which plenty of single-file Flux and Klein builds are --
+    matches none of the keys the detector looks for and comes back as an
+    unknown architecture.
+
+    Detecting differently from the loader is the bug: the point of running the
+    host's own detector is to reach the host's own answer.
+    """
+    if any(key.startswith(_UNET_PREFIXES) for key in stub):
+        return stub
+    return {f"model.diffusion_model.{key}": value for key, value in stub.items()}
 
 
 # --------------------------------------------------------------------------- #
@@ -537,8 +573,56 @@ def detect_from_checkpoint_name(name: str) -> Architecture:
     return detect_from_file(info.filename)
 
 
+def detect_loaded_engine() -> Architecture:
+    """The architecture of the loaded model, as the *model itself* reports it.
+
+    The definitive answer, and the one to prefer wherever it can be asked.
+    ``detect_from_file`` has to guess from a checkpoint header before anything
+    is loaded, and that guess can lose: it cannot open GGUF or pickle
+    checkpoints at all, and a quantised or repacked safetensors build can rename
+    the very keys the detector looks for -- which is how a genuine Flux.2 Klein
+    comes back as "unknown".
+
+    Once the model is loaded there is nothing left to guess. Forge hands the
+    engine the config class its own detector settled on and the engine keeps it,
+    so reading it back is not a second opinion -- it is the loader's own answer.
+    """
+    try:
+        from modules import shared
+
+        model = shared.sd_model
+        if model is None:
+            return UNKNOWN
+
+        key = _GUESS_CLASS_TO_KEY.get(type(getattr(model, "model_config", None)).__name__)
+        if key is not None:
+            return _BY_KEY.get(key, UNKNOWN)
+
+        return _from_engine_class(model)
+    except Exception:
+        return UNKNOWN
+
+
+def _from_engine_class(model) -> Architecture:
+    """Fall back to the engine class when the model config is unrecognisable."""
+    name = type(model).__name__
+
+    if name == "Flux2":
+        # One engine, two Klein sizes. They are identical in everything this
+        # detection decides, so the hidden size only picks the right label.
+        config = getattr(model, "model_config", None)
+        hidden = (getattr(config, "unet_config", None) or {}).get("hidden_size")
+        return by_key("flux2_4b" if hidden == 3072 else "flux2_9b")
+
+    return by_key(_ENGINE_CLASS_TO_KEY.get(name, ""))
+
+
 def detect_loaded() -> Architecture:
     """Detect the architecture of the currently loaded checkpoint."""
+    engine = detect_loaded_engine()
+    if engine is not UNKNOWN:
+        return engine
+
     try:
         from modules import shared
 

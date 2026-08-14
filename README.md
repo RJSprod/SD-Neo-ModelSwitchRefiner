@@ -274,13 +274,25 @@ a universal one:
 | everything else | no reference path; references are ignored with a notice |
 
 The mode stays selectable whatever you pick, and the panel says what will
-happen. For Flux.1 and Qwen-Image the checkpoint's name is not enough — only
-the Kontext and Edit variants have the path at all — so the real check happens
-once the model is loaded, and a checkpoint that turns out not to have it has its
-references dropped with a notice rather than silently mis-fed. After encoding,
-the number the model actually accepted is compared against the number supplied;
-if they differ the whole set is dropped, because a partial set no longer carries
-the order you arranged.
+happen. Nothing is decided on the checkpoint's name, and nothing is *refused* on
+a guess made before the model loads:
+
+- The panel's verdict comes from reading the checkpoint header, which is the
+  best that can be done before anything is loaded. It is a prediction.
+- Once Stage 2's model is in memory it is asked directly — Forge hands each
+  engine the config class its own detector settled on, so this is the loader's
+  own answer rather than a second opinion. A checkpoint the header could not
+  identify (a quantised or repacked build, or a GGUF, which cannot be read at
+  all) is settled here instead of being turned away.
+- For Flux.1 and Qwen-Image even the architecture is not enough — only the
+  Kontext and Edit variants have the path — so the loaded model's own flag is
+  checked too.
+- After encoding, the number the model actually accepted is compared against
+  the number supplied. If they differ the whole set is dropped, because a
+  partial set no longer carries the order you arranged.
+
+A checkpoint that genuinely has no reference path has its references dropped
+with a notice, never silently mis-fed.
 
 **Interaction with edit mode.** Supplying references means asking for reference
 conditioning, so choosing Pass Through or Decoupled implies **Enable** for the

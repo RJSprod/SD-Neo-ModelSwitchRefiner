@@ -163,6 +163,56 @@ class TestHeaderReading:
         assert first is second
 
 
+class TestStateDictPreparation:
+    """The detector must be fed what the loader feeds it, or it answers differently.
+
+    ``forge_loader`` prefixes a bare state dict with ``model.diffusion_model.``
+    before guessing, and ``unet_prefix_from_state_dict`` falls back to ``model.``
+    when it recognises nothing -- so a checkpoint packed with bare UNet keys
+    matches none of the keys the detector looks for and reads back as an unknown
+    architecture, even though the host loads it perfectly well.
+    """
+
+    def stub(self, *keys):
+        return {key: mc_arch._TensorStub([16, 16], "F16") for key in keys}
+
+    def test_bare_keys_are_prefixed_the_way_the_loader_prefixes_them(self):
+        prepared = mc_arch._prefix_bare_keys(self.stub("double_blocks.0.img_attn.norm.key_norm.scale"))
+
+        assert list(prepared) == ["model.diffusion_model.double_blocks.0.img_attn.norm.key_norm.scale"]
+
+    def test_an_already_prefixed_dict_is_left_alone(self):
+        keys = ("model.diffusion_model.img_in.weight", "some.other.key")
+        prepared = mc_arch._prefix_bare_keys(self.stub(*keys))
+
+        assert set(prepared) == set(keys)
+
+    def test_the_cosmos_prefix_counts_as_prefixed_too(self):
+        prepared = mc_arch._prefix_bare_keys(self.stub("net.blocks.0.weight"))
+
+        assert list(prepared) == ["net.blocks.0.weight"]
+
+    def test_values_survive_the_prefixing(self):
+        original = self.stub("img_in.weight")
+        prepared = mc_arch._prefix_bare_keys(original)
+
+        assert prepared["model.diffusion_model.img_in.weight"] is original["img_in.weight"]
+
+    def test_a_header_of_bare_keys_reaches_the_detector_prefixed(self, tmp_path, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(mc_arch, "_detect_from_stub", lambda stub: seen.update(stub) or mc_arch.UNKNOWN)
+
+        path = write_safetensors(
+            tmp_path / "bare.safetensors", {"double_blocks.0.img_attn.proj.weight": ("F16", (16, 16))}
+        )
+        mc_arch.detect_from_file(str(path))
+
+        assert list(seen) == ["model.diffusion_model.double_blocks.0.img_attn.proj.weight"]
+
+    def test_an_empty_header_does_not_invent_keys(self):
+        assert mc_arch._prefix_bare_keys({}) == {}
+
+
 class TestTensorStub:
     def test_exposes_the_attributes_the_detector_reads(self):
         stub = mc_arch._TensorStub([320, 4, 3, 3], "F16")
