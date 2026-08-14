@@ -326,6 +326,10 @@ class ScriptModelChain(scripts.Script):
         # Captured there because that is the only moment it describes Stage 1;
         # by the time a wrong size is noticed, Model B is loaded.
         self._stage1_geometry = ""
+        # The two measurements either side of the noise build, which is where a
+        # requested size stops being a number and becomes a tensor.
+        self._stage1_requested = ()
+        self._stage1_latent = ""
 
     def title(self):
         return "Model Chain"
@@ -943,6 +947,8 @@ class ScriptModelChain(scripts.Script):
         # After the reinstate above, so this describes the model Stage 1 is
         # about to sample with rather than whatever Stage 2 left loaded.
         self._stage1_geometry = mc_memory.describe_latent_geometry()
+        self._stage1_requested = ()
+        self._stage1_latent = ""
 
         if self._in_stage_2 or not enabled:
             return
@@ -1056,6 +1062,15 @@ class ScriptModelChain(scripts.Script):
         if not self._armed:
             return
 
+        # The requested size as the host settled it. process() runs after
+        # process_images_inner has applied any model-driven adjustment to the
+        # dimensions, and before the noise is built from them -- so this is the
+        # last point at which the size is still just a number.
+        self._stage1_requested = (
+            int(getattr(p, "width", 0) or 0),
+            int(getattr(p, "height", 0) or 0),
+        )
+
         # Start the activation measurement here rather than in before_process:
         # this is the first point that is reached only for a chained generation,
         # and resetting the CUDA peak counters is the host's own instrumentation
@@ -1108,6 +1123,25 @@ class ScriptModelChain(scripts.Script):
         self._save_final_images = p.save_samples()
         p.do_not_save_samples = True
         p.do_not_save_grid = True
+
+    def process_before_every_sampling(self, p, *args, **kwargs):
+        """Record the latent Stage 1 is about to sample from.
+
+        The one moment the requested size has stopped being a number and become
+        a tensor. p.width/p.height say what was asked for and the finished image
+        says what arrived; when those two disagree this is the measurement in
+        between, and it says which side of the noise build lost the size.
+
+        Stage 2 runs with scripts unset, so this only ever describes Stage 1.
+        """
+        if not self._armed or self._in_stage_2:
+            return
+        try:
+            shape = getattr(kwargs.get("noise"), "shape", None)
+            if shape:
+                self._stage1_latent = "x".join(str(int(dim)) for dim in shape)
+        except Exception:
+            pass
 
     # -- Stage 2 ----------------------------------------------------------- #
 
@@ -1221,15 +1255,21 @@ class ScriptModelChain(scripts.Script):
             # makes the extension look like the culprit. The geometry state is
             # carried along because it is what decided the size, and it is no
             # longer inspectable by the time anyone reads this.
+            settled = (
+                "%dx%d" % self._stage1_requested if self._stage1_requested else "not captured"
+            )
             logger.warning(
                 "Model Chain: Stage 1 produced %dx%d where %dx%d was requested — Stage 2 "
                 "refines the image it was given, so the final output will be %dx%d. "
+                "Sizes along the way: settled at %s, sampled from a %s latent. "
                 "Stage 1's model state was: %s",
                 stage1_width,
                 stage1_height,
                 *predicted,
                 stage1_width,
                 stage1_height,
+                settled,
+                self._stage1_latent or "not captured",
                 self._stage1_geometry or "not captured",
             )
             processed.comments += (
