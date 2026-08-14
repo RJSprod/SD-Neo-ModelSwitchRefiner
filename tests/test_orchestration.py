@@ -12,11 +12,13 @@ import pytest
 import mc_arch
 import mc_infotext
 import mc_memory
+import mc_references
 
 UI_ORDER = (
     "enabled", "target", "modules", "prompt_mode", "prompt", "negative", "styles",
     "seed_mode", "seed_offset", "fixed_seed", "cfg", "steps", "sampler", "scheduler",
-    "denoise", "size_multiplier", "edit_mode",
+    "denoise", "size_multiplier", "edit_mode", "reference_mode", "reference_images",
+    "reference_max_dim",
 )
 
 DEFAULTS = dict(
@@ -37,6 +39,9 @@ DEFAULTS = dict(
     denoise=0.35,
     size_multiplier=1.0,
     edit_mode=mc_arch.EDIT_AUTO,
+    reference_mode=mc_references.DISABLED,
+    reference_images=None,
+    reference_max_dim=mc_references.DEFAULT_MAX_DIM,
 )
 
 
@@ -1265,6 +1270,7 @@ class TestUiContract:
         "enable", "target", "modules", "prompt_mode", "prompt", "negative",
         "styles", "seed_mode", "seed_offset", "fixed_seed", "cfg", "steps",
         "sampler", "scheduler", "denoise", "size_multiplier", "edit_mode",
+        "reference_mode", "reference_images", "reference_max_dim",
     )
 
     def test_returned_controls_match_the_documented_order(self, chain):
@@ -1279,13 +1285,22 @@ class TestUiContract:
         import mc_presets
 
         chain.script.ui(is_img2img=False)
-        assert set(mc_presets.FIELDS) == set(UI_ORDER)
+        saveable = tuple(n for n in UI_ORDER if n not in mc_presets.EXCLUDED_FIELDS)
+        assert set(mc_presets.FIELDS) == set(saveable)
 
     def test_preset_field_order_matches_the_ui(self, chain):
         """Preset values map onto controls positionally, so order matters."""
         import mc_presets
 
-        assert tuple(mc_presets.FIELDS) == UI_ORDER
+        saveable = tuple(n for n in UI_ORDER if n not in mc_presets.EXCLUDED_FIELDS)
+        assert tuple(mc_presets.FIELDS) == saveable
+
+    def test_the_reference_gallery_is_the_only_control_a_preset_skips(self, chain):
+        """Images are not settings; every other control has to be saved."""
+        import mc_presets
+
+        assert mc_presets.EXCLUDED_FIELDS == ("reference_images",)
+        assert set(mc_presets.EXCLUDED_FIELDS) <= set(UI_ORDER)
 
     def test_every_control_is_registered_for_pasting(self, chain):
         chain.script.ui(is_img2img=False)

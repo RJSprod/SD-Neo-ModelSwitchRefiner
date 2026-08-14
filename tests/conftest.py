@@ -49,6 +49,9 @@ class _Component:
     def click(self, **kwargs):
         self._callbacks.append(("click", kwargs))
 
+    def select(self, **kwargs):
+        self._callbacks.append(("select", kwargs))
+
     def __enter__(self):
         return self
 
@@ -65,13 +68,15 @@ def _make_gradio() -> types.ModuleType:
 
     for name in (
         "Dropdown", "Radio", "Textbox", "Slider", "Number", "Checkbox",
-        "Markdown", "Row", "Group", "Accordion", "Button", "HTML", "State",
+        "Markdown", "Row", "Column", "Group", "Accordion", "Button", "HTML",
+        "State", "Gallery", "Image",
     ):
         setattr(gradio, name, type(name, (_Component,), {}))
 
     gradio.update = lambda **kwargs: _Update(kwargs)
     gradio.skip = lambda: _Update({"__skip__": True})
     gradio.components = types.SimpleNamespace(Component=_Component)
+    gradio.SelectData = type("SelectData", (), {"index": -1})
     return gradio
 
 
@@ -152,6 +157,7 @@ class FakeOptions:
         self.krea2_do_reference = False
         self.anima_do_reference = False
         self.klein_no_reference = False
+        self.img2img_background_color = "#ffffff"
         self.data = {}
 
     def set(self, key, value):
@@ -244,6 +250,10 @@ def _install_modules() -> None:
     images.save_image = lambda image, path, basename, seed=None, prompt=None, extension="png", info=None, p=None, **kw: (
         images.saved.append({"image": image, "path": path, "seed": seed, "info": info}), (path, None)
     )[1]
+    # Reference preprocessing goes through the host's own resize and flatten,
+    # so both have to exist for that path to be exercised at all.
+    images.resize_image = lambda mode, image, width, height, **kw: image.resize((width, height))
+    images.flatten = lambda image, bgcolor: image.convert("RGB")
 
     shared = types.ModuleType("modules.shared")
     shared.opts = FakeOptions()
@@ -252,6 +262,7 @@ def _install_modules() -> None:
     shared.prompt_styles = None
     shared.OptionInfo = FakeOptionInfo
     shared.options_templates = {}
+    shared.device = "cuda"
 
     def options_section(section, options):
         """Stamps the section onto each option, as the host's own does.
@@ -282,6 +293,45 @@ def _install_modules() -> None:
     scripts_mod.Script = FakeScript
     scripts_mod.AlwaysVisible = FakeScript.AlwaysVisible
     scripts_mod.ScriptBuiltinUI = FakeScript
+    # The tab runners Model Chain reaches through to reset ImageStitch's memo.
+    scripts_mod.scripts_txt2img = types.SimpleNamespace(alwayson_scripts=[])
+    scripts_mod.scripts_img2img = types.SimpleNamespace(alwayson_scripts=[])
+
+    sd_samplers_common = types.ModuleType("modules.sd_samplers_common")
+    sd_samplers_common.encoded = []
+
+    def images_tensor_to_samples(image, approximation=None, model=None):
+        """Mirrors the host's route from an encoded image to a reference.
+
+        Faithful because the whole Stage 2 reference feature rides on it: the
+        reference-capable engines override ``encode_first_stage`` to divert
+        anything encoded while ``dynamic_args.is_referencing`` is raised into
+        their own ``ref_latents``, and to treat anything else as the img2img
+        input. An engine without ``ref_latents`` simply takes neither, which is
+        what an architecture with no reference path looks like from outside.
+        """
+        from backend.args import dynamic_args
+
+        sd_samplers_common.encoded.append((image, approximation, model))
+        if model is None:
+            return image
+
+        if dynamic_args.is_referencing:
+            references = getattr(model, "ref_latents", None)
+            if references is not None:
+                references.append(image)
+        elif hasattr(model, "ini_latent"):
+            model.ini_latent = image
+
+        return image
+
+    sd_samplers_common.images_tensor_to_samples = images_tensor_to_samples
+
+    api_module = types.ModuleType("modules.api")
+    api_module.__path__ = []
+    api_api = types.ModuleType("modules.api.api")
+    api_api.decode_base64_to_image = lambda value: None
+    api_module.api = api_api
 
     processing = types.ModuleType("modules.processing")
     processing.need_global_unload = False
@@ -351,6 +401,8 @@ def _install_modules() -> None:
     modules.scripts = scripts_mod
     modules.processing = processing
     modules.infotext_utils = infotext_utils
+    modules.sd_samplers_common = sd_samplers_common
+    modules.api = api_module
     modules.ui_common = ui_common
     modules.ui_components = ui_components
     modules.paths = paths
@@ -440,6 +492,9 @@ def _install_modules() -> None:
         "modules.scripts": scripts_mod,
         "modules.processing": processing,
         "modules.infotext_utils": infotext_utils,
+        "modules.sd_samplers_common": sd_samplers_common,
+        "modules.api": api_module,
+        "modules.api.api": api_api,
         "modules.ui_common": ui_common,
         "modules.ui_components": ui_components,
         "modules.paths": paths,
@@ -488,6 +543,10 @@ def host():
     modules.images.saved.clear()
     modules.processing.need_global_unload = False
     modules.processing.opt_f = 8
+    modules.sd_samplers_common.encoded.clear()
+    modules.scripts.scripts_txt2img.alwayson_scripts.clear()
+    modules.scripts.scripts_img2img.alwayson_scripts.clear()
+    modules.shared.sd_model = None
 
     from backend.args import dynamic_args
 
