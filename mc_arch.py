@@ -46,6 +46,12 @@ EDIT_ENABLE = "Enable"
 EDIT_DISABLE = "Disable"
 EDIT_MODES = (EDIT_AUTO, EDIT_ENABLE, EDIT_DISABLE)
 
+REF_VALIDATED = "validated"
+"""Supplemental Stage 2 references are tested on this architecture."""
+
+REF_EXPERIMENTAL = "experimental"
+"""Forge exposes a reference path here, but Model Chain has not validated it."""
+
 
 @dataclass(frozen=True)
 class Architecture:
@@ -84,9 +90,35 @@ class Architecture:
     about denoise strength.
     """
 
+    # -- supplemental reference images (section 12) ----------------------- #
+    #
+    # A reference-capable engine overrides ``encode_first_stage`` to divert
+    # anything encoded under ``dynamic_args.is_referencing`` into its own
+    # ``ref_latents``. That is what Model Chain fills for Stage 2, and it is a
+    # property of the engine rather than of the checkpoint's name.
+    reference_support: str | None = None
+    """``REF_VALIDATED``, ``REF_EXPERIMENTAL``, or None for no reference path."""
+    reference_flag: str | None = None
+    """``dynamic_args`` field confirming the *loaded* checkpoint has that path.
+
+    For Flux.1 and Qwen-Image the architecture alone does not settle it: only
+    the Kontext and Edit variants reference, and the loader decides which is
+    which by reading the state dict. The flag is how that decision is read back,
+    which is why detection here does not stop at the checkpoint name.
+    """
+
     @property
     def supports_edit(self) -> bool:
         return self.edit_option is not None
+
+    @property
+    def supports_references(self) -> bool:
+        """Whether this architecture has a reference path at all."""
+        return self.reference_support is not None
+
+    @property
+    def references_are_validated(self) -> bool:
+        return self.reference_support == REF_VALIDATED
 
     def edit_is_deliberate(self, mode: str) -> bool:
         """Whether ``mode`` represents the user actively choosing edit semantics."""
@@ -102,18 +134,24 @@ _ARCHITECTURES: tuple[Architecture, ...] = (
     Architecture("sdxl", "SDXL", 8, 7.0),
     Architecture("sdxl_refiner", "SDXL Refiner", 8, 7.0),
     Architecture("mugen", "Mugen", 8, 7.0),
-    Architecture("flux", "Flux.1", 16, 1.0),
+    # Only the Kontext variant references, hence the runtime flag.
+    Architecture(
+        "flux", "Flux.1", 16, 1.0,
+        reference_support=REF_EXPERIMENTAL, reference_flag="kontext",
+    ),
     Architecture("flux_schnell", "Flux.1 Schnell", 16, 1.0),
     # Klein is reference-conditioned by default; the option disables it.
     Architecture(
         "flux2_4b", "Flux.2 Klein 4B", 16, 1.0,
         edit_option="klein_no_reference", edit_on_value=False, edit_needs_lora=False,
         edit_is_default=True,
+        reference_support=REF_VALIDATED, reference_flag="klein",
     ),
     Architecture(
         "flux2_9b", "Flux.2 Klein 9B", 16, 1.0,
         edit_option="klein_no_reference", edit_on_value=False, edit_needs_lora=False,
         edit_is_default=True,
+        reference_support=REF_VALIDATED, reference_flag="klein",
     ),
     Architecture("chroma", "Chroma", 16, 1.0),
     Architecture("lumina2", "Lumina 2", 16, 4.0),
@@ -121,13 +159,23 @@ _ARCHITECTURES: tuple[Architecture, ...] = (
     Architecture(
         "anima", "Anima", 16, 1.0,
         edit_option="anima_do_reference", edit_on_value=True, edit_needs_lora=True,
+        reference_support=REF_EXPERIMENTAL, reference_flag="anima",
     ),
+    # Wan is left out on purpose: ImageStitch feeds it a *last frame* for
+    # video, not a reference set, and it discards everything past the first
+    # image. Routing Stage 2 references there would mean something else
+    # entirely.
     Architecture("wan", "Wan", 16, 1.0),
-    Architecture("qwen", "Qwen-Image", 16, 1.0),
+    # Only the Edit variant references, hence the runtime flag.
+    Architecture(
+        "qwen", "Qwen-Image", 16, 1.0,
+        reference_support=REF_EXPERIMENTAL, reference_flag="edit",
+    ),
     # Krea 2: VAE downscales 8x and the transformer patchifies 2x2 -> 16.
     Architecture(
         "krea2", "Krea 2", 16, 1.0,
         edit_option="krea2_do_reference", edit_on_value=True, edit_needs_lora=True,
+        reference_support=REF_VALIDATED, reference_flag="krea2",
     ),
     Architecture("ernie", "ERNIE-Image", 16, 1.0),
     Architecture("pid", "PiD", 8, 7.0),
@@ -205,6 +253,32 @@ def edit_is_active(arch: Architecture, mode: str) -> bool:
         from modules import shared
 
         return bool(getattr(shared.opts, arch.edit_option, None)) == arch.edit_on_value
+    except Exception:
+        return False
+
+
+def references_available(arch: Architecture) -> bool:
+    """Whether the *loaded* checkpoint exposes Forge's reference path.
+
+    Checked once Stage 2's model is resident, because for Flux.1 and Qwen-Image
+    the architecture is not the whole answer: a plain Flux.1 dev and Flux.1
+    Kontext detect identically from their tensor shapes, and only the loader --
+    which reads the state dict -- knows which one it just loaded. The flag it
+    sets is that answer, and Model Chain's cache carries it across warm swaps
+    along with the rest of the model flags.
+
+    This is the pre-flight check. The encode itself is verified afterwards by
+    counting what the model actually took, which is the signal nothing can fake.
+    """
+    if not arch.supports_references:
+        return False
+    if arch.reference_flag is None:
+        return True
+
+    try:
+        from backend.args import dynamic_args
+
+        return bool(getattr(dynamic_args, arch.reference_flag, False))
     except Exception:
         return False
 

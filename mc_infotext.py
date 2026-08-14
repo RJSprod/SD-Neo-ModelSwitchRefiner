@@ -44,6 +44,39 @@ STAGE1_SIZE = "Model Chain Stage1 Size"
 EDIT_MODE = "Model Chain Edit Mode"
 """Auto | Enable | Disable -- Stage 2 reference/edit conditioning."""
 
+REFERENCE_MODE = "Model Chain Reference Mode"
+"""Disabled | Pass Through ImageStitch | Decoupled -- supplemental Stage 2 references."""
+
+REFERENCE_COUNT = "Model Chain References"
+"""How many supplemental references the Stage 2 pass was given.
+
+Diagnostic only, and deliberately so. Native ImageStitch records no reference
+pixels in infotext and neither does this: the count says a set was in play and
+how large it was, which is what makes a result reproducible *by hand*, but the
+images themselves have to be re-supplied exactly as ImageStitch requires today.
+
+It is settled before the infotexts are written, which is the last moment the
+Stage 1 model is still loaded and infotext can be built at all. In the rare case
+where the loaded Stage 2 model then turns out not to accept the set, the images
+are dropped and a notice says so on the result -- so this reads as the set Stage
+2 was handed, which is the same number in every ordinary generation.
+"""
+
+REFERENCE_MAX_DIM = "Model Chain Reference Max Side"
+"""Longest side the Decoupled references were resized to before encoding.
+
+Recorded for Decoupled only. In Pass Through the sizing belongs to ImageStitch's
+own "Maximum Side Length" control, and recording Model Chain's unused slider
+there would describe something that did not happen.
+"""
+
+REFERENCE_DEFAULT_MODE = "Disabled"
+"""Omitted from infotext, so a chain that never touches this feature keeps the
+infotext it had before the feature existed."""
+
+REFERENCE_DECOUPLED_MODE = "Decoupled"
+"""The one mode whose reference sizing Model Chain owns."""
+
 MODULE_PREFIX = "Model Chain Module "
 """Numbered VAE / text encoder keys: "Model Chain Module 1", "... 2", and so on.
 
@@ -83,6 +116,9 @@ def build_params(
     scheduler: str = INHERIT,
     edit_mode: str = "Auto",
     modules=None,
+    reference_mode: str = REFERENCE_DEFAULT_MODE,
+    reference_count: int = 0,
+    reference_max_dim: int | None = None,
 ) -> dict:
     """Build the ``extra_generation_params`` entries for an enabled chain.
 
@@ -124,6 +160,15 @@ def build_params(
     # same infotext it had before the feature existed.
     if edit_mode and edit_mode != "Auto":
         params[EDIT_MODE] = edit_mode
+
+    # Same reasoning as edit mode: the default is omitted so an image made
+    # without this feature carries no trace of it.
+    if reference_mode and reference_mode != REFERENCE_DEFAULT_MODE:
+        params[REFERENCE_MODE] = reference_mode
+        if int(reference_count or 0) > 0:
+            params[REFERENCE_COUNT] = int(reference_count)
+        if reference_mode == REFERENCE_DECOUPLED_MODE and reference_max_dim is not None:
+            params[REFERENCE_MAX_DIM] = int(reference_max_dim)
 
     params.update(build_module_params(modules))
 
@@ -297,6 +342,22 @@ def build_paste_fields(components: dict) -> list:
         # whatever the control happened to be showing.
         return params.get(EDIT_MODE, "Auto")
 
+    def reference_mode_from(params):
+        mode = params.get(REFERENCE_MODE, REFERENCE_DEFAULT_MODE)
+        if mode != REFERENCE_DEFAULT_MODE:
+            # Said on paste rather than left for the failed generation: the
+            # images are not in the infotext and never were, exactly as native
+            # ImageStitch behaves, so the mode restores and the reference set
+            # has to be rebuilt by hand.
+            logger.info(
+                'Model Chain: restored Stage 2 reference mode "%s"%s. Reference images are '
+                "not stored in PNG info — re-add them before generating, or Stage 2 will "
+                "run without supplemental references.",
+                mode,
+                f" ({params[REFERENCE_COUNT]} image(s) were used)" if REFERENCE_COUNT in params else "",
+            )
+        return mode
+
     fields = [
         PasteField(components["enabled"], lambda d: ENABLED in d, api="model_chain_enabled"),
         PasteField(components["target"], target_from, api="model_chain_target"),
@@ -315,6 +376,14 @@ def build_paste_fields(components: dict) -> list:
         PasteField(components["size_multiplier"], SIZE_MULTIPLIER, api="model_chain_size_multiplier"),
         PasteField(components["edit_mode"], edit_mode_from, api="model_chain_edit_mode"),
         PasteField(components["modules"], modules_from, api="model_chain_modules"),
+        PasteField(
+            components["reference_mode"], reference_mode_from, api="model_chain_reference_mode"
+        ),
+        PasteField(
+            components["reference_max_dim"],
+            REFERENCE_MAX_DIM,
+            api="model_chain_reference_max_dim",
+        ),
     ]
 
     return fields
@@ -340,6 +409,9 @@ def paste_field_names() -> list[str]:
         SIZE_MULTIPLIER,
         STAGE1_SIZE,
         EDIT_MODE,
+        REFERENCE_MODE,
+        REFERENCE_COUNT,
+        REFERENCE_MAX_DIM,
         # A generous fixed span: the host forwards keys by exact name, and a
         # chain realistically selects a VAE plus one or two text encoders.
         *(f"{MODULE_PREFIX}{i}" for i in range(1, 9)),

@@ -24,6 +24,7 @@ import mc_infotext
 import mc_lora
 import mc_memory
 import mc_presets
+import mc_references
 import mc_styles
 from modules import errors, images, processing, scripts, shared
 from modules.processing import (
@@ -251,6 +252,16 @@ def _edit_notice(target: str, mode: str) -> str:
         if mode == mc_arch.EDIT_AUTO:
             return ""
         label = arch.label if arch is not mc_arch.UNKNOWN else "This model"
+        if arch.supports_references:
+            # Flux.1 Kontext and Qwen-Image-Edit reference, but there is no
+            # setting behind it: the loader decides from the checkpoint. Saying
+            # this control is simply "ignored" would be wrong now that it also
+            # vetoes Model Chain's own Stage 2 references.
+            return (
+                f"⚠️ {label} has no edit toggle — whether it uses reference conditioning is "
+                'decided by the checkpoint variant, not by this control. "Disable" still stops '
+                "Model Chain from supplying Stage 2 reference images."
+            )
         return f"⚠️ {label} has no edit/reference mode — this setting will be ignored."
 
     if not mc_arch.edit_is_active(arch, mode):
@@ -273,6 +284,103 @@ def _edit_notice(target: str, mode: str) -> str:
     if mode == mc_arch.EDIT_AUTO:
         note += " (Currently on via the global Settings toggle.)"
     return note
+
+
+def _reference_notice(mode: str, target: str, stitch_gallery=None, decoupled_gallery=None) -> str:
+    """Status and compatibility text for the Stage 2 reference control.
+
+    Two separate things are said, because they fail independently: how many
+    supplemental references the selected mode currently has, and whether the
+    selected Stage 2 model can consume any at all.
+    """
+    if not mc_references.is_active(mode):
+        return ""
+
+    lines = []
+
+    if mode == mc_references.PASS_THROUGH:
+        if stitch_gallery is None:
+            # No gallery to read. Either ImageStitch is not installed at all, or
+            # it is but its gallery never reached after_component -- an id
+            # rename in a later Forge. Only the *live* count is lost in the
+            # second case; the generation reads the same gallery out of the
+            # script arguments regardless.
+            if mc_references.stitch_is_installed():
+                lines.append(
+                    "Stage 2 will use whatever reference images ImageStitch holds when you generate."
+                )
+            else:
+                lines.append(
+                    "⚠️ ImageStitch is not installed, so there are no references to pass through. "
+                    'Use "Decoupled" to supply Stage 2 references from Model Chain instead.'
+                )
+        else:
+            count = len(mc_references.extract_images(stitch_gallery))
+            if count:
+                lines.append(
+                    f"Using **{count}** ImageStitch reference image(s) for each Stage 2 image, "
+                    "in the order shown there."
+                )
+            else:
+                lines.append(
+                    "⚠️ ImageStitch has no reference images, so Stage 2 will run without "
+                    "supplemental references."
+                )
+    else:
+        count = len(mc_references.extract_images(decoupled_gallery))
+        if count:
+            lines.append(
+                f"Using **{count}** Model Chain reference image(s) for each Stage 2 image. "
+                "Stage 1's own ImageStitch references are not included."
+            )
+        else:
+            lines.append(
+                "⚠️ No Stage 2 reference images have been added, so Stage 2 will run without "
+                "supplemental references."
+            )
+
+    compatibility = _reference_compatibility_notice(target)
+    if compatibility:
+        lines.append(compatibility)
+
+    return "\n\n".join(lines)
+
+
+def _reference_compatibility_notice(target: str) -> str:
+    """Whether the selected Stage 2 model can take supplemental references."""
+    if not target or target == _NO_MODEL:
+        return ""
+
+    arch = mc_arch.detect_from_checkpoint_name(target)
+
+    if arch is mc_arch.UNKNOWN:
+        return (
+            "⚠️ The Stage 2 architecture could not be detected, so reference support is "
+            "unknown. It is checked again once the model loads, and the references are "
+            "dropped with a notice if it has no reference path."
+        )
+
+    if not arch.supports_references:
+        return (
+            f"⚠️ **{arch.label} has no reference-conditioning path**, so supplemental "
+            "reference images will be ignored. Stage 2 still receives its own Stage 1 image "
+            "as usual."
+        )
+
+    if not arch.references_are_validated:
+        note = (
+            f"⚠️ **{arch.label} reference routing is experimental** — Forge exposes a "
+            "reference path for it, but this pairing is not one Model Chain has validated. "
+            "Flux.2 Klein and Krea 2 are."
+        )
+        if arch.reference_flag in ("kontext", "edit"):
+            note += (
+                f" Only the reference-capable {arch.label} variants have that path at all; "
+                "an ordinary checkpoint will have its references dropped with a notice."
+            )
+        return note
+
+    return ""
 
 
 def _architecture_notice(target: str) -> str:
@@ -330,6 +438,17 @@ class ScriptModelChain(scripts.Script):
         # requested size stops being a number and becomes a tensor.
         self._stage1_requested = ()
         self._stage1_latent = ""
+        # ImageStitch's own Reference Image(s) gallery, captured for the live
+        # count in Pass Through mode. Read-only, and optional: without it the
+        # panel says less, and the generation itself is unaffected because it
+        # reads the same gallery out of the script arguments.
+        self._stitch_gallery_component = None
+        # Set by ui() when the reference status has to wait for that gallery,
+        # and consumed the moment it arrives.
+        self._wire_reference_notice = None
+        # This generation's supplemental reference set, captured in process()
+        # while the Stage 1 script arguments are still live.
+        self._references = ()
 
     def title(self):
         return "Model Chain"
@@ -352,10 +471,33 @@ class ScriptModelChain(scripts.Script):
     }
 
     def after_component(self, component, **kwargs):
-        """Capture main-tab controls that drive the live size readout."""
-        attribute = self._TRACKED_COMPONENTS.get(kwargs.get("elem_id"))
+        """Capture main-tab controls that drive the live readouts."""
+        elem_id = kwargs.get("elem_id") or ""
+
+        attribute = self._TRACKED_COMPONENTS.get(elem_id)
         if attribute is not None:
             setattr(self, attribute, component)
+
+        # Matched on the tail rather than the whole id: Script.elem_id prefixes
+        # the tab name for a script shown on both tabs, and ImageStitch is one.
+        if elem_id.endswith(mc_references.STITCH_GALLERY_SUFFIX) and self._stitch_gallery_component is None:
+            self._stitch_gallery_component = component
+            self._wire_deferred_reference_notice(component)
+
+    def _wire_deferred_reference_notice(self, gallery) -> None:
+        """Finish the reference status now ImageStitch's gallery exists.
+
+        A one-shot: the wiring is dropped once used, so a second gallery with a
+        matching id -- or a rebuilt UI -- cannot register the same handlers
+        twice and leave two dependencies racing for the same output.
+        """
+        wire, self._wire_reference_notice = self._wire_reference_notice, None
+        if wire is None:
+            return
+        try:
+            wire(gallery)
+        except Exception:
+            errors.report("Model Chain: failed to wire the reference status", exc_info=True)
 
     def ui(self, is_img2img):
         checkpoints, module_choices = _model_choices()
@@ -536,6 +678,84 @@ class ScriptModelChain(scripts.Script):
                     info="Auto follows the global Settings toggle for the model",
                 )
                 edit_notice = gr.Markdown("", elem_id=self.elem_id("edit_notice"))
+
+            # -- supplemental reference images ----------------------------- #
+            with gr.Group():
+                reference_mode = gr.Radio(
+                    choices=list(mc_references.MODES),
+                    value=mc_references.DISABLED,
+                    label="Stage 2 reference images",
+                    elem_id=self.elem_id("reference_mode"),
+                    info=(
+                        "supplemental references, shared by every Stage 2 image and in "
+                        "addition to each image's own Stage 1 handoff"
+                    ),
+                )
+                reference_notice = gr.Markdown("", elem_id=self.elem_id("reference_notice"))
+
+                with gr.Group(visible=False) as reference_panel:
+                    reference_images = gr.Gallery(
+                        value=None,
+                        type="pil",
+                        interactive=True,
+                        show_label=False,
+                        container=False,
+                        show_download_button=False,
+                        show_share_button=False,
+                        label="Stage 2 Reference Image(s)",
+                        min_width=512,
+                        height=384,
+                        columns=3,
+                        rows=1,
+                        allow_preview=False,
+                        object_fit="contain",
+                        elem_id=self.elem_id("reference_images"),
+                    )
+
+                    reference_selected = gr.State(-1)
+
+                    with gr.Row():
+                        reference_upload = gr.Image(
+                            height=225,
+                            width=225,
+                            sources="upload",
+                            type="pil",
+                            label="Image to Upload",
+                            show_download_button=False,
+                            show_share_button=False,
+                            elem_id=self.elem_id("reference_upload"),
+                        )
+                        with gr.Column():
+                            reference_append = gr.Button(
+                                "Append Pasted Image", elem_id=self.elem_id("reference_append")
+                            )
+                            reference_replace = gr.Button(
+                                "Replace Selected Image", elem_id=self.elem_id("reference_replace")
+                            )
+                            reference_delete = gr.Button(
+                                "Delete Selected Image",
+                                variant="stop",
+                                elem_id=self.elem_id("reference_delete"),
+                            )
+                            reference_clear = gr.Button(
+                                "Clear All References",
+                                variant="stop",
+                                elem_id=self.elem_id("reference_clear"),
+                            )
+
+                reference_max_dim = gr.Slider(
+                    minimum=0,
+                    maximum=2048,
+                    value=mc_references.DEFAULT_MAX_DIM,
+                    step=256,
+                    label="Reference maximum side length",
+                    visible=False,
+                    elem_id=self.elem_id("reference_max_dim"),
+                    info=(
+                        "reduces VRAM during encoding; 0 for no limit. Pass Through uses "
+                        "ImageStitch's own setting instead"
+                    ),
+                )
 
             # -- seed ------------------------------------------------------ #
             with gr.Group():
@@ -733,6 +953,117 @@ class ScriptModelChain(scripts.Script):
             show_progress=False,
         )
 
+        # -- reference wiring ---------------------------------------------- #
+        #
+        # The live status counts whichever gallery the selected mode reads, so
+        # ImageStitch's own gallery is an input to it. It is only ever read: the
+        # user's Stage 1 selection is never written to, reordered or cleared
+        # from here.
+
+        def on_reference_change(mode, target_name, decoupled_gallery, stitch_gallery=None):
+            decoupled = mode == mc_references.DECOUPLED
+            return (
+                gr.update(visible=decoupled),
+                gr.update(visible=decoupled),
+                _reference_notice(mode, target_name, stitch_gallery, decoupled_gallery),
+            )
+
+        reference_outputs = [reference_panel, reference_max_dim, reference_notice]
+
+        def wire_reference_notice(stitch_gallery=None):
+            """Connect the status once it is settled what it can read.
+
+            ImageStitch sorts below Model Chain, so its gallery does not exist
+            yet while this panel is being built -- a Gradio event captures its
+            input list at registration, so wiring now would permanently bind a
+            status that cannot see it. When ImageStitch is installed the wiring
+            therefore waits for ``after_component`` to hand the gallery over;
+            when it is not, there is nothing to wait for and this runs at once.
+
+            ``target`` is a trigger as well as an input: the compatibility half
+            of the notice is about the Stage 2 architecture, so it has to follow
+            the checkpoint.
+            """
+            inputs = [reference_mode, target, reference_images]
+            if stitch_gallery is not None:
+                inputs.append(stitch_gallery)
+
+            for trigger in inputs:
+                trigger.change(
+                    fn=on_reference_change,
+                    inputs=inputs,
+                    outputs=reference_outputs,
+                    show_progress=False,
+                )
+
+        if mc_references.stitch_is_installed():
+            self._wire_reference_notice = wire_reference_notice
+        else:
+            wire_reference_notice()
+
+        def on_reference_select(event: gr.SelectData):
+            return event.index
+
+        reference_images.select(
+            fn=on_reference_select,
+            outputs=[reference_selected],
+            queue=False,
+            show_progress=False,
+        )
+
+        # Append / replace / delete / clear, kept deliberately close to
+        # ImageStitch's own gallery controls so the two panels behave alike.
+        # Every one of them rebuilds an ordered list: reference order carries
+        # meaning, so nothing here is allowed to reshuffle it.
+        def on_reference_append(gallery, image):
+            if image is None:
+                return [gr.skip(), gr.skip()]
+            gallery = list(gallery or [])
+            gallery.append((image, None))
+            return [gr.update(value=gallery), gr.update(value=None)]
+
+        def on_reference_replace(index, gallery, image):
+            if image is None or not gallery or index < 0 or index >= len(gallery):
+                return [-1, gr.skip(), gr.skip()]
+            gallery = list(gallery)
+            gallery[index] = (image, None)
+            return [-1, gr.update(value=gallery), gr.update(value=None)]
+
+        def on_reference_delete(index, gallery):
+            if not gallery or index < 0 or index >= len(gallery):
+                return [-1, gr.skip()]
+            gallery = list(gallery)
+            gallery.pop(index)
+            return [-1, gr.update(value=gallery)]
+
+        reference_append.click(
+            fn=on_reference_append,
+            inputs=[reference_images, reference_upload],
+            outputs=[reference_images, reference_upload],
+            queue=False,
+            show_progress=False,
+        )
+        reference_replace.click(
+            fn=on_reference_replace,
+            inputs=[reference_selected, reference_images, reference_upload],
+            outputs=[reference_selected, reference_images, reference_upload],
+            queue=False,
+            show_progress=False,
+        )
+        reference_delete.click(
+            fn=on_reference_delete,
+            inputs=[reference_selected, reference_images],
+            outputs=[reference_selected, reference_images],
+            queue=False,
+            show_progress=False,
+        )
+        reference_clear.click(
+            fn=lambda: [-1, gr.update(value=[])],
+            outputs=[reference_selected, reference_images],
+            queue=False,
+            show_progress=False,
+        )
+
         components = {
             "enabled": enabled,
             "target": target,
@@ -751,6 +1082,9 @@ class ScriptModelChain(scripts.Script):
             "denoise": denoise,
             "size_multiplier": size_multiplier,
             "edit_mode": edit_mode,
+            "reference_mode": reference_mode,
+            "reference_images": reference_images,
+            "reference_max_dim": reference_max_dim,
         }
 
         # -- preset wiring ------------------------------------------------- #
@@ -856,6 +1190,9 @@ class ScriptModelChain(scripts.Script):
             denoise,
             size_multiplier,
             edit_mode,
+            reference_mode,
+            reference_images,
+            reference_max_dim,
         ]
 
     # -- prompt assembly --------------------------------------------------- #
@@ -944,6 +1281,9 @@ class ScriptModelChain(scripts.Script):
 
         self._armed = False
         self._dropped_networks = []
+        # Never carried between generations: the reference set describes the
+        # gallery as it was for one job, and process() recaptures it for the next.
+        self._references = ()
         # The divisor that turns the requested pixel size into a latent shape is
         # a host global rewritten by the loader, so it describes whichever
         # checkpoint was loaded last rather than the one that is loaded now. The
@@ -1063,10 +1403,21 @@ class ScriptModelChain(scripts.Script):
         denoise,
         size_multiplier,
         edit_mode=mc_arch.EDIT_AUTO,
+        reference_mode=mc_references.DISABLED,
+        reference_images=None,
+        reference_max_dim=mc_references.DEFAULT_MAX_DIM,
         **kwargs,
     ):
         if not self._armed:
             return
+
+        # Captured here, while Stage 1's script arguments are live: this is
+        # where the user's ImageStitch gallery can still be read, and reading it
+        # once means the Stage 2 set cannot drift if the panel changes while the
+        # generation runs.
+        self._references = self._capture_references(
+            p, reference_mode, reference_images, reference_max_dim
+        )
 
         # The requested size as the host settled it. process() runs after
         # process_images_inner has applied any model-driven adjustment to the
@@ -1120,6 +1471,9 @@ class ScriptModelChain(scripts.Script):
                 stage1_size="%dx%d" % mc_arch.stage1_size(p),
                 edit_mode=edit_mode,
                 modules=modules,
+                reference_mode=reference_mode,
+                reference_count=len(self._references[0]) if self._references else 0,
+                reference_max_dim=reference_max_dim,
             )
         )
 
@@ -1129,6 +1483,37 @@ class ScriptModelChain(scripts.Script):
         self._save_final_images = p.save_samples()
         p.do_not_save_samples = True
         p.do_not_save_grid = True
+
+    @staticmethod
+    def _capture_references(p, mode, gallery, max_dim):
+        """This job's supplemental reference set: ``(images, max_dim, reason)``.
+
+        ``reason`` is empty when there is nothing to say. When it is not, it
+        explains why the selected mode produced no references -- always a
+        non-fatal condition, and always worth naming, because a mode that
+        silently does nothing is indistinguishable from a broken one.
+        """
+        if not mc_references.is_active(mode):
+            return (), max_dim, ""
+
+        if mode == mc_references.PASS_THROUGH:
+            arguments = mc_references.stitch_arguments(p)
+            if arguments is None:
+                return (), max_dim, "ImageStitch was not found, so there is nothing to pass through"
+
+            enabled, stitch_gallery, stitch_max_dim = arguments
+            if not enabled:
+                return (), stitch_max_dim, "ImageStitch is switched off, so it has no references to pass through"
+
+            images = mc_references.extract_images(stitch_gallery)
+            if not images:
+                return (), stitch_max_dim, "ImageStitch has no reference images selected"
+            return tuple(images), stitch_max_dim, ""
+
+        images = mc_references.extract_images(gallery)
+        if not images:
+            return (), max_dim, "no Stage 2 reference images have been added"
+        return tuple(images), max_dim, ""
 
     def process_before_every_sampling(self, p, *args, **kwargs):
         """Record the latent Stage 1 is about to sample from.
@@ -1172,6 +1557,9 @@ class ScriptModelChain(scripts.Script):
         denoise,
         size_multiplier,
         edit_mode=mc_arch.EDIT_AUTO,
+        reference_mode=mc_references.DISABLED,
+        reference_images=None,
+        reference_max_dim=mc_references.DEFAULT_MAX_DIM,
         **kwargs,
     ):
         if not self._armed or self._in_stage_2:
@@ -1209,6 +1597,7 @@ class ScriptModelChain(scripts.Script):
                 denoise=float(denoise),
                 size_multiplier=float(size_multiplier),
                 edit_mode=edit_mode,
+                reference_mode=reference_mode,
             )
         except Exception:
             errors.report("Model Chain: Stage 2 failed; returning the unrefined Stage 1 images", exc_info=True)
@@ -1242,6 +1631,7 @@ class ScriptModelChain(scripts.Script):
         denoise,
         size_multiplier,
         edit_mode,
+        reference_mode=mc_references.DISABLED,
     ):
         stage1_images = self._collect_stage_1(processed)
         if not stage1_images:
@@ -1304,6 +1694,29 @@ class ScriptModelChain(scripts.Script):
             self._save_as_final(p, processed)
             return
 
+        arch = mc_arch.detect_from_checkpoint_name(target)
+
+        # Settled before the infotexts are built, so the reference count they
+        # record is the set Stage 2 is actually given rather than the set that
+        # was offered.
+        #
+        # Supplying references means asking for reference conditioning, so the
+        # edit toggle is implied on for the Stage 2 pass. An explicit Disable is
+        # the one thing that overrules it -- a control the user set by hand must
+        # not be silently reversed by another one, so the references are dropped
+        # and said out loud instead.
+        references, reference_max_dim, reference_reason = (
+            self._references if self._references else ((), mc_references.DEFAULT_MAX_DIM, "")
+        )
+        references = self._vet_references(
+            processed, arch, references, reference_mode, reference_reason, edit_mode
+        )
+        if mc_references.is_active(reference_mode):
+            p.extra_generation_params[mc_infotext.REFERENCE_COUNT] = len(references)
+
+        effective_edit_mode = mc_arch.EDIT_ENABLE if references else edit_mode
+        edit_override = mc_arch.edit_override(arch, effective_edit_mode)
+
         # Build every Stage 2 infotext now, while Model A is still loaded:
         # create_infotext reads live model attributes, and after the switch
         # those would describe Model B.
@@ -1314,9 +1727,6 @@ class ScriptModelChain(scripts.Script):
 
         if shared.opts.model_chain_save_stage1:
             self._save_stage_1(p, processed, stage1_images, infotexts)
-
-        arch = mc_arch.detect_from_checkpoint_name(target)
-        edit_override = mc_arch.edit_override(arch, edit_mode)
 
         # -- the one and only checkpoint switch (section 3.1) -------------- #
         # Both halves of Stage 1's pair are captured: restoring the checkpoint
@@ -1384,11 +1794,30 @@ class ScriptModelChain(scripts.Script):
         mc_memory.make_vram_room(target, modules, stage_2_width, stage_2_height)
         mc_memory.begin_pass_observation()
 
+        # A cached model keeps its engine object -- and its reference list --
+        # across generations, and ImageStitch cannot clear it because Stage 2
+        # runs with scripts disabled. Anything still in there is from an earlier
+        # job. Cleared for every chain rather than only for an edit-mode one:
+        # when both stages share a checkpoint the object is the *same* one
+        # ImageStitch just filled for Stage 1, and Disabled mode promises Stage 2
+        # sees none of it.
+        self._clear_references(p)
+
         # Model B is loaded now, so its edit-mode state can finally be checked
         # against reality rather than against the dropdown's guess.
-        edit_active = mc_arch.edit_is_active(arch, edit_mode)
+        edit_active = mc_arch.edit_is_active(arch, effective_edit_mode)
         if edit_active:
             self._prepare_edit_mode(p, processed, arch, denoise, edit_override, edit_mode)
+
+        if references:
+            # The infotexts are already written, so a set dropped here keeps the
+            # pre-flight count in them; the notice on the result is what says it
+            # was dropped. This still corrects ``p`` itself, so anything built
+            # from it afterwards describes what happened rather than what was
+            # planned.
+            p.extra_generation_params[mc_infotext.REFERENCE_COUNT] = self._encode_references(
+                p, processed, arch, references, reference_max_dim, edit_override
+            )
 
         refined: list = []
         delivered: list = []
@@ -1444,6 +1873,11 @@ class ScriptModelChain(scripts.Script):
                 refined.append(result)
         finally:
             self._in_stage_2 = False
+            # Before the selection moves back, while shared.sd_model is still
+            # Stage 2's. Completion or failure alike: the cache keeps this model
+            # object, so anything left on it belongs to no job at all by the time
+            # it is next used.
+            self._clear_references(p)
             mc_memory.observe_activation_peak(
                 stage_2_width, stage_2_height, stage=mc_memory.STAGE_2
             )
@@ -1544,14 +1978,128 @@ class ScriptModelChain(scripts.Script):
             return int(stage1_seed) + int(offset)
         return int(stage1_seed)
 
-    def _prepare_edit_mode(self, p, processed, arch, denoise, edit_override, mode):
-        """Set up and sanity-check reference conditioning for the Stage 2 pass."""
-        # A cached model keeps its engine object -- and its reference list --
-        # across generations, and ImageStitch cannot clear it because Stage 2
-        # runs with scripts disabled. Anything still in there is stale. This
-        # applies whenever references will be used at all, deliberate or not.
-        mc_memory.clear_references()
+    @staticmethod
+    def _clear_references(p) -> None:
+        """Drop reference state, and make ImageStitch re-encode its own next time.
 
+        Both halves matter. The first stops an earlier job's references reaching
+        this one; the second stops this clear from silently costing Stage 1 its
+        references on the *next* generation, because ImageStitch memoises on the
+        model and the image hashes and would otherwise skip an encode it needs.
+        """
+        mc_memory.clear_references()
+        mc_references.invalidate_stitch_cache(p)
+
+    def _vet_references(self, processed, arch, references, mode, reason, edit_mode):
+        """The supplemental set Stage 2 may actually use, with a notice if not.
+
+        Everything checkable before the model loads is checked here: whether the
+        mode produced any images at all, whether the architecture has a
+        reference path, and whether the user has explicitly turned reference
+        conditioning off. Each rejection is non-fatal and named -- a mode that
+        quietly does nothing is indistinguishable from one that is broken.
+        """
+        if not mc_references.is_active(mode):
+            return ()
+
+        if not references:
+            self._report_references(
+                processed,
+                f'Stage 2 reference mode is "{mode}" but {reason or "no reference images were supplied"} '
+                "— Stage 2 will run with only its own Stage 1 image.",
+            )
+            return ()
+
+        if not arch.supports_references:
+            label = arch.label if arch is not mc_arch.UNKNOWN else "the Stage 2 model"
+            self._report_references(
+                processed,
+                f"{len(references)} Stage 2 reference image(s) were supplied, but {label} has no "
+                "reference-conditioning path — they were ignored rather than fed to a model that "
+                "cannot use them.",
+            )
+            return ()
+
+        if edit_mode == mc_arch.EDIT_DISABLE:
+            self._report_references(
+                processed,
+                f"{len(references)} Stage 2 reference image(s) were supplied, but Stage 2 edit mode "
+                'is set to "Disable" — the explicit setting wins and the references were ignored.',
+            )
+            return ()
+
+        if not arch.references_are_validated:
+            self._report_references(
+                processed,
+                f"Stage 2 reference routing on {arch.label} is experimental — Forge exposes a "
+                "reference path for it, but this pairing is not one Model Chain has validated.",
+            )
+
+        return references
+
+    def _encode_references(self, p, processed, arch, references, max_dim, edit_override) -> int:
+        """Register the supplemental references on the loaded Stage 2 model.
+
+        Returns how many the model took. Nothing partial is ever shipped: if the
+        model took fewer than were offered, the ordering the user arranged no
+        longer holds, so the whole set is dropped and the pass runs as a plain
+        refine rather than on a reference list that means something else.
+        """
+        if not mc_arch.references_available(arch):
+            # The checkpoint matched a reference-capable architecture but the
+            # loaded model does not have the path -- a plain Flux.1 where
+            # Kontext was assumed, or a Qwen-Image that is not the Edit variant.
+            # This is the check the checkpoint's name cannot make.
+            self._report_references(
+                processed,
+                f"the loaded Stage 2 checkpoint does not expose {arch.label}'s reference path "
+                f"(no {arch.reference_flag!r} model flag), so its {len(references)} reference "
+                "image(s) were ignored.",
+            )
+            return 0
+
+        try:
+            with mc_references.conditioning_enabled(edit_override):
+                encoded = mc_references.encode(list(references), max_dim)
+        except Exception:
+            errors.report("Model Chain: failed to encode the Stage 2 reference images", exc_info=True)
+            self._clear_references(p)
+            self._report_references(
+                processed,
+                "the Stage 2 reference images could not be encoded — the refine ran without them.",
+            )
+            return 0
+
+        if encoded != len(references):
+            self._clear_references(p)
+            self._report_references(
+                processed,
+                f"the Stage 2 model took {encoded} of {len(references)} reference image(s), so the "
+                "order you arranged no longer holds — the whole set was dropped rather than used "
+                "incomplete.",
+            )
+            return 0
+
+        logger.info(
+            "Model Chain: %d supplemental reference image(s) registered for every Stage 2 image, "
+            "after each image's own Stage 1 handoff",
+            encoded,
+        )
+        return encoded
+
+    @staticmethod
+    def _report_references(processed, message: str) -> None:
+        """Say something about references in the console and on the result."""
+        text = f"Model Chain: {message}"
+        logger.warning(text)
+        processed.comments += f"\n{text}"
+
+    def _prepare_edit_mode(self, p, processed, arch, denoise, edit_override, mode):
+        """Sanity-check reference conditioning for the Stage 2 pass.
+
+        Stale reference state is cleared by the caller, for every chain rather
+        than only an edit-mode one.
+        """
         logger.info(
             "Model Chain: %s reference conditioning active%s",
             arch.label,

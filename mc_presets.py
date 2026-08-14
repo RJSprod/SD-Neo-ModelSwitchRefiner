@@ -42,13 +42,24 @@ FIELDS = (
     "denoise",
     "size_multiplier",
     "edit_mode",
+    "reference_mode",
+    "reference_max_dim",
 )
 """Every Stage 2 control, by the name the UI uses for it.
 
 Kept in the same order the accordion returns its controls so a preset reads
 like the panel. Adding a control here without adding it to the UI (or the other
 way round) is caught by the tests.
+
+One control is deliberately absent: the Decoupled reference gallery. A preset is
+a small JSON file of settings, and images are not settings -- storing them would
+mean copying pixels into the data directory and owning their lifetime. The mode
+is saved, the images are re-supplied by hand, which is what native ImageStitch
+asks for too.
 """
+
+EXCLUDED_FIELDS = ("reference_images",)
+"""UI controls a preset intentionally does not carry. See FIELDS."""
 
 NONE = "None"
 """Shown in the dropdown when no preset is selected."""

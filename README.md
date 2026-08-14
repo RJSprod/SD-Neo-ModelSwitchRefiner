@@ -228,6 +228,80 @@ Stale references are cleared before Stage 2 runs. A cached model keeps its engin
 object — and its reference list — across generations, and ImageStitch cannot
 clear it because Stage 2 runs with scripts disabled.
 
+### Stage 2 reference images
+
+Edit mode above is about the **Stage 1 image**. This control is about
+*supplemental* references — extra images every Stage 2 refinement sees, on top
+of its own Stage 1 handoff.
+
+Forge's **ImageStitch Integrated** does the same job for Stage 1. Despite the
+name it does not stitch anything: it hands the model an ordered set of reference
+images. Model Chain runs Stage 2 through its own processing object with scripts
+disabled, so ImageStitch never runs for the refine pass — which is why Model
+Chain routes Stage 2's references itself rather than trying to re-run
+ImageStitch there.
+
+| Mode | Effect |
+| --- | --- |
+| **Disabled** (default) | Stage 2 gets no supplemental references. Stage 1 ImageStitch is untouched. |
+| **Pass Through ImageStitch** | The images in ImageStitch's gallery are reused for every Stage 2 image, in the order shown there. |
+| **Decoupled** | Model Chain's own gallery is used instead, and Stage 1's ImageStitch references are not included. |
+
+In both active modes the references are **shared across the batch** and each
+Stage 2 image still keeps its own Stage 1 result as the primary reference:
+
+```
+Stage1-A + Ref1/Ref2/… -> Stage2-A
+Stage1-B + Ref1/Ref2/… -> Stage2-B
+```
+
+Order matters and is never rearranged. The Decoupled gallery has the same
+append / replace / delete / clear controls as ImageStitch's, so a set can be
+built and reordered without leaving the panel.
+
+Pass Through only ever *reads* ImageStitch's gallery, and uses ImageStitch's own
+**Maximum Side Length** for sizing. Your Stage 1 selection is never cleared,
+reordered or replaced. Decoupled has its own maximum-side-length slider, since
+Model Chain owns that set.
+
+**Which models can use them.** Reference conditioning is an engine feature, not
+a universal one:
+
+| Stage 2 architecture | Support |
+| --- | --- |
+| Flux.2 Klein (4B / 9B), Krea 2 | validated |
+| Anima, Qwen-Image-Edit, Flux.1 Kontext | experimental — Forge exposes the path, this pairing is not validated here |
+| everything else | no reference path; references are ignored with a notice |
+
+The mode stays selectable whatever you pick, and the panel says what will
+happen. For Flux.1 and Qwen-Image the checkpoint's name is not enough — only
+the Kontext and Edit variants have the path at all — so the real check happens
+once the model is loaded, and a checkpoint that turns out not to have it has its
+references dropped with a notice rather than silently mis-fed. After encoding,
+the number the model actually accepted is compared against the number supplied;
+if they differ the whole set is dropped, because a partial set no longer carries
+the order you arranged.
+
+**Interaction with edit mode.** Supplying references means asking for reference
+conditioning, so choosing Pass Through or Decoupled implies **Enable** for the
+Stage 2 pass. Setting edit mode explicitly to **Disable** overrules that — the
+references are dropped and the panel and console say so, rather than one control
+silently reversing another.
+
+**Reference images are not stored in PNG info**, exactly as native ImageStitch
+does not store them. The infotext records the mode (and the reference count, for
+diagnostics). Pasting an image restores the mode; you re-add the images
+yourself, and generating without them produces a notice rather than a failure.
+Presets follow the same rule: they save the mode and the maximum side length,
+never the pixels.
+
+References are cleared at both ends of every job — before the references are
+added and after the last pass, on success and on failure alike — so a cached
+Stage 2 model can never carry a set into the next generation. Because clearing
+them can outdate ImageStitch's own memo of what it last encoded, that memo is
+reset too, so Stage 1 re-encodes its references next time instead of assuming
+they are still there.
+
 ### Sampling
 
 **Stage 2 sampling method** and **Stage 2 schedule type** are selected
@@ -809,6 +883,7 @@ mc_memory.py          model residency / cache management
 mc_lora.py            prepared LoRA state + stage isolation
 mc_infotext.py        infotext write + paste-field registration
 mc_presets.py         named Stage 2 configurations
+mc_references.py      Stage 2 supplemental reference routing
 mc_styles.py          style library integration helpers
 scripts/model_chain.py  Script class, UI, orchestration
 tests/                pytest suite (runs without a WebUI)
@@ -829,9 +904,14 @@ Neo loads extensions:
   identities — fatal for a module holding cache state. The extension root is what
   gets added to `sys.path`, so root-level helpers import cleanly as top-level
   modules. This is the same structure the bundled `sd_forge_lora` extension uses.
-- **`mc_arch.py` and `mc_presets.py` are additional modules**, for architecture
-  detection (needed by both the UI and the orchestration code) and for preset
-  storage.
+- **`mc_arch.py`, `mc_presets.py` and `mc_references.py` are additional
+  modules**, for architecture detection (needed by both the UI and the
+  orchestration code), preset storage, and Stage 2 reference routing.
+
+`mc_references.py` is the only module that knows ImageStitch exists, and it
+reaches for exactly one thing: the contents of the user's input gallery, read
+out of `p.script_args`. It never calls ImageStitch's `process()`, never touches
+its cached parameters as a data source, and never writes to its gallery.
 
 `mc_memory.py`'s two-slot cache is private to that module. `ensure_resident()` /
 `get_model()` expose no slot count, so swapping in an LRU pool for 3+ models
@@ -855,8 +935,9 @@ warm swap, edit-mode scoping and polarity, preset round-tripping and recovery
 from a damaged store, encoder pinning and its fallbacks, the background Stage 1
 preload and its failure handling, prepared-LoRA-state reuse and every case that
 invalidates it, stage isolation of extra-network tags, the VRAM reserve and its
-four floors, speculative warming of Stage 2, interruption handling, the UI's
-control-order contract, and inertness when disabled.
+four floors, speculative warming of Stage 2, interruption handling, Stage 2
+reference routing in all three modes with its ordering, capability and cleanup
+rules, the UI's control-order contract, and inertness when disabled.
 
 Three of those files are lopsided on purpose, because their failure modes are:
 
@@ -876,4 +957,6 @@ The criteria that need real hardware — that an SDXL → Flux.2-Klein chain
 produces coherent output, that a Krea 2 Edit refine responds to its Edit LoRA,
 that a LoRA visibly affects the refined image, that a warm switch is measurably
 faster than a cold disk load, that a preserved LoRA state survives 20–50
-alternating jobs without drift — are left to manual verification.
+alternating jobs without drift, and that multiple Stage 2 references visibly
+condition a Flux.2 Klein or Krea 2 + Edit LoRA refine — are left to manual
+verification.
