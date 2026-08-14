@@ -362,9 +362,23 @@ class TestPinnedEncoders:
 
 
 @pytest.fixture
-def preload(memory, monkeypatch):
-    """Records what the preload worker did, with the swap itself faked."""
-    calls = types.SimpleNamespace(reinstated=0, rooms=[], gpu_loads=0)
+def preload(memory, monkeypatch, host):
+    """Records what the preload worker did, with the swap itself faked.
+
+    Opts the setting in: the preload ships off, so every test of what it *does*
+    has to enable it first.
+    """
+    host.shared.opts.model_chain_preload_stage1 = True
+    calls = types.SimpleNamespace(reinstated=0, rooms=[], gpu_loads=0, contexts=0)
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def fake_context():
+        calls.contexts += 1
+        yield
+
+    monkeypatch.setattr(mc_memory, "_host_torch_context", fake_context)
 
     def reinstate_pending():
         calls.reinstated += 1
@@ -387,7 +401,39 @@ def preload(memory, monkeypatch):
     mc_memory.consume_preload()
 
 
+class TestPreloadIsOptIn:
+    """The preload is the only mechanism here that leaves the generation thread.
+
+    It also saves no work -- it only moves the same work earlier -- so a machine
+    where it misbehaves loses far more than a machine where it is off gains.
+    """
+
+    def test_it_does_not_run_unless_asked(self, memory, monkeypatch):
+        monkeypatch.setattr(mc_memory, "_pending_restore", "A", raising=False)
+        assert mc_memory.preload_async(1024, 1024) is False
+
+    def test_the_registered_default_matches_the_code_fallback(self, host):
+        import model_chain  # noqa: F401
+
+        registered = host.shared.options_templates[mc_memory.OPT_PRELOAD].default
+        assert registered is mc_memory.PRELOAD_DEFAULT
+        assert mc_memory.option(mc_memory.OPT_PRELOAD, mc_memory.PRELOAD_DEFAULT) is False
+
+
 class TestPreload:
+    def test_the_worker_enters_the_hosts_torch_context(self, preload):
+        """Weights loaded outside inference mode break the next sampling step.
+
+        The host holds torch.inference_mode() for a whole generation, so every
+        model it loads yields inference tensors. A thread starting with grad
+        enabled produces the other kind, and mixing them raises
+        "Inference tensors do not track version counter" on the first step.
+        """
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert preload.contexts == 1
+
     def test_nothing_pending_means_no_preload(self, preload, monkeypatch):
         monkeypatch.setattr(mc_memory, "_pending_restore", None)
         assert mc_memory.preload_async(1024, 1024) is False
@@ -565,19 +611,22 @@ class TestOrchestrationWiring:
 class TestSettingsRegistration:
     """The registered default and the code's fallback have to agree.
 
-    ``option()`` falls back to the documented behaviour when a setting is
-    missing, so a registration defaulting the other way would leave the feature
-    off in the UI while the fallback reported it on.
+    ``option()`` falls back to a hardcoded default when a setting is missing, so
+    a registration defaulting the other way would leave a feature off in the UI
+    while the fallback reported it on.
     """
 
-    @pytest.mark.parametrize(
-        "name", [mc_memory.OPT_PRELOAD, mc_memory.OPT_PIN_ENCODERS]
-    )
-    def test_registered_on_by_default(self, host, name):
+    def test_pinning_is_registered_on(self, host):
         import model_chain  # noqa: F401  (registration happens on import)
 
+        name = mc_memory.OPT_PIN_ENCODERS
         assert host.shared.options_templates[name].default is True
         assert mc_memory.option(name, True) is True
+
+    def test_the_host_value_wins_over_the_fallback(self, host):
+        """Otherwise opting in to the preload could not turn it on."""
+        host.shared.opts.model_chain_preload_stage1 = True
+        assert mc_memory.option(mc_memory.OPT_PRELOAD, mc_memory.PRELOAD_DEFAULT) is True
 
 
 class TestModelPatchers:

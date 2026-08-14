@@ -86,6 +86,16 @@ Re-entrant because the preload calls several of those entry points itself.
 OPT_PIN_ENCODERS = "model_chain_pin_stage1_encoders"
 OPT_PRELOAD = "model_chain_preload_stage1"
 
+PRELOAD_DEFAULT = False
+"""Off by default: the preload is the one mechanism here that leaves the
+generation thread, and moving weights off it has proved able to break a
+generation outright rather than merely slow one down.
+
+It is also the least valuable of the three. Pinning and the VRAM sizing remove
+work; the preload only moves the same work earlier, so the cost of having it
+wrong is out of all proportion to the benefit of having it right. Opt in per
+machine, once it is known to be safe there."""
+
 
 def option(name: str, default):
     """Read one of this extension's settings, falling back before the UI exists.
@@ -890,7 +900,7 @@ def preload_async(width: int = 0, height: int = 0) -> bool:
     """
     global _preload_thread
 
-    if not option(OPT_PRELOAD, True):
+    if not option(OPT_PRELOAD, PRELOAD_DEFAULT):
         return False
     if _pending_restore is None:
         return False  # nothing was swapped out, so nothing to swap back
@@ -931,12 +941,39 @@ def consume_preload() -> bool:
     return was_reinstated
 
 
+def _host_torch_context():
+    """The grad-mode context the host loads models under, for use off its thread.
+
+    ``torch.inference_mode`` is thread-local, and the host holds it for the
+    whole of a generation -- so every model load it performs produces *inference
+    tensors*, and the weights of a checkpoint carry that property with them.
+
+    A background thread starts with grad enabled instead. Loading or patching
+    weights there produces tensors of the other kind, and mixing the two is not
+    a slow path but a hard failure: the first sampling step raises
+    ``RuntimeError: Inference tensors do not track version counter``. On-the-fly
+    LoRA patching makes this far more likely, because then every load rewrites
+    the weights rather than just moving them.
+
+    Entering the same context here means the preload leaves the model in the
+    state the host's own loader would have left it in.
+    """
+    try:
+        import torch
+
+        return torch.inference_mode()
+    except Exception:
+        import contextlib
+
+        return contextlib.nullcontext()
+
+
 def _preload_worker(width: int, height: int) -> None:
     global _preload_reinstated
 
     started = time.perf_counter()
     try:
-        with _model_lock:
+        with _model_lock, _host_torch_context():
             # reinstate_pending() re-reads the live selection, so a checkpoint
             # changed in the UI since the generation ended is handled correctly
             # here: either it is cached and gets swapped in, or this returns

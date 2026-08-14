@@ -86,14 +86,16 @@ shared.options_templates.update(
             # would also travel in presets and in every infotext, where a VRAM
             # strategy says nothing useful about the hardware that reads it.
             mc_memory.OPT_PRELOAD: shared.OptionInfo(
-                True,
-                "Preload Stage 1 after Stage 2 finishes",
+                mc_memory.PRELOAD_DEFAULT,
+                "Preload Stage 1 after Stage 2 finishes (experimental)",
             ).info(
                 "moves Stage 1's weights back into VRAM in the background while you look "
-                "at the result, so the next Generate starts sampling immediately. Turn "
-                "this off if you change checkpoints in the UI between generations and see "
-                "instability — the preload runs on its own thread for a few seconds after "
-                "each generation"
+                "at the result, so the next Generate starts sampling immediately. Off by "
+                "default: it is the only part of this extension that touches models off "
+                "the generation thread, and on some setups — on-the-fly LoRA patching in "
+                "particular — that has broken the following generation outright. It saves "
+                "no work, it only moves it earlier, so leave it off unless you have "
+                "confirmed it is safe on your machine"
             ),
             mc_memory.OPT_PIN_ENCODERS: shared.OptionInfo(
                 True,

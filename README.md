@@ -240,8 +240,8 @@ Under **Settings → Model Chain**:
   RAM) — the ceiling on RAM held by the residency cache. This is a ceiling, not
   a reservation: the live free-RAM check is the real guard. Raise it if the
   console reports a model being refused.
-- **Preload Stage 1 after Stage 2 finishes** (default on) — see
-  [Preloading Stage 1](#preloading-stage-1).
+- **Preload Stage 1 after Stage 2 finishes** (experimental, default **off**) —
+  see [Preloading Stage 1](#preloading-stage-1-experimental-off-by-default).
 - **Keep Stage 1's text encoder and VAE in VRAM during Stage 2** (default on) —
   see [Pinning Stage 1's encoders](#pinning-stage-1s-encoders).
 
@@ -352,14 +352,14 @@ Two conditions have to hold, and both fail quietly and visibly in the log:
   down regardless. From the second generation onward the switch is warm and the
   pin applies.
 
-#### Preloading Stage 1
+#### Preloading Stage 1 (experimental, off by default)
 
 Restoring Stage 1 is two costs. The pointer swap out of the RAM cache is cheap;
 moving the weights back into VRAM is not, and it happens lazily the moment the
 sampler first asks for them. Left to the next Generate click, you wait through
 the whole move before a single step runs.
 
-Instead it starts as soon as Stage 2 finishes, on a background thread, so it
+The preload starts as soon as Stage 2 finishes, on a background thread, so it
 overlaps the time you spend looking at the images you just got. Running it
 inline would gain nothing — `postprocess` runs before the generation call
 returns, so an inline preload would just move the same wait to before the
@@ -372,9 +372,24 @@ the way it always did. Changing checkpoint in the UI between generations is
 handled too: the preload re-reads the live selection, so it either warms the
 model you actually picked or does nothing.
 
-The one thing it does introduce is a few seconds after each generation where a
-background thread is moving weights. If you change checkpoints in the UI during
-that window and see instability, turn it off in **Settings → Model Chain**.
+**It ships off, and that is deliberate.** It is the only part of this extension
+that touches models away from the generation thread, and that turns out to be
+sharper than it looks. `torch.inference_mode()` is thread-local and the host
+holds it for a whole generation, so every model the host loads yields *inference
+tensors*. A thread starting with grad enabled produces the other kind, and
+mixing them is not a slow path but a hard failure — the first sampling step
+raises `RuntimeError: Inference tensors do not track version counter`. The
+worker now enters the same context the host loads under, which should close
+that, but "should" is doing real work in that sentence: the failure depends on
+the host build, on other extensions wrapping the sampler, and especially on
+**Patch LoRAs on-the-fly**, which makes every load rewrite weights rather than
+just move them.
+
+The asymmetry is what decides the default. Pinning and the VRAM sizing *remove*
+work; the preload only moves the same work earlier. A machine where it
+misbehaves loses far more than a machine where it is off gains. Turn it on in
+**Settings → Model Chain** once you have confirmed it is safe on yours — and if
+you are chasing a problem, turn off on-the-fly LoRA patching first.
 
 #### Sizing the VRAM budget
 
