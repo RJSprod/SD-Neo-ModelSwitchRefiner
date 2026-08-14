@@ -89,6 +89,10 @@ def memory(host, monkeypatch):
 
     model = make_model("A")
     host.sd_models.model_data.sd_model = model
+    # model_data is a module-level singleton in the fake host, so a test that
+    # points the selection somewhere would otherwise leak into the next one.
+    host.sd_models.model_data.forge_hash = ""
+    host.sd_models.model_data.forge_loading_parameters = {}
     memory_management.current_loaded_models.extend(
         FakeLoadedModel(p) for p in (model.patchers.unet, model.patchers.clip, model.patchers.vae)
     )
@@ -369,7 +373,7 @@ def preload(memory, monkeypatch, host):
     has to enable it first.
     """
     host.shared.opts.model_chain_preload_stage1 = True
-    calls = types.SimpleNamespace(reinstated=0, rooms=[], gpu_loads=0, contexts=0)
+    calls = types.SimpleNamespace(reinstated=0, rooms=[], gpu_loads=0, contexts=0, warms=0)
 
     import contextlib
 
@@ -379,6 +383,22 @@ def preload(memory, monkeypatch, host):
         yield
 
     monkeypatch.setattr(mc_memory, "_host_torch_context", fake_context)
+
+    # Session state the circuit breaker and the readiness report both live in.
+    # Left over from one test it would silently disarm the next.
+    for name, value in (
+        ("_preload_failures", 0),
+        ("_preload_disabled_reason", None),
+        ("_preload_option_seen", None),
+        ("_preload_result", None),
+        ("_preload_reinstated", False),
+    ):
+        monkeypatch.setattr(mc_memory, name, value, raising=False)
+
+    monkeypatch.setattr(
+        mc_memory, "warm_secondary",
+        lambda w=0, h=0: calls.__setattr__("warms", calls.warms + 1) or 0,
+    )
 
     def reinstate_pending():
         calls.reinstated += 1
@@ -391,7 +411,7 @@ def preload(memory, monkeypatch, host):
     )
     monkeypatch.setattr(
         mc_memory, "_load_current_to_gpu",
-        lambda: (calls.__setattr__("gpu_loads", calls.gpu_loads + 1), 4 * GB)[1],
+        lambda w=0, h=0: (calls.__setattr__("gpu_loads", calls.gpu_loads + 1), 4 * GB)[1],
     )
     monkeypatch.setattr(mc_memory, "_pending_restore", "A", raising=False)
 
@@ -507,6 +527,302 @@ class TestPreload:
             mc_memory.ensure_resident("missing")
 
         assert joins, "ensure_resident must join the preload before touching models"
+
+
+class TestPreloadIsGenerationReady:
+    """"Preloaded" has to mean ready to sample, not "a thread ran".
+
+    A preload that swapped the pointer and moved nothing looks identical from
+    the outside to one that moved 13 GB, and the difference is the entire point
+    of the feature. The worker therefore measures what the host reports resident
+    and says which of the two happened.
+    """
+
+    def test_a_full_move_is_reported_ready(self, preload, monkeypatch):
+        monkeypatch.setattr(mc_memory, "_loaded_residency", lambda: (13 * GB, 13 * GB))
+
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert mc_memory.preload_result().state == "ready"
+
+    def test_a_partial_move_is_not_dressed_up_as_ready(self, preload, monkeypatch):
+        monkeypatch.setattr(mc_memory, "_loaded_residency", lambda: (7 * GB, 13 * GB))
+
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert mc_memory.preload_result().state == "partial"
+
+    def test_a_rounding_difference_does_not_demote_a_finished_preload(self, preload, monkeypatch):
+        """model_size() and the host's loaded figure are computed differently."""
+        monkeypatch.setattr(mc_memory, "_loaded_residency", lambda: (13 * GB - 1, 13 * GB))
+
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert mc_memory.preload_result().state == "ready"
+
+    def test_nothing_to_do_is_its_own_answer(self, preload, monkeypatch):
+        monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: False)
+
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert mc_memory.preload_result().state == "nothing"
+
+    def test_the_result_records_what_it_warmed(self, preload, monkeypatch):
+        """So a later checkpoint change can be recognised as superseding it."""
+        monkeypatch.setattr(mc_memory, "_loading_parameters_key", lambda: "key-A")
+
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert mc_memory.preload_result().key == "key-A"
+
+
+class TestPreloadFailureIsNotALoop:
+    """Enabling the preload may cost one generation. It may not cost every one.
+
+    The acceptance criterion is blunt: turning this on cannot make all
+    subsequent generations fail. Two mechanisms answer it -- a single failure
+    leaves the model exactly where the host's synchronous path expects it, and
+    repeated failures retire the feature.
+    """
+
+    @pytest.fixture
+    def failing(self, preload, monkeypatch):
+        def boom():
+            raise RuntimeError("driver said no")
+
+        monkeypatch.setattr(mc_memory, "reinstate_pending", boom)
+        return preload
+
+    def test_a_failure_is_recorded_rather_than_raised(self, failing):
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert mc_memory.preload_result().state == "failed"
+
+    def test_one_failure_does_not_retire_the_feature(self, failing):
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert mc_memory.preload_enabled() is True
+
+    def test_repeated_failures_do(self, failing):
+        for _ in range(mc_memory.PRELOAD_FAILURE_LIMIT):
+            mc_memory.preload_async(1024, 1024)
+            mc_memory.join_preload(timeout=5)
+
+        assert mc_memory.preload_enabled() is False
+        assert mc_memory.preload_async(1024, 1024) is False
+
+    def test_a_success_clears_the_count(self, preload, monkeypatch):
+        """Otherwise one bad moment a session apart would eventually retire it."""
+        calls = types.SimpleNamespace(n=0)
+
+        def sometimes():
+            calls.n += 1
+            if calls.n == 1:
+                raise RuntimeError("driver said no")
+            return True
+
+        monkeypatch.setattr(mc_memory, "reinstate_pending", sometimes)
+
+        for _ in range(3):
+            mc_memory.preload_async(1024, 1024)
+            mc_memory.join_preload(timeout=5)
+
+        assert mc_memory.preload_enabled() is True
+
+    def test_toggling_the_setting_gives_it_another_chance(self, failing, host):
+        for _ in range(mc_memory.PRELOAD_FAILURE_LIMIT):
+            mc_memory.preload_async(1024, 1024)
+            mc_memory.join_preload(timeout=5)
+
+        host.shared.opts.model_chain_preload_stage1 = False
+        assert mc_memory.preload_enabled() is False
+
+        host.shared.opts.model_chain_preload_stage1 = True
+        assert mc_memory.preload_enabled() is True
+
+    def test_a_failure_after_the_swap_still_budgets_vram_next_time(self, preload, monkeypatch):
+        """The swap happened, so Stage 1 *is* the loaded model -- with its
+        weights in RAM. Forgetting that would leave the next generation loading
+        it into whatever VRAM Stage 2 left behind, which is the slow path."""
+        def boom():
+            raise RuntimeError("driver said no")
+
+        monkeypatch.setattr(mc_memory, "_load_current_to_gpu", boom)
+
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert mc_memory.consume_preload() is True
+
+    def test_a_failure_drops_claims_that_may_no_longer_hold(self, preload, monkeypatch):
+        """Pinned encoders and a prepared LoRA state are both beliefs about a
+        load that did not finish."""
+        monkeypatch.setattr(
+            mc_memory, "_load_current_to_gpu",
+            lambda: (_ for _ in ()).throw(RuntimeError("half way")),
+        )
+        mc_memory.capture_stage_1_encoders()
+
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert mc_memory._pinned_patchers == []
+
+
+class TestStalePreloadIsSuperseded:
+    """A preload warms what was selected when it ran. That can change."""
+
+    def test_a_checkpoint_change_supersedes_the_preload(self, preload, monkeypatch):
+        monkeypatch.setattr(mc_memory, "_loading_parameters_key", lambda: "key-A")
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        monkeypatch.setattr(mc_memory, "_loading_parameters_key", lambda: "key-B")
+
+        assert mc_memory.consume_preload() is False
+
+    def test_an_unchanged_selection_is_still_claimed(self, preload, monkeypatch):
+        monkeypatch.setattr(mc_memory, "_loading_parameters_key", lambda: "key-A")
+
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert mc_memory.consume_preload() is True
+
+    def test_a_superseded_result_is_not_left_lying_around(self, preload, monkeypatch):
+        monkeypatch.setattr(mc_memory, "_loading_parameters_key", lambda: "key-A")
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        monkeypatch.setattr(mc_memory, "_loading_parameters_key", lambda: "key-B")
+        mc_memory.consume_preload()
+
+        assert mc_memory.preload_result() is None
+
+
+class TestReadiness:
+    """One line per generation saying how much of Stage 1 is already in VRAM.
+
+    This is what makes the rest of the residency machinery checkable from the
+    console rather than inferred from how long a generation felt.
+    """
+
+    def test_a_fully_resident_model_reports_warm(self, memory):
+        state, message = mc_memory.stage_1_readiness()
+
+        assert state == mc_memory.WARM
+        assert "warm" in message
+
+    def test_a_partly_resident_model_says_so(self, memory, monkeypatch):
+        monkeypatch.setattr(mc_memory, "_loaded_residency", lambda: (5 * GB, 13 * GB))
+
+        state, _ = mc_memory.stage_1_readiness()
+        assert state == mc_memory.PARTIAL
+
+    def test_a_model_in_system_ram_reports_cold(self, memory):
+        memory.mm.current_loaded_models.clear()
+
+        state, message = mc_memory.stage_1_readiness()
+        assert state == mc_memory.COLD
+        assert "system RAM" in message
+
+    def test_a_selection_that_is_not_the_loaded_model_reports_cold(self, memory, host):
+        host.sd_models.model_data.forge_hash = "key-B"
+        host.sd_models.model_data.forge_loading_parameters = {"checkpoint": "A"}
+
+        state, _ = mc_memory.stage_1_readiness()
+        assert state == mc_memory.COLD
+
+    def test_nothing_loaded_at_all_reports_cold(self, memory, host):
+        host.sd_models.model_data.sd_model = None
+
+        state, message = mc_memory.stage_1_readiness()
+        assert state == mc_memory.COLD
+        assert "disk" in message
+
+    def test_a_successful_preload_is_credited(self, preload):
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert "preloaded in" in mc_memory.stage_1_readiness()[1]
+
+    def test_a_failed_preload_is_explained(self, preload, monkeypatch):
+        monkeypatch.setattr(
+            mc_memory, "reinstate_pending",
+            lambda: (_ for _ in ()).throw(RuntimeError("driver said no")),
+        )
+        mc_memory.preload_async(1024, 1024)
+        mc_memory.join_preload(timeout=5)
+
+        assert "driver said no" in mc_memory.stage_1_readiness()[1]
+
+    def test_a_retired_preload_is_explained(self, preload, monkeypatch):
+        monkeypatch.setattr(
+            mc_memory, "reinstate_pending",
+            lambda: (_ for _ in ()).throw(RuntimeError("driver said no")),
+        )
+        for _ in range(mc_memory.PRELOAD_FAILURE_LIMIT):
+            mc_memory.preload_async(1024, 1024)
+            mc_memory.join_preload(timeout=5)
+
+        assert "off for this session" in mc_memory.stage_1_readiness()[1]
+
+    def test_it_says_when_the_preload_is_simply_off(self, memory):
+        assert "preload off" in mc_memory.stage_1_readiness()[1]
+
+    def test_it_says_nothing_on_a_generation_that_has_nothing_to_do_with_us(
+        self, chain, host, image_factory, monkeypatch
+    ):
+        """Someone who never enables Model Chain must never see a line from it."""
+        from test_orchestration import make_p, make_processed, run_chain
+
+        reports = []
+        monkeypatch.setattr(
+            mc_memory, "stage_1_readiness", lambda: reports.append(1) or ("warm", "warm")
+        )
+        monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: False)
+        monkeypatch.setattr(mc_memory, "consume_preload", lambda: False)
+
+        p = make_p(host)
+        run_chain(chain, host, p, make_processed(host, p, image_factory), enabled=False)
+
+        assert reports == []
+
+    def test_it_reports_on_the_generation_after_a_chain(
+        self, chain, host, image_factory, monkeypatch
+    ):
+        """The plain Generate that follows a chain is the interesting one --
+        it is the generation the whole preload exists for."""
+        from test_orchestration import make_p, make_processed, run_chain
+
+        reports = []
+        monkeypatch.setattr(
+            mc_memory, "stage_1_readiness", lambda: reports.append(1) or ("warm", "warm")
+        )
+        monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: True)
+        monkeypatch.setattr(mc_memory, "make_vram_room", lambda *a, **k: 0)
+        monkeypatch.setattr(mc_memory, "warm_for_next_pass", lambda w=0, h=0: 0)
+
+        p = make_p(host)
+        run_chain(chain, host, p, make_processed(host, p, image_factory), enabled=False)
+
+        assert reports == [1]
+
+    def test_a_readiness_report_that_fails_does_not_break_the_generation(self, chain, monkeypatch):
+        """It is a log line. Nothing may depend on it, including itself."""
+        monkeypatch.setattr(
+            mc_memory, "stage_1_readiness",
+            lambda: (_ for _ in ()).throw(RuntimeError("no")),
+        )
+
+        chain.script._report_readiness()  # must not raise
 
 
 class TestLoadCurrentToGpu:
