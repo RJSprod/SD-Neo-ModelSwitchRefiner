@@ -1200,10 +1200,31 @@ class ScriptModelChain(scripts.Script):
         if not stage1_images:
             return
 
+        # Everything downstream sizes itself from the image Stage 2 was actually
+        # handed, never from p.width/p.height. Those describe what was *asked
+        # for*: with hires fix they name the first pass, and the host adjusts
+        # them in process_images_inner before sampling -- so they are a
+        # prediction, and this is the observation. Where the two disagree the
+        # observation is the only one that describes a real image.
+        stage1_width, stage1_height = stage1_images[0].width, stage1_images[0].height
+        predicted = mc_arch.stage1_size(p)
+        if (stage1_width, stage1_height) != predicted:
+            logger.info(
+                "Model Chain: Stage 1 produced %dx%d where %dx%d was expected from the "
+                "generation settings — Stage 2 follows the image it was given.",
+                stage1_width,
+                stage1_height,
+                *predicted,
+            )
+
+        # Recorded now that it can be observed. process() had to write this
+        # before Stage 1 ran, so it could only record the prediction.
+        p.extra_generation_params[mc_infotext.STAGE1_SIZE] = f"{stage1_width}x{stage1_height}"
+
         # Stage 1 has finished sampling and Stage 2's model is not loaded yet,
         # so this is the one moment the peak reading describes Stage 1's pass
         # alone. It feeds the automatic VRAM reserve.
-        mc_memory.observe_activation_peak(*mc_arch.stage1_size(p), stage=mc_memory.STAGE_1)
+        mc_memory.observe_activation_peak(stage1_width, stage1_height, stage=mc_memory.STAGE_1)
 
         if prompt_mode == "Inherit":
             styles = []
@@ -1277,9 +1298,21 @@ class ScriptModelChain(scripts.Script):
         # Every image in the batch is refined at the same size, so one look at
         # the first is enough to size the pass -- and this has to happen before
         # the loop, while there is still something to evict.
-        first = stage1_images[0]
         stage_2_width, stage_2_height = mc_arch.scaled_size(
-            first.width, first.height, size_multiplier, arch.alignment
+            stage1_width, stage1_height, size_multiplier, arch.alignment
+        )
+        # The whole size story on one line: what Stage 2 was handed, what it was
+        # asked to produce, and why the numbers land where they do. Without this
+        # a size that comes out wrong gives the user nothing to look at.
+        logger.info(
+            "Model Chain: Stage 2 refines %dx%d at %.2fx — requesting %dx%d, aligned to %dpx for %s",
+            stage1_width,
+            stage1_height,
+            size_multiplier,
+            stage_2_width,
+            stage_2_height,
+            arch.alignment,
+            arch.label,
         )
         mc_memory.make_vram_room(target, modules, stage_2_width, stage_2_height)
         mc_memory.begin_pass_observation()
@@ -1291,6 +1324,7 @@ class ScriptModelChain(scripts.Script):
             self._prepare_edit_mode(p, processed, arch, denoise, edit_override, edit_mode)
 
         refined: list = []
+        delivered: list = []
         self._in_stage_2 = True
         try:
             for index, image in enumerate(stage1_images):
@@ -1329,7 +1363,18 @@ class ScriptModelChain(scripts.Script):
                     denoise=denoise,
                     override_settings=dict(edit_override),
                 )
-                refined.append(result if result is not None else image)
+                if result is None:
+                    refined.append(image)
+                    continue
+
+                # The pass is what finally decides the output size, and it is
+                # not obliged to honour the request: the host adjusts the
+                # requested dimensions for some architectures, and any other
+                # alwayson script can resize the result. Silently shipping a
+                # size nobody asked for is what makes this class of bug so hard
+                # to place, so it is recorded and reported instead.
+                delivered.append((result.width, result.height))
+                refined.append(result)
         finally:
             self._in_stage_2 = False
             mc_memory.observe_activation_peak(
@@ -1341,7 +1386,35 @@ class ScriptModelChain(scripts.Script):
             mc_memory.restore_selection(previous_checkpoint, previous_modules)
             self._preload_stage_1(p)
 
+        self._report_size(processed, (stage_2_width, stage_2_height), delivered)
         self._finish(p, processed, stage1_images, refined, infotexts)
+
+    @staticmethod
+    def _report_size(processed, requested: tuple[int, int], delivered: list) -> None:
+        """Say so when Stage 2 did not return the size it was asked for.
+
+        The extension controls what it *requests* -- the Stage 1 image's size
+        times the multiplier, snapped to the architecture's grid -- but not what
+        the pass hands back. When those differ the user sees an unexplained
+        resolution and has no way to tell which half of the chain lost it, so
+        the mismatch is named in the console and on the result.
+        """
+        unexpected = sorted({size for size in delivered if size != requested})
+        if not unexpected:
+            return
+
+        message = (
+            "Model Chain: Stage 2 was asked for {}x{} but returned {}. The refine pass "
+            "did not honour the requested size — check whether another extension resizes "
+            "img2img output, and whether the Stage 2 architecture constrains its own "
+            "resolution.".format(
+                requested[0],
+                requested[1],
+                ", ".join(f"{w}x{h}" for w, h in unexpected),
+            )
+        )
+        logger.warning(message)
+        processed.comments += f"\n{message}"
 
     @staticmethod
     def _preload_stage_1(p) -> None:
