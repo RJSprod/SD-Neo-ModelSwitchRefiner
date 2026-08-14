@@ -96,6 +96,12 @@ def memory(host, monkeypatch):
     monkeypatch.setattr(mc_memory, "file_size_bytes", lambda name, mods=None: 10 * GB)
     monkeypatch.setattr(mc_memory, "resolve_modules", lambda mods=None: None)
     monkeypatch.setattr(mc_memory, "current_modules", lambda: [])
+    monkeypatch.setattr(
+        host.sd_models, "get_closet_checkpoint_match",
+        lambda name: types.SimpleNamespace(
+            filename=f"/models/{name}", name_for_extra=name, sha256=f"sha-{name}"
+        ),
+    )
     mc_memory.clear_pinned_encoders()
 
     yield types.SimpleNamespace(mm=memory_management, model=model)
@@ -149,8 +155,9 @@ class TestVramEstimate:
         assert large > small
 
     def test_make_vram_room_frees_past_the_file_size(self, memory, monkeypatch):
+        """"B" rather than "A": the estimate only applies to a model not yet loaded."""
         monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 1 * GB)
-        mc_memory.make_vram_room("A", None, 1024, 1024)
+        mc_memory.make_vram_room("B", None, 1024, 1024)
 
         assert memory.mm.freed[0] > 10 * GB + mc_memory.vram_headroom_bytes(1024, 1024)
 
@@ -172,6 +179,80 @@ class TestVramEstimate:
         )
 
         assert mc_memory.plan("B").kind != "dual"
+
+
+# --------------------------------------------------------------------------- #
+# Never evicting the model the room is being made for
+# --------------------------------------------------------------------------- #
+
+
+class TestTargetIsSpared:
+    """Regression: the preload's work was being thrown away and redone.
+
+    Observed in a real log. The preload moved Krea 2's VAE, UNet and text
+    encoder into VRAM (8.5s), and the very next generation opened with
+    ``freed 13.8 GB VRAM for Stage 1 ... offloaded UnetPatcher, ModelPatcher,
+    ModelPatcher`` and then re-loaded the same three. Asking to free the whole
+    requirement while the target is already resident evicts the target, because
+    the target's own weights are the largest evictable thing on the card.
+    """
+
+    def test_a_fully_resident_target_needs_no_eviction(self, memory, monkeypatch):
+        """This is the preload case: everything is already where it belongs."""
+        # 13 GB of model resident, leaving only the activation headroom to find.
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 3 * GB)
+
+        mc_memory.make_vram_room("A", None, 1024, 1024, stage=mc_memory.STAGE_1)
+
+        assert memory.mm.freed == [], "the preloaded model must not be evicted"
+
+    def test_the_target_is_never_offered_for_eviction(self, memory, monkeypatch):
+        """Even when the pass genuinely needs more room than is free."""
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 0.1 * GB)
+
+        mc_memory.make_vram_room("A", None, 4096, 4096, stage=mc_memory.STAGE_1)
+
+        spared = {entry.model.label for entry in memory.mm.kept[0]}
+        assert spared == {"A-unet", "A-clip", "A-vae"}
+
+    def test_only_the_shortfall_is_requested(self, memory, monkeypatch):
+        """Not the whole requirement: 13 GB of it is already on the card."""
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 0.5 * GB)
+
+        mc_memory.make_vram_room("A", None, 1024, 1024, stage=mc_memory.STAGE_1)
+
+        resident = 13 * GB
+        requirement = resident + mc_memory.vram_headroom_bytes(1024, 1024)
+        assert memory.mm.freed == [requirement - resident]
+
+    def test_a_growing_pass_still_frees_the_difference(self, memory, monkeypatch):
+        """Raising the resolution between generations must still make room."""
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 0.5 * GB)
+
+        mc_memory.make_vram_room("A", None, 2048, 2048, stage=mc_memory.STAGE_1)
+
+        assert memory.mm.freed and memory.mm.freed[0] > 0
+
+    def test_a_target_that_is_not_loaded_falls_back_to_the_disk_estimate(self, memory, monkeypatch):
+        """A cold Stage 2: nothing of it is resident, so nothing is subtracted."""
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 1 * GB)
+
+        mc_memory.make_vram_room("B", None, 1024, 1024, stage=mc_memory.STAGE_2)
+
+        expected = 10 * GB * (1 + mc_memory.VRAM_MODEL_OVERHEAD_FRACTION)
+        assert memory.mm.freed[0] == pytest.approx(
+            expected + mc_memory.vram_headroom_bytes(1024, 1024)
+        )
+
+    def test_the_real_model_size_beats_the_disk_estimate(self, memory, monkeypatch):
+        """The patchers know their true size; the file is only a proxy."""
+        monkeypatch.setattr(mc_memory, "free_vram_bytes", lambda: 0.5 * GB)
+        monkeypatch.setattr(mc_memory, "file_size_bytes", lambda name, mods=None: 99 * GB)
+
+        mc_memory.make_vram_room("A", None, 1024, 1024, stage=mc_memory.STAGE_1)
+
+        # Sized from the 13 GB of resident patchers, not the bogus 99 GB file.
+        assert memory.mm.freed == [mc_memory.vram_headroom_bytes(1024, 1024)]
 
 
 # --------------------------------------------------------------------------- #

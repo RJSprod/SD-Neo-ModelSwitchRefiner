@@ -1075,6 +1075,55 @@ def _entry_vram_bytes(entry) -> int:
         return 0
 
 
+def _loaded_target_patchers(target_name: str) -> list:
+    """The target's own patchers, but only if it really is the loaded model.
+
+    Both call sites reach ``make_vram_room`` *after* the switch, so the target
+    is normally ``model_data.sd_model`` already. Verifying that rather than
+    assuming it means a caller that gets the order wrong falls back to the
+    conservative estimate instead of sizing the budget from the wrong model.
+    """
+    try:
+        from modules.sd_models import model_data
+
+        loaded = model_data.sd_model
+        info = checkpoint_info(target_name)
+        loaded_info = getattr(loaded, "sd_checkpoint_info", None)
+        if info is None or loaded_info is None or loaded_info.filename != info.filename:
+            return []
+        return model_patchers(loaded)
+    except Exception:
+        return []
+
+
+def _pass_requirement(target_name: str, modules, width: int, height: int, patchers: list) -> int:
+    """VRAM the pass needs in total: the model, resident, plus its activations.
+
+    When the target is the loaded model its patchers report their real size, so
+    use that in preference to the disk estimate. The file size is a proxy that
+    can be wrong in either direction -- quantised formats read larger than they
+    land, mixed-precision builds land larger than they read -- and being wrong
+    here either wastes an eviction or leaves the pass short.
+    """
+    size = 0
+    for patcher in patchers:
+        try:
+            size += int(patcher.model_size())
+        except Exception:
+            size = 0
+            break
+
+    if size <= 0:
+        size = int(file_size_bytes(target_name, modules) * (1.0 + VRAM_MODEL_OVERHEAD_FRACTION))
+
+    return size + vram_headroom_bytes(width, height)
+
+
+def _resident_bytes(patchers: list) -> int:
+    """VRAM those patchers are already holding."""
+    return sum(_entry_vram_bytes(entry) for entry in _loaded_entries_for(patchers))
+
+
 def _pinned_keep(required: int, stage: str) -> tuple[list, int]:
     """Entries to spare in this eviction, and the VRAM they hold.
 
@@ -1125,24 +1174,37 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
     weights to their offload device rather than discarding them, so the evicted
     model stays in this cache and switching back to it is still warm.
 
+    What the pass needs and what has to be *freed* are different numbers
+    whenever the target is already partly on the GPU -- after a preload it may
+    be entirely on the GPU. Asking to free the whole requirement in that state
+    is self-defeating: the target's own weights are the biggest evictable thing
+    present, so the eviction throws out exactly what the next pass is about to
+    load and the load happens all over again. So the target's resident bytes are
+    subtracted from the requirement, and its patchers are spared from eviction.
+
     Returns the number of bytes freed (0 when nothing needed doing).
     """
-    required = vram_required_bytes(target_name, modules, width, height)
+    own = _loaded_target_patchers(target_name)
+    required = _pass_requirement(target_name, modules, width, height, own)
+    resident = _resident_bytes(own)
+    needed = max(required - resident, 0)
     free = free_vram_bytes()
 
     if free <= 0:
         return 0  # cannot query VRAM; leave the host's own management alone
 
-    if free >= required:
+    if free >= needed:
         logger.info(
-            "Model Chain: %s has %.1f GB VRAM free against %.1f GB needed — keeping both models resident",
+            "Model Chain: %s needs %.1f GB, has %.1f GB free%s — no eviction needed",
             stage,
-            free / _GB,
             required / _GB,
+            free / _GB,
+            f" and {resident / _GB:.1f} GB already resident" if resident else "",
         )
         return 0
 
-    keep, pinned = _pinned_keep(required, stage)
+    pinned_keep, pinned = _pinned_keep(required, stage)
+    keep = _loaded_entries_for(own) + pinned_keep
 
     try:
         from backend import memory_management
@@ -1150,16 +1212,16 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
         device = memory_management.get_torch_device()
         if keep:
             try:
-                evicted = memory_management.free_memory(required, device, keep_loaded=keep)
+                evicted = memory_management.free_memory(needed, device, keep_loaded=keep)
             except TypeError:
-                # A host without keep_loaded is a reason to skip pinning, never
-                # a reason to skip freeing -- falling through to no eviction at
-                # all would be a far worse outcome than an unpinned encoder.
-                logger.debug("Model Chain: free_memory does not take keep_loaded; not pinning")
+                # A host without keep_loaded is a reason to lose the exemptions,
+                # never a reason to skip freeing -- falling through to no
+                # eviction at all would be far worse than an unpinned encoder.
+                logger.debug("Model Chain: free_memory does not take keep_loaded")
                 keep, pinned = [], 0
-                evicted = memory_management.free_memory(required, device)
+                evicted = memory_management.free_memory(needed, device)
         else:
-            evicted = memory_management.free_memory(required, device)
+            evicted = memory_management.free_memory(needed, device)
     except Exception:
         logger.warning("Model Chain: failed to free VRAM for %s", stage, exc_info=True)
         return 0
@@ -1169,24 +1231,26 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
     names = [type(getattr(m, "model", m)).__name__ for m in (evicted or [])]
 
     logger.info(
-        "Model Chain: freed %.1f GB VRAM for %s (%.1f GB -> %.1f GB free, %.1f GB needed)%s%s",
+        "Model Chain: freed %.1f GB VRAM for %s (%.1f GB -> %.1f GB free, %.1f GB of %.1f GB "
+        "still to load)%s%s",
         freed / _GB,
         stage,
         free / _GB,
         after / _GB,
+        needed / _GB,
         required / _GB,
         f"; offloaded {', '.join(names)}" if names else "",
-        f"; kept {pinned / _GB:.1f} GB of Stage 1 encoders resident" if keep else "",
+        f"; kept {pinned / _GB:.1f} GB of Stage 1 encoders resident" if pinned_keep else "",
     )
 
-    if after < required:
+    if after < needed:
         logger.warning(
-            "Model Chain: still only %.1f GB VRAM free against %.1f GB needed for a "
+            "Model Chain: still only %.1f GB VRAM free against %.1f GB left to load for a "
             "%dx%d pass. Expect the driver to spill into system memory, which is "
             "very slow. A smaller Stage 2 size multiplier, a lower Hires. fix "
             "upscale, or a more heavily quantised Stage 2 model would each help.",
             after / _GB,
-            required / _GB,
+            needed / _GB,
             width,
             height,
         )

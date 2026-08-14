@@ -378,17 +378,26 @@ that window and see instability, turn it off in **Settings → Model Chain**.
 
 #### Sizing the VRAM budget
 
-A checkpoint occupies more VRAM than its file occupies on disk: weights stored
-below the compute dtype are widened on load, and LoRA patches and the patcher's
-own bookkeeping are not in the file at all. The budget therefore adds a
-proportional overhead on top of the file size before freeing.
+Two numbers matter, and they are not the same: what the pass **needs**, and how
+much has to be **freed** to get there.
 
-Getting this wrong is what produces `Unloaded partially` in the log immediately
-before a UNet load — the eviction hit its target and stopped, the target was
-short, and the host made up the difference the expensive way. Two measured
-chains ran short by 11% and 14% of model size. Over-estimating is much cheaper
-than under-estimating: it evicts a model that might have fitted, and that model
-is still warm in the RAM cache.
+The requirement comes from the model's own patchers whenever it is the loaded
+model — which, at both points where room is made, it is. That is its true
+resident size. Only for a model that is not loaded does the budget fall back to
+the file size plus a proportional overhead, because a file is a poor proxy in
+both directions: quantised formats read larger than they land, mixed-precision
+builds land larger than they read. Under-counting is what produces
+`Unloaded partially` immediately before a UNet load — the eviction hit its
+target and stopped, the target was short, and the host made up the difference
+the expensive way.
+
+What has to be freed is the requirement **minus whatever the target already
+holds**, and the target is never itself offered up for eviction. Skipping that
+subtraction is self-defeating: after a preload the target is the largest
+evictable thing on the card, so asking to free the whole requirement evicts
+exactly the weights the next pass is about to use, and the load happens twice.
+That was a real bug — the preload's 8.5s of work was being discarded and redone
+on every Generate click.
 
 ### Interruption
 
