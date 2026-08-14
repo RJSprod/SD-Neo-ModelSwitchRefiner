@@ -1803,11 +1803,34 @@ class ScriptModelChain(scripts.Script):
         # sees none of it.
         self._clear_references(p)
 
+        # Everything above worked from the checkpoint header, which is a guess
+        # made before the model existed. The model is here now, so ask it.
+        #
+        # Kept in a separate name rather than replacing ``arch``: the geometry
+        # above is already committed to the header's answer, and the panel
+        # predicted the output size from that same answer. Correcting the size
+        # here would silently disagree with both.
+        reference_arch = arch
+        if arch is mc_arch.UNKNOWN:
+            loaded = mc_arch.detect_loaded_engine()
+            if loaded is not mc_arch.UNKNOWN:
+                reference_arch = loaded
+                # The override has to be rebuilt: the empty one computed from
+                # "unknown" would leave an opt-in architecture's toggle off, and
+                # the references would encode into nothing.
+                edit_override = mc_arch.edit_override(loaded, effective_edit_mode)
+                logger.info(
+                    "Model Chain: %s was not identifiable from its header, but the loaded "
+                    "model reports it as %s — using that for reference support",
+                    target,
+                    loaded.label,
+                )
+
         # Model B is loaded now, so its edit-mode state can finally be checked
         # against reality rather than against the dropdown's guess.
-        edit_active = mc_arch.edit_is_active(arch, effective_edit_mode)
+        edit_active = mc_arch.edit_is_active(reference_arch, effective_edit_mode)
         if edit_active:
-            self._prepare_edit_mode(p, processed, arch, denoise, edit_override, edit_mode)
+            self._prepare_edit_mode(p, processed, reference_arch, denoise, edit_override, edit_mode)
 
         if references:
             # The infotexts are already written, so a set dropped here keeps the
@@ -1816,7 +1839,7 @@ class ScriptModelChain(scripts.Script):
             # from it afterwards describes what happened rather than what was
             # planned.
             p.extra_generation_params[mc_infotext.REFERENCE_COUNT] = self._encode_references(
-                p, processed, arch, references, reference_max_dim, edit_override
+                p, processed, reference_arch, references, reference_max_dim, edit_override
             )
 
         refined: list = []
@@ -2010,13 +2033,24 @@ class ScriptModelChain(scripts.Script):
             )
             return ()
 
+        if arch is mc_arch.UNKNOWN:
+            # Not a rejection. The checkpoint's header did not identify it --
+            # a quantised or repacked build, or a format the header reader
+            # cannot open at all -- and a guess made before the switch is the
+            # worst possible thing to refuse on when the loaded model is about
+            # to be able to answer properly. Deferred, not dropped.
+            logger.info(
+                "Model Chain: the Stage 2 checkpoint could not be identified from its header; "
+                "its reference support will be settled from the loaded model instead"
+            )
+            return references
+
         if not arch.supports_references:
-            label = arch.label if arch is not mc_arch.UNKNOWN else "the Stage 2 model"
             self._report_references(
                 processed,
-                f"{len(references)} Stage 2 reference image(s) were supplied, but {label} has no "
-                "reference-conditioning path — they were ignored rather than fed to a model that "
-                "cannot use them.",
+                f"{len(references)} Stage 2 reference image(s) were supplied, but {arch.label} has "
+                "no reference-conditioning path — they were ignored rather than fed to a model "
+                "that cannot use them.",
             )
             return ()
 
@@ -2028,13 +2062,6 @@ class ScriptModelChain(scripts.Script):
             )
             return ()
 
-        if not arch.references_are_validated:
-            self._report_references(
-                processed,
-                f"Stage 2 reference routing on {arch.label} is experimental — Forge exposes a "
-                "reference path for it, but this pairing is not one Model Chain has validated.",
-            )
-
         return references
 
     def _encode_references(self, p, processed, arch, references, max_dim, edit_override) -> int:
@@ -2045,11 +2072,24 @@ class ScriptModelChain(scripts.Script):
         longer holds, so the whole set is dropped and the pass runs as a plain
         refine rather than on a reference list that means something else.
         """
+        if not arch.supports_references:
+            # Deferred here from before the switch, where the checkpoint could
+            # not be identified at all. Now it has been asked directly and the
+            # answer is still no.
+            label = arch.label if arch is not mc_arch.UNKNOWN else "the loaded Stage 2 model"
+            self._report_references(
+                processed,
+                f"{len(references)} Stage 2 reference image(s) were supplied, but {label} has no "
+                "reference-conditioning path — they were ignored rather than fed to a model that "
+                "cannot use them.",
+            )
+            return 0
+
         if not mc_arch.references_available(arch):
-            # The checkpoint matched a reference-capable architecture but the
-            # loaded model does not have the path -- a plain Flux.1 where
-            # Kontext was assumed, or a Qwen-Image that is not the Edit variant.
-            # This is the check the checkpoint's name cannot make.
+            # The architecture is reference-capable but this checkpoint is not
+            # the variant that has the path -- a plain Flux.1 where Kontext was
+            # assumed, or a Qwen-Image that is not the Edit build. This is the
+            # check no amount of looking at the name can make.
             self._report_references(
                 processed,
                 f"the loaded Stage 2 checkpoint does not expose {arch.label}'s reference path "
@@ -2057,6 +2097,15 @@ class ScriptModelChain(scripts.Script):
                 "image(s) were ignored.",
             )
             return 0
+
+        if not arch.references_are_validated:
+            # Said once the architecture is settled, so a checkpoint the header
+            # could not identify is judged on what it turned out to be.
+            self._report_references(
+                processed,
+                f"Stage 2 reference routing on {arch.label} is experimental — Forge exposes a "
+                "reference path for it, but this pairing is not one Model Chain has validated.",
+            )
 
         try:
             with mc_references.conditioning_enabled(edit_override):

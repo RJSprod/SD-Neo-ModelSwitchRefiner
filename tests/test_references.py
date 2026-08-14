@@ -50,13 +50,24 @@ class FakeStitch:
         self.process_calls += 1
 
 
+def model_config(class_name, **unet_config):
+    """A stand-in for the config class Forge's own detector settled on.
+
+    Forge hands the engine that class and the engine keeps it, so its *name* is
+    what identifies the loaded architecture.
+    """
+    return type(class_name, (), {"unet_config": dict(unet_config)})()
+
+
 class FakeEngine:
     """A reference-capable diffusion engine, as far as Model Chain can see it."""
 
-    def __init__(self):
+    def __init__(self, config=None):
         self.ref_latents = []
         self.ini_latent = None
         self.cleared = 0
+        if config is not None:
+            self.model_config = config
 
     def clear_references(self):
         self.ref_latents.clear()
@@ -686,6 +697,168 @@ class TestCompatibility:
 
         assert "could not be encoded" in processed.comments
         assert len(refs.refine_calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Detection from the loaded model
+# --------------------------------------------------------------------------- #
+
+
+class TestLoadedEngineDetection:
+    """The checkpoint header is a guess; the loaded model is the answer.
+
+    A quantised or repacked build can rename the keys the header detector looks
+    for, so a genuine Flux.2 Klein reads back as "unknown" -- and GGUF and
+    pickle checkpoints cannot be read at all. Refusing references on that guess
+    made the whole feature unavailable for such builds.
+    """
+
+    def test_the_model_config_class_identifies_the_architecture(self, host):
+        host.shared.sd_model = FakeEngine(config=model_config("Flux2K9B"))
+        assert mc_arch.detect_loaded_engine() is mc_arch.by_key("flux2_9b")
+
+    def test_every_config_class_maps_the_same_way_as_the_header_detector(self, host):
+        for name, key in (("Krea2", "krea2"), ("Anima", "anima"), ("QwenImage", "qwen")):
+            host.shared.sd_model = FakeEngine(config=model_config(name))
+            assert mc_arch.detect_loaded_engine() is mc_arch.by_key(key)
+
+    def test_the_engine_class_is_the_fallback(self, host):
+        engine = type("Krea2", (FakeEngine,), {})()
+        host.shared.sd_model = engine
+        assert mc_arch.detect_loaded_engine() is mc_arch.by_key("krea2")
+
+    def test_the_two_klein_sizes_are_told_apart_by_hidden_size(self, host):
+        for hidden, key in ((3072, "flux2_4b"), (4096, "flux2_9b")):
+            engine = type("Flux2", (FakeEngine,), {})(
+                config=model_config("Unrecognised", hidden_size=hidden)
+            )
+            host.shared.sd_model = engine
+            assert mc_arch.detect_loaded_engine() is mc_arch.by_key(key)
+
+    def test_an_unrecognisable_model_stays_unknown(self, host):
+        host.shared.sd_model = FakeEngine()
+        assert mc_arch.detect_loaded_engine() is mc_arch.UNKNOWN
+
+    def test_no_model_loaded_is_not_an_error(self, host):
+        host.shared.sd_model = None
+        assert mc_arch.detect_loaded_engine() is mc_arch.UNKNOWN
+
+    def test_an_unidentifiable_klein_still_gets_its_references(
+        self, chain, host, image_factory, monkeypatch
+    ):
+        """The reported bug: a Klein build whose header could not be read."""
+        klein = wire_engine(
+            chain,
+            host,
+            monkeypatch,
+            "unknown",
+            flag="klein",
+            engine=FakeEngine(config=model_config("Flux2K9B")),
+        )
+        own = image_factory(512, 512)
+
+        _, processed = run(
+            klein,
+            host,
+            image_factory,
+            reference_mode=mc_references.DECOUPLED,
+            reference_images=[(own, None)],
+        )
+
+        assert klein.seen == [[own]]
+        assert "no reference-conditioning path" not in processed.comments
+
+    def test_the_edit_override_is_rebuilt_from_the_loaded_model(
+        self, chain, host, image_factory, monkeypatch
+    ):
+        """An opt-in toggle left off would encode the references into nothing."""
+        krea2 = wire_engine(
+            chain,
+            host,
+            monkeypatch,
+            "unknown",
+            flag="krea2",
+            engine=FakeEngine(config=model_config("Krea2")),
+        )
+        own = image_factory(512, 512)
+
+        run(
+            krea2,
+            host,
+            image_factory,
+            reference_mode=mc_references.DECOUPLED,
+            reference_images=[(own, None)],
+            denoise=1.0,
+        )
+
+        assert krea2.seen == [[own]]
+        assert krea2.refine_calls[0].override_settings == {"krea2_do_reference": True}
+
+    def test_a_model_that_really_has_no_path_is_still_refused(
+        self, chain, host, image_factory, monkeypatch
+    ):
+        unidentified = wire_engine(chain, host, monkeypatch, "unknown")
+
+        _, processed = run(
+            unidentified,
+            host,
+            image_factory,
+            reference_mode=mc_references.DECOUPLED,
+            reference_images=[(image_factory(512, 512), None)],
+        )
+
+        assert unidentified.seen == [[]]
+        assert "no reference-conditioning path" in processed.comments
+
+    def test_an_experimental_verdict_waits_for_the_settled_architecture(
+        self, chain, host, image_factory, monkeypatch
+    ):
+        anima = wire_engine(
+            chain,
+            host,
+            monkeypatch,
+            "unknown",
+            flag="anima",
+            engine=FakeEngine(config=model_config("Anima")),
+        )
+
+        _, processed = run(
+            anima,
+            host,
+            image_factory,
+            reference_mode=mc_references.DECOUPLED,
+            reference_images=[(image_factory(512, 512), None)],
+            denoise=1.0,
+        )
+
+        assert "experimental" in processed.comments
+
+    def test_the_output_size_still_follows_the_header_answer(
+        self, chain, host, image_factory, monkeypatch
+    ):
+        """The panel predicted the size from the header; correcting it here
+        would silently disagree with what the user was shown."""
+        klein = wire_engine(
+            chain,
+            host,
+            monkeypatch,
+            "unknown",
+            flag="klein",
+            engine=FakeEngine(config=model_config("Flux2K9B")),
+        )
+
+        run(
+            klein,
+            host,
+            image_factory,
+            reference_mode=mc_references.DECOUPLED,
+            reference_images=[(image_factory(512, 512), None)],
+        )
+
+        # UNKNOWN and Klein both align to 16, so the sizes agree here; the
+        # point is that the request is built before the loaded model is asked.
+        assert klein.refine_calls[0].width == 1024
+        assert klein.refine_calls[0].height == 1024
 
 
 # --------------------------------------------------------------------------- #
