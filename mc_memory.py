@@ -1921,14 +1921,22 @@ there is room to be wrong about it.
 def capture_stage_2_components() -> int:
     """Remember Stage 2's patchers before the swap back to Stage 1 hides them.
 
-    Called on the generation thread at the end of Stage 2, for the same reason
-    the encoders are captured before the switch into it: once the pointer moves,
+    Called as the swap happens, for the same reason the encoders are captured
+    before the switch into Stage 2: once the pointer moves,
     ``model_data.sd_model`` describes the other stage and these are unreachable.
+
+    Nothing is captured when nothing can consume it. These are references to
+    real weights, so holding them after the cache has dropped the model would
+    keep gigabytes alive for a warm-up that is never going to run.
     """
     global _stage_2_patchers
 
     _stage_2_patchers = []
     if not option(OPT_WARM_STAGE_2, True):
+        return 0
+    if not option(OPT_PRELOAD, PRELOAD_DEFAULT):
+        # Warming only ever happens on the preload's thread; see the note above
+        # warm_secondary. With the preload off there is no consumer.
         return 0
 
     try:
@@ -2027,23 +2035,18 @@ def _pending_bytes(patchers: list) -> int:
     return max(total - resident, 0)
 
 
-def warm_for_next_pass(width: int = 0, height: int = 0) -> int:
-    """Put Stage 1 in VRAM now, then spend anything left over on Stage 2.
-
-    The order is the policy. Stage 1 is what the pass about to run needs, so it
-    loads first and against the full budget; Stage 2 sees only what is spare
-    afterwards. Doing it the other way round -- warming Stage 2 while Stage 1 is
-    still in system RAM -- would read the card as empty and hand Stage 2 room
-    that Stage 1 is about to need.
-
-    Called on the generation thread immediately after room has been made, which
-    is the same work the sampler would trigger a moment later and the only point
-    at which "how much is genuinely spare" has an answer. That it does not need
-    the background preload to be enabled is deliberate: the preload moves this
-    earlier, it is not what makes it correct.
-    """
-    moved = _load_current_to_gpu(width, height)
-    return moved + warm_secondary(width, height)
+# Warming happens on the preload's thread and nowhere else, and the reason is
+# not tidiness. Loading weights *in* rewrites and re-patches them, and doing
+# that outside the torch context the host loads under leaves the model in a
+# state the next sampling step rejects with "Inference tensors do not track
+# version counter" -- the same failure this module's preload notes describe.
+#
+# The preload has a deliberate answer to that (_host_torch_context), an opt-in
+# switch, and a circuit breaker. A hook on the generation thread has none of
+# the three, so an attempt to warm from before_process was a way of running the
+# riskiest operation here on the path that had opted out of the risk. Freeing
+# is different and stays where it is: free_memory moves weights *out*, which is
+# what the host does on every eviction anyway.
 
 
 # --------------------------------------------------------------------------- #

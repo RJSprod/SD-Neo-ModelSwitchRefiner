@@ -808,7 +808,6 @@ class TestReadiness:
         )
         monkeypatch.setattr(mc_memory, "reinstate_pending", lambda: True)
         monkeypatch.setattr(mc_memory, "make_vram_room", lambda *a, **k: 0)
-        monkeypatch.setattr(mc_memory, "warm_for_next_pass", lambda w=0, h=0: 0)
 
         p = make_p(host)
         run_chain(chain, host, p, make_processed(host, p, image_factory), enabled=False)
