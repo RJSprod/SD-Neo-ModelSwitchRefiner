@@ -378,6 +378,29 @@ Leaving them describing the previously loaded checkpoint would corrupt
 generation — and it would show up exactly when chaining two architecturally
 different models, which is the whole point of the extension.
 
+#### So does the latent scale
+
+`forge_model_reload()` ends by writing `modules.processing.opt_f` from the VAE
+it has just loaded — 16 for Flux.2, 8 for everything else, including a Wan VAE
+whose ratio is a tuple rather than an int. That single module-level number is
+what `process_images_inner` divides the requested pixel size by to shape the
+noise, so it has to describe the model that is about to sample.
+
+A warm swap runs no loader, so the extension writes it too, on both directions
+of the switch. Without that, a Krea 2 → Flux.2 Klein chain is correct on the
+first Generate — both models are loaded from disk — and wrong on every one
+after it: Krea 2 comes back from the RAM cache under Flux.2's 16, a 640×960
+request becomes a 60×40 latent, and Krea 2's VAE decodes it to a 320×480 image.
+Stage 2 then refines exactly what it was handed, at half size, which is where
+the user sees it and where the extension gets the blame.
+
+Because the value is a global that any code path can leave stale, it is also
+checked at the top of every generation and corrected — loudly, since arriving
+there means a swap happened that nothing accounted for — while correcting it is
+still free. The geometry line in a wrong-size report names both the divisor in
+force and the one the loaded model's VAE asks for; those disagreeing *is* the
+wrong size.
+
 The RAM budget check is fail-safe rather than best-effort: host RAM exhaustion
 can hang or kill the whole process, so a model that would breach the budget is
 released instead of cached, and if system RAM cannot be detected at all the cache
