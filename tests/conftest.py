@@ -397,11 +397,22 @@ def _install_modules() -> None:
 
     memory_management = types.ModuleType("backend.memory_management")
     memory_management.get_free_memory = lambda dev=None: 8 * 1024**3
+    memory_management.get_total_memory = lambda dev=None: 24 * 1024**3
     memory_management.get_torch_device = lambda: "cuda"
     memory_management.soft_empty_cache = lambda force=False: None
     memory_management.freed = []
-    memory_management.free_memory = (
-        lambda required, device, keep_loaded=[]: memory_management.freed.append(required) or []
+    memory_management.kept = []
+    memory_management.loaded_to_gpu = []
+    memory_management.current_loaded_models = []
+
+    def free_memory(required, device, keep_loaded=()):
+        memory_management.freed.append(required)
+        memory_management.kept.append(list(keep_loaded))
+        return []
+
+    memory_management.free_memory = free_memory
+    memory_management.load_models_gpu = lambda models, **kw: memory_management.loaded_to_gpu.append(
+        list(models)
     )
     backend.memory_management = memory_management
 
@@ -446,10 +457,17 @@ def host():
     extension does ``from modules.shared import opts, state``, exactly as the
     host's own scripts do, so rebinding the attribute would leave the code
     under test looking at a stale object and quietly disarm these fixtures.
+
+    Cleared before updating, so a setting one test invents cannot survive into
+    the next. Options the extension registers at runtime are absent from
+    ``FakeOptions``, and an update alone would leave them set for every test
+    that followed.
     """
     import modules
 
+    modules.shared.opts.__dict__.clear()
     modules.shared.opts.__dict__.update(FakeOptions().__dict__)
+    modules.shared.state.__dict__.clear()
     modules.shared.state.__dict__.update(FakeState().__dict__)
     modules.images.saved.clear()
     modules.processing.need_global_unload = False

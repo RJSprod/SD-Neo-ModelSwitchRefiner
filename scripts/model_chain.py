@@ -81,6 +81,27 @@ shared.options_templates.update(
                 "0 uses a default of 60% of detected system RAM. The live free-RAM "
                 "check is the real guard, so this is a ceiling rather than a reservation"
             ),
+            # The two below describe the machine rather than the image, which is
+            # why they live here and not in the accordion: an accordion control
+            # would also travel in presets and in every infotext, where a VRAM
+            # strategy says nothing useful about the hardware that reads it.
+            mc_memory.OPT_PRELOAD: shared.OptionInfo(
+                True,
+                "Preload Stage 1 after Stage 2 finishes",
+            ).info(
+                "moves Stage 1's weights back into VRAM in the background while you look "
+                "at the result, so the next Generate starts sampling immediately. Turn "
+                "this off if you change checkpoints in the UI between generations and see "
+                "instability — the preload runs on its own thread for a few seconds after "
+                "each generation"
+            ),
+            mc_memory.OPT_PIN_ENCODERS: shared.OptionInfo(
+                True,
+                "Keep Stage 1's text encoder and VAE in VRAM during Stage 2",
+            ).info(
+                "so switching back only has to move the UNet. Applied only when Stage 2 "
+                "still fits alongside them; otherwise it is skipped automatically and logged"
+            ),
         },
     )
 )
@@ -810,7 +831,14 @@ class ScriptModelChain(scripts.Script):
         # the extension has since been disabled -- that is cleanup of our own
         # state, not extension behaviour.
         try:
-            if mc_memory.reinstate_pending():
+            # A preload started after the last generation may still be running.
+            # Joining first means the worst case is the wait we would have had
+            # anyway, never two threads moving weights at once.
+            mc_memory.join_preload()
+            # Either branch means Stage 1 was swapped in from the cache; the
+            # preload sized its VRAM budget from the *previous* generation, so
+            # re-check it here against the size actually about to be sampled.
+            if mc_memory.reinstate_pending() or mc_memory.consume_preload():
                 self._make_room_for_stage_1(p)
         except Exception:
             errors.report("Model Chain: failed to reinstate the cached checkpoint", exc_info=True)
@@ -1075,6 +1103,10 @@ class ScriptModelChain(scripts.Script):
         # without its VAE/text encoder would change what Stage 1 loads next time.
         previous_checkpoint = shared.opts.sd_model_checkpoint
         previous_modules = mc_memory.current_modules()
+        # Captured while Model A is still loaded: its text encoder and VAE are
+        # small enough to leave in VRAM through the switch, and moving them is a
+        # disproportionate share of every switch's cost.
+        mc_memory.capture_stage_1_encoders()
 
         started = time.perf_counter()
         transition = mc_memory.ensure_resident(target, modules)
@@ -1171,8 +1203,29 @@ class ScriptModelChain(scripts.Script):
             # with Model A's own VAE and text encoder. Only the selection:
             # reloading here would be a second switch.
             mc_memory.restore_selection(previous_checkpoint, previous_modules)
+            self._preload_stage_1(p)
 
         self._finish(p, processed, stage1_images, refined, infotexts)
+
+    @staticmethod
+    def _preload_stage_1(p) -> None:
+        """Start warming Stage 1 back into VRAM for the next generation.
+
+        This runs in the background precisely so it overlaps the time the user
+        spends looking at the images they just got. Done inline it would gain
+        nothing: postprocess() runs before the generation call returns, so the
+        gallery would simply appear later by however long the load took.
+
+        Nothing downstream depends on it finishing. If it fails, is still
+        running, or never starts, the next generation loads Stage 1 exactly as
+        it does today -- before_process() joins the thread and then does the
+        work itself if it was not already done.
+        """
+        try:
+            width, height = mc_arch.stage1_size(p)
+            mc_memory.preload_async(width, height)
+        except Exception:
+            errors.report("Model Chain: failed to start the Stage 1 preload", exc_info=True)
 
     @staticmethod
     def _extend_progress_total(extra_steps: int) -> None:

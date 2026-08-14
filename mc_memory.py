@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -73,6 +74,34 @@ def _make_logger() -> logging.Logger:
 
 logger = _make_logger()
 
+_model_lock = threading.RLock()
+"""Serialises this module's own model movement.
+
+Everything here normally runs on the generation thread, one call at a time. The
+background Stage 1 preload is the exception, so every entry point that moves or
+reassigns weights takes this lock and the preload holds it for its whole run.
+Re-entrant because the preload calls several of those entry points itself.
+"""
+
+OPT_PIN_ENCODERS = "model_chain_pin_stage1_encoders"
+OPT_PRELOAD = "model_chain_preload_stage1"
+
+
+def option(name: str, default):
+    """Read one of this extension's settings, falling back before the UI exists.
+
+    Settings registered through ``on_ui_settings`` are absent from ``opts``
+    during early imports and in tests, and a missing setting must not change
+    behaviour -- so the default is the documented behaviour, not a disabled one.
+    """
+    try:
+        from modules import shared
+
+        value = getattr(shared.opts, name, None)
+    except Exception:
+        return default
+    return default if value is None else value
+
 _MAX_SLOTS = 2
 """v1 holds Model A and Model B. See the forward-compatibility note above."""
 
@@ -91,6 +120,25 @@ silently spills the overflow to system RAM over PCIe, and sampling drops from
 sub-second to tens of seconds per step with no error to explain it.
 """
 
+VRAM_MODEL_OVERHEAD_FRACTION = 0.15
+"""How much larger a model is in VRAM than its file is on disk.
+
+``file_size_bytes`` measures the checkpoint on disk, but that is a floor, not
+the resident footprint: weights stored below the compute dtype are widened on
+load, and LoRA patches and the parameter bookkeeping the patcher keeps alongside
+them are not in the file at all.
+
+Under-estimating here is what produces the ``Unloaded partially`` lines in the
+log immediately before a UNet load. ``free_memory`` hits our target and stops,
+the target turns out to be short, and the host then makes up the difference the
+expensive way -- unloading in chunks *while* it loads, which is the slow path
+this module exists to avoid. Two measured chains were short by 11% and 14% of
+model size, so the correction is proportional to the model rather than flat.
+
+Over-estimating is much cheaper than under-estimating: it evicts a model that
+might have fitted, and that model is still warm in the RAM cache.
+"""
+
 
 def vram_headroom_bytes(width: int = 0, height: int = 0) -> int:
     """Activation headroom to keep free for a pass at the given size."""
@@ -99,6 +147,12 @@ def vram_headroom_bytes(width: int = 0, height: int = 0) -> int:
 
     megapixels = (width * height) / 1_000_000
     return int(VRAM_HEADROOM_BYTES + VRAM_HEADROOM_PER_MEGAPIXEL * max(megapixels - 1.0, 0.0))
+
+
+def vram_required_bytes(name: str, modules=None, width: int = 0, height: int = 0) -> int:
+    """VRAM a pass on ``name`` needs: the model, resident, plus its activations."""
+    model = file_size_bytes(name, modules) * (1.0 + VRAM_MODEL_OVERHEAD_FRACTION)
+    return int(model + vram_headroom_bytes(width, height))
 
 RAM_RESERVE_BYTES = 2 * _GB
 """System RAM never handed to the cache, so the host process cannot be OOM-killed."""
@@ -380,18 +434,24 @@ def file_size_bytes(name: str, modules=None) -> int:
     return total
 
 
-def loaded_size_bytes(sd_model) -> int:
-    """Actual footprint of a loaded model, summed across its patchers."""
+def model_patchers(sd_model, attrs=("unet", "clip", "vae")) -> list:
+    """The ``ModelPatcher`` objects behind a loaded checkpoint, in load order.
+
+    ``forge_objects.clip`` wraps its patcher rather than being one, so each
+    entry is unwrapped before use. Duplicates are dropped: some architectures
+    share one patcher between two slots, and both ``free_memory`` and
+    ``load_models_gpu`` would otherwise see it twice.
+    """
     if not _is_real_model(sd_model):
-        return 0
+        return []
 
     objects = getattr(sd_model, "forge_objects", None)
     if objects is None:
-        return 0
+        return []
 
-    total = 0
+    found: list = []
     seen: set[int] = set()
-    for attr in ("unet", "clip", "vae"):
+    for attr in attrs:
         patcher = getattr(objects, attr, None)
         if patcher is None:
             continue
@@ -399,6 +459,14 @@ def loaded_size_bytes(sd_model) -> int:
         if id(patcher) in seen:
             continue
         seen.add(id(patcher))
+        found.append(patcher)
+    return found
+
+
+def loaded_size_bytes(sd_model) -> int:
+    """Actual footprint of a loaded model, summed across its patchers."""
+    total = 0
+    for patcher in model_patchers(sd_model):
         try:
             total += int(patcher.model_size())
         except Exception:
@@ -411,6 +479,15 @@ def free_vram_bytes() -> int:
         from backend import memory_management
 
         return int(memory_management.get_free_memory(memory_management.get_torch_device()))
+    except Exception:
+        return 0
+
+
+def total_vram_bytes() -> int:
+    try:
+        from backend import memory_management
+
+        return int(memory_management.get_total_memory(memory_management.get_torch_device()))
     except Exception:
         return 0
 
@@ -523,11 +600,14 @@ def plan(target_name: str, modules=None) -> ResidencyPlan:
             "Unable to query free VRAM — residency cannot be predicted.",
         )
 
-    if free_vram >= target_size + VRAM_HEADROOM_BYTES:
+    # Predict against the same figure make_vram_room() will act on, so the
+    # pre-flight label does not promise dual residency the switch then breaks.
+    target_required = vram_required_bytes(target_name, modules)
+    if free_vram >= target_required:
         return ResidencyPlan(
             "dual",
             f"Both models fit in VRAM — no offload expected "
-            f"({free_vram / _GB:.1f} GB free, {target_size / _GB:.1f} GB needed).",
+            f"({free_vram / _GB:.1f} GB free, {target_required / _GB:.1f} GB needed).",
         )
 
     budget = cache_budget_bytes()
@@ -661,6 +741,10 @@ def ensure_resident(name: str, modules=None) -> str:
     from modules.sd_models import model_data
     from modules_forge import main_entry
 
+    # A preload may still be moving Stage 1's weights. Never move models
+    # underneath it -- wait, then proceed against a settled state.
+    join_preload()
+
     info = checkpoint_info(name)
     if info is None:
         raise ModelChainError(f'Stage 2 checkpoint "{name}" was not found.')
@@ -742,28 +826,29 @@ def reinstate_pending() -> bool:
     from modules import processing
     from modules.sd_models import model_data
 
-    if _pending_restore is None:
-        return False
+    with _model_lock:
+        if _pending_restore is None:
+            return False
 
-    key = _loading_parameters_key()
-    entry = _cache.get(key)
-    if entry is None or not _is_real_model(entry.sd_model):
-        # Nothing cached: leave it to forge_model_reload() to load from disk.
+        key = _loading_parameters_key()
+        entry = _cache.get(key)
+        if entry is None or not _is_real_model(entry.sd_model):
+            # Nothing cached: leave it to forge_model_reload() to load from disk.
+            _pending_restore = None
+            return False
+
+        if model_data.sd_model is entry.sd_model:
+            _pending_restore = None
+            return False
+
+        _stash_current()
+        model_data.set_sd_model(entry.sd_model)
+        model_data.forge_hash = key
+        _apply_model_flags(entry.model_flags)
+        processing.need_global_unload = False
+        logger.info("Model Chain: restored %s from the RAM cache", entry.checkpoint_name)
         _pending_restore = None
-        return False
-
-    if model_data.sd_model is entry.sd_model:
-        _pending_restore = None
-        return False
-
-    _stash_current()
-    model_data.set_sd_model(entry.sd_model)
-    model_data.forge_hash = key
-    _apply_model_flags(entry.model_flags)
-    processing.need_global_unload = False
-    logger.info("Model Chain: restored %s from the RAM cache", entry.checkpoint_name)
-    _pending_restore = None
-    return True
+        return True
 
 
 def last_refusal() -> str | None:
@@ -771,7 +856,261 @@ def last_refusal() -> str | None:
     return _last_refusal
 
 
-def make_vram_room(target_name: str, modules=None, width: int = 0, height: int = 0, stage: str = "Stage 2") -> int:
+# -- Stage 1 preload ------------------------------------------------------- #
+#
+# Restoring Stage 1 is two separate costs. reinstate_pending() does the cheap
+# half -- a pointer swap out of the RAM cache -- but the weights themselves are
+# still in system RAM at that point, and the expensive half happens lazily when
+# the sampler first asks for them. Deferring both to the next Generate click
+# means the user waits through the whole move before a single step runs.
+#
+# Doing it eagerly at the end of the generation only helps if it overlaps the
+# time the user spends looking at the result. Running it inline in postprocess()
+# would not overlap anything: the gallery is not populated until the generation
+# call returns, so an inline preload would simply move the same wait to before
+# the images appear and gain nothing. Hence a background thread.
+#
+# The thread is joined by every entry point of this module that touches models,
+# so the extension can never race itself: the worst case is that the user clicks
+# Generate immediately and waits exactly as long as they would have anyway.
+
+_preload_thread: threading.Thread | None = None
+_preload_reinstated = False
+
+
+def preload_async(width: int = 0, height: int = 0) -> bool:
+    """Start warming Stage 1's weights back into VRAM in the background.
+
+    ``width``/``height`` size the VRAM budget, and are the *current*
+    generation's Stage 1 size because the next one's is not knowable yet. That
+    only affects how much room is freed, and ``before_process`` re-checks
+    against the real size before Stage 1 runs.
+
+    Returns True if a preload was started.
+    """
+    global _preload_thread
+
+    if not option(OPT_PRELOAD, True):
+        return False
+    if _pending_restore is None:
+        return False  # nothing was swapped out, so nothing to swap back
+
+    join_preload()
+    _preload_thread = threading.Thread(
+        target=_preload_worker,
+        args=(width, height),
+        name="model-chain-preload",
+        daemon=True,
+    )
+    _preload_thread.start()
+    return True
+
+
+def join_preload(timeout: float | None = None) -> None:
+    """Wait for any in-flight preload to finish."""
+    global _preload_thread
+
+    thread = _preload_thread
+    if thread is None or thread is threading.current_thread():
+        return
+
+    thread.join(timeout)
+    if not thread.is_alive():
+        _preload_thread = None
+
+
+def consume_preload() -> bool:
+    """True once if a background preload already swapped Stage 1 back in.
+
+    Lets ``before_process`` tell "nothing to do" apart from "already done", so
+    the VRAM budget still gets checked against this generation's real size.
+    """
+    global _preload_reinstated
+
+    was_reinstated, _preload_reinstated = _preload_reinstated, False
+    return was_reinstated
+
+
+def _preload_worker(width: int, height: int) -> None:
+    global _preload_reinstated
+
+    started = time.perf_counter()
+    try:
+        with _model_lock:
+            # reinstate_pending() re-reads the live selection, so a checkpoint
+            # changed in the UI since the generation ended is handled correctly
+            # here: either it is cached and gets swapped in, or this returns
+            # False and the next generation loads it from disk as usual.
+            if not reinstate_pending():
+                return
+
+            _preload_reinstated = True
+
+            from modules import shared
+
+            name = shared.opts.sd_model_checkpoint
+            make_vram_room(name, current_modules(), width, height, stage=STAGE_1)
+            moved = _load_current_to_gpu()
+    except Exception:
+        logger.warning("Model Chain: Stage 1 preload failed", exc_info=True)
+        return
+
+    logger.info(
+        "Model Chain: preloaded %s into VRAM in %.1fs — the next generation starts sampling immediately",
+        name,
+        time.perf_counter() - started,
+    )
+    if not moved:
+        logger.debug("Model Chain: preload moved no weights; they were already resident")
+
+
+def _load_current_to_gpu() -> int:
+    """Move the loaded checkpoint's weights onto the GPU now.
+
+    This is exactly the work the sampler would otherwise trigger on the next
+    Generate click, done through the host's own entry point so the model ends
+    up in the state normal sampling produces rather than one this extension
+    invented. Returns the bytes moved, as best as free VRAM can report it.
+    """
+    from backend import memory_management
+    from modules.sd_models import model_data
+
+    patchers = model_patchers(model_data.sd_model)
+    if not patchers:
+        return 0
+
+    before = free_vram_bytes()
+    memory_management.load_models_gpu(patchers)
+    return max(before - free_vram_bytes(), 0)
+
+
+STAGE_1 = "Stage 1"
+STAGE_2 = "Stage 2"
+
+_pinned_patchers: list = []
+"""Stage 1's text encoder and VAE, held resident across the Stage 2 switch."""
+
+
+def capture_stage_1_encoders() -> int:
+    """Remember Stage 1's text encoder and VAE so the Stage 2 switch can spare them.
+
+    Called while Model A is still the loaded model, immediately before the
+    switch. Only the encoders: the UNet is far too large to keep resident
+    alongside Stage 2's, and it is also the one part of Model A that Stage 2
+    genuinely has no use for.
+
+    The encoders are the opposite case. They are a small fraction of a
+    checkpoint but a large fraction of the *time*, because every switch pays to
+    move them: a measured Krea 2 -> Flux.2 cycle spent 3.7s on Stage 1's text
+    encoder against 5.6s on its UNet. Keeping them put removes that from every
+    subsequent generation.
+
+    Re-captured each generation, so pointing Stage 1 at a different checkpoint
+    leaves at most one generation's worth of stale entries -- and those are
+    dropped anyway by the ``current_loaded_models`` lookup in ``_pinned_keep``.
+
+    Returns the number of patchers captured.
+    """
+    global _pinned_patchers
+
+    _pinned_patchers = []
+    if not option(OPT_PIN_ENCODERS, True):
+        return 0
+
+    try:
+        from modules.sd_models import model_data
+
+        _pinned_patchers = model_patchers(model_data.sd_model, attrs=("clip", "vae"))
+    except Exception:
+        logger.debug("Model Chain: could not capture Stage 1's encoders", exc_info=True)
+        _pinned_patchers = []
+
+    return len(_pinned_patchers)
+
+
+def clear_pinned_encoders() -> None:
+    """Stop sparing Stage 1's encoders."""
+    global _pinned_patchers
+
+    _pinned_patchers = []
+
+
+def _loaded_entries_for(patchers: list) -> list:
+    """The host's ``LoadedModel`` records for ``patchers`` that are on the GPU now.
+
+    ``free_memory`` compares ``keep_loaded`` against its own registry entries,
+    not against patchers, so the patchers have to be looked up. Matching on
+    identity avoids depending on how ``LoadedModel`` defines equality.
+    """
+    if not patchers:
+        return []
+
+    try:
+        from backend import memory_management
+
+        registry = list(getattr(memory_management, "current_loaded_models", []))
+    except Exception:
+        return []
+
+    wanted = {id(p) for p in patchers}
+    return [entry for entry in registry if id(getattr(entry, "model", None)) in wanted]
+
+
+def _entry_vram_bytes(entry) -> int:
+    """VRAM held by one ``LoadedModel``, across host versions."""
+    for attribute in ("model_loaded_memory", "model_memory"):
+        method = getattr(entry, attribute, None)
+        if not callable(method):
+            continue
+        try:
+            size = int(method())
+        except Exception:
+            continue
+        if size > 0:
+            return size
+
+    try:
+        return int(entry.model.model_size())
+    except Exception:
+        return 0
+
+
+def _pinned_keep(required: int, stage: str) -> tuple[list, int]:
+    """Entries to spare in this eviction, and the VRAM they hold.
+
+    Pinning is only ever applied on the way *into* Stage 2, and only when the
+    incoming pass still fits with the pinned encoders in place. That condition
+    is not a nicety: pinning more than the card can spare is worse than not
+    pinning at all, because ``free_memory`` would fall short of its target and
+    ``load_models_gpu`` would then make up the difference by partially
+    unloading while it loads -- the slow path this whole function exists to
+    avoid. Failing to fit therefore drops the pin rather than the target.
+    """
+    if stage != STAGE_2 or not _pinned_patchers:
+        return [], 0
+
+    entries = _loaded_entries_for(_pinned_patchers)
+    if not entries:
+        return [], 0
+
+    pinned = sum(_entry_vram_bytes(entry) for entry in entries)
+    total = total_vram_bytes()
+
+    if total <= 0 or total - pinned < required:
+        logger.info(
+            "Model Chain: not pinning Stage 1's encoders — %.1f GB of VRAM less "
+            "%.1f GB pinned leaves too little for the %.1f GB %s pass",
+            total / _GB,
+            pinned / _GB,
+            required / _GB,
+            stage,
+        )
+        return [], 0
+
+    return entries, pinned
+
+
+def make_vram_room(target_name: str, modules=None, width: int = 0, height: int = 0, stage: str = STAGE_2) -> int:
     """Evict other models from VRAM if the Stage 2 pass will not otherwise fit.
 
     This is the "demote only under pressure" half of the residency policy, and
@@ -788,7 +1127,7 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
 
     Returns the number of bytes freed (0 when nothing needed doing).
     """
-    required = file_size_bytes(target_name, modules) + vram_headroom_bytes(width, height)
+    required = vram_required_bytes(target_name, modules, width, height)
     free = free_vram_bytes()
 
     if free <= 0:
@@ -803,10 +1142,24 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
         )
         return 0
 
+    keep, pinned = _pinned_keep(required, stage)
+
     try:
         from backend import memory_management
 
-        evicted = memory_management.free_memory(required, memory_management.get_torch_device())
+        device = memory_management.get_torch_device()
+        if keep:
+            try:
+                evicted = memory_management.free_memory(required, device, keep_loaded=keep)
+            except TypeError:
+                # A host without keep_loaded is a reason to skip pinning, never
+                # a reason to skip freeing -- falling through to no eviction at
+                # all would be a far worse outcome than an unpinned encoder.
+                logger.debug("Model Chain: free_memory does not take keep_loaded; not pinning")
+                keep, pinned = [], 0
+                evicted = memory_management.free_memory(required, device)
+        else:
+            evicted = memory_management.free_memory(required, device)
     except Exception:
         logger.warning("Model Chain: failed to free VRAM for %s", stage, exc_info=True)
         return 0
@@ -816,13 +1169,14 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
     names = [type(getattr(m, "model", m)).__name__ for m in (evicted or [])]
 
     logger.info(
-        "Model Chain: freed %.1f GB VRAM for %s (%.1f GB -> %.1f GB free, %.1f GB needed)%s",
+        "Model Chain: freed %.1f GB VRAM for %s (%.1f GB -> %.1f GB free, %.1f GB needed)%s%s",
         freed / _GB,
         stage,
         free / _GB,
         after / _GB,
         required / _GB,
         f"; offloaded {', '.join(names)}" if names else "",
+        f"; kept {pinned / _GB:.1f} GB of Stage 1 encoders resident" if keep else "",
     )
 
     if after < required:
@@ -876,9 +1230,13 @@ def cached_names() -> list[str]:
 
 def release_all() -> None:
     """Drop every cached model. Next use of any of them reloads from disk."""
-    global _pending_restore
+    global _pending_restore, _preload_reinstated
+
+    join_preload()
 
     _pending_restore = None
+    _preload_reinstated = False
+    clear_pinned_encoders()
     _cache.clear()
 
     try:

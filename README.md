@@ -240,6 +240,10 @@ Under **Settings → Model Chain**:
   RAM) — the ceiling on RAM held by the residency cache. This is a ceiling, not
   a reservation: the live free-RAM check is the real guard. Raise it if the
   console reports a model being refused.
+- **Preload Stage 1 after Stage 2 finishes** (default on) — see
+  [Preloading Stage 1](#preloading-stage-1).
+- **Keep Stage 1's text encoder and VAE in VRAM during Stage 2** (default on) —
+  see [Pinning Stage 1's encoders](#pinning-stage-1s-encoders).
 
 ## How it behaves
 
@@ -325,6 +329,66 @@ The RAM budget check is fail-safe rather than best-effort: host RAM exhaustion
 can hang or kill the whole process, so a model that would breach the budget is
 released instead of cached, and if system RAM cannot be detected at all the cache
 is disabled rather than guessed at.
+
+#### Pinning Stage 1's encoders
+
+When two models cannot both fit, the switch is dominated by moving weights, and
+the encoders are a disproportionate share of it. One measured Krea 2 → Flux.2
+cycle spent 3.7s moving Stage 1's text encoder against 5.6s for its UNet — for a
+component a fraction of the size.
+
+So when making room for Stage 2, Stage 1's text encoder and VAE are spared and
+only the UNets are swapped. Stage 2's own encoders stay evictable, which is the
+asymmetry that makes it worthwhile: Stage 1 is the model you always come back to.
+
+Two conditions have to hold, and both fail quietly and visibly in the log:
+
+- **Stage 2 must still fit alongside them.** Pinning more than the card can
+  spare is worse than not pinning at all — the eviction would fall short of its
+  target and the host would then make up the difference by partially unloading
+  *while* it loads, which is the slow path this is trying to avoid.
+- **The switch must be a warm one.** A cold first load of Stage 2 goes through
+  `forge_model_reload()`, which calls `unload_all_models()` and takes everything
+  down regardless. From the second generation onward the switch is warm and the
+  pin applies.
+
+#### Preloading Stage 1
+
+Restoring Stage 1 is two costs. The pointer swap out of the RAM cache is cheap;
+moving the weights back into VRAM is not, and it happens lazily the moment the
+sampler first asks for them. Left to the next Generate click, you wait through
+the whole move before a single step runs.
+
+Instead it starts as soon as Stage 2 finishes, on a background thread, so it
+overlaps the time you spend looking at the images you just got. Running it
+inline would gain nothing — `postprocess` runs before the generation call
+returns, so an inline preload would just move the same wait to before the
+gallery appears.
+
+Nothing depends on it completing. The next generation joins the thread before
+touching any model, so the worst case is exactly the wait you would have had
+anyway, and if the preload failed or never started, that generation loads Stage 1
+the way it always did. Changing checkpoint in the UI between generations is
+handled too: the preload re-reads the live selection, so it either warms the
+model you actually picked or does nothing.
+
+The one thing it does introduce is a few seconds after each generation where a
+background thread is moving weights. If you change checkpoints in the UI during
+that window and see instability, turn it off in **Settings → Model Chain**.
+
+#### Sizing the VRAM budget
+
+A checkpoint occupies more VRAM than its file occupies on disk: weights stored
+below the compute dtype are widened on load, and LoRA patches and the patcher's
+own bookkeeping are not in the file at all. The budget therefore adds a
+proportional overhead on top of the file size before freeing.
+
+Getting this wrong is what produces `Unloaded partially` in the log immediately
+before a UNet load — the eviction hit its target and stopped, the target was
+short, and the host made up the difference the expensive way. Two measured
+chains ran short by 11% and 14% of model size. Over-estimating is much cheaper
+than under-estimating: it evicts a model that might have fitted, and that model
+is still warm in the RAM cache.
 
 ### Interruption
 
@@ -500,8 +564,9 @@ schedule-type overrides, aspect-ratio preservation and grid alignment, infotext
 round-tripping, the residency cascade and RAM budget, per-checkpoint
 VAE/text-encoder selection and its cache keying, model-flag restoration across a
 warm swap, edit-mode scoping and polarity, preset round-tripping and recovery
-from a damaged store, interruption handling, the UI's control-order contract,
-and inertness when disabled.
+from a damaged store, encoder pinning and its fallbacks, the background Stage 1
+preload, interruption handling, the UI's control-order contract, and inertness
+when disabled.
 
 The criteria that need real hardware — that an SDXL → Flux.2-Klein chain
 produces coherent output, that a Krea 2 Edit refine responds to its Edit LoRA,
