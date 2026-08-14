@@ -62,9 +62,20 @@ adjustment."""
 # Settings
 # --------------------------------------------------------------------------- #
 
+SETTINGS_SECTION = ("model_chain", "Model Chain")
+"""Identifier and title of the Settings page section.
+
+The first element must not be None. ``ui_settings`` skips any option whose
+section id is None -- that is the host's own idiom for settings it stores but
+deliberately never draws, which is how ``sd_checkpoint_hash`` and
+``disabled_extensions`` stay out of the Settings page. Registered with None here
+these options exist and can be read and saved, but no control is ever built for
+them, so there is nothing to tick.
+"""
+
 shared.options_templates.update(
     shared.options_section(
-        (None, "Model Chain"),
+        SETTINGS_SECTION,
         {
             "model_chain_save_stage1": shared.OptionInfo(
                 False,

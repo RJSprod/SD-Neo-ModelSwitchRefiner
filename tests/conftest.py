@@ -252,7 +252,19 @@ def _install_modules() -> None:
     shared.prompt_styles = None
     shared.OptionInfo = FakeOptionInfo
     shared.options_templates = {}
-    shared.options_section = lambda section, options: options
+
+    def options_section(section, options):
+        """Stamps the section onto each option, as the host's own does.
+
+        Faithful because the section identifier decides whether a setting is
+        ever drawn: ui_settings skips anything whose section id is None.
+        Discarding it here would let that go unnoticed.
+        """
+        for option in options.values():
+            option.section = section
+        return options
+
+    shared.options_section = options_section
     shared.cmd_opts = types.SimpleNamespace(disable_console_progressbars=False)
 
     class FakeTotalTqdm:

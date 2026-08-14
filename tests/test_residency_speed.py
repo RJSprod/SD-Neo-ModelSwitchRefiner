@@ -623,6 +623,28 @@ class TestSettingsRegistration:
         assert host.shared.options_templates[name].default is True
         assert mc_memory.option(name, True) is True
 
+    def test_every_setting_lands_in_a_section_that_is_drawn(self, host):
+        """A None section id registers the setting but builds no control for it.
+
+        That is the host's idiom for options it stores and never shows -- the
+        same mechanism that keeps sd_checkpoint_hash off the Settings page. Used
+        by mistake it produces a setting that exists, reads, and saves, but that
+        the user can never find or change.
+        """
+        import model_chain
+
+        assert model_chain.SETTINGS_SECTION[0] is not None
+
+        ours = [
+            option
+            for name, option in host.shared.options_templates.items()
+            if name.startswith("model_chain_")
+        ]
+        assert ours, "no Model Chain settings were registered at all"
+        for option in ours:
+            assert option.section == model_chain.SETTINGS_SECTION
+            assert option.section[0] is not None, f"{option.label} would never be drawn"
+
     def test_the_host_value_wins_over_the_fallback(self, host):
         """Otherwise opting in to the preload could not turn it on."""
         host.shared.opts.model_chain_preload_stage1 = True
