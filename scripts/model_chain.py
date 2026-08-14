@@ -322,6 +322,10 @@ class ScriptModelChain(scripts.Script):
         # Extra-network tags last dropped from an inherited prompt, so the
         # console says so once per generation rather than once per image.
         self._dropped_networks: list[str] = []
+        # The loaded model's geometry state as Stage 1 was about to sample.
+        # Captured there because that is the only moment it describes Stage 1;
+        # by the time a wrong size is noticed, Model B is loaded.
+        self._stage1_geometry = ""
 
     def title(self):
         return "Model Chain"
@@ -936,6 +940,9 @@ class ScriptModelChain(scripts.Script):
 
         self._armed = False
         self._dropped_networks = []
+        # After the reinstate above, so this describes the model Stage 1 is
+        # about to sample with rather than whatever Stage 2 left loaded.
+        self._stage1_geometry = mc_memory.describe_latent_geometry()
 
         if self._in_stage_2 or not enabled:
             return
@@ -1209,12 +1216,26 @@ class ScriptModelChain(scripts.Script):
         stage1_width, stage1_height = stage1_images[0].width, stage1_images[0].height
         predicted = mc_arch.stage1_size(p)
         if (stage1_width, stage1_height) != predicted:
-            logger.info(
-                "Model Chain: Stage 1 produced %dx%d where %dx%d was expected from the "
-                "generation settings — Stage 2 follows the image it was given.",
+            # Warned, not noted: Stage 1 sampling at a size nobody asked for is
+            # a fault in its own right, and Stage 2 faithfully preserving it
+            # makes the extension look like the culprit. The geometry state is
+            # carried along because it is what decided the size, and it is no
+            # longer inspectable by the time anyone reads this.
+            logger.warning(
+                "Model Chain: Stage 1 produced %dx%d where %dx%d was requested — Stage 2 "
+                "refines the image it was given, so the final output will be %dx%d. "
+                "Stage 1's model state was: %s",
                 stage1_width,
                 stage1_height,
                 *predicted,
+                stage1_width,
+                stage1_height,
+                self._stage1_geometry or "not captured",
+            )
+            processed.comments += (
+                f"\nModel Chain: Stage 1 produced {stage1_width}x{stage1_height}, not the "
+                f"{predicted[0]}x{predicted[1]} that was requested — the size was already "
+                "lost before Stage 2 ran."
             )
 
         # Recorded now that it can be observed. process() had to write this

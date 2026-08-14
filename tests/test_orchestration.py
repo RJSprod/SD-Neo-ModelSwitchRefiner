@@ -425,6 +425,45 @@ class TestOutputSize:
         assert (call.width, call.height) == (480, 640)
 
 
+class TestStageOneSize:
+    """A wrong size can be lost before Stage 2 ever runs.
+
+    Stage 1's images never reach the gallery, so a Stage 1 that sampled at the
+    wrong resolution is invisible: the user sees only Stage 2 faithfully
+    preserving it, and blames the multiplier.
+    """
+
+    def test_a_stage_1_size_nobody_asked_for_is_reported(self, chain, host, image_factory):
+        p = make_p(host, width=640, height=960)
+        processed = make_processed(host, p, image_factory)
+        processed.images = [image_factory(320, 480)]
+
+        run_chain(chain, host, p, processed, size_multiplier=1.0)
+
+        assert "320x480" in processed.comments
+        assert "640x960" in processed.comments
+
+    def test_a_matching_stage_1_says_nothing(self, chain, host, image_factory):
+        p = make_p(host, width=640, height=960)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, size_multiplier=1.0)
+
+        assert "was requested" not in processed.comments
+
+    def test_the_multiplier_is_not_blamed_for_it(self, chain, host, image_factory):
+        """Stage 2 still refines at 1.0x of what it was handed."""
+        p = make_p(host, width=640, height=960)
+        processed = make_processed(host, p, image_factory)
+        processed.images = [image_factory(320, 480)]
+
+        run_chain(chain, host, p, processed, size_multiplier=1.0)
+
+        call = chain.refine_calls[0]
+        assert (call.width, call.height) == (320, 480)
+        assert "did not honour" not in processed.comments
+
+
 class TestDeliveredSize:
     """Stage 2 requests a size; it does not control what comes back."""
 
