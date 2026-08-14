@@ -133,6 +133,49 @@ class TestReserve:
         assert mc_memory.host_reserved_bytes() == 0
 
 
+class TestTheRequirementStaysAttainable:
+    """Asking to free more VRAM than the card holds fails in the worst way.
+
+    ``free_memory`` cannot reach an impossible target, so it evicts everything
+    it is allowed to and still reports a shortfall -- the pass then runs having
+    thrown away models it could have kept, and the console warns about spilling
+    on every single generation. A real log did exactly this: a 13.9 GB model
+    asking for 24.3 GB on a 24 GB card, every cycle, because a learned reserve
+    had grown to 10.4 GB.
+    """
+
+    def test_the_requirement_never_exceeds_the_card(self, warming, monkeypatch):
+        monkeypatch.setattr(mc_memory, "total_vram_bytes", lambda: 24 * GB)
+        monkeypatch.setattr(mc_memory, "vram_headroom_bytes", lambda w=0, h=0: 20 * GB)
+
+        required = mc_memory._pass_requirement("A", None, 1024, 1024, [])
+
+        assert required <= 24 * GB
+
+    def test_the_model_is_kept_and_the_margin_is_what_gives(self, warming, monkeypatch):
+        """The model has to be resident to sample at all; the reserve is a
+        margin, and one that cannot be honoured is better spent than pretended."""
+        monkeypatch.setattr(mc_memory, "total_vram_bytes", lambda: 16 * GB)
+        monkeypatch.setattr(mc_memory, "vram_headroom_bytes", lambda w=0, h=0: 20 * GB)
+        monkeypatch.setattr(mc_memory, "file_size_bytes", lambda name, mods=None: 12 * GB)
+
+        model = 12 * GB * (1 + mc_memory.VRAM_MODEL_OVERHEAD_FRACTION)
+        assert mc_memory._pass_requirement("A", None, 1024, 1024, []) >= model
+
+    def test_an_unknowable_card_size_changes_nothing(self, warming, monkeypatch):
+        monkeypatch.setattr(mc_memory, "total_vram_bytes", lambda: 0)
+        monkeypatch.setattr(mc_memory, "vram_headroom_bytes", lambda w=0, h=0: 20 * GB)
+
+        assert mc_memory._pass_requirement("A", None, 1024, 1024, []) > 20 * GB
+
+    def test_a_pass_that_fits_is_left_alone(self, warming, monkeypatch):
+        monkeypatch.setattr(mc_memory, "total_vram_bytes", lambda: 24 * GB)
+        monkeypatch.setattr(mc_memory, "vram_headroom_bytes", lambda w=0, h=0: 2 * GB)
+
+        patchers = [warming.stage_1.patchers.unet]  # 8 GB
+        assert mc_memory._pass_requirement("A", None, 1024, 1024, patchers) == 10 * GB
+
+
 class TestObservedPeaks:
     """Automatic mode is meant to get better at this, not stay a guess."""
 
@@ -161,15 +204,18 @@ class TestObservedPeaks:
 
     def test_the_observation_carries_a_margin(self, warming, torch):
         """A peak is the largest thing that happened, not the largest possible."""
-        torch.peak = 15 * GB  # 2 GB of activations over 1 megapixel
+        torch.peak = 14.5 * GB  # 1.5 GB of activations over ~1 megapixel
         mc_memory.observe_activation_peak(1024, 1024)
 
         assert mc_memory.vram_headroom_bytes(1024, 1024) == pytest.approx(
-            2 * GB * mc_memory.PEAK_MARGIN, rel=0.01
+            1.5 * GB * mc_memory.PEAK_MARGIN, rel=0.01
         )
 
-    def test_it_scales_the_learned_figure_by_pass_size(self, warming, torch):
-        torch.peak = 15 * GB
+    def test_it_scales_the_learned_figure_by_pass_size(self, warming, torch, monkeypatch):
+        # A card large enough that the fraction cap cannot be what is being
+        # measured here; scaling is.
+        monkeypatch.setattr(mc_memory, "total_vram_bytes", lambda: 80 * GB)
+        torch.peak = 14.5 * GB
         mc_memory.observe_activation_peak(1024, 1024)
 
         small = mc_memory.vram_headroom_bytes(1024, 1024)
@@ -192,8 +238,36 @@ class TestObservedPeaks:
         torch.peak = 400 * GB
         mc_memory.observe_activation_peak(1024, 1024)
 
-        ceiling = mc_memory.PEAK_CEILING * static(1024, 1024) * mc_memory.PEAK_MARGIN
-        assert mc_memory.vram_headroom_bytes(1024, 1024) <= ceiling
+        assert mc_memory.observed_peaks()[0] == mc_memory.MAX_LEARNED_BYTES_PER_MEGAPIXEL
+
+    def test_a_small_pass_cannot_authorise_a_huge_rate_for_a_large_one(self, warming, torch):
+        """Regression, from a real log. The ceiling used to be a multiple of the
+        static estimate for the pass that produced the reading -- and that
+        estimate is mostly a flat 1 GB, so dividing it by a small pass's
+        megapixels let 512x512 authorise 15 GB per megapixel. The session then
+        carried that rate into every larger pass, and reserved 10.4 GB for a
+        1280x960 one: more than the 13.9 GB model it was protecting."""
+        torch.peak = 60 * GB
+        mc_memory.observe_activation_peak(512, 512)
+
+        learned = mc_memory.observed_peaks()[0]
+        assert learned <= mc_memory.MAX_LEARNED_BYTES_PER_MEGAPIXEL
+        assert mc_memory.vram_headroom_bytes(1280, 960) < 4 * GB
+
+    def test_a_learned_reserve_never_annexes_the_card(self, warming, torch):
+        """The learned term specifically. The a-priori formula is not clamped
+        here -- a genuinely huge pass does need a lot of headroom, and trimming
+        that to something the card can actually give is _attainable_headroom's
+        job, not this one's."""
+        torch.peak = 400 * GB
+        mc_memory.observe_activation_peak(2048, 2048)
+
+        total = mc_memory.total_vram_bytes()
+        assert mc_memory._observed_headroom_bytes(4096, 4096) <= total * mc_memory.MAX_RESERVE_FRACTION
+
+    def test_a_manual_reserve_is_still_not_clamped(self, warming, host):
+        host.shared.opts.model_chain_vram_reserve_gb = 20.0
+        assert mc_memory.vram_headroom_bytes(1024, 1024) == 20 * GB
 
     def test_a_peak_below_the_static_estimate_changes_nothing(self, warming, torch):
         torch.peak = 13 * GB + 1  # essentially no activations
