@@ -411,6 +411,37 @@ def snapshot_model_flags() -> dict:
         return {}
 
 
+def describe_latent_geometry() -> str:
+    """The loaded model's state that decides what size a pass comes out at.
+
+    ``process_images_inner`` builds its noise as ``(latent_channels, [frames,]
+    height // 8, width // 8)``, branching on the engine's ``is_wan``, and the
+    VAE's own ratio turns that back into pixels. Those four values are the whole
+    geometry contract, and a warm swap restores them by pointer rather than by
+    running the loader -- so when an output arrives at the wrong size, this is
+    the state that says which of them stopped describing the loaded model.
+
+    Best effort by construction: it is only ever used to annotate a report.
+    """
+    try:
+        model = model_data_sd_model()
+        if model is None:
+            return "no model loaded"
+
+        vae = getattr(getattr(model, "forge_objects", None), "vae", None)
+        flags = snapshot_model_flags()
+        active = ", ".join(name for name, value in flags.items() if value) or "none"
+
+        return (
+            f"engine={type(model).__name__} is_wan={getattr(model, 'is_wan', '?')} "
+            f"vae={type(getattr(vae, 'first_stage_model', vae)).__name__} "
+            f"latent_channels={getattr(vae, 'latent_channels', '?')} "
+            f"downscale={getattr(vae, 'downscale_ratio', '?')} flags={active}"
+        )
+    except Exception:
+        return "unavailable"
+
+
 def _apply_model_flags(flags: dict) -> None:
     """Re-apply captured flags and clear per-generation latent state.
 
