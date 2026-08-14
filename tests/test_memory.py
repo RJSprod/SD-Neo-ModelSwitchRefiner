@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import types
 
 import pytest
@@ -216,18 +217,32 @@ class TestPlan:
 # --------------------------------------------------------------------------- #
 
 
+LATENT_SCALES: dict[str, object] = {}
+"""``upscale_ratio`` per checkpoint name, for the tests that care.
+
+Mirrors ``backend.patcher.vae``: an int for the 2D VAEs (8 normally, 16 for
+Flux.2), and a tuple for a Wan VAE -- which is why the host's ``isinstance``
+check falls back to 8 rather than reading the tuple.
+"""
+
+
 class FakeModel:
     def __init__(self, name):
         self.name = name
         self.sd_checkpoint_info = types.SimpleNamespace(
             filename=f"/models/{name}", name_for_extra=name, sha256=f"sha-{name}"
         )
+        vae = types.SimpleNamespace(upscale_ratio=LATENT_SCALES.get(name, 8))
+        self.forge_objects = types.SimpleNamespace(vae=vae)
+        self.forge_objects_original = self.forge_objects
 
 
 @pytest.fixture
 def residency(host, monkeypatch):
     """Fakes the host's single-model slot and its reload entry point."""
     state = types.SimpleNamespace(reloads=0, selection="A")
+
+    LATENT_SCALES.clear()
 
     model_data = host.sd_models.model_data
     model_data.sd_model = FakeModel("A")
@@ -252,6 +267,11 @@ def residency(host, monkeypatch):
         key = str(model_data.forge_loading_parameters)
         model_data.sd_model = FakeModel(model_data.forge_loading_parameters["checkpoint_info"])
         model_data.forge_hash = key
+        # The host's own last act before returning: opt_f is rewritten from the
+        # freshly loaded VAE, which is what makes it describe the last *load*
+        # rather than the model that happens to be in the slot.
+        ratio = model_data.sd_model.forge_objects.vae.upscale_ratio
+        host.processing.opt_f = ratio if isinstance(ratio, int) else 8
         return model_data.sd_model, True
 
     monkeypatch.setattr(host.sd_models, "forge_model_reload", forge_model_reload)
@@ -469,6 +489,190 @@ class TestModelFlags:
             assert flags.krea2 is False
             mc_memory.ensure_resident("B")
             assert flags.krea2 is True
+
+
+# --------------------------------------------------------------------------- #
+# Latent scale across a warm swap
+# --------------------------------------------------------------------------- #
+
+
+WAN_RATIO = (lambda a: max(0, a * 4 - 3), 8, 8)
+"""What a Wan VAE (Krea 2) puts in ``upscale_ratio``: a tuple, not an int."""
+
+
+class TestLatentScale:
+    """``modules.processing.opt_f`` has to travel with the cached model too.
+
+    It is the divisor ``process_images_inner`` applies to the requested pixel
+    size to shape the noise, and ``forge_model_reload`` rewrites it from the
+    VAE of whatever it just loaded. A warm swap skips the loader, so left alone
+    the divisor keeps describing the other stage's model -- and the pass is
+    then sampled at the wrong size, which is only visible in the output image.
+    """
+
+    @pytest.mark.parametrize(
+        "ratio, expected",
+        [
+            (8, 8),           # SD / SDXL / Flux.1 / Qwen
+            (16, 16),         # Flux.2, including Klein
+            (WAN_RATIO, 8),   # Wan / Krea 2: a tuple takes the host's fallback
+            (True, 8),        # nonsense: the fallback, never int(True) == 1
+        ],
+    )
+    def test_it_reads_the_scale_the_loader_would_have_set(self, ratio, expected):
+        model = types.SimpleNamespace(
+            forge_objects=types.SimpleNamespace(
+                vae=types.SimpleNamespace(upscale_ratio=ratio)
+            )
+        )
+        assert mc_memory.latent_scale_of(model) == expected
+
+    def test_a_model_with_no_readable_vae_gets_no_opinion(self):
+        """None means "leave it alone" -- guessing here is the failure itself."""
+        assert mc_memory.latent_scale_of(types.SimpleNamespace()) is None
+        assert mc_memory.latent_scale_of(
+            types.SimpleNamespace(forge_objects=types.SimpleNamespace(vae=object()))
+        ) is None
+
+    def test_it_falls_back_to_the_original_objects(self):
+        """A generation reassigns ``forge_objects``; both carry the same VAE."""
+        model = types.SimpleNamespace(
+            forge_objects_original=types.SimpleNamespace(
+                vae=types.SimpleNamespace(upscale_ratio=16)
+            )
+        )
+        assert mc_memory.latent_scale_of(model) == 16
+
+    def test_warm_swap_restores_the_scale_of_the_model_being_restored(self, residency, host):
+        residency.model_data.sd_model.forge_objects.vae.upscale_ratio = WAN_RATIO
+        LATENT_SCALES["B"] = 16
+
+        mc_memory.ensure_resident("B")
+        assert host.processing.opt_f == 16  # the loader ran
+
+        assert mc_memory.ensure_resident("A") == "warm"
+        assert host.processing.opt_f == 8
+
+    def test_warm_swap_forward_restores_the_target_scale(self, residency, host):
+        residency.model_data.sd_model.forge_objects.vae.upscale_ratio = WAN_RATIO
+        LATENT_SCALES["B"] = 16
+
+        mc_memory.ensure_resident("B")
+        mc_memory.ensure_resident("A")
+        host.processing.opt_f = 8  # A's divisor, so the swap has to change it
+
+        assert mc_memory.ensure_resident("B") == "warm"
+        assert host.processing.opt_f == 16
+
+    def test_reinstating_a_deferred_switch_also_restores_the_scale(self, residency, host):
+        """The exact sequence a chained generation runs.
+
+        Stage 2 defers the swap back to Stage 1 to the start of the next
+        generation, so this is where the second run's Stage 1 gets its divisor
+        -- and where it did not get one before.
+        """
+        residency.model_data.sd_model.forge_objects.vae.upscale_ratio = WAN_RATIO
+        LATENT_SCALES["B"] = 16
+
+        mc_memory.ensure_resident("B")
+        mc_memory.restore_selection("A")
+
+        assert mc_memory.reinstate_pending() is True
+        assert host.processing.opt_f == 8
+
+    def test_a_second_full_chain_still_samples_at_the_requested_size(self, residency, host):
+        """The reported bug, run end to end.
+
+        Krea 2 (a Wan VAE, divisor 8) into Flux.2 Klein (divisor 16). The first
+        generation loads both from disk and is correct. The second warm-swaps
+        Krea 2 back in, and before the fix it sampled under Flux.2's 16: a
+        640x960 request became a 60x40 latent and a 320x480 image, which Stage 2
+        then faithfully refined at half size.
+        """
+        residency.model_data.sd_model.forge_objects.vae.upscale_ratio = WAN_RATIO
+        LATENT_SCALES["B"] = 16
+
+        requested = (960, 640)
+
+        def sampled_size():
+            """What ``process_images_inner`` would build the noise from."""
+            scale = host.processing.opt_f
+            return tuple(dimension // scale * scale for dimension in requested)
+
+        for _ in range(2):
+            # Stage 1.
+            mc_memory.reinstate_pending()
+            assert host.processing.opt_f == 8
+            assert sampled_size() == requested
+
+            # Stage 2, then the deferred swap back.
+            mc_memory.ensure_resident("B")
+            assert host.processing.opt_f == 16
+            mc_memory.restore_selection("A")
+
+    def test_repeated_switching_keeps_the_scale_in_step_with_the_model(self, residency, host):
+        residency.model_data.sd_model.forge_objects.vae.upscale_ratio = WAN_RATIO
+        LATENT_SCALES["B"] = 16
+
+        mc_memory.ensure_resident("B")
+
+        for _ in range(3):
+            mc_memory.ensure_resident("A")
+            assert host.processing.opt_f == 8
+            mc_memory.ensure_resident("B")
+            assert host.processing.opt_f == 16
+
+    def test_a_model_without_a_vae_leaves_the_scale_alone(self, residency, host):
+        """Better a stale divisor than a guessed one -- and nothing raises."""
+        for model in (residency.model_data.sd_model,):
+            del model.forge_objects
+            del model.forge_objects_original
+
+        host.processing.opt_f = 16
+        mc_memory.ensure_resident("B")
+        mc_memory.ensure_resident("A")
+
+        assert host.processing.opt_f == 8  # B's loader set it; A had no opinion
+
+
+class TestAlignLatentScale:
+    """The check at the top of a generation, for swaps nothing accounted for."""
+
+    def test_it_corrects_a_divisor_left_behind_by_another_model(self, residency, host):
+        residency.model_data.sd_model.forge_objects.vae.upscale_ratio = 8
+        host.processing.opt_f = 16
+
+        assert mc_memory.align_latent_scale() is True
+        assert host.processing.opt_f == 8
+
+    def test_it_says_and_does_nothing_when_the_two_agree(self, residency, host):
+        residency.model_data.sd_model.forge_objects.vae.upscale_ratio = 16
+        host.processing.opt_f = 16
+
+        assert mc_memory.align_latent_scale() is False
+        assert host.processing.opt_f == 16
+
+    def test_it_leaves_an_unreadable_model_alone(self, residency, host):
+        del residency.model_data.sd_model.forge_objects
+        del residency.model_data.sd_model.forge_objects_original
+        host.processing.opt_f = 16
+
+        assert mc_memory.align_latent_scale() is False
+        assert host.processing.opt_f == 16
+
+    def test_it_tolerates_no_model_at_all(self, host):
+        host.sd_models.model_data.sd_model = None
+        assert mc_memory.align_latent_scale() is False
+
+    def test_the_correction_names_both_numbers(self, residency, host, caplog):
+        """The log line has to be enough to place the fault without the source."""
+        residency.model_data.sd_model.forge_objects.vae.upscale_ratio = 8
+        host.processing.opt_f = 16
+
+        with caplog.at_level(logging.WARNING, logger="model_chain"):
+            mc_memory.align_latent_scale()
+
+        assert "16" in caplog.text and "8" in caplog.text
 
 
 class TestClearReferences:

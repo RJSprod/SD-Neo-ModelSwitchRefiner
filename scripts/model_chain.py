@@ -944,6 +944,12 @@ class ScriptModelChain(scripts.Script):
 
         self._armed = False
         self._dropped_networks = []
+        # The divisor that turns the requested pixel size into a latent shape is
+        # a host global rewritten by the loader, so it describes whichever
+        # checkpoint was loaded last rather than the one that is loaded now. The
+        # warm swap keeps it in step; this is the check that it is, made while
+        # correcting it is still free.
+        mc_memory.align_latent_scale()
         # After the reinstate above, so this describes the model Stage 1 is
         # about to sample with rather than whatever Stage 2 left loaded.
         self._stage1_geometry = mc_memory.describe_latent_geometry()

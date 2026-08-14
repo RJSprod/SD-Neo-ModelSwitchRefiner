@@ -411,15 +411,123 @@ def snapshot_model_flags() -> dict:
         return {}
 
 
+DEFAULT_LATENT_SCALE = 8
+"""``modules.processing.opt_f``'s value for every VAE that does not override it.
+
+The host's own fallback, repeated here because the warm path has to reproduce
+the loader's arithmetic exactly rather than approximately.
+"""
+
+
+def _model_vae(model):
+    """The VAE the loader would read a model's latent scale from.
+
+    ``forge_objects`` is what ``forge_model_reload`` inspects; a generation
+    reassigns it from ``forge_objects_original`` on every batch, and the two
+    share the same VAE object, so either answers the question.
+    """
+    for attribute in ("forge_objects", "forge_objects_original"):
+        vae = getattr(getattr(model, attribute, None), "vae", None)
+        if vae is not None:
+            return vae
+    return None
+
+
+def latent_scale_of(model) -> int | None:
+    """Pixels per latent unit for ``model``, or None if it cannot be determined.
+
+    The one line of ``forge_model_reload`` that survives it::
+
+        processing.opt_f = vae.upscale_ratio if isinstance(vae.upscale_ratio, int) else 8
+
+    ``opt_f`` is a module-level global in ``modules.processing``, and it is what
+    ``process_images_inner`` divides the requested pixel size by to shape the
+    noise. Flux.2's VAE sets it to 16; SD/SDXL/Flux.1/Qwen set it to 8; a Wan
+    VAE (Krea 2) carries a tuple rather than an int, so it takes the fallback.
+
+    Returning None means "no opinion" -- a model whose VAE is not reachable is
+    left alone rather than guessed at, because writing the wrong divisor is the
+    exact failure this exists to prevent.
+    """
+    vae = _model_vae(model)
+    if vae is None:
+        return None
+
+    ratio = getattr(vae, "upscale_ratio", None)
+    if ratio is None:
+        return None
+
+    # bool is an int subclass and would sail through isinstance().
+    if isinstance(ratio, int) and not isinstance(ratio, bool):
+        return int(ratio)
+    return DEFAULT_LATENT_SCALE
+
+
+def current_latent_scale() -> int | None:
+    """``modules.processing.opt_f`` as it stands, or None if unreadable."""
+    try:
+        from modules import processing
+
+        return int(processing.opt_f)
+    except Exception:
+        return None
+
+
+def align_latent_scale() -> bool:
+    """Make the host's latent divisor agree with the model that is loaded.
+
+    The warm swap sets ``opt_f`` where the loader would have (see
+    ``_apply_latent_scale``), so in the ordinary run of things this finds
+    nothing to do. It exists because the value is a global that any code path
+    can leave stale, and the symptom -- a pass sampled at the wrong size -- is
+    both silent and expensive: it is only visible in the finished image.
+
+    Checked at the top of a generation, where correcting it is still free.
+    Returns True when it had to correct something, and says so in the log:
+    reaching here means a swap happened that nothing accounted for, which is
+    worth seeing even though it has just been made harmless.
+    """
+    try:
+        model = model_data_sd_model()
+        if model is None:
+            return False
+
+        wanted = latent_scale_of(model)
+        if wanted is None or wanted == current_latent_scale():
+            return False
+
+        from modules import processing
+
+        stale = processing.opt_f
+        processing.opt_f = wanted
+    except Exception:
+        # Called from a generation hook: a diagnostic that cannot read the
+        # state it checks must not be the thing that stops the generation.
+        logger.warning("Model Chain: failed to align the latent scale", exc_info=True)
+        return False
+
+    logger.warning(
+        "Model Chain: the host's latent scale said %s but the loaded model's VAE says %s — "
+        "corrected before sampling. Left alone, this pass would have been sampled at %s of "
+        "the requested size in each dimension.",
+        stale,
+        wanted,
+        f"{wanted}/{stale}",
+    )
+    return True
+
+
 def describe_latent_geometry() -> str:
     """The loaded model's state that decides what size a pass comes out at.
 
     ``process_images_inner`` builds its noise as ``(latent_channels, [frames,]
-    height // 8, width // 8)``, branching on the engine's ``is_wan``, and the
-    VAE's own ratio turns that back into pixels. Those four values are the whole
-    geometry contract, and a warm swap restores them by pointer rather than by
-    running the loader -- so when an output arrives at the wrong size, this is
-    the state that says which of them stopped describing the loaded model.
+    height // opt_f, width // opt_f)``, branching on the engine's ``is_wan``,
+    and the VAE's own ratio turns that back into pixels. Those values are the
+    whole geometry contract, and a warm swap restores them by pointer rather
+    than by running the loader -- so when an output arrives at the wrong size,
+    this is the state that says which of them stopped describing the loaded
+    model. ``opt_f`` is listed both as it stands and as the loaded model's VAE
+    would set it, because those disagreeing *is* the wrong size.
 
     Best effort by construction: it is only ever used to annotate a report.
     """
@@ -428,7 +536,7 @@ def describe_latent_geometry() -> str:
         if model is None:
             return "no model loaded"
 
-        vae = getattr(getattr(model, "forge_objects", None), "vae", None)
+        vae = _model_vae(model)
         flags = snapshot_model_flags()
         active = ", ".join(name for name, value in flags.items() if value) or "none"
 
@@ -436,7 +544,9 @@ def describe_latent_geometry() -> str:
             f"engine={type(model).__name__} is_wan={getattr(model, 'is_wan', '?')} "
             f"vae={type(getattr(vae, 'first_stage_model', vae)).__name__} "
             f"latent_channels={getattr(vae, 'latent_channels', '?')} "
-            f"downscale={getattr(vae, 'downscale_ratio', '?')} flags={active}"
+            f"downscale={getattr(vae, 'downscale_ratio', '?')} "
+            f"opt_f={current_latent_scale()} (model wants {latent_scale_of(model)}) "
+            f"flags={active}"
         )
     except Exception:
         return "unavailable"
@@ -458,6 +568,40 @@ def _apply_model_flags(flags: dict) -> None:
             setattr(dynamic_args, name, value)
     except Exception:
         logger.warning("Model Chain: failed to restore model flags on warm swap", exc_info=True)
+
+
+def _apply_latent_scale(model) -> None:
+    """Point ``modules.processing.opt_f`` at the model being restored.
+
+    The other thing ``forge_model_reload`` leaves behind that is not carried on
+    the model object. ``opt_f`` is the divisor turning the requested pixel size
+    into a latent shape, and it is global: the loader rewrites it on every load,
+    so it always describes whichever checkpoint was loaded last.
+
+    A warm swap skips the loader, so without this the divisor keeps describing
+    the *other* stage's model -- and a chain between two models with different
+    latent scales then samples at the wrong size from the second generation
+    onwards. Krea 2 (8) into Flux.2 Klein (16) is the case that showed it: the
+    first run loads both from disk and is correct, the second run warm-swaps
+    Krea 2 back in under Flux.2's 16, and Stage 1 samples a 60x40 latent for a
+    640x960 request and hands Stage 2 a 320x480 image. Stage 2 then faithfully
+    refines the half-size image it was given, which is where it surfaces.
+
+    Silent on the way through: this runs on every warm swap, and a line per
+    swap saying the divisor is still 8 would be noise. A model whose VAE cannot
+    be read leaves the value alone -- see ``latent_scale_of``.
+    """
+    scale = latent_scale_of(model)
+    if scale is None:
+        logger.debug("Model Chain: could not read the latent scale of the restored model")
+        return
+
+    try:
+        from modules import processing
+
+        processing.opt_f = scale
+    except Exception:
+        logger.warning("Model Chain: failed to restore the latent scale on warm swap", exc_info=True)
 
 
 @dataclass
@@ -1152,8 +1296,10 @@ def ensure_resident(name: str, modules=None) -> str:
             model_data.set_sd_model(entry.sd_model)
             model_data.forge_hash = target_key
             shared.opts.data["sd_checkpoint_hash"] = entry.sd_model.sd_checkpoint_info.sha256
-            # The loader did not run, so re-apply the model flags it would have set.
+            # The loader did not run, so re-apply the globals it would have set:
+            # the model flags, and the latent scale that sizes the next pass.
             _apply_model_flags(entry.model_flags)
+            _apply_latent_scale(entry.sd_model)
             prepared = _restore_prepared_state(entry, STAGE_2)
             processing.need_global_unload = False
             _log_restored(entry, prepared)
@@ -1222,6 +1368,7 @@ def reinstate_pending() -> bool:
         model_data.set_sd_model(entry.sd_model)
         model_data.forge_hash = key
         _apply_model_flags(entry.model_flags)
+        _apply_latent_scale(entry.sd_model)
         prepared = _restore_prepared_state(entry, STAGE_1)
         processing.need_global_unload = False
         _log_restored(entry, prepared)

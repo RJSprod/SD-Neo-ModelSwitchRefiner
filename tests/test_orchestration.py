@@ -505,6 +505,66 @@ class TestStageOneSize:
         assert "did not honour" not in processed.comments
 
 
+def load_model_with_latent_scale(host, ratio):
+    """Put a model whose VAE carries ``ratio`` in the host's single slot."""
+    host.sd_models.model_data.sd_model = types.SimpleNamespace(
+        forge_objects=types.SimpleNamespace(
+            vae=types.SimpleNamespace(upscale_ratio=ratio)
+        )
+    )
+
+
+class TestLatentDivisor:
+    """Where the reported half-size output was actually decided.
+
+    ``modules.processing.opt_f`` is the number the requested pixel size is
+    divided by to shape the noise. It is a host global that the loader rewrites
+    on every load, so after a warm swap -- which runs no loader -- it describes
+    the other stage's model. Stage 1 then samples a half-size latent, and Stage
+    2 faithfully refines the half-size image it is handed.
+    """
+
+    def test_a_stale_divisor_is_corrected_before_stage_1_samples(self, chain, host):
+        """Stage 2's model left it at 16; Stage 1's VAE says 8."""
+        load_model_with_latent_scale(host, 8)
+        host.processing.opt_f = 16
+
+        args = [DEFAULTS[name] for name in UI_ORDER]
+        chain.script.before_process(make_p(host, width=640, height=960), *args)
+
+        assert host.processing.opt_f == 8
+
+    def test_it_is_corrected_even_when_the_extension_is_disabled(self, chain, host):
+        """A divisor this extension's swap left behind is its own to clean up."""
+        load_model_with_latent_scale(host, 8)
+        host.processing.opt_f = 16
+
+        args = [DEFAULTS[name] for name in UI_ORDER]
+        args[UI_ORDER.index("enabled")] = False
+        chain.script.before_process(make_p(host), *args)
+
+        assert host.processing.opt_f == 8
+
+    def test_a_divisor_that_already_agrees_is_left_alone(self, chain, host):
+        load_model_with_latent_scale(host, 16)
+        host.processing.opt_f = 16
+
+        args = [DEFAULTS[name] for name in UI_ORDER]
+        chain.script.before_process(make_p(host), *args)
+
+        assert host.processing.opt_f == 16
+
+    def test_the_geometry_report_names_the_divisor(self, chain, host):
+        """The one number that explains a wrong size has to be in the report."""
+        load_model_with_latent_scale(host, 8)
+        host.processing.opt_f = 8
+
+        args = [DEFAULTS[name] for name in UI_ORDER]
+        chain.script.before_process(make_p(host), *args)
+
+        assert "opt_f=8" in chain.script._stage1_geometry
+
+
 class TestDeliveredSize:
     """Stage 2 requests a size; it does not control what comes back."""
 

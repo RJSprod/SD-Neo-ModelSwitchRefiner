@@ -287,6 +287,10 @@ def _install_modules() -> None:
     processing.need_global_unload = False
     processing.create_infotext = create_infotext
     processing.calls = []
+    # The host's module-level latent divisor. forge_model_reload() rewrites it
+    # from the loaded VAE on every load, and process_images_inner divides the
+    # requested pixel size by it to shape the noise.
+    processing.opt_f = 8
 
     class StableDiffusionProcessingImg2Img:
         def __init__(self, **kwargs):
@@ -483,6 +487,7 @@ def host():
     modules.shared.state.__dict__.update(FakeState().__dict__)
     modules.images.saved.clear()
     modules.processing.need_global_unload = False
+    modules.processing.opt_f = 8
 
     from backend.args import dynamic_args
 
