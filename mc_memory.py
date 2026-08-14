@@ -172,13 +172,31 @@ all push past it. The margin is the difference between "what we saw" and "what
 we are prepared to be surprised by".
 """
 
-PEAK_CEILING = 4.0
-"""How far an observation may exceed the static estimate before it is capped.
+MAX_LEARNED_BYTES_PER_MEGAPIXEL = 2.0 * VRAM_HEADROOM_PER_MEGAPIXEL
+"""Ceiling on the learned activation rate.
 
-Observed peaks are measured against currently resident weights, so a pass that
-evicted a model half way through attributes the evicted weights to activations
-and reads far too high. Over-reserving is not free -- it evicts models that
-would have fitted -- so a wild reading is clamped rather than believed.
+An observation is ``peak allocation - weights resident at the end of the pass``,
+and during a Model Chain generation weights move constantly, so anything that
+left the card during the window is counted as activations. The reading is
+therefore biased high by construction, and only bounded by how much moved.
+
+The bound has to be *scale-free*, which an earlier version of this was not. It
+capped the learned rate at a multiple of the static estimate for the pass that
+produced it -- but the static estimate is mostly a flat 1 GB, so dividing it by
+a small pass's megapixels let a 512x512 observation authorise 15 GB per
+megapixel, which then applied to every larger pass for the rest of the session.
+One real log reached 7.4 GB/megapixel against an a-priori 0.75, and the reserve
+that produced (10.4 GB for a 1280x960 pass) was larger than the model it was
+protecting. Expressing the ceiling in the same units as the a-priori rate is
+what makes it independent of where it was learned.
+"""
+
+MAX_RESERVE_FRACTION = 0.25
+"""Most of the card a *learned* reserve may claim.
+
+The second half of the same guard. A manual reserve is the user's decision and
+Forge's own reservation is the host's, so neither is clamped -- but nothing
+inferred from a measurement should be able to quietly annex half the card.
 """
 
 
@@ -316,9 +334,7 @@ def observe_activation_peak(width: int, height: int, stage: str = "") -> int:
     weights = _all_resident_bytes()
     megapixels = max((width * height) / 1_000_000, 0.05)
     per_megapixel = max(peak - weights, 0) / megapixels
-
-    ceiling = PEAK_CEILING * _static_headroom_bytes(width, height) / megapixels
-    per_megapixel = min(per_megapixel, ceiling)
+    per_megapixel = min(per_megapixel, MAX_LEARNED_BYTES_PER_MEGAPIXEL)
 
     _peak_observations += 1
     if per_megapixel > _peak_bytes_per_megapixel:
@@ -341,7 +357,13 @@ def _observed_headroom_bytes(width: int, height: int) -> int:
         return 0
 
     megapixels = max((width * height) / 1_000_000, 0.05)
-    return int(_peak_bytes_per_megapixel * megapixels * PEAK_MARGIN)
+    estimate = _peak_bytes_per_megapixel * megapixels * PEAK_MARGIN
+
+    total = total_vram_bytes()
+    if total > 0:
+        estimate = min(estimate, total * MAX_RESERVE_FRACTION)
+
+    return int(estimate)
 
 
 def observed_peaks() -> tuple[int, int]:
@@ -1745,7 +1767,30 @@ def _pass_requirement(target_name: str, modules, width: int, height: int, patche
     if size <= 0:
         size = int(file_size_bytes(target_name, modules) * (1.0 + VRAM_MODEL_OVERHEAD_FRACTION))
 
-    return size + vram_headroom_bytes(width, height)
+    return size + _attainable_headroom(size, width, height)
+
+
+def _attainable_headroom(model_bytes: int, width: int, height: int) -> int:
+    """The reserve, less anything the card could not have given anyway.
+
+    A requirement larger than the whole card is not a demanding target, it is an
+    impossible one, and it fails in the worst available way: ``free_memory`` is
+    asked for more than exists, so it evicts *everything* it is allowed to and
+    still reports a shortfall, and the pass then runs having thrown away models
+    it could have kept. A real log showed a 13.9 GB model asking for 24.3 GB on
+    a 24 GB card, on every single generation.
+
+    Trimming the reserve rather than the model is the right way round: the model
+    has to be resident to sample at all, whereas the reserve is a margin, and a
+    margin that cannot be honoured is better spent than pretended.
+    """
+    headroom = vram_headroom_bytes(width, height)
+
+    total = total_vram_bytes()
+    if total <= 0:
+        return headroom
+
+    return max(min(headroom, total - model_bytes), 0)
 
 
 def _resident_bytes(patchers: list) -> int:
@@ -1873,16 +1918,30 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
     )
 
     if after < needed:
-        logger.warning(
-            "Model Chain: still only %.1f GB VRAM free against %.1f GB left to load for a "
-            "%dx%d pass. Expect the driver to spill into system memory, which is "
-            "very slow. A smaller Stage 2 size multiplier, a lower Hires. fix "
-            "upscale, or a more heavily quantised Stage 2 model would each help.",
-            after / _GB,
-            needed / _GB,
-            width,
-            height,
-        )
+        total = total_vram_bytes()
+        if 0 < total < required:
+            # Not a shortfall to act on -- the pass is larger than the card. The
+            # advice below would be misleading here, because no amount of
+            # evicting reaches a target that does not fit in the first place.
+            logger.warning(
+                "Model Chain: the %s pass wants %.1f GB but the card holds %.1f GB, so part "
+                "of it will run from system memory however much is evicted. A more heavily "
+                "quantised model for this stage is the only thing that changes that.",
+                stage,
+                required / _GB,
+                total / _GB,
+            )
+        else:
+            logger.warning(
+                "Model Chain: still only %.1f GB VRAM free against %.1f GB left to load for a "
+                "%dx%d pass. Expect the driver to spill into system memory, which is "
+                "very slow. A smaller Stage 2 size multiplier, a lower Hires. fix "
+                "upscale, or a more heavily quantised Stage 2 model would each help.",
+                after / _GB,
+                needed / _GB,
+                width,
+                height,
+            )
 
     return freed
 

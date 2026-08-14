@@ -550,14 +550,32 @@ undercut by the others. In particular a manual reserve is a *floor*, not an
 override — setting 2 GB does not permit a 4096×4096 pass to run on 2 GB — and
 Forge's own reservation is never cancelled or reduced by this extension.
 
-**Automatic mode learns.** The static estimate cannot know your sampler, your
-batch size, or what else is hooked into the UNet, so after each pass the peak
-allocation is compared against the weights resident at the time and the
-difference is folded in as bytes-per-megapixel. The figure only ever moves
-upward: a pass that happened to be cheap is not evidence that the next one will
-be, and an under-reserve is the failure with no error message attached. A
-reading that comes in wildly high — which is what a pass that evicted a model
-mid-flight looks like — is capped rather than believed.
+**Automatic mode learns, within bounds.** The static estimate cannot know your
+sampler, your batch size, or what else is hooked into the UNet, so after each
+pass the peak allocation is compared against the weights resident at the time
+and the difference is folded in as bytes-per-megapixel. The figure only ever
+moves upward: a pass that happened to be cheap is not evidence that the next one
+will be, and an under-reserve is the failure with no error message attached.
+
+The bounds matter as much as the learning, because the measurement is biased
+high by construction — anything that left the card during the window is counted
+as activations. So the learned rate is capped at **twice the a-priori 0.75 GB
+per megapixel**, and the reserve it produces at **a quarter of the card**. Both
+caps are deliberately expressed in units that do not depend on the pass that
+produced the reading. An earlier version capped the rate at a multiple of the
+static estimate instead, and because that estimate is mostly a flat 1 GB,
+dividing it by a small pass's megapixels let a 512×512 observation authorise
+15 GB per megapixel — which the session then applied to everything larger. One
+log reached 7.4 GB/megapixel and reserved 10.4 GB for a 1280×960 pass: more
+than the 13.9 GB model it was protecting.
+
+**And the requirement never exceeds the card.** A target larger than physical
+VRAM is not demanding, it is impossible, and it fails in the worst available
+way: `free_memory` evicts everything it is allowed to, still reports a
+shortfall, and the pass runs having thrown away models it could have kept. When
+model plus reserve would not fit, the *reserve* is what gives — the model has to
+be resident to sample at all, whereas a margin that cannot be honoured is better
+spent than pretended.
 
 #### Spending what is left
 
