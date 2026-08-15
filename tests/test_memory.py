@@ -90,15 +90,22 @@ class TestCache:
         cache.admit(make_entry("A", 7), 64 * GB)
         assert cache.names() == ["A"]
 
-    def test_drop_releases_the_model_reference(self):
-        """Dropping the reference is what lets the GC reclaim system RAM."""
+    def test_drop_releases_the_caches_reference(self):
+        """Letting go of the entry is what lets the GC reclaim system RAM.
+
+        The cache's own reference is the only one it may release. Blanking the
+        entry as well reaches into whoever else is holding it -- and someone is:
+        ``reinstate_pending`` looks its entry up, then stashes the outgoing
+        model, which can evict the entry it is holding.
+        """
         cache = mc_memory._Cache()
         entry = make_entry("A", 7)
         cache.admit(entry, 64 * GB)
         cache.drop("key::A")
 
-        assert entry.sd_model is None
         assert cache.names() == []
+        assert cache.get("key::A") is None
+        assert entry.sd_model is not None
 
     def test_clear_empties_every_slot(self):
         cache = mc_memory._Cache()
@@ -235,6 +242,14 @@ class FakeModel:
         vae = types.SimpleNamespace(upscale_ratio=LATENT_SCALES.get(name, 8))
         self.forge_objects = types.SimpleNamespace(vae=vae)
         self.forge_objects_original = self.forge_objects
+
+
+class FakeInitialModel:
+    """The host's placeholder before anything is loaded.
+
+    Named to match: ``_is_real_model`` recognises it by class name, exactly as
+    it must recognise the host's own.
+    """
 
 
 @pytest.fixture
@@ -396,6 +411,98 @@ class TestRestoreSelection:
         mc_memory._cache.clear()
 
         assert mc_memory.reinstate_pending() is False
+
+    def test_stage_1_survives_being_evicted_by_the_stage_2_stash(self, residency, monkeypatch):
+        """The swap back stashes Stage 2, and that can evict Stage 1 itself.
+
+        The two models are the two largest things in the cache and Stage 2's
+        arrival is exactly when the budget runs out, so this is the ordinary
+        case on a machine with less spare RAM -- not a corner.
+        """
+        model_a = residency.model_data.sd_model
+        # Room for one model only, so stashing B must evict A.
+        monkeypatch.setattr(mc_memory, "cache_budget_bytes", lambda: 8 * GB)
+
+        mc_memory.ensure_resident("B")
+        mc_memory.restore_selection("A")
+
+        assert mc_memory.reinstate_pending() is True
+        assert residency.model_data.sd_model is model_a
+
+    def test_the_swap_back_never_installs_a_null_model(self, residency, monkeypatch):
+        """A null model here wedges the host until it is restarted.
+
+        forge_model_reload returns early while forge_hash matches, handing back
+        whatever is in the slot -- so an empty slot fails every generation from
+        then on, and retrying cannot clear it.
+        """
+        mc_memory.ensure_resident("B")
+        mc_memory.restore_selection("A")
+
+        # Whatever goes wrong, a cold load is the answer, never an empty slot.
+        monkeypatch.setattr(mc_memory, "_stash_current", lambda stage="": mc_memory._cache.clear())
+        for entry in list(mc_memory._cache._entries.values()):
+            entry.sd_model = None
+
+        assert mc_memory.reinstate_pending() is False
+        assert mc_memory._is_real_model(residency.model_data.sd_model)
+
+
+class TestDrop:
+    """Dropping releases the cache's hold; it must not reach into a caller's."""
+
+    def test_dropping_leaves_the_entry_usable(self):
+        entry = make_entry("A", 4)
+        mc_memory._cache.admit(entry, 64 * GB)
+
+        mc_memory._cache.drop(entry.key)
+
+        assert mc_memory._cache.get(entry.key) is None
+        assert entry.sd_model is not None
+
+    def test_eviction_leaves_the_evicted_entry_usable(self):
+        first = make_entry("A", 4)
+        second = make_entry("B", 4)
+        mc_memory._cache.admit(first, 6 * GB)
+        mc_memory._cache.admit(second, 6 * GB)  # no room for both -> evicts A
+
+        assert mc_memory.cached_names() == ["B"]
+        assert first.sd_model is not None
+
+
+class TestStaleLoadingHash:
+    """An empty model slot with a hash still asserting a load is unrecoverable.
+
+    forge_model_reload early-returns on a matching hash and hands back the empty
+    slot, so every generation fails identically until the WebUI restarts.
+    """
+
+    def test_a_stale_hash_is_cleared(self, residency):
+        residency.model_data.sd_model = None
+        residency.model_data.forge_hash = "key::something"
+
+        assert mc_memory.ensure_model_loadable() is True
+        assert residency.model_data.forge_hash == ""
+
+    def test_a_loaded_model_is_left_alone(self, residency):
+        hash_before = residency.model_data.forge_hash
+
+        assert mc_memory.ensure_model_loadable() is False
+        assert residency.model_data.forge_hash == hash_before
+
+    def test_a_fresh_start_is_not_mistaken_for_the_fault(self, residency):
+        """Before the first load: no model, and no hash claiming one either."""
+        residency.model_data.sd_model = FakeInitialModel()
+        residency.model_data.forge_hash = ""
+
+        assert mc_memory.ensure_model_loadable() is False
+
+    def test_the_placeholder_model_counts_as_no_model(self, residency):
+        residency.model_data.sd_model = FakeInitialModel()
+        residency.model_data.forge_hash = "key::something"
+
+        assert mc_memory.ensure_model_loadable() is True
+        assert residency.model_data.forge_hash == ""
 
 
 class TestRelease:

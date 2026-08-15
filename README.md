@@ -965,6 +965,18 @@ tests/test_residency_speed.py  a preload that fails must cost one generation
                                rather than every one
 ```
 
+One invariant in `mc_memory.py` is worth stating outright, because breaking it
+cost a user every generation until they restarted the WebUI: **the cache may
+release its own reference to a model, never a caller's.** `drop()` pops the
+entry and stops there. It must not blank `entry.sd_model`, because an entry
+handed out by `get()` is a live object someone may still be holding — and
+someone is. `reinstate_pending()` looks its entry up, then stashes the outgoing
+Stage 2 model, and that stash can evict the very entry it is holding: the two
+models are the two largest things in the cache, and Stage 2's arrival is exactly
+when the budget runs out. Blanking made the swap back install nothing, leaving
+the host with no model and `forge_hash` still asserting there was one — which
+`forge_model_reload()` believes, so every later generation died the same way.
+
 The criteria that need real hardware — that an SDXL → Flux.2-Klein chain
 produces coherent output, that a Krea 2 Edit refine responds to its Edit LoRA,
 that a LoRA visibly affects the refined image, that a warm switch is measurably

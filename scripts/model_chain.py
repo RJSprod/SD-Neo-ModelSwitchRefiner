@@ -1264,6 +1264,10 @@ class ScriptModelChain(scripts.Script):
         # the extension has since been disabled -- that is cleanup of our own
         # state, not extension behaviour.
         try:
+            # Before anything else, and whether or not the extension is on: a
+            # host left with no model but a loading hash that says otherwise
+            # fails every generation from here on, and only this notices.
+            mc_memory.ensure_model_loadable()
             # A preload started after the last generation may still be running.
             # Joining first means the worst case is the wait we would have had
             # anyway, never two threads moving weights at once.

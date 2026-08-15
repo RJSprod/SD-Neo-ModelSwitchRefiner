@@ -701,11 +701,26 @@ class _Cache:
         self.drop(oldest.key)
 
     def drop(self, key: str) -> None:
+        """Stop holding ``key``'s model. The entry object is left intact.
+
+        Popping is the whole of the release: it drops the only reference the
+        cache had, and the garbage collector reclaims the weights as soon as
+        nothing else is using them.
+
+        Emphatically *not* ``entry.sd_model = None``. An entry handed out by
+        ``get()`` is a live object a caller may still be holding, and blanking
+        it reaches into their hands rather than releasing ours. That is not
+        theoretical: ``reinstate_pending`` looks its entry up, stashes the
+        outgoing model -- which can evict the very entry it is holding -- and
+        then installs it. Blanking made it install None, leaving no model
+        loaded and ``forge_hash`` still claiming there was one, which
+        ``forge_model_reload`` believes; every generation afterwards failed on
+        a null model until the WebUI was restarted.
+        """
         entry = self._entries.pop(key, None)
         if entry is None:
             return
         logger.info("Model Chain: releasing cached model %s", entry.checkpoint_name)
-        entry.sd_model = None
 
     def clear(self) -> None:
         for key in list(self._entries):
@@ -1361,19 +1376,71 @@ def reinstate_pending() -> bool:
             _pending_restore = None
             return False
 
+        # Held in a local across the stash below. Stashing Stage 2's model can
+        # evict this very entry -- the two models are the two largest things in
+        # the cache, and Stage 2's arrival is exactly when the budget runs out
+        # -- so the entry must not be re-read afterwards.
+        restored = entry.sd_model
+
         # The outgoing model is Stage 2's, and this is the last moment it is
         # reachable. Both the preload and an ordinary Generate come through here.
         capture_stage_2_components()
         _stash_current(stage=STAGE_2)
-        model_data.set_sd_model(entry.sd_model)
+
+        if not _is_real_model(restored):
+            # Belt and braces. Installing a null model here would leave the host
+            # with nothing loaded and forge_hash still asserting otherwise,
+            # which wedges every following generation rather than costing this
+            # one a reload. A cold load is the safe answer.
+            logger.warning(
+                "Model Chain: the cached %s went away during the swap back; "
+                "Stage 1 will be loaded from disk instead",
+                _pending_restore,
+            )
+            _pending_restore = None
+            return False
+
+        model_data.set_sd_model(restored)
         model_data.forge_hash = key
         _apply_model_flags(entry.model_flags)
-        _apply_latent_scale(entry.sd_model)
+        _apply_latent_scale(restored)
         prepared = _restore_prepared_state(entry, STAGE_1)
         processing.need_global_unload = False
         _log_restored(entry, prepared)
         _pending_restore = None
         return True
+
+
+def ensure_model_loadable() -> bool:
+    """Clear a stale loading hash when nothing is actually loaded.
+
+    ``forge_model_reload`` returns early whenever ``forge_hash`` still matches
+    the current loading parameters, handing back whatever ``model_data.sd_model``
+    holds. If that is empty while the hash goes on asserting a load, every
+    generation dies on a null model and retrying cannot help -- the only way out
+    is restarting the WebUI.
+
+    Model Chain writes ``forge_hash`` by hand to make its warm swaps work, so
+    Model Chain is what should check the invariant those swaps depend on.
+    Clearing the hash costs one disk load and gives the user back a working UI.
+    Returns True when something was actually wrong.
+    """
+    try:
+        from modules.sd_models import model_data
+
+        if _is_real_model(model_data.sd_model) or not model_data.forge_hash:
+            return False
+
+        logger.warning(
+            "Model Chain: no model is loaded, but the host still holds a loading hash — "
+            "clearing it so this generation loads from disk instead of failing on a null "
+            "model. If you saw this after a chained generation, please report it."
+        )
+        model_data.forge_hash = ""
+        return True
+    except Exception:
+        logger.warning("Model Chain: failed to check the loaded-model state", exc_info=True)
+        return False
 
 
 def last_refusal() -> str | None:
