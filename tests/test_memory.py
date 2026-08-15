@@ -448,6 +448,113 @@ class TestRestoreSelection:
         assert mc_memory._is_real_model(residency.model_data.sd_model)
 
 
+class TestProtectedEviction:
+    """Recency picks the wrong victim at exactly the moment a switch happens.
+
+    Every switch stashes the outgoing model moments before restoring the
+    incoming one -- and the incoming one has not been touched since the last
+    generation, so it is the least recently used, so plain LRU throws it out
+    immediately before it is needed.
+    """
+
+    def test_the_protected_entry_is_not_the_victim(self):
+        cache = mc_memory._Cache()
+        incoming = make_entry("A", 4)
+        cache.admit(incoming, 64 * GB)
+        cache.admit(make_entry("B", 4), 64 * GB)
+        incoming.last_used = 0  # least recently used, and about to be needed
+
+        cache.admit(make_entry("C", 4), 9 * GB, protect="key::A")
+
+        assert "A" in cache.names()
+        assert "B" not in cache.names()
+
+    def test_room_is_refused_rather_than_taken_from_the_protected_entry(self):
+        """One slot's worth of budget: keep what is about to be used."""
+        cache = mc_memory._Cache()
+        incoming = make_entry("A", 4)
+        cache.admit(incoming, 64 * GB)
+        incoming.last_used = 0
+
+        assert cache.admit(make_entry("B", 4), 6 * GB, protect="key::A") is False
+        assert cache.names() == ["A"]
+
+    def test_admitting_terminates_when_only_the_protected_entry_remains(self):
+        """The eviction loop must not spin on an entry it may never drop."""
+        cache = mc_memory._Cache()
+        cache.admit(make_entry("A", 4), 64 * GB)
+
+        assert cache.admit(make_entry("B", 60), 6 * GB, protect="key::A") is False
+
+    def test_without_protection_the_oldest_still_goes(self):
+        cache = mc_memory._Cache()
+        oldest = make_entry("A", 4)
+        cache.admit(oldest, 64 * GB)
+        cache.admit(make_entry("B", 4), 64 * GB)
+        oldest.last_used = 0
+
+        cache.admit(make_entry("C", 4), 9 * GB)
+
+        assert "A" not in cache.names()
+
+    def test_the_swap_back_does_not_evict_the_model_it_is_restoring(
+        self, residency, monkeypatch
+    ):
+        model_a = residency.model_data.sd_model
+        monkeypatch.setattr(mc_memory, "cache_budget_bytes", lambda: 8 * GB)
+
+        mc_memory.ensure_resident("B")
+        mc_memory.restore_selection("A")
+        mc_memory.reinstate_pending()
+
+        # A is what was just restored, so A is what the cache should still hold.
+        assert residency.model_data.sd_model is model_a
+        assert "A" in mc_memory.cached_names()
+
+    def squeezed(self, monkeypatch, *, predict_key=True):
+        """Stage 2 cached from an earlier generation, room in the cache for one.
+
+        The fixture's loading parameters are a one-key dict, so the real
+        ``_target_key_for`` -- which builds the host's three-key form -- cannot
+        match them here. Standing in for it is what puts the behaviour under
+        test rather than the key format.
+        """
+        monkeypatch.setattr(mc_memory, "cache_budget_bytes", lambda: 8 * GB)
+        monkeypatch.setattr(
+            mc_memory,
+            "_target_key_for",
+            (lambda name, mods=None: str({"checkpoint_info": name})) if predict_key
+            else (lambda name, mods=None: ""),
+        )
+        mc_memory._cache.admit(
+            mc_memory._Entry(
+                key=str({"checkpoint_info": "B"}),
+                checkpoint_name="B",
+                sd_model=FakeModel("B"),
+                size_bytes=7 * GB,
+            ),
+            64 * GB,
+        )
+
+    def test_the_switch_out_does_not_evict_the_model_it_is_fetching(
+        self, residency, monkeypatch
+    ):
+        """The expensive direction: evicting B here turns a warm swap cold."""
+        self.squeezed(monkeypatch)
+
+        assert mc_memory.ensure_resident("B") == "warm"
+        assert residency.state.reloads == 0
+
+    def test_without_protection_that_same_switch_reads_the_disk(
+        self, residency, monkeypatch
+    ):
+        """The behaviour being fixed, shown by removing only the protection."""
+        self.squeezed(monkeypatch, predict_key=False)
+
+        assert mc_memory.ensure_resident("B") == "cold"
+        assert residency.state.reloads == 1
+
+
 class TestDrop:
     """Dropping releases the cache's hold; it must not reach into a caller's."""
 

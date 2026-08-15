@@ -492,6 +492,27 @@ can hang or kill the whole process, so a model that would breach the budget is
 released instead of cached, and if system RAM cannot be detected at all the cache
 is disabled rather than guessed at.
 
+The budget is not a fixed ceiling either. It is the lower of the configured
+maximum and *what the cache already holds plus the RAM actually free*, so it
+tracks the machine rather than a number chosen once — which is why the same
+pairing can hold both models on one generation and only one on the next.
+
+#### Which entry gets evicted
+
+Recency alone picks the wrong victim at exactly the moment a switch happens.
+Every switch stashes the outgoing model moments before restoring the incoming
+one, and the incoming model has not been touched since the previous generation
+— so it is the least recently used, so plain LRU throws out the very model that
+is about to be installed. It then reloads from disk immediately.
+
+Both switch points therefore name the entry they are about to fetch, and the
+cache will not evict it. When the budget only fits one model, the model being
+*put away* is refused instead: that costs a disk load on some later switch,
+where evicting the one being *fetched* costs one now, and the deferred cost may
+never be paid at all if free RAM recovers first. The refusal message says which
+of the two happened, because "not enough system RAM" on its own reads as a
+fault when the cache has in fact just made the right choice deliberately.
+
 #### Pinning Stage 1's encoders
 
 When two models cannot both fit, the switch is dominated by moving weights, and
