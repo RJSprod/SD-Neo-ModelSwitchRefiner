@@ -662,7 +662,7 @@ class _Cache:
 
     # -- mutation --------------------------------------------------------- #
 
-    def admit(self, entry: _Entry, budget_bytes: int) -> bool:
+    def admit(self, entry: _Entry, budget_bytes: int, protect: str | None = None) -> bool:
         """Take ``entry`` into the cache, evicting as needed to honour the budget.
 
         Returns False when the entry cannot be cached at all, in which case the
@@ -670,6 +670,15 @@ class _Cache:
         RAM exhaustion is far more disruptive than a VRAM OOM -- it can hang or
         kill the whole process -- so this check is fail-safe, never best-effort
         (section 4.5).
+
+        ``protect`` names an entry that must not be evicted to make this room.
+        Every switch stashes the outgoing model moments before restoring the
+        incoming one, and plain recency picks the wrong victim at exactly that
+        moment: the incoming model has not been touched since the last
+        generation, so it is the least recently used, so it is the one thrown
+        out -- immediately before it is needed. When the budget only fits one
+        model, refusing to cache the model being *put away* costs a disk load
+        on some later switch; evicting the one being *fetched* costs one now.
         """
         if entry.key in self._entries:
             self._entries[entry.key] = entry
@@ -688,7 +697,10 @@ class _Cache:
             len(self._entries) >= self._capacity
             or self.total_bytes() + entry.size_bytes > budget_bytes
         ):
-            self._evict_oldest()
+            if not self._evict_oldest(protect):
+                # Only the protected entry is left. Refusing to cache the
+                # incoming one is the better trade: see the note on ``protect``.
+                break
 
         if self.total_bytes() + entry.size_bytes > budget_bytes:
             return False
@@ -696,9 +708,13 @@ class _Cache:
         self._entries[entry.key] = entry
         return True
 
-    def _evict_oldest(self) -> None:
-        oldest = min(self._entries.values(), key=lambda e: e.last_used)
-        self.drop(oldest.key)
+    def _evict_oldest(self, protect: str | None = None) -> bool:
+        """Drop the least recently used entry. Returns False if none may go."""
+        candidates = [e for e in self._entries.values() if e.key != protect]
+        if not candidates:
+            return False
+        self.drop(min(candidates, key=lambda e: e.last_used).key)
+        return True
 
     def drop(self, key: str) -> None:
         """Stop holding ``key``'s model. The entry object is left intact.
@@ -1095,11 +1111,15 @@ def _target_key_for(name: str, modules=None) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _stash_current(stage: str = "") -> None:
+def _stash_current(stage: str = "", protect: str | None = None) -> None:
     """Move the currently loaded model into the cache before it is displaced.
 
     ``stage`` is which stage this model was serving, and is carried on the entry
     so its prepared LoRA state is only ever offered back to the same stage.
+
+    ``protect`` is the cache key of the model about to be swapped *in*, which
+    must survive making room for this one. Callers know it; the cache's recency
+    order does not, and would evict it first.
     """
     from modules.sd_models import model_data
 
@@ -1157,7 +1177,7 @@ def _stash_current(stage: str = "") -> None:
 
     global _last_refusal
 
-    if _cache.admit(entry, budget):
+    if _cache.admit(entry, budget, protect=protect):
         _last_refusal = None
         logger.info(
             "Model Chain: holding %s in the RAM cache (%.1f GB; cache now %.1f GB of %.1f GB budget)",
@@ -1168,13 +1188,17 @@ def _stash_current(stage: str = "") -> None:
         )
     else:
         _last_refusal = name
+        # Say which of the two it is. "Not enough RAM" alone reads as a fault
+        # when the cache has in fact just made the right choice on purpose.
+        kept = protect is not None and _cache.has(protect)
         logger.warning(
-            "Model Chain: not enough system RAM to cache %s (%.1f GB needed, %.1f GB available to the cache) "
-            "— it will reload from disk on every switch. Raise "
+            "Model Chain: not enough system RAM to cache %s (%.1f GB needed, %.1f GB available to "
+            "the cache)%s — it will reload from disk on every switch. Raise "
             '"Model Chain: max system RAM for model cache (GB)" in Settings if you have the RAM.',
             name,
             size / _GB,
             budget / _GB,
+            ", and the model about to be swapped in was kept in preference to it" if kept else "",
         )
 
 
@@ -1290,7 +1314,14 @@ def ensure_resident(name: str, modules=None) -> str:
                 # is correct, and is why nothing here interferes with it.
                 return "unchanged"
 
-        _stash_current(stage=STAGE_1)
+        # Predicted without touching any global state, so it can be known
+        # *before* the stash below -- which is the only place it is useful.
+        # Evicting Stage 2 here to make room for Stage 1 is the expensive
+        # mistake of the two: the swap that follows is the one that would have
+        # been warm, and instead it reads the whole checkpoint back off disk.
+        incoming_key = _target_key_for(name, resolved_modules) or None
+
+        _stash_current(stage=STAGE_1, protect=incoming_key)
 
         # Let the host recompute loading parameters, dynamic LoRA flags and the
         # checkpoint selection. save=False keeps this transient switch out of the
@@ -1384,8 +1415,11 @@ def reinstate_pending() -> bool:
 
         # The outgoing model is Stage 2's, and this is the last moment it is
         # reachable. Both the preload and an ordinary Generate come through here.
+        # Stage 1 is protected: it is the least recently used entry precisely
+        # because it has been waiting for this moment, and it is about to be
+        # installed on the very next line.
         capture_stage_2_components()
-        _stash_current(stage=STAGE_2)
+        _stash_current(stage=STAGE_2, protect=key)
 
         if not _is_real_model(restored):
             # Belt and braces. Installing a null model here would leave the host
