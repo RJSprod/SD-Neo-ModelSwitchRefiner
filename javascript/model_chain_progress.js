@@ -11,6 +11,32 @@
 // (javascript/progressbar.js), so there is nothing stable to decorate directly
 // -- class-and-variable styling survives that lifecycle, one-time DOM edits do
 // not.
+//
+// ---------------------------------------------------------------------------
+// A note on why the requestProgress wrapper below is so defensive.
+//
+// The host's submit() runs in this order:
+//
+//     const id = randomId();
+//     requestProgress(id, ...);            // <- the wrapper runs here
+//     const res = create_submit_args(arguments);
+//     res[0] = id;                         // <- the backend learns the id here
+//     return res;
+//
+// submit() is a Gradio `_js` handler, and `res[0]` is what reaches
+// `wrap_gradio_gpu_call`, where `id_task = args[0]` becomes the task the
+// progress endpoint reports on. So an exception escaping requestProgress does
+// not merely lose the styling -- it aborts submit() before the task id is
+// attached, the browser polls for an id the backend never registered, and
+// /internal/progress answers `active: false` for the whole run. The bar then
+// sits on "Waiting..." until the generation finishes and it disappears, with
+// the images arriving normally and nothing in the log to connect the two.
+//
+// A cosmetic feature must not be able to do that. Hence: the wrapper is only
+// installed when something actually needs it, every added line runs inside its
+// own guard, and the host's call is made unconditionally even if all of them
+// failed.
+// ---------------------------------------------------------------------------
 
 "use strict";
 
@@ -62,10 +88,24 @@
     }
 
     function setting(name, fallback) {
-        if (typeof opts === "undefined" || opts === null) return fallback;
-        const value = opts[name];
-        return value === undefined || value === null ? fallback : value;
+        try {
+            if (typeof opts === "undefined" || opts === null) return fallback;
+            const value = opts[name];
+            return value === undefined || value === null ? fallback : value;
+        } catch (error) {
+            return fallback;
+        }
     }
+
+    function styleEnabled() {
+        return Boolean(setting("model_chain_style_enable", false));
+    }
+
+    function flashEnabled() {
+        return styleEnabled() && Boolean(setting("model_chain_style_complete", false));
+    }
+
+    // -- appearance ---------------------------------------------------------
 
     function resolveColor() {
         const raw = String(setting("model_chain_style_color", "") || "").trim();
@@ -105,28 +145,35 @@
     }
 
     function apply() {
-        const element = root();
-        if (!element) return;
+        try {
+            const element = root();
+            if (!element) return;
 
-        const on = Boolean(setting("model_chain_style_enable", false));
-        element.classList.toggle(ROOT_CLASS, on);
+            const on = styleEnabled();
+            element.classList.toggle(ROOT_CLASS, on);
 
-        const effects = on ? resolveEffects() : {};
-        for (const effect of EFFECTS) {
-            element.classList.toggle(`mc-fx-${effect}`, Boolean(effects[effect]));
+            const effects = on ? resolveEffects() : {};
+            for (const effect of EFFECTS) {
+                element.classList.toggle(`mc-fx-${effect}`, Boolean(effects[effect]));
+            }
+
+            const color = on ? resolveColor() : "";
+            if (color) {
+                element.style.setProperty("--mc-progress-fill", color);
+            } else {
+                // Removing rather than resetting hands the colour back to the
+                // stylesheet default, which is the active theme's own accent.
+                element.style.removeProperty("--mc-progress-fill");
+            }
+
+            // A theme change can re-enable an effect the overlay check removed.
+            overlayChecked = false;
+
+            // Turning the flash on mid-session is what installs the wrapper.
+            if (flashEnabled()) wrapRequestProgress();
+        } catch (error) {
+            console.error("Model Chain: could not apply the progress-bar appearance", error);
         }
-
-        const color = on ? resolveColor() : "";
-        if (color) {
-            element.style.setProperty("--mc-progress-fill", color);
-        } else {
-            // Removing rather than resetting hands the colour back to the
-            // stylesheet default, which is the active theme's own accent.
-            element.style.removeProperty("--mc-progress-fill");
-        }
-
-        // A theme change can re-enable an effect the overlay check had removed.
-        overlayChecked = false;
     }
 
     // -- co-existing with a theme that decorates the bar --------------------
@@ -162,12 +209,8 @@
 
     // -- completion effect -------------------------------------------------
 
-    function flashEnabled() {
-        return Boolean(setting("model_chain_style_enable", false)) && Boolean(setting("model_chain_style_complete", false));
-    }
-
     function clearFlash(parent) {
-        if (!parent) return;
+        if (!parent || !parent.querySelectorAll) return;
         parent.querySelectorAll(`.${FLASH_CLASS}`).forEach((node) => node.remove());
     }
 
@@ -200,8 +243,12 @@
 
     // requestProgress is a plain global function declaration in the host's
     // javascript/progressbar.js, and its callers look it up by name at click
-    // time, so replacing the global is enough. Extension scripts are injected
-    // after the host's own, so it is already defined by the time this runs.
+    // time, so replacing the global is enough.
+    //
+    // Installed lazily rather than at load: the completion flash is the only
+    // thing that needs it and is off by default, so an install that never turns
+    // it on never has this hook at all. See the note at the top of the file for
+    // what is at stake if this ever misbehaves.
     function wrapRequestProgress() {
         if (typeof window.requestProgress !== "function") return false;
         if (window.requestProgress.mcWrapped) return true;
@@ -209,35 +256,57 @@
         const original = window.requestProgress;
 
         const wrapped = function (id_task, progressbarContainer, gallery, atEnd, onProgress, inactivityTimeout) {
-            let peak = 0;
+            let hooks = null;
 
-            const parent = progressbarContainer && progressbarContainer.parentNode;
-            clearFlash(parent);
+            try {
+                let peak = 0;
+                const parent = progressbarContainer && progressbarContainer.parentNode;
+                clearFlash(parent);
 
-            const trackProgress = function (res) {
-                if (res && typeof res.progress === "number" && res.progress > peak) {
-                    peak = res.progress;
+                hooks = {
+                    parent: parent,
+                    onProgress: function (res) {
+                        try {
+                            if (res && typeof res.progress === "number" && res.progress > peak) {
+                                peak = res.progress;
+                            }
+                        } catch (error) {
+                            console.error(error);
+                        }
+                        if (onProgress) onProgress(res);
+                    },
+                    atEnd: function () {
+                        try {
+                            if (flashEnabled() && peak >= COMPLETE_THRESHOLD) {
+                                showFlash(progressbarContainer);
+                            }
+                        } catch (error) {
+                            console.error(error);
+                        }
+                        if (atEnd) atEnd();
+                    },
+                };
+            } catch (error) {
+                console.error("Model Chain: progress-bar decoration disabled for this run", error);
+            }
+
+            // The host's call happens either way. If anything above failed, its
+            // own callbacks are passed straight through, and the only thing
+            // lost is the flash.
+            const result = hooks
+                ? original(id_task, progressbarContainer, gallery, hooks.atEnd, hooks.onProgress, inactivityTimeout)
+                : original(id_task, progressbarContainer, gallery, atEnd, onProgress, inactivityTimeout);
+
+            try {
+                if (hooks && hooks.parent) {
+                    // The host builds the bar synchronously above; one frame
+                    // later it has been laid out and its styles can be read.
+                    requestAnimationFrame(() =>
+                        checkForThemeOverlay(hooks.parent.querySelector(".progressDiv > .progress")),
+                    );
                 }
-                if (onProgress) onProgress(res);
-            };
-
-            const wrappedAtEnd = function () {
-                try {
-                    if (flashEnabled() && peak >= COMPLETE_THRESHOLD) {
-                        showFlash(progressbarContainer);
-                    }
-                } catch (error) {
-                    console.error(error);
-                }
-                if (atEnd) atEnd();
-            };
-
-            const result = original(id_task, progressbarContainer, gallery, wrappedAtEnd, trackProgress, inactivityTimeout);
-
-            // The host builds the bar synchronously above; one frame later it
-            // has been laid out and its computed styles can be read.
-            if (parent) {
-                requestAnimationFrame(() => checkForThemeOverlay(parent.querySelector(".progressDiv > .progress")));
+            } catch (error) {
+                console.error(error);
             }
 
             return result;
@@ -250,14 +319,7 @@
 
     // -- wiring ------------------------------------------------------------
 
-    wrapRequestProgress();
-
     if (typeof onOptionsAvailable === "function") onOptionsAvailable(apply);
     if (typeof onOptionsChanged === "function") onOptionsChanged(apply);
-    if (typeof onUiLoaded === "function") {
-        onUiLoaded(function () {
-            wrapRequestProgress();
-            apply();
-        });
-    }
+    if (typeof onUiLoaded === "function") onUiLoaded(apply);
 })();
