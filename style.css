@@ -1,0 +1,195 @@
+/* Model Chain -- optional progress-bar appearance.
+ *
+ * Everything here is opt-in and inert until the JS adds .mc-progress-styled to
+ * the document element, which it only does when the Settings toggle is on.
+ *
+ * The file is built from four independent effects -- gradient, sheen, glow,
+ * pulse -- each with exactly one implementation. A named theme is a set of
+ * those effects chosen in the JS, and the Custom theme is the same set chosen
+ * by the user's toggles. Neither the themes nor the toggles have any CSS of
+ * their own, so there is one place to fix a rendering problem rather than six.
+ *
+ * Three constraints shape all of it, and all three come from how the host and
+ * third-party themes actually treat this element:
+ *
+ * 1. javascript/progressbar.js rewrites `.progress`'s textContent on every poll
+ *    (twice a second), so any child element injected into the bar is wiped
+ *    within half a second. Nothing here relies on child nodes.
+ *
+ * 2. ::before and ::after on `.progress` are already spoken for by at least one
+ *    popular theme -- Lobe uses ::before for an animated stripe overlay and
+ *    ::after for a top highlight. Claiming either would replace the theme's
+ *    effect rather than layer with it, so every effect below is expressed on
+ *    the element itself: background layers, box-shadow, animation.
+ *
+ * 3. Themes reposition the bar. Lobe overrides .progressDiv to
+ *    `position: relative; top: 0`, moving it out of the host's absolutely
+ *    positioned overlay and into normal flow. Nothing here sets geometry --
+ *    no height, no offset, no radius -- so the bar stays wherever its theme
+ *    puts it and only its colour and animation change.
+ *
+ * The default fill is the theme's own accent. Gradio defines --primary-500 and
+ * Lobe redefines it against its palette, so an untouched install picks up the
+ * right colour in both, in light and dark alike, with the literal only used
+ * when neither is present. Every theme below derives its stops from that one
+ * variable, which is what lets a custom colour recolour all of them.
+ */
+
+:root {
+    --mc-progress-fill: var(--primary-500, #0060df);
+    --mc-progress-sheen-width: 180px;
+    --mc-progress-sheen-speed: 2.2s;
+}
+
+/* -- fill ---------------------------------------------------------------- */
+
+/* Declared before every background-image rule so a browser without color-mix
+ * still gets a solid, correctly coloured bar rather than a transparent one. */
+.mc-progress-styled .progressDiv .progress {
+    background-color: var(--mc-progress-fill);
+}
+
+/* -- gradient ------------------------------------------------------------ */
+
+/* Lightened towards the leading edge, so the bar reads as moving even while
+ * the percentage is static. color-mix keeps this working for any colour the
+ * user types, including rgba() with real transparency. */
+.mc-progress-styled.mc-fx-gradient .progressDiv .progress {
+    background-image: linear-gradient(
+        90deg,
+        var(--mc-progress-fill) 0%,
+        color-mix(in srgb, var(--mc-progress-fill) 68%, white) 100%
+    );
+    background-size: 100% 100%;
+    background-repeat: no-repeat;
+}
+
+/* -- sheen --------------------------------------------------------------- */
+
+/* A highlight band travelling the length of the bar. Declared after the
+ * gradient so a theme carrying both gets this complete two-layer version, and
+ * done with background layers rather than a pseudo-element for the reason at
+ * the top of the file. The JS drops this effect entirely when it detects that
+ * the active WebUI theme already animates an overlay of its own. */
+.mc-progress-styled.mc-fx-sheen .progressDiv .progress {
+    background-image:
+        linear-gradient(
+            100deg,
+            transparent 35%,
+            rgb(255 255 255 / 26%) 50%,
+            transparent 65%
+        ),
+        linear-gradient(
+            90deg,
+            var(--mc-progress-fill) 0%,
+            color-mix(in srgb, var(--mc-progress-fill) 68%, white) 100%
+        );
+    background-size: var(--mc-progress-sheen-width) 100%, 100% 100%;
+    background-repeat: repeat-x, no-repeat;
+    animation: mc-progress-sheen var(--mc-progress-sheen-speed) linear infinite;
+}
+
+@keyframes mc-progress-sheen {
+    from {
+        background-position: 0 0, 0 0;
+    }
+    to {
+        background-position: var(--mc-progress-sheen-width) 0, 0 0;
+    }
+}
+
+/* -- glow ---------------------------------------------------------------- */
+
+/* box-shadow rather than a filter or an overlay: it spreads outside the bar,
+ * so it cannot reduce the contrast of the percentage and ETA text sitting on
+ * top of the fill. */
+.mc-progress-styled.mc-fx-glow .progressDiv .progress {
+    box-shadow:
+        0 0 6px color-mix(in srgb, var(--mc-progress-fill) 80%, transparent),
+        0 0 14px color-mix(in srgb, var(--mc-progress-fill) 45%, transparent);
+}
+
+.mc-progress-styled.mc-fx-glow.mc-fx-intense .progressDiv .progress {
+    box-shadow:
+        0 0 8px color-mix(in srgb, var(--mc-progress-fill) 95%, transparent),
+        0 0 20px color-mix(in srgb, var(--mc-progress-fill) 70%, transparent),
+        0 0 34px color-mix(in srgb, var(--mc-progress-fill) 40%, transparent);
+    /* The one place the text itself is touched: a bar this bright needs the
+     * percentage lifted off it, not left to fight it. */
+    text-shadow: 0 1px 4px rgb(0 0 0 / 75%);
+}
+
+/* -- pulse --------------------------------------------------------------- */
+
+.mc-progress-styled.mc-fx-pulse .progressDiv .progress {
+    animation: mc-progress-pulse 2.4s ease-in-out infinite;
+}
+
+/* Both animations at once. They drive different properties, so they compose --
+ * but `animation` is one shorthand, and the last declaration would otherwise
+ * simply replace the other. */
+.mc-progress-styled.mc-fx-sheen.mc-fx-pulse .progressDiv .progress {
+    animation:
+        mc-progress-sheen var(--mc-progress-sheen-speed) linear infinite,
+        mc-progress-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes mc-progress-pulse {
+    0%,
+    100% {
+        box-shadow:
+            0 0 6px color-mix(in srgb, var(--mc-progress-fill) 80%, transparent),
+            0 0 14px color-mix(in srgb, var(--mc-progress-fill) 45%, transparent);
+    }
+    50% {
+        box-shadow:
+            0 0 12px color-mix(in srgb, var(--mc-progress-fill) 95%, transparent),
+            0 0 26px color-mix(in srgb, var(--mc-progress-fill) 62%, transparent);
+    }
+}
+
+/* -- completion ---------------------------------------------------------- */
+
+/* The flash carries the host's own .progressDiv / .progress classes as well as
+ * its own, so it inherits whatever geometry the active theme gives the real
+ * bar. That is what keeps it from shifting the layout under a theme that has
+ * moved the bar out of the host's absolute overlay. */
+.mc-progress-flash {
+    pointer-events: none;
+}
+
+.mc-progress-flash .progress {
+    width: 100%;
+    background-color: var(--mc-progress-fill);
+    animation: mc-progress-complete 0.65s ease-out forwards;
+}
+
+@keyframes mc-progress-complete {
+    0% {
+        opacity: 1;
+        filter: brightness(1);
+    }
+    30% {
+        opacity: 1;
+        filter: brightness(1.6);
+    }
+    100% {
+        opacity: 0;
+        filter: brightness(1);
+    }
+}
+
+/* -- accessibility ------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+    .mc-progress-styled.mc-fx-sheen .progressDiv .progress,
+    .mc-progress-styled.mc-fx-pulse .progressDiv .progress,
+    .mc-progress-styled.mc-fx-sheen.mc-fx-pulse .progressDiv .progress,
+    .mc-progress-flash .progress {
+        animation: none;
+    }
+
+    .mc-progress-flash {
+        display: none;
+    }
+}

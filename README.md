@@ -383,6 +383,117 @@ Under **Settings → Model Chain**:
   see [Prepared LoRA state](#prepared-lora-state). Turn it off if a LoRA
   misbehaves after a switch; every restored model then rebuilds its LoRA state
   from scratch, which is slower but leaves nothing to be wrong about.
+- **Predict progress and ETA for the whole chained job** (default on) — see
+  [Progress and ETA](#progress-and-eta).
+- **Custom progress-bar appearance**, **Progress-bar theme**, **Progress-bar
+  colour** and the toggles below them — see
+  [Progress-bar appearance](#progress-bar-appearance).
+
+### Progress and ETA
+
+The WebUI's progress bar counts sampler jobs and steps. That describes one
+sampling loop well and a chained job badly: the bar would reach 100% when
+Stage 1 finished and then drop back when Stage 2's images were added to the
+count. A batch of two, 20 steps then 8, went 100% → 33% → 66% → 100%. Time
+spent moving several gigabytes of weights between the stages counted for
+nothing at all.
+
+With this on, the job is modelled as timed phases — waiting on a preload,
+freeing VRAM, Stage 1 sampling, the checkpoint switch, Stage 2 sampling,
+finalising — and the bar reports **how much of the predicted wall time has
+passed**. It moves forwards only, at a roughly even rate through work of very
+different kinds, and the ETA falls out of the same arithmetic. The bar's text
+names the phase, so `Stage 2 1/2` appears beside the percentage without the
+percentage jumping for it.
+
+The predictions are **measured on your machine**. The first chained generation
+on a fresh install works from a small built-in table, scaled by your card's
+VRAM; from the second onwards it uses what it actually observed — seconds per
+gigabyte for each kind of model switch, seconds per step per megapixel for each
+architecture and batch size. Those measurements are written to
+`model_chain_timing.json` in your WebUI data directory, so they survive a
+restart. Interrupted and failed jobs are not learned from.
+
+Batch size is part of the model, and asymmetrically so: Stage 1 samples a batch
+in one pass, but Stage 2 refines each image separately, so it gets none of the
+batching gain. Hires fix is accounted for too, including that its two passes
+cost different amounts.
+
+The bar never shows 100% — the WebUI removes it when the job genuinely ends. And
+"the job" means your images are ready. If the optional
+[Stage 1 preload](#preloading-stage-1-experimental-off-by-default) is on it runs
+in the background *after* that, once the progress bar is already gone; the
+panel's residency line is where its state is reported.
+
+Nothing here is required. With it off, the bar falls back to the WebUI's own
+calculation — still without the backwards jump, because the job counters are
+sized for the whole chain before Stage 1 starts either way.
+
+### Progress-bar appearance
+
+Purely cosmetic, entirely independent of everything above, and applied to
+**every** generation. It never changes the numbers on the bar; the calculation
+above never changes how it looks. Either can be turned off without affecting
+the other.
+
+**Installing the extension is all it takes.** The theme applies whether or not
+Model Chain is enabled, whether or not a Stage 2 checkpoint is selected, and
+whether or not you have ever opened the accordion — and on **txt2img, img2img
+and Extras alike**, even though Model Chain itself is txt2img-only. It restyles
+the WebUI's own progress bar, so there is no version of the bar that belongs to
+this extension and no state of the extension that can switch it off. The only
+thing that turns it off is its own toggle, or uninstalling.
+
+Tick **Custom progress-bar appearance**, then pick a **Progress-bar theme**:
+
+| Theme | Look |
+| --- | --- |
+| **Flat** (default) | plain fill — what the WebUI does, in your colour |
+| **Gradient** | the fill lightens towards its leading edge |
+| **Sheen** | the above, plus a highlight band travelling along the bar |
+| **Pulse** | flat fill with a breathing halo around it |
+| **Neon** | gradient, sheen and a hard glow — the loud one |
+| **Custom** | build your own from the three toggles below |
+
+**Progress-bar colour** applies to *whichever* theme you picked — every theme
+derives its gradient stops and glow from one colour, so setting it recolours the
+whole look rather than only the plain one. Any CSS colour works: `#38bdf8`,
+`rgba(56, 189, 248, 0.85)`, `hsl(199 89% 60%)`. Leave it empty to follow your
+WebUI theme's own accent colour, which is what keeps it looking right in light
+and dark. Something the browser cannot parse is ignored, with a note in the
+console, rather than blanking the bar.
+
+The three **Custom theme** toggles — fade, sheen, glow — do nothing unless the
+theme above is set to `Custom`.
+
+**Flash the bar when a job finishes** works with every theme. It fires once, at
+the end of the whole job; in a chained generation that is after Stage 2, and it
+cannot fire at the end of Stage 1, because both stages run inside one
+progress-bar lifecycle.
+
+Everything animated respects your system's reduced-motion setting, and the glow
+is drawn *outside* the bar so it can never make the percentage and ETA harder to
+read.
+
+#### Living with other WebUI themes
+
+The appearance layer is built to share the bar rather than fight for it. It sets
+no geometry — no height, offset or radius — so the bar stays wherever your theme
+puts it, and it uses no `::before`/`::after`, so a theme that already decorates
+the bar keeps its decoration.
+
+[Lobe Theme](https://github.com/lobehub/sd-webui-lobe-theme) was the case
+checked in detail. It restyles the WebUI's own bar rather than replacing it, it
+never sets the fill colour, and it redefines the same `--primary-*` variables the
+default here reads — so with **Flat** and no colour set, the bar picks up Lobe's
+accent instead of the WebUI's hardcoded blue, which is an improvement on the
+current appearance rather than a change to it.
+
+Lobe also animates diagonal stripes over the bar. **Sheen** and **Neon** would
+otherwise put a second moving pattern on the same small element, so the sheen
+detects that and stands down by itself, leaving the colour and glow to carry the
+look. That check measures the actual conflict rather than looking for a theme by
+name, so it works for any theme that decorates the bar the same way.
 
 ## How it behaves
 
@@ -916,10 +1027,14 @@ mc_memory.py          model residency / cache management
 mc_lora.py            prepared LoRA state + stage isolation
 mc_infotext.py        infotext write + paste-field registration
 mc_presets.py         named Stage 2 configurations
+mc_progress.py        whole-job progress model + measured timings
 mc_references.py      Stage 2 supplemental reference routing
 mc_styles.py          style library integration helpers
 scripts/model_chain.py  Script class, UI, orchestration
+style.css             optional progress-bar appearance
+javascript/           the settings-to-CSS layer for the above
 tests/                pytest suite (runs without a WebUI)
+docs/                 revised specifications for the progress work
 ```
 
 `mc_lora.py` deliberately depends on nothing else in the extension. It is a
@@ -970,7 +1085,8 @@ preload and its failure handling, prepared-LoRA-state reuse and every case that
 invalidates it, stage isolation of extra-network tags, the VRAM reserve and its
 four floors, speculative warming of Stage 2, interruption handling, Stage 2
 reference routing in all three modes with its ordering, capability and cleanup
-rules, the UI's control-order contract, and inertness when disabled.
+rules, whole-job progress and its measured calibration, the UI's control-order
+contract, and inertness when disabled.
 
 Three of those files are lopsided on purpose, because their failure modes are:
 

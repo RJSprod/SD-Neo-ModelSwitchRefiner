@@ -242,39 +242,78 @@ class TestStageOneSizeInfotext:
 
 
 class TestProgressAccounting:
-    """Stage 1 sizes the Total progress bar for its own passes only.
+    """The host's own counters are sized for the whole chain before Stage 1.
 
-    With hires fix that total is resized again for the second pass, so Stage
-    2's steps would overflow it and the bar would wrap -- reading as though the
-    work were repeating.
+    They used to be raised in postprocess, once Stage 1 had already driven
+    ``job_no`` up to ``job_count``: the bar reached 100%, then dropped back to
+    the fraction the enlarged count implied. Setting the final figures up front
+    is what removes that, and hires fix is what makes the arithmetic worth
+    testing -- the host doubles ``job_count`` for a hires job, and the second
+    pass has its own step count.
+
+    Stage 1 runs 30 steps in these fixtures, the hires pass another 30, and
+    Stage 2 is asked for 4.
     """
 
-    def test_stage_2_steps_are_added_to_the_total(self, chain, host, image_factory):
-        host.shared.total_tqdm._tqdm.total = 40  # 20 first pass + 20 hires
+    def test_the_total_covers_both_stages_and_the_hires_pass(self, chain, host, image_factory):
         p = make_hires_p(host, batch_size=1)
         processed = make_processed(host, p, image_factory)
 
         run_chain(chain, host, p, processed, steps=4)
 
-        assert host.shared.total_tqdm._tqdm.total == 44
+        assert host.shared.total_tqdm._tqdm.total == 30 + 30 + 4
 
     def test_the_whole_batch_is_accounted_for(self, chain, host, image_factory):
-        host.shared.total_tqdm._tqdm.total = 40
+        """Stage 1 samples a batch of four in one pass; Stage 2 refines four."""
         p = make_hires_p(host, batch_size=4)
         processed = make_processed(host, p, image_factory)
 
         run_chain(chain, host, p, processed, steps=4)
 
-        assert host.shared.total_tqdm._tqdm.total == 40 + 4 * 4
+        assert host.shared.total_tqdm._tqdm.total == 30 + 30 + 4 * 4
 
-    def test_an_unstarted_bar_is_left_alone(self, chain, host, image_factory):
-        host.shared.total_tqdm._tqdm.total = 0
+    def test_a_plain_job_counts_one_pass_per_stage(self, chain, host, image_factory):
         p = make_p(host, batch_size=1)
         processed = make_processed(host, p, image_factory)
 
         run_chain(chain, host, p, processed, steps=4)
 
-        assert host.shared.total_tqdm._tqdm.total == 0
+        assert host.shared.total_tqdm._tqdm.total == 30 + 4
+
+    def test_job_count_is_final_before_stage_1_samples(self, chain, host, image_factory):
+        """The regression this exists for: no upward revision mid-job.
+
+        A batch of two is one Stage 1 pass and two Stage 2 passes. If the count
+        were raised afterwards the bar would show 100% at the end of Stage 1.
+        """
+        p = make_p(host, batch_size=2)
+        processed = make_processed(host, p, image_factory)
+        settings = {**DEFAULTS, "steps": 4}
+        args = [settings[name] for name in UI_ORDER]
+
+        chain.script.before_process(p, *args)
+        chain.script.process(p, *args)
+        before = host.shared.state.job_count
+
+        chain.script.postprocess(p, processed, *args)
+
+        assert before == 1 + 2
+        assert host.shared.state.job_count == before
+
+    def test_hires_doubling_is_claimed_rather_than_compensated_for(self, chain, host, image_factory):
+        """The host skips its own refinement once this flag is set.
+
+        Leaving it unset would have the host double whatever count is in place,
+        so the count and the step total have to be claimed together.
+        """
+        p = make_hires_p(host, batch_size=1, n_iter=2)
+        processed = make_processed(host, p, image_factory)
+
+        run_chain(chain, host, p, processed, steps=4)
+
+        assert host.shared.state.processing_has_refined_job_count is True
+        # Two first passes, two hires passes, two refines.
+        assert host.shared.state.job_count == 2 * 2 + 2
 
 
 class TestVramHeadroom:

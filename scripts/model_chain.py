@@ -24,6 +24,7 @@ import mc_infotext
 import mc_lora
 import mc_memory
 import mc_presets
+import mc_progress
 import mc_references
 import mc_styles
 from modules import errors, images, processing, scripts, shared
@@ -40,6 +41,13 @@ logger = mc_memory.logger
 """Shared with the helper modules; mc_memory attaches the console handler."""
 
 STAGE1_SUBFOLDER = "model-chain-stage1"
+
+_GB = 1024**3
+
+
+def _megapixels(width, height) -> float:
+    """Pixel count in megapixels, the unit sampling rates are normalised by."""
+    return max(int(width or 0) * int(height or 0), 0) / 1_000_000
 
 _NO_MODEL = "None"
 
@@ -63,6 +71,40 @@ adjustment."""
 # --------------------------------------------------------------------------- #
 # Settings
 # --------------------------------------------------------------------------- #
+
+OPT_STYLE_ENABLE = "model_chain_style_enable"
+OPT_STYLE_THEME = "model_chain_style_theme"
+OPT_STYLE_COLOR = "model_chain_style_color"
+OPT_STYLE_GRADIENT = "model_chain_style_gradient"
+OPT_STYLE_SHEEN = "model_chain_style_sheen"
+OPT_STYLE_GLOW = "model_chain_style_glow"
+OPT_STYLE_COMPLETE = "model_chain_style_complete"
+"""Appearance settings, read by javascript/model_chain_progress.js.
+
+Every option registered here reaches the browser as a field of the global
+``opts`` object, which is the whole mechanism: the styling layer needs no
+endpoint, no Gradio component and no Python of its own. It is also why these
+live in Settings rather than in the accordion -- a look is a property of the
+install, not of one generation, and an accordion control would travel in presets
+and infotexts where it means nothing.
+"""
+
+STYLE_CUSTOM = "Custom"
+
+STYLE_THEMES = ("Flat", "Gradient", "Sheen", "Pulse", "Neon", STYLE_CUSTOM)
+"""The ready-made looks, plus the one that defers to the toggles.
+
+Each named theme is a choice of the four effects ``style.css`` implements --
+gradient, sheen, glow, pulse -- made in the JS rather than here, so there is one
+implementation of each effect rather than one per theme. This list exists only
+to populate the dropdown; a test checks it against the JS so the two cannot
+drift apart.
+
+Every theme derives its colours from a single custom property, which is what
+lets the colour setting recolour all of them rather than only the plain one.
+"""
+
+STYLE_THEME_DEFAULT = "Flat"
 
 SETTINGS_SECTION = ("model_chain", "Model Chain")
 """Identifier and title of the Settings page section.
@@ -146,9 +188,86 @@ shared.options_templates.update(
                 "state from scratch — slower, and worth trying if a LoRA misbehaves after "
                 "a switch"
             ),
+            mc_progress.OPT_PROGRESS: shared.OptionInfo(
+                mc_progress.PROGRESS_DEFAULT,
+                "Predict progress and ETA for the whole chained job",
+            ).info(
+                "the host counts sampling steps, which makes the bar finish at the end of "
+                "Stage 1 and then jump backwards. This models the job as timed phases "
+                "instead — including the model switch — and reports how much of the "
+                "predicted wall time has passed. Timings are measured on your machine and "
+                "improve after a few generations"
+            ),
+            # -- appearance, deliberately independent of everything above --- #
+            # These change how the host's bar looks and never what it reports,
+            # so they apply to ordinary Forge generations too and stay useful
+            # with Model Chain switched off entirely.
+            OPT_STYLE_ENABLE: shared.OptionInfo(
+                False,
+                "Custom progress-bar appearance",
+            ).info(
+                "restyles the WebUI's own progress bar for every generation, chained or "
+                "not. Purely cosmetic: it never changes the numbers on the bar"
+            ),
+            OPT_STYLE_THEME: shared.OptionInfo(
+                STYLE_THEME_DEFAULT,
+                "Progress-bar theme",
+                gr.Dropdown,
+                {"choices": list(STYLE_THEMES)},
+            ).info(
+                "<b>Flat</b> plain fill · <b>Gradient</b> lightens towards the leading edge · "
+                "<b>Sheen</b> adds a travelling highlight · <b>Pulse</b> a breathing halo · "
+                "<b>Neon</b> all of it, turned up · <b>Custom</b> uses the three toggles "
+                "below. Each one takes its colours from the setting underneath, so picking "
+                "a colour recolours whichever theme you chose"
+            ),
+            OPT_STYLE_COLOR: shared.OptionInfo(
+                "",
+                "Progress-bar colour",
+            ).info(
+                "any CSS colour — <code>#38bdf8</code>, <code>rgba(56, 189, 248, 0.85)</code>, "
+                "<code>hsl(199 89% 60%)</code>. Leave it empty to follow the active theme's "
+                "accent colour, which is what keeps it looking right in light and dark and "
+                "under third-party themes"
+            ),
+            OPT_STYLE_GRADIENT: shared.OptionInfo(
+                False,
+                "Custom theme: fade the fill towards its leading edge",
+            ).info(f'ignored unless the theme above is "{STYLE_CUSTOM}"'),
+            OPT_STYLE_SHEEN: shared.OptionInfo(
+                False,
+                "Custom theme: send a highlight travelling along the bar",
+            ).info(
+                f'ignored unless the theme above is "{STYLE_CUSTOM}". Stands down by itself '
+                "when the active WebUI theme already animates the bar, so the two do not "
+                "move over each other"
+            ),
+            OPT_STYLE_GLOW: shared.OptionInfo(
+                False,
+                "Custom theme: glow and pulse while generating",
+            ).info(
+                f'ignored unless the theme above is "{STYLE_CUSTOM}". Drawn outside the bar '
+                "so it cannot make the percentage or ETA harder to read"
+            ),
+            OPT_STYLE_COMPLETE: shared.OptionInfo(
+                False,
+                "Flash the bar when a job finishes",
+            ).info(
+                "once, when the whole job is done — in a chained generation that is after "
+                "Stage 2, never at the end of Stage 1. Applies to every theme"
+            ),
         },
     )
 )
+
+mc_progress.install()
+"""Wrap the host's progress endpoint while rebinding it still takes effect.
+
+``modules.progress.setup_progress_api`` registers the route long after
+extensions are imported and resolves the function from the module globals when
+it does, so this has to happen at import time and cannot wait for a UI callback.
+Failure is not fatal -- see mc_progress.install().
+"""
 
 
 # --------------------------------------------------------------------------- #
@@ -449,6 +568,14 @@ class ScriptModelChain(scripts.Script):
         # This generation's supplemental reference set, captured in process()
         # while the Stage 1 script arguments are still live.
         self._references = ()
+        # The residency kind mc_memory.plan() predicted for this job's switch.
+        self._transition = ""
+        # Whether the host's own job counters were pre-sized for the whole chain.
+        self._reserved = False
+        # (entry timestamp, preload wait, Stage 1 preparation, bytes freed) for
+        # the part of before_process that runs before the chain is known to be
+        # armed. Consumed once, in process().
+        self._preamble = ()
 
     def title(self):
         return "Model Chain"
@@ -1260,6 +1387,17 @@ class ScriptModelChain(scripts.Script):
     # -- hooks ------------------------------------------------------------- #
 
     def before_process(self, p, enabled, target, modules=None, *args):
+        # The two spans below happen before this hook knows whether the chain is
+        # armed, and both are real time the user spends looking at an empty
+        # progress bar -- waiting on a preload that is still moving weights, and
+        # freeing VRAM so Stage 1 loads in one piece. They are timed here and
+        # handed to the estimator in process(), which is the first point that
+        # has the whole job in front of it.
+        entered = time.perf_counter()
+        joined = entered
+        prepared = entered
+        freed = 0
+
         # Always reinstate a checkpoint we ourselves left swapped out, even when
         # the extension has since been disabled -- that is cleanup of our own
         # state, not extension behaviour.
@@ -1272,19 +1410,28 @@ class ScriptModelChain(scripts.Script):
             # Joining first means the worst case is the wait we would have had
             # anyway, never two threads moving weights at once.
             mc_memory.join_preload()
+            joined = time.perf_counter()
             # Either branch means Stage 1 was swapped in from the cache; the
             # preload sized its VRAM budget from the *previous* generation, so
             # re-check it here against the size actually about to be sampled.
             swapped = mc_memory.reinstate_pending() or mc_memory.consume_preload()
             if swapped:
-                self._make_room_for_stage_1(p)
+                freed = self._make_room_for_stage_1(p)
             if swapped or enabled:
                 self._report_readiness()
+            prepared = time.perf_counter()
         except Exception:
             errors.report("Model Chain: failed to reinstate the cached checkpoint", exc_info=True)
 
         self._armed = False
         self._dropped_networks = []
+        self._transition = ""
+        self._reserved = False
+        self._preamble = (entered, joined - entered, prepared - joined, freed)
+        # A plan left behind by a generation that never reached its end -- an
+        # exception between here and postprocess -- would otherwise describe
+        # this generation's bar with the last one's phases.
+        mc_progress.abandon()
         # Never carried between generations: the reference set describes the
         # gallery as it was for one job, and process() recaptures it for the next.
         self._references = ()
@@ -1328,6 +1475,12 @@ class ScriptModelChain(scripts.Script):
 
         plan = mc_memory.plan(target, modules)
         logger.info("Model Chain: %s", plan.message)
+        # Kept for the estimator: the residency kind is what decides whether the
+        # switch is a pointer swap, a copy back from system RAM or a disk read,
+        # and those differ by an order of magnitude. Reading it from the same
+        # call the console line uses means the prediction and the explanation
+        # the user is given cannot disagree.
+        self._transition = plan.kind
         self._armed = True
 
     @staticmethod
@@ -1351,7 +1504,7 @@ class ScriptModelChain(scripts.Script):
         logger.info("%s", message)
 
     @staticmethod
-    def _make_room_for_stage_1(p) -> None:
+    def _make_room_for_stage_1(p) -> int:
         """Give Stage 1 a clean VRAM budget after swapping its model back in.
 
         The previous generation ended with Stage 2's model in VRAM, and a warm
@@ -1374,18 +1527,25 @@ class ScriptModelChain(scripts.Script):
         ``RuntimeError: Inference tensors do not track version counter``.
         The host's own lazy load, driven from inside the sampler, is in the
         right context by construction. Nothing is gained by beating it to it.
+
+        Returns the bytes it freed, which is what the progress estimator learns
+        its freeing rate from.
         """
         try:
             width, height = mc_arch.stage1_size(p)
-            mc_memory.make_vram_room(
-                shared.opts.sd_model_checkpoint,
-                mc_memory.current_modules(),
-                width,
-                height,
-                stage="Stage 1",
+            return int(
+                mc_memory.make_vram_room(
+                    shared.opts.sd_model_checkpoint,
+                    mc_memory.current_modules(),
+                    width,
+                    height,
+                    stage="Stage 1",
+                )
+                or 0
             )
         except Exception:
             errors.report("Model Chain: failed to free VRAM for Stage 1", exc_info=True)
+            return 0
 
     def process(
         self,
@@ -1437,6 +1597,12 @@ class ScriptModelChain(scripts.Script):
         # and resetting the CUDA peak counters is the host's own instrumentation
         # to reset on every other one.
         mc_memory.begin_pass_observation()
+
+        # The first point with the whole job in view: Stage 1's geometry is
+        # settled, Stage 2's target and multiplier are in hand, and no sampling
+        # has started. Both of these size the job for the progress bar.
+        self._reserve_job_counters(p, target, size_multiplier, int(steps))
+        self._begin_progress(p, target, modules, size_multiplier, int(steps))
 
         styles = list(styles or [])
         if prompt_mode == "Inherit":
@@ -1528,9 +1694,16 @@ class ScriptModelChain(scripts.Script):
         between, and it says which side of the noise build lost the size.
 
         Stage 2 runs with scripts unset, so this only ever describes Stage 1.
+
+        It is also the only per-pass boundary the host offers, which makes it
+        where the estimator is told a Stage 1 pass is starting -- including the
+        hires second pass, which fires this hook again.
         """
         if not self._armed or self._in_stage_2:
             return
+
+        mc_progress.note_pass()
+
         try:
             shape = getattr(kwargs.get("noise"), "shape", None)
             if shape:
@@ -1603,9 +1776,14 @@ class ScriptModelChain(scripts.Script):
                 edit_mode=edit_mode,
                 reference_mode=reference_mode,
             )
+            mc_progress.end()
         except Exception:
             errors.report("Model Chain: Stage 2 failed; returning the unrefined Stage 1 images", exc_info=True)
             processed.comments += "\nModel Chain: Stage 2 failed — these images are unrefined Stage 1 output."
+            # Dropped rather than closed: a job that failed part-way measures the
+            # failure, not the work, and folding those spans into the store would
+            # teach it that everything on this machine is faster than it is.
+            mc_progress.abandon()
             self._save_as_final(p, processed)
 
     def _collect_stage_1(self, processed) -> list:
@@ -1742,6 +1920,7 @@ class ScriptModelChain(scripts.Script):
         # disproportionate share of every switch's cost.
         mc_memory.capture_stage_1_encoders()
 
+        mc_progress.enter(mc_progress.PHASE_SWITCH)
         started = time.perf_counter()
         transition = mc_memory.ensure_resident(target, modules)
         elapsed = time.perf_counter() - started
@@ -1773,8 +1952,14 @@ class ScriptModelChain(scripts.Script):
                     target,
                 )
 
-        state.job_count = (state.job_count or 0) + len(stage1_images)
-        self._extend_progress_total(len(stage1_images) * int(steps))
+        # Only when process() could not pre-size the counters. Adding to them
+        # here is what made the bar fall backwards at the Stage 1 boundary --
+        # Stage 1 has already driven job_no up to the old job_count by now -- so
+        # it is a fallback for a host that did not accept the reservation rather
+        # than the normal path.
+        if not self._reserved:
+            state.job_count = (state.job_count or 0) + len(stage1_images)
+            self._extend_progress_total(len(stage1_images) * int(steps))
 
         # Every image in the batch is refined at the same size, so one look at
         # the first is enough to size the pass -- and this has to happen before
@@ -1795,6 +1980,7 @@ class ScriptModelChain(scripts.Script):
             arch.alignment,
             arch.label,
         )
+        mc_progress.enter(mc_progress.PHASE_STAGE2_PREPARE)
         mc_memory.make_vram_room(target, modules, stage_2_width, stage_2_height)
         mc_memory.begin_pass_observation()
 
@@ -1849,14 +2035,23 @@ class ScriptModelChain(scripts.Script):
         refined: list = []
         delivered: list = []
         self._in_stage_2 = True
+        mc_progress.enter(mc_progress.PHASE_STAGE2)
         try:
             for index, image in enumerate(stage1_images):
                 if state.interrupted or state.stopping_generation:
+                    # Everything measured from here on would be measuring the
+                    # interruption. The images already refined are still
+                    # returned; the timings are not kept.
+                    mc_progress.abandon()
                     break
                 if state.skipped:
                     state.skipped = False
 
                 state.job = f"Model Chain refine {index + 1}/{len(stage1_images)}"
+                # The phase label the bar shows, which counts through the batch
+                # without the percentage moving any differently for it.
+                mc_progress.relabel(f"Stage 2 {index + 1}/{len(stage1_images)}")
+                mc_progress.note_pass()
 
                 seed = self._stage_2_seed(processed.all_seeds[index], seed_mode, seed_offset, fixed_seed)
                 positive, negative = self._resolve_prompts(
@@ -1900,6 +2095,12 @@ class ScriptModelChain(scripts.Script):
                 refined.append(result)
         finally:
             self._in_stage_2 = False
+            # Everything from here is bookkeeping and delivery. The Stage 1
+            # preload started at the end of it is deliberately *not* a phase:
+            # it runs on a background thread after postprocess returns, by which
+            # point the host has finished the task and removed the progress bar,
+            # so "job complete" means the images are ready.
+            mc_progress.enter(mc_progress.PHASE_FINALIZE)
             # Before the selection moves back, while shared.sd_model is still
             # Stage 2's. Completion or failure alike: the cache keeps this model
             # object, so anything left on it belongs to no job at all by the time
@@ -1972,6 +2173,9 @@ class ScriptModelChain(scripts.Script):
         it again for its second pass -- so Stage 2's steps would overflow it,
         making the bar wrap and re-render as though the work were repeating.
         Purely cosmetic, hence best-effort.
+
+        Only reached when the counters were not pre-sized in process(); when
+        they were, Stage 2's steps are already in the total.
         """
         if extra_steps <= 0:
             return
@@ -1981,6 +2185,136 @@ class ScriptModelChain(scripts.Script):
                 shared.total_tqdm.updateTotal(bar.total + extra_steps)
         except Exception:
             pass
+
+    def _reserve_job_counters(self, p, target, size_multiplier, stage2_steps: int) -> None:
+        """Size the host's own job and step counters for the whole chain, up front.
+
+        Stage 2 used to be added to ``state.job_count`` in postprocess, by which
+        point Stage 1 had already driven ``job_no`` to ``job_count`` and the bar
+        to 100%; the addition then dropped it to a third of the way along. A
+        batch of two refined after a 20-step Stage 1 went 100% -> 33% -> 66% ->
+        100%. Setting the final figure before any sampling starts is what
+        removes that, and it is what the bar falls back to when the progress
+        endpoint could not be wrapped.
+
+        The host would otherwise refine these numbers itself for a hires job,
+        doubling ``job_count`` inside ``StableDiffusionProcessingTxt2Img.init``.
+        Claiming that refinement here rather than compensating for it afterwards
+        keeps one piece of arithmetic in one place -- and the console's step
+        total is supplied along with it, so nothing is left half-adjusted.
+        """
+        self._reserved = False
+        try:
+            images = len(p.all_prompts or [p.prompt])
+            passes = max(int(getattr(p, "n_iter", 1) or 1), 1)
+            steps = max(int(getattr(p, "steps", 0) or 0), 0)
+            hires = bool(getattr(p, "enable_hr", False))
+            hr_steps = (int(getattr(p, "hr_second_pass_steps", 0) or 0) or steps) if hires else 0
+            # The host's own special case: an upscale started from the gallery
+            # has no first pass to count.
+            first_steps = 0 if getattr(p, "txt2img_upscale", False) else steps
+
+            state.job_count = passes * (2 if hires else 1) + images
+            state.processing_has_refined_job_count = True
+            shared.total_tqdm.updateTotal(
+                passes * (first_steps + hr_steps) + images * max(stage2_steps, 0)
+            )
+            self._reserved = True
+        except Exception:
+            errors.report("Model Chain: could not pre-size the progress counters", exc_info=True)
+
+    def _begin_progress(self, p, target, modules, size_multiplier, stage2_steps: int) -> None:
+        """Hand the estimator a phase-by-phase plan of this generation.
+
+        Everything it needs is known here and nowhere earlier: Stage 1's
+        geometry is settled, the hires pass is decided, the Stage 2 target and
+        multiplier are in hand, and no sampling has started.
+
+        Best-effort throughout. A plan that cannot be built leaves the bar on
+        the host's own arithmetic, which the counters above have just made
+        monotonic anyway.
+        """
+        if not mc_progress.enabled():
+            return
+
+        try:
+            passes = max(int(getattr(p, "n_iter", 1) or 1), 1)
+            batch = max(int(getattr(p, "batch_size", 1) or 1), 1)
+            steps = max(int(getattr(p, "steps", 0) or 0), 0)
+            hires = bool(getattr(p, "enable_hr", False))
+            hr_steps = (int(getattr(p, "hr_second_pass_steps", 0) or 0) or steps) if hires else 0
+
+            base = _megapixels(getattr(p, "width", 0), getattr(p, "height", 0))
+            stage1_width, stage1_height = mc_arch.stage1_size(p)
+            upscaled = _megapixels(stage1_width, stage1_height)
+
+            # Listed in the order they run rather than grouped by kind: with
+            # hires on, each batch is a first pass followed by a second one,
+            # and the two cost different amounts. Interleaving them is what
+            # keeps the bar moving evenly through a multi-batch hires job.
+            stage1_passes = []
+            for _ in range(passes):
+                stage1_passes.append((steps, base))
+                if hires:
+                    stage1_passes.append((hr_steps, upscaled))
+
+            arch = mc_arch.detect_from_checkpoint_name(target)
+            stage2_width, stage2_height = mc_arch.scaled_size(
+                stage1_width, stage1_height, float(size_multiplier), arch.alignment
+            )
+            stage2_megapixels = _megapixels(stage2_width, stage2_height)
+
+            # Every refine is its own batch-of-one pass, so a chain gets none of
+            # Stage 1's batching gain and must not be predicted as though it
+            # did. This is the whole reason batch size is part of the rate key.
+            images = len(p.all_prompts or [p.prompt])
+            stage2_passes = [(stage2_steps, stage2_megapixels)] * images
+
+            job = mc_progress.build(
+                stage1_arch=self._stage_1_arch_label(),
+                stage1_passes=stage1_passes,
+                batch_size=batch,
+                stage2_arch=arch.label,
+                stage2_passes=stage2_passes,
+                transition=self._transition,
+                move_gigabytes=mc_memory.file_size_bytes(target, modules) / _GB,
+                free_gigabytes=self._expected_free_gigabytes(
+                    target, modules, stage2_width, stage2_height
+                ),
+                target_label=os.path.splitext(os.path.basename(target))[0],
+            )
+
+            entered, waited, prepared, freed = self._preamble or (time.perf_counter(), 0.0, 0.0, 0)
+            job.record(mc_progress.PHASE_JOIN, waited)
+            job.record(mc_progress.PHASE_STAGE1_PREPARE, prepared, units=freed / _GB)
+            mc_progress.begin(job, since=entered)
+            mc_progress.enter(mc_progress.PHASE_STAGE1)
+        except Exception:
+            errors.report("Model Chain: could not plan this job's progress", exc_info=True)
+            mc_progress.abandon()
+
+    @staticmethod
+    def _stage_1_arch_label() -> str:
+        """The architecture rates are keyed on for Stage 1's sampling."""
+        try:
+            return mc_arch.detect_from_checkpoint_name(shared.opts.sd_model_checkpoint).label
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _expected_free_gigabytes(target, modules, width: int, height: int) -> float:
+        """How much VRAM the Stage 2 switch is likely to have to free.
+
+        A prediction made while Model A is still resident, so it is the shortfall
+        as it looks now rather than a reading. It only has to be the right order
+        of magnitude: when the shortfall is nil the phase costs nothing, and
+        make_vram_room() checks before acting for the same reason.
+        """
+        try:
+            required = mc_memory.vram_required_bytes(target, modules, width, height)
+            return max(required - mc_memory.free_vram_bytes(), 0) / _GB
+        except Exception:
+            return 0.0
 
     @staticmethod
     def _describe_modules(modules) -> str:

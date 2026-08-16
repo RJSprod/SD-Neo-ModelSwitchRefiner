@@ -240,8 +240,14 @@ class TestPreparedStateIsInvalidated:
 
         assert mc_memory._restore_prepared_state(entry, mc_memory.STAGE_1) == "rebuilt"
 
-    def test_preservation_is_on_when_the_setting_is_absent(self, host, cache):
-        """Settings do not exist until the UI builds them, and never in tests."""
+    def test_preservation_is_on_when_the_setting_is_absent(self, host, cache, monkeypatch):
+        """A host that never registered the option still gets the default.
+
+        Which is the case for a config saved by a version that predates it, and
+        for any code path that reads the option before the settings page has
+        been built.
+        """
+        monkeypatch.delitem(host.shared.options_templates, mc_memory.OPT_PRESERVE_LORA)
         assert not hasattr(host.shared.opts, mc_memory.OPT_PRESERVE_LORA)
 
         model = make_model("A", lora_hash="hash-1")

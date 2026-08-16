@@ -350,8 +350,14 @@ class TestPinnedEncoders:
         host.shared.opts.model_chain_pin_stage1_encoders = False
         assert mc_memory.capture_stage_1_encoders() == 0
 
-    def test_a_missing_setting_keeps_the_documented_default(self, memory, host):
-        """Settings do not exist until the UI builds them, and in tests never."""
+    def test_a_missing_setting_keeps_the_documented_default(self, memory, host, monkeypatch):
+        """A host that never registered the option still gets the default.
+
+        Which is the case for a config saved by a version that predates it, and
+        for any code path that reads the option before the settings page has
+        been built.
+        """
+        monkeypatch.delitem(host.shared.options_templates, mc_memory.OPT_PIN_ENCODERS)
         assert not hasattr(host.shared.opts, mc_memory.OPT_PIN_ENCODERS)
         assert mc_memory.capture_stage_1_encoders() == 2
 

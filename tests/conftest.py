@@ -166,6 +166,27 @@ class FakeOptions:
     def save(self, *args, **kwargs):
         pass
 
+    def __getattr__(self, item):
+        """Serve a registered option's default, as the host's ``Options`` does.
+
+        Faithful because it is what makes a setting readable the moment it is
+        registered: the host looks in saved data first and falls back to
+        ``data_labels[key].default``, so an option the user has never saved
+        still answers with its default rather than raising. Without this the
+        fakes would turn every unsaved setting into an AttributeError, which
+        the real object never produces -- and would hide the fact that the
+        appearance settings reach the browser on a fresh install.
+        """
+        if item.startswith("_"):
+            raise AttributeError(item)
+
+        shared = sys.modules.get("modules.shared")
+        registered = getattr(shared, "options_templates", None) or {}
+        if item in registered:
+            return registered[item].default
+
+        raise AttributeError(item)
+
 
 class FakeState:
     def __init__(self):
@@ -175,6 +196,15 @@ class FakeState:
         self.job = ""
         self.job_count = 0
         self.job_no = 0
+        # The step counters the progress endpoint reads, and the flag the host
+        # sets once it has settled job_count for a hires pass.
+        self.sampling_step = 0
+        self.sampling_steps = 0
+        self.processing_has_refined_job_count = False
+        # Stamped by state.begin() when a task starts. None until then, which
+        # is what a leftover plan is checked against.
+        self.time_start = None
+        self.textinfo = None
 
 
 class FakeOptionInfo:
@@ -518,6 +548,24 @@ _install_modules()
 # --------------------------------------------------------------------------- #
 # Fixtures
 # --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def timing_store(tmp_path, monkeypatch):
+    """Point the progress calibration at a throwaway file, and empty it.
+
+    Autouse because the store is module state that outlives a test: a rate
+    measured by one would silently become the next one's starting estimate, and
+    the file itself would land in the working tree, since the fake host's data
+    directory is the current one.
+    """
+    import mc_progress
+
+    monkeypatch.setattr(mc_progress, "path", lambda: str(tmp_path / mc_progress.FILENAME))
+    mc_progress.forget()
+    mc_progress.abandon()
+    yield
+    mc_progress.abandon()
 
 
 @pytest.fixture
