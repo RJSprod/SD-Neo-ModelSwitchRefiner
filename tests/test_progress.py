@@ -15,11 +15,17 @@ the machine running it.
 from __future__ import annotations
 
 import json
+import re
 import types
+from pathlib import Path
 
 import pytest
 
 import mc_progress
+
+EXTENSION_ROOT = Path(__file__).resolve().parent.parent
+STYLESHEET = EXTENSION_ROOT / "style.css"
+STYLE_SCRIPT = EXTENSION_ROOT / "javascript" / "model_chain_progress.js"
 
 from test_orchestration import DEFAULTS, UI_ORDER, make_p, make_processed, run_chain  # noqa: F401
 
@@ -718,6 +724,135 @@ class TestEndpointOutput:
         response = host_progress.progressapi(FakeRequest())
 
         assert response.progress == 0.25
+
+
+# --------------------------------------------------------------------------- #
+# Appearance
+# --------------------------------------------------------------------------- #
+
+
+def javascript_list(name):
+    """The named array literal from the styling script."""
+    match = re.search(rf"const {name} = \[(.*?)\]", STYLE_SCRIPT.read_text(), re.S)
+    assert match, f"{name} not found in {STYLE_SCRIPT.name}"
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+def javascript_themes():
+    """The theme names the styling script knows how to render."""
+    body = STYLE_SCRIPT.read_text()
+    block = re.search(r"const THEMES = \{(.*?)\n    \};", body, re.S)
+    assert block, "THEMES not found in the styling script"
+    return re.findall(r"^\s{8}(\w+):", block.group(1), re.M)
+
+
+def stylesheet():
+    """The stylesheet with its comments removed.
+
+    The comments discuss the very properties and selectors these tests forbid,
+    which is the point of them -- but it means scanning the raw file would find
+    the explanation rather than a violation.
+    """
+    return re.sub(r"/\*.*?\*/", "", STYLESHEET.read_text(), flags=re.S)
+
+
+def styled_bar_rules():
+    """Every rule that styles the host's own bar, as (selector, body) pairs."""
+    css = stylesheet()
+    return [
+        (selector.strip(), body)
+        for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css)
+        if ".mc-progress-styled" in selector
+    ]
+
+
+class TestThemeRegistration:
+    """The dropdown and the code that renders it must not drift apart.
+
+    The themes are defined in the JS, because a theme is a choice of effects and
+    the effects are CSS. Python only has to offer the names.
+    """
+
+    def test_the_dropdown_offers_exactly_the_themes_the_script_renders(self):
+        import model_chain
+
+        assert list(model_chain.STYLE_THEMES) == javascript_themes() + [model_chain.STYLE_CUSTOM]
+
+    def test_the_default_theme_is_one_of_them(self):
+        import model_chain
+
+        assert model_chain.STYLE_THEME_DEFAULT in model_chain.STYLE_THEMES
+
+    def test_every_effect_the_script_toggles_is_implemented(self):
+        css = stylesheet()
+
+        for effect in javascript_list("EFFECTS"):
+            assert f".mc-fx-{effect}" in css, f"no rule for the {effect} effect"
+
+    def test_the_appearance_settings_are_registered(self, host):
+        import model_chain
+
+        for name in (
+            model_chain.OPT_STYLE_ENABLE,
+            model_chain.OPT_STYLE_THEME,
+            model_chain.OPT_STYLE_COLOR,
+            model_chain.OPT_STYLE_GRADIENT,
+            model_chain.OPT_STYLE_SHEEN,
+            model_chain.OPT_STYLE_GLOW,
+            model_chain.OPT_STYLE_COMPLETE,
+        ):
+            assert name in host.shared.options_templates
+
+
+class TestStylesheetConstraints:
+    """The three findings that shaped the stylesheet, guarded as tests.
+
+    Each of these is a rule that reads as an arbitrary restriction until it is
+    broken, at which point it is a bug in somebody else's theme.
+    """
+
+    def test_it_claims_no_pseudo_elements_on_the_bar(self):
+        """Lobe already uses ::before and ::after on .progress.
+
+        Claiming either replaces the theme's effect rather than layering with
+        it, so every effect is expressed on the element itself.
+        """
+        css = stylesheet()
+
+        assert "::before" not in css
+        assert "::after" not in css
+
+    def test_it_sets_no_geometry_on_the_bar(self):
+        """Themes move this element; Lobe takes it out of the host's overlay.
+
+        Colour and animation travel between themes. Height, offset and radius
+        do not.
+        """
+        forbidden = ("height:", "top:", "left:", "right:", "bottom:", "position:", "border-radius:")
+
+        for selector, body in styled_bar_rules():
+            for property_name in forbidden:
+                assert property_name not in body, f"{selector} sets {property_name}"
+
+    def test_a_solid_fill_is_declared_before_any_gradient(self):
+        """color-mix is recent; a browser without it must still get a bar."""
+        css = stylesheet()
+
+        assert css.index("background-color: var(--mc-progress-fill)") < css.index("color-mix")
+
+    def test_every_effect_derives_from_the_one_colour(self):
+        """Which is what lets a custom colour recolour every theme."""
+        for selector, body in styled_bar_rules():
+            if "color-mix" not in body:
+                continue
+            assert "--mc-progress-fill" in body, f"{selector} mixes a colour from nowhere"
+
+    def test_motion_can_be_turned_off_by_the_system(self):
+        css = stylesheet()
+        reduced = css[css.index("prefers-reduced-motion") :]
+
+        for effect in ("sheen", "pulse"):
+            assert f"mc-fx-{effect}" in reduced, f"{effect} keeps animating under reduced motion"
 
 
 # --------------------------------------------------------------------------- #

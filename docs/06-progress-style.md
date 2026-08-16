@@ -35,14 +35,53 @@ one custom property onto `document.documentElement`.
 | Setting | Effect |
 | --- | --- |
 | `model_chain_style_enable` | master toggle; adds `.mc-progress-styled` |
+| `model_chain_style_theme` | named look; see below |
 | `model_chain_style_color` | any CSS colour, including `rgba()`; empty follows the theme |
-| `model_chain_style_gradient` | fade towards the leading edge |
-| `model_chain_style_glow` | outer glow and pulse |
+| `model_chain_style_gradient` | Custom theme only: fade towards the leading edge |
+| `model_chain_style_sheen` | Custom theme only: travelling highlight |
+| `model_chain_style_glow` | Custom theme only: outer glow and pulse |
 | `model_chain_style_complete` | one flash when a job truly finishes |
 
 A colour the browser does not understand is rejected by `CSS.supports('color', …)`
 and logged once, rather than written to the variable where it would blank the
 fill.
+
+---
+
+## Themes
+
+The stylesheet implements four independent effects — `gradient`, `sheen`,
+`glow`, `pulse` — plus an `intense` modifier, each exactly once, keyed on a
+`.mc-fx-*` class. **A theme is a choice of those effects, made in the JS.**
+
+| Theme | gradient | sheen | glow | pulse | intense |
+| --- | :-: | :-: | :-: | :-: | :-: |
+| Flat (default) | | | | | |
+| Gradient | ● | | | | |
+| Sheen | ● | ● | | | |
+| Pulse | | | ● | ● | |
+| Neon | ● | ● | ● | | ● |
+| Custom | *toggle* | *toggle* | *toggle* | *with glow* | |
+
+Two consequences of putting the themes in the JS rather than giving each one its
+own CSS:
+
+- There is one implementation of each effect to get right, not one per theme. A
+  rendering problem is fixed in one place.
+- `Custom` is not a special case. It resolves to the same capability classes by
+  a different route.
+
+Python contributes only the dropdown's choice list. A test parses the JS and
+asserts the two agree, so a theme cannot be offered that nothing renders.
+
+**Every theme derives its colours from one custom property**, `--mc-progress-fill`,
+through `color-mix`. That is what makes the colour setting orthogonal to the
+theme choice — one colour recolours whichever look is selected, rather than only
+the plain one. A solid `background-color` is declared before any gradient so a
+browser without `color-mix` still gets a correctly coloured bar.
+
+`prefers-reduced-motion: reduce` disables the sheen and the pulse and suppresses
+the completion flash entirely.
 
 ---
 
@@ -63,13 +102,26 @@ Lobe Theme puts an animated diagonal stripe on `::before` and a top highlight
 gradient on `::after`. Claiming either would *replace* the theme's effect rather
 than layer with it.
 
-**Resolution: the styling layer uses no pseudo-elements at all.** The gradient is
-`background-image` on the element, and the glow is `box-shadow` on the element.
+**Resolution: the styling layer uses no pseudo-elements at all.** The gradient
+and the travelling sheen are stacked `background-image` layers on the element,
+animated through `background-position`; the glow is `box-shadow` on the element.
 This removes the whole collision class rather than detecting and working around
 it — and `box-shadow` has the separate virtue of spreading *outside* the bar, so
 it cannot reduce the contrast of the percentage and ETA text sitting on the fill.
 That answers revision 1's watchpoint about animation making the text harder to
 read.
+
+There is one remaining interaction, and it is visual rather than structural: a
+theme animating its own overlay plus our sheen puts two moving patterns on one
+small element, which reads as a fault. The JS measures the actual conflict —
+`getComputedStyle(bar, '::before').content` on the live bar — and drops the
+sheen when it finds one, leaving colour and glow to carry the look. Measuring
+the conflict rather than recognising the theme means it holds for any theme that
+decorates the bar the same way, including ones that do not exist yet.
+
+`animation` is a single shorthand, so sheen and pulse together would replace
+rather than compose. They drive different properties and are emitted as one
+two-name declaration by a dedicated rule.
 
 ### 3. Themes move the bar
 
@@ -162,6 +214,10 @@ their contrast in every combination.
 
 - [x] Styling can be enabled and disabled without touching Model Chain, and
       vice versa.
+- [x] A small set of ready-made themes is offered, and a Custom one that defers
+      to the individual toggles.
+- [x] The colour setting is orthogonal to the theme choice — it recolours every
+      theme, not only the plain one.
 - [x] Colour customisation applies to the ordinary Forge progress bar, with
       Model Chain inactive or uninstalled from the generation.
 - [x] `rgba()` and every other CSS colour form is accepted; invalid input falls

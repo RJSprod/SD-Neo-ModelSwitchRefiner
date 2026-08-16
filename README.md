@@ -385,8 +385,9 @@ Under **Settings → Model Chain**:
   from scratch, which is slower but leaves nothing to be wrong about.
 - **Predict progress and ETA for the whole chained job** (default on) — see
   [Progress and ETA](#progress-and-eta).
-- **Custom progress-bar appearance** and the four options below it (all default
-  off) — see [Progress-bar appearance](#progress-bar-appearance).
+- **Custom progress-bar appearance**, **Progress-bar theme**, **Progress-bar
+  colour** and the toggles below them — see
+  [Progress-bar appearance](#progress-bar-appearance).
 
 ### Progress and ETA
 
@@ -435,28 +436,56 @@ Purely cosmetic, entirely independent of everything above, and applied to
 changes the numbers on the bar; the calculation above never changes how it
 looks. Either can be turned off without affecting the other.
 
-- **Custom progress-bar appearance** — the master toggle.
-- **Progress-bar fill colour** — any CSS colour: `#38bdf8`,
-  `rgba(56, 189, 248, 0.85)`, `hsl(199 89% 60%)`. Leave it empty to follow your
-  theme's own accent colour, which is what keeps it looking right in light and
-  dark. Something the browser cannot parse is ignored, with a note in the
-  console, rather than blanking the bar.
-- **Fade the fill towards its leading edge**.
-- **Glow and pulse while generating** — drawn *outside* the bar, so it cannot
-  make the percentage and ETA harder to read. Honours your system's
-  reduced-motion setting.
-- **Flash the bar when a job finishes** — once, at the end of the whole job. In
-  a chained generation that is after Stage 2; it cannot fire at the end of
-  Stage 1, because both stages run inside one progress-bar lifecycle.
+Tick **Custom progress-bar appearance**, then pick a **Progress-bar theme**:
 
-It is built to survive third-party themes rather than fight them. Nothing sets
-geometry — no height, offset or radius — so the bar stays wherever your theme
-puts it, and no pseudo-elements are used, so a theme that already decorates the
-bar keeps its decoration. [Lobe Theme](https://github.com/lobehub/sd-webui-lobe-theme)
-was the specific case checked: it restyles the WebUI's own bar rather than
-replacing it, it does not set the fill colour, and it redefines the same
-`--primary-*` variables the default here reads — so the bar picks up Lobe's
-accent instead of the WebUI's hardcoded blue.
+| Theme | Look |
+| --- | --- |
+| **Flat** (default) | plain fill — what the WebUI does, in your colour |
+| **Gradient** | the fill lightens towards its leading edge |
+| **Sheen** | the above, plus a highlight band travelling along the bar |
+| **Pulse** | flat fill with a breathing halo around it |
+| **Neon** | gradient, sheen and a hard glow — the loud one |
+| **Custom** | build your own from the three toggles below |
+
+**Progress-bar colour** applies to *whichever* theme you picked — every theme
+derives its gradient stops and glow from one colour, so setting it recolours the
+whole look rather than only the plain one. Any CSS colour works: `#38bdf8`,
+`rgba(56, 189, 248, 0.85)`, `hsl(199 89% 60%)`. Leave it empty to follow your
+WebUI theme's own accent colour, which is what keeps it looking right in light
+and dark. Something the browser cannot parse is ignored, with a note in the
+console, rather than blanking the bar.
+
+The three **Custom theme** toggles — fade, sheen, glow — do nothing unless the
+theme above is set to `Custom`.
+
+**Flash the bar when a job finishes** works with every theme. It fires once, at
+the end of the whole job; in a chained generation that is after Stage 2, and it
+cannot fire at the end of Stage 1, because both stages run inside one
+progress-bar lifecycle.
+
+Everything animated respects your system's reduced-motion setting, and the glow
+is drawn *outside* the bar so it can never make the percentage and ETA harder to
+read.
+
+#### Living with other WebUI themes
+
+The appearance layer is built to share the bar rather than fight for it. It sets
+no geometry — no height, offset or radius — so the bar stays wherever your theme
+puts it, and it uses no `::before`/`::after`, so a theme that already decorates
+the bar keeps its decoration.
+
+[Lobe Theme](https://github.com/lobehub/sd-webui-lobe-theme) was the case
+checked in detail. It restyles the WebUI's own bar rather than replacing it, it
+never sets the fill colour, and it redefines the same `--primary-*` variables the
+default here reads — so with **Flat** and no colour set, the bar picks up Lobe's
+accent instead of the WebUI's hardcoded blue, which is an improvement on the
+current appearance rather than a change to it.
+
+Lobe also animates diagonal stripes over the bar. **Sheen** and **Neon** would
+otherwise put a second moving pattern on the same small element, so the sheen
+detects that and stands down by itself, leaving the colour and glow to carry the
+look. That check measures the actual conflict rather than looking for a theme by
+name, so it works for any theme that decorates the bar the same way.
 
 ## How it behaves
 

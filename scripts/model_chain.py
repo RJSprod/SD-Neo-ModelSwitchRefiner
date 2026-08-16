@@ -73,8 +73,10 @@ adjustment."""
 # --------------------------------------------------------------------------- #
 
 OPT_STYLE_ENABLE = "model_chain_style_enable"
+OPT_STYLE_THEME = "model_chain_style_theme"
 OPT_STYLE_COLOR = "model_chain_style_color"
 OPT_STYLE_GRADIENT = "model_chain_style_gradient"
+OPT_STYLE_SHEEN = "model_chain_style_sheen"
 OPT_STYLE_GLOW = "model_chain_style_glow"
 OPT_STYLE_COMPLETE = "model_chain_style_complete"
 """Appearance settings, read by javascript/model_chain_progress.js.
@@ -86,6 +88,23 @@ live in Settings rather than in the accordion -- a look is a property of the
 install, not of one generation, and an accordion control would travel in presets
 and infotexts where it means nothing.
 """
+
+STYLE_CUSTOM = "Custom"
+
+STYLE_THEMES = ("Flat", "Gradient", "Sheen", "Pulse", "Neon", STYLE_CUSTOM)
+"""The ready-made looks, plus the one that defers to the toggles.
+
+Each named theme is a choice of the four effects ``style.css`` implements --
+gradient, sheen, glow, pulse -- made in the JS rather than here, so there is one
+implementation of each effect rather than one per theme. This list exists only
+to populate the dropdown; a test checks it against the JS so the two cannot
+drift apart.
+
+Every theme derives its colours from a single custom property, which is what
+lets the colour setting recolour all of them rather than only the plain one.
+"""
+
+STYLE_THEME_DEFAULT = "Flat"
 
 SETTINGS_SECTION = ("model_chain", "Model Chain")
 """Identifier and title of the Settings page section.
@@ -190,9 +209,21 @@ shared.options_templates.update(
                 "restyles the WebUI's own progress bar for every generation, chained or "
                 "not. Purely cosmetic: it never changes the numbers on the bar"
             ),
+            OPT_STYLE_THEME: shared.OptionInfo(
+                STYLE_THEME_DEFAULT,
+                "Progress-bar theme",
+                gr.Dropdown,
+                {"choices": list(STYLE_THEMES)},
+            ).info(
+                "<b>Flat</b> plain fill · <b>Gradient</b> lightens towards the leading edge · "
+                "<b>Sheen</b> adds a travelling highlight · <b>Pulse</b> a breathing halo · "
+                "<b>Neon</b> all of it, turned up · <b>Custom</b> uses the three toggles "
+                "below. Each one takes its colours from the setting underneath, so picking "
+                "a colour recolours whichever theme you chose"
+            ),
             OPT_STYLE_COLOR: shared.OptionInfo(
                 "",
-                "Progress-bar fill colour",
+                "Progress-bar colour",
             ).info(
                 "any CSS colour — <code>#38bdf8</code>, <code>rgba(56, 189, 248, 0.85)</code>, "
                 "<code>hsl(199 89% 60%)</code>. Leave it empty to follow the active theme's "
@@ -201,21 +232,29 @@ shared.options_templates.update(
             ),
             OPT_STYLE_GRADIENT: shared.OptionInfo(
                 False,
-                "Fade the fill towards its leading edge",
+                "Custom theme: fade the fill towards its leading edge",
+            ).info(f'ignored unless the theme above is "{STYLE_CUSTOM}"'),
+            OPT_STYLE_SHEEN: shared.OptionInfo(
+                False,
+                "Custom theme: send a highlight travelling along the bar",
+            ).info(
+                f'ignored unless the theme above is "{STYLE_CUSTOM}". Stands down by itself '
+                "when the active WebUI theme already animates the bar, so the two do not "
+                "move over each other"
             ),
             OPT_STYLE_GLOW: shared.OptionInfo(
                 False,
-                "Glow and pulse while generating",
+                "Custom theme: glow and pulse while generating",
             ).info(
-                "drawn outside the bar so it cannot make the percentage or ETA harder to "
-                "read. Honours the system's reduced-motion setting"
+                f'ignored unless the theme above is "{STYLE_CUSTOM}". Drawn outside the bar '
+                "so it cannot make the percentage or ETA harder to read"
             ),
             OPT_STYLE_COMPLETE: shared.OptionInfo(
                 False,
                 "Flash the bar when a job finishes",
             ).info(
                 "once, when the whole job is done — in a chained generation that is after "
-                "Stage 2, never at the end of Stage 1"
+                "Stage 2, never at the end of Stage 1. Applies to every theme"
             ),
         },
     )

@@ -16,9 +16,35 @@
 
 (function () {
     const ROOT_CLASS = "mc-progress-styled";
-    const GRADIENT_CLASS = "mc-progress-gradient";
-    const GLOW_CLASS = "mc-progress-glow";
     const FLASH_CLASS = "mc-progress-flash";
+
+    // The four effects style.css implements. A named theme is a choice of
+    // these; the Custom theme is the same choice made by the user's toggles.
+    // Keeping the themes here rather than as CSS of their own means there is
+    // one implementation of each effect to get right.
+    const EFFECTS = ["gradient", "sheen", "glow", "pulse", "intense"];
+
+    const THEMES = {
+        // Plain fill in the chosen colour. What the host does, recoloured.
+        Flat: {},
+        // A single lightening towards the leading edge, so the bar reads as
+        // moving between percentage updates.
+        Gradient: { gradient: true },
+        // The above plus a highlight band travelling the bar.
+        Sheen: { gradient: true, sheen: true },
+        // Flat fill with a breathing halo. Legible from across the room
+        // without anything moving inside the bar.
+        Pulse: { glow: true, pulse: true },
+        // Everything, turned up. The loud one.
+        Neon: { gradient: true, sheen: true, glow: true, intense: true },
+    };
+
+    const DEFAULT_THEME = "Flat";
+    const CUSTOM_THEME = "Custom";
+
+    // Themes are exported so the Settings dropdown and this file cannot drift
+    // apart: Python builds the choice list from the same names.
+    window.modelChainProgressThemes = Object.keys(THEMES).concat([CUSTOM_THEME]);
 
     // A job that ends below this is treated as interrupted rather than
     // finished, and gets no completion effect. The host cannot tell us which it
@@ -29,6 +55,7 @@
     const FLASH_MS = 700;
 
     let warnedAboutColor = false;
+    let overlayChecked = false;
 
     function root() {
         return document.documentElement;
@@ -58,14 +85,36 @@
         return raw;
     }
 
+    function resolveEffects() {
+        const name = String(setting("model_chain_style_theme", DEFAULT_THEME));
+
+        if (name === CUSTOM_THEME) {
+            return {
+                gradient: Boolean(setting("model_chain_style_gradient", false)),
+                sheen: Boolean(setting("model_chain_style_sheen", false)),
+                glow: Boolean(setting("model_chain_style_glow", false)),
+                // The glow toggle carries its own animation: a static halo on a
+                // bar that is otherwise moving reads as a rendering fault.
+                pulse: Boolean(setting("model_chain_style_glow", false)),
+            };
+        }
+
+        // A theme saved before this version, or one typed by hand, falls back
+        // rather than leaving the bar unstyled with the toggle switched on.
+        return THEMES[name] || THEMES[DEFAULT_THEME];
+    }
+
     function apply() {
         const element = root();
         if (!element) return;
 
         const on = Boolean(setting("model_chain_style_enable", false));
         element.classList.toggle(ROOT_CLASS, on);
-        element.classList.toggle(GRADIENT_CLASS, on && Boolean(setting("model_chain_style_gradient", false)));
-        element.classList.toggle(GLOW_CLASS, on && Boolean(setting("model_chain_style_glow", false)));
+
+        const effects = on ? resolveEffects() : {};
+        for (const effect of EFFECTS) {
+            element.classList.toggle(`mc-fx-${effect}`, Boolean(effects[effect]));
+        }
 
         const color = on ? resolveColor() : "";
         if (color) {
@@ -75,7 +124,43 @@
             // stylesheet default, which is the active theme's own accent.
             element.style.removeProperty("--mc-progress-fill");
         }
+
+        // A theme change can re-enable an effect the overlay check had removed.
+        overlayChecked = false;
     }
+
+    // -- co-existing with a theme that decorates the bar --------------------
+
+    // Some WebUI themes animate their own overlay on the bar through
+    // .progress::before -- Lobe draws travelling diagonal stripes there. Our
+    // sheen would then be the second thing moving on one small element, which
+    // looks like a fault rather than a style. Rather than name the themes this
+    // could apply to, the actual conflict is measured: if a pseudo-element with
+    // content exists on the live bar, the sheen stands down and the colour and
+    // glow carry the look.
+    function checkForThemeOverlay(bar) {
+        if (overlayChecked || !bar) return;
+        overlayChecked = true;
+
+        if (!root().classList.contains("mc-fx-sheen")) return;
+
+        try {
+            const before = getComputedStyle(bar, "::before");
+            const decorated =
+                before &&
+                before.content &&
+                before.content !== "none" &&
+                before.content !== "normal";
+            if (decorated) {
+                root().classList.remove("mc-fx-sheen");
+            }
+        } catch (error) {
+            // A browser that will not report pseudo-element styles simply
+            // keeps the sheen; the worst case is a busy-looking bar.
+        }
+    }
+
+    // -- completion effect -------------------------------------------------
 
     function flashEnabled() {
         return Boolean(setting("model_chain_style_enable", false)) && Boolean(setting("model_chain_style_complete", false));
@@ -113,8 +198,6 @@
         parent.insertBefore(flash, container);
     }
 
-    // -- completion effect -------------------------------------------------
-
     // requestProgress is a plain global function declaration in the host's
     // javascript/progressbar.js, and its callers look it up by name at click
     // time, so replacing the global is enough. Extension scripts are injected
@@ -128,7 +211,8 @@
         const wrapped = function (id_task, progressbarContainer, gallery, atEnd, onProgress, inactivityTimeout) {
             let peak = 0;
 
-            clearFlash(progressbarContainer && progressbarContainer.parentNode);
+            const parent = progressbarContainer && progressbarContainer.parentNode;
+            clearFlash(parent);
 
             const trackProgress = function (res) {
                 if (res && typeof res.progress === "number" && res.progress > peak) {
@@ -148,7 +232,15 @@
                 if (atEnd) atEnd();
             };
 
-            return original(id_task, progressbarContainer, gallery, wrappedAtEnd, trackProgress, inactivityTimeout);
+            const result = original(id_task, progressbarContainer, gallery, wrappedAtEnd, trackProgress, inactivityTimeout);
+
+            // The host builds the bar synchronously above; one frame later it
+            // has been laid out and its computed styles can be read.
+            if (parent) {
+                requestAnimationFrame(() => checkForThemeOverlay(parent.querySelector(".progressDiv > .progress")));
+            }
+
+            return result;
         };
 
         wrapped.mcWrapped = true;
