@@ -175,6 +175,15 @@ class FakeState:
         self.job = ""
         self.job_count = 0
         self.job_no = 0
+        # The step counters the progress endpoint reads, and the flag the host
+        # sets once it has settled job_count for a hires pass.
+        self.sampling_step = 0
+        self.sampling_steps = 0
+        self.processing_has_refined_job_count = False
+        # Stamped by state.begin() when a task starts. None until then, which
+        # is what a leftover plan is checked against.
+        self.time_start = None
+        self.textinfo = None
 
 
 class FakeOptionInfo:
@@ -518,6 +527,24 @@ _install_modules()
 # --------------------------------------------------------------------------- #
 # Fixtures
 # --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def timing_store(tmp_path, monkeypatch):
+    """Point the progress calibration at a throwaway file, and empty it.
+
+    Autouse because the store is module state that outlives a test: a rate
+    measured by one would silently become the next one's starting estimate, and
+    the file itself would land in the working tree, since the fake host's data
+    directory is the current one.
+    """
+    import mc_progress
+
+    monkeypatch.setattr(mc_progress, "path", lambda: str(tmp_path / mc_progress.FILENAME))
+    mc_progress.forget()
+    mc_progress.abandon()
+    yield
+    mc_progress.abandon()
 
 
 @pytest.fixture
