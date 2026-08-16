@@ -804,6 +804,113 @@ class TestThemeRegistration:
             assert name in host.shared.options_templates
 
 
+class TestStylingIsIndependent:
+    """The appearance layer works on any generation, in any tab, always.
+
+    It is not a Model Chain feature that happens to be cosmetic -- it restyles
+    the host's own bar, so it has to apply with Stage 2 switched off, with the
+    accordion never opened, and on tabs this script is not even shown on
+    (`show()` returns None for img2img). Four host mechanisms carry that, and
+    none of them consult the extension's state:
+
+    * ``Options.dumpjson`` dumps *every* registered option, unfiltered, so the
+      settings reach the browser's ``opts`` whatever else is going on;
+    * ``list_files_with_name("style.css")`` reads each active extension's root;
+    * ``list_scripts("javascript", ".js")`` loads the host's own JS before any
+      extension's, so ``requestProgress`` exists by the time it is wrapped;
+    * ``requestProgress`` is the single entry point for all six submit and
+      restore paths -- txt2img, txt2img upscale, img2img, extras and the two
+      progress restores.
+
+    What these tests guard is the other half: that nothing on *our* side
+    quietly couples the two.
+    """
+
+    def test_the_assets_are_where_the_host_scans_for_them(self):
+        """Root style.css, javascript/*.js. Anywhere else is never loaded."""
+        assert STYLESHEET.is_file()
+        assert STYLE_SCRIPT.is_file()
+        assert STYLE_SCRIPT.parent.name == "javascript"
+        assert STYLE_SCRIPT.parent.parent == EXTENSION_ROOT
+
+    def test_the_settings_exist_from_import_alone(self, host):
+        """No generation, no chain, no accordion -- just the module loaded."""
+        import model_chain
+
+        registered = host.shared.options_templates
+
+        assert registered[model_chain.OPT_STYLE_ENABLE].default is False
+        assert registered[model_chain.OPT_STYLE_THEME].default == model_chain.STYLE_THEME_DEFAULT
+
+    def test_the_script_reads_only_appearance_settings(self):
+        """The one way styling could couple itself to the chain is by asking.
+
+        If it ever consults the chain's enable state, or Item 4's calculation
+        setting, then turning one off would turn the other off -- which is the
+        thing both specs say must not happen.
+        """
+        import model_chain
+
+        consulted = set(re.findall(r'setting\(\s*"([^"]+)"', STYLE_SCRIPT.read_text()))
+        allowed = {
+            model_chain.OPT_STYLE_ENABLE,
+            model_chain.OPT_STYLE_THEME,
+            model_chain.OPT_STYLE_COLOR,
+            model_chain.OPT_STYLE_GRADIENT,
+            model_chain.OPT_STYLE_SHEEN,
+            model_chain.OPT_STYLE_GLOW,
+            model_chain.OPT_STYLE_COMPLETE,
+        }
+
+        assert consulted <= allowed, f"styling consults {consulted - allowed}"
+
+    def test_the_calculation_setting_is_not_one_of_them(self):
+        import model_chain
+
+        body = STYLE_SCRIPT.read_text() + stylesheet()
+
+        assert mc_progress.OPT_PROGRESS not in body
+        assert model_chain.OPT_STYLE_ENABLE in STYLE_SCRIPT.read_text()
+
+    def test_the_stylesheet_targets_only_the_hosts_own_bar(self):
+        """Not a Model Chain element, not a panel -- the host's progress bar.
+
+        Which is why it applies to an ordinary generation: there is no version
+        of the bar that belongs to this extension.
+        """
+        for selector, _ in styled_bar_rules():
+            assert ".progressDiv" in selector or ".progress" in selector
+
+    def test_the_wrapper_covers_every_tab_not_just_txt2img(self):
+        """It replaces the global rather than binding to one container."""
+        body = STYLE_SCRIPT.read_text()
+
+        assert "window.requestProgress = wrapped" in body
+        # A tab name anywhere in here would mean it had been scoped to one.
+        for tab in ("txt2img", "img2img", "extras"):
+            assert tab not in body
+
+    def test_a_generation_with_the_chain_off_leaves_progress_to_the_host(
+        self, chain, host, image_factory
+    ):
+        """The calculation stands down; the styling is not involved either way."""
+        p = make_p(host)
+        run_chain(chain, host, p, make_processed(host, p, image_factory), enabled=False)
+
+        assert mc_progress.active() is False
+        assert host.shared.opts.model_chain_style_enable is False
+
+    def test_turning_the_calculation_off_leaves_the_styling_alone(self, host):
+        """And the reverse -- the two settings share nothing."""
+        import model_chain
+
+        host.shared.opts.model_chain_progress = False
+        host.shared.opts.model_chain_style_enable = True
+
+        assert mc_progress.enabled() is False
+        assert getattr(host.shared.opts, model_chain.OPT_STYLE_ENABLE) is True
+
+
 class TestStylesheetConstraints:
     """The three findings that shaped the stylesheet, guarded as tests.
 

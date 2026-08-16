@@ -23,6 +23,32 @@ of its own. Nothing crosses.
 
 ---
 
+## Scope: installed is enough
+
+The requirement is that the appearance applies to an ordinary Forge generation
+with Model Chain not participating. In practice that has to mean something
+stronger — with Model Chain *never* participating, on tabs the script is not
+even registered for. `show()` returns `None` for img2img, so the script does not
+exist in that tab's runner at all, and the styling still has to work there.
+
+Four host mechanisms carry it, and none of them consults the extension's state:
+
+| Mechanism | Why it is unconditional |
+| --- | --- |
+| `Options.dumpjson` | dumps **every** registered option with no filtering, falling back to `data_labels[key].default`, so the settings reach the browser's `opts` on a fresh install with nothing saved |
+| `list_files_with_name("style.css")` | scans each *active* extension's root directory; being installed and enabled is the whole condition |
+| `list_scripts("javascript", ".js")` | loads the host's own JS before any extension's — `topological_sort` preserves insertion order for files with no declared dependencies — so `requestProgress` is defined by the time it is wrapped |
+| `requestProgress` | the single entry point for all six submit and restore paths: txt2img, txt2img upscale, img2img, extras, and the two progress restores |
+
+The wrap is also re-attempted from `onUiLoaded`, so a host that ever changed the
+JS ordering would not silently lose the completion effect.
+
+On this side, the guarantee is that nothing couples the two: the styling script
+reads only the seven `model_chain_style_*` settings — never the chain's enable
+state, never Item 4's calculation setting — and the stylesheet targets only
+`.progressDiv` / `.progress`, elements the host owns. Both are asserted in
+`tests/test_progress.py::TestStylingIsIndependent`.
+
 ## How the settings reach the browser
 
 Every option registered through `shared.options_templates` arrives in the

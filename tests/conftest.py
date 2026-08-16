@@ -166,6 +166,27 @@ class FakeOptions:
     def save(self, *args, **kwargs):
         pass
 
+    def __getattr__(self, item):
+        """Serve a registered option's default, as the host's ``Options`` does.
+
+        Faithful because it is what makes a setting readable the moment it is
+        registered: the host looks in saved data first and falls back to
+        ``data_labels[key].default``, so an option the user has never saved
+        still answers with its default rather than raising. Without this the
+        fakes would turn every unsaved setting into an AttributeError, which
+        the real object never produces -- and would hide the fact that the
+        appearance settings reach the browser on a fresh install.
+        """
+        if item.startswith("_"):
+            raise AttributeError(item)
+
+        shared = sys.modules.get("modules.shared")
+        registered = getattr(shared, "options_templates", None) or {}
+        if item in registered:
+            return registered[item].default
+
+        raise AttributeError(item)
+
 
 class FakeState:
     def __init__(self):

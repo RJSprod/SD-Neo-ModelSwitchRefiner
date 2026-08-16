@@ -432,9 +432,17 @@ sized for the whole chain before Stage 1 starts either way.
 ### Progress-bar appearance
 
 Purely cosmetic, entirely independent of everything above, and applied to
-**every** generation — chained or not, with Model Chain enabled or not. It never
-changes the numbers on the bar; the calculation above never changes how it
-looks. Either can be turned off without affecting the other.
+**every** generation. It never changes the numbers on the bar; the calculation
+above never changes how it looks. Either can be turned off without affecting
+the other.
+
+**Installing the extension is all it takes.** The theme applies whether or not
+Model Chain is enabled, whether or not a Stage 2 checkpoint is selected, and
+whether or not you have ever opened the accordion — and on **txt2img, img2img
+and Extras alike**, even though Model Chain itself is txt2img-only. It restyles
+the WebUI's own progress bar, so there is no version of the bar that belongs to
+this extension and no state of the extension that can switch it off. The only
+thing that turns it off is its own toggle, or uninstalling.
 
 Tick **Custom progress-bar appearance**, then pick a **Progress-bar theme**:
 
