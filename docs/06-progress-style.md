@@ -105,17 +105,46 @@ theme. What needs a real element is the bubbles that **leave** the bar:
 - varying size, drift, lift and timing per bubble is the whole effect, and
   sixteen circles on a background grid read as a repeating texture instead.
 
-That produces two exceptions, both scoped to `.mc-fx-ooze` alone, and a test
-asserts no other rule takes either:
+That produces three exceptions, all scoped to `.mc-fx-ooze` alone, and tests
+assert no other rule takes any of them:
 
 1. **`overflow: visible` on `.progressDiv`.** Lobe sets `overflow: hidden`
    there; stock Forge leaves it visible. Overriding a theme's clipping is
    normally exactly what this layer refuses to do — here it is the feature.
 2. **Geometry on an element we own.** `.mc-ooze-overlay` positions itself
-   absolutely and stretches 42px above the bar. The geometry restrictions exist
-   so the *host's* bar stays where its theme puts it; they say nothing about
+   absolutely and stretches above the bar. The geometry restrictions exist so
+   the *host's* bar stays where its theme puts it; they say nothing about
    elements this extension creates, and the test that enforces them was
    narrowed to match that reasoning rather than widened to permit an exception.
+3. **`content: none` on `.progress::before`.** Lobe animates diagonal stripes
+   there, which over sludge read as candy. This is suppressing a pseudo-element
+   the WebUI theme created, not drawing into one — the rule the rest of the
+   file follows is about what a declaration *puts* there, so the test now
+   checks that rather than the selector. Lobe's `::after`, a soft highlight
+   along the top, flatters the sludge and is left alone.
+
+### Reduced motion, and why Ooze is treated differently
+
+Every other effect here stops under `prefers-reduced-motion: reduce`, and the
+completion flash does not fire. Ooze slows to about a third instead, loses its
+sideways drift, and fades its bubbles rather than bursting them.
+
+That distinction came out of a bug report, and it is worth recording why. The
+first version stopped Ooze dead and hid its overlay entirely. What that produced
+was a flat green bar under a field of dots that never moved — indistinguishable
+from the theme being broken, which is exactly how it was reported. Two things
+were wrong with it:
+
+- **Motion is the content of this theme, not decoration on top of it.** The
+  other themes have something to look at when they stop. This one does not.
+- **The WebUI theme underneath may not honour the setting at all.** Lobe keeps
+  its stripes running regardless, so stopping our animation left the *only*
+  moving thing on the bar being the one we did not put there — the precise
+  opposite of what the setting is for.
+
+Reduce, do not remove, is the general guidance for motion that carries meaning.
+Here it is also the difference between a theme that looks calm and one that
+looks dead.
 
 Two mechanics carry the rest:
 

@@ -934,16 +934,32 @@ class TestStylesheetConstraints:
     broken, at which point it is a bug in somebody else's theme.
     """
 
-    def test_it_claims_no_pseudo_elements_on_the_bar(self):
+    def test_it_draws_into_no_pseudo_element_on_the_bar(self):
         """Lobe already uses ::before and ::after on .progress.
 
-        Claiming either replaces the theme's effect rather than layering with
-        it, so every effect is expressed on the element itself.
-        """
-        css = stylesheet()
+        Drawing into either replaces the theme's effect rather than layering
+        with it, so every effect is expressed on the element itself.
 
-        assert "::before" not in css
-        assert "::after" not in css
+        Suppressing one is a different act and is allowed: `content: none`
+        removes a decoration the WebUI theme added, which the Ooze theme does
+        deliberately. The distinction is drawing versus switching off, so the
+        test is on what the rule *puts* there rather than on the selector.
+        """
+        for selector, body in rules():
+            if "::before" not in selector and "::after" not in selector:
+                continue
+            declarations = [d.strip() for d in body.split(";") if d.strip()]
+            assert declarations, f"{selector} is empty"
+            for declaration in declarations:
+                assert declaration.split(":")[0].strip() == "content", (
+                    f"{selector} draws into a pseudo-element the theme may own"
+                )
+                assert "none" in declaration, f"{selector} generates content"
+
+    def test_only_the_ooze_theme_suppresses_a_themes_own_overlay(self):
+        for selector, _ in rules():
+            if "::before" in selector or "::after" in selector:
+                assert "mc-fx-ooze" in selector, f"{selector} is not scoped to one theme"
 
     def test_it_sets_no_geometry_on_the_bar(self):
         """Themes move this element; Lobe takes it out of the host's overlay.
@@ -999,6 +1015,57 @@ class TestStylesheetConstraints:
 
         for effect in ("sheen", "pulse"):
             assert f"mc-fx-{effect}" in reduced, f"{effect} keeps animating under reduced motion"
+
+    def test_the_ooze_theme_is_reduced_rather_than_stopped(self):
+        """Stopping it leaves a flat bar under a field of dots that never move.
+
+        Motion is the whole content of this theme rather than decoration on
+        top of it, so the reduced-motion answer is to slow it down. Stopping it
+        looks like the bug that prompted this, not like consideration.
+        """
+        css = stylesheet()
+        reduced = css[css.index("prefers-reduced-motion") :]
+
+        assert "mc-fx-ooze" in reduced, "the ooze theme ignores reduced motion entirely"
+        assert "animation: none" not in reduced.split("mc-fx-ooze")[1].split("}")[0]
+        assert "mc-ooze-rise-calm" in reduced, "no slowed variant for the bubbles"
+        # The overlay must survive: hiding it is what made the theme look broken.
+        assert "display: none" not in reduced.split(".mc-ooze-bubble")[0].split("mc-fx-ooze")[1]
+
+    def test_the_bubbles_are_slowed_by_scaling_not_by_pinning(self):
+        """Every bubble on one duration is every bubble on one period.
+
+        The field then surfaces in lockstep -- and because the delays are
+        computed against each bubble's own, shorter duration, they only cover
+        part of that common cycle, leaving a stretch of it with no bubble
+        starting at all. Measured, two of ten phase bins were empty and the
+        rest carried 120 bubbles between them, which is exactly the "all at
+        once, then nothing" this was reported as.
+
+        Scaling each bubble's own duration and delay by one factor keeps the
+        durations distinct and the phases spread, whatever the factor is.
+        """
+        css = stylesheet()
+        reduced = css[css.index("prefers-reduced-motion") :]
+        bubble_rule = reduced.split(".mc-ooze-bubble")[1].split("}")[0]
+
+        assert "animation-duration" not in bubble_rule, "pins every bubble to one period"
+        assert "--mc-ooze-slow" in bubble_rule, "no scaling factor to slow them by"
+
+    def test_the_bubble_delay_is_scaled_with_its_duration(self):
+        """Scaling one without the other reintroduces the dead gap.
+
+        The delay sets where in its cycle a bubble starts. Left unscaled while
+        the duration doubles, it covers only the first half of the new cycle.
+        """
+        base = [body for selector, body in rules() if selector == ".mc-ooze-bubble"]
+        assert base, "no base rule for the bubbles"
+        animation = [line for line in base[0].split(";") if "animation:" in line]
+        assert animation, "the bubbles have no animation shorthand"
+
+        assert animation[0].count("--mc-ooze-slow") == 2, (
+            "duration and delay must both be scaled, or the phases bunch up"
+        )
 
 
 # --------------------------------------------------------------------------- #

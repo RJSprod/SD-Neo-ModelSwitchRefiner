@@ -470,14 +470,29 @@ radioactive, `#ff6a00` for molten.
 The three **Custom theme** toggles — fade, sheen, glow — do nothing unless the
 theme above is set to `Custom`.
 
-**Ooze is the one theme that paints outside the bar**, so it is also the only
-one that overrides a WebUI theme's clipping — Lobe hides anything leaving the
-bar, and Ooze turns that back on for itself. The rising bubbles are real
-elements rather than a background pattern, so each has its own size, speed and
-drift; they are parented to the bar's *track*, which the WebUI builds once,
-rather than to the fill, whose contents it rewrites twice a second. They are
-added by a `MutationObserver` watching for the bar to appear, which runs after
-the fact and so cannot interfere with the generation itself.
+**Ooze is the one theme that takes the bar over completely**, and it is the only
+one that overrides what a WebUI theme does there. Two things: it re-enables
+overflow, because Lobe hides anything leaving the bar and the bubbles have to
+leave it; and it switches off Lobe's animated diagonal stripes across the fill,
+which over sludge read as candy rather than as a surface. Lobe's softer top
+highlight is left alone. Every other theme here layers with whatever your WebUI
+theme draws — Ooze is the exception, because half a takeover looks worse than
+either whole.
+
+The rising bubbles are real elements rather than a background pattern, so each
+has its own size, speed and drift. They are parented to the bar's *track*,
+which the WebUI builds once, rather than to the fill, whose contents it rewrites
+twice a second, and they are added by a `MutationObserver` watching for the bar
+to appear — which runs after the fact and so cannot interfere with the
+generation itself.
+
+If your system asks for reduced motion, most of these themes stop moving
+entirely and the completion flash does not fire. **Ooze slows down instead of
+stopping**, because motion is the whole content of that theme rather than
+decoration on top of it — a still Ooze is a flat green bar under a field of
+dots that never move, which looks broken rather than considerate. Everything
+runs about three times slower, the sideways drift goes, and the bubbles fade out
+rather than bursting.
 
 **Flash the bar when a job finishes** works with every theme. It fires once, at
 the end of the whole job; in a chained generation that is after Stage 2, and it

@@ -214,43 +214,103 @@
     // -- ooze ---------------------------------------------------------------
 
     const OOZE_OVERLAY = "mc-ooze-overlay";
-    const BUBBLE_COUNT = 26;
+
+    // Dense enough to read as a rolling boil rather than as separate circles.
+    // They animate transform and opacity only, so the compositor carries them
+    // and the count is far cheaper than the number suggests.
+    const BUBBLE_COUNT = 120;
+
+    // Bubbles still under the surface. Fewer, because they are confined to the
+    // fill's own height rather than to the band above it -- but placed and
+    // timed by exactly the same code, which is the whole reason they exist.
+    // They replaced two tiled background layers, and a tiled background is a
+    // grid: those bubbles sat in exact rows and a whole row broke the surface
+    // at once, so the sludge bunched while the air above it did not.
+    const INNER_COUNT = 80;
+
+    // Inset from both ends. A bubble centred on the very first pixel is half
+    // clipped by the overlay's own left edge; at the right edge that is wanted,
+    // because it is the ooze front arriving, but on the left it is just a half
+    // circle sitting there for the whole job.
+    const FIELD_START = 3;
+    const FIELD_WIDTH = 94;
 
     function oozeEnabled() {
         return styleEnabled() && Boolean(resolveEffects().ooze);
     }
 
-    // Deliberately not derived from anything: sixteen circles on a strict grid
-    // read as a texture rather than as bubbles, and the irregularity is the
-    // whole effect. Randomised once per bar, so no two generations look
-    // identical either.
-    function buildBubbles(overlay) {
-        for (let i = 0; i < BUBBLE_COUNT; i++) {
+    // One generator for both populations. The submerged bubbles and the ones in
+    // the air differ only in how far they travel and how they are drawn; their
+    // placement and timing come from the same lines, so the two can never bunch
+    // differently from one another.
+    function seedBubbles(overlay, count, className, sizeAt, liftAt) {
+        // Stratified rather than uniform: the width is divided into one cell
+        // per bubble and each is placed at random *within its own cell*.
+        //
+        // Plain Math.random() across the whole width is what produced the
+        // clumps-and-voids the field was reported for. Uniform random points
+        // are not evenly spaced -- they cluster, by definition -- so at any
+        // density there are stretches with four bubbles overlapping and
+        // stretches with none. One per cell keeps the spacing even while the
+        // jitter inside the cell keeps it from looking like a comb.
+        const cell = FIELD_WIDTH / count;
+
+        for (let i = 0; i < count; i++) {
             const bubble = document.createElement("span");
-            bubble.className = "mc-ooze-bubble";
+            bubble.className = className;
+
             // Bigger bubbles rise further and slower, as they would in
             // something viscous. Tying the three together stops the field
             // looking like noise.
-            const scale = Math.random();
-            const size = 4 + scale * 8;
-            // Inset from both ends: a bubble centred on the very first pixel is
-            // half clipped by the overlay's own left edge. At the right edge
-            // that is wanted -- it is the ooze front arriving -- but on the left
-            // it is just a half circle sitting there for the whole job.
-            bubble.style.setProperty("--x", (3 + Math.random() * 94).toFixed(2) + "%");
-            bubble.style.setProperty("--size", size.toFixed(1) + "px");
-            bubble.style.setProperty("--dur", (1.5 + scale * 1.6 + Math.random() * 0.8).toFixed(2) + "s");
+            //
+            // Biased towards the small end: a uniform spread at this density
+            // reads as a clutter of blobs, where mostly-small with a few large
+            // ones reads as fizz.
+            const scale = Math.pow(Math.random(), 1.35);
+            const duration = 0.35 + scale * 0.42 + Math.random() * 0.2;
+
+            bubble.style.setProperty("--x", (FIELD_START + (i + Math.random()) * cell).toFixed(2) + "%");
+            bubble.style.setProperty("--size", sizeAt(scale).toFixed(1) + "px");
+            bubble.style.setProperty("--dur", duration.toFixed(2) + "s");
             // Negative, so every bubble is already mid-flight on the first
-            // frame instead of the whole field launching at once.
-            bubble.style.setProperty("--delay", (-Math.random() * 4).toFixed(2) + "s");
+            // frame instead of the whole field launching at once -- and scaled
+            // to this bubble's *own* duration, which is what makes the phases
+            // uniform. A delay drawn from one fixed window instead left every
+            // bubble's position in its cycle correlated with its speed, so they
+            // rose in visible ranks with gaps between them.
+            bubble.style.setProperty("--delay", (-Math.random() * duration).toFixed(3) + "s");
             bubble.style.setProperty("--drift", (Math.random() * 16 - 8).toFixed(1) + "px");
-            // A tight band rather than a fountain. The bar sits directly under
-            // the Generate button in the host's layout, and bubbles carrying on
-            // up into it stop reading as a surface fizzing and start reading as
-            // something escaping.
-            bubble.style.setProperty("--lift", (12 + scale * 12 + Math.random() * 6).toFixed(0) + "px");
+            bubble.style.setProperty("--lift", liftAt(scale).toFixed(0) + "px");
             overlay.appendChild(bubble);
         }
+    }
+
+    function buildBubbles(overlay, surface) {
+        // Above the surface: a tight band rather than a fountain. The bar sits
+        // directly under the Generate button in the host's layout, and bubbles
+        // carrying on up into it stop reading as a surface fizzing and start
+        // reading as something escaping.
+        seedBubbles(
+            overlay,
+            BUBBLE_COUNT,
+            "mc-ooze-bubble",
+            (scale) => 3.5 + scale * 8,
+            (scale) => 10 + scale * 16 + Math.random() * 10,
+        );
+
+        // Below it: bounded by the fill's own height, so they fade just under
+        // the skin rather than crossing it. A bar too short to show any travel
+        // gets none of them rather than a row of dots that never move.
+        const headroom = Math.max(surface - 6, 0);
+        if (headroom < 5) return;
+
+        seedBubbles(
+            overlay,
+            INNER_COUNT,
+            "mc-ooze-inner",
+            (scale) => 2 + scale * 4,
+            (scale) => headroom * (0.55 + scale * 0.35 + Math.random() * 0.1),
+        );
     }
 
     // The overlay is clipped at the ooze front, so a bubble only appears once
@@ -289,7 +349,10 @@
 
         const overlay = document.createElement("div");
         overlay.className = OOZE_OVERLAY;
-        buildBubbles(overlay);
+        // The submerged bubbles have to fit inside the fill, so how tall it is
+        // decides how far they can travel -- and that is the active WebUI
+        // theme's decision, not ours.
+        buildBubbles(overlay, bar.offsetHeight || 20);
         // Appended to .progressDiv, not to .progress: the host rewrites
         // .progress's textContent twice a second, which would wipe these
         // within half a second of adding them.
