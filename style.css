@@ -189,7 +189,7 @@
         );
     background-size: 38px 100%, 47px 33px, 29px 25px, 100% 100%;
     background-repeat: repeat-x, repeat, repeat, no-repeat;
-    animation: mc-ooze-flow 2.6s linear infinite;
+    animation: mc-ooze-flow 1.5s linear infinite;
     /* Restrained next to the other themes' glow: the bubbles carry their own,
      * and a wide halo on the bar washes them out just as they clear it. */
     box-shadow:
@@ -372,16 +372,21 @@
      * not put there.
      *
      * Motion is the entire content of this theme and the user chose it by
-     * name. So it is reduced rather than removed: everything slows down by
-     * roughly a factor of three, the sideways drift goes, and the bubbles fade
-     * out instead of swelling and bursting. */
+     * name. So it is reduced rather than removed: it runs at roughly half
+     * speed, the sideways drift goes, and the bubbles fade out instead of
+     * swelling and bursting.
+     *
+     * Half rather than the third it was first set to. At a third the theme is
+     * technically moving and still reads as stalled, which defeats the point of
+     * not stopping it -- and someone who has turned this theme on has asked for
+     * motion in about as many words. */
     .mc-progress-styled.mc-fx-ooze .progressDiv .progress {
-        animation-duration: 9s;
+        animation-duration: 3s;
     }
 
     .mc-ooze-bubble {
         animation-name: mc-ooze-rise-calm;
-        animation-duration: 7s;
+        animation-duration: 2.6s;
     }
 }
 

@@ -214,7 +214,11 @@
     // -- ooze ---------------------------------------------------------------
 
     const OOZE_OVERLAY = "mc-ooze-overlay";
-    const BUBBLE_COUNT = 26;
+
+    // Dense enough to read as a fizzing surface rather than as a handful of
+    // circles. They animate transform and opacity only, so the compositor
+    // carries them and the count is cheap.
+    const BUBBLE_COUNT = 60;
 
     function oozeEnabled() {
         return styleEnabled() && Boolean(resolveEffects().ooze);
@@ -231,18 +235,23 @@
             // Bigger bubbles rise further and slower, as they would in
             // something viscous. Tying the three together stops the field
             // looking like noise.
-            const scale = Math.random();
-            const size = 4 + scale * 8;
+            //
+            // Biased towards the small end: a uniform spread at this density
+            // reads as a clutter of blobs, where mostly-small with a few large
+            // ones reads as fizz.
+            const scale = Math.pow(Math.random(), 1.35);
+            const size = 3.5 + scale * 8;
             // Inset from both ends: a bubble centred on the very first pixel is
             // half clipped by the overlay's own left edge. At the right edge
             // that is wanted -- it is the ooze front arriving -- but on the left
             // it is just a half circle sitting there for the whole job.
             bubble.style.setProperty("--x", (3 + Math.random() * 94).toFixed(2) + "%");
             bubble.style.setProperty("--size", size.toFixed(1) + "px");
-            bubble.style.setProperty("--dur", (1.5 + scale * 1.6 + Math.random() * 0.8).toFixed(2) + "s");
+            bubble.style.setProperty("--dur", (0.7 + scale * 0.85 + Math.random() * 0.4).toFixed(2) + "s");
             // Negative, so every bubble is already mid-flight on the first
-            // frame instead of the whole field launching at once.
-            bubble.style.setProperty("--delay", (-Math.random() * 4).toFixed(2) + "s");
+            // frame instead of the whole field launching at once. Spread wider
+            // than the longest life, or they clump into visible waves.
+            bubble.style.setProperty("--delay", (-Math.random() * 2.2).toFixed(2) + "s");
             bubble.style.setProperty("--drift", (Math.random() * 16 - 8).toFixed(1) + "px");
             // A tight band rather than a fountain. The bar sits directly under
             // the Generate button in the host's layout, and bubbles carrying on
