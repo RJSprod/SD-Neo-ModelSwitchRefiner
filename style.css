@@ -189,7 +189,7 @@
         );
     background-size: 38px 100%, 47px 33px, 29px 25px, 100% 100%;
     background-repeat: repeat-x, repeat, repeat, no-repeat;
-    animation: mc-ooze-flow 1.5s linear infinite;
+    animation: mc-ooze-flow 0.75s linear infinite;
     /* Restrained next to the other themes' glow: the bubbles carry their own,
      * and a wide halo on the bar washes them out just as they clear it. */
     box-shadow:
@@ -381,12 +381,12 @@
      * not stopping it -- and someone who has turned this theme on has asked for
      * motion in about as many words. */
     .mc-progress-styled.mc-fx-ooze .progressDiv .progress {
-        animation-duration: 3s;
+        animation-duration: 1.5s;
     }
 
     .mc-ooze-bubble {
         animation-name: mc-ooze-rise-calm;
-        animation-duration: 2.6s;
+        animation-duration: 1.3s;
     }
 }
 
