@@ -80,14 +80,60 @@ The stylesheet implements four independent effects — `gradient`, `sheen`,
 `glow`, `pulse` — plus an `intense` modifier, each exactly once, keyed on a
 `.mc-fx-*` class. **A theme is a choice of those effects, made in the JS.**
 
-| Theme | gradient | sheen | glow | pulse | intense |
-| --- | :-: | :-: | :-: | :-: | :-: |
-| Flat (default) | | | | | |
-| Gradient | ● | | | | |
-| Sheen | ● | ● | | | |
-| Pulse | | | ● | ● | |
-| Neon | ● | ● | ● | | ● |
-| Custom | *toggle* | *toggle* | *toggle* | *with glow* | |
+| Theme | gradient | sheen | glow | pulse | intense | ooze |
+| --- | :-: | :-: | :-: | :-: | :-: | :-: |
+| Flat (default) | | | | | | |
+| Gradient | ● | | | | | |
+| Sheen | ● | ● | | | | |
+| Pulse | | | ● | ● | | |
+| Neon | ● | ● | ● | | ● | |
+| Ooze | | | | | | ● |
+| Custom | *toggle* | *toggle* | *toggle* | *with glow* | | |
+
+### Ooze, and the two exceptions it makes
+
+Ooze is the only theme that paints outside the bar, and it is worth being
+explicit that this is a deliberate exemption rather than the constraints
+quietly loosening for everyone.
+
+The body, the meniscus and the bubbles suspended *inside* the sludge are still
+background layers on the element — no pseudo-elements, same as every other
+theme. What needs a real element is the bubbles that **leave** the bar:
+
+- they have to be positioned against the *track* rather than the fill, so they
+  can rise past the top edge;
+- varying size, drift, lift and timing per bubble is the whole effect, and
+  sixteen circles on a background grid read as a repeating texture instead.
+
+That produces two exceptions, both scoped to `.mc-fx-ooze` alone, and a test
+asserts no other rule takes either:
+
+1. **`overflow: visible` on `.progressDiv`.** Lobe sets `overflow: hidden`
+   there; stock Forge leaves it visible. Overriding a theme's clipping is
+   normally exactly what this layer refuses to do — here it is the feature.
+2. **Geometry on an element we own.** `.mc-ooze-overlay` positions itself
+   absolutely and stretches 42px above the bar. The geometry restrictions exist
+   so the *host's* bar stays where its theme puts it; they say nothing about
+   elements this extension creates, and the test that enforces them was
+   narrowed to match that reasoning rather than widened to permit an exception.
+
+Two mechanics carry the rest:
+
+- **The overlay is parented to `.progressDiv`, never to `.progress`.** The host
+  rewrites `.progress`'s `textContent` on every poll, so anything inside it is
+  gone within half a second. `.progressDiv` is built once and never rewritten.
+- **The ooze front is the fill's own width.** The overlay is clipped with
+  `clip-path: inset(0 calc(100% - var(--mc-ooze-level)) 0 0)`, and a
+  `MutationObserver` on the fill's `style` attribute mirrors its inline width
+  into that variable. Bubbles sit at fixed positions and are revealed as the
+  sludge reaches them, rather than sliding along with the front.
+
+The overlay is added by a second `MutationObserver` watching the document for
+`.progressDiv` appearing. That is deliberate: the alternative — hooking
+`requestProgress`, which is where the bar's lifecycle is otherwise visible —
+sits inside `submit()` *before* the task id is attached, and once shipped a
+throw there for the whole WebUI. An observer runs after the fact and cannot
+abort anything.
 
 Two consequences of putting the themes in the JS rather than giving each one its
 own CSS:

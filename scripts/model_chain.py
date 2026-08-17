@@ -91,7 +91,7 @@ and infotexts where it means nothing.
 
 STYLE_CUSTOM = "Custom"
 
-STYLE_THEMES = ("Flat", "Gradient", "Sheen", "Pulse", "Neon", STYLE_CUSTOM)
+STYLE_THEMES = ("Flat", "Gradient", "Sheen", "Pulse", "Neon", "Ooze", STYLE_CUSTOM)
 """The ready-made looks, plus the one that defers to the toggles.
 
 Each named theme is a choice of the four effects ``style.css`` implements --
@@ -217,9 +217,11 @@ shared.options_templates.update(
             ).info(
                 "<b>Flat</b> plain fill · <b>Gradient</b> lightens towards the leading edge · "
                 "<b>Sheen</b> adds a travelling highlight · <b>Pulse</b> a breathing halo · "
-                "<b>Neon</b> all of it, turned up · <b>Custom</b> uses the three toggles "
-                "below. Each one takes its colours from the setting underneath, so picking "
-                "a colour recolours whichever theme you chose"
+                "<b>Neon</b> all of it, turned up · <b>Ooze</b> glowing sludge that fills "
+                "from the left and bubbles, with bubbles escaping above the bar · "
+                "<b>Custom</b> uses the three toggles below. Each one takes its colours from "
+                "the setting underneath, so picking a colour recolours whichever theme you "
+                "chose — <code>#39ff5e</code> makes Ooze toxic slime"
             ),
             OPT_STYLE_COLOR: shared.OptionInfo(
                 "",
