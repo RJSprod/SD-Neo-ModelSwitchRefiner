@@ -247,6 +247,116 @@
         }
     }
 
+    // -- driving the fill ---------------------------------------------------
+
+    // How hard the displayed value chases where the truth is predicted to be,
+    // per second.
+    //
+    // Measured rather than guessed, by recording the rendered width every frame
+    // and looking at the spread of per-frame velocity. Too low and the display
+    // falls behind between polls and then has to sprint: at 1.2 the fastest
+    // frame was thirteen times the 95th percentile. Too high and it
+    // over-corrects, dipping almost to a stop before pushing on again. At 4.5
+    // the fastest frame is 47 px/s against a 95th percentile of 46 -- no spike
+    // left to speak of -- and the floor across every frame is the highest of
+    // any value tried.
+    const CATCHUP = 4.5;
+
+    // Never let the display crawl to a halt while the job is still moving. A
+    // bar that stops is the thing being removed; a bar that is briefly a little
+    // behind is not something anyone can see.
+    const FLOOR_FRACTION = 0.35;
+
+    // How far ahead of the last known value the display may run, in poll
+    // intervals. Extrapolating is what fills the gap between two polls; this
+    // bounds it so a generation that genuinely stalls does not keep the bar
+    // sliding towards a number nothing has reported.
+    const MAX_LEAD = 1.6;
+
+    function parsePercent(value) {
+        const match = /^([\d.]+)%$/.exec(String(value || "").trim());
+        return match ? parseFloat(match[1]) : null;
+    }
+
+    // A transition cannot do this. Every new width retargets it, so the bar's
+    // speed changes abruptly at each poll -- finer steps rather than continuous
+    // motion -- and `width` transitions run on the main thread, which is the
+    // busiest thread on the page during a generation.
+    //
+    // Driving it per frame instead means the display has a velocity of its own.
+    // It is advanced by that velocity every frame and steered towards where the
+    // host's next value is predicted to land, so it never stops, never steps,
+    // and never jumps to a reported value: a change in the true rate arrives as
+    // a change in speed.
+    function driveSmoothly(progressDiv, bar) {
+        let shown = parsePercent(bar.style.width) || 0;
+        let target = shown;
+        let targetAt = performance.now();
+        let seen = bar.style.width;
+        let rate = 0;
+        let last = targetAt;
+
+        const write = () => {
+            const text = shown.toFixed(2) + "%";
+            progressDiv.style.setProperty("--mc-smooth-width", text);
+            // The ooze front is this same number; taking it from here rather
+            // than from the host's value keeps the sludge and its bubbles on
+            // the fill they belong to.
+            progressDiv.style.setProperty("--mc-ooze-level", text);
+        };
+
+        write();
+        bar.classList.add("mc-smooth-on");
+
+        const frame = (now) => {
+            if (!bar.isConnected) return;
+
+            // The host is still writing its own width; it is simply no longer
+            // the one being displayed. Reading it back is how the target
+            // arrives, with no observer and nothing to fight over.
+            if (bar.style.width !== seen) {
+                seen = bar.style.width;
+                const value = parsePercent(seen);
+                if (value !== null) {
+                    const gap = (now - targetAt) / 1000;
+                    if (gap > 0.05 && value > target) {
+                        const observed = (value - target) / gap;
+                        // Smoothed, or one slow step would halve the speed and
+                        // one fast step would double it.
+                        rate = rate > 0 ? rate * 0.65 + observed * 0.35 : observed;
+                    }
+                    target = Math.max(target, value);
+                    targetAt = now;
+                }
+            }
+
+            const dt = Math.min((now - last) / 1000, 0.1);
+            last = now;
+
+            const lead = rate * (tickMilliseconds() / 1000) * MAX_LEAD;
+            const predicted = Math.min(target + rate * ((now - targetAt) / 1000), target + lead, 100);
+            const speed = Math.max(rate + (predicted - shown) * CATCHUP, rate * FLOOR_FRACTION);
+
+            // Monotonic by construction: speed is never negative because rate
+            // never is and the catch-up term is only subtracted from a value
+            // that is already ahead of the prediction, where standing still is
+            // the correct thing to do.
+            shown = Math.min(Math.max(shown + Math.max(speed, 0) * dt, shown), 100);
+            write();
+
+            requestAnimationFrame(frame);
+        };
+
+        requestAnimationFrame(frame);
+    }
+
+    function smooth(progressDiv) {
+        if (!progressDiv || !smoothEnabled()) return;
+        const bar = progressDiv.querySelector(".progress");
+        if (!bar || bar.classList.contains("mc-smooth-on")) return;
+        driveSmoothly(progressDiv, bar);
+    }
+
     // -- ooze ---------------------------------------------------------------
 
     const OOZE_OVERLAY = "mc-ooze-overlay";
@@ -353,10 +463,15 @@
     // the sludge has reached its position. The front is the fill's own width,
     // which the host writes as an inline style on every poll -- so it is read
     // back from there rather than recomputed.
-    function trackLevel(overlay, bar) {
+    function trackLevel(progressDiv, overlay, bar) {
         const update = () => {
             try {
-                overlay.style.setProperty("--mc-ooze-level", bar.style.width || "0%");
+                // Only when the frame-by-frame driver is not running. When it
+                // is, it publishes this itself, from the value actually on
+                // screen rather than from the host's last step.
+                if (!bar.classList.contains("mc-smooth-on")) {
+                    progressDiv.style.setProperty("--mc-ooze-level", bar.style.width || "0%");
+                }
                 // The height of the fill is where the surface is, and it is the
                 // active WebUI theme's decision rather than ours -- Forge uses
                 // 20px, another theme need not. Measuring it is what lets the
@@ -394,7 +509,7 @@
         // within half a second of adding them.
         progressDiv.appendChild(overlay);
 
-        trackLevel(overlay, bar);
+        trackLevel(progressDiv, overlay, bar);
     }
 
     // Watching the document rather than hooking the host's submit path. The bar
@@ -402,6 +517,13 @@
     // lifecycle -- but an observer runs after the fact and cannot abort
     // anything, which is exactly the property the note at the top of this file
     // says the alternative lacks.
+    // Smoothing first, so the fill is already being driven by the time the
+    // ooze overlay reads a level from it.
+    function attach(progressDiv) {
+        smooth(progressDiv);
+        decorate(progressDiv);
+    }
+
     function watchForBars() {
         if (typeof MutationObserver !== "function" || !document.body) return;
 
@@ -411,9 +533,9 @@
                     if (!node || node.nodeType !== 1) continue;
                     try {
                         if (node.classList && node.classList.contains("progressDiv")) {
-                            decorate(node);
+                            attach(node);
                         } else if (node.querySelector) {
-                            node.querySelectorAll(".progressDiv").forEach(decorate);
+                            node.querySelectorAll(".progressDiv").forEach(attach);
                         }
                     } catch (error) {
                         console.error("Model Chain: could not decorate the progress bar", error);

@@ -960,6 +960,54 @@ class TestSmoothAdvance:
         for selector, _ in smoothing:
             assert ".mc-progress-styled" not in selector, f"{selector} needs a theme switched on"
 
+    def test_the_driver_overrides_the_inline_width_rather_than_racing_it(self):
+        """The host keeps writing its own width; it is just not the one shown.
+
+        Both sides writing the same attribute would be a fight neither can win
+        reliably. An `!important` rule beats an inline declaration, so the host
+        writes freely, the driver reads that back as its target, and nothing is
+        contested.
+        """
+        rule = [
+            body
+            for selector, body in rules()
+            if selector == ".mc-progress-smooth .progressDiv .progress.mc-smooth-on"
+        ]
+
+        assert rule, "the driver has no way to take over the width"
+        assert "!important" in rule[0]
+        assert "transition: none" in rule[0], "a transition would fight the per-frame writes"
+
+    def test_the_driver_never_assigns_a_reported_value_directly(self):
+        """Which would be the jump this exists to remove.
+
+        The displayed value only ever moves by speed times elapsed time, so a
+        change in the reported rate arrives as a change in speed.
+        """
+        body = STYLE_SCRIPT.read_text()
+
+        assert "shown = target" not in body
+        assert re.search(r"shown \+ [^;]*speed[^;]*\* dt", body), (
+            "the display is not advanced by a velocity"
+        )
+
+    def test_the_driver_cannot_come_to_a_stop_while_progressing(self):
+        """A bar that stops is the complaint; being slightly behind is not."""
+        body = STYLE_SCRIPT.read_text()
+        match = re.search(r"const FLOOR_FRACTION = ([\d.]+);", body)
+
+        assert match, "nothing stops the display crawling to a halt"
+        assert float(match.group(1)) > 0
+
+    def test_the_driver_bounds_how_far_it_runs_ahead(self):
+        """Extrapolation fills the gap between polls; unbounded it would
+        keep sliding towards a number nothing has reported."""
+        body = STYLE_SCRIPT.read_text()
+        match = re.search(r"const MAX_LEAD = ([\d.]+);", body)
+
+        assert match, "the extrapolation is unbounded"
+        assert 0 < float(match.group(1)) < 5
+
     def test_it_transitions_the_width_linearly(self):
         """Any easing puts a visible stall at each end of every step.
 

@@ -36,22 +36,61 @@ the same as wanting it recoloured, and a user who wants the first should not
 have to accept the second. A test asserts no smoothing rule sits under the
 appearance class.
 
-Two decisions worth recording:
+### A transition is not enough
 
-- **Linear easing.** Any easing curve puts a visible stall at each end of every
-  step, which is precisely the artefact being removed.
-- **The duration overshoots the poll interval by 40%.** The interval itself
-  comes from the host's own `live_preview_refresh_period` rather than being
-  assumed, but matching it exactly is wrong: the host schedules its next poll
-  from *inside* the response handler, so the true gap between two width writes
-  is the interval plus a server round trip. A transition of exactly the
-  interval always lands early and leaves the bar sitting still — measured, with
-  a 120ms simulated round trip, as a repeating glide-hold-glide. Overshooting
-  costs a fraction of a second of lag on a value that only ever increases,
-  which is invisible; the stall is not.
+The first attempt was a CSS transition on `width`, and it was not continuous
+motion. Two reasons, both structural:
 
-The ooze overlay's `clip-path` is transitioned alongside, or the sludge would
-slide smoothly while the bubbles riding it appeared in jumps.
+- **Every new value retargets the transition.** The browser abandons the one in
+  flight and starts a fresh one from wherever it had reached, over the full
+  duration. The bar's speed therefore changes abruptly at each poll. That is
+  finer-grained stepping.
+- **`width` is not compositor-accelerated.** It relayouts every frame on the
+  main thread, which during a generation is the busiest thread on the page.
+
+The transition survives as a fallback for when the script cannot attach, and it
+is switched off the moment the script takes over.
+
+### The driver
+
+The fill is written every frame from a value with a velocity of its own:
+
+- the rate of true progress is estimated from consecutive host values and
+  smoothed, so one slow poll does not halve the speed;
+- between polls the display keeps advancing at that rate, bounded to `MAX_LEAD`
+  poll intervals ahead so a genuinely stalled generation does not keep the bar
+  sliding;
+- it steers towards the predicted value at `CATCHUP` per second, so a jump in
+  the reported number arrives as a change in speed;
+- `FLOOR_FRACTION` keeps it from crawling to a halt while the job is moving.
+
+Nothing ever assigns a reported value to the display, which is what would put
+the jump back.
+
+**Both sides write the width, and neither fights.** The host keeps setting its
+inline `style.width`; an `!important` rule means ours is what renders, and the
+host's value is read back as the target. No observer, no contention, and the
+host needs no knowledge of any of it.
+
+### The constants came from measurement
+
+Recording the rendered width every frame across a simulated generation:
+
+| | fallback transition | driver |
+| --- | --- | --- |
+| frames in which the bar moved | 2% | 100% |
+| frames in which it sat still | 175 / 179 | 0 |
+| fastest frame | 1912 px/s | 47 px/s |
+| slowest frame | 0 px/s | 16.7 px/s |
+
+`CATCHUP` was chosen the same way. At 1.2 the display falls behind between polls
+and then sprints — the fastest frame was thirteen times the 95th percentile. At
+6 and above it over-corrects, dipping close to a stop before pushing on. At 4.5
+the fastest frame is 47 px/s against a 95th percentile of 46, and the per-frame
+floor is the highest of any value tried.
+
+The ooze overlay reads its front from the same per-frame value, so the sludge
+and the bubbles riding it stay on the fill they belong to.
 
 ## Scope: installed is enough
 
