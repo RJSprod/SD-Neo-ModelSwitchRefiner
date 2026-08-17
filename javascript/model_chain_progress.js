@@ -48,7 +48,7 @@
     // these; the Custom theme is the same choice made by the user's toggles.
     // Keeping the themes here rather than as CSS of their own means there is
     // one implementation of each effect to get right.
-    const EFFECTS = ["gradient", "sheen", "glow", "pulse", "intense"];
+    const EFFECTS = ["gradient", "sheen", "glow", "pulse", "intense", "ooze"];
 
     const THEMES = {
         // Plain fill in the chosen colour. What the host does, recoloured.
@@ -63,6 +63,10 @@
         Pulse: { glow: true, pulse: true },
         // Everything, turned up. The loud one.
         Neon: { gradient: true, sheen: true, glow: true, intense: true },
+        // Toxic sludge. The only theme that paints outside the bar: bubbles
+        // rise through the fill and escape above it. See the ooze section of
+        // style.css for the two exceptions it makes and why.
+        Ooze: { ooze: true },
     };
 
     const DEFAULT_THEME = "Flat";
@@ -207,6 +211,119 @@
         }
     }
 
+    // -- ooze ---------------------------------------------------------------
+
+    const OOZE_OVERLAY = "mc-ooze-overlay";
+    const BUBBLE_COUNT = 26;
+
+    function oozeEnabled() {
+        return styleEnabled() && Boolean(resolveEffects().ooze);
+    }
+
+    // Deliberately not derived from anything: sixteen circles on a strict grid
+    // read as a texture rather than as bubbles, and the irregularity is the
+    // whole effect. Randomised once per bar, so no two generations look
+    // identical either.
+    function buildBubbles(overlay) {
+        for (let i = 0; i < BUBBLE_COUNT; i++) {
+            const bubble = document.createElement("span");
+            bubble.className = "mc-ooze-bubble";
+            // Bigger bubbles rise further and slower, as they would in
+            // something viscous. Tying the three together stops the field
+            // looking like noise.
+            const scale = Math.random();
+            const size = 4 + scale * 8;
+            // Inset from both ends: a bubble centred on the very first pixel is
+            // half clipped by the overlay's own left edge. At the right edge
+            // that is wanted -- it is the ooze front arriving -- but on the left
+            // it is just a half circle sitting there for the whole job.
+            bubble.style.setProperty("--x", (3 + Math.random() * 94).toFixed(2) + "%");
+            bubble.style.setProperty("--size", size.toFixed(1) + "px");
+            bubble.style.setProperty("--dur", (1.5 + scale * 1.6 + Math.random() * 0.8).toFixed(2) + "s");
+            // Negative, so every bubble is already mid-flight on the first
+            // frame instead of the whole field launching at once.
+            bubble.style.setProperty("--delay", (-Math.random() * 4).toFixed(2) + "s");
+            bubble.style.setProperty("--drift", (Math.random() * 16 - 8).toFixed(1) + "px");
+            // A tight band rather than a fountain. The bar sits directly under
+            // the Generate button in the host's layout, and bubbles carrying on
+            // up into it stop reading as a surface fizzing and start reading as
+            // something escaping.
+            bubble.style.setProperty("--lift", (12 + scale * 12 + Math.random() * 6).toFixed(0) + "px");
+            overlay.appendChild(bubble);
+        }
+    }
+
+    // The overlay is clipped at the ooze front, so a bubble only appears once
+    // the sludge has reached its position. The front is the fill's own width,
+    // which the host writes as an inline style on every poll -- so it is read
+    // back from there rather than recomputed.
+    function trackLevel(overlay, bar) {
+        const update = () => {
+            try {
+                overlay.style.setProperty("--mc-ooze-level", bar.style.width || "0%");
+                // The height of the fill is where the surface is, and it is the
+                // active WebUI theme's decision rather than ours -- Forge uses
+                // 20px, another theme need not. Measuring it is what lets the
+                // bubbles break the surface instead of the floor.
+                const height = bar.offsetHeight;
+                if (height > 0) {
+                    overlay.style.setProperty("--mc-ooze-surface", height + "px");
+                }
+            } catch (error) {
+                /* the bar has gone; the overlay goes with it */
+            }
+        };
+        update();
+
+        const observer = new MutationObserver(update);
+        observer.observe(bar, { attributes: true, attributeFilter: ["style"] });
+        return observer;
+    }
+
+    function decorate(progressDiv) {
+        if (!progressDiv || progressDiv.querySelector(`.${OOZE_OVERLAY}`)) return;
+        if (!oozeEnabled()) return;
+
+        const bar = progressDiv.querySelector(".progress");
+        if (!bar) return;
+
+        const overlay = document.createElement("div");
+        overlay.className = OOZE_OVERLAY;
+        buildBubbles(overlay);
+        // Appended to .progressDiv, not to .progress: the host rewrites
+        // .progress's textContent twice a second, which would wipe these
+        // within half a second of adding them.
+        progressDiv.appendChild(overlay);
+
+        trackLevel(overlay, bar);
+    }
+
+    // Watching the document rather than hooking the host's submit path. The bar
+    // is created and destroyed per generation, so something has to observe that
+    // lifecycle -- but an observer runs after the fact and cannot abort
+    // anything, which is exactly the property the note at the top of this file
+    // says the alternative lacks.
+    function watchForBars() {
+        if (typeof MutationObserver !== "function" || !document.body) return;
+
+        new MutationObserver((records) => {
+            for (const record of records) {
+                for (const node of record.addedNodes) {
+                    if (!node || node.nodeType !== 1) continue;
+                    try {
+                        if (node.classList && node.classList.contains("progressDiv")) {
+                            decorate(node);
+                        } else if (node.querySelector) {
+                            node.querySelectorAll(".progressDiv").forEach(decorate);
+                        }
+                    } catch (error) {
+                        console.error("Model Chain: could not decorate the progress bar", error);
+                    }
+                }
+            }
+        }).observe(document.body, { childList: true, subtree: true });
+    }
+
     // -- completion effect -------------------------------------------------
 
     function clearFlash(parent) {
@@ -321,5 +438,14 @@
 
     if (typeof onOptionsAvailable === "function") onOptionsAvailable(apply);
     if (typeof onOptionsChanged === "function") onOptionsChanged(apply);
-    if (typeof onUiLoaded === "function") onUiLoaded(apply);
+    if (typeof onUiLoaded === "function") {
+        onUiLoaded(function () {
+            apply();
+            try {
+                watchForBars();
+            } catch (error) {
+                console.error("Model Chain: could not watch for the progress bar", error);
+            }
+        });
+    }
 })();

@@ -756,13 +756,29 @@ def stylesheet():
     return re.sub(r"/\*.*?\*/", "", STYLESHEET.read_text(), flags=re.S)
 
 
+def rules():
+    """Every rule in the stylesheet, as (selector, body) pairs, one per comma."""
+    out = []
+    for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", stylesheet()):
+        for selector in selectors.split(","):
+            selector = selector.strip()
+            if selector:
+                out.append((selector, body))
+    return out
+
+
 def styled_bar_rules():
-    """Every rule that styles the host's own bar, as (selector, body) pairs."""
-    css = stylesheet()
+    """Rules that style the host's *own* bar element.
+
+    Narrower than "every rule we add", and the distinction matters: the geometry
+    restrictions exist so the host's bar stays where its theme puts it. They say
+    nothing about elements this extension creates and owns, which have to
+    position themselves.
+    """
     return [
-        (selector.strip(), body)
-        for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css)
-        if ".mc-progress-styled" in selector
+        (selector, body)
+        for selector, body in rules()
+        if ".mc-progress-styled" in selector and selector.endswith((".progress", ".progressDiv"))
     ]
 
 
@@ -949,10 +965,33 @@ class TestStylesheetConstraints:
 
     def test_every_effect_derives_from_the_one_colour(self):
         """Which is what lets a custom colour recolour every theme."""
-        for selector, body in styled_bar_rules():
+        for selector, body in rules():
             if "color-mix" not in body:
                 continue
             assert "--mc-progress-fill" in body, f"{selector} mixes a colour from nowhere"
+
+    def test_only_the_ooze_theme_relaxes_the_bar_rules(self):
+        """Ooze paints outside the bar, so it overrides a theme's clipping.
+
+        That is a deliberate exception for one theme, not a general licence:
+        any *other* rule reaching for `overflow` on the host's bar would be
+        undoing a theme's decision for no reason its author agreed to.
+        """
+        for selector, body in styled_bar_rules():
+            if "overflow" not in body:
+                continue
+            assert "mc-fx-ooze" in selector, f"{selector} overrides the theme's clipping"
+
+    def test_the_ooze_overlay_is_not_placed_inside_the_fill(self):
+        """`.progress`'s textContent is rewritten twice a second.
+
+        Anything parented to it is wiped within half a second, so the overlay
+        goes into `.progressDiv`, which the host builds once and never rewrites.
+        """
+        body = STYLE_SCRIPT.read_text()
+
+        assert "progressDiv.appendChild(overlay)" in body
+        assert "bar.appendChild" not in body
 
     def test_motion_can_be_turned_off_by_the_system(self):
         css = stylesheet()

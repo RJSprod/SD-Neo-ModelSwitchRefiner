@@ -453,6 +453,7 @@ Tick **Custom progress-bar appearance**, then pick a **Progress-bar theme**:
 | **Sheen** | the above, plus a highlight band travelling along the bar |
 | **Pulse** | flat fill with a breathing halo around it |
 | **Neon** | gradient, sheen and a hard glow — the loud one |
+| **Ooze** | glowing sludge that fills from the left, bubbling, with bubbles rising out of the surface and popping above the bar |
 | **Custom** | build your own from the three toggles below |
 
 **Progress-bar colour** applies to *whichever* theme you picked — every theme
@@ -463,8 +464,20 @@ WebUI theme's own accent colour, which is what keeps it looking right in light
 and dark. Something the browser cannot parse is ignored, with a note in the
 console, rather than blanking the bar.
 
+Try `#39ff5e` with **Ooze** for toxic slime, `#b026ff` for something more
+radioactive, `#ff6a00` for molten.
+
 The three **Custom theme** toggles — fade, sheen, glow — do nothing unless the
 theme above is set to `Custom`.
+
+**Ooze is the one theme that paints outside the bar**, so it is also the only
+one that overrides a WebUI theme's clipping — Lobe hides anything leaving the
+bar, and Ooze turns that back on for itself. The rising bubbles are real
+elements rather than a background pattern, so each has its own size, speed and
+drift; they are parented to the bar's *track*, which the WebUI builds once,
+rather than to the fill, whose contents it rewrites twice a second. They are
+added by a `MutationObserver` watching for the bar to appear, which runs after
+the fact and so cannot interfere with the generation itself.
 
 **Flash the bar when a job finishes** works with every theme. It fires once, at
 the end of the whole job; in a chained generation that is after Stage 2, and it

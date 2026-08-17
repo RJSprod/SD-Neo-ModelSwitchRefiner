@@ -148,6 +148,157 @@
     }
 }
 
+/* -- ooze ---------------------------------------------------------------- */
+
+/* Toxic sludge: a dense body that lightens towards a bubbling surface, with
+ * bubbles rising inside it and escaping above the bar entirely.
+ *
+ * This is the one theme that paints outside the bar, and it is the reason the
+ * two exceptions below exist. Both are scoped to `.mc-fx-ooze` alone; no other
+ * theme relaxes anything.
+ *
+ * The body, the meniscus and the internal bubbles are still background layers
+ * on the element -- no pseudo-elements, same as everything else. What needs a
+ * real element is the bubbles that leave the bar, because they have to be
+ * positioned against the *track* rather than the fill, and because varying
+ * their size, drift and timing individually is what stops sixteen circles
+ * reading as a repeating texture. The JS inserts them into `.progressDiv`,
+ * which the host builds once and never rewrites -- unlike `.progress`, whose
+ * textContent is replaced twice a second. */
+
+.mc-progress-styled.mc-fx-ooze .progressDiv .progress {
+    background-color: var(--mc-progress-fill);
+    background-image:
+        /* meniscus: a thin undulating skin on top of the fill. Kept shallow and
+         * close to the fill's own colour -- at any real size or lightness it
+         * stops reading as a surface and becomes a row of pale blobs. */
+        radial-gradient(
+            ellipse 19px 3px at 50% 0,
+            color-mix(in srgb, var(--mc-progress-fill) 55%, white) 0 55%,
+            transparent 58%
+        ),
+        /* bubbles suspended in the sludge, two sizes at two apparent speeds */
+        radial-gradient(circle 2.5px at 50% 50%, rgb(255 255 255 / 55%) 0 100%, transparent 0),
+        radial-gradient(circle 1.5px at 50% 50%, rgb(255 255 255 / 38%) 0 100%, transparent 0),
+        /* body: luminous just under the surface, dense at the floor */
+        linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--mc-progress-fill) 72%, white) 0%,
+            var(--mc-progress-fill) 48%,
+            color-mix(in srgb, var(--mc-progress-fill) 62%, black) 100%
+        );
+    background-size: 38px 100%, 47px 33px, 29px 25px, 100% 100%;
+    background-repeat: repeat-x, repeat, repeat, no-repeat;
+    animation: mc-ooze-flow 2.6s linear infinite;
+    /* Restrained next to the other themes' glow: the bubbles carry their own,
+     * and a wide halo on the bar washes them out just as they clear it. */
+    box-shadow:
+        0 0 6px color-mix(in srgb, var(--mc-progress-fill) 85%, transparent),
+        0 0 16px color-mix(in srgb, var(--mc-progress-fill) 50%, transparent),
+        inset 0 -3px 6px color-mix(in srgb, var(--mc-progress-fill) 55%, black);
+    text-shadow: 0 1px 4px rgb(0 0 0 / 80%);
+}
+
+/* One animation, because `background-position` is a single property and the
+ * meniscus and the two bubble layers all live in it. The layers travel
+ * different distances over the same duration, which is what gives them
+ * different apparent speeds. */
+@keyframes mc-ooze-flow {
+    from {
+        background-position: 0 0, 0 0, 0 0, 0 0;
+    }
+    to {
+        background-position: 38px 0, 0 -33px, 0 -25px, 0 0;
+    }
+}
+
+/* Exception 1: the bubbles have to escape the bar, and a theme may have
+ * clipped it. Lobe sets `overflow: hidden` on this element; stock Forge leaves
+ * it visible. Overriding is the whole point of the theme rather than an
+ * accident of it. */
+.mc-progress-styled.mc-fx-ooze .progressDiv {
+    overflow: visible;
+}
+
+/* Exception 2: our own element, so the geometry rules that keep the host's bar
+ * where its theme puts it do not apply. It is stretched upwards to give the
+ * bubbles somewhere to go, and clipped on the right at the ooze front so a
+ * bubble only appears once the sludge has reached it. */
+.mc-ooze-overlay {
+    position: absolute;
+    /* Deep enough for the tallest rise the JS produces, and no deeper: this box
+     * sits over whatever the host has above the bar. */
+    top: -34px;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    clip-path: inset(0 calc(100% - var(--mc-ooze-level, 0%)) 0 0);
+    pointer-events: none;
+}
+
+/* Bubbles break the surface rather than the floor.
+ *
+ * They used to start at the bottom of the bar, which meant most of the rise
+ * happened inside the sludge -- invisible against it -- and they emerged only
+ * as they were already fading. `--mc-ooze-surface` is the fill's own height,
+ * measured once by the JS, so a bubble starts just under the skin whatever
+ * height the active WebUI theme gives the bar, and every frame of the rise
+ * happens in the open air above it. */
+.mc-ooze-bubble {
+    position: absolute;
+    bottom: calc(var(--mc-ooze-surface, 20px) - 4px);
+    left: var(--x);
+    width: var(--size);
+    height: var(--size);
+    border-radius: 50%;
+    /* A rim rather than a disc: the bright ring at the edge with a thinner
+     * middle is what makes it read as a bubble instead of a dot. The fill
+     * colour runs through both, so a recoloured bar recolours its bubbles. */
+    background:
+        radial-gradient(
+            circle at 36% 30%,
+            rgb(255 255 255 / 95%) 0 15%,
+            color-mix(in srgb, var(--mc-progress-fill) 42%, white) 30%,
+            color-mix(in srgb, var(--mc-progress-fill) 80%, transparent) 52%,
+            color-mix(in srgb, var(--mc-progress-fill) 25%, transparent) 68%,
+            color-mix(in srgb, var(--mc-progress-fill) 35%, white) 86%,
+            color-mix(in srgb, var(--mc-progress-fill) 60%, transparent) 94%,
+            transparent 100%
+        );
+    box-shadow: 0 0 7px color-mix(in srgb, var(--mc-progress-fill) 85%, transparent);
+    animation: mc-ooze-rise var(--dur) linear var(--delay) infinite;
+}
+
+/* Negative delays are set per bubble in the JS, so they are already in flight
+ * on the first frame rather than launching together.
+ *
+ * Linear rather than eased: a bubble in liquid rises at a fairly steady rate,
+ * and easing made them look thrown. The shape of the thing is in the opacity
+ * and scale instead -- swelling out of the surface, holding, then expanding
+ * and vanishing at the top, which reads as a pop. */
+@keyframes mc-ooze-rise {
+    0% {
+        transform: translate(-50%, 0) scale(0.2);
+        opacity: 0;
+    }
+    14% {
+        transform: translate(-50%, calc(-0.14 * var(--lift))) scale(0.85);
+        opacity: 0.95;
+    }
+    72% {
+        transform: translate(calc(-50% + var(--drift) * 0.7), calc(-0.76 * var(--lift))) scale(1);
+        opacity: 0.9;
+    }
+    93% {
+        transform: translate(calc(-50% + var(--drift)), calc(-1 * var(--lift))) scale(1.3);
+        opacity: 0.45;
+    }
+    100% {
+        transform: translate(calc(-50% + var(--drift)), calc(-1.06 * var(--lift))) scale(1.75);
+        opacity: 0;
+    }
+}
+
 /* -- completion ---------------------------------------------------------- */
 
 /* The flash carries the host's own .progressDiv / .progress classes as well as
@@ -185,10 +336,14 @@
     .mc-progress-styled.mc-fx-sheen .progressDiv .progress,
     .mc-progress-styled.mc-fx-pulse .progressDiv .progress,
     .mc-progress-styled.mc-fx-sheen.mc-fx-pulse .progressDiv .progress,
+    .mc-progress-styled.mc-fx-ooze .progressDiv .progress,
     .mc-progress-flash .progress {
         animation: none;
     }
 
+    /* The sludge itself still reads as sludge standing still; the bubbles
+     * leaving the bar are motion and nothing else, so they go entirely. */
+    .mc-ooze-overlay,
     .mc-progress-flash {
         display: none;
     }
