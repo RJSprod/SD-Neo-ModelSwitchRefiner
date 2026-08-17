@@ -775,10 +775,11 @@ def styled_bar_rules():
     nothing about elements this extension creates and owns, which have to
     position themselves.
     """
+    ours = (".mc-progress-styled", ".mc-progress-smooth")
     return [
         (selector, body)
         for selector, body in rules()
-        if ".mc-progress-styled" in selector and selector.endswith((".progress", ".progressDiv"))
+        if any(cls in selector for cls in ours) and selector.endswith((".progress", ".progressDiv"))
     ]
 
 
@@ -858,8 +859,8 @@ class TestStylingIsIndependent:
         assert registered[model_chain.OPT_STYLE_ENABLE].default is False
         assert registered[model_chain.OPT_STYLE_THEME].default == model_chain.STYLE_THEME_DEFAULT
 
-    def test_the_script_reads_only_appearance_settings(self):
-        """The one way styling could couple itself to the chain is by asking.
+    def test_the_script_reads_only_its_own_settings(self):
+        """The one way this layer could couple itself to the chain is by asking.
 
         If it ever consults the chain's enable state, or Item 4's calculation
         setting, then turning one off would turn the other off -- which is the
@@ -876,9 +877,14 @@ class TestStylingIsIndependent:
             model_chain.OPT_STYLE_SHEEN,
             model_chain.OPT_STYLE_GLOW,
             model_chain.OPT_STYLE_COMPLETE,
+            # Its own toggle, and the host's poll interval -- which has to be
+            # read rather than assumed, or the transition length stops matching
+            # the gap it exists to cover.
+            model_chain.OPT_SMOOTH,
+            "live_preview_refresh_period",
         }
 
-        assert consulted <= allowed, f"styling consults {consulted - allowed}"
+        assert consulted <= allowed, f"the styling layer consults {consulted - allowed}"
 
     def test_the_calculation_setting_is_not_one_of_them(self):
         import model_chain
@@ -925,6 +931,75 @@ class TestStylingIsIndependent:
 
         assert mc_progress.enabled() is False
         assert getattr(host.shared.opts, model_chain.OPT_STYLE_ENABLE) is True
+
+
+class TestSmoothAdvance:
+    """Filling in the movement between the host's once-per-poll width writes.
+
+    Not a theme and not gated on one. The host sets the fill's width from
+    `/internal/progress`, so it arrives in steps; this interpolates between two
+    values the host already asked for and changes neither of them.
+    """
+
+    def test_it_is_on_by_default(self, host):
+        import model_chain
+
+        assert host.shared.options_templates[model_chain.OPT_SMOOTH].default is True
+
+    def test_it_does_not_depend_on_the_appearance_toggle(self):
+        """Its rules must not sit under `.mc-progress-styled`.
+
+        Otherwise a user who wants a smooth bar and the WebUI's own colours
+        would have to switch on a theme to get one.
+        """
+        smoothing = [
+            (selector, body) for selector, body in rules() if ".mc-progress-smooth" in selector
+        ]
+
+        assert smoothing, "no rules for the smooth advance"
+        for selector, _ in smoothing:
+            assert ".mc-progress-styled" not in selector, f"{selector} needs a theme switched on"
+
+    def test_it_transitions_the_width_linearly(self):
+        """Any easing puts a visible stall at each end of every step.
+
+        Which is the thing being removed, so linear is not a preference here.
+        """
+        rule = [body for selector, body in rules() if selector == ".mc-progress-smooth .progressDiv .progress"]
+
+        assert rule, "the fill is not transitioned"
+        assert "width" in rule[0]
+        assert "linear" in rule[0]
+
+    def test_the_ooze_front_glides_with_the_fill(self):
+        """Or the sludge would slide while its bubbles appeared in jumps."""
+        rule = [body for selector, body in rules() if selector == ".mc-progress-smooth .mc-ooze-overlay"]
+
+        assert rule, "the ooze clip does not follow the fill"
+        assert "clip-path" in rule[0]
+
+    def test_the_duration_comes_from_the_hosts_own_poll_interval(self):
+        """A user who slowed the refresh rate still gets a bar that glides.
+
+        Assuming 500ms would leave it racing ahead and then waiting.
+        """
+        body = STYLE_SCRIPT.read_text()
+
+        assert "live_preview_refresh_period" in body
+        assert "--mc-progress-tick" in body
+
+    def test_the_duration_overshoots_the_poll_interval(self):
+        """The host schedules its next poll from inside the response handler.
+
+        So the real gap between two width writes is the configured period plus
+        a round trip, and a transition of exactly the period always lands early
+        and leaves the bar sitting still until the next one arrives.
+        """
+        body = STYLE_SCRIPT.read_text()
+        match = re.search(r"const TICK_SLACK = ([\d.]+);", body)
+
+        assert match, "no slack factor on the transition length"
+        assert float(match.group(1)) > 1.0
 
 
 class TestStylesheetConstraints:

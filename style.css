@@ -39,6 +39,34 @@
     --mc-progress-fill: var(--primary-500, #0060df);
     --mc-progress-sheen-width: 180px;
     --mc-progress-sheen-speed: 2.2s;
+    --mc-progress-tick: 500ms;
+}
+
+/* -- smooth advance ------------------------------------------------------ */
+
+/* The host writes the fill's width as an inline percentage once per poll, so
+ * the bar arrives in steps -- one jump every `live_preview_refresh_period`
+ * milliseconds, half a second by default. Interpolating between those writes
+ * is a transition and nothing more: the numbers the host reports are untouched,
+ * and so is the width it sets. Only the journey between two of its values is
+ * filled in.
+ *
+ * Linear, and exactly as long as the gap between polls, which the JS reads from
+ * the host's own setting. Shorter and the bar finishes early and waits; longer
+ * and it falls progressively further behind. Any easing at all would put a
+ * visible stall at each end of every step, which is the thing being removed.
+ *
+ * Deliberately not under `.mc-progress-styled`: this is not part of a theme and
+ * does not want the appearance toggle. Installing the extension is enough.
+ */
+.mc-progress-smooth .progressDiv .progress {
+    transition: width var(--mc-progress-tick) linear;
+}
+
+/* The ooze front is the fill's width, so it has to glide with it or the sludge
+ * would slide smoothly while its bubbles appeared in jumps. */
+.mc-progress-smooth .mc-ooze-overlay {
+    transition: clip-path var(--mc-progress-tick) linear;
 }
 
 /* -- fill ---------------------------------------------------------------- */

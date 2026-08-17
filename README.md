@@ -436,6 +436,28 @@ Purely cosmetic, entirely independent of everything above, and applied to
 above never changes how it looks. Either can be turned off without affecting
 the other.
 
+### Smooth advance
+
+**On by default, and the one setting here that needs nothing switched on.**
+
+The WebUI writes the bar's width once per progress poll — every *Progress bar
+update period* milliseconds, half a second out of the box — so the bar arrives
+in visible steps. This fills in the movement between those writes.
+
+It is a transition and nothing more: the width the WebUI sets and the numbers it
+reports are untouched, and only the journey between two of its own values is
+drawn. It applies to every generation on every tab, with or without Model Chain,
+with or without a theme selected below.
+
+The transition is linear and slightly longer than your poll interval, which it
+reads from the WebUI's own setting rather than assuming. The overshoot is
+deliberate — the WebUI schedules its next poll *after* the previous response
+lands, so the real gap between two width writes is the interval plus a round
+trip. A transition of exactly the interval finishes early and leaves the bar
+sitting still, which is the thing being removed.
+
+### Themes
+
 **Installing the extension is all it takes.** The theme applies whether or not
 Model Chain is enabled, whether or not a Stage 2 checkpoint is selected, and
 whether or not you have ever opened the accordion — and on **txt2img, img2img
