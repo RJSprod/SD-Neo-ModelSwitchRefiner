@@ -214,7 +214,7 @@
     // -- ooze ---------------------------------------------------------------
 
     const OOZE_OVERLAY = "mc-ooze-overlay";
-    const BUBBLE_COUNT = 16;
+    const BUBBLE_COUNT = 26;
 
     function oozeEnabled() {
         return styleEnabled() && Boolean(resolveEffects().ooze);
@@ -228,15 +228,27 @@
         for (let i = 0; i < BUBBLE_COUNT; i++) {
             const bubble = document.createElement("span");
             bubble.className = "mc-ooze-bubble";
-            const size = 3 + Math.random() * 7;
-            bubble.style.setProperty("--x", (Math.random() * 100).toFixed(2) + "%");
+            // Bigger bubbles rise further and slower, as they would in
+            // something viscous. Tying the three together stops the field
+            // looking like noise.
+            const scale = Math.random();
+            const size = 4 + scale * 8;
+            // Inset from both ends: a bubble centred on the very first pixel is
+            // half clipped by the overlay's own left edge. At the right edge
+            // that is wanted -- it is the ooze front arriving -- but on the left
+            // it is just a half circle sitting there for the whole job.
+            bubble.style.setProperty("--x", (3 + Math.random() * 94).toFixed(2) + "%");
             bubble.style.setProperty("--size", size.toFixed(1) + "px");
-            bubble.style.setProperty("--dur", (1.6 + Math.random() * 2.4).toFixed(2) + "s");
+            bubble.style.setProperty("--dur", (1.5 + scale * 1.6 + Math.random() * 0.8).toFixed(2) + "s");
             // Negative, so every bubble is already mid-flight on the first
             // frame instead of the whole field launching at once.
             bubble.style.setProperty("--delay", (-Math.random() * 4).toFixed(2) + "s");
             bubble.style.setProperty("--drift", (Math.random() * 16 - 8).toFixed(1) + "px");
-            bubble.style.setProperty("--lift", (16 + Math.random() * 22).toFixed(0) + "px");
+            // A tight band rather than a fountain. The bar sits directly under
+            // the Generate button in the host's layout, and bubbles carrying on
+            // up into it stop reading as a surface fizzing and start reading as
+            // something escaping.
+            bubble.style.setProperty("--lift", (12 + scale * 12 + Math.random() * 6).toFixed(0) + "px");
             overlay.appendChild(bubble);
         }
     }
@@ -249,6 +261,14 @@
         const update = () => {
             try {
                 overlay.style.setProperty("--mc-ooze-level", bar.style.width || "0%");
+                // The height of the fill is where the surface is, and it is the
+                // active WebUI theme's decision rather than ours -- Forge uses
+                // 20px, another theme need not. Measuring it is what lets the
+                // bubbles break the surface instead of the floor.
+                const height = bar.offsetHeight;
+                if (height > 0) {
+                    overlay.style.setProperty("--mc-ooze-surface", height + "px");
+                }
             } catch (error) {
                 /* the bar has gone; the overlay goes with it */
             }
