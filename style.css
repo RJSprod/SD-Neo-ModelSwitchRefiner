@@ -220,6 +220,22 @@
     overflow: visible;
 }
 
+/* Exception 2: a theme's own overlay is switched off for this theme alone.
+ *
+ * This is not claiming the pseudo-element -- nothing is drawn into it -- it is
+ * suppressing one the WebUI theme created. Lobe animates diagonal stripes
+ * across the fill through `.progress::before`, which over sludge reads as
+ * candy rather than as a surface, and which keeps running even where this
+ * stylesheet has quietened everything else for reduced motion.
+ *
+ * Only `::before` goes. Lobe's `::after` is a soft highlight along the top and
+ * flatters the sludge, so it stays. Every other theme here still layers with
+ * whatever the WebUI theme draws; Ooze is the one that takes the bar over
+ * completely, and half a takeover looks worse than either whole. */
+.mc-progress-styled.mc-fx-ooze .progressDiv .progress::before {
+    content: none !important;
+}
+
 /* Exception 2: our own element, so the geometry rules that keep the host's bar
  * where its theme puts it do not apply. It is stretched upwards to give the
  * bubbles somewhere to go, and clipped on the right at the ooze front so a
@@ -333,18 +349,55 @@
 /* -- accessibility ------------------------------------------------------- */
 
 @media (prefers-reduced-motion: reduce) {
+    /* Decoration layered over a bar that reads perfectly well without it.
+     * Removing it costs nothing. */
     .mc-progress-styled.mc-fx-sheen .progressDiv .progress,
     .mc-progress-styled.mc-fx-pulse .progressDiv .progress,
     .mc-progress-styled.mc-fx-sheen.mc-fx-pulse .progressDiv .progress,
-    .mc-progress-styled.mc-fx-ooze .progressDiv .progress,
     .mc-progress-flash .progress {
         animation: none;
     }
 
-    /* The sludge itself still reads as sludge standing still; the bubbles
-     * leaving the bar are motion and nothing else, so they go entirely. */
-    .mc-ooze-overlay,
     .mc-progress-flash {
         display: none;
+    }
+
+    /* Ooze is the exception, and it took a bug report to see why.
+     *
+     * Removing its motion does not leave a calmer version of the theme, it
+     * leaves a flat green bar under a field of dots that never move -- which
+     * reads as broken, not as considerate. Worse, the WebUI theme underneath
+     * may not honour this setting at all: Lobe keeps its diagonal stripes
+     * running regardless, so the one thing still moving is the thing we did
+     * not put there.
+     *
+     * Motion is the entire content of this theme and the user chose it by
+     * name. So it is reduced rather than removed: everything slows down by
+     * roughly a factor of three, the sideways drift goes, and the bubbles fade
+     * out instead of swelling and bursting. */
+    .mc-progress-styled.mc-fx-ooze .progressDiv .progress {
+        animation-duration: 9s;
+    }
+
+    .mc-ooze-bubble {
+        animation-name: mc-ooze-rise-calm;
+        animation-duration: 7s;
+    }
+}
+
+@keyframes mc-ooze-rise-calm {
+    0% {
+        transform: translate(-50%, 0) scale(0.6);
+        opacity: 0;
+    }
+    28% {
+        opacity: 0.65;
+    }
+    76% {
+        opacity: 0.55;
+    }
+    100% {
+        transform: translate(-50%, calc(-1 * var(--lift))) scale(0.85);
+        opacity: 0;
     }
 }
