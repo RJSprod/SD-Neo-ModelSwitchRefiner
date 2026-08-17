@@ -23,6 +23,36 @@ of its own. Nothing crosses.
 
 ---
 
+## Smooth advance
+
+Not in either original spec, and not a theme. The host writes the fill's width
+once per progress poll, so the bar arrives in discrete steps; this interpolates
+between two values the host already chose. Neither the width it sets nor the
+numbers it reports are altered — only the frames between them are drawn.
+
+It carries its own root class, `.mc-progress-smooth`, deliberately **not**
+nested under `.mc-progress-styled`. Wanting a bar that moves smoothly is not
+the same as wanting it recoloured, and a user who wants the first should not
+have to accept the second. A test asserts no smoothing rule sits under the
+appearance class.
+
+Two decisions worth recording:
+
+- **Linear easing.** Any easing curve puts a visible stall at each end of every
+  step, which is precisely the artefact being removed.
+- **The duration overshoots the poll interval by 40%.** The interval itself
+  comes from the host's own `live_preview_refresh_period` rather than being
+  assumed, but matching it exactly is wrong: the host schedules its next poll
+  from *inside* the response handler, so the true gap between two width writes
+  is the interval plus a server round trip. A transition of exactly the
+  interval always lands early and leaves the bar sitting still — measured, with
+  a 120ms simulated round trip, as a repeating glide-hold-glide. Overshooting
+  costs a fraction of a second of lag on a value that only ever increases,
+  which is invisible; the stall is not.
+
+The ooze overlay's `clip-path` is transitioned alongside, or the sludge would
+slide smoothly while the bubbles riding it appeared in jumps.
+
 ## Scope: installed is enough
 
 The requirement is that the appearance applies to an ordinary Forge generation
@@ -60,7 +90,8 @@ one custom property onto `document.documentElement`.
 
 | Setting | Effect |
 | --- | --- |
-| `model_chain_style_enable` | master toggle; adds `.mc-progress-styled` |
+| `model_chain_smooth_progress` | **on by default**, no other toggle required; adds `.mc-progress-smooth` |
+| `model_chain_style_enable` | master toggle for the themes; adds `.mc-progress-styled` |
 | `model_chain_style_theme` | named look; see below |
 | `model_chain_style_color` | any CSS colour, including `rgba()`; empty follows the theme |
 | `model_chain_style_gradient` | Custom theme only: fade towards the leading edge |

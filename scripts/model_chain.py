@@ -72,6 +72,15 @@ adjustment."""
 # Settings
 # --------------------------------------------------------------------------- #
 
+OPT_SMOOTH = "model_chain_smooth_progress"
+"""Interpolate the host's stepped progress bar between polls.
+
+Kept apart from the appearance settings below because it is not an appearance:
+it does not change how the bar looks, only how often it is redrawn between two
+widths the host already asked for. Default on, and independent of every other
+toggle here -- installing the extension is the whole condition.
+"""
+
 OPT_STYLE_ENABLE = "model_chain_style_enable"
 OPT_STYLE_THEME = "model_chain_style_theme"
 OPT_STYLE_COLOR = "model_chain_style_color"
@@ -197,6 +206,16 @@ shared.options_templates.update(
                 "instead — including the model switch — and reports how much of the "
                 "predicted wall time has passed. Timings are measured on your machine and "
                 "improve after a few generations"
+            ),
+            OPT_SMOOTH: shared.OptionInfo(
+                True,
+                "Advance the progress bar smoothly",
+            ).info(
+                "the WebUI writes the bar's width once per progress poll, so it arrives in "
+                "steps — one jump every <em>Progress bar update period</em> milliseconds. "
+                "This fills in the movement between those writes. It changes nothing about "
+                "the numbers, applies to every generation whether or not Model Chain is "
+                "involved, and is independent of the appearance settings below"
             ),
             # -- appearance, deliberately independent of everything above --- #
             # These change how the host's bar looks and never what it reports,

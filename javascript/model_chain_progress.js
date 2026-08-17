@@ -42,7 +42,12 @@
 
 (function () {
     const ROOT_CLASS = "mc-progress-styled";
+    const SMOOTH_CLASS = "mc-progress-smooth";
     const FLASH_CLASS = "mc-progress-flash";
+
+    // What the host polls at when it has no opinion, matching the fallback in
+    // its own javascript/progressbar.js.
+    const DEFAULT_TICK_MS = 500;
 
     // The four effects style.css implements. A named theme is a choice of
     // these; the Custom theme is the same choice made by the user's toggles.
@@ -109,6 +114,32 @@
         return styleEnabled() && Boolean(setting("model_chain_style_complete", false));
     }
 
+    // -- smooth advance -----------------------------------------------------
+
+    function smoothEnabled() {
+        return Boolean(setting("model_chain_smooth_progress", true));
+    }
+
+    // The gap the transition has to cover is the host's own poll interval, and
+    // the host publishes it. Reading it rather than assuming means a user who
+    // has turned the refresh rate down still gets a bar that glides instead of
+    // one that races ahead and then waits.
+    //
+    // Stretched past that interval on purpose. The host schedules its next poll
+    // from inside the response handler, so the true gap between two width
+    // writes is the configured period *plus* a round trip to the server. A
+    // transition of exactly the period therefore always lands early and leaves
+    // the bar sitting still until the next one arrives -- measurably: glide,
+    // hold, glide. Overshooting costs a little lag on a value that only ever
+    // increases, which is invisible, where the stall is the entire complaint.
+    const TICK_SLACK = 1.4;
+
+    function tickMilliseconds() {
+        const raw = Number(setting("live_preview_refresh_period", DEFAULT_TICK_MS));
+        const period = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TICK_MS;
+        return Math.round(period * TICK_SLACK);
+    }
+
     // -- appearance ---------------------------------------------------------
 
     function resolveColor() {
@@ -152,6 +183,11 @@
         try {
             const element = root();
             if (!element) return;
+
+            // Independent of everything below it. Smoothing the host's own bar
+            // is not part of a theme and is not gated on one being chosen.
+            element.classList.toggle(SMOOTH_CLASS, smoothEnabled());
+            element.style.setProperty("--mc-progress-tick", tickMilliseconds() + "ms");
 
             const on = styleEnabled();
             element.classList.toggle(ROOT_CLASS, on);
