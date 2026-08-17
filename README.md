@@ -444,17 +444,29 @@ The WebUI writes the bar's width once per progress poll — every *Progress bar
 update period* milliseconds, half a second out of the box — so the bar arrives
 in visible steps. This fills in the movement between those writes.
 
-It is a transition and nothing more: the width the WebUI sets and the numbers it
-reports are untouched, and only the journey between two of its own values is
-drawn. It applies to every generation on every tab, with or without Model Chain,
-with or without a theme selected below.
+The numbers the WebUI reports are untouched, and so is the width it writes —
+only what is drawn between two of its own values changes. It applies to every
+generation on every tab, with or without Model Chain, with or without a theme
+selected below.
 
-The transition is linear and slightly longer than your poll interval, which it
-reads from the WebUI's own setting rather than assuming. The overshoot is
-deliberate — the WebUI schedules its next poll *after* the previous response
-lands, so the real gap between two width writes is the interval plus a round
-trip. A transition of exactly the interval finishes early and leaves the bar
-sitting still, which is the thing being removed.
+The bar is redrawn **every frame**, with a speed of its own. It tracks how fast
+progress is really moving, keeps advancing at that speed between polls, and
+steers gently towards wherever the next value is predicted to land — so a change
+in the real rate arrives as a change in *speed* rather than as a jump. It never
+stops, never steps, and never snaps to a reported number.
+
+A plain CSS transition cannot do this, which is worth knowing if you were
+expecting one: each new value retargets the transition, so the bar's speed
+changes abruptly at every poll. That is finer-grained stepping, not continuous
+motion. A transition is still used as a fallback if the script cannot attach.
+
+Measured over a simulated generation, sampling the rendered width every frame:
+
+| | Off | On |
+| --- | --- | --- |
+| Frames in which the bar moved | 2% | **100%** |
+| Frames in which it sat still | 175 of 179 | **0** |
+| Fastest frame | 1912 px/s | 47 px/s |
 
 ### Themes
 

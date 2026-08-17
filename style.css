@@ -46,15 +46,21 @@
 
 /* The host writes the fill's width as an inline percentage once per poll, so
  * the bar arrives in steps -- one jump every `live_preview_refresh_period`
- * milliseconds, half a second by default. Interpolating between those writes
- * is a transition and nothing more: the numbers the host reports are untouched,
- * and so is the width it sets. Only the journey between two of its values is
- * filled in.
+ * milliseconds, half a second by default.
  *
- * Linear, and exactly as long as the gap between polls, which the JS reads from
- * the host's own setting. Shorter and the bar finishes early and waits; longer
- * and it falls progressively further behind. Any easing at all would put a
- * visible stall at each end of every step, which is the thing being removed.
+ * Two rules, for two levels of ambition.
+ *
+ * The first is a plain transition, and it is the fallback. It smooths each step
+ * individually, which is better than nothing and is all that is available if
+ * the script cannot attach. It is not continuous motion: every new value
+ * retargets the transition, so the bar's speed changes abruptly at each poll.
+ *
+ * The second takes over once the script is driving the width frame by frame,
+ * and switches the transition off because there is nothing left for it to do.
+ * `!important` is what lets a stylesheet beat the host's inline width without
+ * either side having to know about the other -- the host keeps writing its
+ * value, we keep reading it as the target, and nothing fights over the
+ * attribute.
  *
  * Deliberately not under `.mc-progress-styled`: this is not part of a theme and
  * does not want the appearance toggle. Installing the extension is enough.
@@ -63,10 +69,20 @@
     transition: width var(--mc-progress-tick) linear;
 }
 
-/* The ooze front is the fill's width, so it has to glide with it or the sludge
- * would slide smoothly while its bubbles appeared in jumps. */
+.mc-progress-smooth .progressDiv .progress.mc-smooth-on {
+    width: var(--mc-smooth-width, 0%) !important;
+    transition: none !important;
+}
+
+/* The ooze front is the fill's width. Under the fallback it has to glide with
+ * it; once the script is driving, both come from the same value every frame and
+ * a transition would only add lag. */
 .mc-progress-smooth .mc-ooze-overlay {
     transition: clip-path var(--mc-progress-tick) linear;
+}
+
+.mc-progress-smooth .progressDiv:has(.mc-smooth-on) .mc-ooze-overlay {
+    transition: none;
 }
 
 /* -- fill ---------------------------------------------------------------- */
