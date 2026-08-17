@@ -1032,6 +1032,41 @@ class TestStylesheetConstraints:
         # The overlay must survive: hiding it is what made the theme look broken.
         assert "display: none" not in reduced.split(".mc-ooze-bubble")[0].split("mc-fx-ooze")[1]
 
+    def test_the_bubbles_are_slowed_by_scaling_not_by_pinning(self):
+        """Every bubble on one duration is every bubble on one period.
+
+        The field then surfaces in lockstep -- and because the delays are
+        computed against each bubble's own, shorter duration, they only cover
+        part of that common cycle, leaving a stretch of it with no bubble
+        starting at all. Measured, two of ten phase bins were empty and the
+        rest carried 120 bubbles between them, which is exactly the "all at
+        once, then nothing" this was reported as.
+
+        Scaling each bubble's own duration and delay by one factor keeps the
+        durations distinct and the phases spread, whatever the factor is.
+        """
+        css = stylesheet()
+        reduced = css[css.index("prefers-reduced-motion") :]
+        bubble_rule = reduced.split(".mc-ooze-bubble")[1].split("}")[0]
+
+        assert "animation-duration" not in bubble_rule, "pins every bubble to one period"
+        assert "--mc-ooze-slow" in bubble_rule, "no scaling factor to slow them by"
+
+    def test_the_bubble_delay_is_scaled_with_its_duration(self):
+        """Scaling one without the other reintroduces the dead gap.
+
+        The delay sets where in its cycle a bubble starts. Left unscaled while
+        the duration doubles, it covers only the first half of the new cycle.
+        """
+        base = [body for selector, body in rules() if selector == ".mc-ooze-bubble"]
+        assert base, "no base rule for the bubbles"
+        animation = [line for line in base[0].split(";") if "animation:" in line]
+        assert animation, "the bubbles have no animation shorthand"
+
+        assert animation[0].count("--mc-ooze-slow") == 2, (
+            "duration and delay must both be scaled, or the phases bunch up"
+        )
+
 
 # --------------------------------------------------------------------------- #
 # Wiring into a generation

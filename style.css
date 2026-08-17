@@ -282,7 +282,13 @@
             transparent 100%
         );
     box-shadow: 0 0 7px color-mix(in srgb, var(--mc-progress-fill) 85%, transparent);
-    animation: mc-ooze-rise var(--dur) linear var(--delay) infinite;
+    /* Duration and delay are both this bubble's own, multiplied by a single
+     * factor. Slowing the field down therefore means changing the factor and
+     * nothing else -- see the reduced-motion block for why that matters more
+     * than it looks. */
+    --mc-ooze-slow: 1;
+    animation: mc-ooze-rise calc(var(--dur) * var(--mc-ooze-slow)) linear
+        calc(var(--delay) * var(--mc-ooze-slow)) infinite;
 }
 
 /* Negative delays are set per bubble in the JS, so they are already in flight
@@ -384,9 +390,22 @@
         animation-duration: 1.5s;
     }
 
+    /* Slowed by scaling each bubble's own timings, never by pinning them all to
+     * one duration.
+     *
+     * Pinning is what the first version did, and it produced the exact fault it
+     * was meant to avoid. Every bubble ended up on an identical period, so the
+     * whole field ran in lockstep -- and because the delays had been computed
+     * against each bubble's *original*, shorter duration, they only ever
+     * covered the first three quarters of that common cycle. Measured, the
+     * phase histogram had two entirely empty bins: 120 bubbles surfacing
+     * together, then a visible pause, over and over.
+     *
+     * Only ever visible to someone with this setting on, which is also why it
+     * survived being checked -- the checking was done without it. */
     .mc-ooze-bubble {
+        --mc-ooze-slow: 2;
         animation-name: mc-ooze-rise-calm;
-        animation-duration: 1.3s;
     }
 }
 
