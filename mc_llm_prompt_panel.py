@@ -207,8 +207,8 @@ def build() -> dict:
     )
     running.then(fn=lambda: gr.update(choices=_history_choices()), outputs=[history])
 
-    stop.click(fn=_cancel, inputs=[cancellation], outputs=[status], cancels=[running],
-               queue=False)
+    stop.click(fn=_cancel, inputs=[cancellation], outputs=[status, generate, stop],
+               cancels=[running], queue=False)
 
     save.click(fn=_save_file, inputs=[positive, negative], outputs=[saved])
     clear.click(fn=lambda: ("", "", None, ui.notice("Cleared.")),
@@ -334,10 +334,21 @@ def _generate(intent, image_path, *values):
 
 
 def _cancel(cancel):
-    """Stop the run. Cheap, queue-free, and safe to press twice."""
+    """Stop the run. Cheap, queue-free, and safe to press twice.
+Stop the run, and put the controls back.
+
+    The buttons are the point. ``cancels=`` closes the generator where it
+    stands, which is what makes a stop immediate -- and a generator that is
+    closed never reaches the yield that would have re-enabled Send and greyed
+    out Stop. So the run stopped, the partial text stayed, and the panel was
+    left permanently busy with no way to ask for anything else. Whatever
+    restores those controls has to be *this* handler, because it is the only
+    one that still runs.
+    """
     if cancel is not None:
         cancel.cancel()
-    return ui.working("Stopping…", "warn")
+    return (ui.notice("Stopped.", "warn"),
+            gr.update(interactive=True), gr.update(interactive=False))
 
 
 def _remember(settings: dict, request, positive: str, negative: str) -> None:

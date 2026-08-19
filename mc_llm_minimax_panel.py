@@ -111,8 +111,8 @@ def build() -> dict:
         show_progress="minimal")
     running.then(fn=lambda: gr.update(choices=_history_choices()), outputs=[history])
 
-    stop.click(fn=_cancel, inputs=[cancellation], outputs=[status], cancels=[running],
-               queue=False)
+    stop.click(fn=_cancel, inputs=[cancellation], outputs=[status, enhance, stop],
+               cancels=[running], queue=False)
     clear.click(fn=lambda: ("", "", gr.update(value="", visible=False), ui.notice("Cleared.")),
                 outputs=[prompt, written, caption, status], queue=False)
 
@@ -122,7 +122,7 @@ def build() -> dict:
                outputs=[prompt, written, caption, variant, status], queue=False)
     drop.click(fn=_delete_session, inputs=[history], outputs=[history, status], queue=False)
 
-    return {"status": status, "output": written}
+    return {"status": status, "output": written, "stop": stop}
 
 
 # --------------------------------------------------------------------------- #
@@ -195,9 +195,20 @@ def _enhance(prompt, variant, image_path, seed):
 
 
 def _cancel(cancel):
+    """Stop the run, and put the controls back.
+
+    The buttons are the point. ``cancels=`` closes the generator where it
+    stands, which is what makes a stop immediate -- and a generator that is
+    closed never reaches the yield that would have re-enabled Send and greyed
+    out Stop. So the run stopped, the partial text stayed, and the panel was
+    left permanently busy with no way to ask for anything else. Whatever
+    restores those controls has to be *this* handler, because it is the only
+    one that still runs.
+    """
     if cancel is not None:
         cancel.cancel()
-    return ui.working("Stopping…", "warn")
+    return (ui.notice("Stopped.", "warn"),
+            gr.update(interactive=True), gr.update(interactive=False))
 
 
 def _structure(variant):

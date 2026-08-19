@@ -333,7 +333,7 @@ def build() -> dict:
                  inputs=[character, search], outputs=[threads])
         run.then(fn=_close_selection, inputs=[character, thread_state], outputs=view)
 
-    stop.click(fn=_cancel, inputs=[cancellation], outputs=[status],
+    stop.click(fn=_cancel, inputs=[cancellation], outputs=[status, send, stop],
                cancels=[replying, regenerating, continuing, resending], queue=False)
 
     # -- characters and persona ------------------------------------------- #
@@ -1151,11 +1151,20 @@ def _decimal(value, *fallbacks) -> float:
 
 
 def _cancel(cancel):
+    """Stop the run, and put the controls back.
+
+    The buttons are the point. ``cancels=`` closes the generator where it
+    stands, which is what makes a stop immediate -- and a generator that is
+    closed never reaches the yield that would have re-enabled Send and greyed
+    out Stop. So the run stopped, the partial reply stayed, and the panel was
+    left permanently busy with no way to ask for anything else. Whatever
+    restores those controls has to be *this* handler, because it is the only
+    one that still runs.
+    """
     if cancel is not None:
         cancel.cancel()
-    # Still busy: a stop asks the run to finish, and what is already streaming
-    # keeps arriving until it does. The bar stays until the run says it stopped.
-    return ui.working("Stopping…", "warn")
+    return (ui.notice("Stopped.", "warn"),
+            gr.update(interactive=True), gr.update(interactive=False))
 
 
 def _context_size() -> int:

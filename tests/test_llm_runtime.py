@@ -9,6 +9,7 @@ without reporting what it changed."
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -729,11 +730,11 @@ class TestRetryingASmallerPlacement:
         attempts: list = []
         real = managed._launch
 
-        def launch(configuration, placement):
+        def launch(configuration, placement, projector=None):
             attempts.append(placement)
             if len(attempts) <= failures:
                 raise runtime._StartFailed("out of memory", out_of_memory=True)
-            return real(configuration, placement)
+            return real(configuration, placement, projector)
 
         monkeypatch.setattr(managed, "_launch", launch)
         return attempts
@@ -772,7 +773,7 @@ class TestRetryingASmallerPlacement:
         set_free(monkeypatch, 20)
         attempts: list = []
 
-        def launch(configuration, placement):
+        def launch(configuration, placement, projector=None):
             attempts.append(placement)
             raise runtime._StartFailed("the model file is corrupt")
 
@@ -834,3 +835,113 @@ class TestPlacingAgainstWhatTheDriverHas:
         managed.client()
 
         assert not released
+
+
+class TestSayingWhatIsWrongWithTheMachine:
+    """Two warnings, both about memory this extension does not control.
+
+    It cannot make another application give back system RAM, and it cannot
+    stop llama.cpp's own fitter deciding that the way to fit a context is to
+    move weights off the card. What it can do is refuse to be silent about
+    either, because both look identical from the outside: a load that seems to
+    hang and a reply that arrives at five tokens a second.
+    """
+
+    def test_a_model_larger_than_free_ram_is_called_out(self, placed, server, tmp_path,
+                                                        monkeypatch, caplog):
+        import mc_memory
+
+        managed, _ = server
+        configure(monkeypatch, tmp_path, size_mb=64)
+        set_free(monkeypatch, 20)
+        monkeypatch.setattr(mc_memory, "free_ram_bytes", lambda: 8 * 1024**2)
+
+        with caplog.at_level("WARNING", logger="model_chain"):
+            managed.client()
+
+        assert any("system RAM is free" in record.getMessage() for record in caplog.records)
+
+    def test_room_to_read_it_is_not_worth_a_word(self, placed, server, tmp_path, monkeypatch,
+                                                 caplog):
+        import mc_memory
+
+        managed, _ = server
+        configure(monkeypatch, tmp_path, size_mb=64)
+        set_free(monkeypatch, 20)
+        monkeypatch.setattr(mc_memory, "free_ram_bytes", lambda: 64 * 1024**3)
+
+        with caplog.at_level("WARNING", logger="model_chain"):
+            managed.client()
+
+        assert not any("system RAM is free" in record.getMessage() for record in caplog.records)
+
+    def test_weights_that_never_reached_the_card_are_called_out(self, placed, tmp_path,
+                                                                monkeypatch, caplog):
+        """The one check that works on every build, because it reads nothing
+        llama.cpp wrote: seventeen gigabytes of weights, and the card's free
+        memory fell by four."""
+        configuration = configure(monkeypatch, tmp_path, size_mb=64)
+        set_free(monkeypatch, 20)
+        negotiated = runtime.negotiate(configuration)
+        managed = runtime.Runtime()
+
+        with caplog.at_level("WARNING", logger="model_chain"):
+            managed._record(configuration, negotiated,
+                            int(negotiated.estimate.weights_bytes * 0.2))
+
+        assert any("read it over PCIe" in record.getMessage() for record in caplog.records)
+
+    def test_a_placement_that_landed_says_nothing(self, placed, tmp_path, monkeypatch, caplog):
+        configuration = configure(monkeypatch, tmp_path, size_mb=64)
+        set_free(monkeypatch, 20)
+        negotiated = runtime.negotiate(configuration)
+        managed = runtime.Runtime()
+
+        with caplog.at_level("WARNING", logger="model_chain"):
+            managed._record(configuration, negotiated, negotiated.estimate.weights_bytes)
+
+        assert not any("PCIe" in record.getMessage() for record in caplog.records)
+
+
+class TestTheProjectorIsNotFree:
+    """A gigabyte and a third of a card the model is already filling, paid on
+    every text-only turn — and where llama.cpp finds a gigabyte and a third it
+    was not told about is by leaving part of the model in system RAM.
+    """
+
+    def _with_projector(self, monkeypatch, tmp_path, configuration):
+        projector = tmp_path / "mmproj.gguf"
+        projector.write_bytes(b"x" * (1024 * 1024))
+        replaced = dataclasses.replace(configuration, mmproj=projector)
+        monkeypatch.setattr(runtime, "config", lambda: replaced)
+        return replaced
+
+    def test_it_is_counted_against_the_card_when_it_is_loaded(self, placed, tmp_path,
+                                                              monkeypatch):
+        configuration = self._with_projector(monkeypatch, tmp_path,
+                                             configure(monkeypatch, tmp_path))
+
+        assert runtime.projector_bytes(configuration, vision=True) > 1024 * 1024
+        assert runtime.projector_bytes(configuration, vision=False) == 0
+
+    def test_a_text_only_request_does_not_load_it(self, placed, server, tmp_path, monkeypatch):
+        managed, started = server
+        self._with_projector(monkeypatch, tmp_path, configure(monkeypatch, tmp_path))
+        set_free(monkeypatch, 20)
+
+        managed.client(needs_vision=False)
+
+        assert started[0][0][2] is None
+
+    def test_a_request_carrying_an_image_replaces_the_server_with_one_that_sees(
+            self, placed, server, tmp_path, monkeypatch):
+        managed, started = server
+        configuration = self._with_projector(monkeypatch, tmp_path,
+                                             configure(monkeypatch, tmp_path))
+        set_free(monkeypatch, 20)
+        managed.client(needs_vision=False)
+
+        managed.client(needs_vision=True)
+
+        assert len(started) == 2
+        assert started[1][0][2] == configuration.mmproj

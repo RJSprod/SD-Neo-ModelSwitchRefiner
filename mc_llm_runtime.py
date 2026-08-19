@@ -202,9 +202,30 @@ class Negotiation:
         return bool(self.notes)
 
 
+def projector_bytes(configuration: Config, vision: bool) -> int:
+    """What the vision projector will cost the card, or 0 when it is not loaded.
+
+    Read off the file rather than guessed at, plus a quarter for the encoder's
+    own working memory -- llama.cpp announces its own worst case for the same
+    thing, and for a 26B model's f16 projector that came to 1.3 GB. A
+    gigabyte and a third is not a rounding error on a card that is already
+    within two of its limit: unaccounted for, it is a gigabyte and a third that
+    llama.cpp has to find somewhere, and where it finds it is by leaving part
+    of the model in system RAM.
+    """
+    if not vision or configuration.mmproj is None:
+        return 0
+    try:
+        return int(Path(configuration.mmproj).stat().st_size * 1.25)
+    except OSError:
+        logger.debug("Model Chain: could not size the vision projector", exc_info=True)
+        return 0
+
+
 def negotiate(configuration: Config | None = None,
               gguf: mc_gguf.Gguf | None = None, *, reclaim: bool = True,
-              already_ours: int = 0, extra_reserve: int = 0) -> Negotiation:
+              already_ours: int = 0, extra_reserve: int = 0,
+              vision: bool = False) -> Negotiation:
     """Decide where the LLM goes, given what is on the card right now.
 
     ``reclaim=False`` answers the same question without moving anything, which
@@ -260,7 +281,8 @@ def negotiate(configuration: Config | None = None,
         return Negotiation(wanted, mc_llm_context.estimate(configuration.model, wanted, described),
                            (), True)
 
-    reserve = mc_broker.safety_margin_bytes() + max(int(extra_reserve), 0)
+    reserve = (mc_broker.safety_margin_bytes() + max(int(extra_reserve), 0)
+               + projector_bytes(configuration, vision))
     estimate = mc_llm_context.estimate(configuration.model, wanted, described)
 
     if reclaim and mc_broker.mode() == mc_broker.MODE_EXCLUSIVE:
@@ -768,7 +790,7 @@ def _device_label(configuration: Config) -> str:
     return head.strip() or configuration.device
 
 
-def _identity(configuration: Config) -> tuple:
+def _identity(configuration: Config, projector=None) -> tuple:
     """Everything the user chose, as opposed to everything the card decided.
 
     The split this returns is the point. A server has to be restarted when the
@@ -779,7 +801,7 @@ def _identity(configuration: Config) -> tuple:
     placement, and :func:`_worth_restarting` decides how much of a difference
     there has to be in that before a running server is given up.
     """
-    return (str(configuration.runtime), str(configuration.model), str(configuration.mmproj),
+    return (str(configuration.runtime), str(configuration.model), str(projector),
             int(configuration.gpu_index), str(configuration.device),
             str(configuration.gpu_layers), int(configuration.context_size),
             str(configuration.context_mode), str(configuration.kv_type_k),
@@ -830,6 +852,47 @@ class Report:
     fits: bool = True
     offload: Offload = field(default_factory=Offload)
     """What llama.cpp said it did, as opposed to what it was asked to do."""
+
+
+SYSTEM_RAM_MARGIN = 1.15
+"""How much free system RAM a load wants, as a multiple of what it will read.
+
+llama.cpp reads a GGUF through ``mmap``, so the file's pages go through system
+RAM whether the weights end up on the card or not, and anything left on the
+processor stays there. Fifteen per cent over the top of it covers the runtime,
+the projector and the page cache having something else to do -- and below that
+the operating system starts paging the model against itself, which is how a
+load that normally takes twenty seconds takes four minutes and a reply that
+should stream arrives a word at a time.
+"""
+
+
+def _warn_about_system_ram(configuration: Config, placement: mc_llm_context.Placement) -> None:
+    """Say so when there is not enough system RAM to read the model comfortably.
+
+    A warning and not a refusal. It is the machine's memory, the user may know
+    exactly what else is using it, and llama.cpp will make an honest attempt
+    either way. What is not acceptable is for it to be slow for a reason
+    nothing on screen mentions -- this is the single most common cause of a
+    load that appears to hang, and the one thing this extension cannot do
+    anything about from inside the WebUI's own process.
+    """
+    try:
+        import mc_memory
+
+        free = int(mc_memory.free_ram_bytes())
+        needed = int(Path(configuration.model).stat().st_size)
+    except (OSError, ValueError, AttributeError):
+        return
+    if free <= 0 or needed <= 0 or free >= needed * SYSTEM_RAM_MARGIN:
+        return
+    logger.warning(
+        "Model Chain: only %.1f GB of system RAM is free and the model is %.1f GB. llama.cpp "
+        "reads it through the page cache whatever ends up on the card, so expect a slow load "
+        "and slow replies until something else on this machine gives that memory back%s",
+        free / _GB, needed / _GB,
+        "" if placement.gpu_layers == mc_llm_context.ALL_LAYERS
+        else " — and this placement already leaves part of the model there, which is worse")
 
 
 class _StartFailed(RuntimeError):
@@ -923,8 +986,15 @@ class Runtime:
                     "request without the image; text-only fallback is disabled."
                 )
 
+            # The projector is loaded for a request that carries an image and
+            # for no other. It is a gigabyte and a third of a card this model
+            # is already filling, and every text-only turn was paying it. The
+            # cost of the rule is one restart when a picture is finally
+            # attached, which is a trade worth making the other way round.
+            projector = configuration.mmproj if needs_vision else None
+
             ours = self.resident_bytes()
-            if (self._running and self._identity == _identity(configuration)
+            if (self._running and self._identity == _identity(configuration, projector)
                     and not self._outgrown(configuration, ours)):
                 self._touch(configuration, ours)
                 return LlamaClient(f"http://127.0.0.1:{self._process.port}",
@@ -941,14 +1011,14 @@ class Runtime:
                 logger.info("Model Chain: returned %.1f GB of cached VRAM to the driver before "
                             "placing the LLM", recovered / _GB)
 
-            negotiated = negotiate(configuration, already_ours=ours)
+            negotiated = negotiate(configuration, already_ours=ours, vision=needs_vision)
             placement = negotiated.placement
-            signature = (configuration.runtime, configuration.model, configuration.mmproj,
+            signature = (configuration.runtime, configuration.model, projector,
                          configuration.gpu_index, configuration.device,
                          placement.context, placement.gpu_layers)
 
             if self._running and signature == self._signature:
-                self._identity = _identity(configuration)
+                self._identity = _identity(configuration, projector)
                 self._touch(configuration, ours)
                 return LlamaClient(f"http://127.0.0.1:{self._process.port}", self._process.api_key)
 
@@ -966,13 +1036,14 @@ class Runtime:
             for attempt in range(START_ATTEMPTS):
                 if penalty:
                     negotiated = negotiate(configuration, already_ours=ours,
-                                           extra_reserve=penalty)
+                                           extra_reserve=penalty, vision=needs_vision)
                     placement = negotiated.placement
-                    signature = (configuration.runtime, configuration.model,
-                                 configuration.mmproj, configuration.gpu_index,
-                                 configuration.device, placement.context, placement.gpu_layers)
+                    signature = (configuration.runtime, configuration.model, projector,
+                                 configuration.gpu_index, configuration.device,
+                                 placement.context, placement.gpu_layers)
                 try:
-                    process, observed, offload = self._launch(configuration, placement)
+                    process, observed, offload = self._launch(configuration, placement,
+                                                              projector)
                     break
                 except _StartFailed as failure:
                     if not failure.out_of_memory or attempt == START_ATTEMPTS - 1:
@@ -982,11 +1053,12 @@ class Runtime:
                                    failure, penalty / _GB)
 
             self._process, self._signature, self._placement = process, signature, placement
-            self._identity = _identity(configuration)
+            self._identity = _identity(configuration, projector)
             self._record(configuration, negotiated, observed, offload)
             return LlamaClient(f"http://127.0.0.1:{process.port}", process.api_key)
 
-    def _launch(self, configuration: Config, placement: mc_llm_context.Placement):
+    def _launch(self, configuration: Config, placement: mc_llm_context.Placement,
+                projector=None):
         """One llama-server, started and waited for. Returns it, its VRAM and its report.
 
         Raises :class:`_StartFailed` carrying llama.cpp's own reason rather
@@ -1019,13 +1091,14 @@ class Runtime:
         # nobody can find is a log nobody reads. It is one line per start, and
         # starts are rare.
         logger.info("Model Chain: llama-server log — %s", log_path)
+        _warn_about_system_ram(configuration, placement)
         self._log = (log_path, written_before)
 
         process = self._new_process()
         from_system_ram = (configuration.device.casefold() == CPU_DEVICE
                            or layers == NO_OFFLOAD)
         try:
-            process.start(configuration.runtime, configuration.model, configuration.mmproj,
+            process.start(configuration.runtime, configuration.model, projector,
                           configuration.gpu_index, configuration.device, placement.context,
                           log_path, gpu_layers=layers)
             process.wait_ready(CPU_READY_TIMEOUT if from_system_ram else GPU_READY_TIMEOUT)
@@ -1143,6 +1216,7 @@ class Runtime:
         allocation it could not fit -- so what is said is what was observed
         rather than a diagnosis.
         """
+        self._report_residency(negotiated)
         offload = self.report.offload
         granted = offload.granted_context
         if granted and self.report.placement is not None \
@@ -1168,6 +1242,40 @@ class Runtime:
                 "nvidia-smi for another process holding VRAM, and on Windows check that the "
                 "driver's CUDA sysmem-fallback policy is not spilling the allocation",
                 offload.system_bytes / _GB, offload.system_share * 100)
+
+    RESIDENT_SHORTFALL = 0.75
+    """How much of the weights have to reach the card before it counts as placed.
+
+    Below three quarters something else decided where this model went. Not a
+    tight bound on purpose: the measurement is a difference of two free-VRAM
+    readings taken either side of a process start, and anything else on the
+    machine moving in between is noise in it.
+    """
+
+    def _report_residency(self, negotiated: Negotiation) -> None:
+        """Say when the card did not take what it was asked to take.
+
+        The one check that works on every build of llama.cpp, because it reads
+        nothing llama.cpp wrote: the placement says all thirty layers, the
+        weights are seventeen gigabytes, and the card's free memory fell by
+        four. Whatever the log format, whatever the fitter decided and did not
+        mention, the rest of that model is being read over PCIe on every single
+        token -- which is the difference between a reply that streams and one
+        that arrives at five tokens a second.
+        """
+        estimate, placement = negotiated.estimate, negotiated.placement
+        observed = self.report.observed_bytes
+        if not placement.on_gpu or estimate is None or observed <= 0:
+            return
+        expected = estimate.weights_bytes
+        if expected <= 0 or observed >= expected * self.RESIDENT_SHORTFALL:
+            return
+        logger.warning(
+            "Model Chain: the card took %.1f GB where this placement needs %.1f GB of weights — "
+            "llama.cpp has left the rest in system RAM and will read it over PCIe for every "
+            "token. Something outside this extension is holding VRAM, or llama.cpp's own fitter "
+            "made room for its context and compute buffers by moving weights off the card",
+            observed / _GB, expected / _GB)
 
     def _label(self, configuration: Config) -> str:
         name = configuration.quantization or (
