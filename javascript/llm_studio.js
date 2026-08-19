@@ -8,8 +8,8 @@
 // server round trip:
 //
 //   * Ctrl/Cmd+Enter submits the composer that has focus;
-//   * the transcript follows a streaming reply, unless the reader has scrolled
-//     up to read something, in which case it stays where they put it;
+//   * the transcript follows a streaming reply while the reader is at the end
+//     of it, and holds their place when they are not;
 //   * Escape stops a run;
 //   * the conversation workspace is measured against the window, so the layout
 //     can fit the space it actually has rather than a space guessed in a
@@ -45,7 +45,11 @@
     // How close to the bottom still counts as "following along". A reader who
     // has scrolled up by more than this is reading, and moving the viewport
     // under them is the rudest thing a chat window can do.
-    const FOLLOW_SLACK_PX = 120;
+    //
+    // 100 and not a number of our own: it is what Gradio's own Chatbot uses,
+    // and two components disagreeing about whether you are at the bottom is
+    // worse than either answer.
+    const FOLLOW_SLACK_PX = 100;
 
     function root() {
         const app = typeof gradioApp === "function" ? gradioApp() : document;
@@ -113,6 +117,57 @@
         return null;
     }
 
+    function bottomGap(target) {
+        return target.scrollHeight - target.scrollTop - target.clientHeight;
+    }
+
+    // Where the reader put the transcript, remembered *before* anything
+    // arrives.
+    //
+    // This is the whole of why the first version of this did not work. It
+    // asked "are we near the bottom?" from inside the MutationObserver, which
+    // by definition runs after the new content is in the DOM -- so a reply
+    // that added more than the slack made the answer "no" for a reader who had
+    // been pinned to the bottom a millisecond earlier. Whether to follow is a
+    // question about where you *were*, and there is no reading of the DOM
+    // after the fact that answers it.
+    //
+    // So it is answered from scroll events instead, which only fire when the
+    // position actually changes, and the observer does what the recorded
+    // answer says.
+    function watch(target) {
+        if (target.mcLlmAnchor) return target.mcLlmAnchor;
+        // A scroller seen for the first time is a thread that has just been
+        // opened, and a thread opens at its newest message.
+        const state = {pinned: true, offset: target.scrollTop};
+        target.mcLlmAnchor = state;
+        target.addEventListener("scroll", function () {
+            state.offset = target.scrollTop;
+            state.pinned = bottomGap(target) <= FOLLOW_SLACK_PX;
+        }, {passive: true});
+        return state;
+    }
+
+    // What the scroll position should be once new content has landed, or null
+    // to leave it exactly where it is. Split out from the DOM so the decision
+    // can be tested without a browser.
+    function anchorTo(state, position) {
+        if (state.pinned) {
+            // Clamped by the browser to the real maximum, which is what we
+            // want: "the end", not a number.
+            return position.scrollHeight;
+        }
+        // Not pinned, and the position has collapsed to the top. That is not
+        // something a reader did -- it is what happens when a re-render empties
+        // the list for an instant, because scrollTop is clamped to a
+        // scrollHeight that was briefly zero. Put them back where they were
+        // reading rather than at the top of an hour-old conversation.
+        if (position.scrollTop === 0 && state.offset > 0) {
+            return state.offset;
+        }
+        return null;
+    }
+
     function wireTranscript() {
         const holder = byId("mc-llm-chat-transcript");
         if (!holder || holder.dataset.mcLlmFollow === "1") return;
@@ -122,12 +177,22 @@
         const observer = new MutationObserver(function () {
             const target = scroller(holder);
             if (!target) return;
-            const distance = target.scrollHeight - target.scrollTop - target.clientHeight;
-            if (distance <= FOLLOW_SLACK_PX) {
-                target.scrollTop = target.scrollHeight;
+            const state = watch(target);
+            const wanted = anchorTo(state, {
+                scrollTop: target.scrollTop,
+                scrollHeight: target.scrollHeight,
+                clientHeight: target.clientHeight,
+            });
+            if (wanted !== null && wanted !== target.scrollTop) {
+                target.scrollTop = wanted;
             }
         });
         observer.observe(holder, {childList: true, subtree: true, characterData: true});
+
+        // Start watching now rather than at the first mutation, so the reader's
+        // position is already being recorded when the first reply arrives.
+        const target = scroller(holder);
+        if (target) watch(target);
     }
 
     // -- fit the workspace to the window ------------------------------------ //

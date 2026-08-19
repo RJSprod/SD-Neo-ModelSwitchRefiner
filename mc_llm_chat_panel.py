@@ -188,8 +188,12 @@ def build() -> dict:
             # out in the browser and applied in style.css -- a number here
             # would be an inline style and would win over the CSS that makes
             # the transcript fit the window instead of the other way round.
+            # No copy button. It put an icon under every message in a
+            # transcript whose whole job is to be read, to do something a
+            # selection and Ctrl+C already do -- and it was one more thing
+            # between two bubbles that are meant to read as a conversation.
             transcript = gr.Chatbot(
-                label=None, show_copy_button=True, render_markdown=True,
+                label=None, show_copy_button=False, render_markdown=True,
                 value=initial_rows,
                 elem_id=ui.ident("chat", "transcript"),
                 elem_classes=ui.classes("transcript"))

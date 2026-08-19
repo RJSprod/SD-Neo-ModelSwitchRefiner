@@ -1158,7 +1158,12 @@ it:
 | **Delete message** / **Delete from here** | One message, or that one and everything after it. |
 
 Tapping the same message again puts the bar away; tapping a different one moves
-it there.
+it there. There is no per-message copy button — select the text and copy it.
+
+The transcript follows a reply while you are at the end of it and holds your
+place while you are not: scroll up to read something and new messages arrive
+below without moving what you are looking at; scroll back to the bottom and it
+starts following again.
 
 The threads list, the character (chat with, edit, or create) and your persona
 are in a drawer behind **☰ Threads & character**, closed by default — with it

@@ -747,3 +747,54 @@ Send, Stop and Attach stacked vertically were taller than the three-line message
 box beside them, so *they* decided how tall the composer was. Stop and Attach
 share a row now, and the stack stretches to the box's height rather than
 setting it.
+
+### 8.10 Following a reply, and the question that has to be asked first
+
+The transcript is meant to do what every chat window does: stay at the end while
+you are at the end, and hold your place while you are not.
+
+The first version asked the question from inside the `MutationObserver` —
+
+```js
+const distance = target.scrollHeight - target.scrollTop - target.clientHeight;
+if (distance <= FOLLOW_SLACK_PX) target.scrollTop = target.scrollHeight;
+```
+
+— and a `MutationObserver` runs *after* the new content is in the DOM. So a
+reply taller than the slack made `distance` large for a reader who had been
+pinned to the bottom a millisecond earlier, and the answer came back "no". There
+is no reading of the DOM after the fact that answers "were you at the end?",
+because the thing that moved is the definition of "the end".
+
+So it is answered from `scroll` events, which fire only when the position
+actually changes, and the observer does what the recorded answer says:
+
+- **pinned** → `scrollTop = scrollHeight`, which the browser clamps to the real
+  maximum, so the value is "the end" rather than a number that was right once;
+- **not pinned, and `scrollTop` has collapsed to 0** → put it back. Nobody
+  scrolled there: a full re-render empties the list for an instant and
+  `scrollTop` is clamped against a `scrollHeight` that was briefly zero;
+- **not pinned otherwise** → leave it exactly alone.
+
+`FOLLOW_SLACK_PX` is 100 and not a number of this file's own, because that is
+what Gradio's `ChatBot.svelte` uses in its own `beforeUpdate` check. Two
+components disagreeing about whether you are at the bottom is worse than either
+answer, and a scroller seen for the first time starts pinned, which is what
+makes an opened thread show its newest message.
+
+One honest note about how this was verified. Gradio 4.40 gets the algorithm
+right for itself — its `beforeUpdate` captures pinned-ness before the DOM
+changes, exactly as above — and in a browser harness that reproduces its update
+cycle, it *masks* the old observer entirely: both the old and the new script
+pass the end-to-end check. What does not pass is the observer driven directly,
+which is what `tests/test_llm_studio_js.py::TestAnchoringTheTranscript` does by
+capturing the callback and setting the scroller's numbers itself. Five of its
+six cases fail against the old script. The behaviour now holds because this file
+decides correctly on its own rather than because Gradio happens to decide first.
+
+The per-message copy button went with it. It put an icon under every bubble in a
+transcript whose whole job is to be read, to do something a selection and
+Ctrl+C already do — and it was one more thing between two bubbles that are meant
+to read as a conversation. There is no Copy in the action bar either: a server
+cannot write to a clipboard, and a button that needs its own JavaScript to do
+what selecting text already does is not worth the line.
