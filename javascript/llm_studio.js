@@ -206,6 +206,66 @@
         if (target) watch(target);
     }
 
+    // -- a section that opens stays where it can be read -------------------- //
+
+    // The drawer is a fixed-height scrolling column: the threads, the
+    // character and the persona, in as much room as the window has left. Open
+    // a section near the bottom of it and what you opened is below the fold,
+    // which is a thing browsers do not fix for you -- the click landed on the
+    // heading, and the heading was already visible.
+    //
+    // So the section is brought back after it has opened. Not by the browser's
+    // own scrollIntoView: that scrolls every scrollable ancestor including the
+    // page, and the page is not meant to move. This scrolls the drawer, by the
+    // smallest amount that helps, and nothing else.
+
+    // How long to wait for the section to have opened. A frame is not enough
+    // -- Gradio re-renders on its own schedule -- and anything long enough to
+    // notice would feel like the panel jumping on its own.
+    const OPEN_SETTLE_MS = 80;
+
+    // What the drawer's scroll position should become once a section has
+    // opened, or null to leave it alone. Split out from the DOM so the rule
+    // can be read and tested as arithmetic.
+    function sectionScroll(section, view) {
+        const top = section.top;
+        const bottom = top + section.height;
+        const seen = view.scrollTop + view.clientHeight;
+        if (top >= view.scrollTop && bottom <= seen) return null;   // all of it is there
+        // Taller than the drawer: show its beginning, because that is where
+        // the control you just pressed is.
+        if (section.height >= view.clientHeight) return top;
+        // Otherwise the smallest move that brings the end of it into view.
+        if (bottom > seen) return bottom - view.clientHeight;
+        return top;
+    }
+
+    function keepInView(drawer, target) {
+        let section = target;
+        while (section && section.parentElement !== drawer) section = section.parentElement;
+        if (!section) return;
+        const wanted = sectionScroll(
+            {top: section.offsetTop - drawer.offsetTop, height: section.offsetHeight},
+            {scrollTop: drawer.scrollTop, clientHeight: drawer.clientHeight});
+        if (wanted !== null) drawer.scrollTop = wanted;
+    }
+
+    function wireDrawer() {
+        const drawer = byId("mc-llm-chat-drawer");
+        if (!drawer || drawer.dataset.mcLlmInView === "1") return;
+        drawer.dataset.mcLlmInView = "1";
+        drawer.addEventListener("click", function (event) {
+            const target = event.target;
+            window.setTimeout(function () {
+                try {
+                    keepInView(drawer, target);
+                } catch (error) {
+                    console.error("Model Chain: could not keep the drawer in view", error);
+                }
+            }, OPEN_SETTLE_MS);
+        });
+    }
+
     // -- how long the request in flight has been in flight ------------------ //
 
     // The status lines that can be busy. Named rather than searched for, for
@@ -358,6 +418,7 @@
         try {
             PANELS.forEach(wireComposer);
             wireTranscript();
+            wireDrawer();
             watchActivity();
             tick();
             watchWindow();

@@ -691,6 +691,17 @@
  * since it was written, for exactly this reason; the drawer had `min-width: 0`
  * and not its opposite number. */
 #mc-llm-studio .mc-llm-drawer {
+    /* Stated, not assumed. Everything else here arranges the sections in a
+       column and depends on their being in one -- and `display`/
+       `flex-direction` on a host container is not this file's to take for
+       granted. Laid out as a *row* instead, with the children told not to
+       shrink, the three sections stand side by side at their natural widths
+       and walk off the right-hand edge of the page: "it expands to the right
+       instead of expanding vertically". The stage has declared both since it
+       was written. */
+    display: flex;
+    flex-direction: column;
+    gap: 0.4em;
     flex: 0 0 22em;
     height: 100%;
     max-height: 100%;
@@ -716,6 +727,11 @@
    drawer was the half that did not. */
 #mc-llm-studio .mc-llm-drawer > * {
     flex: 0 0 auto;
+    /* And never wider than the drawer. A flex item's automatic minimum size
+       is its content, so a row of two sliders inside a 22em column pushes the
+       column open rather than wrapping inside it. */
+    max-width: 100%;
+    min-width: 0;
 }
 
 /* The stage is a column, and exactly one thing in it is allowed to grow.

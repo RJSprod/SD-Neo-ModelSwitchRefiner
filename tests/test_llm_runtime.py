@@ -9,6 +9,8 @@ without reporting what it changed."
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import mc_broker
@@ -631,3 +633,144 @@ class TestTheLoadReportIsWaitedFor:
             managed.client()
 
         assert any("no load report" in record.getMessage() for record in caplog.records)
+
+
+# --------------------------------------------------------------------------- #
+# A second log format, and a start that did not come up
+# --------------------------------------------------------------------------- #
+#
+# The parser above was written against the format llama.cpp had when it was
+# written. A 2025 build logs none of those lines: it fits the model to the
+# device itself, says so, and leaves the per-buffer accounting out of the
+# server log entirely. What it does say is the context it settled on, what it
+# saw free on the card, why a load failed, and -- after every request -- how
+# fast that request actually ran. The fixture beside this file is one such
+# build's own output, kept because a format nobody can reproduce from memory is
+# a format that quietly stops being parsed.
+
+OOM_LOG = (Path(__file__).resolve().parent / "data"
+           / "llama-server-out-of-memory.log").read_text(encoding="utf-8")
+
+
+class TestTheOtherLogFormat:
+    def test_the_context_it_settled_on_is_read(self):
+        """A build with its own fitter adjusts the context, and then the number
+        this extension is reasoning about is not the one being run."""
+        assert runtime.read_offload(
+            "llama_context: n_ctx_seq (6912) < n_ctx_train (262144)").granted_context == 6912
+
+    def test_what_llama_cpp_saw_free_is_read(self):
+        offload = runtime.read_offload(OOM_LOG)
+
+        assert offload.known
+        assert offload.device_free[0][0] == "CUDA0"
+        assert round(offload.device_free[0][2] / 1024) == 23
+
+    def test_a_request_s_own_timings_are_read(self):
+        prompt, reply = runtime.read_speed(
+            "slot print_timing: prompt eval time = 3409.96 ms / 159 tokens "
+            "( 21.45 ms per token, 46.63 tokens per second)\n"
+            "slot print_timing: eval time = 5584.40 ms / 53 tokens "
+            "( 105.37 ms per token, 9.49 tokens per second)\n")
+
+        assert (round(prompt, 2), round(reply, 2)) == (46.63, 9.49)
+
+    def test_the_last_request_wins(self):
+        prompt, reply = runtime.read_speed(OOM_LOG + """
+slot print_timing: eval time = 1 ms / 1 tokens ( 1 ms per token, 106.07 tokens per second)
+slot print_timing: eval time = 1 ms / 1 tokens ( 1 ms per token, 2.68 tokens per second)
+""")
+
+        assert reply == 2.68
+
+
+class TestAStartThatDidNotComeUp:
+    def test_the_reason_is_llama_cpp_s_own(self):
+        """"llama-server exited before becoming ready" is true of every failed
+        start and useful for none of them."""
+        failure = runtime.read_failure(OOM_LOG)
+
+        assert failure.out_of_memory
+        assert "17.8 GB" in failure.text and "22.8 GB reported free" in failure.text
+
+    def test_a_card_with_room_can_still_refuse_one_allocation(self):
+        """The whole reason this is retried rather than predicted: what a
+        driver will hand out in one piece is not what it has left."""
+        failure = runtime.read_failure(OOM_LOG)
+
+        assert "in one piece" in failure.text
+
+    def test_a_start_that_failed_for_another_reason_is_not_retried(self):
+        failure = runtime.read_failure(
+            "E llama_model_load: error loading model: tensor 'x' has wrong shape")
+
+        assert failure and not failure.out_of_memory
+
+    def test_nothing_to_say_is_said_as_nothing(self):
+        assert not runtime.read_failure("srv update_slots: all slots are idle")
+
+
+class TestRetryingASmallerPlacement:
+    """A start that ran out of VRAM is tried again with more headroom, because
+    nothing this module knows could have predicted the refusal: the card said
+    22.8 GB free and the driver would not give out 17.8 GB of it in one piece.
+    """
+
+    def _failing(self, managed, monkeypatch, failures: int):
+        """A runtime whose first ``failures`` starts run out of VRAM."""
+        attempts: list = []
+        real = managed._launch
+
+        def launch(configuration, placement):
+            attempts.append(placement)
+            if len(attempts) <= failures:
+                raise runtime._StartFailed("out of memory", out_of_memory=True)
+            return real(configuration, placement)
+
+        monkeypatch.setattr(managed, "_launch", launch)
+        return attempts
+
+    def test_the_second_attempt_asks_for_less(self, placed, server, tmp_path, monkeypatch):
+        managed, _ = server
+        # Sized so the extra headroom actually bites: a card this model fits on
+        # once and does not fit on with three gigabytes held back.
+        configure(monkeypatch, tmp_path, mode="auto", blocks=30)
+        set_free(monkeypatch, 17)
+        attempts = self._failing(managed, monkeypatch, failures=1)
+
+        managed.client()
+
+        assert len(attempts) == 2
+        first, second = attempts
+        assert (second.context < first.context
+                or runtime._offloaded_layers(second, 30) < runtime._offloaded_layers(first, 30))
+
+    def test_it_gives_up_rather_than_retrying_for_ever(self, placed, server, tmp_path,
+                                                       monkeypatch):
+        managed, _ = server
+        configure(monkeypatch, tmp_path)
+        set_free(monkeypatch, 20)
+        attempts = self._failing(managed, monkeypatch, failures=99)
+
+        with pytest.raises(RuntimeError):
+            managed.client()
+
+        assert len(attempts) == runtime.START_ATTEMPTS
+
+    def test_a_failure_that_is_not_about_memory_is_not_retried(self, placed, server, tmp_path,
+                                                               monkeypatch):
+        managed, _ = server
+        configure(monkeypatch, tmp_path)
+        set_free(monkeypatch, 20)
+        attempts: list = []
+
+        def launch(configuration, placement):
+            attempts.append(placement)
+            raise runtime._StartFailed("the model file is corrupt")
+
+        monkeypatch.setattr(managed, "_launch", launch)
+
+        with pytest.raises(RuntimeError, match="corrupt"):
+            managed.client()
+
+        assert len(attempts) == 1

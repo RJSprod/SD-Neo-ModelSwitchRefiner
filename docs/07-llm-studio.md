@@ -1129,3 +1129,110 @@ gigabyte for the driver and the desktop, from what the card says is in use.
 When the remainder is real it is named — in the shortfall note, and in Setup's
 residency panel, which is the panel somebody opens when a placement makes no
 sense and is the one explanation no row in its table can ever show.
+
+## 13. The drawer, and a llama-server that would not start (19 August 2026)
+
+### 13.1 It expanded to the right
+
+"When it expands, it expands to the right off page, instead of expanding
+vertically."
+
+That sentence names the mechanism, and it is the third and last thing wrong
+with the same eight lines of CSS. The drawer's rules arrange three sections in
+a column, scroll them, and stop them being squashed — and never once say that
+the sections are in a column. `display` and `flex-direction` on a host
+container were left to Gradio, and laid out as a *row* instead, with the
+children told not to shrink by §10.2, the three sections stand side by side at
+their natural widths and walk straight off the right-hand edge of the page.
+
+The stage next door has declared both since the day it was written. Every fix
+to this drawer has been a property the stage already had:
+
+| | stage | drawer |
+| --- | --- | --- |
+| `display: flex; flex-direction: column` | from the start | §13.1 |
+| `min-height: 0` | from the start | §11 |
+| `flex: 0 0 auto` on children | from the start | §10.2 |
+| `height: 100%` / `align-items: stretch` | §11 | §11 |
+
+A column that was written as "the drawer is the narrow one" and a column that
+was written as "this is a flex layout and here is what each rule is for".
+
+### 13.2 And it stays where it can be read
+
+The drawer is a fixed-height scrolling column, so a section opened near the
+bottom of it opens below the fold — the click landed on the heading, and the
+heading was already visible, which is why no browser fixes this for you.
+
+`llm_studio.js` brings it back: after the section has had a moment to open, the
+drawer is scrolled by the smallest amount that shows it. Deliberately not
+`scrollIntoView`, which scrolls every scrollable ancestor including the page,
+and the page is the one thing this tab does not move. The rule is arithmetic —
+already visible, taller than the drawer, or below the fold — so it is run in
+the test harness rather than described.
+
+### 13.3 The load report that was never in that format
+
+§12.2 said the load report was missing because it had not been flushed yet.
+That was a good guess and it was wrong, which the user's own
+`llama-server.log` settled in one line:
+
+```
+common_init_result: fitting params to device memory ...
+```
+
+This is a 2025 build with its own memory fitter. It logs none of the three
+lines the parser was written against — no `load_tensors:`, no per-buffer
+accounting, no `offloaded N/M layers to GPU`. What it does log is the context
+it settled on, what it saw free on each device, why a load failed, and, after
+every request, how fast that request actually ran. All four are now read, and
+the fixture in `tests/data/` is that build's own output, kept because a format
+nobody can reproduce from memory is a format that quietly stops being parsed.
+
+Two of them earn their place immediately. The context llama.cpp *settled on* is
+not always the one it was asked for — 7,168 asked, 6,912 run — and a number
+this extension reasons about while the server runs a different one is worth a
+line. And the timings are the measurement every other number here is a proxy
+for: on that one card, that one model and that one week, the same placement
+reported by this extension as "all layers on the GPU" produced **106 tokens per
+second** on the first start and **2.68** on a later one. Characters per second,
+which is all this side can count, cannot tell those apart from a chattier
+model. `llama.cpp measured 6.7 tokens/s` on the end of the run line can.
+
+### 13.4 A card with room that refuses to give it out
+
+The run where nothing worked at all:
+
+```
+device_info:
+  - CUDA0 : NVIDIA GeForce RTX 3090 (24575 MiB, 23304 MiB free)
+ggml_backend_cuda_buffer_type_alloc_buffer: allocating 18231.52 MiB on device 0:
+    cudaMalloc failed: out of memory
+llama_model_load: error loading model: unable to allocate CUDA0 buffer
+srv llama_server: exiting due to model loading error
+```
+
+22.8 GB free, and a single 17.8 GB allocation refused. That is not a
+contradiction, it is the difference between how much memory a driver has left
+and how much of it it will hand out in one piece — and Windows is stricter
+about it than any arithmetic in this module can model. Every check here passed;
+the placement was sound; the server died anyway, and what reached the user was
+"llama-server exited before becoming ready", which is true of every failed
+start and useful for none of them.
+
+Two changes, and the order matters:
+
+- **Say what happened.** The reason is in the log, one line before the server
+  goes. It is read and raised: *"llama-server could not fit on the card: it
+  asked the driver for 17.8 GB in one piece and was refused (out of memory),
+  with 22.8 GB reported free."* A sentence somebody can act on, in place of a
+  sentence about a process exiting.
+- **Then try again with less.** Nothing here could have predicted the refusal,
+  so it is learned instead: up to two more attempts, each holding back three
+  more gigabytes than the last, each one logged. Three gigabytes rather than
+  one because a step that only trimmed the context would ask the driver for the
+  same allocation it had just refused — the weights are what did not fit, and
+  only fewer layers make that number smaller.
+
+Only an out-of-memory failure is retried. A corrupt file, a missing projector
+or a port already in use fails once, immediately, with its own sentence.

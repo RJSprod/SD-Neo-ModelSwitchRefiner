@@ -204,7 +204,7 @@ class Negotiation:
 
 def negotiate(configuration: Config | None = None,
               gguf: mc_gguf.Gguf | None = None, *, reclaim: bool = True,
-              already_ours: int = 0) -> Negotiation:
+              already_ours: int = 0, extra_reserve: int = 0) -> Negotiation:
     """Decide where the LLM goes, given what is on the card right now.
 
     ``reclaim=False`` answers the same question without moving anything, which
@@ -212,6 +212,11 @@ def negotiate(configuration: Config | None = None,
     panel is rendered when the tab is built and every time somebody opens the
     accordion, and a preview that evicted a checkpoint to show a table would be
     a far worse bug than any it was drawing attention to.
+
+    ``extra_reserve`` is headroom on top of the global safety margin, and the
+    only thing that ever passes it is a start that has already failed: the card
+    said it had room, the driver disagreed, and the arithmetic here has no way
+    to know that except by being told. See :meth:`Runtime.client`.
 
     ``already_ours`` is VRAM a llama-server this module started is holding at
     this moment. It is *free* for the purposes of every decision below, because
@@ -255,7 +260,7 @@ def negotiate(configuration: Config | None = None,
         return Negotiation(wanted, mc_llm_context.estimate(configuration.model, wanted, described),
                            (), True)
 
-    reserve = mc_broker.safety_margin_bytes()
+    reserve = mc_broker.safety_margin_bytes() + max(int(extra_reserve), 0)
     estimate = mc_llm_context.estimate(configuration.model, wanted, described)
 
     if reclaim and mc_broker.mode() == mc_broker.MODE_EXCLUSIVE:
@@ -459,6 +464,20 @@ _LAYERS = re.compile(r"offloaded\s+(\d+)\s*/\s*(\d+)\s+layers to GPU")
 _WEIGHTS = re.compile(r"load_tensors:\s*(.+?)\s+(?:model\s+)?buffer size\s*=\s*([0-9.]+)\s*MiB")
 _CACHE = re.compile(r"(\S+)\s+KV buffer size\s*=\s*([0-9.]+)\s*MiB")
 
+# The second format, and the reason there is a second one. A 2025 build logs
+# none of the three above: it fits the model to the device itself, says so, and
+# leaves the per-buffer accounting out of the server log entirely. What it does
+# say is what the context ended up as, what it saw free on the card, why a load
+# failed, and -- after every request -- how fast that request actually ran,
+# which is the number the whole placement argument is really about.
+_GRANTED = re.compile(r"n_ctx_seq\s*\((\d+)\)")
+_DEVICE = re.compile(r"-\s*(CUDA\d+|GPU\d+)\s*:.*?\(\s*(\d+)\s*MiB,\s*(\d+)\s*MiB free\s*\)")
+_ALLOC_FAILED = re.compile(
+    r"allocating\s+([0-9.]+)\s*MiB on device\s*(\d+):\s*(?:cudaMalloc|.*?)\s*failed:?\s*(.*)")
+_LOAD_FAILED = re.compile(r"(?:error loading model|failed to load model|exiting due to)[^\n]*")
+_SPEED = re.compile(
+    r"(prompt eval|eval) time\s*=.*?\(\s*[0-9.]+ ms per token,\s*([0-9.]+) tokens per second\)")
+
 SYSTEM_BUFFERS = ("cpu", "host")
 """Buffer names that mean system RAM rather than the card.
 
@@ -486,10 +505,16 @@ class Offload:
     total_layers: int = 0
     weights: tuple[tuple[str, float], ...] = ()
     cache: tuple[tuple[str, float], ...] = ()
+    granted_context: int = 0
+    """The context llama.cpp settled on, which is not always the one asked for:
+    a build with its own fitter adjusts it to what it thinks will fit."""
+    device_free: tuple[tuple[str, int, int], ...] = ()
+    """``(device, total MiB, free MiB)`` as llama.cpp saw it at start."""
 
     @property
     def known(self) -> bool:
-        return bool(self.total_layers or self.weights)
+        return bool(self.total_layers or self.weights or self.granted_context
+                    or self.device_free)
 
     @staticmethod
     def _bytes(buffers, system: bool) -> int:
@@ -520,6 +545,11 @@ class Offload:
             parts.append(f"{self.layers}/{self.total_layers} layers on the GPU")
         for name, size in self.weights + self.cache:
             parts.append(f"{name} {size * _MB / _GB:.1f} GB")
+        if self.granted_context:
+            parts.append(f"{self.granted_context:,} token context")
+        for device, total, free in self.device_free:
+            parts.append(f"{device} {free * _MB / _GB:.1f} GB free of "
+                         f"{total * _MB / _GB:.1f} GB at start")
         return ", ".join(parts)
 
 
@@ -540,22 +570,102 @@ def read_offload(text: str) -> Offload:
     layers, total = (int(found.group(1)), int(found.group(2))) if found else (0, 0)
     weights = tuple((name.strip(), float(size)) for name, size in _WEIGHTS.findall(text))
     cache = tuple((f"{name.strip()} KV", float(size)) for name, size in _CACHE.findall(text))
-    return Offload(layers=layers, total_layers=total, weights=weights, cache=cache)
+    granted = _GRANTED.findall(text)
+    devices = tuple((name, int(total_mib), int(free_mib))
+                    for name, total_mib, free_mib in _DEVICE.findall(text))
+    return Offload(layers=layers, total_layers=total, weights=weights, cache=cache,
+                   granted_context=int(granted[-1]) if granted else 0,
+                   device_free=devices)
+
+
+@dataclass(frozen=True)
+class Failure:
+    """Why a start failed, and whether a smaller placement would help."""
+
+    text: str = ""
+    out_of_memory: bool = False
+
+    def __bool__(self) -> bool:
+        return bool(self.text)
+
+
+def read_failure(text: str) -> Failure:
+    """Why a start failed, in llama.cpp's own words.
+
+    "llama-server exited before becoming ready" is true of every failed start
+    and useful for none of them. The server always says why, in the log, one
+    line before it goes -- and the sentence it uses is the difference between
+    "buy a bigger card", "close the other thing using this one", and "ask for
+    less of it", which is the one this module can act on by itself.
+    """
+    alloc = _ALLOC_FAILED.search(text)
+    if alloc:
+        asked = float(alloc.group(1)) * _MB
+        why = (alloc.group(3) or "").strip().rstrip(".") or "the allocation was refused"
+        seen = ""
+        devices = _DEVICE.findall(text)
+        if devices:
+            _name, _total, free_mib = devices[0]
+            seen = f", with {int(free_mib) * _MB / _GB:.1f} GB reported free"
+        return Failure(
+            f"llama-server could not fit on the card: it asked the driver for "
+            f"{asked / _GB:.1f} GB in one piece and was refused ({why}){seen}",
+            out_of_memory=True)
+    failure = _LOAD_FAILED.search(text)
+    if failure:
+        return Failure(failure.group(0).strip())
+    return Failure()
+
+
+def _text_since(log_path, offset: int, tail: int = 0) -> str:
+    """The log this start wrote, or "" when it cannot be read.
+
+    ``tail`` reads only the last that many bytes of it, never crossing back
+    over ``offset`` into an earlier run's. A load report is at the beginning of
+    a start and a request's timings are at the end of one, and a server that
+    has been answering for an hour has a great deal in between.
+    """
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+            start = max(int(offset), 0)
+            if tail > 0:
+                handle.seek(0, 2)
+                start = max(start, handle.tell() - int(tail))
+            handle.seek(start)
+            return handle.read(_LOG_READ_LIMIT)
+    except OSError:
+        logger.debug("Model Chain: could not read llama-server's log", exc_info=True)
+        return ""
+
+
+_TIMING_TAIL = 64 * 1024
+"""How far back to look for the last request's timings."""
+
+
+def read_speed(text: str) -> tuple[float, float]:
+    """The last request's ``(prompt, reply)`` tokens per second, or ``(0, 0)``.
+
+    The one measurement that settles the argument this module spends its time
+    having. A placement is a plan; this is the speed that plan produced, from
+    the process that produced it, and on a card that has quietly stopped
+    holding what it was given the two disagree by a factor of forty.
+    """
+    prompt = reply = 0.0
+    for kind, rate in _SPEED.findall(text):
+        if kind == "prompt eval":
+            prompt = float(rate)
+        else:
+            reply = float(rate)
+    return prompt, reply
 
 
 def _offload_since(log_path, offset: int) -> Offload:
-    """Read back what the server just written to ``log_path`` said about itself.
+    """Read back what the server just wrote to ``log_path`` about itself.
 
     ``offset`` is where the file ended before this start, because the log is
     appended to across runs and the report wanted is this run's.
     """
-    try:
-        with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
-            handle.seek(max(int(offset), 0))
-            return read_offload(handle.read(_LOG_READ_LIMIT))
-    except OSError:
-        logger.debug("Model Chain: could not read llama-server's log", exc_info=True)
-        return Offload()
+    return read_offload(_text_since(log_path, offset))
 
 
 _LOG_READ_LIMIT = 4 * 1024 * 1024
@@ -715,6 +825,29 @@ class Report:
     """What llama.cpp said it did, as opposed to what it was asked to do."""
 
 
+class _StartFailed(RuntimeError):
+    """A start that did not come up, with llama.cpp's own reason attached."""
+
+    def __init__(self, message: str, out_of_memory: bool = False):
+        super().__init__(message)
+        self.out_of_memory = out_of_memory
+
+
+START_ATTEMPTS = 3
+"""How many placements to try before giving up on a start.
+
+Only a placement that ran out of VRAM is retried, and each attempt asks for
+meaningfully less than the last, so three is enough to walk a large model down
+onto a card that will not take it whole -- and small enough that a start which
+is failing for some other reason still fails quickly.
+"""
+
+RETRY_HEADROOM = 3 * _GB
+"""How much more room each retry leaves. Large enough to change the placement:
+a step that only trimmed the context would ask the driver for the same
+allocation that had just been refused."""
+
+
 class Runtime:
     """One managed llama-server, placed by the broker and reclaimable by it."""
 
@@ -724,6 +857,8 @@ class Runtime:
         self._signature: tuple | None = None
         self._identity: tuple | None = None
         self._placement: mc_llm_context.Placement | None = None
+        self._log: tuple | None = None
+        """``(path, offset)`` of the running server's slice of the log."""
         self.report = Report()
 
     # -- lifecycle -------------------------------------------------------- #
@@ -801,47 +936,88 @@ class Runtime:
 
             self._stop_locked("making way for a new placement")
 
-            before = mc_broker.free_vram_bytes()
-            layers = _layers_argument(placement, mc_gguf.describe(configuration.model))
-            paths = mc_llm_paths.app_paths()
-            paths.logs.mkdir(parents=True, exist_ok=True)
-            log_path = paths.logs / "llama-server.log"
-            # Where this start's log begins. The file is appended to across
-            # runs, and what is read back afterwards has to be this run's.
-            written_before = log_path.stat().st_size if log_path.exists() else 0
-
-            logger.info(
-                "Model Chain: starting llama-server — %s on %s, %s, %s token context, "
-                "%.1f GB free",
-                configuration.quantization or Path(configuration.model).stem,
-                _device_label(configuration),
-                placement.describe(),
-                f"{placement.context:,}",
-                before / _GB,
-            )
-            # Said every time, and said in full. llama-server's own log is where
-            # the answer lives when a placement and a reply speed disagree, and
-            # a log nobody can find is a log nobody reads. It is one line per
-            # start, and starts are rare.
-            logger.info("Model Chain: llama-server log — %s", log_path)
-            process = self._new_process()
-            process.start(configuration.runtime, configuration.model, configuration.mmproj,
-                          configuration.gpu_index, configuration.device, placement.context,
-                          log_path, gpu_layers=layers)
-            from_system_ram = (configuration.device.casefold() == CPU_DEVICE
-                               or layers == NO_OFFLOAD)
-            try:
-                process.wait_ready(CPU_READY_TIMEOUT if from_system_ram else GPU_READY_TIMEOUT)
-            except Exception:
-                process.stop()
-                raise
+            # The card said it had room and the driver disagreed. That is not a
+            # hypothetical: a 24 GB card with 22.8 GB free refuses a single
+            # 17.8 GB allocation, because what a driver can give out in one
+            # piece is not the same number as what it has left -- and Windows
+            # is stricter about it than the arithmetic here can model. Nothing
+            # this module knows can predict it, so it is *learned*, once, by
+            # asking for less and trying again. Two extra attempts, each with
+            # more headroom than the last, and every one of them says so.
+            penalty = 0
+            for attempt in range(START_ATTEMPTS):
+                if penalty:
+                    negotiated = negotiate(configuration, already_ours=ours,
+                                           extra_reserve=penalty)
+                    placement = negotiated.placement
+                    signature = (configuration.runtime, configuration.model,
+                                 configuration.mmproj, configuration.gpu_index,
+                                 configuration.device, placement.context, placement.gpu_layers)
+                try:
+                    process, observed, offload = self._launch(configuration, placement)
+                    break
+                except _StartFailed as failure:
+                    if not failure.out_of_memory or attempt == START_ATTEMPTS - 1:
+                        raise RuntimeError(str(failure)) from None
+                    penalty += RETRY_HEADROOM
+                    logger.warning("Model Chain: %s. Trying again with %.1f GB more headroom",
+                                   failure, penalty / _GB)
 
             self._process, self._signature, self._placement = process, signature, placement
             self._identity = _identity(configuration)
-            observed = max(before - mc_broker.free_vram_bytes(), 0) if before > 0 else 0
-            self._record(configuration, negotiated, observed,
-                         _await_offload(log_path, written_before))
+            self._record(configuration, negotiated, observed, offload)
             return LlamaClient(f"http://127.0.0.1:{process.port}", process.api_key)
+
+    def _launch(self, configuration: Config, placement: mc_llm_context.Placement):
+        """One llama-server, started and waited for. Returns it, its VRAM and its report.
+
+        Raises :class:`_StartFailed` carrying llama.cpp's own reason rather
+        than "llama-server exited before becoming ready", which is true of
+        every failed start and useful for none of them.
+        """
+        from prompt_master.inference.device_detection import CPU_DEVICE, NO_OFFLOAD
+        from prompt_master.inference.service import CPU_READY_TIMEOUT, GPU_READY_TIMEOUT
+
+        before = mc_broker.free_vram_bytes()
+        layers = _layers_argument(placement, mc_gguf.describe(configuration.model))
+        paths = mc_llm_paths.app_paths()
+        paths.logs.mkdir(parents=True, exist_ok=True)
+        log_path = paths.logs / "llama-server.log"
+        # Where this start's log begins. The file is appended to across runs,
+        # and what is read back afterwards has to be this run's.
+        written_before = log_path.stat().st_size if log_path.exists() else 0
+
+        logger.info(
+            "Model Chain: starting llama-server — %s on %s, %s, %s token context, "
+            "%.1f GB free",
+            configuration.quantization or Path(configuration.model).stem,
+            _device_label(configuration),
+            placement.describe(),
+            f"{placement.context:,}",
+            before / _GB,
+        )
+        # Said every time, and said in full. llama-server's own log is where the
+        # answer lives when a placement and a reply speed disagree, and a log
+        # nobody can find is a log nobody reads. It is one line per start, and
+        # starts are rare.
+        logger.info("Model Chain: llama-server log — %s", log_path)
+        self._log = (log_path, written_before)
+
+        process = self._new_process()
+        from_system_ram = (configuration.device.casefold() == CPU_DEVICE
+                           or layers == NO_OFFLOAD)
+        try:
+            process.start(configuration.runtime, configuration.model, configuration.mmproj,
+                          configuration.gpu_index, configuration.device, placement.context,
+                          log_path, gpu_layers=layers)
+            process.wait_ready(CPU_READY_TIMEOUT if from_system_ram else GPU_READY_TIMEOUT)
+        except Exception as exc:
+            process.stop()
+            said = read_failure(_text_since(log_path, written_before))
+            raise _StartFailed(said.text or str(exc), said.out_of_memory) from exc
+
+        observed = max(before - mc_broker.free_vram_bytes(), 0) if before > 0 else 0
+        return process, observed, _await_offload(log_path, written_before)
 
     def _outgrown(self, configuration: Config, ours: int) -> bool:
         """Whether the card could now hold more of the model than this server does.
@@ -950,6 +1126,14 @@ class Runtime:
         rather than a diagnosis.
         """
         offload = self.report.offload
+        granted = offload.granted_context
+        if granted and self.report.placement is not None \
+                and granted != self.report.placement.context:
+            # A build with its own fitter adjusts the context to what it thinks
+            # will fit, and then the number this extension is reasoning about is
+            # not the number the server is running.
+            logger.info("Model Chain: llama.cpp settled on a %s token context, not the %s "
+                        "asked for", f"{granted:,}", f"{self.report.placement.context:,}")
         if not offload.known:
             # Not silence. The line above this one said where the model was
             # sent; with nothing after it there is no way to tell a report that
@@ -1064,6 +1248,25 @@ class Runtime:
             return self.report.observed_bytes or (
                 self.report.estimate.resident_bytes if self.report.estimate else 0)
 
+    def speed_note(self) -> str:
+        """What llama.cpp measured for the most recent request, or "".
+
+        The number every other number in this module is a proxy for. A
+        placement is a plan; this is what the plan produced, measured by the
+        process that produced it -- and on one card, one model and one week,
+        those have differed by a factor of forty while every line this
+        extension wrote said "all layers on the GPU".
+        """
+        with self._lock:
+            if self._log is None or not self._running:
+                return ""
+            path, offset = self._log
+        prompt, reply = read_speed(_text_since(path, offset, tail=_TIMING_TAIL))
+        if reply <= 0:
+            return ""
+        measured = f"llama.cpp measured {reply:.1f} tokens/s"
+        return f"{measured}, prompt at {prompt:.0f} tokens/s" if prompt > 0 else measured
+
     def describe(self) -> str:
         return self._label(config())
 
@@ -1075,6 +1278,7 @@ class Runtime:
         process, self._process = self._process, None
         held = self.report.observed_bytes if self._placement is not None else 0
         self._signature, self._identity, self._placement = None, None, None
+        self._log = None
         mc_broker.retire(RESIDENCY_KEY)
         if process is None:
             return

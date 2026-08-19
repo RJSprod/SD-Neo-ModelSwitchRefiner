@@ -1212,6 +1212,20 @@ than failing it — NVIDIA Control Panel → Manage 3D settings → **CUDA — S
 Fallback Policy**. Both look identical from the outside: the model loads, the
 log says it is resident, and every reply runs at a fraction of the speed.
 
+### When it will not start
+
+A card with room on it can still refuse to give that room out in one piece —
+22.8 GB free and a single 17.8 GB allocation refused is a real reading from a
+real 24 GB card, and Windows is stricter about it than any arithmetic can
+predict. So it is not predicted: the reason llama.cpp gives is read out of its
+log and reported as a sentence ("it asked the driver for 17.8 GB in one piece
+and was refused"), and the start is then tried again with more headroom held
+back, up to twice, each attempt logged. What used to be no reply at all is now
+a slightly smaller placement that works.
+
+Only running out of memory is retried. A corrupt model, a missing projector or
+a port in use fails once, immediately, and says which.
+
 ### What the console says
 
 Every run reports itself to the WebUI console: llama-server starting with the
