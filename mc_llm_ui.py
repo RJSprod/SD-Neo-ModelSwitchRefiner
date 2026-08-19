@@ -124,6 +124,26 @@ def notice(text: str, kind: str = "info") -> str:
             f'{escape(text)}</div>')
 
 
+def state(label: str, kind: str = "info", detail: str = "") -> str:
+    """The runtime's state as one word, with the detail on hover.
+
+    A chip rather than a sentence. This sits in the top bar beside the mode
+    selector and the model chooser, and the sentence it replaced --
+    "Model: Q4_K_M · Device: NVIDIA GeForce RTX 3090 (24575 MiB, 23304 MiB
+    free) · Server: stopped" -- had to be read to learn one thing anybody
+    glances at it for, which is whether the model is up. Worse, it was long
+    enough to wrap the whole bar into ten lines and push the conversation off
+    the bottom of the window.
+
+    The detail is not thrown away, it is moved: ``title`` puts it a hover away,
+    Setup's residency view has all of it, and the console has every state
+    change with a timestamp.
+    """
+    tooltip = f' title="{escape(detail)}"' if detail else ""
+    return (f'<div class="{PREFIX}-state {PREFIX}-state-{kind}"{tooltip}>'
+            f'<span class="{PREFIX}-state-dot"></span>{escape(label)}</div>')
+
+
 def failure(exc: BaseException) -> str:
     """An exception as something a user can act on.
 

@@ -1117,8 +1117,12 @@ The tab opens on the mode you left it on.
 
 ### Switching models
 
-The top of the tab carries the only three controls a model switch needs day to
-day: a **chooser**, **Load** and **Unload**.
+The top of the tab is one line: the mode selector, a model **chooser**, a
+rescan, **Load**, **Unload**, and a state chip reading *Loaded*, *Unloaded*,
+*Loading…* or *Not set up*. Hovering the chip gives the detail — which model, on
+which device, at what context — and Setup\u2019s residency view has all of it in
+full. It is deliberately small: everything the top bar takes is taken from the
+conversation under it.
 
 The chooser lists every `.gguf` under your models folder — the **LLM models
 folder** setting, or `models/` inside the LLM data directory — walked a few

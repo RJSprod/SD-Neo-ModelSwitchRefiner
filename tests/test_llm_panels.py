@@ -587,6 +587,84 @@ class TestTheModelChooser:
         assert mc_llm_studio.ui.PREFIX in residency
 
 
+class TestTheRuntimeStateChip:
+    """One word in the top bar, and the sentence it replaced kept elsewhere.
+
+    The sentence was accurate and unreadable at a glance -- "Model: Q4_K_M ·
+    Device: NVIDIA GeForce RTX 3090 (24575 MiB, 23304 MiB free) · Server:
+    stopped" -- and long enough that the top bar wrapped it into ten lines and
+    pushed the conversation off the bottom of the window.
+    """
+
+    def test_it_is_one_word_and_one_line(self, store):
+        chip = mc_llm_studio._runtime_line()
+
+        assert "\n" not in chip
+        assert f'{mc_llm_studio.ui.PREFIX}-state' in chip
+        # The visible text, with the tooltip and the markup taken out.
+        import re
+
+        visible = re.sub(r"<[^>]+>", "", re.sub(r'title="[^"]*"', "", chip)).strip()
+        assert len(visible.split()) <= 3, visible
+
+    def test_it_says_which_state_the_runtime_is_in(self, store, monkeypatch):
+        import mc_llm_runtime
+
+        def status(configured=True, running=False):
+            return {"configured": configured, "has_runtime": configured, "has_model": configured,
+                    "running": running, "model": "thinker.gguf", "quantization": "Q4_K_M",
+                    "device": "NVIDIA GeForce RTX 3090", "mode": "gpu", "sees": True,
+                    "placement": None, "report": mc_llm_runtime.Report(), "resident_bytes": 0}
+
+        monkeypatch.setattr(mc_llm_runtime.runtime, "status", lambda: status(running=True))
+        assert "Loaded" in mc_llm_studio._runtime_line()
+
+        monkeypatch.setattr(mc_llm_runtime.runtime, "status", lambda: status(running=False))
+        assert "Unloaded" in mc_llm_studio._runtime_line()
+
+        monkeypatch.setattr(mc_llm_runtime.runtime, "status", lambda: status(configured=False))
+        assert "Not set up" in mc_llm_studio._runtime_line()
+
+    def test_the_detail_is_moved_to_the_tooltip_rather_than_dropped(self, store, monkeypatch):
+        import mc_llm_runtime
+
+        monkeypatch.setattr(mc_llm_runtime.runtime, "status", lambda: {
+            "configured": True, "has_runtime": True, "has_model": True, "running": True,
+            "model": "thinker.gguf", "quantization": "Q4_K_M", "device": "RTX 3090",
+            "mode": "gpu", "sees": True, "placement": None,
+            "report": mc_llm_runtime.Report(), "resident_bytes": 0})
+
+        chip = mc_llm_studio._runtime_line()
+
+        assert "Q4_K_M" in chip and "RTX 3090" in chip
+        assert 'title="' in chip
+
+    def test_a_model_files_metadata_cannot_escape_the_tooltip(self):
+        """general.name is free text out of somebody else's file, and it lands
+        in an HTML attribute now as well as in a body."""
+        chip = mc_llm_studio.ui.state("Loaded", "info", '"><script>alert(1)</script>')
+
+        assert "<script>" not in chip
+
+    def test_load_says_loading_before_it_says_anything_else(self, store):
+        """Twenty gigabytes off a disk is long enough that a button which looks
+        like it did nothing gets pressed again."""
+        steps = list(mc_llm_studio._load_model(progress=lambda *a, **k: None))
+
+        assert mc_llm_studio.LOADING in steps[0][0]
+        assert len(steps) >= 2
+
+    def test_unload_with_nothing_running_reports_the_state_it_is_in(self, store):
+        status, residency = mc_llm_studio._unload_model()
+
+        assert "Unloaded" in status or "Not set up" in status
+        assert mc_llm_studio.ui.PREFIX in residency
+
+    def test_the_residency_view_still_carries_the_whole_sentence(self, store):
+        """Nothing was dropped; it was moved. Setup is where it moved to."""
+        assert "LLM runtime:" in mc_llm_studio._residency_html()
+
+
 class TestSettingsOwnThePlainValues:
     """The five preferences the WebUI's Settings page is now the front end for.
 

@@ -210,14 +210,20 @@ def build() -> dict:
                     label=None, lines=3, max_lines=6, show_label=False, scale=6,
                     placeholder="Write a message. Shift+Enter for a new line.",
                     elem_id=ui.ident("chat", "message"))
-                with gr.Column(scale=1, min_width=120,
+                # Two rows beside a three-line box, not three: a taller stack
+                # than the thing it sits next to is a stack that decides how
+                # tall the composer is, and the composer's height is the
+                # transcript's to keep.
+                with gr.Column(scale=0, min_width=150,
                                elem_classes=ui.classes("composer-side")):
                     send = gr.Button("Send", variant="primary",
                                      elem_id=ui.ident("chat", "send"))
-                    stop = gr.Button("Stop", variant="stop", interactive=False,
-                                     elem_id=ui.ident("chat", "stop"))
-                    attach = gr.Button("Attach…", size="sm",
-                                       elem_id=ui.ident("chat", "attach"))
+                    with gr.Row(elem_classes=ui.classes("composer-side-row")):
+                        stop = gr.Button("Stop", variant="stop", interactive=False,
+                                         size="sm", min_width=0,
+                                         elem_id=ui.ident("chat", "stop"))
+                        attach = gr.Button("Attach…", size="sm", min_width=0,
+                                           elem_id=ui.ident("chat", "attach"))
 
     # -- wiring ----------------------------------------------------------- #
     #

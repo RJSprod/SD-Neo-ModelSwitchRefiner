@@ -700,3 +700,50 @@ and servers rather than about what was said.
 `tests/test_llm_studio.py::TestWhatTheConsoleIsTold` asserts the second
 paragraph, because the difference between a status line and a transcript of a
 private conversation is one careless format string.
+
+### 8.9 The top bar was four hundred pixels of chrome
+
+Reported from a real install, and worth recording because none of it was a
+layout bug — every element did exactly what it was told.
+
+The status line said:
+
+> Model: Q4_K_M · Device: NVIDIA GeForce RTX 3090 (24575 MiB, 23304 MiB free) ·
+> Server: stopped
+
+It was in a `gr.HTML` with no `scale`, in a `gr.Row` whose other child was a
+`gr.Column(scale=4)`. A Column takes the width a Row's scale gives it and then
+makes its contents fit *that*, however tall that turns out to be — so the
+status was given the narrow remainder, wrapped to ten lines, and set the height
+of the whole bar. The four mode radios wrapped to two rows underneath. Between
+them the tab's chrome was taller than its conversation.
+
+Three changes, in order of how much they were worth:
+
+**The status is a chip, not a sentence.** One word — *Loaded*, *Unloaded*,
+*Loading…*, *Not set up* — with a dot, `white-space: nowrap`, and a `max-width`
+so it can never wrap the row it lives in whatever it is asked to say. The
+sentence is not thrown away: it is the chip's `title`, it is the first line of
+Setup's residency view, and every state change is already in the console with a
+timestamp. `ui.state()` is the helper, and it escapes into an HTML *attribute*
+now as well as into a body — a GGUF's `general.name` is still somebody else's
+free text.
+
+`_load_model` became a generator so the chip can say *Loading…* before the
+load and *Loaded* after it. That is a state a status can only report by being
+told, because at the moment it matters nothing has changed yet.
+
+**The bar is flat.** One `gr.Row` with six controls and no nested Column, every
+one of them `scale=0, min_width=0` except the model chooser, which is the only
+control whose text is not known in advance and so is the only one allowed to
+take the slack.
+
+**It is sized as chrome.** `font-size: 0.9em`, tight button padding, and the
+mode radios' labels given `white-space: nowrap` and small padding so four fit on
+one line. 38px, measured, against roughly 400 before.
+
+The composer's side buttons were the same class of mistake one level down:
+Send, Stop and Attach stacked vertically were taller than the three-line message
+box beside them, so *they* decided how tall the composer was. Stop and Attach
+share a row now, and the stack stretches to the box's height rather than
+setting it.
