@@ -1182,6 +1182,15 @@ knows how long a reply will be — and under `prefers-reduced-motion` it stops
 moving and stays lit. In the top bar, the state chip pulses while the model is
 loading.
 
+### Where the log is
+
+`<LLM data directory>/logs/llama-server.log` — beside the runtime and the
+models. The LLM data directory is the **LLM data directory** setting, or
+`model_chain_llm` inside your WebUI data directory when that is empty; not the
+extension folder, which an update overwrites. The full path is printed to the
+console on every llama-server start and shown in Setup's residency panel, so
+finding it should never involve guessing.
+
 ### Is it really on the GPU?
 
 The placement line says where the model was *sent*. The line after it says what
