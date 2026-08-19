@@ -24,6 +24,7 @@ import mc_broker
 import mc_infotext
 import mc_llm_paths
 import mc_llm_runtime
+import mc_llm_state
 import mc_llm_studio
 import mc_lora
 import mc_memory
@@ -118,6 +119,23 @@ lets the colour setting recolour all of them rather than only the plain one.
 """
 
 STYLE_THEME_DEFAULT = "Flat"
+
+
+def _kv_types() -> list[tuple[str, str]]:
+    """The key/value cache types llama.cpp offers, as ``(name, label)``.
+
+    Read from ``mc_llm_context`` rather than listed here, and wrapped because
+    this runs at import: a settings section that cannot be registered would
+    take the whole extension down with it, and f16 alone is a correct -- if
+    short -- list for a host where the LLM half will not import.
+    """
+    try:
+        import mc_llm_context
+
+        return [(name, label) for name, label in mc_llm_context.KV_TYPE_LABELS]
+    except Exception:
+        return [("f16", "f16")]
+
 
 SETTINGS_SECTION = ("model_chain", "Model Chain")
 """Identifier and title of the Settings page section.
@@ -337,6 +355,75 @@ shared.options_templates.update(
                 "where LLM Studio keeps the runtime, the model, characters and chats. Empty "
                 "uses a folder in your WebUI data directory. Point it at an existing Prompt "
                 "Master install to reuse a model you have already downloaded"
+            ),
+            mc_llm_paths.OPT_MODELS: shared.OptionInfo(
+                "",
+                "LLM models folder",
+                gr.Textbox,
+            ).info(
+                "scanned for .gguf files to fill the model chooser at the top of the LLM "
+                "Studio tab, so a model can be switched to without typing a path. Empty scans "
+                "the models folder inside the LLM data directory above. A model does not have "
+                "to be in here to be used — it is read, not started — this is only what the "
+                "chooser offers"
+            ),
+            # -- what the LLM is placed at ---------------------------------
+            #
+            # These five were controls in the tab's own "Models, hardware and
+            # memory" panel and are here now for the same reason the VRAM
+            # settings above are: every one of them describes the installation
+            # rather than the click being made, the host already persists and
+            # restores exactly this kind of value, and a context budget says
+            # nothing useful in an infotext. The tab keeps what a Settings page
+            # cannot draw -- the file dialogs, the download, the estimate and
+            # the residency table -- in its Setup mode.
+            mc_llm_state.OPT_CONTEXT_MODE: shared.OptionInfo(
+                mc_llm_state.label_for_context_mode("auto"),
+                "LLM context sizing",
+                gr.Radio,
+                {"choices": [label for _, label in mc_llm_state.CONTEXT_MODES]},
+            ).info(
+                "Automatic budgets the key/value cache from whatever VRAM is free once the "
+                "weights and the reserve are accounted for, so a context grows to fill an "
+                "empty card and shrinks when a checkpoint arrives. Fixed buffer spends the "
+                "number below and no more"
+            ),
+            mc_llm_state.OPT_CONTEXT_BUFFER: shared.OptionInfo(
+                4.0,
+                "LLM context / VRAM buffer (GB)",
+                gr.Number,
+            ).info(
+                "memory budgeted for the key/value cache, separate from the weights and from "
+                "the runtime reserve. Used when sizing is Fixed buffer"
+            ),
+            mc_llm_state.OPT_CONTEXT_SIZE: shared.OptionInfo(
+                8192,
+                "LLM context size (tokens)",
+                gr.Number,
+            ).info(
+                "used when sizing is Fixed buffer, and never allowed past the model's own "
+                "ceiling. A number rather than a slider because modern ceilings run to a "
+                "million tokens and no slider across that range can be aimed at 32,768"
+            ),
+            mc_llm_state.OPT_KV_TYPE_K: shared.OptionInfo(
+                "f16",
+                "LLM K cache type",
+                gr.Dropdown,
+                {"choices": [name for name, _ in _kv_types()]},
+            ).info(
+                "quantising the key cache buys context at some cost in reply quality. "
+                "llama.cpp sizes the two halves separately, which is why there are two "
+                "settings; f16 for both is what the estimator's numbers assume"
+            ),
+            mc_llm_state.OPT_KV_TYPE_V: shared.OptionInfo(
+                "f16",
+                "LLM V cache type",
+                gr.Dropdown,
+                {"choices": [name for name, _ in _kv_types()]},
+            ).info(
+                "the value half of the cache. Some llama.cpp builds refuse a quantised V "
+                "cache without flash attention; if llama-server will not start after "
+                "changing this, put it back to f16"
             ),
         },
     )

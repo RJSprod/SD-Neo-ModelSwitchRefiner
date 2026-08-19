@@ -1,16 +1,35 @@
-"""LLM Studio: one native Forge tab, three distinct workspaces (section 4.1).
+"""LLM Studio: one native Forge tab, four distinct workspaces (section 4.1).
 
-This module is the shell. It builds the tab, switches between the three modes,
-and owns the two things all of them share -- the residency status that makes
-memory decisions visible (section 14), and the Models, hardware and memory
-panel where the model, the placement and the context budget are chosen
-(sections 6, 11 and 12).
+This module is the shell. It builds the tab, switches between the modes, and
+owns the two things all of them share -- the residency status that makes memory
+decisions visible (section 14), and a top bar carrying the one control every
+mode needs, which is *which model is running*.
 
-What it deliberately does not do is host the modes' logic. Prompt Studio,
-Conversation and MiniMax are built by three separate modules and share no state
-beyond the preferences file, which is section 4.1's requirement that the modes
-"may reuse shared panels" but "must not be collapsed into a single generic chat
-workflow" enforced at the level of the source tree.
+Where setup went, and why
+-------------------------
+The model, the placement and the context budget used to be a "Models, hardware
+and memory" accordion sitting under whichever workspace was open. Two things
+were wrong with that. Everything in it that is a plain value -- the context
+sizing, the cache types, the residency policy, the folders -- describes the
+installation rather than anything a mode is doing, which is precisely the test
+this extension already applies to decide that a control belongs on the WebUI's
+Settings page; and everything in it that is *not* a plain value -- the file
+dialogs, the runtime download, the estimator, the residency table -- is a panel
+in its own right and had no business being a footnote to a chat window.
+
+So the plain values are registered as Forge settings (see
+``scripts/model_chain.py``, ``mc_llm_state.HOSTED`` and
+``mc_llm_paths.OPT_MODELS``) and the panel is a mode of its own, **Setup**,
+reached from the same selector as the other three. What is left in the top bar
+is a model chooser filled from the models folder, and Load and Unload -- start
+the thing with what was chosen last, or give the VRAM back -- because that is
+the whole of what switching models day to day actually needs.
+
+What this module deliberately does not do is host the modes' logic. Prompt
+Studio, Conversation and MiniMax are built by three separate modules and share
+no state beyond the preferences file, which is section 4.1's requirement that
+the modes "may reuse shared panels" but "must not be collapsed into a single
+generic chat workflow" enforced at the level of the source tree.
 
 Failure is a first-class state here. Section 18 requires that a failure to
 start or load the LLM must not poison image generation, and the way that is
@@ -23,6 +42,7 @@ the WebUI never knows.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import gradio as gr
 
@@ -45,7 +65,14 @@ MODES = (
     ("Prompt Studio", "prompt"),
     ("Conversation", "chat"),
     ("MiniMax H3", "minimax"),
+    ("Setup", "setup"),
 )
+"""The workspaces, as Gradio choices -- ``(label, value)``.
+
+Setup is one of them rather than an accordion under the others: it is where a
+model, a runtime and a placement are chosen, and none of that is a footnote to
+whichever mode happened to be open when it was needed.
+"""
 
 
 def enabled() -> bool:
@@ -90,55 +117,96 @@ def _build():
     import mc_llm_minimax_panel
     import mc_llm_prompt_panel
 
+    initial = _initial_mode()
+
     with gr.Blocks(analytics_enabled=False) as block:
         with gr.Column(elem_id=ui.ident("studio"), elem_classes=ui.classes("studio")):
 
             with gr.Row(elem_classes=ui.classes("topbar")):
-                with gr.Column(scale=2, min_width=280):
-                    mode = gr.Radio(
-                        label=None, show_label=False, choices=list(MODES), value=_initial_mode(),
-                        elem_id=ui.ident("mode"), elem_classes=ui.classes("modes"))
-                with gr.Column(scale=3):
-                    runtime_status = gr.HTML(_runtime_line(),
-                                             elem_id=ui.ident("runtime", "status"))
+                mode = gr.Radio(
+                    label=None, show_label=False, choices=list(MODES), value=initial,
+                    scale=3, min_width=320,
+                    elem_id=ui.ident("mode"), elem_classes=ui.classes("modes"))
+                with gr.Column(scale=4, min_width=280,
+                               elem_classes=ui.classes("model-bar")):
+                    with gr.Row():
+                        chooser = gr.Dropdown(
+                            label=None, show_label=False, choices=_model_choices(),
+                            value=_current_model(), scale=5, min_width=180,
+                            elem_id=ui.ident("model"),
+                            elem_classes=ui.classes("model-choice"))
+                        rescan = gr.Button("\u21bb", size="sm", min_width=44,
+                                           elem_id=ui.ident("model", "rescan"))
+                        load = gr.Button("Load", variant="primary", size="sm", min_width=80,
+                                         elem_id=ui.ident("load"))
+                        unload = gr.Button("Unload", variant="stop", size="sm", min_width=80,
+                                           elem_id=ui.ident("unload"))
+                runtime_status = gr.HTML(_runtime_line(), elem_id=ui.ident("runtime", "status"))
 
-            with gr.Column(visible=True, elem_classes=ui.classes("mode-view")) as prompt_view:
-                mc_llm_prompt_panel.build()
-            with gr.Column(visible=False, elem_classes=ui.classes("mode-view")) as chat_view:
-                mc_llm_chat_panel.build()
-            with gr.Column(visible=False, elem_classes=ui.classes("mode-view")) as minimax_view:
-                mc_llm_minimax_panel.build()
+            # Keyed by mode rather than zipped against MODES: a mode added to
+            # the selector without a panel behind it should fail here, where
+            # on_ui_tabs turns it into the "could not start" tab, rather than
+            # silently render an empty column.
+            builders = {"prompt": mc_llm_prompt_panel.build,
+                        "chat": mc_llm_chat_panel.build,
+                        "minimax": mc_llm_minimax_panel.build,
+                        "setup": _setup_panel}
+            views, settings = [], None
+            for _, value in MODES:
+                # visible= comes from the stored mode rather than being
+                # hard-coded. It used to be hard-coded to Prompt Studio while
+                # the selector was restored from preferences, so a tab left on
+                # Conversation opened with the selector reading Conversation
+                # and Prompt Studio's panel underneath it -- two controls
+                # telling the truth about different things, which reads as the
+                # mode selector not working.
+                with gr.Column(visible=(value == initial),
+                               elem_id=ui.ident("view", value),
+                               elem_classes=ui.classes("mode-view")) as view:
+                    built = builders[value]()
+                    if value == "setup":
+                        settings = built
+                views.append(view)
 
-            with gr.Accordion("Models, hardware and memory", open=False,
-                              elem_id=ui.ident("settings")):
-                settings = _settings_panel()
-
-        views = [prompt_view, chat_view, minimax_view]
         mode.change(fn=_switch, inputs=[mode], outputs=views + [runtime_status], queue=False)
-        # The radios below are built once, when the WebUI starts, and read
-        # settings that the Settings page can change afterwards. Refreshing
-        # them on load is what stops the panel showing Hybrid while the
-        # residency view underneath it says Exclusive.
+
+        rescan.click(fn=_rescan_models, outputs=[chooser, runtime_status], queue=False)
+        # ``input`` and not ``change``: this code refills the chooser on load
+        # and on every rescan, and ``change`` fires on the refill -- which
+        # would re-record the model, and stop the running server, every time
+        # the tab was opened.
+        _picked(chooser)(fn=_choose_model, inputs=[chooser],
+                         outputs=[runtime_status, settings["model"], settings["estimator"],
+                                  settings["notice"]], queue=False)
+        load.click(fn=_load_model,
+                   outputs=[runtime_status, settings["residency"], settings["estimator"]])
+        unload.click(fn=_unload_model,
+                     outputs=[runtime_status, settings["residency"]], queue=False)
+
+        # The status line and the residency view are built once, when the WebUI
+        # starts, and read settings the Settings page can change afterwards.
+        # Refreshing them on load is what stops the tab describing a placement
+        # decided under a policy that has since been changed.
         block.load(fn=_on_load,
-                   outputs=[runtime_status, settings["residency"], settings["memory_mode"],
-                            settings["policy"], settings["release"]], queue=False)
+                   outputs=[runtime_status, settings["residency"], chooser], queue=False)
 
     return block
 
 
+def _picked(component):
+    """The event that fires when a *user* picks, not when this code refills.
+
+    The same helper ``mc_llm_browse`` needs and for the same reason, restated
+    rather than imported: this module builds the tab and must not import the
+    picker to do it.
+    """
+    return getattr(component, "input", None) or component.change
+
+
 def _on_load():
     """What the tab shows the moment it is opened, rather than at build time."""
-    import mc_llm_runtime
-
     return (_runtime_line(), _residency_html(),
-            gr.update(value=mc_broker.label_for(mc_broker.MODES, mc_broker.mode())),
-            gr.update(value=mc_broker.label_for(mc_broker.POLICIES, mc_broker.policy())),
-            gr.update(value=mc_broker.label_for(
-                mc_llm_runtime.RELEASE_MODES,
-                mc_broker.resolve(mc_broker.option(mc_llm_runtime.OPT_RELEASE,
-                                                   mc_llm_runtime.RELEASE_STOP),
-                                  mc_llm_runtime.RELEASE_MODES,
-                                  mc_llm_runtime.RELEASE_STOP))))
+            gr.update(choices=_model_choices(), value=_current_model()))
 
 
 def _initial_mode() -> str:
@@ -149,7 +217,7 @@ def _initial_mode() -> str:
 
 
 def _switch(chosen):
-    """Show one workspace. The other two are hidden, not rebuilt.
+    """Show one workspace. The others are hidden, not rebuilt.
 
     Rebuilding would lose whatever was on screen -- a half-read reply, a prompt
     someone is editing -- every time the selector moved, which is the one thing
@@ -159,6 +227,161 @@ def _switch(chosen):
 
     mc_llm_state.remember(mode=chosen)
     return [gr.update(visible=(chosen == value)) for _, value in MODES] + [_runtime_line()]
+
+
+# --------------------------------------------------------------------------- #
+# The model chooser, Load and Unload
+# --------------------------------------------------------------------------- #
+
+
+def _library():
+    """Every model under the models folder. Never raises into a panel."""
+    try:
+        return mc_llm_files.library(mc_llm_paths.models_root())
+    except Exception:
+        logger.debug("Model Chain: could not scan the models folder", exc_info=True)
+        return mc_llm_files.Library(mc_llm_paths.data_root())
+
+
+def _model_choices() -> list[tuple[str, str]]:
+    """The chooser's choices: what is in the models folder, plus what is running.
+
+    The second half matters more than it looks. A model may be recorded from
+    anywhere on the machine -- that is the whole point of section 6b's path
+    boxes -- so a chooser filled only from the scan would show *nothing
+    selected* on an installation that is working perfectly, which reads as the
+    model having been lost.
+    """
+    found = _library()
+    root = found.folder
+    choices: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(path, label=None):
+        key = str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        choices.append((label or _model_label(path, root), key))
+
+    for path in found.models:
+        add(path)
+
+    current = _current_model()
+    if current and str(current) not in seen:
+        add(current, f"{Path(current).name} · {Path(current).parent}")
+    return choices
+
+
+def _model_label(path, root) -> str:
+    """A model's name in the chooser: enough of its path to tell two apart."""
+    try:
+        relative = Path(path).relative_to(root)
+    except (ValueError, TypeError):
+        return Path(path).name
+    return relative.as_posix()
+
+
+def _current_model() -> str | None:
+    import mc_llm_runtime
+
+    try:
+        model = mc_llm_runtime.config().model
+    except Exception:
+        logger.debug("Model Chain: could not read the configured model", exc_info=True)
+        return None
+    return str(model) if model else None
+
+
+def _rescan_models():
+    """Walk the models folder again, and say what came back."""
+    found = _library()
+    if not found.models:
+        return (gr.update(choices=_model_choices(), value=_current_model()),
+                ui.notice(f"No .gguf files under {found.folder}. Set the Model Chain LLM "
+                          f"models folder setting, or choose a model by path in Setup.",
+                          "warn"))
+    counted = f"{len(found.models)} model{'s' if len(found.models) != 1 else ''}"
+    limited = (f" — the scan stopped at {mc_llm_files.MAX_LIBRARY_ENTRIES}"
+               if found.truncated else "")
+    return (gr.update(choices=_model_choices(), value=_current_model()),
+            ui.notice(f"{counted} under {found.folder}{limited}."))
+
+
+def _choose_model(path):
+    """Record the chosen model. Loading it is a separate press.
+
+    Separate because they cost differently: recording is a line in a file and
+    switching back is free, while loading spends the time to read twenty
+    gigabytes off a disk. A dropdown that started a load on every change would
+    make scrolling through the list an expensive mistake.
+
+    The projector is deliberately *not* carried over or inferred. A projector
+    has to match the model it was made for and a file name does not prove that
+    it does -- so one sitting beside the new model is mentioned and left for
+    Setup to apply, which is the rule the rest of this extension already keeps.
+    """
+    import mc_llm_runtime
+    from prompt_master.inference import model_choice
+
+    if not path:
+        return _runtime_line(), gr.update(), gr.update(), gr.update()
+
+    configuration = mc_llm_runtime.config()
+    if configuration.model is not None and str(configuration.model) == str(path):
+        return _runtime_line(), gr.update(), gr.update(), gr.update()
+    if configuration.runtime is None:
+        return (ui.notice("There is no llama.cpp runtime yet, so there is nothing to run a "
+                          "model with. Set one up in Setup first.", "warn"),
+                gr.update(), gr.update(), gr.update())
+
+    try:
+        chosen = mc_llm_files.resolve_model(path)
+        model_choice.choose(mc_llm_paths.app_paths(), chosen.path, None)
+    except mc_llm_files.PathError as exc:
+        return ui.notice(str(exc), "warn"), gr.update(), gr.update(), gr.update()
+    except Exception as exc:
+        return ui.notice(ui.failure(exc), "error"), gr.update(), gr.update(), gr.update()
+
+    # The running server holds the weights it was started with.
+    mc_llm_runtime.runtime.stop()
+    notes = list(chosen.notes) + _projector_hint(chosen.path)
+    updated = mc_llm_runtime.config()
+    return (_runtime_line(), str(chosen.path), _estimator_html(),
+            _model_line(updated, notes))
+
+
+def _load_model(progress=gr.Progress()):
+    """Start llama-server on what is recorded, and report where it landed.
+
+    The one press that makes the tab usable again after an Unload, and the one
+    that answers "is it ready?" without sending a message to find out. It asks
+    the runtime for a client and throws the client away: starting the server is
+    the whole of the work, and every placement decision, every reduction and
+    every note comes back on the report either way.
+    """
+    import mc_llm_runtime
+
+    try:
+        progress(0, desc="Starting llama-server…")
+        mc_llm_runtime.runtime.client()
+    except Exception as exc:
+        logger.warning("Model Chain: llama-server could not be started", exc_info=True)
+        return (ui.notice(ui.failure(exc), "error"), _residency_html(), _estimator_html())
+    return _runtime_line(), _residency_html(), _estimator_html()
+
+
+def _unload_model():
+    """Stop llama-server, releasing every byte of VRAM it held."""
+    import mc_llm_runtime
+
+    try:
+        mc_llm_runtime.runtime.stop()
+    except Exception:
+        logger.warning("Model Chain: llama-server could not be stopped", exc_info=True)
+        return (ui.notice("llama-server could not be stopped — see the console.", "error"),
+                _residency_html())
+    return _runtime_line(), _residency_html()
 
 
 # --------------------------------------------------------------------------- #
@@ -185,7 +408,7 @@ def _runtime_text() -> str:
         # says which rather than making the reader open the panel to find out.
         missing = ("a llama.cpp runtime and a model" if not state["has_runtime"]
                    else "a model")
-        return ui.notice(f"LLM Studio needs {missing} — open Models, hardware and memory.",
+        return ui.notice(f"LLM Studio needs {missing} — open Setup.",
                          "warn")
 
     parts = [f"Model: {state['quantization'] or state['model'] or 'unknown'}"]
@@ -257,22 +480,28 @@ def _residency_table() -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Models, hardware and memory
+# Setup mode
 # --------------------------------------------------------------------------- #
 
 
-def _settings_panel() -> dict:
-    """Everything about what runs and where, in one collapsible place."""
+def _setup_panel() -> dict:
+    """Setup mode: the runtime, the model, what fits, and what is resident.
+
+    Only the things that are not plain values. Context sizing, the cache types,
+    the residency mode, the policy and the release behaviour were all controls
+    here once and are now Forge settings, because every one of them describes
+    the installation rather than the click being made -- the same test that put
+    the VRAM reserve and the progress theme on the Settings page. What is left
+    is the four things a Settings page cannot draw: a file dialog, a download,
+    an estimate and a table.
+    """
     import mc_llm_browse
-    import mc_llm_context
     import mc_llm_runtime
     import mc_llm_setup
-    import mc_llm_state
 
     configuration = mc_llm_runtime.config()
-    prefs = mc_llm_state.preferences()
 
-    with gr.Row():
+    with gr.Row(elem_classes=ui.classes("workspace")):
         with gr.Column(scale=2, min_width=320):
             # The runtime comes first because it is first: a model cannot be
             # chosen until there is something to run it with, and the panel
@@ -304,7 +533,9 @@ def _settings_panel() -> dict:
             gr.Markdown(
                 "A model can live anywhere on the machine — it is read, not started, so it "
                 "does not have to be copied in. Press Browse for a file dialog, or paste a "
-                "path; a folder is as good as a file when it holds one model.",
+                "path; a folder is as good as a file when it holds one model. Anything under "
+                f"the models folder ({_models_folder()}) is also offered in the chooser at the "
+                "top of the tab, so it can be switched to without coming back here.",
                 elem_classes=ui.classes("hint"))
             model_path = gr.Textbox(
                 label="GGUF model", value=str(configuration.model or ""),
@@ -323,69 +554,17 @@ def _settings_panel() -> dict:
                 suggest = gr.Button("Find the projector beside it", size="sm")
             model_notice = gr.HTML(_model_line(configuration))
 
-            gr.Markdown("#### Context and VRAM buffer")
-            context_mode = gr.Radio(
-                label="Context sizing", value=prefs.get("context_mode", "auto"),
-                choices=[("Automatic — fill what is free", "auto"),
-                         ("Fixed buffer", "fixed")],
-                elem_id=ui.ident("settings", "context-mode"))
-            buffer_gb = gr.Slider(
-                label="Context / VRAM buffer (GB)", minimum=0.5, maximum=48, step=0.5,
-                value=float(prefs.get("context_buffer_gb", 4.0)),
-                info="Memory budgeted for the key/value cache. Separate from the weights and "
-                     "from the runtime reserve.")
-            # A number rather than a slider: modern ceilings run to a million
-            # tokens, and a slider across that range cannot be aimed at 32,768.
-            context_size = gr.Number(
-                label="Context size (tokens)", value=int(prefs.get("context_size", 8192)),
-                precision=0, minimum=mc_llm_runtime.MINIMUM_CONTEXT,
-                info="Used when sizing is Fixed. Never exceeds the model's own ceiling.")
-            with gr.Row():
-                kv_k = gr.Dropdown(label="K cache type",
-                                   choices=[(label, name) for name, label
-                                            in mc_llm_context.KV_TYPE_LABELS],
-                                   value=prefs.get("kv_type_k", "f16"))
-                kv_v = gr.Dropdown(label="V cache type",
-                                   choices=[(label, name) for name, label
-                                            in mc_llm_context.KV_TYPE_LABELS],
-                                   value=prefs.get("kv_type_v", "f16"))
-            save_context = gr.Button("Save context settings", variant="primary", size="sm")
-
         with gr.Column(scale=3, min_width=360):
             gr.Markdown("#### What fits")
             estimator = gr.HTML(_estimator_html(), elem_id=ui.ident("settings", "estimator"))
             estimate_now = gr.Button("Re-estimate", size="sm")
 
-            gr.Markdown("#### Memory policy")
-            # Labels rather than values, and the same labels the Settings page
-            # offers: these controls write straight into shared.opts, so what
-            # they store has to be a string that page can also display.
-            memory_mode = gr.Radio(
-                label="Residency mode",
-                choices=[label for _, label in mc_broker.MODES],
-                value=mc_broker.label_for(mc_broker.MODES, mc_broker.mode()),
-                elem_id=ui.ident("settings", "memory-mode"))
-            hybrid_policy = gr.Radio(
-                label="When it does not all fit",
-                choices=[label for _, label in mc_broker.POLICIES],
-                value=mc_broker.label_for(mc_broker.POLICIES, mc_broker.policy()),
-                elem_id=ui.ident("settings", "policy"))
-            release_mode = gr.Radio(
-                label="When the image side needs the VRAM back",
-                choices=[label for _, label in mc_llm_runtime.RELEASE_MODES],
-                value=mc_broker.label_for(
-                    mc_llm_runtime.RELEASE_MODES,
-                    mc_broker.resolve(mc_broker.option(mc_llm_runtime.OPT_RELEASE,
-                                                       mc_llm_runtime.RELEASE_STOP),
-                                      mc_llm_runtime.RELEASE_MODES,
-                                      mc_llm_runtime.RELEASE_STOP)),
-                elem_id=ui.ident("settings", "release"))
-
             gr.Markdown("#### Residency")
             residency = gr.HTML(_residency_html(), elem_id=ui.ident("settings", "residency"))
-            with gr.Row():
-                refresh_residency = gr.Button("Refresh", size="sm")
-                stop_server = gr.Button("Stop llama-server", size="sm", variant="stop")
+            refresh_residency = gr.Button("Refresh", size="sm")
+
+            gr.Markdown("#### Everything else")
+            gr.Markdown(_settings_pointer(), elem_classes=ui.classes("hint"))
 
     # -- wiring ----------------------------------------------------------- #
 
@@ -402,21 +581,36 @@ def _settings_panel() -> dict:
     suggest.click(fn=_suggest_projector, inputs=[model_path],
                   outputs=[mmproj_path, model_notice], queue=False)
 
-    save_context.click(fn=_save_context,
-                       inputs=[context_mode, buffer_gb, context_size, kv_k, kv_v],
-                       outputs=[estimator], queue=False)
     estimate_now.click(fn=lambda: _estimator_html(), outputs=[estimator], queue=False)
-
-    for control, name in ((memory_mode, mc_broker.OPT_MODE),
-                          (hybrid_policy, mc_broker.OPT_POLICY),
-                          (release_mode, mc_llm_runtime.OPT_RELEASE)):
-        control.change(fn=_setter(name), inputs=[control], outputs=[residency], queue=False)
-
     refresh_residency.click(fn=_residency_html, outputs=[residency], queue=False)
-    stop_server.click(fn=_stop_server, outputs=[residency], queue=False)
 
-    return {"residency": residency, "estimator": estimator, "memory_mode": memory_mode,
-            "policy": hybrid_policy, "release": release_mode}
+    return {"residency": residency, "estimator": estimator, "model": model_path,
+            "mmproj": mmproj_path, "notice": model_notice, "runtime": runtime_path}
+
+
+def _models_folder() -> str:
+    try:
+        return str(mc_llm_paths.models_root())
+    except Exception:
+        logger.debug("Model Chain: could not read the models folder", exc_info=True)
+        return "the models folder"
+
+
+def _settings_pointer() -> str:
+    """Where the plain values went, named so nobody has to go looking.
+
+    Written out rather than left implicit: a control that used to be on this
+    panel and is not any more is indistinguishable, from the reader's side,
+    from a control that was removed.
+    """
+    return (
+        "Context sizing and buffer, the key/value cache types, the VRAM residency mode, what "
+        "happens when the LLM and an image model do not both fit, what the image side gets "
+        "back, the LLM data directory and the models folder are all on the WebUI's "
+        "**Settings** page, under **Model Chain**. They describe this installation rather "
+        "than this click, so the host stores them with the rest of its configuration and "
+        "they survive a restart."
+    )
 
 
 def _model_line(configuration, notes=()) -> str:
@@ -669,53 +863,6 @@ def _suggest_projector(model):
             f"named mmproj or projector — a text-only model simply has none.", "warn")
     return str(found), ui.notice(f"Suggested {found.name} — check it belongs to this model, "
                                  f"then press Use this model.")
-
-
-def _save_context(context_mode, buffer_gb, context_size, kv_k, kv_v):
-    """Store the context settings. Its output is the estimator, so it says why
-    rather than raising: a cleared number box hands this ``None``, and losing a
-    click to a toast reading "Error" is not a useful answer to an empty field.
-    """
-    import mc_llm_runtime
-    import mc_llm_state
-
-    try:
-        size = max(int(float(context_size)), mc_llm_runtime.MINIMUM_CONTEXT)
-        buffer_bytes = max(float(buffer_gb), 0.0)
-    except (TypeError, ValueError):
-        return ui.notice(
-            f"Context size and buffer have to be numbers — context in tokens (at least "
-            f"{mc_llm_runtime.MINIMUM_CONTEXT:,}), buffer in gigabytes.", "warn")
-
-    mc_llm_state.remember(context_mode=context_mode, context_buffer_gb=buffer_bytes,
-                          context_size=size, kv_type_k=kv_k, kv_type_v=kv_v)
-    return _estimator_html()
-
-
-def _setter(name: str):
-    """A change handler that writes one Forge setting and repaints residency."""
-    def apply(value):
-        try:
-            from modules import shared
-
-            shared.opts.set(name, value)
-            shared.opts.save(shared.config_filename)
-        except Exception:
-            logger.debug("Model Chain: could not persist %s", name, exc_info=True)
-        return _residency_html()
-
-    return apply
-
-
-def _stop_server():
-    import mc_llm_runtime
-
-    try:
-        mc_llm_runtime.runtime.stop()
-    except Exception:
-        logger.warning("Model Chain: llama-server could not be stopped", exc_info=True)
-        return ui.notice("llama-server could not be stopped — see the console.", "error")
-    return _residency_html()
 
 
 # --------------------------------------------------------------------------- #

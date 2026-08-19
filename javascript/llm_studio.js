@@ -4,13 +4,26 @@
 // JavaScript focused on enhancement, not core business logic. Python should
 // remain authoritative for model state, persistence, inference, and memory
 // decisions." Nothing here talks to a model, stores anything, or decides
-// anything. It does three things a browser is better placed to do than a
+// anything. It does four things a browser is better placed to do than a
 // server round trip:
 //
 //   * Ctrl/Cmd+Enter submits the composer that has focus;
 //   * the transcript follows a streaming reply, unless the reader has scrolled
 //     up to read something, in which case it stays where they put it;
-//   * Escape stops a run.
+//   * Escape stops a run;
+//   * the tab is measured against the window, so the layout can fit the space
+//     it actually has rather than a space guessed in a stylesheet.
+//
+// The measuring is the one that needs a word. The tab is meant to fit the
+// window -- the page does not scroll, the transcript does -- and how much room
+// the tab has depends on where it starts on screen, which depends on the
+// browser chrome, the host's header, the width the tabs wrapped to and any
+// theme in play. None of that is knowable from CSS. So the distance from the
+// top of the tab to the bottom of the viewport is measured here and published
+// as one custom property, --mc-llm-available, and style.css does the layout.
+// Every var() reading it carries a fallback that is a pure-CSS estimate of the
+// same number, so the tab is laid out correctly without this file and exactly
+// with it.
 //
 // Everything is found by this extension's own element ids. Section 5 again:
 // no selector below depends on a class Gradio generated, so a theme that
@@ -116,10 +129,51 @@
         observer.observe(holder, {childList: true, subtree: true, characterData: true});
     }
 
+    // -- fit the tab to the window ----------------------------------------- //
+
+    // Left under the tab so a status line or a wrapped row of buttons has
+    // somewhere to grow into before anything is pushed off the bottom.
+    const BOTTOM_MARGIN_PX = 24;
+
+    // Below this there is no layout worth doing, and style.css hands the page
+    // back its scroll bar instead. Matching the max-height media query there.
+    const MIN_AVAILABLE_PX = 320;
+
+    function fit() {
+        const studio = byId("mc-llm-studio");
+        if (!studio) return;
+        const box = studio.getBoundingClientRect();
+        // getBoundingClientRect on a tab that is not the open one returns
+        // zeroes; measuring that would publish a height of nothing to every
+        // tab, so it is skipped and the fallback in the CSS stands until this
+        // tab is looked at.
+        if (box.height === 0 && box.top === 0) return;
+        const available = window.innerHeight - box.top - BOTTOM_MARGIN_PX;
+        if (available < MIN_AVAILABLE_PX) {
+            studio.style.removeProperty("--mc-llm-available");
+            return;
+        }
+        studio.style.setProperty("--mc-llm-available", Math.round(available) + "px");
+    }
+
+    function watchWindow() {
+        if (window.mcLlmFitWired) return;
+        window.mcLlmFitWired = true;
+        window.addEventListener("resize", fit);
+        // A tab switch changes where the panel starts without resizing
+        // anything, and nothing fires for it, so the click that does it is
+        // what is listened to.
+        document.addEventListener("click", function () {
+            window.setTimeout(fit, 0);
+        }, true);
+    }
+
     function wire() {
         try {
             PANELS.forEach(wireComposer);
             wireTranscript();
+            watchWindow();
+            fit();
         } catch (error) {
             // Polish must never be able to break the tab it is polishing.
             console.error("Model Chain: LLM Studio polish failed", error);

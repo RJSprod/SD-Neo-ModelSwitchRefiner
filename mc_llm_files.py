@@ -529,3 +529,78 @@ def _entries(folder: Path) -> list[Path]:
         return []
     found.sort(key=lambda entry: entry.name.casefold())
     return [Path(entry.path) for entry in found]
+
+
+# --------------------------------------------------------------------------- #
+# The model library
+# --------------------------------------------------------------------------- #
+
+MAX_LIBRARY_DEPTH = 3
+"""How far below the models folder a scan will look.
+
+Deep enough for the layout a downloader produces -- ``models/<publisher>/<repo>
+/<file>.gguf`` -- and shallow enough that pointing this at a whole drive costs
+a bounded walk rather than an unbounded one.
+"""
+
+MAX_LIBRARY_ENTRIES = 400
+"""How many models one scan will report.
+
+The scan fills a dropdown, and a dropdown of a thousand entries is not a way to
+choose anything. Reaching the limit is reported to the caller rather than
+silently truncated.
+"""
+
+
+@dataclass(frozen=True)
+class Library:
+    """Every model found under a folder, and whether the walk was complete."""
+
+    folder: Path
+    models: tuple[Path, ...] = ()
+    truncated: bool = False
+
+    def __bool__(self) -> bool:
+        return bool(self.models)
+
+
+def library(folder) -> Library:
+    """The GGUFs under ``folder``, ready to be offered as choices.
+
+    Three things are dropped, all for the same reason -- they are not something
+    anybody would choose to *run*:
+
+    * vision projectors, which are chosen beside a model rather than instead of
+      one (see :func:`looks_like_projector`);
+    * every shard of a split model but the first, because llama.cpp is handed
+      part one and finds the rest itself;
+    * anything below :data:`MAX_LIBRARY_DEPTH`, so a folder pointed at a whole
+      drive costs a bounded walk.
+
+    Never raises. An unreadable folder is a library with nothing in it, which is
+    what the panel draws as "nothing found here" -- a scan is not a reason to
+    take a click down with it.
+    """
+    root = to_path(folder) if not isinstance(folder, Path) else folder
+    if root is None or not root.is_dir():
+        return Library(Path(str(folder or "")), (), False)
+
+    found: list[Path] = []
+    truncated = False
+    queue: list[tuple[Path, int]] = [(root, 0)]
+    while queue and not truncated:
+        current, depth = queue.pop(0)
+        for entry in _entries(current):
+            if entry.is_dir():
+                if depth < MAX_LIBRARY_DEPTH:
+                    queue.append((entry, depth + 1))
+                continue
+            if entry.suffix.casefold() != MODEL_SUFFIX or looks_like_projector(entry):
+                continue
+            found.append(entry)
+            if len(found) >= MAX_LIBRARY_ENTRIES:
+                truncated = True
+                break
+
+    kept = _leading_shards(sorted(found, key=lambda path: str(path).casefold()))
+    return Library(root, tuple(kept), truncated)

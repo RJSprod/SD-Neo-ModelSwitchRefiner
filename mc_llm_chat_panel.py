@@ -2,9 +2,12 @@
 
 Designed around reading. Section 4.3 asks for the conversation area to receive
 most of the visual space and for configuration to be secondary and collapsible,
-so the transcript is the centre column at full height, the thread list is a
-narrow rail beside it, and everything about characters, personas and sampling
-is behind accordions that open when wanted.
+and this panel takes that further than the first version did: there is one
+column, it is the transcript, and everything else -- threads, the character,
+the persona -- lives in a single drawer that is *not in the layout at all*
+until it is asked for. A rail that is always there is not secondary, it is
+narrow; a drawer that is not rendered is what actually gives the transcript the
+window.
 
 The state lives in the vendored ``prompt_master.chat`` package, unchanged:
 characters are files in a folder other tools already understand, chats are
@@ -13,6 +16,30 @@ written by ``CharacterStore`` and ``ChatStore`` rather than by anything here.
 That is section 16's separation kept by construction -- Conversation's history
 cannot leak into Prompt Studio's, because they are not in the same files and
 never pass through the same code.
+
+Per-message actions, and why they are a bar rather than a menu
+--------------------------------------------------------------
+The standalone application hangs a ``⋯`` on every bubble. Gradio 4.40's
+``Chatbot`` has nowhere to put one -- it renders the value it is given and
+nothing else -- and that was originally recorded as "no per-message
+affordances", with branching reduced to "copy the whole thread and delete back".
+That is the wrong trade: the actions are the feature, and the component only
+decides where they are drawn.
+
+So the component's own ``select`` event is what nominates a message -- click a
+bubble and it says which -- and the actions are drawn once, in a bar under the
+transcript, applying to whichever message is nominated. Everything the
+standalone menu offers is there: edit, regenerate, continue, send again from
+here, branch from here, delete, delete from here, and the version pager a
+regenerate leaves behind. One bar rather than sixty menus is also what keeps
+this cheap: the transcript is re-rendered from the conversation on every
+change, which is the standalone application's own rule and the only way a dozen
+in-place mutations cannot drift from what is on disk.
+
+``Chatbot`` pairs turns, so the row and column the click reports is not the
+index of a message. The map between them is built with the transcript, in one
+pass, and carried in a ``gr.State`` -- deriving it a second time somewhere else
+is how the two would come to disagree.
 
 Multimodal attachment follows the same rule the standalone application used:
 an image is offered only when the running model has a projector, and a request
@@ -35,6 +62,9 @@ import mc_llm_ui as ui
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
 
+NO_SELECTION = -1
+"""What ``selected`` holds when the action bar applies to nothing."""
+
 
 def build() -> dict:
     """Assemble the panel. Returns the handles the shell needs."""
@@ -50,86 +80,89 @@ def build() -> dict:
     initial_threads = _thread_choices(who)
     initial_thread = prefs.get("thread") or (initial_threads[0][1] if initial_threads else "")
     initial_persona = _persona()
+    initial_rows, initial_map = _view(_load(who, initial_thread))
+
     cancellation = gr.State(None)
     thread_state = gr.State(initial_thread)
+    # Which message the action bar applies to, and how to get from the
+    # component's (row, column) to that index. Both are State rather than
+    # recomputed, because a transcript that has been edited since the click is
+    # a different transcript and the click has to be read against the one it
+    # was made on.
+    selected = gr.State(NO_SELECTION)
+    positions = gr.State(initial_map)
+    # Whether the drawer and the image box are open. Held here rather than read
+    # back off the components because a Column and an Image have no value for a
+    # handler to be given -- only a State can be an input to the click that
+    # flips it.
+    drawer_open = gr.State(False)
+    attachment_open = gr.State(False)
 
-    with gr.Row(elem_id=ui.ident("chat"), elem_classes=ui.classes("workspace")):
+    with gr.Row(elem_id=ui.ident("chat"),
+                elem_classes=ui.classes("workspace", "chat-workspace")):
 
-        # -- left rail: characters and threads (section 4.5, item 2) ------- #
-        with gr.Column(scale=1, min_width=220, elem_classes=ui.classes("rail")):
-            character = gr.Dropdown(
-                label="Character", choices=_character_choices(),
-                value=who or None, interactive=True,
-                elem_id=ui.ident("chat", "character"))
-            search = gr.Textbox(label="Find a thread", placeholder="Filter by title…",
-                                elem_id=ui.ident("chat", "search"))
-            threads = gr.Radio(label="Threads", choices=initial_threads,
-                               value=initial_thread or None,
-                               elem_id=ui.ident("chat", "threads"),
-                               elem_classes=ui.classes("threads"))
-            with gr.Row():
-                new_thread = gr.Button("New", size="sm", variant="primary")
-                branch = gr.Button("Branch", size="sm")
-            with gr.Row():
-                rename = gr.Button("Rename", size="sm")
-                delete = gr.Button("Delete", size="sm", variant="stop")
-            rename_box = gr.Textbox(label="New title", visible=False,
-                                    elem_id=ui.ident("chat", "rename"))
+        # -- the drawer: everything that is not the conversation ----------- #
+        #
+        # visible=False and not merely narrow. Gradio removes a hidden column
+        # from the layout entirely, which is what lets the transcript have the
+        # whole window rather than the whole window minus two rails.
+        with gr.Column(scale=1, min_width=260, visible=False,
+                       elem_id=ui.ident("chat", "drawer"),
+                       elem_classes=ui.classes("drawer")) as drawer:
 
-        # -- centre: the transcript, then the composer --------------------- #
-        with gr.Column(scale=4, min_width=420, elem_classes=ui.classes("stage")):
-            status = gr.HTML(ui.notice("Ready."), elem_id=ui.ident("chat", "status"))
-            transcript = gr.Chatbot(
-                label=None, height=560, show_copy_button=True, render_markdown=True,
-                value=_transcript(_load(who, initial_thread)),
-                elem_id=ui.ident("chat", "transcript"),
-                elem_classes=ui.classes("transcript"))
+            with gr.Accordion("Threads", open=True):
+                search = gr.Textbox(label="Find a thread", placeholder="Filter by title…",
+                                    elem_id=ui.ident("chat", "search"))
+                threads = gr.Radio(label=None, show_label=False, choices=initial_threads,
+                                   value=initial_thread or None,
+                                   elem_id=ui.ident("chat", "threads"),
+                                   elem_classes=ui.classes("threads"))
+                with gr.Row():
+                    new_thread = gr.Button("New", size="sm", variant="primary")
+                    rename = gr.Button("Rename", size="sm")
+                    delete = gr.Button("Delete", size="sm", variant="stop")
+                rename_box = gr.Textbox(label="New title", visible=False,
+                                        elem_id=ui.ident("chat", "rename"))
 
-            with gr.Row(elem_classes=ui.classes("composer")):
-                with gr.Column(scale=5):
-                    message = gr.Textbox(
-                        label=None, lines=3, max_lines=12, show_label=False,
-                        placeholder="Write a message. Shift+Enter for a new line.",
-                        elem_id=ui.ident("chat", "message"))
-                with gr.Column(scale=1, min_width=140):
-                    attachment = gr.Image(label="Attach", type="filepath", height=110,
-                                          elem_id=ui.ident("chat", "image"))
-
-            with gr.Row(elem_classes=ui.classes("actions")):
-                send = gr.Button("Send", variant="primary", elem_id=ui.ident("chat", "send"))
-                stop = gr.Button("Stop", variant="stop", interactive=False,
-                                 elem_id=ui.ident("chat", "stop"))
-                regenerate = gr.Button("Regenerate")
-                undo = gr.Button("Undo")
-                clear = gr.Button("Clear thread")
-
-        # -- right: who is talking, and how (section 4.3: secondary) ------- #
-        with gr.Column(scale=2, min_width=250, elem_classes=ui.classes("inspector")):
+            # Choosing, editing and creating a character are three things done
+            # to the same object, so they are one section: the drop-down is
+            # who you are talking to, and the editor under it is that same
+            # character, opened only when it is being changed.
             with gr.Accordion("Character", open=False):
-                name = gr.Textbox(label="Name", elem_id=ui.ident("chat", "name"))
-                context = gr.Textbox(label="Context", lines=8,
-                                     placeholder="Who the character is. Shown to the model "
-                                                 "before the first line of dialogue.")
-                greeting = gr.Textbox(label="Greeting", lines=3)
-                system = gr.Textbox(label="System prompt override", lines=3,
-                                    placeholder="Leave empty to use the built prompt.")
-                # Every default here is the vendored package's own, named rather
-                # than copied: these are the numbers the standalone application
-                # ships with, and a second set of literals in the UI is how a
-                # panel quietly stops matching the engine behind it.
+                character = gr.Dropdown(
+                    label="Talking to", choices=_character_choices(),
+                    value=who or None, interactive=True,
+                    elem_id=ui.ident("chat", "character"))
                 with gr.Row():
-                    temperature = gr.Slider(label="Temperature", minimum=0.0, maximum=2.0,
-                                            step=0.05, value=DEFAULT_TEMPERATURE)
-                    top_p = gr.Slider(label="Top-p", minimum=0.0, maximum=1.0, step=0.01,
-                                      value=DEFAULT_TOP_P)
-                reply_tokens = gr.Slider(label="Reply tokens", minimum=64, maximum=4096, step=64,
-                                         value=DEFAULT_MAX_REPLY_TOKENS)
-                seed = gr.Number(label="Seed", value=RANDOM_SEED, precision=0,
-                                 info=f"{RANDOM_SEED} draws a fresh seed for every reply.")
-                with gr.Row():
-                    save_character = gr.Button("Save character", variant="primary", size="sm")
+                    edit_character = gr.Button("Edit", size="sm")
                     new_character = gr.Button("New", size="sm")
                     delete_character = gr.Button("Delete", size="sm", variant="stop")
+                with gr.Group(visible=False,
+                              elem_id=ui.ident("chat", "character-editor")) as character_editor:
+                    name = gr.Textbox(label="Name", elem_id=ui.ident("chat", "name"))
+                    context = gr.Textbox(label="Context", lines=8,
+                                         placeholder="Who the character is. Shown to the model "
+                                                     "before the first line of dialogue.")
+                    greeting = gr.Textbox(label="Greeting", lines=3)
+                    system = gr.Textbox(label="System prompt override", lines=3,
+                                        placeholder="Leave empty to use the built prompt.")
+                    # Every default here is the vendored package's own, named
+                    # rather than copied: these are the numbers the standalone
+                    # application ships with, and a second set of literals in
+                    # the UI is how a panel quietly stops matching the engine
+                    # behind it.
+                    with gr.Row():
+                        temperature = gr.Slider(label="Temperature", minimum=0.0, maximum=2.0,
+                                                step=0.05, value=DEFAULT_TEMPERATURE)
+                        top_p = gr.Slider(label="Top-p", minimum=0.0, maximum=1.0, step=0.01,
+                                          value=DEFAULT_TOP_P)
+                    reply_tokens = gr.Slider(label="Reply tokens", minimum=64, maximum=4096,
+                                             step=64, value=DEFAULT_MAX_REPLY_TOKENS)
+                    seed = gr.Number(label="Seed", value=RANDOM_SEED, precision=0,
+                                     info=f"{RANDOM_SEED} draws a fresh seed for every reply.")
+                    with gr.Row():
+                        save_character = gr.Button("Save character", variant="primary", size="sm")
+                        close_editor = gr.Button("Close", size="sm")
                 import_card = gr.File(label="Import a character card",
                                       file_types=[".json", ".yaml", ".yml", ".png"],
                                       elem_id=ui.ident("chat", "import"))
@@ -140,53 +173,148 @@ def build() -> dict:
                                                  value=initial_persona.description)
                 save_persona = gr.Button("Save", size="sm")
 
+        # -- the stage: status, transcript, actions, composer -------------- #
+        with gr.Column(scale=4, min_width=360,
+                       elem_id=ui.ident("chat", "stage"),
+                       elem_classes=ui.classes("stage", "chat-stage")):
+
+            with gr.Row(elem_classes=ui.classes("stage-head")):
+                panel = gr.Button("☰ Threads & character", size="sm",
+                                  elem_id=ui.ident("chat", "panel"),
+                                  elem_classes=ui.classes("drawer-toggle"))
+                status = gr.HTML(ui.notice("Ready."), elem_id=ui.ident("chat", "status"))
+
+            # No height= at all. The height is the space the tab has, worked
+            # out in the browser and applied in style.css -- a number here
+            # would be an inline style and would win over the CSS that makes
+            # the transcript fit the window instead of the other way round.
+            transcript = gr.Chatbot(
+                label=None, show_copy_button=True, render_markdown=True,
+                value=initial_rows,
+                elem_id=ui.ident("chat", "transcript"),
+                elem_classes=ui.classes("transcript"))
+
+            actions = _action_bar()
+
+            with gr.Row(visible=False, elem_id=ui.ident("chat", "attachment"),
+                        elem_classes=ui.classes("attachment")) as attachment_row:
+                attachment = gr.Image(label="Attach an image", type="filepath", height=140,
+                                      elem_id=ui.ident("chat", "image"))
+
+            with gr.Row(elem_classes=ui.classes("composer")):
+                message = gr.Textbox(
+                    label=None, lines=3, max_lines=12, show_label=False, scale=6,
+                    placeholder="Write a message. Shift+Enter for a new line.",
+                    elem_id=ui.ident("chat", "message"))
+                with gr.Column(scale=1, min_width=120,
+                               elem_classes=ui.classes("composer-side")):
+                    send = gr.Button("Send", variant="primary",
+                                     elem_id=ui.ident("chat", "send"))
+                    stop = gr.Button("Stop", variant="stop", interactive=False,
+                                     elem_id=ui.ident("chat", "stop"))
+                    attach = gr.Button("Attach…", size="sm",
+                                       elem_id=ui.ident("chat", "attach"))
+
     # -- wiring ----------------------------------------------------------- #
+    #
+    # Everything that changes what the transcript is goes through one output
+    # list, so a handler cannot leave the transcript, the position map and the
+    # action bar describing three different conversations.
+
+    view = [transcript, positions, selected, status] + actions["outputs"]
+    stream = [cancellation, transcript, positions, message, attachment, status, send, stop]
+    sampling = [temperature, top_p, reply_tokens, seed]
+
+    panel.click(fn=_toggle_drawer, inputs=[drawer_open],
+                outputs=[drawer_open, drawer], queue=False)
+    attach.click(fn=_toggle_attachment, inputs=[attachment_open],
+                 outputs=[attachment_open, attachment_row, status], queue=False)
 
     character.change(fn=_select_character, inputs=[character, search],
-                     outputs=[threads, thread_state, transcript, status, name, context, greeting,
-                              system, temperature, top_p, reply_tokens, seed], queue=False)
-    search.change(fn=lambda who, text: gr.update(choices=_thread_choices(who, text)),
+                     outputs=[threads, thread_state] + view
+                     + [name, context, greeting, system] + sampling, queue=False)
+    search.change(fn=lambda person, text: gr.update(choices=_thread_choices(person, text)),
                   inputs=[character, search], outputs=[threads], queue=False)
     threads.change(fn=_open_thread, inputs=[character, threads],
-                   outputs=[transcript, thread_state, status], queue=False)
+                   outputs=[thread_state] + view, queue=False)
 
     new_thread.click(fn=_new_thread, inputs=[character, search],
-                     outputs=[threads, thread_state, transcript, status], queue=False)
-    branch.click(fn=_branch_thread, inputs=[character, thread_state, search],
-                 outputs=[threads, thread_state, transcript, status], queue=False)
+                     outputs=[threads, thread_state] + view, queue=False)
     delete.click(fn=_delete_thread, inputs=[character, thread_state, search],
-                 outputs=[threads, thread_state, transcript, status], queue=False)
+                 outputs=[threads, thread_state] + view, queue=False)
     rename.click(fn=lambda: gr.update(visible=True), outputs=[rename_box], queue=False)
     rename_box.submit(fn=_rename_thread, inputs=[character, thread_state, rename_box, search],
                       outputs=[threads, rename_box, status], queue=False)
 
-    replying = send.click(
-        fn=_send, inputs=[character, thread_state, message, attachment, temperature, top_p,
-                          reply_tokens, seed],
-        outputs=[cancellation, transcript, message, attachment, status, send, stop],
-        show_progress="minimal")
-    replying.then(fn=lambda who, text: gr.update(choices=_thread_choices(who, text)),
-                  inputs=[character, search], outputs=[threads])
+    # -- the per-message actions ------------------------------------------ #
 
-    regenerating = regenerate.click(
-        fn=_regenerate, inputs=[character, thread_state, temperature, top_p, reply_tokens, seed],
-        outputs=[cancellation, transcript, message, attachment, status, send, stop],
-        show_progress="minimal")
+    transcript.select(fn=_select_message, inputs=[character, thread_state, positions],
+                      outputs=view, queue=False)
+    actions["close"].click(fn=_close_selection, inputs=[character, thread_state],
+                           outputs=view, queue=False)
+
+    actions["back"].click(fn=_page_version(-1), inputs=[character, thread_state, selected],
+                          outputs=view, queue=False)
+    actions["forward"].click(fn=_page_version(1), inputs=[character, thread_state, selected],
+                             outputs=view, queue=False)
+    actions["drop"].click(fn=_drop_version, inputs=[character, thread_state, selected],
+                          outputs=view, queue=False)
+
+    actions["edit"].click(fn=_open_editor, inputs=[character, thread_state, selected],
+                          outputs=[actions["editor"], actions["editor_box"]], queue=False)
+    actions["save_edit"].click(
+        fn=_commit_edit, inputs=[character, thread_state, selected, actions["editor_box"]],
+        outputs=view, queue=False)
+    actions["cancel_edit"].click(fn=lambda: gr.update(visible=False),
+                                 outputs=[actions["editor"]], queue=False)
+
+    actions["branch"].click(fn=_branch_here, inputs=[character, thread_state, selected, search],
+                            outputs=[threads, thread_state] + view, queue=False)
+    actions["delete"].click(fn=_delete_message, inputs=[character, thread_state, selected],
+                            outputs=view, queue=False)
+    actions["delete_from"].click(fn=_delete_from, inputs=[character, thread_state, selected],
+                                 outputs=view, queue=False)
+
+    # -- sending, and the three ways of asking again ---------------------- #
+
+    replying = send.click(
+        fn=_send, inputs=[character, thread_state, message, attachment] + sampling,
+        outputs=stream, show_progress="minimal")
+    regenerating = actions["regenerate"].click(
+        fn=_regenerate, inputs=[character, thread_state, selected] + sampling,
+        outputs=stream, show_progress="minimal")
+    continuing = actions["continue"].click(
+        fn=_continue, inputs=[character, thread_state, selected] + sampling,
+        outputs=stream, show_progress="minimal")
+    resending = actions["resend"].click(
+        fn=_resend, inputs=[character, thread_state, selected] + sampling,
+        outputs=stream, show_progress="minimal")
+
+    for run in (replying, regenerating, continuing, resending):
+        # The thread list is refreshed because an untitled thread has just been
+        # named, and the selection is dropped because the message it pointed at
+        # may not be the message that is there now.
+        run.then(fn=lambda person, text: gr.update(choices=_thread_choices(person, text)),
+                 inputs=[character, search], outputs=[threads])
+        run.then(fn=_close_selection, inputs=[character, thread_state], outputs=view)
 
     stop.click(fn=_cancel, inputs=[cancellation], outputs=[status],
-               cancels=[replying, regenerating], queue=False)
+               cancels=[replying, regenerating, continuing, resending], queue=False)
 
-    undo.click(fn=_undo, inputs=[character, thread_state], outputs=[transcript, status],
-               queue=False)
-    clear.click(fn=_clear, inputs=[character, thread_state], outputs=[transcript, status],
-                queue=False)
+    # -- characters and persona ------------------------------------------- #
 
+    edit_character.click(fn=_open_character, inputs=[character],
+                         outputs=[character_editor, name, context, greeting, system]
+                         + sampling + [status], queue=False)
+    new_character.click(fn=_new_character,
+                        outputs=[character_editor, name, context, greeting, system, status],
+                        queue=False)
+    close_editor.click(fn=lambda: gr.update(visible=False), outputs=[character_editor],
+                       queue=False)
     save_character.click(
         fn=_save_character,
-        inputs=[character, name, context, greeting, system, temperature, top_p, reply_tokens, seed],
+        inputs=[character, name, context, greeting, system] + sampling,
         outputs=[character, status], queue=False)
-    new_character.click(fn=_new_character,
-                        outputs=[name, context, greeting, system, status], queue=False)
     delete_character.click(fn=_delete_character, inputs=[character],
                            outputs=[character, status], queue=False)
     import_card.upload(fn=_import_character, inputs=[import_card],
@@ -195,8 +323,58 @@ def build() -> dict:
     save_persona.click(fn=_save_persona, inputs=[persona_name, persona_description],
                        outputs=[status], queue=False)
 
-    return {"status": status, "transcript": transcript,
+    return {"status": status, "transcript": transcript, "drawer": drawer,
             "persona": (persona_name, persona_description)}
+
+
+def _action_bar() -> dict:
+    """The one row of per-message actions, and the editor it can open.
+
+    Built once and re-labelled, because Gradio cannot create a control in
+    response to a click: which of these apply to the message in hand is said by
+    hiding the ones that do not, and by :func:`_selection_updates`.
+    """
+    with gr.Group(visible=False, elem_id=ui.ident("chat", "actions"),
+                  elem_classes=ui.classes("message-actions")) as bar:
+        with gr.Row(elem_classes=ui.classes("message-actions-head")):
+            heading = gr.HTML(elem_id=ui.ident("chat", "selection"))
+            close = gr.Button("✕", size="sm", min_width=44,
+                              elem_classes=ui.classes("message-actions-close"))
+        with gr.Row(elem_classes=ui.classes("message-actions-row")):
+            back = gr.Button("◀", size="sm", min_width=44, visible=False)
+            pager = gr.HTML(visible=False, elem_classes=ui.classes("pager"))
+            forward = gr.Button("▶", size="sm", min_width=44, visible=False)
+            drop = gr.Button("Delete this version", size="sm", visible=False)
+        with gr.Row(elem_classes=ui.classes("message-actions-row")):
+            edit = gr.Button("Edit", size="sm")
+            regenerate = gr.Button("Regenerate", size="sm", visible=False,
+                                   elem_id=ui.ident("chat", "regenerate"))
+            carry_on = gr.Button("Continue", size="sm", visible=False)
+            resend = gr.Button("Send again from here", size="sm", visible=False)
+            branch = gr.Button("Branch from here", size="sm")
+            delete = gr.Button("Delete message", size="sm", variant="stop")
+            delete_from = gr.Button("Delete from here", size="sm", variant="stop")
+        with gr.Group(visible=False, elem_classes=ui.classes("message-editor")) as editor:
+            editor_box = gr.Textbox(label="Edit this message", lines=6, show_label=True,
+                                    elem_id=ui.ident("chat", "editor"))
+            with gr.Row():
+                save_edit = gr.Button("Save", size="sm", variant="primary")
+                cancel_edit = gr.Button("Cancel", size="sm")
+
+    return {
+        "bar": bar, "heading": heading, "close": close,
+        "back": back, "pager": pager, "forward": forward, "drop": drop,
+        "edit": edit, "regenerate": regenerate, "continue": carry_on, "resend": resend,
+        "branch": branch, "delete": delete, "delete_from": delete_from,
+        "editor": editor, "editor_box": editor_box,
+        "save_edit": save_edit, "cancel_edit": cancel_edit,
+        # The order here is the order :func:`_selection_updates` returns, and
+        # the two are asserted against each other in tests/test_llm_panels.py:
+        # a handler that returned them in a different order would silently put
+        # a button's label in another button's visibility.
+        "outputs": [bar, heading, back, pager, forward, drop,
+                    regenerate, carry_on, resend, editor, editor_box],
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -253,31 +431,161 @@ def _load(who: str, identifier: str):
         return None
 
 
-def _transcript(conversation) -> list[list[str | None]]:
-    """The conversation as Gradio 4's Chatbot value: a list of ``[user, bot]`` pairs.
+# --------------------------------------------------------------------------- #
+# The transcript, and the map back to the conversation
+# --------------------------------------------------------------------------- #
+
+
+def _view(conversation) -> tuple[list[list[str | None]], list[list[int]]]:
+    """The Chatbot value, and where each message ended up in it.
 
     Gradio 4.40 predates the message-shaped Chatbot value, and section 5 says
     to target the components the host actually has rather than newer Gradio
-    assumptions. The pairing is the only lossy part -- two replies in a row
-    become two rows with an empty left side, which is what the component draws
-    correctly anyway.
+    assumptions. So a conversation is a list of ``[user, bot]`` pairs, and the
+    pairing is what makes a click's ``(row, column)`` not a message index: two
+    replies in a row become two rows with an empty left side, and one exchange
+    is one row holding two messages.
+
+    Both are produced here, in one pass over the messages, because they are one
+    fact. Deriving the map somewhere else -- from the rows, or by pairing again
+    -- is how a click would come to name the message beside the one clicked.
     """
     from prompt_master.chat.history import ASSISTANT, USER
 
-    if conversation is None:
-        return []
     rows: list[list[str | None]] = []
-    for message in conversation.messages:
+    positions: list[list[int]] = []
+    if conversation is None:
+        return rows, positions
+    for index, message in enumerate(conversation.messages):
         body = message.text
         if message.image_name:
             body = f"*[{message.image_name}]*\n\n{body}" if body else f"*[{message.image_name}]*"
         if message.role == USER:
             rows.append([body, None])
+            positions.append([len(rows) - 1, 0, index])
         elif rows and rows[-1][1] is None and message.role == ASSISTANT:
             rows[-1][1] = body
+            positions.append([len(rows) - 1, 1, index])
         else:
             rows.append([None, body])
-    return rows
+            positions.append([len(rows) - 1, 1, index])
+    return rows, positions
+
+
+def _transcript(conversation) -> list[list[str | None]]:
+    """The Chatbot value alone, for callers that do not need the map."""
+    return _view(conversation)[0]
+
+
+def _message_at(positions, row, column) -> int:
+    """The message a click on ``(row, column)`` names, or :data:`NO_SELECTION`."""
+    for entry in positions or ():
+        try:
+            at_row, at_column, index = entry
+        except (TypeError, ValueError):
+            continue
+        if int(at_row) == int(row) and int(at_column) == int(column):
+            return int(index)
+    return NO_SELECTION
+
+
+def _selection_updates(conversation, index: int) -> list:
+    """What the action bar shows for message ``index``.
+
+    Returned in the order ``_action_bar()["outputs"]`` lists, which is the one
+    thing about this function that has to be kept in step with the layout.
+    """
+    from prompt_master.chat.history import ASSISTANT
+
+    hidden = gr.update(visible=False)
+    if (conversation is None or index < 0 or index >= len(conversation.messages)):
+        return [gr.update(visible=False), gr.update(value=""), hidden, hidden, hidden, hidden,
+                hidden, hidden, hidden, hidden, gr.update(value="")]
+
+    message = conversation.messages[index]
+    reply = message.role == ASSISTANT
+    last = index == len(conversation.messages) - 1
+    versions = len(message.versions)
+    speaker = "the character" if reply else "you"
+    opening = " ".join(message.text.split())[:80] or "(empty)"
+
+    return [
+        gr.update(visible=True),
+        gr.update(value=ui.notice(f"Message {index + 1} of {len(conversation.messages)}, "
+                                  f"from {speaker}: {opening}"
+                                  + ("…" if len(message.text) > 80 else ""))),
+        gr.update(visible=versions > 1, interactive=message.active > 0),
+        gr.update(visible=versions > 1,
+                  value=f'<div class="{ui.PREFIX}-pager">'
+                        f'{message.active + 1}/{versions}</div>'),
+        gr.update(visible=versions > 1, interactive=message.active < versions - 1),
+        gr.update(visible=versions > 1),
+        # Regenerate writes this reply again and keeps the one it had as a
+        # version; continuing only makes sense for the reply still at the end,
+        # because anything after it would be answering a question that has
+        # already been answered again.
+        gr.update(visible=reply),
+        gr.update(visible=reply and last and bool(message.text.strip())),
+        gr.update(visible=not reply),
+        gr.update(visible=False),
+        gr.update(value=message.text),
+    ]
+
+
+def _refresh(conversation, note: str, kind: str = "info",
+             index: int = NO_SELECTION) -> list:
+    """Every output the ``view`` list names, for one state of one thread.
+
+    One function for all of them because they are one fact: the rows, the map
+    a click is read against, the message the action bar applies to and what
+    that bar shows all come from the same conversation, and a handler that
+    returned three of the four would leave the fourth describing a thread that
+    is no longer on screen.
+    """
+    rows, positions = _view(conversation)
+    return ([rows, positions, index, ui.notice(note, kind)]
+            + _selection_updates(conversation, index))
+
+
+def _reopen(who, identifier, note: str, kind: str = "info",
+            index: int = NO_SELECTION) -> list:
+    """:func:`_refresh` for a thread read back off disk."""
+    return _refresh(_load(who, identifier), note, kind, index)
+
+
+# --------------------------------------------------------------------------- #
+# The drawer and the attachment
+# --------------------------------------------------------------------------- #
+
+
+def _toggle_drawer(open_now):
+    """Show or hide the drawer."""
+    showing = not bool(open_now)
+    return showing, gr.update(visible=showing)
+
+
+def _toggle_attachment(open_now):
+    """Open the image box, or close it — and say when it would be pointless.
+
+    Warned when it is opened rather than when the reply fails: whether a
+    picture can be sent depends on the model running, and finding that out
+    after writing a message is finding it out too late.
+    """
+    showing = not bool(open_now)
+    if not showing:
+        return False, gr.update(visible=False), ui.notice("Ready.")
+    try:
+        sees = mc_llm_runtime.config().sees
+    except Exception:
+        logger.debug("Model Chain: could not read the vision configuration", exc_info=True)
+        sees = True
+    if sees:
+        return True, gr.update(visible=True), ui.notice(
+            "The attached image goes with your next message.")
+    return True, gr.update(visible=True), ui.notice(
+        "The model running has no vision projector, so an attached image cannot be sent to "
+        "it. Choose one in LLM Studio\u2019s Setup mode, or send the message without a "
+        "picture.", "warn")
 
 
 # --------------------------------------------------------------------------- #
@@ -297,31 +605,33 @@ def _select_character(who, filter_text):
     except Exception:
         loaded = Character(name=who or "")
     mc_llm_state.remember(character=who or "", thread=identifier)
-    return (gr.update(choices=choices, value=identifier or None), identifier,
-            _transcript(conversation),
-            ui.notice(f"{len(choices)} thread{'s' if len(choices) != 1 else ''}."),
-            loaded.name, loaded.context, loaded.greeting, loaded.system,
-            loaded.temperature, loaded.top_p, loaded.max_reply_tokens, loaded.seed)
+    note = f"{len(choices)} thread{'s' if len(choices) != 1 else ''}."
+    return ([gr.update(choices=choices, value=identifier or None), identifier]
+            + _refresh(conversation, note)
+            + [loaded.name, loaded.context, loaded.greeting, loaded.system,
+               loaded.temperature, loaded.top_p, loaded.max_reply_tokens, loaded.seed])
 
 
 def _open_thread(who, identifier):
     conversation = _load(who, identifier)
     if conversation is None:
-        return [], identifier or "", ui.notice("Choose a thread.", "warn")
+        return [identifier or ""] + _refresh(None, "Choose a thread.", "warn")
     mc_llm_state.remember(character=who or "", thread=identifier)
-    return _transcript(conversation), identifier, ui.notice(conversation.title)
+    return [identifier] + _refresh(conversation, conversation.title)
 
 
 def _new_thread(who, filter_text):
     if not who:
-        return gr.update(), "", [], ui.notice("Choose a character first.", "warn")
+        return ([gr.update(), ""]
+                + _refresh(None, "Choose a character first.", "warn"))
     store = _chats()
     conversation = store.new(who)
     _greet(conversation, who)
     store.save(conversation)
     mc_llm_state.remember(character=who, thread=conversation.identifier)
-    return (gr.update(choices=_thread_choices(who, filter_text), value=conversation.identifier),
-            conversation.identifier, _transcript(conversation), ui.notice("New thread."))
+    return ([gr.update(choices=_thread_choices(who, filter_text),
+                       value=conversation.identifier), conversation.identifier]
+            + _refresh(conversation, "New thread."))
 
 
 def _greet(conversation, who: str) -> None:
@@ -338,31 +648,14 @@ def _greet(conversation, who: str) -> None:
         conversation.append(ASSISTANT, text)
 
 
-def _branch_thread(who, identifier, filter_text):
-    """Copy a thread from its last turn, so an alternative can be explored.
-
-    Branching from the end rather than from a chosen turn: picking a point is
-    a per-message action and Gradio 4's Chatbot has no per-message affordance
-    to hang one off. Copy then delete back is the same result in two moves.
-    """
-    conversation = _load(who, identifier)
-    if conversation is None:
-        return gr.update(), identifier or "", [], ui.notice("Choose a thread first.", "warn")
-    store = _chats()
-    branched = store.branch(conversation, len(conversation.messages) - 1)
-    store.save(branched)
-    return (gr.update(choices=_thread_choices(who, filter_text), value=branched.identifier),
-            branched.identifier, _transcript(branched), ui.notice("Branched."))
-
-
 def _delete_thread(who, identifier, filter_text):
     if not (who and identifier):
-        return gr.update(), "", [], ui.notice("Choose a thread first.", "warn")
+        return [gr.update(), ""] + _refresh(None, "Choose a thread first.", "warn")
     _chats().delete(who, identifier)
     choices = _thread_choices(who, filter_text)
     following = choices[0][1] if choices else ""
-    return (gr.update(choices=choices, value=following or None), following,
-            _transcript(_load(who, following)), ui.notice("Deleted."))
+    return ([gr.update(choices=choices, value=following or None), following]
+            + _reopen(who, following, "Deleted."))
 
 
 def _rename_thread(who, identifier, title, filter_text):
@@ -376,57 +669,141 @@ def _rename_thread(who, identifier, title, filter_text):
 
 
 # --------------------------------------------------------------------------- #
+# Per-message actions
+# --------------------------------------------------------------------------- #
+
+
+def _select_message(who, identifier, positions, event: gr.SelectData = None):
+    """A click on a bubble nominates the message the action bar applies to."""
+    conversation = _load(who, identifier)
+    index = NO_SELECTION
+    where = getattr(event, "index", None)
+    if isinstance(where, (list, tuple)) and len(where) >= 2:
+        index = _message_at(positions, where[0], where[1])
+    elif isinstance(where, int):
+        # Some hosts report a flat index. Read it as the row, and take the
+        # reply half of it, which is what a flat index counts.
+        index = _message_at(positions, where, 1)
+    if index == NO_SELECTION:
+        return _refresh(conversation,
+                        "That part of the transcript is not a message.", "warn")
+    return _refresh(conversation, "Ready.", index=index)
+
+
+def _close_selection(who, identifier):
+    return _reopen(who, identifier, "Ready.")
+
+
+def _page_version(step: int):
+    """Show the previous or next version of the selected reply."""
+    def page(who, identifier, index):
+        conversation = _load(who, identifier)
+        if conversation is None or not (0 <= index < len(conversation.messages)):
+            return _refresh(conversation, "Choose a message first.", "warn")
+        message = conversation.messages[index]
+        message.show(message.active + step)
+        _chats().save(conversation)
+        return _refresh(conversation,
+                        f"Showing version {message.active + 1} of {len(message.versions)}.",
+                        index=index)
+
+    return page
+
+
+def _drop_version(who, identifier, index):
+    conversation = _load(who, identifier)
+    if conversation is None or not (0 <= index < len(conversation.messages)):
+        return _refresh(conversation, "Choose a message first.", "warn")
+    message = conversation.messages[index]
+    if len(message.versions) <= 1:
+        return _refresh(conversation,
+                        "This message has only one version — deleting it would delete the "
+                        "message.", "warn", index=index)
+    message.drop_version()
+    _chats().save(conversation)
+    return _refresh(conversation, "Version deleted.", index=index)
+
+
+def _open_editor(who, identifier, index):
+    conversation = _load(who, identifier)
+    if conversation is None or not (0 <= index < len(conversation.messages)):
+        return gr.update(visible=False), gr.update()
+    return gr.update(visible=True), gr.update(value=conversation.messages[index].text)
+
+
+def _commit_edit(who, identifier, index, text):
+    conversation = _load(who, identifier)
+    if conversation is None or not (0 <= index < len(conversation.messages)):
+        return _refresh(conversation, "Choose a message first.", "warn")
+    conversation.messages[index].text = (text or "").strip()
+    _chats().save(conversation)
+    return _refresh(conversation, "Edited.", index=index)
+
+
+def _branch_here(who, identifier, index, filter_text):
+    """Copy the thread up to this message, so an alternative can be explored.
+
+    A branch is a copy, which is the vendored store's own semantics: the two
+    conversations then diverge as ordinary threads with nothing shared, rather
+    than as a tree every later operation would have to understand.
+    """
+    conversation = _load(who, identifier)
+    if conversation is None or not (0 <= index < len(conversation.messages)):
+        return ([gr.update(), identifier or ""]
+                + _refresh(conversation, "Choose a message first.", "warn"))
+    branched = _chats().branch(conversation, index)
+    mc_llm_state.remember(character=who or "", thread=branched.identifier)
+    return ([gr.update(choices=_thread_choices(who, filter_text), value=branched.identifier),
+             branched.identifier]
+            + _refresh(branched,
+                       "Branched — this is a new thread, and the one it came from is "
+                       "untouched."))
+
+
+def _delete_message(who, identifier, index):
+    conversation = _load(who, identifier)
+    if conversation is None or not (0 <= index < len(conversation.messages)):
+        return _refresh(conversation, "Choose a message first.", "warn")
+    conversation.delete(index)
+    _chats().save(conversation)
+    return _refresh(conversation, "Message deleted.")
+
+
+def _delete_from(who, identifier, index):
+    conversation = _load(who, identifier)
+    if conversation is None or not (0 <= index < len(conversation.messages)):
+        return _refresh(conversation, "Choose a message first.", "warn")
+    removed = len(conversation.messages) - index
+    conversation.delete_from(index)
+    _chats().save(conversation)
+    return _refresh(conversation,
+                    f"Deleted {removed} message{'s' if removed != 1 else ''}.")
+
+
+# --------------------------------------------------------------------------- #
 # Replies
 # --------------------------------------------------------------------------- #
 
 
 def _send(who, identifier, text, image_path, temperature, top_p, reply_tokens, seed):
-    yield from _reply(who, identifier, text, image_path, temperature, top_p, reply_tokens, seed,
-                      regenerate=False)
-
-
-def _regenerate(who, identifier, temperature, top_p, reply_tokens, seed):
-    yield from _reply(who, identifier, "", None, temperature, top_p, reply_tokens, seed,
-                      regenerate=True)
-
-
-def _reply(who, identifier, text, image_path, temperature, top_p, reply_tokens, seed,
-           regenerate: bool):
-    """Stream one reply into the thread, and save the thread when it lands."""
-    from prompt_master.chat.characters import (DEFAULT_MAX_REPLY_TOKENS, DEFAULT_TEMPERATURE,
-                                               DEFAULT_TOP_P)
+    """Add your message to the thread, then stream the reply to it."""
     from prompt_master.chat.history import ASSISTANT, USER
-    from prompt_master.chat.prompt import build, clean_reply
-    from prompt_master.core.models import RANDOM_SEED, draw_seed
-
-    busy = (gr.update(interactive=False), gr.update(interactive=True))
-    idle = (gr.update(interactive=True), gr.update(interactive=False))
 
     conversation = _load(who, identifier)
     if conversation is None:
-        yield (None, [], text, image_path,
-               ui.notice("Choose a character and a thread first.", "warn"), *idle)
+        yield _idle(None, text, image_path, "Choose a character and a thread first.", "warn")
         return
-    if not regenerate and not (text or "").strip() and not image_path:
-        yield (None, _transcript(conversation), text, image_path,
-               ui.notice("Write a message first.", "warn"), *idle)
-        return
-
-    store = _chats()
-    try:
-        character = _characters().load(who)
-    except Exception as exc:
-        yield (None, _transcript(conversation), text, image_path,
-               ui.notice(ui.failure(exc), "error"), *idle)
+    if not (text or "").strip() and not image_path:
+        yield _idle(conversation, text, image_path, "Write a message first.", "warn")
         return
 
     attachment, attachment_name = "", ""
     if image_path:
         if not mc_llm_runtime.config().sees:
-            yield (None, _transcript(conversation), text, image_path,
-                   ui.notice("The model running has no vision projector, so the attached image "
-                             "cannot be sent to it. Choose one under Models and Hardware, or "
-                             "remove the image.", "error"), *idle)
+            yield _idle(conversation, text, image_path,
+                        "The model running has no vision projector, so the attached image "
+                        "cannot be sent to it. Choose one in Setup, or remove the image.",
+                        "error")
             return
         try:
             attachment = ui.data_url(image_path) or ""
@@ -434,23 +811,141 @@ def _reply(who, identifier, text, image_path, temperature, top_p, reply_tokens, 
             # with backslashes and the whole path would end up as the caption.
             attachment_name = Path(image_path).name
         except Exception as exc:
-            yield (None, _transcript(conversation), text, image_path,
-                   ui.notice(ui.failure(exc), "error"), *idle)
+            yield _idle(conversation, text, image_path, ui.failure(exc), "error")
             return
 
-    if regenerate:
-        # Drop the reply being replaced, and everything after it, so the model
-        # is asked the same question rather than a longer one.
-        last = conversation.last_index(ASSISTANT)
-        if last < 0:
-            yield (None, _transcript(conversation), text, image_path,
-                   ui.notice("There is no reply to regenerate.", "warn"), *idle)
-            return
-        conversation.delete_from(last)
-    else:
-        conversation.append(USER, (text or "").strip(), attachment, attachment_name)
+    conversation.append(USER, (text or "").strip(), attachment, attachment_name)
+    _chats().save(conversation)
+    conversation.append(ASSISTANT, "")
+    yield from _stream(who, conversation, len(conversation.messages) - 1,
+                       temperature, top_p, reply_tokens, seed)
 
+
+def _regenerate(who, identifier, index, temperature, top_p, reply_tokens, seed):
+    """Write this reply again, keeping the one it had as a version.
+
+    Paging rather than replacing, which is what makes a regenerate reversible:
+    the reply that came back worse is undone with ``◀`` rather than by
+    regenerating until luck returns.
+    """
+    from prompt_master.chat.history import ASSISTANT
+
+    conversation = _load(who, identifier)
+    index = _last_reply(conversation, index)
+    if conversation is None or not (0 <= index < len(conversation.messages)):
+        yield _idle(conversation, "", None, "There is no reply to regenerate.", "warn")
+        return
+    message = conversation.messages[index]
+    if message.role != ASSISTANT:
+        yield _idle(conversation, "", None,
+                    "Regenerate applies to a reply. For one of your own messages, use Send "
+                    "again from here.", "warn")
+        return
+
+    conversation.truncate_after(index)
+    message.add_version("")
+    yield from _stream(who, conversation, index, temperature, top_p, reply_tokens, seed)
+
+
+def _continue(who, identifier, index, temperature, top_p, reply_tokens, seed):
+    """Carry the reply on from where it stopped."""
+    from prompt_master.chat.history import ASSISTANT
+    from prompt_master.chat.prompt import continue_instruction
+
+    conversation = _load(who, identifier)
+    index = _last_reply(conversation, index)
+    if conversation is None or not (0 <= index < len(conversation.messages)):
+        yield _idle(conversation, "", None, "There is no reply to continue.", "warn")
+        return
+    message = conversation.messages[index]
+    if message.role != ASSISTANT or not message.text.strip():
+        yield _idle(conversation, "", None, "There is nothing to carry on from.", "warn")
+        return
+
+    try:
+        character = _characters().load(who)
+    except Exception as exc:
+        yield _idle(conversation, "", None, ui.failure(exc), "error")
+        return
+    # ``upto`` includes the reply itself: the model cannot carry on from text
+    # it was not shown.
+    yield from _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
+                       instruction=continue_instruction(character), upto=index + 1,
+                       opening=message.text)
+
+
+def _resend(who, identifier, index, temperature, top_p, reply_tokens, seed):
+    """Answer this message of yours again, dropping everything after it."""
+    from prompt_master.chat.history import ASSISTANT, USER
+
+    conversation = _load(who, identifier)
+    if conversation is None or not (0 <= index < len(conversation.messages)):
+        yield _idle(conversation, "", None, "Choose one of your messages first.", "warn")
+        return
+    if conversation.messages[index].role != USER:
+        yield _idle(conversation, "", None,
+                    "Send again from here applies to one of your own messages. For a reply, "
+                    "use Regenerate.", "warn")
+        return
+
+    conversation.truncate_after(index)
+    _chats().save(conversation)
+    conversation.append(ASSISTANT, "")
+    yield from _stream(who, conversation, len(conversation.messages) - 1,
+                       temperature, top_p, reply_tokens, seed)
+
+
+def _last_reply(conversation, index) -> int:
+    """``index``, or the last reply in the thread when nothing is selected.
+
+    So Regenerate and Continue still mean what they mean with no message
+    nominated -- "again" and "more" are about the end of the thread unless
+    somebody has said otherwise.
+    """
+    from prompt_master.chat.history import ASSISTANT
+
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        index = NO_SELECTION
+    if index >= 0 or conversation is None:
+        return index
+    return conversation.last_index(ASSISTANT)
+
+
+def _idle(conversation, text, image_path, note: str, kind: str = "info") -> tuple:
+    """One yield that changes nothing and says why."""
+    rows, positions = _view(conversation)
+    return (None, rows, positions, text, image_path, ui.notice(note, kind),
+            gr.update(interactive=True), gr.update(interactive=False))
+
+
+def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
+            instruction=None, upto=None, opening: str = ""):
+    """Stream one reply into ``conversation.messages[index]``, and save it.
+
+    ``opening`` is what is already in that message -- the text a continuation
+    extends -- and ``upto`` bounds the history the model is asked from, so an
+    ordinary reply is not written from the empty message being written into
+    while a continuation is written from the reply it continues.
+    """
+    from prompt_master.chat.characters import (DEFAULT_MAX_REPLY_TOKENS, DEFAULT_TEMPERATURE,
+                                               DEFAULT_TOP_P)
+    from prompt_master.chat.prompt import build, clean_reply, has_image
+    from prompt_master.core.models import RANDOM_SEED, draw_seed
+
+    busy = (gr.update(interactive=False), gr.update(interactive=True))
+    idle = (gr.update(interactive=True), gr.update(interactive=False))
+    store = _chats()
+
+    try:
+        character = _characters().load(who)
+    except Exception as exc:
+        yield _idle(conversation, "", None, ui.failure(exc), "error")
+        return
     persona = _persona()
+    history = conversation.messages[:upto if upto is not None else index]
+
     # Every control below falls back to the character's own value, and the
     # character's own value falls back to the vendored default. A cleared
     # number box therefore runs at the settings the standalone application
@@ -462,56 +957,91 @@ def _reply(who, identifier, text, image_path, temperature, top_p, reply_tokens, 
     asked = _number(seed, RANDOM_SEED)
 
     request = sessions.ChatRequest(
-        messages=build(character, persona, conversation.messages,
-                       context_size=_context_size(), reply_tokens=tokens),
-        needs_vision=bool(attachment) or _has_image(conversation),
+        messages=build(character, persona, history, context_size=_context_size(),
+                       reply_tokens=tokens, instruction=instruction),
+        needs_vision=has_image(history),
         temperature=_decimal(temperature, character.temperature, DEFAULT_TEMPERATURE),
         top_p=_decimal(top_p, character.top_p, DEFAULT_TOP_P),
         max_tokens=tokens,
         seed=asked if asked != RANDOM_SEED else resolved,
     )
 
+    message = conversation.messages[index]
     cancel = sessions.Cancellation()
-    reply = conversation.append(ASSISTANT, "")
-    rows = _transcript(conversation)
-    yield cancel, rows, "", None, ui.notice("Starting…"), *busy
+    streamed = opening
+    # A continuation is joined to what is already there, and the model is not
+    # reliable about starting with the space that needs.
+    join_space = bool(opening) and not opening[-1].isspace()
+    rows, positions = _view(conversation)
+    yield cancel, rows, positions, "", None, ui.notice("Starting…"), *busy
 
-    streamed = ""
     try:
         for event in sessions.conversation(request, cancel):
             if event.kind == sessions.CHUNK:
+                if join_space and event.text and not event.text[0].isspace():
+                    streamed += " "
+                join_space = False
                 streamed += event.text
-                reply.text = streamed
-                yield cancel, _transcript(conversation), "", None, gr.update(), *busy
+                message.text = streamed
+                rows, positions = _view(conversation)
+                yield cancel, rows, positions, "", None, gr.update(), *busy
             elif event.kind == sessions.STATUS:
-                yield (cancel, _transcript(conversation), "", None,
-                       ui.notice(event.text), *busy)
+                rows, positions = _view(conversation)
+                yield cancel, rows, positions, "", None, ui.notice(event.text), *busy
             elif event.kind in (sessions.DONE, sessions.CANCELLED):
-                reply.text = clean_reply(event.text or streamed, character, persona)
-                if not reply.text.strip():
-                    conversation.delete(len(conversation.messages) - 1)
+                whole = event.text if event.kind == sessions.DONE and not opening else streamed
+                message.text = clean_reply(whole or streamed, character, persona)
+                _tidy(conversation, index)
                 conversation.retitle()
                 store.save(conversation)
-                message = ("Stopped." if event.kind == sessions.CANCELLED else "Reply complete.")
-                yield (cancel, _transcript(conversation), "", None,
-                       ui.notice(message, "warn" if event.kind == sessions.CANCELLED else "info"),
+                note = "Stopped." if event.kind == sessions.CANCELLED else "Reply complete."
+                rows, positions = _view(conversation)
+                yield (cancel, rows, positions, "", None,
+                       ui.notice(note, "warn" if event.kind == sessions.CANCELLED else "info"),
                        *idle)
                 return
             elif event.kind == sessions.FAILED:
-                # The half-written reply goes; the user's turn stays, so the
-                # message they typed is not lost to a server that would not start.
-                conversation.delete(len(conversation.messages) - 1)
+                # The half-written reply goes; your turn stays, so the message
+                # you typed is not lost to a server that would not start.
+                _tidy(conversation, index)
                 store.save(conversation)
-                yield (cancel, _transcript(conversation), "", None,
-                       ui.notice(event.text, "error"), *idle)
+                rows, positions = _view(conversation)
+                yield cancel, rows, positions, "", None, ui.notice(event.text, "error"), *idle
                 return
     except Exception as exc:
-        yield (cancel, _transcript(conversation), "", None,
-               ui.notice(ui.failure(exc), "error"), *idle)
+        _tidy(conversation, index)
+        store.save(conversation)
+        rows, positions = _view(conversation)
+        yield cancel, rows, positions, "", None, ui.notice(ui.failure(exc), "error"), *idle
         return
 
     store.save(conversation)
-    yield cancel, _transcript(conversation), "", None, ui.notice("Reply complete."), *idle
+    rows, positions = _view(conversation)
+    yield cancel, rows, positions, "", None, ui.notice("Reply complete."), *idle
+
+
+def _tidy(conversation, index: int) -> None:
+    """Take away a reply that never arrived, and nothing else.
+
+    "Never arrived" is the message being empty. A continuation that came back
+    with nothing still has the reply it was continuing in it and is left
+    exactly where it was -- there is a difference between a generation that
+    produced no new text and one that produced no reply, and only the second is
+    something to clear up after.
+
+    A message that has other versions loses only the empty one, because the
+    versions are what a regenerate was risking, and losing them all is not what
+    "that attempt failed" should cost.
+    """
+    if not (0 <= index < len(conversation.messages)):
+        return
+    message = conversation.messages[index]
+    if message.text.strip():
+        return
+    if len(message.versions) > 1:
+        message.drop_version()
+    elif index == len(conversation.messages) - 1:
+        conversation.delete(index)
 
 
 def _number(value, *fallbacks) -> int:
@@ -545,12 +1075,6 @@ def _cancel(cancel):
     return ui.notice("Stopping…", "warn")
 
 
-def _has_image(conversation) -> bool:
-    from prompt_master.chat.prompt import has_image
-
-    return has_image(conversation.messages)
-
-
 def _context_size() -> int:
     """The context the runtime is actually placed at, not the one requested.
 
@@ -564,32 +1088,38 @@ def _context_size() -> int:
     return int(mc_llm_runtime.config().context_size)
 
 
-def _undo(who, identifier):
-    """Remove the last exchange."""
-    from prompt_master.chat.history import USER
-
-    conversation = _load(who, identifier)
-    if conversation is None or not conversation.messages:
-        return [], ui.notice("Nothing to undo.", "warn")
-    last_user = conversation.last_index(USER)
-    conversation.delete_from(last_user if last_user >= 0 else len(conversation.messages) - 1)
-    _chats().save(conversation)
-    return _transcript(conversation), ui.notice("Undone.")
-
-
-def _clear(who, identifier):
-    conversation = _load(who, identifier)
-    if conversation is None:
-        return [], ui.notice("Choose a thread first.", "warn")
-    conversation.messages.clear()
-    _greet(conversation, who)
-    _chats().save(conversation)
-    return _transcript(conversation), ui.notice("Thread cleared.")
-
-
 # --------------------------------------------------------------------------- #
 # Characters and persona
 # --------------------------------------------------------------------------- #
+
+
+def _open_character(who):
+    """Open the editor on the character being talked to."""
+    from prompt_master.chat.characters import Character
+
+    if not who:
+        return ([gr.update(visible=False), gr.update(), gr.update(), gr.update(), gr.update(),
+                 gr.update(), gr.update(), gr.update(), gr.update()]
+                + [ui.notice("Choose a character to edit, or press New.", "warn")])
+    try:
+        loaded = _characters().load(who)
+    except Exception as exc:
+        return ([gr.update(visible=False)] + [gr.update()] * 8
+                + [ui.notice(ui.failure(exc), "error")])
+    blank = Character(name="")
+    return [gr.update(visible=True), loaded.name, loaded.context, loaded.greeting,
+            loaded.system or "",
+            _decimal(loaded.temperature, blank.temperature),
+            _decimal(loaded.top_p, blank.top_p),
+            _number(loaded.max_reply_tokens, blank.max_reply_tokens),
+            _number(loaded.seed, blank.seed),
+            ui.notice(f"Editing {loaded.name}. Save writes it back; changing the name saves it "
+                      f"under the new one.")]
+
+
+def _new_character():
+    return (gr.update(visible=True), "", "", "", "",
+            ui.notice("Fill in a name and press Save character to create it."))
 
 
 def _save_character(previous, name, context, greeting, system, temperature, top_p,
@@ -611,10 +1141,6 @@ def _save_character(previous, name, context, greeting, system, temperature, top_
         return gr.update(), ui.notice(ui.failure(exc), "error")
     return (gr.update(choices=_character_choices(), value=character.name),
             ui.notice(f"Saved {character.name}."))
-
-
-def _new_character():
-    return "", "", "", "", ui.notice("Fill in a name and save to create the character.")
 
 
 def _delete_character(who):

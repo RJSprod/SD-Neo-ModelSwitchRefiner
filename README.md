@@ -1101,17 +1101,62 @@ extensions independently unloading things from the same GPU is how you get a
 checkpoint evicted for an LLM that then evicts itself for the checkpoint. Model
 Chain already owns image residency, so it owns the LLM's too.
 
-### Three modes, three products
+### Four modes
 
 | Mode | What it is |
 | --- | --- |
 | **Prompt Studio** | LTX video-prompt generation. Text-to-video and image-to-video, a positive and a negative prompt as two separate outputs, the smart-negative second pass, and the full control set — style, motion, camera, transition, POV, wardrobe, accent and strength, dialogue budget, extra speech, music, duration, FPS, dimensions, output format, lexicon, extra negative terms and seed. |
-| **Conversation** | Threaded chat with persistent histories. Characters are files in a `characters/` folder in the layout oobabooga uses, so cards import and export; chats are documents filed per character. New, rename, filter, branch and delete threads; edit characters and your own persona; attach an image when the running model has a vision projector. |
+| **Conversation** | Threaded chat with persistent histories, and per-message actions. Characters are files in a `characters/` folder in the layout oobabooga uses, so cards import and export; chats are documents filed per character. |
 | **MiniMax H3** | The prompt enhancer, as its own workflow. FL2VA and REF2VA variants, an optional reference frame that is captioned first and shown to you, and its own history. |
+| **Setup** | The runtime, which GGUF runs, what context fits, and what is currently resident on the card. Everything here needs a file dialog, a download, an estimate or a table — the plain values live on the Settings page instead. |
 
 They share one loaded model and one runtime. They do not share a history, an
 output format, or a screen. Switching modes hides a workspace rather than
 rebuilding it, so a half-read reply survives a trip to Prompt Studio and back.
+The tab opens on the mode you left it on.
+
+### Switching models
+
+The top of the tab carries the only three controls a model switch needs day to
+day: a **chooser**, **Load** and **Unload**.
+
+The chooser lists every `.gguf` under your models folder — the **LLM models
+folder** setting, or `models/` inside the LLM data directory — walked a few
+levels deep so a `publisher/repo/model.gguf` layout is found, with vision
+projectors and every shard of a split model but the first left out, because
+neither is something you would choose to *run*. Whatever is recorded right now
+is always in the list too, even when it lives somewhere else entirely.
+
+Choosing records the model; it does not load it. **Load** starts llama-server
+on what is recorded and reports where it landed — the placement, the context it
+got, and anything that had to be reduced to fit. **Unload** stops it and gives
+back every byte of VRAM. Both are also what happens on their own when you send
+a message or when an image generation needs the card, so the buttons are for
+when you want to decide rather than for making it work.
+
+Switching model does not carry the vision projector across, and does not guess
+one from the new model's folder. A projector has to match the model it was made
+for and a filename does not prove that it does; one sitting beside the new model
+is mentioned, and applying it is a press in **Setup**.
+
+### Conversation, per message
+
+Click a message in the transcript and the actions for that message appear under
+it:
+
+| Action | What it does |
+| --- | --- |
+| **Edit** | Rewrite the message in place. The version showing is the one changed. |
+| **Regenerate** | Ask for the reply again, keeping the one it had. `◀ 2/3 ▶` pages between attempts, so one that came back worse is undone rather than re-rolled. |
+| **Continue** | Carry the last reply on from exactly where it stopped. |
+| **Send again from here** | Answer one of your own messages again, dropping everything after it. |
+| **Branch from here** | Copy the thread up to this message into a new one. The thread it came from is untouched. |
+| **Delete message** / **Delete from here** | One message, or that one and everything after it. |
+
+The threads list, the character (chat with, edit, or create) and your persona
+are in a drawer behind **☰ Threads & character**, closed by default — with it
+closed the conversation has the whole browser window. The transcript itself
+sizes to the window: the page does not scroll, the thread does.
 
 ### What runs it
 
@@ -1135,9 +1180,9 @@ runtime, weights, characters and chats — rather than downloaded again.
 
 ### First-time setup
 
-Everything is under **Models, hardware and memory**, and it is two steps in
-order: a runtime, then a model. There is nothing to run a GGUF with until the
-first one is done, so the panel does that one first.
+Everything is in **Setup**, and it is two steps in order: a runtime, then a
+model. There is nothing to run a GGUF with until the first one is done, so the
+panel does that one first.
 
 **1. llama.cpp runtime.** Three routes, and the panel tells you which apply:
 
@@ -1176,6 +1221,12 @@ first, because that is the one llama.cpp wants. Whatever it works out is
 written back into the box, so what was recorded is always visible.
 
 ### Context, and what it costs
+
+Context sizing, the buffer, the context size and the two key/value cache types
+are on the WebUI's **Settings** page under **Model Chain**, with the residency
+settings below. They describe the installation rather than any one generation,
+so the host stores them with the rest of its configuration and they survive a
+restart. **Setup** shows what they add up to.
 
 Three budgets, kept separate because they behave differently:
 
@@ -1283,7 +1334,7 @@ mc_llm_native.py      the operating system's own file dialog
 mc_llm_setup.py       getting a llama.cpp runtime in place
 mc_llm_state.py       shared preferences + the two mode histories
 mc_llm_sessions.py    the three run orchestrations, as streaming generators
-mc_llm_studio.py      the LLM Studio tab shell, status and settings panel
+mc_llm_studio.py      the LLM Studio tab shell, model chooser and Setup mode
 mc_llm_prompt_panel.py     Prompt Studio workspace
 mc_llm_chat_panel.py       Conversation workspace
 mc_llm_minimax_panel.py    MiniMax H3 workspace

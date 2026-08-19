@@ -37,7 +37,21 @@ logger = logging.getLogger("model_chain")
 
 OPT_ROOT = "model_chain_llm_root"
 
+OPT_MODELS = "model_chain_llm_models_dir"
+"""Where the tab's model chooser looks for GGUFs.
+
+Separate from :data:`OPT_ROOT` because the two answer different questions. The
+root is where this extension *keeps* things -- the runtime it starts, the
+characters and chats it writes. A models folder is somewhere a user already
+has twenty gigabytes of weights, very often on another drive and very often
+shared with another front end, and asking them to move it in to be able to
+pick from a list would be the wrong way round.
+"""
+
 DIRNAME = "model_chain_llm"
+
+MODELS_DIRNAME = "models"
+"""Where the provisioner puts a downloaded model, and so the default to scan."""
 
 ROOT_ENV = "PROMPT_MASTER_ROOT"
 """Upstream's own name for this, from ``prompt_master.core.paths``.
@@ -59,6 +73,19 @@ def data_root() -> Path:
         return Path(str(configured)).expanduser().resolve()
 
     return (_webui_data_path() / DIRNAME).resolve()
+
+
+def models_root() -> Path:
+    """The folder the tab's model chooser scans.
+
+    The setting when there is one, and the folder provisioning downloads into
+    otherwise -- so an installation that has only ever used the pinned model
+    still opens the chooser on something rather than on nothing.
+    """
+    configured = _setting(OPT_MODELS)
+    if configured:
+        return Path(str(configured)).expanduser().resolve()
+    return data_root() / MODELS_DIRNAME
 
 
 def app_paths():
