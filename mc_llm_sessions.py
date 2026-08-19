@@ -215,6 +215,26 @@ def _client(needs_vision: bool):
     return mc_llm_runtime.runtime.client(needs_vision)
 
 
+def _preparing() -> str:
+    """What to say before asking for a client, which may not start anything.
+
+    Every mode used to announce "Starting llama-server…" before every request,
+    which was true when every request restarted the server and is a lie now
+    that a warm one is handed back untouched. The distinction is worth a
+    branch rather than a vaguer sentence that covers both: a cold start is
+    twenty seconds of reading weights and the reason the tab looks stuck, and
+    somebody watching it deserves to know which of the two they are waiting
+    for.
+    """
+    try:
+        if mc_llm_runtime.runtime.running():
+            return "Preparing…"
+    except Exception:  # a runtime that cannot say is a runtime about to start
+        logger.debug("Model Chain: could not ask the LLM runtime whether it is up",
+                     exc_info=True)
+    return "Starting llama-server…"
+
+
 def _placement_notes() -> list[Event]:
     """Report anything negotiation changed (section 13)."""
     report = mc_llm_runtime.runtime.report
@@ -250,7 +270,7 @@ def _prompt_studio(request, cancel: Cancellation):
             return
 
         needs_vision = bool(request.image_data_url) and request.video_mode == "i2v"
-        yield Event(STATUS, "Starting llama-server…")
+        yield Event(STATUS, _preparing())
         client = _client(needs_vision)
         for event in _placement_notes():
             yield event
@@ -386,7 +406,7 @@ def _conversation(request: ChatRequest, cancel: Cancellation):
             yield Event(CANCELLED, "Cancelled")
             return
 
-        yield Event(STATUS, "Starting llama-server…")
+        yield Event(STATUS, _preparing())
         client = _client(request.needs_vision)
         for event in _placement_notes():
             yield event
@@ -439,7 +459,7 @@ def _minimax(prompt: str, variant: str, image: str | None, seed: int,
             yield Event(CANCELLED, "Cancelled")
             return
 
-        yield Event(STATUS, "Starting llama-server…")
+        yield Event(STATUS, _preparing())
         client = _client(image is not None)
         for event in _placement_notes():
             yield event
@@ -518,10 +538,19 @@ def _traced(label: str, events):
     A ``yield from`` and not a loop, so that closing the outer generator —
     which is what Gradio's ``cancels=`` does — still closes the inner one and
     still runs the ``finally`` that gives the GPU back.
+
+    "Abandoned" is only said about a run that was actually abandoned. Gradio
+    closes a handler's generator once it has consumed the last event, so a run
+    that finished normally raises ``GeneratorExit`` here a moment after saying
+    it was complete — and a console that reported both read as though every
+    reply had gone wrong at the end. What is worth a line is the other case:
+    the tab was closed, or the queue dropped the request, while the run still
+    had work to do.
     """
     started = time.monotonic()
     streamed = 0
     spoke_at = started
+    finished = False
     logger.info("Model Chain: LLM run started — %s", label)
     try:
         for event in events:
@@ -535,19 +564,23 @@ def _traced(label: str, events):
             elif event.kind == STATUS:
                 logger.info("Model Chain: LLM %s — %s", label, event.text)
             elif event.kind == DONE:
+                finished = True
                 logger.info("Model Chain: LLM run finished — %s, %s characters in %.1fs",
                             label, f"{max(streamed, len(event.text or '')):,}",
                             time.monotonic() - started)
             elif event.kind == CANCELLED:
+                finished = True
                 logger.info("Model Chain: LLM run cancelled — %s after %.1fs",
                             label, time.monotonic() - started)
             elif event.kind == FAILED:
+                finished = True
                 logger.warning("Model Chain: LLM run failed — %s after %.1fs: %s",
                                label, time.monotonic() - started, event.text)
             yield event
     except GeneratorExit:
-        logger.info("Model Chain: LLM run abandoned — %s after %.1fs",
-                    label, time.monotonic() - started)
+        if not finished:
+            logger.info("Model Chain: LLM run abandoned — %s after %.1fs",
+                        label, time.monotonic() - started)
         raise
 
 

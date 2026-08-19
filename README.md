@@ -1172,6 +1172,16 @@ to the window: the composer is measured first and sits on the bottom edge, the
 transcript takes whatever is left, and the page does not scroll — the thread
 does.
 
+### While it is working
+
+A two-pixel bar sweeps along the bottom of the status line whenever a request is
+in flight, with the seconds it has been running beside it, and both go away when
+the run ends. It sits inside the status line that is already there, so nothing
+on the page moves when a reply starts. It is indeterminate on purpose — nothing
+knows how long a reply will be — and under `prefers-reduced-motion` it stops
+moving and stays lit. In the top bar, the state chip pulses while the model is
+loading.
+
 ### What the console says
 
 Every run reports itself to the WebUI console: llama-server starting with the
@@ -1310,6 +1320,18 @@ bug rather than a setting.
 
 Whatever gets reduced is reported. If your 128k context became 24k to fit
 alongside a checkpoint, the status line says so.
+
+**A server that is up stays up.** Placement is decided when llama-server is
+started, not before every message. Once it is running, a message is answered by
+the server that is already there — which is what keeps llama.cpp's prompt cache,
+so a reply reads the message you just sent instead of reprocessing the whole
+conversation. It is replaced when you change something (the model, the device,
+the offload, the context, the cache types), when the image side takes the VRAM
+back, or when the card has since freed up enough to put meaningfully more of the
+model on it than it is running now. It is never replaced with a *smaller*
+placement: a running server holds its VRAM whether or not it is using all of it,
+so moving it into a corner of the card frees nothing — when the image side needs
+that memory it says so, and the server stops.
 
 When the image side does need the VRAM back, you choose what happens to the LLM:
 stop the server, which releases every byte and leaves the weights warm in the

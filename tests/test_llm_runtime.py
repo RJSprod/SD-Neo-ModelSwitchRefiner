@@ -36,8 +36,13 @@ def placed(host, tmp_path, monkeypatch):
 def configure(monkeypatch, tmp_path, *, context=8192, mode="fixed", blocks=32,
               size_mb=4, gpu_layers="all", ceiling=131072):
     model = build_model(tmp_path, blocks=blocks, size_mb=size_mb, context=ceiling)
+    # Written rather than merely named: ``Runtime.client`` refuses to start a
+    # server whose executable is not there, which is the check that turns a
+    # half-finished setup into a sentence instead of a traceback.
+    server = tmp_path / "llama-server"
+    server.write_bytes(b"")
     configuration = runtime.Config(
-        runtime=tmp_path / "llama-server", model=model, mmproj=None, gpu_index=0,
+        runtime=server, model=model, mmproj=None, gpu_index=0,
         device="CUDA0", gpu_layers=gpu_layers, context_size=context, context_mode=mode,
         context_buffer_gb=4.0, kv_type_k="f16", kv_type_v="f16")
     monkeypatch.setattr(runtime, "config", lambda: configuration)
@@ -283,3 +288,174 @@ class TestPreview:
 
         assert negotiated.placement.context < 131072
         assert negotiated.notes
+
+
+# --------------------------------------------------------------------------- #
+# A server that is already running
+# --------------------------------------------------------------------------- #
+#
+# Everything below is one bug, seen from four sides. Placement is decided from
+# free VRAM; a running llama-server is *why* free VRAM is low; so re-deciding a
+# placement before every message read the model's own footprint as somebody
+# else's and placed the next server in the gap it had just left. Each answer
+# differed from the last, each difference stopped the server and started
+# another one, and a card that had been holding all thirty layers ended up
+# running two of them with the rest in system RAM -- while every restart also
+# threw away llama.cpp's prompt cache, so each reply reprocessed the whole
+# conversation before it wrote a word.
+
+
+class FakeProcess:
+    """A llama-server that starts instantly and holds nothing."""
+
+    def __init__(self, started: list):
+        self._started = started
+        self.port = 8080
+        self.api_key = "test"
+        self.alive = False
+
+    def start(self, *args, **kwargs):
+        self._started.append((args, kwargs))
+        self.alive = True
+
+    def wait_ready(self, timeout=0):
+        return None
+
+    def stop(self):
+        self.alive = False
+
+    @property
+    def running(self) -> bool:
+        return self.alive
+
+
+@pytest.fixture
+def server(monkeypatch, tmp_path):
+    """A runtime whose processes are fakes, and the log of what it started."""
+    import mc_llm_paths
+
+    monkeypatch.setattr(mc_llm_paths, "data_root", lambda: tmp_path / "data")
+    started: list = []
+    managed = runtime.Runtime()
+    monkeypatch.setattr(managed, "_new_process", lambda: FakeProcess(started))
+    yield managed, started
+    managed.stop()
+
+
+class TestAServerThatIsAlreadyRunning:
+    def test_its_own_vram_is_not_read_as_somebody_else_s(self, placed, tmp_path, monkeypatch):
+        """The whole bug, as arithmetic. 17 GB of the card is this model; a
+        negotiation told only about the 5 GB beside it demotes the model that
+        is already there to a corner of the card it is holding all of."""
+        configuration = configure(monkeypatch, tmp_path, context=8192, size_mb=64)
+        set_free(monkeypatch, 0.2)
+
+        blind = runtime.negotiate(configuration)
+        knowing = runtime.negotiate(configuration, already_ours=8 * _GB)
+
+        assert blind.placement.gpu_layers != ctx.ALL_LAYERS  # degraded, as it must be
+        assert knowing.placement.gpu_layers == ctx.ALL_LAYERS
+        assert not knowing.degraded
+
+    def test_a_second_request_reuses_the_server_rather_than_replacing_it(self, placed, server,
+                                                                        tmp_path, monkeypatch):
+        managed, started = server
+        configure(monkeypatch, tmp_path, gpu_layers="all")
+        set_free(monkeypatch, 20)
+
+        managed.client()
+        first = managed._process
+        managed.client()
+
+        assert len(started) == 1
+        assert managed._process is first
+
+    def test_the_card_filling_up_underneath_it_does_not_restart_it(self, placed, server,
+                                                                   tmp_path, monkeypatch):
+        """The reading that used to cause the thrash, made harmless. Free VRAM
+        collapses between two messages -- which is what it looks like from the
+        outside when the model itself is what is holding the card -- and the
+        server that is running is left exactly where it is."""
+        managed, started = server
+        configure(monkeypatch, tmp_path, gpu_layers="all")
+        set_free(monkeypatch, 20)
+        managed.client()
+
+        set_free(monkeypatch, 0.5)
+        managed.client()
+
+        assert len(started) == 1
+
+    def test_a_server_that_could_now_hold_more_is_replaced(self, placed, server, tmp_path,
+                                                           monkeypatch):
+        """The other half of the same rule. A placement that was degraded when
+        it was made is not permanent: once the card has room, one restart buys
+        back every layer, and that restart is worth what it costs."""
+        managed, started = server
+        configure(monkeypatch, tmp_path, gpu_layers="all", size_mb=64)
+        set_free(monkeypatch, 0.2)
+        managed.client()
+        assert managed._placement.gpu_layers != ctx.ALL_LAYERS
+
+        set_free(monkeypatch, 20)
+        managed.client()
+
+        assert len(started) == 2
+        assert managed._placement.gpu_layers == ctx.ALL_LAYERS
+
+    def test_changing_the_model_still_replaces_it(self, placed, server, tmp_path, monkeypatch):
+        """Settings are not placements. What the user chose is always honoured
+        at once; only what the arithmetic chose is held on to."""
+        managed, started = server
+        configure(monkeypatch, tmp_path, gpu_layers="all")
+        set_free(monkeypatch, 20)
+        managed.client()
+
+        configure(monkeypatch, tmp_path, gpu_layers="all", context=4096, mode="fixed")
+        managed.client()
+
+        assert len(started) == 2
+
+    def test_a_warm_turn_asks_the_image_side_for_nothing(self, placed, server, tmp_path, host,
+                                                         monkeypatch):
+        """Exclusive mode is a promise about who owns the card, and it is kept
+        when the server is placed. Re-sweeping before every message afterwards
+        evicts a checkpoint the LLM already has room beside, and buys nothing:
+        the VRAM this turn needs is VRAM this turn is already holding."""
+        host.shared.opts.set(mc_broker.OPT_MODE, mc_broker.MODE_EXCLUSIVE)
+        managed, _ = server
+        configure(monkeypatch, tmp_path, gpu_layers="all")
+        set_free(monkeypatch, 20)
+        managed.client()
+
+        image = Recorder(holds=8 * _GB)
+        mc_broker.register_reclaimer(mc_broker.FAMILY_IMAGE, image)
+        managed.client()
+
+        assert image.calls == []
+
+
+class TestWorthRestarting:
+    def test_more_layers_is_worth_it(self):
+        assert runtime._worth_restarting(ctx.Placement(gpu_layers=6, context=8192),
+                                         ctx.Placement(gpu_layers=ctx.ALL_LAYERS, context=8192),
+                                         30)
+
+    def test_fewer_layers_never_is(self):
+        """A running server holds its VRAM whether or not it is using all of
+        it, so placing it smaller frees nothing anybody asked for -- the image
+        side asks through ``release``, which stops the process outright."""
+        assert not runtime._worth_restarting(ctx.Placement(gpu_layers=ctx.ALL_LAYERS),
+                                             ctx.Placement(gpu_layers=2), 30)
+
+    def test_a_little_more_context_is_not_worth_a_reload(self):
+        assert not runtime._worth_restarting(ctx.Placement(context=7168),
+                                             ctx.Placement(context=8192))
+
+    def test_a_quarter_more_context_is(self):
+        assert runtime._worth_restarting(ctx.Placement(context=8192),
+                                         ctx.Placement(context=32768))
+
+    def test_coming_back_off_system_ram_is(self):
+        assert runtime._worth_restarting(ctx.Placement(on_gpu=False),
+                                         ctx.Placement(gpu_layers=ctx.ALL_LAYERS), 30)

@@ -798,3 +798,152 @@ Ctrl+C already do — and it was one more thing between two bubbles that are mea
 to read as a conversation. There is no Copy in the action bar either: a server
 cannot write to a clipboard, and a button that needs its own JavaScript to do
 what selecting text already does is not worth the line.
+
+## 9. The conversation that got slower with every message (19 August 2026)
+
+A chat session with no image generation anywhere in it, in Exclusive mode, on a
+24 GB card. Three replies, 35 s, 94 s and counting, and the console said why —
+without anybody noticing what it was saying:
+
+```
+LLM a conversation reply — Starting llama-server…
+starting llama-server — Q4_K_M …, 6 layers on the GPU, 8,192 token context
+offload reduced to 6 of 30 layers on the GPU; the rest run from system RAM
+…
+LLM a conversation reply — Starting llama-server…
+llama-server stopped — making way for a new placement
+starting llama-server — Q4_K_M …, all layers on the GPU, 7,168 token context
+llama-server ready — all layers on the GPU, 7,168 token context, 17.3 GB VRAM
+…
+LLM a conversation reply — Starting llama-server…
+llama-server stopped — making way for a new placement, 17.3 GB of VRAM released
+starting llama-server — Q4_K_M …, 2 layers on the GPU, 8,192 token context
+```
+
+Every message restarted the server. Every restart placed it worse than the last
+one. The third reply was running two of thirty layers on a card that had been
+holding all thirty a minute earlier.
+
+### 9.1 A model negotiating against its own footprint
+
+`negotiate` decides a placement from `mc_broker.free_vram_bytes()`, and
+`Runtime.client` compares what it decided against the placement the running
+server was started with. Different answer, different signature, restart. That
+is the right shape when the question is asked once. It is a trap when it is
+asked before every message, because **a running llama-server is the reason free
+VRAM is low**. 17.3 GB of the card was this model; the negotiation was told
+about the 5.5 GB beside it, concluded that the model would not fit, and placed
+it in the gap it was about to leave — two layers, and the other twenty-eight in
+system RAM. The next message asked again, from a card that now had 22 GB free
+because the model was no longer on it, and swung back the other way.
+
+Two costs, and the second is the larger one. Layers in system RAM are slow, and
+that is visible in the log. What is not visible is that a restart throws away
+llama.cpp's prompt cache: the server keeps the processed prefix of the previous
+turn, so an ordinary reply only reads the new message. A replaced server reads
+the *whole conversation* again before it writes a word — which is what
+`generating, 1 characters in 67s` is a picture of.
+
+So the negotiation is now told what it already owns. `already_ours` is added to
+free VRAM in every fit calculation, and it is only ever correct because of what
+the caller does next: every path that acts on the answer stops the running
+server before it starts another one, so those bytes really are free by the time
+anything is placed in them. With that one term, the same reading of the same
+card gives the same answer twice running, which is all the stability the
+comparison downstream ever needed.
+
+Setup's estimator takes the same term, for the same reason and with the same
+consequence if it does not: a table drawn while the model is loaded read the
+card it is loaded on as a card with no room, and reported that the model
+currently answering at 7,168 tokens could not be given a context at all.
+
+### 9.2 Settings are honoured at once; arithmetic is not
+
+The comparison itself changed shape too, because "the answer came out
+different" and "the user asked for something different" had been the same test.
+They are now two:
+
+- **`_identity`** — the runtime, the model, the projector, the device, the
+  offload and context the user chose, the KV types. Change any of these and the
+  server is replaced immediately, as it must be.
+- **`_worth_restarting`** — everything the card decided. More layers than the
+  server is running, or a quarter more context, is worth a reload. Anything
+  *less* is not worth anything: a running server holds its VRAM whether or not
+  it is using all of it, so re-placing it smaller frees nothing anybody asked
+  for. The image side has its own way of asking, and it is `release`, which
+  stops the process outright.
+
+A warm turn therefore costs a tuple comparison and one read of the model's
+header, and asks the image side for nothing at all. That last part is a real
+change in Exclusive mode, which used to sweep the image family before every
+message: the sweep happens when the LLM is *placed*, which is when ownership of
+the card actually changes hands. Re-sweeping before a message that is about to
+be answered out of VRAM the LLM is already holding evicts a checkpoint to buy
+nothing.
+
+The recovery path is the same rule read the other way. A placement made while
+the card was full is not permanent: `_outgrown` re-checks it before each
+request with `reclaim=False` — a preview may never evict anything to answer a
+question — and one restart buys back every layer once there is room for them.
+
+### 9.3 Three things the console was saying wrongly
+
+Fixed alongside, because all three cost time in reading the log above:
+
+- **"LLM run abandoned"** after every completed reply. Gradio closes a
+  handler's generator once it has consumed the last event, so `GeneratorExit`
+  arrives a moment after the run says it is complete. Only a run that had not
+  finished is abandoned now.
+- **"Starting llama-server…"** before every message. True when every message
+  restarted it. A warm turn says `Preparing…`.
+- **"on NVIDIA GeForce RTX 3090 (24575 MiB, 23304 MiB free)"** beside a live
+  placement decision. That parenthetical is part of the device name recorded
+  during setup and is a snapshot of a moment months ago; sitting in the same
+  sentence as the placement it appears to explain, it is the number a person
+  debugging that placement will believe. The name is kept, the parenthetical is
+  dropped, and the line says what was actually free when the decision was made.
+
+### 9.4 The activity bar
+
+The other half of the same report: with a minute between a message and its
+reply, nothing on the page said the request was alive.
+
+It is two pixels along the bottom edge of the status line that is already
+there, so a reply starting moves nothing — not the transcript, not the
+composer. It is indeterminate, because nothing on the server knows how many
+tokens a reply will run to and a bar filling towards an invented number is a
+worse answer than one that only claims the request is alive. `ui.working` is
+`ui.notice` plus one class, so a theme that styles status lines styles this
+one, and the bar is the only difference between them.
+
+Which lines get it is a decision about truth rather than decoration. A busy
+line is one a run is still working behind: "Starting…", "Waiting for image
+generation…", "Replying…", and "Stopping…" — a stop asks the run to finish and
+what is already streaming keeps arriving until it does. "Reply complete.",
+"Cancelled." and every error are `ui.notice`, because a bar still sweeping
+under a finished run says the opposite of the sentence printed beside it. The
+top bar's state chip does the same thing where there is room for a dot and not
+for a bar: `Loading…` pulses.
+
+Two details are worth their lines. The bar is a `<span>` this extension emits
+rather than a `::after` on the status line, for the reason the rest of the
+stylesheet gives about the host's progress bar and `tests/test_progress.py`
+then holds the whole file to — a pseudo-element may already be somewhere a
+theme is drawing. And under `prefers-reduced-motion` it is reduced rather than
+removed, for the reason the ooze theme is: it is the only thing on the page
+saying the request is still alive, and a ninety-second request is exactly when
+somebody needs to be told. The sweep becomes a still bar along the whole edge.
+
+The elapsed count beside it is in `llm_studio.js`, and that is not an arbitrary
+split. The server could have written the number; it could not have kept
+writing it, because a status is repainted when the run yields and the whole
+complaint was runs that yield nothing for a minute while a server loads and
+reprocesses a prompt. A clock that stops during the wait it exists to measure
+is worse than no clock. The bar is CSS and runs without the file; the number is
+the one thing here that needs a second to be able to pass without a round trip.
+Where the clock is *kept* is the part with a bug in it, and the part the tests
+drive: a run's status line is replaced wholesale every time the run says
+something new — "Starting…" and "Replying…" are separate elements, not one
+element with two texts — so a start time stored on the line resets at each of
+them and a ninety-second reply reads as five. It is kept on the component,
+which survives the run, and cleared when the line stops being busy.

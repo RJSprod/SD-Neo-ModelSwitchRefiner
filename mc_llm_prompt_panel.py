@@ -296,7 +296,7 @@ def _generate(intent, image_path, *values):
 
     cancel = sessions.Cancellation()
     positive_text, negative_text = "", ""
-    yield cancel, "", "", ui.notice("Starting…"), *busy
+    yield cancel, "", "", ui.working("Starting…"), *busy
 
     try:
         for event in sessions.prompt_studio(request, cancel):
@@ -310,7 +310,7 @@ def _generate(intent, image_path, *values):
                 negative_text = event.text
                 yield cancel, positive_text, negative_text, gr.update(), *busy
             elif event.kind == sessions.STATUS:
-                yield cancel, positive_text, negative_text, ui.notice(event.text), *busy
+                yield cancel, positive_text, negative_text, ui.working(event.text), *busy
             elif event.kind == sessions.DONE:
                 _remember(settings, request, positive_text, negative_text)
                 yield cancel, positive_text, negative_text, ui.notice(event.text), *idle
@@ -334,7 +334,7 @@ def _cancel(cancel):
     """Stop the run. Cheap, queue-free, and safe to press twice."""
     if cancel is not None:
         cancel.cancel()
-    return ui.notice("Stopping…", "warn")
+    return ui.working("Stopping…", "warn")
 
 
 def _remember(settings: dict, request, positive: str, negative: str) -> None:

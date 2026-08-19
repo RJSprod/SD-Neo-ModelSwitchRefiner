@@ -154,7 +154,7 @@ def _enhance(prompt, variant, image_path, seed):
 
     cancel = sessions.Cancellation()
     text, described = "", ""
-    yield cancel, "", hidden, ui.notice("Starting…"), *busy
+    yield cancel, "", hidden, ui.working("Starting…"), *busy
 
     try:
         for event in sessions.minimax(prompt.strip(), variant, attachment, resolved, cancel):
@@ -164,9 +164,9 @@ def _enhance(prompt, variant, image_path, seed):
             elif event.kind == sessions.CAPTION:
                 described = event.text
                 yield (cancel, text, gr.update(value=described, visible=True),
-                       ui.notice("Image described."), *busy)
+                       ui.working("Image described."), *busy)
             elif event.kind == sessions.STATUS:
-                yield cancel, text, gr.update(), ui.notice(event.text), *busy
+                yield cancel, text, gr.update(), ui.working(event.text), *busy
             elif event.kind == sessions.DONE:
                 text = event.text
                 _remember(prompt, variant, described, text, resolved, image_path)
@@ -189,7 +189,7 @@ def _enhance(prompt, variant, image_path, seed):
 def _cancel(cancel):
     if cancel is not None:
         cancel.cancel()
-    return ui.notice("Stopping…", "warn")
+    return ui.working("Stopping…", "warn")
 
 
 def _structure(variant):

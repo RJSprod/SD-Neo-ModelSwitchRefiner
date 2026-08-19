@@ -95,6 +95,9 @@ globalThis.innerHeight = WINDOW_HEIGHT;
 globalThis.scrollY = SCROLLED;
 globalThis.addEventListener = () => {};
 globalThis.setTimeout = (fn) => { fn(); return 0; };
+// Swallowed rather than run: a real interval keeps node alive after the
+// harness has printed its answer, and neither harness is about the clock.
+globalThis.setInterval = () => 0;
 globalThis.MutationObserver = function () { this.observe = () => {}; };
 globalThis.gradioApp = () => globalThis.document;
 
@@ -224,6 +227,9 @@ globalThis.innerHeight = 900;
 globalThis.scrollY = 0;
 globalThis.addEventListener = () => {};
 globalThis.setTimeout = (fn) => { fn(); return 0; };
+// Swallowed rather than run: a real interval keeps node alive after the
+// harness has printed its answer, and neither harness is about the clock.
+globalThis.setInterval = () => 0;
 globalThis.MutationObserver = function (callback) {
     mutations.push(callback);
     this.observe = () => {};
@@ -308,3 +314,127 @@ class TestAnchoringTheTranscript:
         landed = arrival(start=0, reader=None, grown=1600)
 
         assert landed["scrollTop"] == 1600
+
+
+# --------------------------------------------------------------------------- #
+# The elapsed-time readout
+# --------------------------------------------------------------------------- #
+#
+# The rule worth executing is not the formatting, it is *where the clock is
+# kept*. A run's status line is replaced wholesale every time the run says
+# something new -- "Starting…", "Replying…" are three separate elements, not
+# one element with three texts -- so a start time stored on the line itself
+# resets at each of them, and a reply that took ninety seconds reads as having
+# taken five. It is kept on the component instead, which survives the run, and
+# is cleared when the run stops being busy. That is what these drive.
+
+CLOCK = """
+// A status component whose notice can be replaced under it, as Gradio replaces
+// it: a fresh object with the same class, exactly as a repaint produces.
+function notice() {
+    const children = [];
+    return {
+        className: "mc-llm-notice mc-llm-busy",
+        querySelector(selector) {
+            return children.find((child) => "." + child.className === selector) || null;
+        },
+        appendChild(child) { children.push(child); },
+    };
+}
+
+const status = {
+    dataset: {},
+    current: notice(),
+    querySelector(selector) {
+        return selector === ".mc-llm-busy" ? status.current : null;
+    },
+};
+
+const now = {value: 0};
+globalThis.Date = {now: () => now.value};
+globalThis.document = {
+    documentElement: {scrollTop: 0},
+    querySelector: (selector) => (selector === "#mc-llm-chat-status" ? status : null),
+    createElement: () => ({className: "", textContent: ""}),
+    addEventListener() {},
+    readyState: "complete",
+};
+globalThis.window = globalThis;
+globalThis.innerHeight = 900;
+globalThis.scrollY = 0;
+globalThis.addEventListener = () => {};
+globalThis.setTimeout = (fn) => { fn(); return 0; };
+globalThis.MutationObserver = function () { this.observe = () => {}; };
+globalThis.gradioApp = () => globalThis.document;
+
+let tick = () => {};
+globalThis.setInterval = (fn) => { tick = fn; return 0; };
+
+const loaded = [];
+globalThis.onUiLoaded = (fn) => loaded.push(fn);
+globalThis.onAfterUiUpdate = () => {};
+
+SOURCE
+
+loaded.forEach((fn) => fn());
+
+function readout() {
+    // null is the answer for a status line with no busy notice in it at all,
+    // which is what "the run has finished" looks like from here.
+    if (!status.current) return null;
+    const found = status.current.querySelector(".mc-llm-busy-elapsed");
+    return found ? found.textContent : null;
+}
+
+const written = [];
+STEPS.forEach((step) => {
+    now.value = step.at;
+    if (step.repaint) status.current = notice();
+    if (step.idle) status.current = null;
+    if (step.busy) status.current = notice();
+    tick();
+    written.push(readout());
+});
+console.log(JSON.stringify(written));
+"""
+
+
+def clock(steps: list[dict]) -> list:
+    """What the readout said at each step, driving the script's own timer."""
+    harness = (CLOCK.replace("SOURCE", SCRIPT.read_text())
+               .replace("STEPS", json.dumps(steps)))
+    result = subprocess.run(["node", "--input-type=module", "-e", harness],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+class TestTheElapsedReadout:
+    def test_a_reply_that_arrives_at_once_is_never_counted_at_all(self):
+        """Every request is "starting" for a moment. A readout that flickers
+        0s and vanishes is noise where the point was reassurance."""
+        assert clock([{"at": 0}, {"at": 1200}]) == ["", ""]
+
+    def test_it_counts_from_the_first_busy_line(self):
+        assert clock([{"at": 0}, {"at": 5000}]) == ["", "5s"]
+
+    def test_a_repainted_status_does_not_restart_the_clock(self):
+        """The whole bug this is shaped around: "Starting…", "Replying…" and
+        every progress line are separate elements, and the run is one run."""
+        written = clock([{"at": 0}, {"at": 40000, "repaint": True}])
+
+        assert written[-1] == "40s"
+
+    def test_minutes_are_read_as_minutes(self):
+        assert clock([{"at": 0}, {"at": 94500}])[-1] == "1m 34s"
+
+    def test_a_finished_run_stops_the_clock_and_the_next_one_starts_over(self):
+        written = clock([
+            {"at": 0},
+            {"at": 30000},
+            {"at": 31000, "idle": True},
+            {"at": 90000, "busy": True},
+            {"at": 95000},
+        ])
+
+        assert written == ["", "30s", None, "", "5s"]

@@ -889,6 +889,73 @@
     font-weight: 600;
 }
 
+/* -- the activity bar -----------------------------------------------------
+   Shown while a request is in flight and at no other time, and it costs the
+   layout nothing: the bar is a pseudo-element on the bottom edge of a status
+   line that is already there, so a reply starting does not move the
+   transcript, the composer or anything else by a pixel.
+
+   Indeterminate on purpose. Nothing on the server knows how many tokens a
+   reply will run to, and a bar that fills towards a number somebody invented
+   is a worse answer than one that only says the request is alive. What it is
+   answering is the question a still page asks -- "did that do anything?" --
+   and for that, movement is the whole of the information.
+
+   The colour is the host's accent and the geometry is two pixels, so a theme
+   decides what it looks like and no theme has to make room for it. */
+
+#mc-llm-studio .mc-llm-busy {
+    align-items: baseline;
+    display: flex;
+    gap: 0.6em;
+    overflow: hidden;
+    position: relative;
+}
+
+#mc-llm-studio .mc-llm-busy-text {
+    min-width: 0;
+}
+
+/* Right-aligned and quiet: it is a number to glance at when a reply is taking
+   longer than it should, not part of the sentence beside it. Written by
+   llm_studio.js, which is why it is empty and invisible without that file. */
+#mc-llm-studio .mc-llm-busy-elapsed {
+    color: var(--body-text-color-subdued, inherit);
+    flex: 0 0 auto;
+    font-variant-numeric: tabular-nums;
+    margin-left: auto;
+    opacity: 0.75;
+}
+
+/* An element and not a ``::after`` on the line above it. The rule the rest of
+   this file keeps -- and that tests/test_progress.py holds it to -- is that a
+   pseudo-element may already be somebody else's: Lobe draws into ::before and
+   ::after on the host's progress bar, and a second thing drawn there replaces
+   the theme's rather than layering with it. A span this extension emitted is
+   somewhere no theme has ever heard of. */
+#mc-llm-studio .mc-llm-busy-bar {
+    animation: mc-llm-busy-sweep 1.5s linear infinite;
+    background: linear-gradient(90deg,
+                                transparent,
+                                var(--color-accent, currentColor),
+                                transparent);
+    bottom: 0;
+    height: 2px;
+    left: 0;
+    position: absolute;
+    width: 40%;
+}
+
+@keyframes mc-llm-busy-sweep {
+    from {
+        transform: translateX(-110%);
+    }
+
+    to {
+        transform: translateX(260%);
+    }
+}
+
 /* -- the runtime state chip -----------------------------------------------
    One word and a dot, on one line, forever. The sentence it replaced was
    accurate and unreadable at a glance, and long enough to wrap the top bar
@@ -934,6 +1001,47 @@
     color: var(--error-text-color, var(--color-accent, inherit));
 }
 
+/* The state chip says the same thing in the top bar, where there is room for a
+   dot and not for a bar. */
+#mc-llm-studio .mc-llm-state-busy {
+    color: var(--color-accent, inherit);
+}
+
+#mc-llm-studio .mc-llm-state-busy .mc-llm-state-dot {
+    animation: mc-llm-busy-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes mc-llm-busy-pulse {
+    0%, 100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+
+    50% {
+        opacity: 0.35;
+        transform: scale(0.7);
+    }
+}
+
+/* Reduced rather than removed, for the reason the ooze theme is reduced rather
+   than removed: this is the only thing on the page saying a request is still
+   alive, and a request that runs to ninety seconds is exactly when somebody
+   needs to be told. So the sweep becomes a still bar along the whole edge --
+   "in progress", with nothing moving -- and the chip's dot holds its colour.
+
+   Here rather than in the accessibility block above, because a media query
+   adds no specificity: an override has to come after the rule it overrides. */
+@media (prefers-reduced-motion: reduce) {
+    #mc-llm-studio .mc-llm-busy-bar {
+        animation: none;
+        opacity: 0.6;
+        width: 100%;
+    }
+
+    #mc-llm-studio .mc-llm-state-busy .mc-llm-state-dot {
+        animation: none;
+    }
+}
 /* The status never grows the bar. If it somehow says more than it should, it
    is cut rather than allowed to wrap the row it lives in. */
 #mc-llm-studio .mc-llm-runtime-state {

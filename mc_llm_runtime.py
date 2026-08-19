@@ -202,7 +202,8 @@ class Negotiation:
 
 
 def negotiate(configuration: Config | None = None,
-              gguf: mc_gguf.Gguf | None = None, *, reclaim: bool = True) -> Negotiation:
+              gguf: mc_gguf.Gguf | None = None, *, reclaim: bool = True,
+              already_ours: int = 0) -> Negotiation:
     """Decide where the LLM goes, given what is on the card right now.
 
     ``reclaim=False`` answers the same question without moving anything, which
@@ -210,6 +211,16 @@ def negotiate(configuration: Config | None = None,
     panel is rendered when the tab is built and every time somebody opens the
     accordion, and a preview that evicted a checkpoint to show a table would be
     a far worse bug than any it was drawing attention to.
+
+    ``already_ours`` is VRAM a llama-server this module started is holding at
+    this moment. It is *free* for the purposes of every decision below, because
+    a re-placement stops that server before it starts the next one -- and a
+    negotiation that leaves it out reads its own footprint as somebody else's
+    and places the next server in the gap it left. That is not a rounding
+    error: a model resident in 17 GB negotiated against the 5 GB left beside it
+    demotes itself to two layers on the card and runs the rest from system RAM,
+    on a card that was holding all of it a second earlier. See
+    :func:`_free_vram`.
 
     The ladder, in order, and it is the order that encodes the policy:
 
@@ -234,7 +245,7 @@ def negotiate(configuration: Config | None = None,
         )
 
     described = gguf if gguf is not None else mc_gguf.describe(configuration.model)
-    wanted = _requested_placement(configuration, described)
+    wanted = _requested_placement(configuration, described, already_ours)
     notes: list[str] = []
 
     if not wanted.on_gpu:
@@ -247,11 +258,12 @@ def negotiate(configuration: Config | None = None,
     estimate = mc_llm_context.estimate(configuration.model, wanted, described)
 
     if reclaim and mc_broker.mode() == mc_broker.MODE_EXCLUSIVE:
-        mc_broker.request_vram(mc_broker.FAMILY_LLM, estimate.total_bytes,
+        mc_broker.request_vram(mc_broker.FAMILY_LLM,
+                               max(estimate.total_bytes - already_ours, 0),
                                reason="LLM took VRAM ownership (Exclusive mode)", margin=reserve)
         estimate = mc_llm_context.estimate(configuration.model, wanted, described)
 
-    if _fits(estimate, reserve):
+    if _fits(estimate, reserve, already_ours):
         return Negotiation(wanted, estimate, (), True)
 
     chosen = mc_broker.policy()
@@ -259,35 +271,37 @@ def negotiate(configuration: Config | None = None,
 
     if chosen == mc_broker.POLICY_LLM_PRIORITY:
         placement, estimate, freed = _ask_broker(configuration, placement, described, reserve,
-                                                 reclaim)
+                                                 reclaim, already_ours)
         if freed:
             notes.append(freed)
-        if _fits(estimate, reserve):
+        if _fits(estimate, reserve, already_ours):
             return Negotiation(placement, estimate, tuple(notes), True)
 
-    placement, estimate, shrunk = _shrink_context(configuration, placement, described, reserve)
+    placement, estimate, shrunk = _shrink_context(configuration, placement, described, reserve,
+                                                  already_ours)
     if shrunk:
         notes.append(shrunk)
-    if _fits(estimate, reserve):
+    if _fits(estimate, reserve, already_ours):
         return Negotiation(placement, estimate, tuple(notes), True)
 
     if chosen == mc_broker.POLICY_ADAPTIVE:
         placement, estimate, freed = _ask_broker(configuration, placement, described, reserve,
-                                                 reclaim)
+                                                 reclaim, already_ours)
         if freed:
             notes.append(freed)
-        if _fits(estimate, reserve):
+        if _fits(estimate, reserve, already_ours):
             return Negotiation(placement, estimate, tuple(notes), True)
 
-    placement, estimate, offloaded = _shrink_offload(configuration, placement, described, reserve)
+    placement, estimate, offloaded = _shrink_offload(configuration, placement, described, reserve,
+                                                     already_ours)
     if offloaded:
         notes.append(offloaded)
 
-    return Negotiation(placement, estimate, tuple(notes), _fits(estimate, reserve))
+    return Negotiation(placement, estimate, tuple(notes), _fits(estimate, reserve, already_ours))
 
 
-def _requested_placement(configuration: Config,
-                         gguf: mc_gguf.Gguf | None) -> mc_llm_context.Placement:
+def _requested_placement(configuration: Config, gguf: mc_gguf.Gguf | None,
+                         already_ours: int = 0) -> mc_llm_context.Placement:
     """The placement the user's settings ask for, before any negotiation."""
     from prompt_master.inference.device_detection import NO_OFFLOAD
 
@@ -314,7 +328,7 @@ def _requested_placement(configuration: Config,
         # context, rather than whatever number the state file happens to hold.
         weights = mc_llm_context.weights_bytes(gguf, placement) if gguf is not None else 0
         budget = mc_llm_context.automatic_buffer_bytes(
-            mc_broker.free_vram_bytes(), weights, mc_broker.safety_margin_bytes())
+            _free_vram(already_ours), weights, mc_broker.safety_margin_bytes())
         sized = mc_llm_context.context_for_budget(configuration.model, placement, budget)
         if sized >= MINIMUM_CONTEXT:
             placement = placement.with_context(sized)
@@ -332,11 +346,25 @@ def _capped(placement: mc_llm_context.Placement,
     return placement.with_context(gguf.context_length)
 
 
-def _fits(estimate: mc_llm_context.Estimate, reserve: int) -> bool:
-    return mc_broker.free_vram_bytes() >= estimate.total_bytes + reserve
+def _free_vram(already_ours: int = 0) -> int:
+    """Free VRAM, plus whatever a server of ours is holding while it is asked.
+
+    The addition is the whole of it, and it is only ever correct because of
+    what the caller does next: every path that acts on this number stops the
+    running server before it starts another one, so those bytes are free by the
+    time anything is placed in them. Nothing here may be used to decide that a
+    *running* placement fits, which is a different question with a different
+    answer -- see :meth:`Runtime.client`.
+    """
+    return mc_broker.free_vram_bytes() + max(int(already_ours), 0)
 
 
-def _ask_broker(configuration: Config, placement, gguf, reserve: int, reclaim: bool = True):
+def _fits(estimate: mc_llm_context.Estimate, reserve: int, already_ours: int = 0) -> bool:
+    return _free_vram(already_ours) >= estimate.total_bytes + reserve
+
+
+def _ask_broker(configuration: Config, placement, gguf, reserve: int, reclaim: bool = True,
+                already_ours: int = 0):
     """Ask the image side for room, or -- when previewing -- do not ask at all.
 
     A preview that declined to demote reports a placement that fits less well
@@ -347,16 +375,18 @@ def _ask_broker(configuration: Config, placement, gguf, reserve: int, reclaim: b
     estimate = mc_llm_context.estimate(configuration.model, placement, gguf)
     if not reclaim:
         return placement, estimate, ""
-    released = mc_broker.request_vram(mc_broker.FAMILY_LLM, estimate.total_bytes,
+    released = mc_broker.request_vram(mc_broker.FAMILY_LLM,
+                                      max(estimate.total_bytes - already_ours, 0),
                                       reason="an LLM request", margin=reserve,
                                       exclusive_sweep=False)
     estimate = mc_llm_context.estimate(configuration.model, placement, gguf)
     return placement, estimate, (released.describe() if released.moved_anything else "")
 
 
-def _shrink_context(configuration: Config, placement, gguf, reserve: int):
+def _shrink_context(configuration: Config, placement, gguf, reserve: int,
+                    already_ours: int = 0):
     """Lower the context until the cache fits what is free, or hit the floor."""
-    free = mc_broker.free_vram_bytes()
+    free = _free_vram(already_ours)
     estimate = mc_llm_context.estimate(configuration.model, placement, gguf)
     per_token = estimate.kv_bytes_per_token
     if per_token <= 0:
@@ -377,7 +407,8 @@ def _shrink_context(configuration: Config, placement, gguf, reserve: int):
             f"context reduced from {was:,} to {affordable:,} tokens to fit the free VRAM")
 
 
-def _shrink_offload(configuration: Config, placement, gguf, reserve: int):
+def _shrink_offload(configuration: Config, placement, gguf, reserve: int,
+                    already_ours: int = 0):
     """Move blocks off the card, which is section 13's graceful degradation.
 
     Reached only when a full-precision placement will not fit even at the
@@ -390,7 +421,7 @@ def _shrink_offload(configuration: Config, placement, gguf, reserve: int):
         return placement, mc_llm_context.estimate(configuration.model, placement, gguf), ""
 
     total = gguf.block_count
-    free = mc_broker.free_vram_bytes()
+    free = _free_vram(already_ours)
     for layers in range(total - 4, -1, -4):
         candidate = placement.with_layers(max(layers, 0))
         estimate = mc_llm_context.estimate(configuration.model, candidate, gguf)
@@ -413,6 +444,82 @@ def _shrink_offload(configuration: Config, placement, gguf, reserve: int):
 
 RESIDENCY_KEY = "llm:llama.cpp"
 
+CONTEXT_UPGRADE_FRACTION = 0.25
+"""How much more context has to be available before a running server is replaced.
+
+A restart is not free -- it re-reads the weights, and it throws away llama.cpp's
+prompt cache, so the next reply pays for the whole conversation to be processed
+again from the first token. A few hundred tokens of extra window is not worth
+that; a quarter more of it is. The asymmetry is deliberate: this is only ever
+consulted about placing *more* on the card, never less.
+"""
+
+
+def _device_label(configuration: Config) -> str:
+    """The card's name, without the numbers recorded beside it during setup.
+
+    ``gpu_device_name`` is stored once, when the device was detected, and it
+    carries a snapshot of that moment's free VRAM inside it: "NVIDIA GeForce
+    RTX 3090 (24575 MiB, 23304 MiB free)". Printed months later beside a
+    placement decision that was made from a live reading, it is not merely
+    stale -- it is the number a person debugging a placement will believe,
+    sitting in the same sentence as the placement it appears to explain. So the
+    name is kept and the parenthetical is dropped, and the line that used to
+    carry it now says what was actually free when the decision was made.
+    """
+    name = configuration.device_name or configuration.device
+    head, _, _ = name.partition(" (")
+    return head.strip() or configuration.device
+
+
+def _identity(configuration: Config) -> tuple:
+    """Everything the user chose, as opposed to everything the card decided.
+
+    The split this returns is the point. A server has to be restarted when the
+    *settings* behind it change -- a different model, another device, a context
+    the user typed -- and must not be restarted merely because the arithmetic
+    that reads free VRAM came back with a slightly different answer than it did
+    a minute ago. Only the first list is here; the second is the negotiated
+    placement, and :func:`_worth_restarting` decides how much of a difference
+    there has to be in that before a running server is given up.
+    """
+    return (str(configuration.runtime), str(configuration.model), str(configuration.mmproj),
+            int(configuration.gpu_index), str(configuration.device),
+            str(configuration.gpu_layers), int(configuration.context_size),
+            str(configuration.context_mode), str(configuration.kv_type_k),
+            str(configuration.kv_type_v))
+
+
+def _offloaded_layers(placement: mc_llm_context.Placement, total: int) -> int:
+    """``placement``'s layer count as a number two placements can be compared by."""
+    if not placement.on_gpu:
+        return 0
+    if placement.gpu_layers == mc_llm_context.ALL_LAYERS:
+        return total if total > 0 else 1 << 30
+    return max(int(placement.gpu_layers), 0)
+
+
+def _worth_restarting(current: mc_llm_context.Placement, wanted: mc_llm_context.Placement,
+                      total_layers: int = 0) -> bool:
+    """Whether ``wanted`` is enough of an improvement to stop a server for.
+
+    Only ever an improvement. A running llama-server holds the VRAM it was
+    given, and moving it somewhere smaller frees nothing anybody asked for --
+    the image side has its own way of asking, which is :meth:`Runtime.release`.
+    So a placement that would be *worse* than the one already running is not a
+    reason to restart, and answering that question the other way round is
+    exactly how a card with room on it ends up running two layers of a model in
+    VRAM and twenty-eight in system RAM.
+    """
+    if wanted.on_gpu != current.on_gpu:
+        return bool(wanted.on_gpu)
+
+    here = _offloaded_layers(current, total_layers)
+    there = _offloaded_layers(wanted, total_layers)
+    if there != here:
+        return there > here
+    return wanted.context >= current.context * (1.0 + CONTEXT_UPGRADE_FRACTION)
+
 
 @dataclass
 class Report:
@@ -434,6 +541,7 @@ class Runtime:
         self._lock = threading.RLock()
         self._process = None
         self._signature: tuple | None = None
+        self._identity: tuple | None = None
         self._placement: mc_llm_context.Placement | None = None
         self.report = Report()
 
@@ -448,6 +556,26 @@ class Runtime:
         simply called: the context size and offload this starts the server with
         come from :func:`negotiate` rather than from the state file, because
         the state file does not know what else is on the card.
+
+        A server that is already up and was started from the settings in force
+        is handed back without negotiating anything at all. That early return
+        is not an optimisation, it is the fix for the thing that made a
+        conversation unusable: negotiation reads free VRAM, a running server is
+        *why* free VRAM is low, and re-deciding a placement against that number
+        before every message produced a different answer before every message.
+        Each different answer stopped the server and started another one --
+        losing llama.cpp's prompt cache, so the whole conversation was
+        processed again from the first token -- and each one was placed in the
+        gap left by the model it had just evicted, which is how a card holding
+        thirty layers came to be running two of them. What a warm turn costs
+        now is a tuple comparison and one read of the model's header.
+
+        The check is against the *settings*, not the placement: change the
+        model, the device or the context and the server is replaced, as it has
+        to be. A placement that merely came out differently is only acted on
+        when it is a real improvement -- see :func:`_worth_restarting` -- and
+        never when it is worse, because a running server holds its VRAM either
+        way and giving it a smaller share of the card helps nobody.
         """
         from prompt_master.inference.device_detection import CPU_DEVICE, NO_OFFLOAD
         from prompt_master.inference.llama_client import LlamaClient
@@ -472,18 +600,22 @@ class Runtime:
                     "request without the image; text-only fallback is disabled."
                 )
 
-            negotiated = negotiate(configuration)
+            ours = self.resident_bytes()
+            if (self._running and self._identity == _identity(configuration)
+                    and not self._outgrown(configuration, ours)):
+                self._touch(configuration, ours)
+                return LlamaClient(f"http://127.0.0.1:{self._process.port}",
+                                   self._process.api_key)
+
+            negotiated = negotiate(configuration, already_ours=ours)
             placement = negotiated.placement
             signature = (configuration.runtime, configuration.model, configuration.mmproj,
                          configuration.gpu_index, configuration.device,
                          placement.context, placement.gpu_layers)
 
             if self._running and signature == self._signature:
-                mc_broker.declare(mc_broker.FAMILY_LLM, RESIDENCY_KEY,
-                                  self._label(configuration),
-                                  self.report.observed_bytes or
-                                  (negotiated.estimate.resident_bytes if negotiated.estimate else 0),
-                                  rank=mc_broker.RANK_HOT)
+                self._identity = _identity(configuration)
+                self._touch(configuration, ours)
                 return LlamaClient(f"http://127.0.0.1:{self._process.port}", self._process.api_key)
 
             self._stop_locked("making way for a new placement")
@@ -496,11 +628,13 @@ class Runtime:
             paths.logs.mkdir(parents=True, exist_ok=True)
 
             logger.info(
-                "Model Chain: starting llama-server — %s on %s, %s, %s token context",
+                "Model Chain: starting llama-server — %s on %s, %s, %s token context, "
+                "%.1f GB free",
                 configuration.quantization or Path(configuration.model).stem,
-                configuration.device_name or configuration.device,
+                _device_label(configuration),
                 placement.describe(),
                 f"{placement.context:,}",
+                before / _GB,
             )
             process = self._new_process()
             process.start(configuration.runtime, configuration.model, configuration.mmproj,
@@ -515,9 +649,60 @@ class Runtime:
                 raise
 
             self._process, self._signature, self._placement = process, signature, placement
+            self._identity = _identity(configuration)
             observed = max(before - mc_broker.free_vram_bytes(), 0) if before > 0 else 0
             self._record(configuration, negotiated, observed)
             return LlamaClient(f"http://127.0.0.1:{process.port}", process.api_key)
+
+    def _outgrown(self, configuration: Config, ours: int) -> bool:
+        """Whether the card could now hold more of the model than this server does.
+
+        Asked with ``reclaim=False``: this runs before every request, and a
+        question that evicted a checkpoint to answer itself would be a worse
+        bug than the degraded placement it was checking for. So it can only
+        ever see room that is already free -- which is the right way round.
+        A guess that goes wrong keeps the server that is running, because the
+        placement it has is one that worked.
+        """
+        current = self._placement
+        if current is None:
+            return True
+        try:
+            described = mc_gguf.describe(configuration.model)
+            preview = negotiate(configuration, described, reclaim=False, already_ours=ours)
+        except Exception:
+            logger.debug("Model Chain: could not re-check the LLM placement", exc_info=True)
+            return False
+        if not _worth_restarting(current, preview.placement,
+                                 described.block_count if described else 0):
+            return False
+        logger.info("Model Chain: re-placing llama-server — %s now fits, where it is running %s",
+                    preview.placement.describe(described.block_count if described else 0),
+                    current.describe(described.block_count if described else 0))
+        return True
+
+    def _touch(self, configuration: Config, held: int) -> None:
+        """Keep a reused server at the top of the register, and say nothing.
+
+        Reuse is the common case -- every message of a conversation after the
+        first -- so it is not narrated at INFO. What it does do is declare the
+        residency again, which is what stops a server that is being used every
+        minute from ageing into a stale entry the image side evicts first.
+
+        A server with nothing on the card declares nothing. The figure to hand
+        is the one measured when it started, and after a demotion to system RAM
+        that figure describes VRAM the process gave back -- declaring it would
+        put bytes in the register that nothing is holding, and the image side
+        would come looking for them.
+        """
+        placement = self._placement
+        if placement is not None and (not placement.on_gpu
+                                      or placement.gpu_layers == mc_llm_context.NO_LAYERS):
+            return
+        estimated = self.report.estimate.resident_bytes if self.report.estimate else 0
+        mc_broker.declare(mc_broker.FAMILY_LLM, RESIDENCY_KEY, self._label(configuration),
+                          held or self.report.observed_bytes or estimated,
+                          rank=mc_broker.RANK_HOT)
 
     def _new_process(self):
         from prompt_master.inference.llama_process import LlamaProcess
@@ -642,6 +827,7 @@ class Runtime:
         self._signature = (configuration.runtime, configuration.model, configuration.mmproj,
                            configuration.gpu_index, configuration.device,
                            placement.context, placement.gpu_layers)
+        self._identity = _identity(configuration)
         mc_broker.retire(RESIDENCY_KEY)
         freed = max(mc_broker.free_vram_bytes() - before, 0)
         mc_broker.note(mc_broker.FAMILY_LLM,
@@ -666,7 +852,7 @@ class Runtime:
     def _stop_locked(self, reason: str) -> None:
         process, self._process = self._process, None
         held = self.report.observed_bytes if self._placement is not None else 0
-        self._signature, self._placement = None, None
+        self._signature, self._identity, self._placement = None, None, None
         mc_broker.retire(RESIDENCY_KEY)
         if process is None:
             return
