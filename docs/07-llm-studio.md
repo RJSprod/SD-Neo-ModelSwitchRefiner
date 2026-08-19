@@ -1045,3 +1045,87 @@ because llama.cpp clamps a count above the model's own while a guess that came
 out too small would silently leave layers on the processor. A build that does
 not understand `all` refuses to start rather than offloading less, so this was
 never the cause of a slow reply; it is one fewer thing a slow reply could be.
+
+## 11. The drawer that was drawn outside the box (19 August 2026)
+
+Section 10.2 fixed one half of this and named the other half without seeing it.
+The sections in the drawer were being shrunk to fit, so `flex: 0 0 auto` on the
+drawer's children stopped that — and the next report was worse: expanding
+**Character** made the whole drawer blank, with a screenful of nothing above a
+stage sitting on the bottom edge of the workspace.
+
+Which is the same bug seen from the other end. The workspace is a Row with a
+fixed height and `overflow: hidden`. What decides how tall its two columns are
+is `align-items`, and that is a property the host's own Row — or a theme over
+it — is entitled to set. Aligned to an edge rather than stretched, both columns
+are sized by their own contents: the stage becomes as tall as a status line, a
+transcript and a composer, which is why it sinks to the bottom with a gap above
+it; and the drawer becomes as tall as its contents, which once the Threads list
+is open is taller than the row, so its top half is pushed out through the clip.
+Nothing was hidden. It was drawn outside a box that does not scroll, and
+stopping the sections from shrinking is exactly what let them grow far enough
+to be pushed out.
+
+Three declarations, and each one is a different half-truth removed:
+
+- `align-items: stretch` on the workspace — both columns are the row's height,
+  whatever anything upstream would rather they were;
+- `height: 100%` on each column — the same statement made where a percentage
+  can resolve against the row's own fixed height, so it does not depend on the
+  first being honoured;
+- `min-height: 0` on the drawer — a flex item's automatic minimum size is its
+  content size, so without it the declared height is overridden from
+  underneath and the `overflow-y: auto` that has been on the drawer all along
+  never has anything to scroll.
+
+The stage has carried `min-height: 0` since it was written. The drawer had
+`min-width: 0` and never its opposite number, which is the kind of asymmetry
+that survives every reading of the file and none of the resizes.
+
+## 12. Two questions the console could not answer
+
+### 12.1 Where the log is
+
+`<LLM data directory>/logs/llama-server.log` — beside the runtime and the
+models, not in the extension folder, because the extension folder is a git
+checkout that an update overwrites. That was already true and written down in
+exactly one place nobody had reason to open.
+
+So it is printed, in full, on every start, and it is in Setup's residency panel
+whether or not anything has gone wrong. One line per start, and starts are rare
+now.
+
+### 12.2 What llama.cpp reported
+
+Section 10.4 added a line reporting llama.cpp's own load report. It never
+appeared, and the reason is the same reason the report is worth having: what a
+program says about itself and what a reader can see are two different things.
+`/health` answers the moment the model is loaded, and what llama-server wrote
+while loading is on the other side of its own output buffer — which, when the
+output is a file rather than a console, is a block buffer on Windows rather
+than a line one. Reading once, immediately, found an empty file on the platform
+that most needed the answer.
+
+It is now read for up to five seconds, stopping the moment there is something
+to read, and a start that still has nothing says so with the path rather than
+printing nothing at all: with silence after the placement line there is no way
+to tell a report that said everything was fine from a report that was never
+read.
+
+### 12.3 "Nothing evictable was found"
+
+True, and on its own misleading. It reads as though the card were full of
+things this extension chose not to move; what it usually means is that the card
+is full of something it cannot see at all. A user's log had the LLM short by
+18.2 GB with 4.7 GB free, the image side reporting nothing resident and freeing
+nothing when asked — because there was nothing of the image side to free. Some
+other process had nineteen gigabytes of that card: another program, or a
+llama-server left running by a WebUI that was killed rather than closed, which
+holds its allocation for as long as it lives and is invisible to every check
+here.
+
+`unaccounted_bytes()` subtracts what each family admits to holding, and a
+gigabyte for the driver and the desktop, from what the card says is in use.
+When the remainder is real it is named — in the shortfall note, and in Setup's
+residency panel, which is the panel somebody opens when a placement makes no
+sense and is the one explanation no row in its table can ever show.

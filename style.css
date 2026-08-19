@@ -658,6 +658,16 @@
    has mis-measured itself from making the page taller, which is what would
    turn one bad frame into a workspace that grows on every click. */
 #mc-llm-studio .mc-llm-chat-workspace {
+    /* Both columns are the full height of the row, and that is stated here
+       rather than left to the default. `align-items` is a property the host's
+       Row and any theme over it are entitled to set, and one that aligns its
+       children to an edge instead of stretching them sizes both columns by
+       their own contents: the stage sinks to the bottom of the workspace with
+       a screenful of nothing above it, and the drawer -- taller than the row
+       once the Threads list is open -- has its top half pushed out through the
+       clip below. Which is what "the character controls completely
+       disappeared" was: not hidden, drawn outside a box that does not scroll. */
+    align-items: stretch;
     flex-wrap: nowrap;
     height: var(--mc-llm-available, calc(100vh - 20em));
     max-height: var(--mc-llm-available, calc(100vh - 20em));
@@ -665,9 +675,27 @@
     overflow: hidden;
 }
 
+/* Two properties here do the whole job, and neither is obvious.
+ *
+ * `height: 100%` is what makes the drawer the *row's* height rather than its
+ * own contents' height, whatever the row aligns its children to. A drawer
+ * sized by its contents grows straight through the edge of a row that has a
+ * fixed height and `overflow: hidden`, and everything past that edge is
+ * clipped away -- nothing is hidden, it is drawn outside a box that does not
+ * scroll.
+ *
+ * `min-height: 0` is what lets it be shorter than its contents at all. A flex
+ * item's automatic minimum size is its content size, so without this the
+ * declared height is overridden from underneath and `overflow-y: auto` never
+ * has anything to scroll. The stage next door has carried `min-height: 0`
+ * since it was written, for exactly this reason; the drawer had `min-width: 0`
+ * and not its opposite number. */
 #mc-llm-studio .mc-llm-drawer {
     flex: 0 0 22em;
+    height: 100%;
+    max-height: 100%;
     max-width: 22em;
+    min-height: 0;
     min-width: 0;
     overflow-y: auto;
 }
@@ -701,6 +729,10 @@
     flex-direction: column;
     flex: 1 1 auto;
     gap: 0.4em;
+    /* The row's height, not the contents'. The transcript's whole layout is
+       "the height the stage has left", and a stage sized by its own contents
+       has none to give. */
+    height: 100%;
     min-height: 0;
     min-width: 0;
     overflow: hidden;
@@ -1163,8 +1195,16 @@
 
     #mc-llm-studio .mc-llm-drawer {
         flex: 1 1 100%;
+        /* Its own height here, not the row's: the workspace above is `height:
+           auto` in this layout, and a percentage of an automatic height is an
+           automatic height with a rule in front of it. Said plainly so the two
+           layouts do not have to be read together to know which one wins. */
+        height: auto;
         max-height: 40vh;
         max-width: none;
+        /* Tall enough to be a panel rather than a gap. A drawer that has been
+           asked for and shows nothing is worse than no drawer. */
+        min-height: 12em;
     }
 
     #mc-llm-studio .mc-llm-chat-stage {

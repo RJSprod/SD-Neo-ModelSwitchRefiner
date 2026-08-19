@@ -444,3 +444,42 @@ class TestStatusSeesTheImageSide:
         broker.register_reclaimer(broker.FAMILY_IMAGE, Broken())
 
         assert broker.status().image_bytes == 0
+
+
+class TestVramNobodyAdmitsTo:
+    """"Nothing evictable was found" is true and, on its own, misleading: it
+    reads as though the card were full of things this extension chose not to
+    move, when what it usually means is that the card is full of something it
+    cannot see at all — another program, or a llama-server left running by a
+    WebUI that was killed rather than closed. Two very different problems.
+    """
+
+    def test_a_card_held_by_nothing_here_is_reported_as_such(self, broker, monkeypatch):
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 4 * _GB)
+
+        assert round(mc_broker.unaccounted_bytes() / _GB) == 19
+
+    def test_what_a_family_holds_is_not_unaccounted_for(self, broker, monkeypatch):
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 4 * _GB)
+        mc_broker.declare(mc_broker.FAMILY_LLM, "llm:x", "the LLM", 19 * _GB)
+
+        assert mc_broker.unaccounted_bytes() == 0
+
+    def test_the_driver_s_own_share_is_not_worth_reporting(self, broker, monkeypatch):
+        """A card in a desktop is never entirely free: a CUDA context is
+        hundreds of megabytes before a single weight is loaded."""
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 23.5 * _GB)
+
+        assert mc_broker.unaccounted_bytes() == 0
+
+    def test_a_shortfall_says_where_the_card_went(self, broker, monkeypatch):
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 4 * _GB)
+
+        mc_broker.request_vram(mc_broker.FAMILY_LLM, 18 * _GB, reason="an LLM request")
+
+        said = [entry.text for entry in mc_broker.decisions()]
+        assert any("not managing" in text for text in said), said

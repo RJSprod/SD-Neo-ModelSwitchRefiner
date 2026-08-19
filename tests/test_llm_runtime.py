@@ -336,6 +336,9 @@ def server(monkeypatch, tmp_path):
     import mc_llm_paths
 
     monkeypatch.setattr(mc_llm_paths, "data_root", lambda: tmp_path / "data")
+    # A fake server writes no log, and waiting five seconds for one it will
+    # never write is the whole of what that wait costs here.
+    monkeypatch.setattr(runtime, "OFFLOAD_WAIT_SECONDS", 0.0)
     started: list = []
     managed = runtime.Runtime()
     monkeypatch.setattr(managed, "_new_process", lambda: FakeProcess(started))
@@ -572,3 +575,59 @@ class TestTheOffloadArgument:
         managed.client()
 
         assert started[0][1]["gpu_layers"] == "31"
+
+
+class TestTheLoadReportIsWaitedFor:
+    def test_a_report_that_arrives_late_is_still_read(self, tmp_path, monkeypatch):
+        """llama-server answers /health the moment the model is loaded, and what
+        it wrote while loading is on the other side of somebody else's output
+        buffer -- a block buffer, not a line one, when the output is a file.
+        Reading once, immediately, found nothing at all on Windows."""
+        log = tmp_path / "llama-server.log"
+        log.write_text("")
+        monkeypatch.setattr(runtime, "OFFLOAD_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(runtime, "OFFLOAD_WAIT_SECONDS", 2.0)
+
+        reads = {"count": 0}
+        real = runtime._offload_since
+
+        def flushing(path, offset):
+            reads["count"] += 1
+            if reads["count"] == 3:
+                log.write_text(FULL_LOAD)
+            return real(path, offset)
+
+        monkeypatch.setattr(runtime, "_offload_since", flushing)
+
+        assert runtime._await_offload(log, 0).known
+
+    def test_it_gives_up_rather_than_holding_the_load_open(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(runtime, "OFFLOAD_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(runtime, "OFFLOAD_WAIT_SECONDS", 0.05)
+
+        assert not runtime._await_offload(tmp_path / "nothing.log", 0).known
+
+    def test_the_log_path_is_named_on_every_start(self, placed, server, tmp_path, monkeypatch,
+                                                  caplog):
+        """A log nobody can find is a log nobody reads."""
+        managed, _ = server
+        configure(monkeypatch, tmp_path)
+        set_free(monkeypatch, 20)
+
+        with caplog.at_level("INFO", logger="model_chain"):
+            managed.client()
+
+        assert any("llama-server log" in record.getMessage() for record in caplog.records)
+
+    def test_a_run_with_no_report_says_that_rather_than_nothing(self, placed, server, tmp_path,
+                                                               monkeypatch, caplog):
+        """With nothing after the placement line there is no way to tell a
+        report that said everything was fine from one that was never read."""
+        managed, _ = server
+        configure(monkeypatch, tmp_path)
+        set_free(monkeypatch, 20)
+
+        with caplog.at_level("INFO", logger="model_chain"):
+            managed.client()
+
+        assert any("no load report" in record.getMessage() for record in caplog.records)

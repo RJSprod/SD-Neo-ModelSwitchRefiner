@@ -501,6 +501,15 @@ def _runtime_detail(state=None) -> str:
     return " · ".join(parts)
 
 
+def _log_path() -> str:
+    """Where llama-server writes. Asked for by name often enough to be a function."""
+    try:
+        return str(mc_llm_paths.app_paths().logs / "llama-server.log")
+    except Exception:
+        logger.debug("Model Chain: could not work out the LLM log path", exc_info=True)
+        return "unknown"
+
+
 def _residency_html() -> str:
     """The detailed residency view (section 14), kept out of the main UI."""
     try:
@@ -539,7 +548,21 @@ def _residency_table() -> str:
         f"{ui.gigabytes(status.total_vram)}, {ui.gigabytes(status.reserve)} reserved</li>",
         f"<li>VRAM owners: {ui.escape(owners)}</li>",
         f"<li>Active workload: {ui.escape(running.label) if running else 'none'}</li>",
+        # Where the file is, always, whether or not anything has gone wrong
+        # with it. It is the one thing in this panel that a user has to be
+        # able to find on a day when the panel itself is not enough.
+        f"<li>llama-server log: <code>{ui.escape(_log_path())}</code></li>",
     ]
+    stray = mc_broker.unaccounted_bytes()
+    if stray > 0:
+        # Named here as well as in the console, because this is the panel
+        # somebody opens when a placement makes no sense, and VRAM held by
+        # another process is the explanation that no row in the table below
+        # can ever show.
+        summary.append(
+            f"<li><b>{ui.gigabytes(stray)}</b> of the card is in use by something this "
+            f"WebUI is not managing — another program on the same GPU, or a llama-server "
+            f"left running by a previous session. Nothing here can reclaim it.</li>")
     report = state.get("report")
     if report is not None and report.placement is not None:
         summary.append(

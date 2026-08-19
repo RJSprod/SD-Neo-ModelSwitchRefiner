@@ -680,9 +680,55 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
     elif remaining > 0:
         note(family,
              f"{reason or family} is short {remaining / _GB:.1f} GB and nothing evictable "
-             f"was found; expect the driver to spill into system memory")
+             f"was found; expect the driver to spill into system memory{_unaccounted_note()}")
 
     return result
+
+
+def unaccounted_bytes() -> int:
+    """VRAM in use that neither family admits to holding.
+
+    The subtraction is the point. The card reports what is free; the image side
+    reports what its models are holding; the register holds what this extension
+    started. When those do not add up to the card, the difference is somebody
+    else's -- another program on the same GPU, or a llama-server left running
+    by a WebUI that was killed rather than closed, which holds its allocation
+    for as long as it lives and is invisible to every check here.
+    """
+    total = total_vram_bytes()
+    if total <= 0:
+        return 0
+    accounted = sum(max(resident_bytes(family), reported_bytes(family))
+                    for family in (FAMILY_IMAGE, FAMILY_LLM))
+    return max(total - free_vram_bytes() - accounted - _DRIVER_OVERHEAD, 0)
+
+
+_DRIVER_OVERHEAD = 1 * _GB
+"""Allowed for before any of this is called unexplained.
+
+A card in a desktop is never entirely free: the driver, the compositor and
+whatever is drawing the browser this is being read in all hold some of it, and
+a CUDA context is hundreds of megabytes before a single weight is loaded. A
+gigabyte is generous for that and small enough that the case worth reporting --
+a whole model somebody cannot see -- still clears it easily.
+"""
+
+
+def _unaccounted_note() -> str:
+    """The other half of "nothing evictable was found", when there is one.
+
+    "Nothing evictable" is true and, on its own, misleading: it reads as though
+    the card were full of things this extension chose not to move, when what it
+    usually means is that the card is full of something this extension cannot
+    see at all. Two very different problems, one message -- so the message says
+    which.
+    """
+    stray = unaccounted_bytes()
+    if stray <= 0:
+        return ""
+    return (f". {stray / _GB:.1f} GB of the card is in use by something this WebUI is not "
+            f"managing — another program on the same GPU, or a llama-server left running by "
+            f"a previous session. Nothing here can reclaim that; check nvidia-smi")
 
 
 def _victim_order(family: str) -> tuple[str, ...]:

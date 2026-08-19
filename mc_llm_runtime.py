@@ -563,6 +563,30 @@ _LOG_READ_LIMIT = 4 * 1024 * 1024
 of it; the rest is request logging, and on a long-lived server there is a lot
 of that."""
 
+OFFLOAD_WAIT_SECONDS = 5.0
+"""How long to wait for llama.cpp's load report to reach the file.
+
+The server answers ``/health`` from the moment the model is loaded, and what it
+wrote while loading is on the other side of somebody else's output buffer --
+which on Windows is a block buffer rather than a line one when the output is a
+file. Reading once, immediately, therefore found nothing at all on the platform
+that most needed the answer. Waiting is safe because it is only ever reached
+after a start, which already took long enough that five seconds is noise, and
+it stops the moment there is something to read.
+"""
+
+OFFLOAD_POLL_SECONDS = 0.25
+
+
+def _await_offload(log_path, offset: int) -> Offload:
+    """:func:`_offload_since`, given a few seconds to appear."""
+    deadline = time.monotonic() + OFFLOAD_WAIT_SECONDS
+    while True:
+        found = _offload_since(log_path, offset)
+        if found.known or time.monotonic() >= deadline:
+            return found
+        time.sleep(OFFLOAD_POLL_SECONDS)
+
 
 # --------------------------------------------------------------------------- #
 # The runtime itself
@@ -795,6 +819,11 @@ class Runtime:
                 f"{placement.context:,}",
                 before / _GB,
             )
+            # Said every time, and said in full. llama-server's own log is where
+            # the answer lives when a placement and a reply speed disagree, and
+            # a log nobody can find is a log nobody reads. It is one line per
+            # start, and starts are rare.
+            logger.info("Model Chain: llama-server log — %s", log_path)
             process = self._new_process()
             process.start(configuration.runtime, configuration.model, configuration.mmproj,
                           configuration.gpu_index, configuration.device, placement.context,
@@ -811,7 +840,7 @@ class Runtime:
             self._identity = _identity(configuration)
             observed = max(before - mc_broker.free_vram_bytes(), 0) if before > 0 else 0
             self._record(configuration, negotiated, observed,
-                         _offload_since(log_path, written_before))
+                         _await_offload(log_path, written_before))
             return LlamaClient(f"http://127.0.0.1:{process.port}", process.api_key)
 
     def _outgrown(self, configuration: Config, ours: int) -> bool:
@@ -922,6 +951,11 @@ class Runtime:
         """
         offload = self.report.offload
         if not offload.known:
+            # Not silence. The line above this one said where the model was
+            # sent; with nothing after it there is no way to tell a report that
+            # said everything was fine from a report that was never read.
+            logger.info("Model Chain: llama.cpp wrote no load report this run — see %s",
+                        mc_llm_paths.app_paths().logs / "llama-server.log")
             return
         logger.info("Model Chain: llama.cpp reports %s", offload.describe())
         if offload.spilled and negotiated.placement.on_gpu:
