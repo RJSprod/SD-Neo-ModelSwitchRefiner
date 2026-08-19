@@ -280,6 +280,23 @@ def _check_copyable(directory: Path) -> None:
                 )
 
 
+def in_use_error(destination: Path, exc: BaseException) -> SetupError:
+    """The sentence for a runtime folder that cannot be replaced.
+
+    Windows will not let a file be renamed or deleted while a process has it
+    open, and a running llama-server holds every DLL beside it -- so replacing
+    the runtime under a server that is still up fails with "[WinError 5] Access
+    is denied: ...\\cublas64_12.dll", which names a CUDA library and reads like
+    a driver problem rather than like the file lock it is. Callers stop the
+    server first; this is what is said when something else is holding it.
+    """
+    return SetupError(
+        f"{destination} is in use and could not be replaced ({exc}). Something still has "
+        f"the runtime open — press Unload in LLM Studio, close any other copy of the WebUI, "
+        f"and try again."
+    )
+
+
 def _copy_tree(source: Path, destination: Path) -> Path:
     """Copy ``source`` into ``destination``, replacing what was there.
 
@@ -301,6 +318,8 @@ def _copy_tree(source: Path, destination: Path) -> Path:
             destination.rename(previous)
         target.rename(destination)
         shutil.rmtree(previous, ignore_errors=True)
+    except PermissionError as exc:
+        raise in_use_error(destination, exc) from None
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
@@ -364,7 +383,10 @@ def download(device=None, on_status=None, on_progress=None) -> Path:
     say("Extracting the runtime…")
     tick(share * len(ids))
     destination = paths.root / RUNTIME_DIRNAME
-    extract_zips_atomic(archives, destination)
+    try:
+        extract_zips_atomic(archives, destination)
+    except PermissionError as exc:
+        raise in_use_error(destination, exc) from None
     executable = _server_in(destination)
     if executable is None:
         raise SetupError("The downloaded archives contain no llama-server executable")

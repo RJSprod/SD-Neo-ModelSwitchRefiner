@@ -80,13 +80,16 @@ def build() -> dict:
 
             with gr.Row(elem_classes=ui.classes("outputs")):
                 with gr.Column(scale=3):
+                    # Fixed height, for the reason MiniMax's output is fixed:
+                    # a box that grows while a generation streams into it walks
+                    # the Stop button off the bottom of the window.
                     positive = gr.Textbox(
-                        label="Positive prompt", lines=16, max_lines=40, show_copy_button=True,
+                        label="Positive prompt", lines=16, max_lines=16, show_copy_button=True,
                         elem_id=ui.ident("prompt", "positive"),
                         elem_classes=ui.classes("output", "output-primary"))
                 with gr.Column(scale=2):
                     negative = gr.Textbox(
-                        label="Negative prompt", lines=16, max_lines=40, show_copy_button=True,
+                        label="Negative prompt", lines=16, max_lines=16, show_copy_button=True,
                         elem_id=ui.ident("prompt", "negative"),
                         elem_classes=ui.classes("output"))
 
@@ -97,7 +100,7 @@ def build() -> dict:
             with gr.Row(elem_classes=ui.classes("composer")):
                 with gr.Column(scale=4):
                     intent = gr.Textbox(
-                        label="Video intent", lines=4, max_lines=12,
+                        label="Video intent", lines=4, max_lines=4,
                         placeholder="What happens in the shot. Quoted lines become spoken dialogue.",
                         elem_id=ui.ident("prompt", "intent"))
                 with gr.Column(scale=1, min_width=160):

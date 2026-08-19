@@ -55,8 +55,16 @@ def build() -> dict:
         # -- centre: the written prompt, then what it was written from ----- #
         with gr.Column(scale=4, min_width=420, elem_classes=ui.classes("stage")):
             status = gr.HTML(ui.notice("Ready."), elem_id=ui.ident("minimax", "status"))
+            # max_lines == lines, and that equality is the whole point: a
+            # Gradio Textbox grows from `lines` towards `max_lines` as text
+            # arrives, so an output box that could reach 44 lines grew by
+            # hundreds of pixels *while a generation was streaming into it* --
+            # and everything below it, including Stop, was pushed off the
+            # bottom of the window at the one moment somebody wants to press
+            # it. A box that cannot change size cannot move the button, and a
+            # prompt longer than the box is read by scrolling inside it.
             written = gr.Textbox(
-                label="H3 prompt", lines=18, max_lines=44, show_copy_button=True,
+                label="H3 prompt", lines=18, max_lines=18, show_copy_button=True,
                 elem_id=ui.ident("minimax", "output"),
                 elem_classes=ui.classes("output", "output-primary"))
             caption = gr.Textbox(
@@ -66,7 +74,7 @@ def build() -> dict:
             with gr.Row(elem_classes=ui.classes("composer")):
                 with gr.Column(scale=4):
                     prompt = gr.Textbox(
-                        label="Your prompt", lines=4, max_lines=12,
+                        label="Your prompt", lines=4, max_lines=4,
                         placeholder="A rough description of the shot. The enhancer writes the "
                                     "structured H3 prompt from it.",
                         elem_id=ui.ident("minimax", "prompt"))

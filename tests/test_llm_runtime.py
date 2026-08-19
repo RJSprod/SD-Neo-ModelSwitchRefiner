@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 import mc_broker
+import mc_gguf
 import mc_llm_context as ctx
 import mc_llm_runtime as runtime
 from test_llm_context import build_model
@@ -459,3 +460,115 @@ class TestWorthRestarting:
     def test_coming_back_off_system_ram_is(self):
         assert runtime._worth_restarting(ctx.Placement(on_gpu=False),
                                          ctx.Placement(gpu_layers=ctx.ALL_LAYERS), 30)
+
+
+# --------------------------------------------------------------------------- #
+# What llama.cpp says it did
+# --------------------------------------------------------------------------- #
+#
+# Everything else in this file is about a decision. This is about evidence: a
+# placement reported as "all layers on the GPU" that generates at a fifth of
+# the speed a resident model generates at is a sentence and a fact that
+# disagree, and the only place the fact was written down is llama-server's own
+# log. Parsed leniently and on purpose -- it is somebody else's format, it has
+# changed before, and a version this cannot read has to come back as "could not
+# tell" rather than as "nothing was offloaded".
+
+FULL_LOAD = """
+load_tensors: loading model tensors, this can take a while... (mmap = true)
+load_tensors: offloading 30 repeating layers to GPU
+load_tensors: offloading output layer to GPU
+load_tensors: offloaded 31/31 layers to GPU
+load_tensors:        CUDA0 model buffer size = 17000.00 MiB
+load_tensors:   CPU_Mapped model buffer size =   300.00 MiB
+llama_kv_cache_unified:      CUDA0 KV buffer size =   896.00 MiB
+"""
+
+SPILLED_LOAD = """
+load_tensors: offloaded 31/31 layers to GPU
+load_tensors:        CUDA0 model buffer size = 11000.00 MiB
+load_tensors:   CPU_Mapped model buffer size =  6000.00 MiB
+"""
+
+
+class TestReadingLlamaCppsOwnReport:
+    def test_it_reads_the_layers_and_the_buffers(self):
+        offload = runtime.read_offload(FULL_LOAD)
+
+        assert (offload.layers, offload.total_layers) == (31, 31)
+        assert offload.known
+        assert round(offload.device_bytes / _GB, 1) == 16.6
+        assert not offload.spilled
+
+    def test_a_token_embedding_left_on_the_host_is_not_a_spill(self):
+        """A full offload still leaves a small buffer on the CPU for many
+        models. A warning that fires on every load is a warning nobody reads."""
+        assert not runtime.read_offload(FULL_LOAD).spilled
+
+    def test_weights_in_system_ram_are_reported_as_such(self):
+        offload = runtime.read_offload(SPILLED_LOAD)
+
+        assert offload.spilled
+        assert round(offload.system_share, 2) == 0.35
+
+    def test_pinned_host_memory_counts_as_system_memory(self):
+        """CUDA_Host is pinned *system* memory. Reading its first word would
+        put six gigabytes of system RAM on the card."""
+        offload = runtime.read_offload(
+            "load_tensors: CUDA0 model buffer size = 1000.00 MiB\n"
+            "load_tensors: CUDA_Host model buffer size = 6000.00 MiB\n")
+
+        assert offload.spilled
+
+    def test_a_format_it_cannot_read_says_so_rather_than_guessing(self):
+        offload = runtime.read_offload("llama_model_loader: loaded meta data\n")
+
+        assert not offload.known
+        assert not offload.spilled
+
+    def test_only_this_start_is_read(self, tmp_path):
+        """The log is appended to across runs, and a load that went well an
+        hour ago must not answer for the one that just happened."""
+        log = tmp_path / "llama-server.log"
+        log.write_text(FULL_LOAD)
+        offset = log.stat().st_size
+        with log.open("a") as handle:
+            handle.write(SPILLED_LOAD)
+
+        assert runtime._offload_since(log, offset).spilled
+
+    def test_a_missing_log_is_not_a_failed_load(self, tmp_path):
+        assert not runtime._offload_since(tmp_path / "nothing.log", 0).known
+
+
+class TestTheOffloadArgument:
+    def test_all_layers_is_asked_for_as_a_number(self, tmp_path):
+        """llama.cpp's own argument is an integer and every invocation of it in
+        the wild passes one. "all" is this project's word."""
+        model = mc_gguf.read(build_model(tmp_path, blocks=30))
+
+        assert runtime._layers_argument(ctx.Placement(gpu_layers=ctx.ALL_LAYERS), model) == "31"
+
+    def test_a_header_that_could_not_be_read_asks_for_far_too_many(self, tmp_path):
+        """Clamped by llama.cpp, where a guess that came out too small would
+        silently run half the model on the processor."""
+        assert runtime._layers_argument(ctx.Placement(gpu_layers=ctx.ALL_LAYERS), None) == "999"
+
+    def test_a_partial_offload_is_passed_as_it_was_negotiated(self, tmp_path):
+        model = mc_gguf.read(build_model(tmp_path, blocks=30))
+
+        assert runtime._layers_argument(ctx.Placement(gpu_layers=6), model) == "6"
+
+    def test_no_offload_is_llama_cpps_own_token_for_it(self, tmp_path):
+        model = mc_gguf.read(build_model(tmp_path, blocks=30))
+
+        assert runtime._layers_argument(ctx.Placement(gpu_layers=ctx.NO_LAYERS), model) == "0"
+
+    def test_the_server_is_started_with_the_number(self, placed, server, tmp_path, monkeypatch):
+        managed, started = server
+        configure(monkeypatch, tmp_path, gpu_layers="all", blocks=30)
+        set_free(monkeypatch, 20)
+
+        managed.client()
+
+        assert started[0][1]["gpu_layers"] == "31"

@@ -38,9 +38,10 @@ reloading it somewhere else.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import mc_broker
@@ -439,6 +440,131 @@ def _shrink_offload(configuration: Config, placement, gguf, reserve: int,
 
 
 # --------------------------------------------------------------------------- #
+# What llama.cpp says it did (section 13, read back rather than assumed)
+# --------------------------------------------------------------------------- #
+#
+# Everything above this line is a *decision*: where the model should go, given
+# what is on the card. Nothing above it is evidence that llama.cpp did what it
+# was told. The two came apart in a way that cost a user an afternoon -- a
+# placement reported as "all layers on the GPU" generating at a fifth of the
+# speed a fully-resident model on that card generates at -- and the only place
+# the truth was written down was llama-server's own log, which nobody reads
+# because it is a file in a folder rather than a line in the console.
+#
+# So it is read. Two lines of somebody else's log format, parsed leniently,
+# reported once per start, and never allowed to fail a load: the placement is
+# what it is whether or not this can describe it.
+
+_LAYERS = re.compile(r"offloaded\s+(\d+)\s*/\s*(\d+)\s+layers to GPU")
+_WEIGHTS = re.compile(r"load_tensors:\s*(.+?)\s+(?:model\s+)?buffer size\s*=\s*([0-9.]+)\s*MiB")
+_CACHE = re.compile(r"(\S+)\s+KV buffer size\s*=\s*([0-9.]+)\s*MiB")
+
+SYSTEM_BUFFERS = ("cpu", "host")
+"""Buffer names that mean system RAM rather than the card.
+
+llama.cpp names a buffer for the backend that owns it -- ``CUDA0``, ``CPU``,
+``CPU_Mapped``, ``CUDA_Host``. The first word is the part that says where the
+memory is, except for ``CUDA_Host``, which is pinned *system* memory and is
+matched here by its second word rather than its first.
+"""
+
+SYSTEM_SHARE_WARNING = 0.10
+"""Share of the weights in system RAM that is worth a warning.
+
+Not zero. A full offload still leaves a token-embedding buffer on the host for
+many models, and a warning that fires on every load is a warning nobody reads.
+A tenth of the model in system RAM is not that: it is the difference between a
+reply that streams and one that crawls.
+"""
+
+
+@dataclass(frozen=True)
+class Offload:
+    """What llama.cpp reported about the load it just did."""
+
+    layers: int = 0
+    total_layers: int = 0
+    weights: tuple[tuple[str, float], ...] = ()
+    cache: tuple[tuple[str, float], ...] = ()
+
+    @property
+    def known(self) -> bool:
+        return bool(self.total_layers or self.weights)
+
+    @staticmethod
+    def _bytes(buffers, system: bool) -> int:
+        return int(sum(size for name, size in buffers
+                       if _is_system(name) is system) * _MB)
+
+    @property
+    def system_bytes(self) -> int:
+        return self._bytes(self.weights, True)
+
+    @property
+    def device_bytes(self) -> int:
+        return self._bytes(self.weights, False)
+
+    @property
+    def system_share(self) -> float:
+        total = self.system_bytes + self.device_bytes
+        return self.system_bytes / total if total else 0.0
+
+    @property
+    def spilled(self) -> bool:
+        """Whether enough of the weights are in system RAM to explain a slow reply."""
+        return self.system_share >= SYSTEM_SHARE_WARNING
+
+    def describe(self) -> str:
+        parts = []
+        if self.total_layers:
+            parts.append(f"{self.layers}/{self.total_layers} layers on the GPU")
+        for name, size in self.weights + self.cache:
+            parts.append(f"{name} {size * _MB / _GB:.1f} GB")
+        return ", ".join(parts)
+
+
+def _is_system(name: str) -> bool:
+    return any(word in name.casefold() for word in SYSTEM_BUFFERS)
+
+
+def read_offload(text: str) -> Offload:
+    """Parse llama.cpp's load report out of ``text``.
+
+    Lenient by construction: this is somebody else's log format, it has changed
+    before, and every field is optional. What comes back from a version that
+    writes it differently is an empty report, which reads as "could not tell"
+    rather than as "nothing was offloaded" -- the distinction matters, because
+    only one of those is worth warning somebody about.
+    """
+    found = _LAYERS.search(text)
+    layers, total = (int(found.group(1)), int(found.group(2))) if found else (0, 0)
+    weights = tuple((name.strip(), float(size)) for name, size in _WEIGHTS.findall(text))
+    cache = tuple((f"{name.strip()} KV", float(size)) for name, size in _CACHE.findall(text))
+    return Offload(layers=layers, total_layers=total, weights=weights, cache=cache)
+
+
+def _offload_since(log_path, offset: int) -> Offload:
+    """Read back what the server just written to ``log_path`` said about itself.
+
+    ``offset`` is where the file ended before this start, because the log is
+    appended to across runs and the report wanted is this run's.
+    """
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(max(int(offset), 0))
+            return read_offload(handle.read(_LOG_READ_LIMIT))
+    except OSError:
+        logger.debug("Model Chain: could not read llama-server's log", exc_info=True)
+        return Offload()
+
+
+_LOG_READ_LIMIT = 4 * 1024 * 1024
+"""How much of one start's log to read. The load report is in the first lines
+of it; the rest is request logging, and on a long-lived server there is a lot
+of that."""
+
+
+# --------------------------------------------------------------------------- #
 # The runtime itself
 # --------------------------------------------------------------------------- #
 
@@ -453,6 +579,35 @@ again from the first token. A few hundred tokens of extra window is not worth
 that; a quarter more of it is. The asymmetry is deliberate: this is only ever
 consulted about placing *more* on the card, never less.
 """
+
+
+def _layers_argument(placement: mc_llm_context.Placement,
+                     gguf: mc_gguf.Gguf | None) -> str:
+    """``--n-gpu-layers``, as a number whenever one can be worked out.
+
+    llama.cpp's own argument is an integer, and every invocation of it in the
+    wild passes one -- "all" is this project's word, understood here and
+    nowhere else with any guarantee. A build that does not parse it does not
+    quietly offload fewer layers, it refuses to start, so this is not the cause
+    of a slow reply; it is one unknown removed from the list of things a slow
+    reply could be. A count above the model's own is clamped by llama.cpp, so
+    the fallback when the header could not be read is deliberately far too big
+    rather than a guess that might be too small.
+    """
+    from prompt_master.inference.device_detection import NO_OFFLOAD
+
+    if placement.gpu_layers == mc_llm_context.NO_LAYERS:
+        return NO_OFFLOAD
+    if placement.gpu_layers != mc_llm_context.ALL_LAYERS:
+        return str(placement.gpu_layers)
+    blocks = gguf.block_count if gguf is not None else 0
+    # +1 for the output layer, which llama.cpp counts separately from the
+    # repeating blocks and which is the one whose absence costs the most.
+    return str(blocks + 1) if blocks > 0 else str(EVERY_LAYER)
+
+
+EVERY_LAYER = 999
+"""What to ask for when the model's own layer count could not be read."""
 
 
 def _device_label(configuration: Config) -> str:
@@ -532,6 +687,8 @@ class Report:
     started_at: float = 0.0
     model: str = ""
     fits: bool = True
+    offload: Offload = field(default_factory=Offload)
+    """What llama.cpp said it did, as opposed to what it was asked to do."""
 
 
 class Runtime:
@@ -621,11 +778,13 @@ class Runtime:
             self._stop_locked("making way for a new placement")
 
             before = mc_broker.free_vram_bytes()
-            layers = (NO_OFFLOAD if placement.gpu_layers == mc_llm_context.NO_LAYERS
-                      else "all" if placement.gpu_layers == mc_llm_context.ALL_LAYERS
-                      else str(placement.gpu_layers))
+            layers = _layers_argument(placement, mc_gguf.describe(configuration.model))
             paths = mc_llm_paths.app_paths()
             paths.logs.mkdir(parents=True, exist_ok=True)
+            log_path = paths.logs / "llama-server.log"
+            # Where this start's log begins. The file is appended to across
+            # runs, and what is read back afterwards has to be this run's.
+            written_before = log_path.stat().st_size if log_path.exists() else 0
 
             logger.info(
                 "Model Chain: starting llama-server — %s on %s, %s, %s token context, "
@@ -639,7 +798,7 @@ class Runtime:
             process = self._new_process()
             process.start(configuration.runtime, configuration.model, configuration.mmproj,
                           configuration.gpu_index, configuration.device, placement.context,
-                          paths.logs / "llama-server.log", gpu_layers=layers)
+                          log_path, gpu_layers=layers)
             from_system_ram = (configuration.device.casefold() == CPU_DEVICE
                                or layers == NO_OFFLOAD)
             try:
@@ -651,7 +810,8 @@ class Runtime:
             self._process, self._signature, self._placement = process, signature, placement
             self._identity = _identity(configuration)
             observed = max(before - mc_broker.free_vram_bytes(), 0) if before > 0 else 0
-            self._record(configuration, negotiated, observed)
+            self._record(configuration, negotiated, observed,
+                         _offload_since(log_path, written_before))
             return LlamaClient(f"http://127.0.0.1:{process.port}", process.api_key)
 
     def _outgrown(self, configuration: Config, ours: int) -> bool:
@@ -717,12 +877,13 @@ class Runtime:
         with self._lock:
             return self._running
 
-    def _record(self, configuration: Config, negotiated: Negotiation, observed: int) -> None:
+    def _record(self, configuration: Config, negotiated: Negotiation, observed: int,
+                offload: Offload | None = None) -> None:
         self.report = Report(
             placement=negotiated.placement, estimate=negotiated.estimate,
             notes=negotiated.notes, observed_bytes=observed, started_at=time.time(),
             model=Path(configuration.model).name if configuration.model else "",
-            fits=negotiated.fits,
+            fits=negotiated.fits, offload=offload or Offload(),
         )
         for text in negotiated.notes:
             mc_broker.note(mc_broker.FAMILY_LLM, text)
@@ -744,6 +905,33 @@ class Runtime:
             observed / _GB,
             "" if not negotiated.notes else f" ({'; '.join(negotiated.notes)})",
         )
+        self._report_offload(negotiated)
+
+    def _report_offload(self, negotiated: Negotiation) -> None:
+        """Say what llama.cpp reported, and say plainly when it is not the plan.
+
+        The line above this one is what was *asked for*. This is what happened,
+        and the two being printed together is the point: a placement that says
+        "all layers on the GPU" while llama.cpp put a third of the weights in
+        system RAM is a five-fold slowdown with nothing on screen to explain
+        it, and no amount of reading the placement would ever have found it.
+        The likeliest cause is not llama.cpp -- it is the card being fuller
+        than this extension can see, or a driver quietly spilling an
+        allocation it could not fit -- so what is said is what was observed
+        rather than a diagnosis.
+        """
+        offload = self.report.offload
+        if not offload.known:
+            return
+        logger.info("Model Chain: llama.cpp reports %s", offload.describe())
+        if offload.spilled and negotiated.placement.on_gpu:
+            logger.warning(
+                "Model Chain: %.1f GB of the weights (%.0f%%) are in system RAM, not on the "
+                "card — generation will run at a fraction of the speed it would with all of "
+                "them resident. The card has less room than this extension can see: check "
+                "nvidia-smi for another process holding VRAM, and on Windows check that the "
+                "driver's CUDA sysmem-fallback policy is not spilling the allocation",
+                offload.system_bytes / _GB, offload.system_share * 100)
 
     def _label(self, configuration: Config) -> str:
         name = configuration.quantization or (

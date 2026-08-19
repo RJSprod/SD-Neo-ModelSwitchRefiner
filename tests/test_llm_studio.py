@@ -8,6 +8,8 @@ reach ordinary image generation.
 
 from __future__ import annotations
 
+import types
+
 import threading
 
 import pytest
@@ -614,3 +616,64 @@ class TestTheActivityIndicator:
 
         assert "mc-llm-state-busy" in mc_llm_studio._runtime_line(mc_llm_studio.LOADING)
         assert "mc-llm-state-busy" not in mc_llm_studio._runtime_line()
+
+
+# --------------------------------------------------------------------------- #
+# Replacing the runtime under a running server
+# --------------------------------------------------------------------------- #
+#
+# Windows will not let a file be renamed or deleted while a process holds it
+# open, and llama-server holds every DLL beside it. Adopting a build replaces
+# that whole folder, so doing it while the server was still up failed with
+# "[WinError 5] Access is denied: ...\\runtime\\cublas64_12.dll" -- which names
+# a CUDA library and reads like a driver problem rather than like the file lock
+# it is. The stop was always there; it was after the copy.
+
+
+class TestSwappingTheRuntime:
+    def test_the_server_is_stopped_before_the_build_is_replaced(self, host, store, monkeypatch):
+        import mc_llm_files
+        import mc_llm_runtime
+        import mc_llm_setup
+        import mc_llm_studio
+
+        order = []
+        monkeypatch.setattr(mc_llm_runtime.runtime, "stop", lambda: order.append("stop"))
+        monkeypatch.setattr(mc_llm_files, "resolve_runtime",
+                            lambda path: types.SimpleNamespace(path=store / "llama-server"))
+        monkeypatch.setattr(mc_llm_setup, "adopt",
+                            lambda source: (order.append("copy"), (source, "Copied."))[1])
+        monkeypatch.setattr(mc_llm_setup, "record",
+                            lambda executable, device=None: order.append("record"))
+
+        mc_llm_studio._apply_runtime(str(store / "llama-server"), "0")
+
+        assert order == ["stop", "copy", "record"]
+
+    def test_the_download_stops_it_too(self, host, store, monkeypatch):
+        """The pinned build is extracted over the same folder."""
+        import mc_llm_runtime
+        import mc_llm_setup
+        import mc_llm_studio
+
+        order = []
+        monkeypatch.setattr(mc_llm_runtime.runtime, "stop", lambda: order.append("stop"))
+        monkeypatch.setattr(mc_llm_setup, "download",
+                            lambda device, on_status=None, on_progress=None:
+                            (order.append("extract"), store / "llama-server")[1])
+        monkeypatch.setattr(mc_llm_setup, "record",
+                            lambda executable, device=None: order.append("record"))
+
+        mc_llm_studio._download_runtime("0")
+
+        assert order == ["stop", "extract", "record"]
+
+    def test_a_folder_still_in_use_is_reported_as_one(self, store):
+        """The sentence a user can act on, in place of a Windows error code
+        pointing at a CUDA library."""
+        import mc_llm_setup
+
+        message = str(mc_llm_setup.in_use_error(store / "runtime",
+                                                PermissionError("[WinError 5] Access is denied")))
+
+        assert "in use" in message and "Unload" in message

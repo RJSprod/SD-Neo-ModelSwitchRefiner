@@ -740,12 +740,52 @@ class TestThemeContract:
                 assert not re.search(r":\s*#[0-9a-fA-F]{3,8}\b", stripped), stripped
                 assert not re.search(r":\s*rgba?\(", stripped), stripped
 
+    def test_nothing_in_the_drawer_can_be_squashed_out_of_existence(self):
+        """The drawer is a flex column inside a workspace of fixed height, so
+        its sections shrink by default when they do not all fit -- and opening
+        the Threads accordion, which is as long as your thread history, took
+        that space out of Character underneath it. What that looks like is the
+        character controls emptying into a blank gap, with no scrollbar,
+        because from the drawer's point of view everything fitted."""
+        from pathlib import Path
+
+        css = (Path(__file__).resolve().parent.parent / "style.css").read_text(encoding="utf-8")
+        rule = css.split("#mc-llm-studio .mc-llm-drawer > *", 1)
+
+        assert len(rule) == 2, "the drawer's sections may still be shrunk"
+        assert "flex: 0 0 auto" in rule[1].split("}", 1)[0]
+
     def test_the_escaping_helper_neutralises_metadata_from_a_model_file(self):
         """general.name is free text out of somebody else's file, and it lands
         in HTML."""
         import mc_llm_ui as ui
 
         assert "<script>" not in ui.notice("<script>alert(1)</script>")
+
+
+class TestBoxesThatDoNotMoveTheButtons:
+    """A Gradio Textbox grows from ``lines`` towards ``max_lines`` as text
+    arrives. An output box that grows while a generation streams into it walks
+    everything below it -- including Stop -- off the bottom of the window, at
+    the one moment somebody wants to press it. So the boxes a generation writes
+    into do not change size, and text longer than the box is scrolled inside
+    it.
+    """
+
+    def test_the_minimax_output_does_not_grow_while_it_is_written(self):
+        import mc_llm_minimax_panel
+
+        written = mc_llm_minimax_panel.build()["output"]
+
+        assert written.max_lines == written.lines
+
+    def test_neither_prompt_studio_output_grows(self):
+        import mc_llm_prompt_panel
+
+        built = mc_llm_prompt_panel.build()
+
+        for box in (built["positive"], built["negative"]):
+            assert box.max_lines == box.lines
 
 
 class TestPanelsOpenWhereTheyWereLeft:
