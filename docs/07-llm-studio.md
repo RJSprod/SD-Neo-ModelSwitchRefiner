@@ -167,11 +167,16 @@ attention to.
 
 ```
 mc_llm_*_panel  ->  mc_llm_sessions  ->  mc_llm_runtime  ->  mc_broker
-                                              |                  |
-                                        mc_llm_context      mc_memory
-                                              |
-                                          mc_gguf
+       |                                      |                  |
+mc_llm_browse                           mc_llm_context      mc_memory
+       |                                      |
+mc_llm_files  <-  mc_llm_setup            mc_gguf
 ```
+
+`mc_llm_files` imports neither Gradio nor the vendored package, which is what
+lets `mc_llm_setup` use it and what lets it answer on an installation where
+neither of those will import — the installation most likely to be typing a path
+into the setup panel.
 
 `mc_memory` does not import `mc_broker`. The image half stays importable,
 testable and correct on an installation that never loads the LLM half — which is
@@ -253,11 +258,79 @@ release may be. They are the guard against being pointed at a folder that
 *contains* a release rather than at the release.
 
 
+## 6b. Paths typed into a text box
+
+Three of the panel's controls ask for an absolute path, and for a while a text
+box was the only way to supply one. That is a fine interface for somebody who
+already has the path on a clipboard and a poor one for everybody else — and it
+was worse than it looked, because *the obvious way to get a path onto a Windows
+clipboard produces a path that names nothing*. Explorer's **Copy as path**
+copies `"C:\models\thing.gguf"` **with the quotes**, and the resulting "there
+is nothing at ..." names a path that reads as exactly right.
+
+`mc_llm_files.py` is what stands between a paste and a `Path`. Everything it
+undoes is something a real clipboard does:
+
+| What arrives | Where from |
+| --- | --- |
+| `"C:\models\thing.gguf"` | Explorer's *Copy as path* |
+| `file:///C:/models/thing%20one.gguf` | a file dragged onto the box |
+| `%USERPROFILE%\models`, `$HOME/models` | a path written down in a note |
+| a path with the line break still in it | a copy out of a chat window or a PDF |
+
+It also answers two questions that used to be refusals:
+
+- **A folder is an answer.** "My models path" is, to most people, the folder the
+  models are in. Given that folder, the honest replies are "here is the one
+  model in it" and "it holds these six — which one?". Refusing both with "there
+  is no model file at ..." sends somebody back to the file manager to do work
+  this can do.
+- **A shard is corrected.** llama.cpp is handed `-00001-of-00003.gguf` and finds
+  the other two itself; handed the third it loads a third of a model and fails
+  oddly. Picking the wrong shard out of a folder listing is a reasonable
+  mistake, so it is fixed and reported.
+
+Everything the module works out is *reported and written back into the box* —
+the panel's four outputs from **Use this model** exist so that a user who
+pasted one thing and got another can see which. A silent correction would be
+the same bug in a nicer coat.
+
+`mc_llm_browse.py` is the other half: a picker, so the paths need not be pasted
+at all. It renders the listing **server-side** rather than opening a native
+dialog, and that is not a stylistic preference — a `tkinter` dialog would open
+on the machine running the WebUI, which is either somebody's desktop (fine) or
+a headless box where the dialog cannot be seen or dismissed and the worker
+thread waits forever (not fine). One picker is built per box because Gradio
+wires outputs statically and a shared one cannot know at build time which box
+it will fill. Navigation binds to `input` where the host has it, because a
+dropdown whose choices the handler replaces fires `change` on the replacement
+and walks a folder deeper on every click.
+
+## 6c. Panels that draw failure instead of raising it
+
+`_estimator_html`, `_residency_html` and `_runtime_line` each wrap a body that
+can raise. The estimator's wrapper is the load-bearing one: its HTML is *one of
+four outputs of "Use this model"*, and Gradio discards every output of a handler
+that raises. So a model could be recorded correctly, the panel show nothing at
+all, and the only feedback be the word **Error** in a toast — which is
+indistinguishable, from the user's side, from the model having been rejected.
+
+The rule this settles on: a panel that cannot draw itself says which panel and
+why, in the space where it would have drawn, and lets the rest of the click
+stand.
+
+The same class of confusion produced the memory radios' refresh on
+`block.load`. Those controls are built once, when the WebUI starts, from
+settings the Settings page can change afterwards — so the panel could show
+*Hybrid* while the residency view directly under it said *Exclusive*. Both were
+telling the truth about different moments.
+
 ## 7. Tests
 
 `tests/test_gguf.py`, `test_llm_context.py`, `test_broker.py`,
-`test_llm_runtime.py`, `test_llm_studio.py`, `test_llm_panels.py` and
-`test_cross_workload.py`. They run without a GPU, a model file or a WebUI.
+`test_llm_runtime.py`, `test_llm_studio.py`, `test_llm_panels.py`,
+`test_llm_files.py` and `test_cross_workload.py`. They run without a GPU, a
+model file or a WebUI.
 
 Three are shaped by their failure modes rather than by their feature size:
 
@@ -267,7 +340,10 @@ Three are shaped by their failure modes rather than by their feature size:
 - `test_cross_workload.py` exists only for the seams between the two halves,
   which is where the two bugs found during implementation both were;
 - `test_llm_panels.py` builds every panel against the faked Gradio, because a
-  UI this size is mostly wiring and wiring fails at build time or not at all.
+  UI this size is mostly wiring and wiring fails at build time or not at all;
+- `test_llm_files.py` is a list of real pastes rather than invented edge cases.
+  Every string in it is something a clipboard actually produces, which is the
+  only reason any of them is worth handling.
 
 `test_llm_setup.py` has one fixture worth reading before adding to it: the
 install root is a *subdirectory* of `tmp_path`, not `tmp_path` itself, so that a
