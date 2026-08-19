@@ -16,6 +16,15 @@ So the property is asserted to be **scroll-invariant**: the same element, in the
 same place in the document, measured at two scroll positions, has to publish the
 same height. That is the whole bug, stated as a test.
 
+The transcript's anchoring is here for the same reason and has the same shape of
+bug behind it. Whether to follow a reply is a question about where the reader
+*was*, and the first version asked it from inside a MutationObserver -- which
+runs after the new content is in the DOM, so a reply longer than the slack made
+the answer "no" for somebody who had been at the bottom a millisecond earlier.
+The observer's own callback is captured and driven here, against a scroller
+whose numbers a test can set, which is the only way to ask "and what did it do
+about it?" without a browser.
+
 These run under node, which is not a Forge dependency, so they skip without it.
 """
 
@@ -161,3 +170,141 @@ class TestFittingTheWorkspace:
         """Below that, style.css hands the page its scroll bar back rather than
         squeezing the transcript into nothing."""
         assert measure(top=240, window=420) == ""
+
+
+# --------------------------------------------------------------------------- #
+# The transcript's anchoring
+# --------------------------------------------------------------------------- #
+
+
+ANCHOR = """
+// A transcript holder with one scrolling child, and a captured
+// MutationObserver so a test can say "and then content arrived".
+const mutations = [];
+const scrollListeners = [];
+
+const bubbles = {
+    tagName: "DIV",
+    dataset: {},
+    style: {setProperty() {}, removeProperty() {}, getPropertyValue: () => ""},
+    scrollHeight: 1000,
+    clientHeight: 400,
+    scrollTop: START_SCROLL_TOP,
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    addEventListener: (kind, fn) => { if (kind === "scroll") scrollListeners.push(fn); },
+};
+
+const holder = {
+    tagName: "DIV",
+    dataset: {},
+    offsetParent: {},
+    style: {setProperty() {}, removeProperty() {}, getPropertyValue: () => ""},
+    // The holder itself does not overflow; the child does. That is the shape
+    // Gradio actually renders, and finding the right child is part of what is
+    // being tested.
+    scrollHeight: 400,
+    clientHeight: 400,
+    scrollTop: 0,
+    querySelectorAll: () => [bubbles],
+    querySelector: () => null,
+    addEventListener() {},
+    getBoundingClientRect: () => ({top: 240, height: 400, bottom: 0, left: 0, right: 0}),
+};
+
+globalThis.document = {
+    documentElement: {scrollTop: 0},
+    querySelector: (selector) =>
+        (selector === "#mc-llm-chat-transcript" ? holder : null),
+    addEventListener() {},
+    readyState: "complete",
+};
+globalThis.window = globalThis;
+globalThis.innerHeight = 900;
+globalThis.scrollY = 0;
+globalThis.addEventListener = () => {};
+globalThis.setTimeout = (fn) => { fn(); return 0; };
+globalThis.MutationObserver = function (callback) {
+    mutations.push(callback);
+    this.observe = () => {};
+};
+globalThis.gradioApp = () => globalThis.document;
+
+const loaded = [];
+globalThis.onUiLoaded = (fn) => loaded.push(fn);
+globalThis.onAfterUiUpdate = () => {};
+
+SOURCE
+
+loaded.forEach((fn) => fn());
+
+// What the reader did, if anything: a scroll to READER_SCROLL_TOP, reported the
+// way a browser reports it.
+if (READER_SCROLL_TOP !== null) {
+    bubbles.scrollTop = READER_SCROLL_TOP;
+    scrollListeners.forEach((fn) => fn());
+}
+
+// And then a reply arrives: taller content, and — when COLLAPSE is true — the
+// scrollTop a re-render leaves behind when the list is empty for an instant.
+bubbles.scrollHeight = GROWN_HEIGHT;
+if (COLLAPSE) bubbles.scrollTop = 0;
+mutations.forEach((fn) => fn());
+
+console.log(JSON.stringify({scrollTop: bubbles.scrollTop, watched: scrollListeners.length}));
+"""
+
+
+def arrival(start: int = 600, reader=None, grown: int = 1600, collapse: bool = False) -> dict:
+    """Open a transcript, optionally scroll it, then let a reply land."""
+    harness = (
+        ANCHOR.replace("SOURCE", SCRIPT.read_text())
+        .replace("START_SCROLL_TOP", json.dumps(start))
+        .replace("READER_SCROLL_TOP", json.dumps(reader))
+        .replace("GROWN_HEIGHT", json.dumps(grown))
+        .replace("COLLAPSE", "true" if collapse else "false")
+    )
+    result = subprocess.run(["node", "--input-type=module", "-e", harness],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+class TestAnchoringTheTranscript:
+    """At the end, stay at the end. Away from it, stay where you are."""
+
+    def test_it_watches_the_child_that_scrolls_not_the_holder(self):
+        """Gradio's transcript does not overflow; the list inside it does."""
+        assert arrival()["watched"] == 1
+
+    def test_a_reader_at_the_end_is_carried_to_the_new_end(self):
+        """The regression. The reply is 600px taller than the slack, which is
+        exactly the case the old check got wrong: it asked whether we were near
+        the bottom *after* the reply landed, and the answer was no."""
+        landed = arrival(start=600, reader=600, grown=1600)
+
+        assert landed["scrollTop"] == 1600
+
+    def test_within_the_slack_still_counts_as_the_end(self):
+        """Gradio's own threshold is 100px and this has to agree with it, or
+        the two fight over every reply that arrives near the bottom."""
+        assert arrival(start=600, reader=550, grown=1600)["scrollTop"] == 1600
+
+    def test_a_reader_who_has_scrolled_away_is_left_where_they_are(self):
+        landed = arrival(start=600, reader=120, grown=1600)
+
+        assert landed["scrollTop"] == 120
+
+    def test_a_re_render_does_not_throw_them_to_the_top(self):
+        """A full re-render empties the list for an instant, and scrollTop is
+        clamped to a scrollHeight that was briefly zero. Nobody scrolled."""
+        landed = arrival(start=600, reader=120, grown=1600, collapse=True)
+
+        assert landed["scrollTop"] == 120
+
+    def test_a_thread_just_opened_shows_its_newest_message(self):
+        """No scroll event has happened yet, so there is nothing recorded to
+        hold — and the newest message is what somebody opening a chat wants."""
+        landed = arrival(start=0, reader=None, grown=1600)
+
+        assert landed["scrollTop"] == 1600
