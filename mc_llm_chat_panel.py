@@ -1,13 +1,23 @@
-"""Conversation: threads, characters and streamed replies (section 4.3).
+"""Conversation: a messaging application first, a control surface second.
 
-Designed around reading. Section 4.3 asks for the conversation area to receive
-most of the visual space and for configuration to be secondary and collapsible,
-and this panel takes that further than the first version did: there is one
-column, it is the transcript, and everything else -- threads, the character,
-the persona -- lives in a single drawer that is *not in the layout at all*
-until it is asked for. A rail that is always there is not secondary, it is
-narrow; a drawer that is not rendered is what actually gives the transcript the
-window.
+Section 4.3 asks for the conversation area to receive most of the visual space
+and for configuration to be secondary and collapsible. The first version of
+this panel answered that with a drawer beside the transcript; this one answers
+it the way a messaging application does, because that is what the thing is:
+there is a compact header, a transcript that owns the scrolling, and a composer
+on the bottom edge, and *nothing else is in the layout at all*. Threads, the
+character, the persona, the model and the per-message actions are surfaces that
+open over the conversation and close again, leaving the transcript exactly
+where it was.
+
+Why not a drawer
+----------------
+A drawer is a column, and a column is in the layout. On a desktop that costs a
+fifth of the width; on a phone Gradio wraps it to a full-width block *above* the
+stage, which pushes the composer off the bottom of the window -- the one thing
+a chat window must never do. An overlay costs nothing until it is opened and
+nothing after it is closed, at every width, which is why every configuration
+surface here is one.
 
 The state lives in the vendored ``prompt_master.chat`` package, unchanged:
 characters are files in a folder other tools already understand, chats are
@@ -17,24 +27,41 @@ That is section 16's separation kept by construction -- Conversation's history
 cannot leak into Prompt Studio's, because they are not in the same files and
 never pass through the same code.
 
-Per-message actions, and why they are a bar rather than a menu
---------------------------------------------------------------
-The standalone application hangs a ``⋯`` on every bubble. Gradio 4.40's
-``Chatbot`` has nowhere to put one -- it renders the value it is given and
-nothing else -- and that was originally recorded as "no per-message
-affordances", with branching reduced to "copy the whole thread and delete back".
-That is the wrong trade: the actions are the feature, and the component only
-decides where they are drawn.
+View states
+-----------
+The panel is built once and the surfaces are shown and hidden, because Gradio
+cannot create a control in response to a click. The states are:
 
-So the component's own ``select`` event is what nominates a message -- click a
-bubble and it says which -- and the actions are drawn once, in a bar under the
-transcript, applying to whichever message is nominated. Everything the
-standalone menu offers is there: edit, regenerate, continue, send again from
-here, branch from here, delete, delete from here, and the version pager a
-regenerate leaves behind. One bar rather than sixty menus is also what keeps
-this cheap: the transcript is re-rendered from the conversation on every
-change, which is the standalone application's own rule and the only way a dozen
-in-place mutations cannot drift from what is on disk.
+``CHAT_HOME``
+    Header, transcript, status, composer. Everything else hidden.
+``NAV_SHEET``
+    Threads, Character, You, and the secondary route to the model, to Setup and
+    to the other workspaces.
+``THREADS_SCREEN`` / ``CHARACTER_SCREEN`` / ``PERSONA_SCREEN``
+    One destination each, opened from the nav sheet.
+``MESSAGE_ACTION_SHEET``
+    A bottom sheet applying to the message that was tapped.
+``MESSAGE_EDIT_MODE``
+    The composer, temporarily replaced by an editor for the selected message.
+``ATTACHMENT_PREVIEW``
+    The picture for the next message, in a compact row above the composer.
+
+Only one of the four screens is ever open: :func:`_screens` is the single
+function that says so, and every handler that opens one returns its whole
+answer rather than toggling a component of its own.
+
+Per-message actions, and why they are a sheet
+---------------------------------------------
+Gradio 4.40's ``Chatbot`` renders the value it is given and nothing else, so
+there is nowhere to hang a ``⋯`` on a bubble. The component's own ``select``
+event is what nominates a message -- tap a bubble and it says which -- and the
+actions are drawn once, in a sheet that overlays the bottom of the transcript,
+applying to whichever message is nominated. Everything the standalone menu
+offers is there: edit, regenerate, continue, send again from here, branch from
+here, delete, delete from here, and the version pager a regenerate leaves
+behind. A sheet rather than a row in the flow, because a row inserted between
+the transcript and the composer moves both of them every time you tap a
+message.
 
 ``Chatbot`` pairs turns, so the row and column the click reports is not the
 index of a message. The map between them is built with the transcript, in one
@@ -63,7 +90,33 @@ logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
 
 NO_SELECTION = -1
-"""What ``selected`` holds when the action bar applies to nothing."""
+"""What ``selected`` holds when the action sheet applies to nothing."""
+
+SCREENS = ("nav", "threads", "character", "persona")
+"""The overlay surfaces, in the order :func:`_screens` returns them.
+
+One at a time, always. They occupy the same space -- the whole conversation
+workspace on a narrow display -- so two open at once is two half-drawn panels
+rather than one usable one, and the way that is guaranteed is that there is one
+function which decides, and it decides for all of them at once.
+"""
+
+SELECTION_ORDER = ("sheet", "heading", "back", "pager", "forward", "drop",
+                   "regenerate", "continue", "resend", "edit", "edit_box", "composer")
+"""The order :func:`_selection_updates` answers in.
+
+The action sheet is redrawn from that one function by every handler that
+changes the transcript, so the list of controls it writes into has to be
+written down once. ``tests/test_llm_panels.py`` asserts the two are the same
+length: a handler one value short would put a label into a visibility and
+nothing would raise.
+
+The last three are not in the sheet. Editing replaces the composer rather than
+opening an editor between the transcript and the composer, so "which message is
+selected" decides the state of the edit row and of the composer too -- and
+because they are in this list, every refresh returns the panel to CHAT_HOME
+without a second handler having to remember to.
+"""
 
 
 def build() -> dict:
@@ -75,269 +128,320 @@ def build() -> dict:
     prefs = mc_llm_state.preferences()
     who = prefs.get("character") or ""
     # Populated at build rather than left for the first character change: the
-    # panel opens on the thread it was left on, and a rail that starts empty
+    # panel opens on the thread it was left on, and a list that starts empty
     # reads as "you have no threads" rather than as "pick a character".
     initial_threads = _thread_choices(who)
     initial_thread = prefs.get("thread") or (initial_threads[0][1] if initial_threads else "")
     initial_persona = _persona()
-    initial_rows, initial_map = _view(_load(who, initial_thread))
+    opened = _load(who, initial_thread)
+    initial_rows, initial_map = _view(opened)
 
     cancellation = gr.State(None)
     thread_state = gr.State(initial_thread)
-    # Which message the action bar applies to, and how to get from the
+    # Which message the action sheet applies to, and how to get from the
     # component's (row, column) to that index. Both are State rather than
     # recomputed, because a transcript that has been edited since the click is
     # a different transcript and the click has to be read against the one it
     # was made on.
     selected = gr.State(NO_SELECTION)
     positions = gr.State(initial_map)
-    # Whether the drawer and the image box are open. Held here rather than read
-    # back off the components because a Column and an Image have no value for a
-    # handler to be given -- only a State can be an input to the click that
-    # flips it.
-    drawer_open = gr.State(False)
+    # Whether the attachment row is open. Held here rather than read back off
+    # the component because an Image has no value for a handler to be given --
+    # only a State can be an input to the click that flips it.
     attachment_open = gr.State(False)
 
-    with gr.Row(elem_id=ui.ident("chat"),
-                elem_classes=ui.classes("workspace", "chat-workspace")):
+    # position: relative in the stylesheet, and every sheet below is absolutely
+    # positioned inside it. That is the whole of the responsive strategy: a
+    # surface that opens takes no room in the layout, so nothing it opens over
+    # can be pushed anywhere -- least of all the composer, off the bottom of a
+    # phone.
+    with gr.Column(elem_id=ui.ident("chat"),
+                   elem_classes=ui.classes("workspace", "chat-workspace")):
 
-        # -- the drawer: everything that is not the conversation ----------- #
-        #
-        # visible=False and not merely narrow. Gradio removes a hidden column
-        # from the layout entirely, which is what lets the transcript have the
-        # whole window rather than the whole window minus two rails.
-        with gr.Column(scale=1, min_width=260, visible=False,
-                       elem_id=ui.ident("chat", "drawer"),
-                       elem_classes=ui.classes("drawer")) as drawer:
+        # -- CHAT_HOME ------------------------------------------------------ #
 
-            # A chooser and three columns, not three accordions. What was asked
-            # for is "always stacked, one open at a time, and the open one gets
-            # the room" -- and an accordion cannot promise any of the three: it
-            # is laid out by the host, opened independently of its neighbours,
-            # and as tall as whatever is inside it. Three sections and a radio
-            # promise all three by construction, in a drawer of fixed height
-            # where two open at once would leave neither readable.
-            section = gr.Radio(label=None, show_label=False,
-                               choices=[(name, key) for key, name in SECTIONS],
-                               value=SECTIONS[0][0], container=False,
-                               elem_id=ui.ident("chat", "section"),
-                               elem_classes=ui.classes("sections"))
+        with gr.Column(elem_id=ui.ident("chat", "stage"),
+                       elem_classes=ui.classes("chat-stage")):
 
-            with gr.Column(elem_classes=ui.classes("section")) as threads_section:
-                search = gr.Textbox(label="Find a thread", placeholder="Filter by title…",
-                                    elem_id=ui.ident("chat", "search"))
-                threads = gr.Radio(label=None, show_label=False, choices=initial_threads,
-                                   value=initial_thread or None,
-                                   elem_id=ui.ident("chat", "threads"),
-                                   elem_classes=ui.classes("threads"))
-                with gr.Row():
-                    new_thread = gr.Button("New", size="sm", variant="primary")
-                    rename = gr.Button("Rename", size="sm")
-                    delete = gr.Button("Delete", size="sm", variant="stop")
-                rename_box = gr.Textbox(label="New title", visible=False,
-                                        elem_id=ui.ident("chat", "rename"))
-
-            # Choosing, editing and creating a character are three things done
-            # to the same object, so they are one section: the drop-down is
-            # who you are talking to, and the editor under it is that same
-            # character, opened only when it is being changed.
-            with gr.Column(visible=False,
-                           elem_classes=ui.classes("section")) as character_section:
-                character = gr.Dropdown(
-                    label="Talking to", choices=_character_choices(),
-                    value=who or None, interactive=True,
-                    elem_id=ui.ident("chat", "character"))
-                with gr.Row():
-                    edit_character = gr.Button("Edit", size="sm")
-                    new_character = gr.Button("New", size="sm")
-                    delete_character = gr.Button("Delete", size="sm", variant="stop")
-                with gr.Group(visible=False,
-                              elem_id=ui.ident("chat", "character-editor")) as character_editor:
-                    name = gr.Textbox(label="Name", elem_id=ui.ident("chat", "name"))
-                    context = gr.Textbox(label="Context", lines=8,
-                                         placeholder="Who the character is. Shown to the model "
-                                                     "before the first line of dialogue.")
-                    greeting = gr.Textbox(label="Greeting", lines=3)
-                    system = gr.Textbox(label="System prompt override", lines=3,
-                                        placeholder="Leave empty to use the built prompt.")
-                    # Every default here is the vendored package's own, named
-                    # rather than copied: these are the numbers the standalone
-                    # application ships with, and a second set of literals in
-                    # the UI is how a panel quietly stops matching the engine
-                    # behind it.
-                    with gr.Row():
-                        temperature = gr.Slider(label="Temperature", minimum=0.0, maximum=2.0,
-                                                step=0.05, value=DEFAULT_TEMPERATURE)
-                        top_p = gr.Slider(label="Top-p", minimum=0.0, maximum=1.0, step=0.01,
-                                          value=DEFAULT_TOP_P)
-                    reply_tokens = gr.Slider(label="Reply tokens", minimum=64, maximum=4096,
-                                             step=64, value=DEFAULT_MAX_REPLY_TOKENS)
-                    seed = gr.Number(label="Seed", value=RANDOM_SEED, precision=0,
-                                     info=f"{RANDOM_SEED} draws a fresh seed for every reply.")
-                    with gr.Row():
-                        save_character = gr.Button("Save character", variant="primary", size="sm")
-                        close_editor = gr.Button("Close", size="sm")
-                import_card = gr.File(label="Import a character card",
-                                      file_types=[".json", ".yaml", ".yml", ".png"],
-                                      elem_id=ui.ident("chat", "import"))
-
-            with gr.Column(visible=False,
-                           elem_classes=ui.classes("section")) as persona_section:
-                persona_name = gr.Textbox(label="Your name", value=initial_persona.name)
-                persona_description = gr.Textbox(label="About you", lines=4,
-                                                 value=initial_persona.description)
-                save_persona = gr.Button("Save", size="sm")
-
-        # -- the stage: status, transcript, actions, composer -------------- #
-        with gr.Column(scale=4, min_width=360,
-                       elem_id=ui.ident("chat", "stage"),
-                       elem_classes=ui.classes("stage", "chat-stage")):
-
-            with gr.Row(elem_classes=ui.classes("stage-head")):
-                panel = gr.Button(OPEN_LABEL, size="sm",
-                                  elem_id=ui.ident("chat", "panel"),
-                                  elem_classes=ui.classes("drawer-toggle"))
-                status = gr.HTML(ui.notice("Ready."), elem_id=ui.ident("chat", "status"))
+            with gr.Row(elem_classes=ui.classes("chat-header")):
+                menu = gr.Button("☰", size="sm", scale=0, min_width=44,
+                                 elem_id=ui.ident("chat", "menu"),
+                                 elem_classes=ui.classes("icon-button"))
+                header = gr.HTML(_heading(who, opened),
+                                 elem_id=ui.ident("chat", "title"),
+                                 elem_classes=ui.classes("chat-title"))
+                # The runtime, as one tappable word. What it opens -- the model
+                # chooser, Load, Unload, the route to Setup -- is the shell's,
+                # and the shell wires this button to it: Conversation is not
+                # the place a model filename, a rescan and two buttons belong
+                # on screen at all times.
+                model = gr.Button(_MODEL_LABEL, size="sm", scale=0, min_width=0,
+                                  elem_id=ui.ident("chat", "model"),
+                                  elem_classes=ui.classes("chip-button"))
 
             # No height= at all. The height is the space the tab has, worked
             # out in the browser and applied in style.css -- a number here
             # would be an inline style and would win over the CSS that makes
             # the transcript fit the window instead of the other way round.
-            # No copy button. It put an icon under every message in a
+            # No copy button: it put an icon under every message in a
             # transcript whose whole job is to be read, to do something a
-            # selection and Ctrl+C already do -- and it was one more thing
-            # between two bubbles that are meant to read as a conversation.
+            # selection and Ctrl+C already do.
             transcript = gr.Chatbot(
-                label=None, show_copy_button=False, render_markdown=True,
+                label=None, show_label=False, show_copy_button=False, render_markdown=True,
                 value=initial_rows,
                 elem_id=ui.ident("chat", "transcript"),
                 elem_classes=ui.classes("transcript"))
 
-            actions = _action_bar()
-
+            # ATTACHMENT_PREVIEW. Not in the layout until Attach opens it, and
+            # small when it is: the picture for the next message is a chip, not
+            # a panel.
             with gr.Row(visible=False, elem_id=ui.ident("chat", "attachment"),
                         elem_classes=ui.classes("attachment")) as attachment_row:
-                attachment = gr.Image(label="Attach an image", type="filepath", height=140,
+                attachment = gr.Image(label="Next message", type="filepath", height=96,
+                                      show_label=False, scale=1,
                                       elem_id=ui.ident("chat", "image"))
+                remove_attachment = gr.Button("Remove", size="sm", scale=0, min_width=88)
 
-            with gr.Row(elem_classes=ui.classes("composer")):
-                # Three lines, and never more than six. The composer is the
-                # one thing that must stay on screen, so it is not allowed to
-                # grow into the space the transcript is living on; a message
-                # longer than six lines scrolls inside its own box.
+            # One line, always the same height, immediately above the composer.
+            # "Ready." is quiet; a warning or an error is not, and neither of
+            # them moves the transcript by a pixel when it arrives.
+            status = gr.HTML(ui.notice("Ready."), elem_id=ui.ident("chat", "status"),
+                             elem_classes=ui.classes("chat-status"))
+
+            with gr.Row(elem_id=ui.ident("chat", "composer"),
+                        elem_classes=ui.classes("composer")) as composer:
+                attach = gr.Button("\U0001f4ce", size="sm", scale=0, min_width=44,
+                                   elem_id=ui.ident("chat", "attach"),
+                                   elem_classes=ui.classes("icon-button"))
+                # One line, and never more than six: the composer is the one
+                # thing that must stay on screen, so it grows with what is
+                # being written and then stops, and a longer message scrolls
+                # inside its own box. Gradio's own rule for a box declared one
+                # line tall is that Enter submits and Shift+Enter breaks the
+                # line, which is what a messaging application does and what the
+                # placeholder therefore says -- and the box is bound to
+                # ``submit`` as well as to the button below, so the two agree.
                 message = gr.Textbox(
-                    label=None, lines=3, max_lines=6, show_label=False, scale=6,
-                    placeholder="Write a message. Shift+Enter for a new line.",
+                    label=None, lines=1, max_lines=6, show_label=False, container=False,
+                    scale=1, placeholder="Message…  Enter sends, Shift+Enter for a new line.",
                     elem_id=ui.ident("chat", "message"))
-                # Two rows beside a three-line box, not three: a taller stack
-                # than the thing it sits next to is a stack that decides how
-                # tall the composer is, and the composer's height is the
-                # transcript's to keep.
-                with gr.Column(scale=0, min_width=150,
-                               elem_classes=ui.classes("composer-side")):
-                    send = gr.Button("Send", variant="primary",
-                                     elem_id=ui.ident("chat", "send"))
-                    with gr.Row(elem_classes=ui.classes("composer-side-row")):
-                        stop = gr.Button("Stop", variant="stop", interactive=False,
-                                         size="sm", min_width=0,
-                                         elem_id=ui.ident("chat", "stop"))
-                        attach = gr.Button("Attach…", size="sm", min_width=0,
-                                           elem_id=ui.ident("chat", "attach"))
+                # Send and Stop are one control in two states, in one place.
+                # Two components rather than one because a single button cannot
+                # carry two click handlers without both of them firing; only
+                # ever one of them is on screen.
+                send = gr.Button("Send", variant="primary", size="sm", scale=0, min_width=88,
+                                 elem_id=ui.ident("chat", "send"))
+                stop = gr.Button("Stop", variant="stop", size="sm", scale=0, min_width=88,
+                                 visible=False, interactive=False,
+                                 elem_id=ui.ident("chat", "stop"))
+
+            # MESSAGE_EDIT_MODE. The composer's space, borrowed: the transcript
+            # stays visible above it, which is the whole reason an edit does not
+            # open a panel of its own.
+            with gr.Row(visible=False, elem_id=ui.ident("chat", "edit"),
+                        elem_classes=ui.classes("composer", "composer-edit")) as edit_row:
+                # Said on the row rather than left to the buttons: a composer
+                # that has quietly filled itself with a message from halfway up
+                # the transcript is a composer somebody sends by accident.
+                gr.HTML(f'<div class="{ui.PREFIX}-editing">\u270e Editing</div>',
+                        elem_classes=ui.classes("editing"))
+                edit_box = gr.Textbox(label="Editing message", lines=2, max_lines=8,
+                                      show_label=False, container=False, scale=1,
+                                      placeholder="Editing this message…",
+                                      elem_id=ui.ident("chat", "editor"))
+                save_edit = gr.Button("Save", variant="primary", size="sm", scale=0,
+                                      min_width=80)
+                cancel_edit = gr.Button("Cancel", size="sm", scale=0, min_width=80)
+
+        # -- NAV_SHEET ------------------------------------------------------ #
+
+        with gr.Column(visible=False, elem_id=ui.ident("chat", "nav"),
+                       elem_classes=ui.classes("sheet", "sheet-side")) as nav:
+            with gr.Row(elem_classes=ui.classes("sheet-head")):
+                gr.Markdown("#### Menu")
+                close_nav = gr.Button("✕", size="sm", scale=0, min_width=44,
+                                      elem_classes=ui.classes("icon-button"))
+            to_threads = gr.Button("Threads", elem_classes=ui.classes("nav-entry"))
+            to_character = gr.Button("Character", elem_classes=ui.classes("nav-entry"))
+            to_persona = gr.Button("You", elem_classes=ui.classes("nav-entry"))
+            gr.Markdown("##### Elsewhere", elem_classes=ui.classes("sheet-label"))
+            to_model = gr.Button("Model / Runtime", size="sm",
+                                 elem_classes=ui.classes("nav-entry"))
+            to_setup = gr.Button("Setup", size="sm", elem_classes=ui.classes("nav-entry"))
+            to_modes = gr.Button("Switch mode", size="sm",
+                                 elem_classes=ui.classes("nav-entry"))
+
+        # -- THREADS_SCREEN ------------------------------------------------- #
+
+        with gr.Column(visible=False, elem_id=ui.ident("chat", "threads"),
+                       elem_classes=ui.classes("sheet", "sheet-screen")) as threads_screen:
+            with gr.Row(elem_classes=ui.classes("sheet-head")):
+                threads_back = gr.Button("‹ Back", size="sm", scale=0, min_width=76,
+                                         elem_classes=ui.classes("sheet-back"))
+                gr.Markdown("#### Threads")
+                new_thread = gr.Button("New", variant="primary", size="sm", scale=0,
+                                       min_width=68)
+            search = gr.Textbox(label="Find a thread", placeholder="Filter by title…",
+                                show_label=False, container=False,
+                                elem_id=ui.ident("chat", "search"))
+            threads = gr.Radio(label=None, show_label=False, choices=initial_threads,
+                               value=initial_thread or None, container=False,
+                               elem_id=ui.ident("chat", "threads"),
+                               elem_classes=ui.classes("threads"))
+            rename = gr.Button("Rename this thread", size="sm")
+            rename_box = gr.Textbox(label="New title", visible=False, container=False,
+                                    placeholder="New title…",
+                                    elem_id=ui.ident("chat", "rename"))
+            with gr.Row(visible=False) as rename_row:
+                save_rename = gr.Button("Save", variant="primary", size="sm")
+                cancel_rename = gr.Button("Cancel", size="sm")
+            # Away from the primary controls and behind its own heading, which
+            # is the only confirmation Gradio can honestly offer: there is no
+            # dialog to put in front of it, so the distance is the deliberation.
+            with gr.Group(elem_classes=ui.classes("destructive")):
+                gr.Markdown("##### Danger zone", elem_classes=ui.classes("sheet-label"))
+                delete = gr.Button("Delete this thread", size="sm", variant="stop")
+
+        # -- CHARACTER_SCREEN ----------------------------------------------- #
+
+        with gr.Column(visible=False, elem_id=ui.ident("chat", "character"),
+                       elem_classes=ui.classes("sheet", "sheet-screen")) as character_screen:
+            with gr.Row(elem_classes=ui.classes("sheet-head")):
+                character_back = gr.Button("‹ Back", size="sm", scale=0, min_width=76,
+                                           elem_classes=ui.classes("sheet-back"))
+                gr.Markdown("#### Character")
+            character = gr.Dropdown(
+                label="Talking to", choices=_character_choices(),
+                value=who or None, interactive=True,
+                elem_id=ui.ident("chat", "who"))
+            with gr.Row():
+                edit_character = gr.Button("Edit", size="sm")
+                new_character = gr.Button("New", size="sm")
+            # Choosing, editing and creating a character are three things done
+            # to the same object, so they are one screen: the drop-down is who
+            # you are talking to, and the editor under it is that same
+            # character, opened only when it is being changed.
+            with gr.Group(visible=False,
+                          elem_id=ui.ident("chat", "character-editor")) as character_editor:
+                name = gr.Textbox(label="Name", elem_id=ui.ident("chat", "name"))
+                context = gr.Textbox(label="Context", lines=6,
+                                     placeholder="Who the character is. Shown to the model "
+                                                 "before the first line of dialogue.")
+                greeting = gr.Textbox(label="Greeting", lines=3)
+                system = gr.Textbox(label="System prompt override", lines=3,
+                                    placeholder="Leave empty to use the built prompt.")
+                with gr.Row():
+                    save_character = gr.Button("Save character", variant="primary", size="sm")
+                    close_editor = gr.Button("Cancel", size="sm")
+            import_card = gr.File(label="Import a character card",
+                                  file_types=[".json", ".yaml", ".yml", ".png"],
+                                  elem_id=ui.ident("chat", "import"))
+            # Nested, because they are the answer to a question almost nobody
+            # asks -- and every default here is the vendored package's own,
+            # named rather than copied: a second set of literals in the UI is
+            # how a panel quietly stops matching the engine behind it.
+            with gr.Accordion("Advanced generation settings", open=False,
+                              elem_classes=ui.classes("advanced")):
+                with gr.Row():
+                    temperature = gr.Slider(label="Temperature", minimum=0.0, maximum=2.0,
+                                            step=0.05, value=DEFAULT_TEMPERATURE)
+                    top_p = gr.Slider(label="Top-p", minimum=0.0, maximum=1.0, step=0.01,
+                                      value=DEFAULT_TOP_P)
+                reply_tokens = gr.Slider(label="Reply tokens", minimum=64, maximum=4096,
+                                         step=64, value=DEFAULT_MAX_REPLY_TOKENS)
+                seed = gr.Number(label="Seed", value=RANDOM_SEED, precision=0,
+                                 info=f"{RANDOM_SEED} draws a fresh seed for every reply.")
+            with gr.Group(elem_classes=ui.classes("destructive")):
+                gr.Markdown("##### Danger zone", elem_classes=ui.classes("sheet-label"))
+                delete_character = gr.Button("Delete this character", size="sm",
+                                             variant="stop")
+
+        # -- PERSONA_SCREEN ------------------------------------------------- #
+
+        with gr.Column(visible=False, elem_id=ui.ident("chat", "persona"),
+                       elem_classes=ui.classes("sheet", "sheet-screen")) as persona_screen:
+            with gr.Row(elem_classes=ui.classes("sheet-head")):
+                persona_back = gr.Button("‹ Back", size="sm", scale=0, min_width=76,
+                                         elem_classes=ui.classes("sheet-back"))
+                gr.Markdown("#### You")
+            persona_name = gr.Textbox(label="Your name", value=initial_persona.name)
+            persona_description = gr.Textbox(label="About you", lines=4,
+                                             value=initial_persona.description)
+            save_persona = gr.Button("Save", variant="primary", size="sm")
+
+        # -- MESSAGE_ACTION_SHEET ------------------------------------------- #
+
+        actions = _action_sheet()
 
     # -- wiring ----------------------------------------------------------- #
     #
     # Everything that changes what the transcript is goes through one output
-    # list, so a handler cannot leave the transcript, the position map and the
-    # action bar describing three different conversations.
+    # list, so a handler cannot leave the transcript, the position map, the
+    # header and the action sheet describing four different conversations.
 
-    view = [transcript, positions, selected, status] + actions["outputs"]
+    selection = {"sheet": actions["sheet"], "heading": actions["heading"],
+                 "back": actions["back"], "pager": actions["pager"],
+                 "forward": actions["forward"], "drop": actions["drop"],
+                 "regenerate": actions["regenerate"], "continue": actions["continue"],
+                 "resend": actions["resend"],
+                 "edit": edit_row, "edit_box": edit_box, "composer": composer}
+    view = ([transcript, positions, selected, status, header]
+            + [selection[key] for key in SELECTION_ORDER])
     stream = [cancellation, transcript, positions, message, attachment, status, send, stop]
     sampling = [temperature, top_p, reply_tokens, seed]
+    screens = [nav, threads_screen, character_screen, persona_screen]
 
-    sections = [threads_section, character_section, persona_section]
-    section.change(fn=_show_section, inputs=[section], outputs=sections, queue=False)
-    # The button carries the state it is about to change, so a drawer and a
-    # button that disagree say so on their faces rather than by one press
-    # appearing to do nothing.
-    panel.click(fn=_toggle_drawer, inputs=[drawer_open],
-                outputs=[drawer_open, drawer, panel], queue=False)
-    attach.click(fn=_toggle_attachment, inputs=[attachment_open],
-                 outputs=[attachment_open, attachment_row, status], queue=False)
+    # -- getting about ---------------------------------------------------- #
+
+    menu.click(fn=_open_nav, inputs=[character, thread_state], outputs=screens + view,
+               queue=False)
+    close_nav.click(fn=_close_screens, outputs=screens, queue=False)
+    for control in (threads_back, character_back, persona_back):
+        control.click(fn=_close_screens, outputs=screens, queue=False)
+
+    to_threads.click(fn=_open_threads, inputs=[character, search],
+                     outputs=screens + [threads], queue=False)
+    to_character.click(fn=_open_character_screen, inputs=[character],
+                       outputs=screens + [character], queue=False)
+    to_persona.click(fn=_open_persona,
+                     outputs=screens + [persona_name, persona_description], queue=False)
+    # The three secondary entries belong to the shell -- the model sheet, the
+    # Setup workspace and the mode chooser are not Conversation's to own -- so
+    # all this panel does is get out of the way, and the shell adds the second
+    # handler that does the rest.
+    for control in (to_model, to_setup, to_modes):
+        control.click(fn=_close_screens, outputs=screens, queue=False)
+
+    # -- threads ---------------------------------------------------------- #
+
+    # ``input`` and not ``change``: this code refills the list whenever a
+    # thread is created, deleted or branched, and ``change`` fires on the
+    # refill -- which would re-open the thread the handler had just opened, and
+    # send the reader home from the screen they were working in. Every handler
+    # that moves the value returns the transcript with it, so nothing is lost
+    # by listening only to the tap.
+    _picked(threads)(fn=_open_thread_home, inputs=[character, threads],
+                     outputs=[thread_state] + view + screens, queue=False)
+    search.change(fn=lambda person, text: gr.update(choices=_thread_choices(person, text)),
+                  inputs=[character, search], outputs=[threads], queue=False)
+    new_thread.click(fn=_new_thread, inputs=[character, search],
+                     outputs=[threads, thread_state] + view + screens, queue=False)
+    delete.click(fn=_delete_thread, inputs=[character, thread_state, search],
+                 outputs=[threads, thread_state] + view, queue=False)
+
+    rename.click(fn=lambda: (gr.update(visible=True), gr.update(visible=True)),
+                 outputs=[rename_box, rename_row], queue=False)
+    cancel_rename.click(fn=lambda: (gr.update(value="", visible=False), gr.update(visible=False)),
+                        outputs=[rename_box, rename_row], queue=False)
+    for control in (rename_box.submit, save_rename.click):
+        control(fn=_rename_thread, inputs=[character, thread_state, rename_box, search],
+                outputs=[threads, rename_box, rename_row, status, header], queue=False)
+
+    # -- the character and the persona ------------------------------------ #
 
     character.change(fn=_select_character, inputs=[character, search],
                      outputs=[threads, thread_state] + view
                      + [name, context, greeting, system] + sampling, queue=False)
-    search.change(fn=lambda person, text: gr.update(choices=_thread_choices(person, text)),
-                  inputs=[character, search], outputs=[threads], queue=False)
-    threads.change(fn=_open_thread, inputs=[character, threads],
-                   outputs=[thread_state] + view, queue=False)
-
-    new_thread.click(fn=_new_thread, inputs=[character, search],
-                     outputs=[threads, thread_state] + view, queue=False)
-    delete.click(fn=_delete_thread, inputs=[character, thread_state, search],
-                 outputs=[threads, thread_state] + view, queue=False)
-    rename.click(fn=lambda: gr.update(visible=True), outputs=[rename_box], queue=False)
-    rename_box.submit(fn=_rename_thread, inputs=[character, thread_state, rename_box, search],
-                      outputs=[threads, rename_box, status], queue=False)
-
-    # -- the per-message actions ------------------------------------------ #
-
-    transcript.select(fn=_select_message,
-                      inputs=[character, thread_state, positions, selected],
-                      outputs=view, queue=False)
-    actions["close"].click(fn=_close_selection, inputs=[character, thread_state],
-                           outputs=view, queue=False)
-
-    actions["back"].click(fn=_page_version(-1), inputs=[character, thread_state, selected],
-                          outputs=view, queue=False)
-    actions["forward"].click(fn=_page_version(1), inputs=[character, thread_state, selected],
-                             outputs=view, queue=False)
-    actions["drop"].click(fn=_drop_version, inputs=[character, thread_state, selected],
-                          outputs=view, queue=False)
-
-    actions["edit"].click(fn=_open_editor, inputs=[character, thread_state, selected],
-                          outputs=[actions["editor"], actions["editor_box"]], queue=False)
-    actions["save_edit"].click(
-        fn=_commit_edit, inputs=[character, thread_state, selected, actions["editor_box"]],
-        outputs=view, queue=False)
-    actions["cancel_edit"].click(fn=lambda: gr.update(visible=False),
-                                 outputs=[actions["editor"]], queue=False)
-
-    actions["branch"].click(fn=_branch_here, inputs=[character, thread_state, selected, search],
-                            outputs=[threads, thread_state] + view, queue=False)
-    actions["delete"].click(fn=_delete_message, inputs=[character, thread_state, selected],
-                            outputs=view, queue=False)
-    actions["delete_from"].click(fn=_delete_from, inputs=[character, thread_state, selected],
-                                 outputs=view, queue=False)
-
-    # -- sending, and the three ways of asking again ---------------------- #
-
-    replying = send.click(
-        fn=_send, inputs=[character, thread_state, message, attachment] + sampling,
-        outputs=stream, show_progress="minimal")
-    regenerating = actions["regenerate"].click(
-        fn=_regenerate, inputs=[character, thread_state, selected] + sampling,
-        outputs=stream, show_progress="minimal")
-    continuing = actions["continue"].click(
-        fn=_continue, inputs=[character, thread_state, selected] + sampling,
-        outputs=stream, show_progress="minimal")
-    resending = actions["resend"].click(
-        fn=_resend, inputs=[character, thread_state, selected] + sampling,
-        outputs=stream, show_progress="minimal")
-
-    for run in (replying, regenerating, continuing, resending):
-        # The thread list is refreshed because an untitled thread has just been
-        # named, and the selection is dropped because the message it pointed at
-        # may not be the message that is there now.
-        run.then(fn=lambda person, text: gr.update(choices=_thread_choices(person, text)),
-                 inputs=[character, search], outputs=[threads])
-        run.then(fn=_close_selection, inputs=[character, thread_state], outputs=view)
-
-    stop.click(fn=_cancel, inputs=[cancellation], outputs=[status, send, stop],
-               cancels=[replying, regenerating, continuing, resending], queue=False)
-
-    # -- characters and persona ------------------------------------------- #
-
     edit_character.click(fn=_open_character, inputs=[character],
                          outputs=[character_editor, name, context, greeting, system]
                          + sampling + [status], queue=False)
@@ -358,23 +462,108 @@ def build() -> dict:
     save_persona.click(fn=_save_persona, inputs=[persona_name, persona_description],
                        outputs=[status], queue=False)
 
-    return {"status": status, "transcript": transcript, "drawer": drawer,
-            "persona": (persona_name, persona_description)}
+    # -- the per-message actions ------------------------------------------ #
+
+    transcript.select(fn=_select_message,
+                      inputs=[character, thread_state, positions, selected],
+                      outputs=view, queue=False)
+    actions["close"].click(fn=_close_selection, inputs=[character, thread_state],
+                           outputs=view, queue=False)
+
+    actions["back"].click(fn=_page_version(-1), inputs=[character, thread_state, selected],
+                          outputs=view, queue=False)
+    actions["forward"].click(fn=_page_version(1), inputs=[character, thread_state, selected],
+                             outputs=view, queue=False)
+    actions["drop"].click(fn=_drop_version, inputs=[character, thread_state, selected],
+                          outputs=view, queue=False)
+
+    actions["edit"].click(fn=_open_editor, inputs=[character, thread_state, selected],
+                          outputs=[edit_row, edit_box, composer, actions["sheet"]],
+                          queue=False)
+    save_edit.click(fn=_commit_edit, inputs=[character, thread_state, selected, edit_box],
+                    outputs=view, queue=False)
+    cancel_edit.click(fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
+                      outputs=[edit_row, composer], queue=False)
+
+    actions["branch"].click(fn=_branch_here, inputs=[character, thread_state, selected, search],
+                            outputs=[threads, thread_state] + view, queue=False)
+    actions["delete"].click(fn=_delete_message, inputs=[character, thread_state, selected],
+                            outputs=view, queue=False)
+    actions["delete_from"].click(fn=_delete_from, inputs=[character, thread_state, selected],
+                                 outputs=view, queue=False)
+
+    # -- the attachment ---------------------------------------------------- #
+
+    attach.click(fn=_toggle_attachment, inputs=[attachment_open],
+                 outputs=[attachment_open, attachment_row, status], queue=False)
+    remove_attachment.click(fn=_clear_attachment,
+                            outputs=[attachment_open, attachment_row, attachment, status],
+                            queue=False)
+
+    # -- sending, and the three ways of asking again ---------------------- #
+
+    sent = [character, thread_state, message, attachment] + sampling
+    replying = send.click(fn=_send, inputs=sent, outputs=stream, show_progress="minimal")
+    # The same pathway from the keyboard. Gradio fires ``submit`` on Enter for
+    # a composer that is one line tall, which is what this one starts as.
+    submitted = message.submit(fn=_send, inputs=sent, outputs=stream,
+                               show_progress="minimal")
+    regenerating = actions["regenerate"].click(
+        fn=_regenerate, inputs=[character, thread_state, selected] + sampling,
+        outputs=stream, show_progress="minimal")
+    continuing = actions["continue"].click(
+        fn=_continue, inputs=[character, thread_state, selected] + sampling,
+        outputs=stream, show_progress="minimal")
+    resending = actions["resend"].click(
+        fn=_resend, inputs=[character, thread_state, selected] + sampling,
+        outputs=stream, show_progress="minimal")
+
+    # The three that start from the action sheet put it away as they go: the
+    # reply is arriving in the transcript behind it, and Stop is in the
+    # composer, which the sheet is covering.
+    for control in (actions["regenerate"], actions["continue"], actions["resend"]):
+        control.click(fn=lambda: gr.update(visible=False), outputs=[actions["sheet"]],
+                      queue=False)
+
+    for run in (replying, submitted, regenerating, continuing, resending):
+        # The thread list is refreshed because an untitled thread has just been
+        # named, and the selection is dropped because the message it pointed at
+        # may not be the message that is there now.
+        run.then(fn=lambda person, text: gr.update(choices=_thread_choices(person, text)),
+                 inputs=[character, search], outputs=[threads])
+        run.then(fn=_close_selection, inputs=[character, thread_state], outputs=view)
+
+    stop.click(fn=_cancel, inputs=[cancellation], outputs=[status, send, stop],
+               cancels=[replying, submitted, regenerating, continuing, resending],
+               queue=False)
+
+    return {"status": status, "transcript": transcript, "header": header,
+            "persona": (persona_name, persona_description),
+            # What the shell wires: the state chip and the nav entry both open
+            # the model sheet, Setup switches workspace, and Switch mode opens
+            # the workspace chooser.
+            "model": [model, to_model], "setup": to_setup, "modes": to_modes,
+            "chip": model}
 
 
-def _action_bar() -> dict:
-    """The one row of per-message actions, and the editor it can open.
+_MODEL_LABEL = "● Model"
+"""What the header's state control says before the shell has told it anything."""
+
+
+def _action_sheet() -> dict:
+    """The per-message actions, as a sheet over the bottom of the transcript.
 
     Built once and re-labelled, because Gradio cannot create a control in
     response to a click: which of these apply to the message in hand is said by
     hiding the ones that do not, and by :func:`_selection_updates`.
     """
-    with gr.Group(visible=False, elem_id=ui.ident("chat", "actions"),
-                  elem_classes=ui.classes("message-actions")) as bar:
-        with gr.Row(elem_classes=ui.classes("message-actions-head")):
+    with gr.Column(visible=False, elem_id=ui.ident("chat", "actions"),
+                   elem_classes=ui.classes("sheet", "sheet-bottom",
+                                           "message-actions")) as sheet:
+        with gr.Row(elem_classes=ui.classes("sheet-head")):
             heading = gr.HTML(elem_id=ui.ident("chat", "selection"))
-            close = gr.Button("✕", size="sm", min_width=44,
-                              elem_classes=ui.classes("message-actions-close"))
+            close = gr.Button("✕", size="sm", scale=0, min_width=44,
+                              elem_classes=ui.classes("icon-button"))
         with gr.Row(elem_classes=ui.classes("message-actions-row")):
             back = gr.Button("◀", size="sm", min_width=44, visible=False)
             pager = gr.HTML(visible=False, elem_classes=ui.classes("pager"))
@@ -387,29 +576,29 @@ def _action_bar() -> dict:
             carry_on = gr.Button("Continue", size="sm", visible=False)
             resend = gr.Button("Send again from here", size="sm", visible=False)
             branch = gr.Button("Branch from here", size="sm")
-            delete = gr.Button("Delete message", size="sm", variant="stop")
-            delete_from = gr.Button("Delete from here", size="sm", variant="stop")
-        with gr.Group(visible=False, elem_classes=ui.classes("message-editor")) as editor:
-            editor_box = gr.Textbox(label="Edit this message", lines=6, show_label=True,
-                                    elem_id=ui.ident("chat", "editor"))
-            with gr.Row():
-                save_edit = gr.Button("Save", size="sm", variant="primary")
-                cancel_edit = gr.Button("Cancel", size="sm")
+        # Last, and behind a rule of its own: nothing above this line loses
+        # anything, and everything below it does.
+        with gr.Group(elem_classes=ui.classes("destructive")):
+            with gr.Row(elem_classes=ui.classes("message-actions-row")):
+                delete = gr.Button("Delete message", size="sm", variant="stop")
+                delete_from = gr.Button("Delete from here", size="sm", variant="stop")
 
     return {
-        "bar": bar, "heading": heading, "close": close,
+        "sheet": sheet, "heading": heading, "close": close,
         "back": back, "pager": pager, "forward": forward, "drop": drop,
         "edit": edit, "regenerate": regenerate, "continue": carry_on, "resend": resend,
         "branch": branch, "delete": delete, "delete_from": delete_from,
-        "editor": editor, "editor_box": editor_box,
-        "save_edit": save_edit, "cancel_edit": cancel_edit,
-        # The order here is the order :func:`_selection_updates` returns, and
-        # the two are asserted against each other in tests/test_llm_panels.py:
-        # a handler that returned them in a different order would silently put
-        # a button's label in another button's visibility.
-        "outputs": [bar, heading, back, pager, forward, drop,
-                    regenerate, carry_on, resend, editor, editor_box],
     }
+
+
+def _picked(component):
+    """The event that fires when a *user* picks, not when this code refills.
+
+    The same helper the shell's model chooser needs and for the same reason,
+    restated rather than imported: this module builds a panel and must not
+    import the shell to do it.
+    """
+    return getattr(component, "input", None) or component.change
 
 
 # --------------------------------------------------------------------------- #
@@ -467,7 +656,7 @@ def _load(who: str, identifier: str):
 
 
 # --------------------------------------------------------------------------- #
-# The transcript, and the map back to the conversation
+# The transcript, the header, and the map back to the conversation
 # --------------------------------------------------------------------------- #
 
 
@@ -512,6 +701,26 @@ def _transcript(conversation) -> list[list[str | None]]:
     return _view(conversation)[0]
 
 
+def _heading(who: str | None, conversation) -> str:
+    """The header's two lines: who you are talking to, and about what.
+
+    Two lines rather than one sentence, because they are answers to two
+    different questions and only the first is asked often. On a narrow display
+    the thread title is the one that truncates.
+
+    ``who`` is only consulted when there is no conversation to ask: a thread
+    knows which character it belongs to, and a header built from the panel's
+    idea of that rather than the thread's is a header that can disagree with
+    the transcript under it.
+    """
+    person = (getattr(conversation, "character", None) or who or "No character").strip()
+    title = getattr(conversation, "title", None) or "No thread"
+    return (f'<div class="{ui.PREFIX}-heading">'
+            f'<span class="{ui.PREFIX}-heading-who">{ui.escape(person)}</span>'
+            f'<span class="{ui.PREFIX}-heading-thread">{ui.escape(title)}</span>'
+            f'</div>')
+
+
 def _message_at(positions, row, column) -> int:
     """The message a click on ``(row, column)`` names, or :data:`NO_SELECTION`."""
     for entry in positions or ():
@@ -525,17 +734,18 @@ def _message_at(positions, row, column) -> int:
 
 
 def _selection_updates(conversation, index: int) -> list:
-    """What the action bar shows for message ``index``.
+    """What the action sheet shows for message ``index``.
 
-    Returned in the order ``_action_bar()["outputs"]`` lists, which is the one
-    thing about this function that has to be kept in step with the layout.
+    Returned in the order :data:`SELECTION_ORDER` lists, which is the one thing
+    about this function that has to be kept in step with the layout.
     """
     from prompt_master.chat.history import ASSISTANT
 
     hidden = gr.update(visible=False)
+    home = [gr.update(visible=False), gr.update(), gr.update(visible=True)]
     if (conversation is None or index < 0 or index >= len(conversation.messages)):
         return [gr.update(visible=False), gr.update(value=""), hidden, hidden, hidden, hidden,
-                hidden, hidden, hidden, hidden, gr.update(value="")]
+                hidden, hidden, hidden] + home
 
     message = conversation.messages[index]
     reply = message.role == ASSISTANT
@@ -562,8 +772,11 @@ def _selection_updates(conversation, index: int) -> list:
         gr.update(visible=reply),
         gr.update(visible=reply and last and bool(message.text.strip())),
         gr.update(visible=not reply),
+        # The edit row is put away and the composer comes back: a refresh is a
+        # return to CHAT_HOME, whatever the panel was doing before it.
         gr.update(visible=False),
         gr.update(value=message.text),
+        gr.update(visible=True),
     ]
 
 
@@ -571,14 +784,14 @@ def _refresh(conversation, note: str, kind: str = "info",
              index: int = NO_SELECTION) -> list:
     """Every output the ``view`` list names, for one state of one thread.
 
-    One function for all of them because they are one fact: the rows, the map
-    a click is read against, the message the action bar applies to and what
-    that bar shows all come from the same conversation, and a handler that
-    returned three of the four would leave the fourth describing a thread that
-    is no longer on screen.
+    One function for all of them because they are one fact: the rows, the map a
+    click is read against, the header, the message the action sheet applies to
+    and what that sheet shows all come from the same conversation, and a
+    handler that returned four of the five would leave the fifth describing a
+    thread that is no longer on screen.
     """
     rows, positions = _view(conversation)
-    return ([rows, positions, index, ui.notice(note, kind)]
+    return ([rows, positions, index, ui.notice(note, kind), _heading(None, conversation)]
             + _selection_updates(conversation, index))
 
 
@@ -589,48 +802,50 @@ def _reopen(who, identifier, note: str, kind: str = "info",
 
 
 # --------------------------------------------------------------------------- #
-# The drawer and the attachment
+# The surfaces
 # --------------------------------------------------------------------------- #
 
 
-SECTIONS = (("threads", "Threads"), ("character", "Character"), ("you", "You"))
-"""The drawer's three sections, in the order they are offered."""
+def _screens(name: str = "") -> list:
+    """Show one overlay and hide the rest. ``""`` returns to CHAT_HOME.
 
-OPEN_LABEL = "☰ Threads & character"
-CLOSE_LABEL = "✕ Close panel"
-
-
-def _show_section(chosen):
-    """Show the chosen section and hide the other two.
-
-    One at a time, always: the drawer is a fixed-height column, and two open
-    sections in it is two half-readable sections rather than one usable one.
+    Every handler that opens a surface returns this whole answer rather than
+    toggling one component, which is what makes "only one open at a time" a
+    property of the code instead of a rule somebody has to remember.
     """
-    keys = [key for key, _name in SECTIONS]
-    wanted = chosen if chosen in keys else keys[0]
-    return [gr.update(visible=(key == wanted)) for key in keys]
+    return [gr.update(visible=(name == key)) for key in SCREENS]
 
 
-def _toggle_drawer(open_now):
-    """Show or hide the drawer, and say on the button which it will do next.
+def _close_screens() -> list:
+    return _screens("")
 
-    The label is not decoration. The open/closed state lives in a ``gr.State``
-    and the drawer's visibility lives in the component, and nothing in Gradio
-    keeps two such things in step -- so a reload, or any handler that rebuilds
-    the panel, can leave the state saying "closed" under a drawer that is on
-    screen, and then the press that should close it opens it again. A button
-    that reads "Close panel" while the panel is open is a button whose next
-    press is predictable, and one that reads it while the panel is *shut* is a
-    bug somebody can see and report rather than one that feels like a dead
-    control.
+
+def _open_nav(who, identifier) -> list:
+    """The menu, over a conversation with nothing selected.
+
+    Opening the menu also drops the message selection: the action sheet applies
+    to a message the reader can no longer see, and a sheet left open under
+    another sheet is the second half of every "why is this still here?".
     """
-    showing = not bool(open_now)
-    return (showing, gr.update(visible=showing),
-            gr.update(value=CLOSE_LABEL if showing else OPEN_LABEL))
+    return _screens("nav") + _close_selection(who, identifier)
+
+
+def _open_threads(who, filter_text) -> list:
+    return _screens("threads") + [gr.update(choices=_thread_choices(who, filter_text))]
+
+
+def _open_character_screen(who) -> list:
+    return _screens("character") + [gr.update(choices=_character_choices(),
+                                              value=who or None)]
+
+
+def _open_persona() -> list:
+    person = _persona()
+    return _screens("persona") + [person.name, person.description]
 
 
 def _toggle_attachment(open_now):
-    """Open the image box, or close it — and say when it would be pointless.
+    """Open the image row, or close it — and say when it would be pointless.
 
     Warned when it is opened rather than when the reply fails: whether a
     picture can be sent depends on the model running, and finding that out
@@ -649,8 +864,13 @@ def _toggle_attachment(open_now):
             "The attached image goes with your next message.")
     return True, gr.update(visible=True), ui.notice(
         "The model running has no vision projector, so an attached image cannot be sent to "
-        "it. Choose one in LLM Studio\u2019s Setup mode, or send the message without a "
+        "it. Choose one in LLM Studio’s Setup mode, or send the message without a "
         "picture.", "warn")
+
+
+def _clear_attachment():
+    """Take the picture off the next message, and put the row away with it."""
+    return False, gr.update(visible=False), None, ui.notice("Ready.")
 
 
 # --------------------------------------------------------------------------- #
@@ -685,10 +905,16 @@ def _open_thread(who, identifier):
     return [identifier] + _refresh(conversation, conversation.title)
 
 
+def _open_thread_home(who, identifier):
+    """Tapping a thread opens it and returns to the conversation."""
+    return _open_thread(who, identifier) + _close_screens()
+
+
 def _new_thread(who, filter_text):
     if not who:
         return ([gr.update(), ""]
-                + _refresh(None, "Choose a character first.", "warn"))
+                + _refresh(None, "Choose a character first.", "warn")
+                + _screens("threads"))
     store = _chats()
     conversation = store.new(who)
     _greet(conversation, who)
@@ -696,7 +922,8 @@ def _new_thread(who, filter_text):
     mc_llm_state.remember(character=who, thread=conversation.identifier)
     return ([gr.update(choices=_thread_choices(who, filter_text),
                        value=conversation.identifier), conversation.identifier]
-            + _refresh(conversation, "New thread."))
+            + _refresh(conversation, "New thread.")
+            + _close_screens())
 
 
 def _greet(conversation, who: str) -> None:
@@ -726,11 +953,13 @@ def _delete_thread(who, identifier, filter_text):
 def _rename_thread(who, identifier, title, filter_text):
     conversation = _load(who, identifier)
     if conversation is None or not (title or "").strip():
-        return gr.update(), gr.update(visible=False), ui.notice("Nothing to rename.", "warn")
+        return (gr.update(), gr.update(visible=False), gr.update(visible=False),
+                ui.notice("Nothing to rename.", "warn"), gr.update())
     conversation.title = title.strip()
     _chats().save(conversation)
     return (gr.update(choices=_thread_choices(who, filter_text), value=identifier),
-            gr.update(value="", visible=False), ui.notice("Renamed."))
+            gr.update(value="", visible=False), gr.update(visible=False),
+            ui.notice("Renamed."), _heading(who, conversation))
 
 
 # --------------------------------------------------------------------------- #
@@ -739,12 +968,11 @@ def _rename_thread(who, identifier, title, filter_text):
 
 
 def _select_message(who, identifier, positions, current, event: gr.SelectData = None):
-    """A click on a bubble nominates the message the action bar applies to.
+    """A tap on a bubble nominates the message the action sheet applies to.
 
-    Clicking the message that is already nominated puts the bar away again.
+    Tapping the message that is already nominated puts the sheet away again.
     The same gesture opens and closes it because there is only one gesture: a
-    Chatbot bubble has no second affordance to dismiss from, and a bar that can
-    only be closed from its own ✕ is a bar that stays open while you read.
+    Chatbot bubble has no second affordance to dismiss from.
     """
     conversation = _load(who, identifier)
     index = NO_SELECTION
@@ -784,6 +1012,9 @@ def _page_version(step: int):
         message = conversation.messages[index]
         message.show(message.active + step)
         _chats().save(conversation)
+        # The sheet stays open on the message being paged: reading three
+        # variants is three taps on one control, not three round trips through
+        # the transcript.
         return _refresh(conversation,
                         f"Showing version {message.active + 1} of {len(message.versions)}.",
                         index=index)
@@ -806,10 +1037,18 @@ def _drop_version(who, identifier, index):
 
 
 def _open_editor(who, identifier, index):
+    """Borrow the composer's space for the selected message.
+
+    Four answers: the edit row, its text, the composer it replaces and the
+    action sheet it was opened from. The transcript is untouched and stays
+    where it was, which is the whole reason an edit is not a panel of its own.
+    """
     conversation = _load(who, identifier)
     if conversation is None or not (0 <= index < len(conversation.messages)):
-        return gr.update(visible=False), gr.update()
-    return gr.update(visible=True), gr.update(value=conversation.messages[index].text)
+        return (gr.update(visible=False), gr.update(), gr.update(visible=True),
+                gr.update(visible=False))
+    return (gr.update(visible=True), gr.update(value=conversation.messages[index].text),
+            gr.update(visible=False), gr.update(visible=False))
 
 
 def _commit_edit(who, identifier, index, text):
@@ -994,11 +1233,18 @@ def _last_reply(conversation, index) -> int:
     return conversation.last_index(ASSISTANT)
 
 
+# The composer's primary action, in its two states. Visibility *and*
+# interactivity: only one of the two is ever on screen, and the one that is not
+# is also disabled, so a keyboard shortcut aimed at a hidden Stop finds a
+# control that refuses rather than one that quietly cancels nothing.
+BUSY = (gr.update(visible=False, interactive=False), gr.update(visible=True, interactive=True))
+IDLE = (gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False))
+
+
 def _idle(conversation, text, image_path, note: str, kind: str = "info") -> tuple:
     """One yield that changes nothing and says why."""
     rows, positions = _view(conversation)
-    return (None, rows, positions, text, image_path, ui.notice(note, kind),
-            gr.update(interactive=True), gr.update(interactive=False))
+    return (None, rows, positions, text, image_path, ui.notice(note, kind)) + IDLE
 
 
 def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
@@ -1015,8 +1261,7 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
     from prompt_master.chat.prompt import build, clean_reply, has_image
     from prompt_master.core.models import RANDOM_SEED, draw_seed
 
-    busy = (gr.update(interactive=False), gr.update(interactive=True))
-    idle = (gr.update(interactive=True), gr.update(interactive=False))
+    busy, idle = BUSY, IDLE
     store = _chats()
 
     try:
@@ -1155,16 +1400,15 @@ def _cancel(cancel):
 
     The buttons are the point. ``cancels=`` closes the generator where it
     stands, which is what makes a stop immediate -- and a generator that is
-    closed never reaches the yield that would have re-enabled Send and greyed
-    out Stop. So the run stopped, the partial reply stayed, and the panel was
+    closed never reaches the yield that would have put Send back in the
+    composer. So the run stopped, the partial reply stayed, and the panel was
     left permanently busy with no way to ask for anything else. Whatever
     restores those controls has to be *this* handler, because it is the only
     one that still runs.
     """
     if cancel is not None:
         cancel.cancel()
-    return (ui.notice("Stopped.", "warn"),
-            gr.update(interactive=True), gr.update(interactive=False))
+    return (ui.notice("Stopped.", "warn"),) + IDLE
 
 
 def _context_size() -> int:

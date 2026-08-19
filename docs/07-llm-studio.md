@@ -1423,3 +1423,129 @@ the console carries all of them at every start:
 | only N GB of system RAM is free and the model is M GB | close something, or expect a slow load |
 | the card took N GB where this placement needs M GB | the weights are not all on the card, whatever the placement says |
 | Last reply: llama.cpp measured N tokens/s | the only number that is not a plan |
+
+## 19. Conversation rebuilt as a messaging application (19 August 2026)
+
+Every fix in sections 10, 11, 13 and 15 was a fix to the same thing: a drawer
+beside a transcript, in a row, laid out by a host that is entitled to disagree
+about how a row works. The sections stopped being squashed, then stopped being
+drawn outside the box, then stopped expanding to the right, then stopped being
+accordions — and the last report was the one none of that could reach, because
+it was not a bug in the drawer. It was the drawer.
+
+A drawer is a column. A column is in the layout. Below 900px Gradio wraps it to
+a full-width block *above* the stage, which is a screenful of configuration on
+top of the conversation and a composer somewhere under the fold — and the
+mobile rules that made that survivable set the workspace to `height: auto`,
+which gave up the one property the whole panel depends on. The old top bar was
+the same mistake one level up: a mode selector, a model chooser, a rescan, Load,
+Unload and a status line, above every workspace, at all times, wrapping to four
+rows on a phone.
+
+So Conversation is now what it always was: a messaging application. One
+permanent screen, and everything else an overlay.
+
+### 19.1 The screen
+
+```
+┌──────────────────────────────────────────────┐
+│ ☰   Ada                              ● Loaded│  header, flex: 0 0 auto
+│     harbour at night                         │
+├──────────────────────────────────────────────┤
+│                                              │
+│  the transcript                              │  flex: 1 1 0, scrolls
+│                                              │
+├──────────────────────────────────────────────┤
+│ Ready.                                       │  one line, never taller
+│ 📎 [ Message…                    ] [  Send  ]│  flex: 0 0 auto
+└──────────────────────────────────────────────┘
+```
+
+Three controls in the header: the menu, who you are talking to and about what,
+and whether the model is up. Three in the composer: attach, the message, and
+one primary action — **Send**, which becomes **Stop** in the same place while a
+reply is streaming. Two components rather than one, because a single Gradio
+button cannot carry two click handlers without both of them firing, and only
+ever one of them is on screen or interactive.
+
+The composer starts at one line and grows to six. The status line above it has
+a minimum height, so a reply starting does not move the transcript by a pixel;
+a long error scrolls inside it rather than growing.
+
+### 19.2 Everything else is a sheet
+
+`position: absolute` inside the workspace, which is `position: relative`. That
+is the whole responsive contract, and it is one declaration rather than a media
+query: a surface that opens takes no room in the layout, at any width, so
+nothing it opens over can be pushed anywhere. The transcript stays mounted
+behind it and comes back unchanged — same scroll position, same unsent message
+— when it closes.
+
+| surface | what is on it |
+| --- | --- |
+| Menu | Threads, Character, You; then Model / Runtime, Setup, Switch mode |
+| Threads | search, the list, New, Rename, and Delete behind its own heading |
+| Character | Talking to, Edit/New, the editor, card import, advanced sampling, Delete |
+| You | your name, about you, Save |
+| Message actions | the version pager and every per-message operation |
+| Model and runtime | the chooser, Rescan, Load, Unload, the state, Open Setup |
+| Workspace | the four modes |
+
+Only one is ever open. That is not a rule somebody has to remember: it is
+`_screens()` in `mc_llm_chat_panel.py` and `_sheet()` in `mc_llm_studio.py`,
+each of which answers for *all* of its surfaces at once, and every handler that
+opens one returns that whole answer rather than toggling a component of its own.
+
+On a display wider than 900px the menu and the screens become a 23em left
+sheet and the shell's sheets a corner panel, because a full-screen overlay for
+a model chooser on a 27-inch monitor is a gesture rather than a layout. The
+information architecture does not change with the width; only the geometry
+does.
+
+### 19.3 Editing borrows the composer
+
+An edit used to open a six-line editor between the transcript and the composer,
+which moved both of them. Now the action sheet closes, the composer is replaced
+in place by an **Editing message** row with Save and Cancel, and the transcript
+stays exactly where it was. Cancel restores the composer with whatever unsent
+text was in it, because that text was never touched — it is a different
+component.
+
+The state of the edit row and of the composer are the last two entries in
+`SELECTION_ORDER`, so *every* refresh of the transcript returns the panel to the
+home state. There is no second handler that has to remember to.
+
+### 19.4 The shell is a menu, a title and a state
+
+The mode selector is still one `gr.Radio` over one list of modes — which mode is
+open is a thing a radio says by construction — but it is in a sheet now, reached
+from **☰** in the shell bar or from **Switch mode** in Conversation's own menu.
+The model chooser, Rescan, Load and Unload are in the other sheet, reached from
+the state chip in either header, from **Model / Runtime** in either menu, and
+leading on to Setup for the residency, the estimator and the paths.
+
+Prompt Studio, MiniMax H3 and Setup are untouched inside their own workspaces.
+What changed for them is how you arrive: a menu instead of a row of pills, and a
+state chip instead of a filename, a rescan and two buttons above everything they
+draw.
+
+While Conversation is open the shell bar is not drawn at all, because
+Conversation's header carries the same three affordances beside the character
+and the thread rather than above them. The two state chips are updated together,
+from the runtime itself, after anything that can have changed it.
+
+### 19.5 What is kept
+
+Nothing in `prompt_master.chat` changed, and no handler's behaviour did:
+`CharacterStore`, `ChatStore`, `_thread_choices`, `_load`, `_view`, the position
+map, message versioning, branch, delete-from, continue, resend, the streaming
+generator, cancellation, the character editor and card import, the persona, the
+sampling fallbacks, the vision-projector refusal and the measured context size
+are the same code. What was replaced was the presentation layer and the CSS
+under it — wholesale, rather than by another override on top of the last one.
+
+One behaviour is new rather than moved: pressing Enter in a one-line composer
+now sends, because the message box is bound to `_send` through its `submit`
+event as well as through the button. Ctrl/Cmd+Enter still submits and Escape
+still stops, from `javascript/llm_studio.js`, which is also where the workspace
+is still measured against the window into `--mc-llm-available`.

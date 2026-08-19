@@ -444,35 +444,36 @@ class TestTheElapsedReadout:
 # Keeping an opened section in view
 # --------------------------------------------------------------------------- #
 #
-# The drawer is a fixed-height scrolling column. Open a section near the bottom
-# of it and what you opened is below the fold — which is a thing browsers do
-# not fix for you, because the click landed on the heading and the heading was
-# already visible. The rule is arithmetic, so it is run rather than read: the
-# smallest move that brings the opened section into view, and no move at all
-# when it is already there.
+# Conversation's screens are fixed-height scrolling sheets. Open a disclosure
+# near the bottom of one — the character editor, the advanced sampling settings
+# — and what you opened is below the fold, which is a thing browsers do not fix
+# for you, because the click landed on the heading and the heading was already
+# visible. The rule is arithmetic, so it is run rather than read: the smallest
+# move that brings the opened section into view, and no move at all when it is
+# already there.
 
-DRAWER = """
+SHEET = """
 function section(top, height) {
     const node = {offsetTop: top, offsetHeight: height, parentElement: null};
-    node.parentElement = drawer;
+    node.parentElement = sheet;
     return node;
 }
 
-const drawer = {
-    id: "mc-llm-chat-drawer",
+const sheet = {
+    id: "mc-llm-chat-character",
     dataset: {},
     offsetTop: 0,
     clientHeight: VIEW,
     scrollTop: SCROLLED,
     handler: null,
-    addEventListener(kind, fn) { if (kind === "click") drawer.handler = fn; },
+    addEventListener(kind, fn) { if (kind === "click") sheet.handler = fn; },
     querySelector: () => null,
     querySelectorAll: () => [],
 };
 
 globalThis.document = {
     documentElement: {scrollTop: 0},
-    querySelector: (selector) => (selector === "#mc-llm-chat-drawer" ? drawer : null),
+    querySelector: (selector) => (selector === "#mc-llm-chat-character" ? sheet : null),
     createElement: () => ({className: "", textContent: ""}),
     addEventListener() {},
     readyState: "complete",
@@ -494,17 +495,17 @@ SOURCE
 
 loaded.forEach((fn) => fn());
 
-// A control inside a section of the drawer, clicked. The section is what the
+// A control inside a section of the sheet, clicked. The section is what the
 // script has to find its way back to — the target itself is a button inside it.
 const opened = section(TOP, HEIGHT);
-drawer.handler({target: {parentElement: opened}});
-console.log(JSON.stringify({scrollTop: drawer.scrollTop, wired: drawer.dataset.mcLlmInView}));
+sheet.handler({target: {parentElement: opened}});
+console.log(JSON.stringify({scrollTop: sheet.scrollTop, wired: sheet.dataset.mcLlmInView}));
 """
 
 
 def opened(top: int, height: int, view: int = 400, scrolled: int = 0) -> dict:
-    """Where the drawer ended up after a section at ``top`` was opened."""
-    harness = (DRAWER.replace("SOURCE", SCRIPT.read_text())
+    """Where the sheet ended up after a section at ``top`` was opened."""
+    harness = (SHEET.replace("SOURCE", SCRIPT.read_text())
                .replace("TOP", json.dumps(top))
                .replace("HEIGHT", json.dumps(height))
                .replace("VIEW", json.dumps(view))
@@ -521,16 +522,16 @@ class TestKeepingAnOpenedSectionInView:
         assert opened(top=0, height=200, view=400, scrolled=0)["scrollTop"] == 0
 
     def test_a_section_that_opened_below_the_fold_is_brought_up(self):
-        """It is 320 tall starting at 300, so its end is at 620 and the drawer
+        """It is 320 tall starting at 300, so its end is at 620 and the sheet
         shows 400: the smallest move that shows the end of it is 220."""
         assert opened(top=300, height=320, view=400, scrolled=0)["scrollTop"] == 220
 
-    def test_a_section_taller_than_the_drawer_shows_its_beginning(self):
+    def test_a_section_taller_than_the_sheet_shows_its_beginning(self):
         """Which is where the control you just pressed is."""
         assert opened(top=300, height=900, view=400, scrolled=0)["scrollTop"] == 300
 
     def test_a_section_scrolled_off_the_top_is_brought_back_down(self):
         assert opened(top=0, height=200, view=400, scrolled=350)["scrollTop"] == 0
 
-    def test_the_drawer_is_wired_once(self):
+    def test_the_sheet_is_wired_once(self):
         assert opened(top=0, height=100)["wired"] == "1"
