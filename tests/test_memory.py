@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import types
 
 import pytest
@@ -1010,3 +1011,83 @@ class TestRefusalTracking:
         mc_memory.ensure_resident("A")
 
         assert mc_memory.last_refusal() is None
+
+
+# --------------------------------------------------------------------------- #
+# Two kinds of free
+# --------------------------------------------------------------------------- #
+#
+# The host's own figure is free device memory plus whatever its allocator is
+# holding cached and not using, and for the host that is exactly right: torch
+# reuses its own cache before it asks the driver for anything. For another
+# process it is a fiction, and llama.cpp is another process. A placement sized
+# against the host's number asks for VRAM that exists only inside this one --
+# and what comes back is "cudaMalloc failed: out of memory" on a card that
+# reports twenty-two gigabytes free.
+
+
+class FakeTorch:
+    """Just enough torch to answer the two memory questions."""
+
+    def __init__(self, device_free, cached=0):
+        self.device_free = device_free
+        self.cached = cached
+        self.emptied = 0
+
+        outer = self
+
+        class _Cuda:
+            @staticmethod
+            def mem_get_info(device=None):
+                return outer.device_free, 24 * GB
+
+            @staticmethod
+            def empty_cache():
+                outer.emptied += 1
+                outer.device_free += outer.cached
+                outer.cached = 0
+
+        self.cuda = _Cuda()
+
+
+class TestDriverFreeVram:
+    def _install(self, monkeypatch, torch, free_total):
+        from backend import memory_management
+
+        monkeypatch.setitem(sys.modules, "torch", torch)
+        device = types.SimpleNamespace(type="cuda")
+        monkeypatch.setattr(memory_management, "get_torch_device", lambda: device)
+        monkeypatch.setattr(memory_management, "get_free_memory", lambda dev=None: free_total)
+
+    def test_the_allocator_s_cache_is_free_to_the_host_and_to_nobody_else(
+            self, host, monkeypatch):
+        """20 GB free by the host's accounting, 4 of it actually on offer."""
+        torch = FakeTorch(device_free=4 * GB, cached=16 * GB)
+        self._install(monkeypatch, torch, free_total=20 * GB)
+
+        assert mc_memory.free_vram_bytes() == 20 * GB
+        assert mc_memory.device_free_vram_bytes() == 4 * GB
+
+    def test_emptying_the_cache_hands_it_back(self, host, monkeypatch):
+        torch = FakeTorch(device_free=4 * GB, cached=16 * GB)
+        self._install(monkeypatch, torch, free_total=20 * GB)
+        from backend import memory_management
+
+        monkeypatch.delattr(memory_management, "soft_empty_cache")
+
+        recovered = mc_memory.release_cached_vram()
+
+        assert torch.emptied == 1
+        assert recovered == 16 * GB
+        assert mc_memory.device_free_vram_bytes() == 20 * GB
+
+    def test_a_question_that_cannot_be_put_falls_back_to_the_host_s_answer(
+            self, host, monkeypatch):
+        """A wrong number still places a model. No number places nothing."""
+        from backend import memory_management
+
+        monkeypatch.setattr(memory_management, "get_free_memory", lambda dev=None: 11 * GB)
+        # A string, not a device: there is nothing here to ask for a type.
+        monkeypatch.setattr(memory_management, "get_torch_device", lambda: "cuda")
+
+        assert mc_memory.device_free_vram_bytes() == 11 * GB

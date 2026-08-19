@@ -54,8 +54,15 @@ def broker(host, monkeypatch):
 
 
 def set_free(monkeypatch, gigabytes):
-    """Fix what the card reports as free."""
+    """Fix what the card reports as free, to both of the questions that asks.
+
+    The host counts its allocator's cached blocks as free and another process
+    cannot have them, so the broker asks a different question on the LLM's
+    behalf than on the image side's. A test that set only one of the two would
+    be describing a machine that does not exist.
+    """
     monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: int(gigabytes * _GB))
+    monkeypatch.setattr(mc_broker, "device_free_vram_bytes", lambda: int(gigabytes * _GB))
 
 
 class TestFitFirst:

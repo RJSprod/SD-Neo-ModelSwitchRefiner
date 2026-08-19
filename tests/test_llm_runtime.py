@@ -53,7 +53,15 @@ def configure(monkeypatch, tmp_path, *, context=8192, mode="fixed", blocks=32,
 
 
 def set_free(monkeypatch, gigabytes):
+    """A card with this much free, to both of the questions that asks.
+
+    Both, because the two answers differ in life and the difference is a bug
+    this file exists to keep fixed: the host counts its allocator's cached
+    blocks as free and another process cannot have them. A test that set only
+    one of them would be describing a machine that does not exist.
+    """
     monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: int(gigabytes * _GB))
+    monkeypatch.setattr(mc_broker, "device_free_vram_bytes", lambda: int(gigabytes * _GB))
 
 
 class Recorder:
@@ -774,3 +782,55 @@ class TestRetryingASmallerPlacement:
             managed.client()
 
         assert len(attempts) == 1
+
+
+class TestPlacingAgainstWhatTheDriverHas:
+    """The bug that produced four hundred lines of failed starts.
+
+    The host's free-VRAM figure counts the blocks its allocator is holding
+    cached; llama.cpp is another process and cannot have them. Placed against
+    the host's number, the server is asked to allocate memory that exists only
+    inside the WebUI's own address space, and llama.cpp says so and exits.
+    """
+
+    def test_the_llm_is_placed_against_the_driver_s_figure(self, placed, tmp_path, monkeypatch):
+        configuration = configure(monkeypatch, tmp_path, size_mb=64, blocks=30)
+        # Twenty free by the host's accounting, four of them really on offer.
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 20 * _GB)
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes", lambda: 0.2 * _GB)
+
+        negotiated = runtime.negotiate(configuration)
+
+        assert negotiated.placement.gpu_layers != ctx.ALL_LAYERS
+
+    def test_the_cache_is_handed_back_before_a_server_is_placed(self, placed, server, tmp_path,
+                                                               monkeypatch, caplog):
+        """Nothing is unloaded and no model moves: what is given up is the
+        empty space between them, which is worth doing exactly once."""
+        managed, _ = server
+        configure(monkeypatch, tmp_path)
+        set_free(monkeypatch, 20)
+        released = []
+        monkeypatch.setattr(mc_broker, "release_cached_vram",
+                            lambda: (released.append(True), 4 * _GB)[1])
+
+        with caplog.at_level("INFO", logger="model_chain"):
+            managed.client()
+
+        assert released
+        assert any("cached VRAM" in record.getMessage() for record in caplog.records)
+
+    def test_a_warm_turn_does_not_empty_anybody_s_cache(self, placed, server, tmp_path,
+                                                        monkeypatch):
+        """Reuse is the common case and touches nothing at all."""
+        managed, _ = server
+        configure(monkeypatch, tmp_path)
+        set_free(monkeypatch, 20)
+        managed.client()
+
+        released = []
+        monkeypatch.setattr(mc_broker, "release_cached_vram",
+                            lambda: (released.append(True), 0)[1])
+        managed.client()
+
+        assert not released

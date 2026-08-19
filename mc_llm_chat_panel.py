@@ -110,7 +110,20 @@ def build() -> dict:
                        elem_id=ui.ident("chat", "drawer"),
                        elem_classes=ui.classes("drawer")) as drawer:
 
-            with gr.Accordion("Threads", open=True):
+            # A chooser and three columns, not three accordions. What was asked
+            # for is "always stacked, one open at a time, and the open one gets
+            # the room" -- and an accordion cannot promise any of the three: it
+            # is laid out by the host, opened independently of its neighbours,
+            # and as tall as whatever is inside it. Three sections and a radio
+            # promise all three by construction, in a drawer of fixed height
+            # where two open at once would leave neither readable.
+            section = gr.Radio(label=None, show_label=False,
+                               choices=[(name, key) for key, name in SECTIONS],
+                               value=SECTIONS[0][0], container=False,
+                               elem_id=ui.ident("chat", "section"),
+                               elem_classes=ui.classes("sections"))
+
+            with gr.Column(elem_classes=ui.classes("section")) as threads_section:
                 search = gr.Textbox(label="Find a thread", placeholder="Filter by title…",
                                     elem_id=ui.ident("chat", "search"))
                 threads = gr.Radio(label=None, show_label=False, choices=initial_threads,
@@ -128,7 +141,8 @@ def build() -> dict:
             # to the same object, so they are one section: the drop-down is
             # who you are talking to, and the editor under it is that same
             # character, opened only when it is being changed.
-            with gr.Accordion("Character", open=False):
+            with gr.Column(visible=False,
+                           elem_classes=ui.classes("section")) as character_section:
                 character = gr.Dropdown(
                     label="Talking to", choices=_character_choices(),
                     value=who or None, interactive=True,
@@ -167,7 +181,8 @@ def build() -> dict:
                                       file_types=[".json", ".yaml", ".yml", ".png"],
                                       elem_id=ui.ident("chat", "import"))
 
-            with gr.Accordion("You", open=False):
+            with gr.Column(visible=False,
+                           elem_classes=ui.classes("section")) as persona_section:
                 persona_name = gr.Textbox(label="Your name", value=initial_persona.name)
                 persona_description = gr.Textbox(label="About you", lines=4,
                                                  value=initial_persona.description)
@@ -179,7 +194,7 @@ def build() -> dict:
                        elem_classes=ui.classes("stage", "chat-stage")):
 
             with gr.Row(elem_classes=ui.classes("stage-head")):
-                panel = gr.Button("☰ Threads & character", size="sm",
+                panel = gr.Button(OPEN_LABEL, size="sm",
                                   elem_id=ui.ident("chat", "panel"),
                                   elem_classes=ui.classes("drawer-toggle"))
                 status = gr.HTML(ui.notice("Ready."), elem_id=ui.ident("chat", "status"))
@@ -239,8 +254,13 @@ def build() -> dict:
     stream = [cancellation, transcript, positions, message, attachment, status, send, stop]
     sampling = [temperature, top_p, reply_tokens, seed]
 
+    sections = [threads_section, character_section, persona_section]
+    section.change(fn=_show_section, inputs=[section], outputs=sections, queue=False)
+    # The button carries the state it is about to change, so a drawer and a
+    # button that disagree say so on their faces rather than by one press
+    # appearing to do nothing.
     panel.click(fn=_toggle_drawer, inputs=[drawer_open],
-                outputs=[drawer_open, drawer], queue=False)
+                outputs=[drawer_open, drawer, panel], queue=False)
     attach.click(fn=_toggle_attachment, inputs=[attachment_open],
                  outputs=[attachment_open, attachment_row, status], queue=False)
 
@@ -573,10 +593,40 @@ def _reopen(who, identifier, note: str, kind: str = "info",
 # --------------------------------------------------------------------------- #
 
 
+SECTIONS = (("threads", "Threads"), ("character", "Character"), ("you", "You"))
+"""The drawer's three sections, in the order they are offered."""
+
+OPEN_LABEL = "☰ Threads & character"
+CLOSE_LABEL = "✕ Close panel"
+
+
+def _show_section(chosen):
+    """Show the chosen section and hide the other two.
+
+    One at a time, always: the drawer is a fixed-height column, and two open
+    sections in it is two half-readable sections rather than one usable one.
+    """
+    keys = [key for key, _name in SECTIONS]
+    wanted = chosen if chosen in keys else keys[0]
+    return [gr.update(visible=(key == wanted)) for key in keys]
+
+
 def _toggle_drawer(open_now):
-    """Show or hide the drawer."""
+    """Show or hide the drawer, and say on the button which it will do next.
+
+    The label is not decoration. The open/closed state lives in a ``gr.State``
+    and the drawer's visibility lives in the component, and nothing in Gradio
+    keeps two such things in step -- so a reload, or any handler that rebuilds
+    the panel, can leave the state saying "closed" under a drawer that is on
+    screen, and then the press that should close it opens it again. A button
+    that reads "Close panel" while the panel is open is a button whose next
+    press is predictable, and one that reads it while the panel is *shut* is a
+    bug somebody can see and report rather than one that feels like a dead
+    control.
+    """
     showing = not bool(open_now)
-    return showing, gr.update(visible=showing)
+    return (showing, gr.update(visible=showing),
+            gr.update(value=CLOSE_LABEL if showing else OPEN_LABEL))
 
 
 def _toggle_attachment(open_now):
@@ -1114,8 +1164,17 @@ def _context_size() -> int:
     Trimming a conversation against a number llama.cpp was not started with is
     how a thread ends up truncated by the server instead of by the fitter --
     and the fitter is the one that knows which turns matter.
+
+    Three answers, in order of how much they know. What llama.cpp *reported*
+    beats what it was asked for, because a build with its own memory fitter
+    adjusts the context downwards and then answers with 6,912 tokens against a
+    conversation trimmed to fit 7,168. What it was asked for beats the setting,
+    for the same reason one step earlier.
     """
     report = mc_llm_runtime.runtime.report
+    granted = report.offload.granted_context if report.offload else 0
+    if granted:
+        return int(granted)
     if report.placement is not None:
         return int(report.placement.context)
     return int(mc_llm_runtime.config().context_size)

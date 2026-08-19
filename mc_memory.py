@@ -931,6 +931,69 @@ def free_vram_bytes() -> int:
         return 0
 
 
+def device_free_vram_bytes() -> int:
+    """VRAM the *driver* has free, which is a smaller number than :func:`free_vram_bytes`.
+
+    The host's own figure is free device memory **plus** what its allocator is
+    holding cached and not currently using, and for the host that is exactly
+    right: torch will reuse its own cache before it asks the driver for
+    anything. For another process it is a fiction. llama-server cannot be
+    handed a block PyTorch is sitting on, and a placement sized against the
+    host's number therefore asks for VRAM that only exists inside this process:
+    the card reports twenty-two gigabytes free, the driver refuses an
+    allocation of ten, and llama-server exits before it ever answers.
+
+    So the LLM half of this extension asks the driver instead. Falls back to
+    the host's figure when the question cannot be put -- a wrong number is
+    still better than no placement at all, and it is the number this extension
+    used for its whole first year.
+    """
+    try:
+        import torch
+        from backend import memory_management
+
+        device = memory_management.get_torch_device()
+        if getattr(device, "type", "") != "cuda":
+            return free_vram_bytes()
+        free, _total = torch.cuda.mem_get_info(device)
+        return int(free)
+    except Exception:
+        logger.debug("Model Chain: could not ask the driver for free VRAM", exc_info=True)
+        return free_vram_bytes()
+
+
+def release_cached_vram() -> int:
+    """Hand the allocator's cached blocks back to the driver. Returns bytes recovered.
+
+    Free for the host and invisible to everybody else: an allocator that has
+    finished with a block keeps it, because keeping it is how the next
+    allocation is fast. Nothing is unloaded here and no model moves -- what is
+    given up is the *empty* space between them, which is worth doing exactly
+    once, immediately before another process is asked to fit in it.
+    """
+    before = device_free_vram_bytes()
+    released = False
+    try:
+        from backend import memory_management
+
+        try:
+            memory_management.soft_empty_cache(True)
+        except TypeError:
+            memory_management.soft_empty_cache()
+        released = True
+    except Exception:
+        logger.debug("Model Chain: the host has no cache-emptying entry point", exc_info=True)
+    if not released:
+        try:
+            import torch
+
+            torch.cuda.empty_cache()
+        except Exception:
+            logger.debug("Model Chain: could not empty the allocator cache", exc_info=True)
+            return 0
+    return max(device_free_vram_bytes() - before, 0)
+
+
 def total_vram_bytes() -> int:
     try:
         from backend import memory_management

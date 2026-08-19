@@ -1167,7 +1167,10 @@ starts following again.
 
 The threads list, the character (chat with, edit, or create) and your persona
 are in a drawer behind **☰ Threads & character**, closed by default — with it
-closed the conversation has the whole browser window. The workspace sizes itself
+closed the conversation has the whole browser window. The drawer holds one
+section at a time, chosen at its top, so the one you are using has the room;
+the button that opened it reads **✕ Close panel** while it is open, and puts it
+away again. The workspace sizes itself
 to the window: the composer is measured first and sits on the bottom edge, the
 transcript takes whatever is left, and the page does not scroll — the thread
 does.
@@ -1211,6 +1214,18 @@ Windows, the driver spilling the allocation into shared system memory rather
 than failing it — NVIDIA Control Panel → Manage 3D settings → **CUDA — Sysmem
 Fallback Policy**. Both look identical from the outside: the model loads, the
 log says it is resident, and every reply runs at a fraction of the speed.
+
+### Two kinds of free VRAM
+
+The WebUI's own free-VRAM figure includes the blocks PyTorch is holding cached
+and not using — correct for the WebUI, which reuses them, and a fiction for
+llama.cpp, which is a separate process and cannot be handed them. So the LLM
+side places against what the *driver* reports instead, and hands the cache back
+to the driver before it starts a server. Nothing is unloaded to do that: what
+is given up is the empty space between the models already loaded.
+
+If you have seen `cudaMalloc failed: out of memory` on a card with twenty
+gigabytes free, that gap is why.
 
 ### When it will not start
 
