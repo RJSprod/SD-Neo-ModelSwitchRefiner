@@ -2180,6 +2180,17 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
         return 0
 
     after = free_vram_bytes()
+
+    if after < needed:
+        # Forge's own eviction has done what it can and the pass still does not
+        # fit. Only now is another workload's residency worth taking: moving an
+        # image model to RAM is cheap and keeps it warm, and ending a
+        # llama-server process is neither, so it is the second answer and not
+        # the first (sections 8 and 9).
+        foreign = _reclaim_foreign(needed - after, f"the {stage} pass")
+        if foreign:
+            after = free_vram_bytes()
+
     freed = max(after - free, 0)
     names = [type(getattr(m, "model", m)).__name__ for m in (evicted or [])]
 
@@ -2485,6 +2496,127 @@ def clear_references() -> None:
         dynamic_args.ref_latents.clear()
     except Exception:
         logger.warning("Model Chain: failed to clear stale references", exc_info=True)
+
+
+_foreign_reclaim = None
+"""Optional callback that frees VRAM held by *another* workload family.
+
+Installed by ``mc_broker`` at import; ``None`` on an installation that never
+loads it, and on every test of this module in isolation. That direction of
+dependency is the point: this module is about image residency and stays
+importable, testable and correct without knowing an LLM exists. What it gains
+from the hook is one extra place to look when its own eviction has fallen
+short -- and what it must never gain is an opinion about when the *other*
+family should give ground, which is the broker's to hold.
+
+Signature: ``reclaim(needed_bytes: int, reason: str) -> int`` (bytes freed).
+"""
+
+
+def set_foreign_reclaim(callback) -> None:
+    """Register (or clear, with ``None``) the cross-workload reclaim hook."""
+    global _foreign_reclaim
+
+    _foreign_reclaim = callback
+
+
+def _reclaim_foreign(needed: int, reason: str) -> int:
+    """Ask another workload family for ``needed`` bytes. Never raises.
+
+    A hook that fails is a reason to carry on with less VRAM than hoped -- the
+    driver spills into system memory and the pass is slow -- and never a reason
+    to fail the generation that called it.
+    """
+    if _foreign_reclaim is None or needed <= 0:
+        return 0
+    try:
+        return int(_foreign_reclaim(needed, reason) or 0)
+    except Exception:
+        logger.warning("Model Chain: cross-workload reclaim failed", exc_info=True)
+        return 0
+
+
+def resident_vram_bytes() -> int:
+    """VRAM the host's image models are holding right now.
+
+    Deliberately not ``loaded_size_bytes(shared.sd_model)``, which sums each
+    patcher's ``model_size()`` and is therefore the model's *total* footprint
+    wherever it happens to live. A checkpoint that has been offloaded to system
+    RAM still answers that question with gigabytes, so a caller asking "is
+    there anything of yours on the card" would be told yes forever.
+
+    This asks the host's own loaded-model registry instead, which is where the
+    per-device figure lives.
+    """
+    return _all_resident_bytes()
+
+
+def release_vram(needed_bytes: int, reason: str = "") -> int:
+    """Move image weights out of VRAM until ``needed_bytes`` is free.
+
+    The cross-workload half of ``make_vram_room``. That function knows which
+    Stage 2 pass is coming and sizes the requirement from it; this one is
+    called by the residency broker on behalf of a workload this module knows
+    nothing about -- an LLM about to load -- and is handed the number instead.
+
+    Everything else is deliberately identical, because the properties that make
+    the image side safe are all in the mechanism rather than the caller:
+
+    * ``free_memory`` moves weights to their offload device rather than
+      discarding them, so an image model demoted for an LLM stays in this
+      module's RAM cache and switching back to it is still a warm swap. That is
+      section 7.3's "prefer RAM demotion over destruction", and it costs nothing
+      extra to honour because it is what the host's own path already does.
+    * the currently loaded model's patchers are *not* spared. A caller asking
+      for room on another workload's behalf is asking for exactly that, and the
+      loaded checkpoint is usually the only thing on the card large enough to
+      answer with.
+    * pinned Stage 1 encoders are spared while they fit, through the same
+      ``_pinned_keep`` the image path uses, so a cross-workload reclaim cannot
+      quietly undo a pin the user asked for.
+
+    Returns the bytes actually freed, which the broker reports and logs.
+    """
+    needed = max(int(needed_bytes), 0)
+    if needed <= 0:
+        return 0
+
+    before = free_vram_bytes()
+    if before <= 0:
+        return 0  # cannot query VRAM; leave the host's own management alone
+    if before >= needed:
+        return 0
+
+    keep, pinned = _pinned_keep(needed, STAGE_2)
+
+    with _model_lock:
+        try:
+            from backend import memory_management
+
+            device = memory_management.get_torch_device()
+            if keep:
+                try:
+                    memory_management.free_memory(needed, device, keep_loaded=keep)
+                except TypeError:
+                    keep, pinned = [], 0
+                    memory_management.free_memory(needed, device)
+            else:
+                memory_management.free_memory(needed, device)
+        except Exception:
+            logger.warning("Model Chain: failed to free VRAM for %s", reason or "another workload",
+                           exc_info=True)
+            return 0
+
+    freed = max(free_vram_bytes() - before, 0)
+    logger.info(
+        "Model Chain: released %.1f GB of image VRAM for %s (%.1f GB -> %.1f GB free)%s",
+        freed / _GB,
+        reason or "another workload",
+        before / _GB,
+        free_vram_bytes() / _GB,
+        f"; kept {pinned / _GB:.1f} GB of pinned encoders resident" if keep else "",
+    )
+    return freed
 
 
 def get_model(name: str):

@@ -1,0 +1,76 @@
+{
+  "components": [
+    {
+      "component_id": "llama-runtime-cuda12",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9637/llama-b9637-bin-win-cuda-12.4-x64.zip",
+      "destination": "cache/downloads/llama-b9637-bin-win-cuda-12.4-x64.zip",
+      "size": null,
+      "sha256": "e0080832743b478fc3d1a465c2d281091c3e02145d70ad06ad181f81895270a8",
+      "version": "b9637-cuda-12.4"
+    },
+    {
+      "component_id": "llama-runtime-cuda12-cudart",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9637/cudart-llama-bin-win-cuda-12.4-x64.zip",
+      "destination": "cache/downloads/cudart-llama-bin-win-cuda-12.4-x64.zip",
+      "size": null,
+      "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+      "version": "b9637-cuda-12.4"
+    },
+    {
+      "component_id": "llama-runtime-cuda13",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9637/llama-b9637-bin-win-cuda-13.3-x64.zip",
+      "destination": "cache/downloads/llama-b9637-bin-win-cuda-13.3-x64.zip",
+      "size": null,
+      "sha256": "8667e76077b40db57fc680577c6d8b48b8aa3f58e34fc23a70bcc668a69c97e9",
+      "version": "b9637-cuda-13.3"
+    },
+    {
+      "component_id": "llama-runtime-cuda13-cudart",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9637/cudart-llama-bin-win-cuda-13.3-x64.zip",
+      "destination": "cache/downloads/cudart-llama-bin-win-cuda-13.3-x64.zip",
+      "size": null,
+      "sha256": "1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e",
+      "version": "b9637-cuda-13.3"
+    },
+    {
+      "component_id": "llama-runtime-cpu",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9637/llama-b9637-bin-win-cpu-x64.zip",
+      "destination": "cache/downloads/llama-b9637-bin-win-cpu-x64.zip",
+      "size": null,
+      "sha256": "f7783c2b8c007f95e710ac40f26a24861a80b603b0b739fc54d7c926a4716c1e",
+      "version": "b9637-cpu"
+    },
+    {
+      "component_id": "model-Q4_K_M",
+      "url": "https://huggingface.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced/resolve/96c11c22b1128c3c8c655b21557b409f307c557f/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf?download=true",
+      "destination": "models/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf",
+      "size": 16796015968,
+      "sha256": "f8b1da6dc139e6928159e536bc85602adbc1412018871732a878dedcad7ccafd",
+      "version": "96c11c22b1128c3c8c655b21557b409f307c557f"
+    },
+    {
+      "component_id": "model-Q6_K_P",
+      "url": "https://huggingface.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced/resolve/96c11c22b1128c3c8c655b21557b409f307c557f/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q6_K_P.gguf?download=true",
+      "destination": "models/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q6_K_P.gguf",
+      "size": 22758955104,
+      "sha256": "e468cbb7ec1a58dd341475eccb9614d3bc2423aadca40ac6caf887bcfc637349",
+      "version": "96c11c22b1128c3c8c655b21557b409f307c557f"
+    },
+    {
+      "component_id": "model-Q8_K_P",
+      "url": "https://huggingface.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced/resolve/96c11c22b1128c3c8c655b21557b409f307c557f/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q8_K_P.gguf?download=true",
+      "destination": "models/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q8_K_P.gguf",
+      "size": 27275669856,
+      "sha256": "96fb0a8a8ab4fd2b3bcf0ece5b1f852cffa7fa9f2cb8886f6f0166d830016d9d",
+      "version": "96c11c22b1128c3c8c655b21557b409f307c557f"
+    },
+    {
+      "component_id": "mmproj",
+      "url": "https://huggingface.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced/resolve/96c11c22b1128c3c8c655b21557b409f307c557f/mmproj-Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-f16.gguf?download=true",
+      "destination": "models/mmproj-Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-f16.gguf",
+      "size": 1193058368,
+      "sha256": "9422eeb070cc7f6e412d34d03e2fb4693bb90dcdba4a0294150de28a04f4e12c",
+      "version": "96c11c22b1128c3c8c655b21557b409f307c557f"
+    }
+  ]
+}

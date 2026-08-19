@@ -1,0 +1,35 @@
+Vendored from https://github.com/RJSprod/LTX_Video_Prompt_Claude
+commit eb80c6099b38a134856ecb6b132f390062c535ee (2026-08-04)
+path in source repository: src/prompt_master/
+
+Everything under this directory is a byte-identical copy of that tree with two
+exclusions and no edits:
+
+  * ui/     -- the PySide6 window, chat page, MiniMax page, character editor,
+               model chooser and setup wizard. Section 17.B of the design
+               intent: the business logic comes across, the Qt presentation
+               layer does not. Its Forge replacement is mc_llm_studio.py.
+  * app.py  -- the standalone Qt entry point, for the same reason.
+
+Nothing else was removed and nothing was rewritten, which is the point. The
+prompt engine, its vendored upstream, the MiniMax enhancer, the chat stores,
+the llama.cpp client and the provisioning pipeline are all still comparable
+against their own sources with `diff -r`, and the parity tooling those trees
+carry (prompt_engine/UPSTREAM_COMMIT.txt, minimax/UPSTREAM_SOURCE.txt,
+prompt_engine/upstream/README.md) still describes them accurately.
+
+Two consequences of dropping the src/ layer are worth knowing about:
+
+  * core/paths.py::application_dir() looks for app.py three directories up.
+    It will not find one here, and it is not meant to -- mc_llm_paths.py
+    constructs AppPaths against a Forge-chosen root directly rather than
+    letting it discover one. The function is left exactly as upstream wrote
+    it so the file still diffs clean.
+  * setup_cli.py is kept. It is the console half of the provisioning pipeline,
+    it has never needed Qt, and it stays a working fallback for provisioning a
+    runtime when the Gradio panel cannot (a headless install, a first run
+    before the WebUI starts).
+
+To update: re-copy src/prompt_master/ from a newer commit, delete ui/ and
+app.py again, and record the new commit here. Do not hand-edit these files --
+changes belong in the mc_llm_* modules that sit on top of them.

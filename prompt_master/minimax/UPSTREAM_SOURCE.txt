@@ -1,0 +1,35 @@
+# MiniMax H3 prompt enhancer — where it came from
+
+prompt_enhancer.py is a byte-for-byte copy of the file of that name in the
+MiniMax H3 module written for WanGP (github.com/deepbeepmeep/Wan2GP). It was
+supplied as minimax_h3.zip rather than fetched from a checkout, so there is no
+commit to pin and the content is pinned instead.
+
+source-archive: 7e4a502d-minimax_h3.zip
+archive-path:   minimax_h3/prompt_enhancer.py
+received:       2026-08-04
+
+# vendored file digest (sha256, as received)
+2e4743e451c805873d7113dcb7b6deb9a8b584fed1c873625f581f9281d6a6bb  prompt_enhancer.py
+
+The mechanics in enhancer.py — which instructions apply to which generation,
+how the image becomes a caption, what the user turn looks like and what the
+sampler is set to — are ported from WanGP itself, at these call sites:
+
+  wgp.py                                          process_prompt_enhancer
+                                                  resolve_prompt_enhancer_settings
+                                                  get_prompt_enhancer_choices
+                                                  server_config enhancer defaults
+  shared/prompt_enhancer/prompt_enhance_utils.py  generate_cinematic_prompt
+                                                  _generate_t2v_prompt
+                                                  _generate_i2v_prompt
+                                                  _split_prompt_enhancer_system_suffix
+                                                  _merge_prompt_enhancer_system_prompt
+                                                  _format_prompt_enhancer_user_content
+  shared/prompt_enhancer/qwen35_vl.py             _generate_image_captions
+
+  fetched: 2026-08-04, branch main
+
+The values those call sites decide are quoted in enhancer.py beside the
+constants they became. Where this port departs from WanGP it says so in the
+module docstring; there is one departure, and it is about newlines.

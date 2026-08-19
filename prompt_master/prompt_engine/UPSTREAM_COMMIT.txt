@@ -1,0 +1,40 @@
+# Prompt-Master-LD upstream revision
+
+git-commit: UNKNOWN
+
+The upstream repository github.com/Brojakhoeman/Prompt-Master-LD was not
+reachable when this port was made (every repository under that account
+returns 404 or demands credentials, while public controls resolve normally).
+The source was supplied instead as a GitHub source ZIP of the main branch,
+which carries no .git directory and therefore no commit SHA.
+
+Because there is no revision to pin, the content itself is pinned: the
+SHA-256 of every upstream file as received. tools/check_upstream_sync.py
+verifies the vendored copies against these digests.
+
+source-archive: 69d6cd54-PromptMasterLDmain_1.zip
+archive-sha256: 66deb4f6cc41257bee0a166f0998adf04ee8aa94fb624b769ec93b423fb65313
+archive-root:   Prompt-Master-LD-main/
+received:       2026-07-26
+
+# upstream file digests (sha256, as received)
+ca0235eb0300d90abe1b3f990866dd75217f9c8ee0137b4a2092b03b42cd79a6  DEV_NOTES.md
+980b03cb4a419ff80b8aaa2eb0373665060d5cb9ca9e2d48f62da1dc43ccc9be  README.md
+d12b1544417adb220f560269202d0e4e130b67d9236a7f28c9d055979b566881  __init__.py
+7a06e6a9bf78775662a4a275b9d7d433978151023f3f91e7d41f63cb9d2b6a05  accents.py
+53c09eba6cee2f3b4589b25ddf551093ce76c8c7e4954f114752d565ed37db0b  backend.py
+0e8c76695d8d316f18579091cce1a6955e93ec0eec6db61f3db3dd427f6987a6  brain.py
+1190fa163627a9e5e879261d7a17426a8bad2405bbfce6a58297ef2d7157cf6a  cinematics.py
+5ae79818b59a36d1c233553b1c3e5280c0e482dae2ce05094c3a489951d3c594  hands.py
+796b08dbf19f4d31b5d4a73615a40f3c33a9358aca358a2d860331f753b2a72e  identity.py
+e4e7348c2542924f426d2b3c18da28f1cb0b5d4cc8b76477a460c18206e07100  imaging.py
+3fcf5fd6742d2f97d81cd6c49b9507bab582200d487ab53331ae656bca62e36e  lora_loader_ld.py
+2a17c83b744f148e179911ebbfbaf216c924c3512dd0bc3ca520656f1f194eed  music.py
+e406074b5815162e965ca0f9e661538d689008ea46439dd57897525d8ecdf1ca  negative.py
+8c991109b8ca0d7d826ea5fbd67f0c08723932ca680bfb31fb882c2cfc980b52  node.py
+8afd7170e67c0b0e56a1eb95b397a0133731772a694740eceb178f46782678fe  routes.py
+1ef2c0c9e430966afc34dfcbfa0a329ddca55b449f743eb8597800de53036128  selftest.py
+9ff2312d3e65f4e4ba5373261fd4a5ea62468280b7237c30131bd7f3e80183b6  shotscript.py
+c6b933804550e9c6ebc250a6a0c1f0f17cf554cbdd0bb6dfec4427d0e3f27bda  styles.py
+f6e2e434745c8e4ca5e6e7cdd19817a1bd5759a117b49ccf561be791f5d97592  vram.py
+0038a361f4dcac7d9f1e74f400db7f4fc229db8128da387fc8ef8fb86e8f601a  wardrobe.py

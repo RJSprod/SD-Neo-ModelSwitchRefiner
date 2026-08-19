@@ -28,7 +28,10 @@ Clone into the WebUI's `extensions` directory and restart:
 git clone https://github.com/RJSprod/SD-Neo-ModelSwitchRefiner extensions/sd-model-chain
 ```
 
-The panel appears as a **Model Chain** accordion on the txt2img tab.
+The panel appears as a **Model Chain** accordion on the txt2img tab, and a
+top-level **LLM Studio** tab appears beside txt2img and img2img. The LLM half is
+inert until you open it — see [LLM Studio](#llm-studio) — and can be turned off
+entirely in Settings.
 
 ## Using it
 
@@ -1081,23 +1084,192 @@ if a checkpoint switch had already happened, those weights would be written into
 Model B. When the built-in Refiner is enabled, Model Chain skips itself for that
 generation and says so rather than corrupting the loaded model.
 
+## LLM Studio
+
+A local-LLM workspace, in the same extension and on the same card. It is the
+[LTX_Video_Prompt_Claude](https://github.com/RJSprod/LTX_Video_Prompt_Claude)
+application's feature set brought into Forge as a native Gradio tab rather than
+as an embedded Qt window: the prompt engine, the conversation system, the
+MiniMax enhancer and the llama.cpp runtime are the same code, vendored under
+`prompt_master/` with its provenance recorded in
+`prompt_master/VENDORED_FROM.txt`. The presentation layer is new; nothing
+underneath it is.
+
+It lives here rather than in a separate extension for one reason: **whoever
+decides when a model leaves VRAM has to decide it for both kinds of model.** Two
+extensions independently unloading things from the same GPU is how you get a
+checkpoint evicted for an LLM that then evicts itself for the checkpoint. Model
+Chain already owns image residency, so it owns the LLM's too.
+
+### Three modes, three products
+
+| Mode | What it is |
+| --- | --- |
+| **Prompt Studio** | LTX video-prompt generation. Text-to-video and image-to-video, a positive and a negative prompt as two separate outputs, the smart-negative second pass, and the full control set — style, motion, camera, transition, POV, wardrobe, accent and strength, dialogue budget, extra speech, music, duration, FPS, dimensions, output format, lexicon, extra negative terms and seed. |
+| **Conversation** | Threaded chat with persistent histories. Characters are files in a `characters/` folder in the layout oobabooga uses, so cards import and export; chats are documents filed per character. New, rename, filter, branch and delete threads; edit characters and your own persona; attach an image when the running model has a vision projector. |
+| **MiniMax H3** | The prompt enhancer, as its own workflow. FL2VA and REF2VA variants, an optional reference frame that is captioned first and shown to you, and its own history. |
+
+They share one loaded model and one runtime. They do not share a history, an
+output format, or a screen. Switching modes hides a workspace rather than
+rebuilding it, so a half-read reply survives a trip to Prompt Studio and back.
+
+### What runs it
+
+llama.cpp, in its own process, exactly as the standalone application ran it.
+GGUF weights, an optional multimodal projector, and a choice of full GPU
+offload, partial offload, mixed system-RAM execution or CPU. Nothing is
+converted into a PyTorch model and nothing is handed to Forge's memory manager
+to move — a separate process is what makes it possible to hand VRAM back
+reliably, because ending it releases the allocation with a certainty no
+in-process cache can offer.
+
+**Point it at a model you already have.** LLM Studio looks for its runtime and
+weights under a data directory, in this order:
+
+1. `PROMPT_MASTER_ROOT`, the standalone application's own environment variable;
+2. the **LLM data directory** setting;
+3. `<WebUI data directory>/model_chain_llm`.
+
+The first two exist so an existing Prompt Master install is reused as-is —
+runtime, weights, characters and chats — rather than downloaded again. Under
+**Models, hardware and memory** you can also point the install at any GGUF on
+disk, with or without a projector; that changes two lines of state and downloads
+nothing.
+
+### Context, and what it costs
+
+Three budgets, kept separate because they behave differently:
+
+- **context size** — tokens asked of llama.cpp;
+- **context / VRAM buffer** — memory set aside for the key/value cache that
+  context implies;
+- **runtime reserve** — llama.cpp's scratch space, which exists whether the
+  context is 512 tokens or 128k.
+
+The panel estimates the second from the model's own GGUF header rather than from
+a tokens-per-gigabyte rule of thumb, because a rule of thumb is wrong for every
+model. A grouped-query model with 8 KV heads costs a quarter of what a 32-head
+model of the same width costs, and the header is where that is written down.
+
+It shows a buffer → estimated → recommended table, the model's own context
+ceiling (which always wins over what VRAM would allow), and the two answers that
+only matter on a shared card:
+
+> how much context fits **while keeping the image model resident**, and how much
+> becomes available **if it is demoted**.
+
+The runtime reserve starts as a coarse allowance and is then replaced by
+measurement: the first real load of a given model and placement records what the
+card actually lost, and the panel says **calibrated** instead of **estimated**
+from then on.
+
+### Sharing the card
+
+Two modes, chosen in Settings:
+
+**Hybrid** (the default) keeps an image model and an LLM resident together
+whenever they both fit. Alternating between them then costs nothing, because
+nothing moves. The rule is stated as a sentence and implemented as one:
+
+> Never unload merely because another workload started. Demote only because the
+> incoming workload actually needs the memory.
+
+**Exclusive** gives one family the whole card at a time. It is more predictable
+and leaves more headroom for a single large workload, and the handover happens
+when a workload starts rather than when the arithmetic forces it — ownership
+that depended on the size of the last request would not be ownership.
+
+When something genuinely does not fit, what gives ground is a policy:
+
+| Policy | Behaviour |
+| --- | --- |
+| **Adaptive** (default) | Lower the LLM's context first, then move a checkpoint. A context nobody is using is cheaper to give up than a model somebody is about to use. |
+| **Preserve image** | Never move the checkpoint. Shrink the LLM's context, then its GPU offload, then run it from system RAM. |
+| **LLM priority** | Give the LLM the placement it asked for and demote image residency to pay for it. |
+
+One thing is not negotiable under any of them: **an image generation always
+outranks an idle LLM.** Ordinary txt2img has to keep working, so a policy that
+let a background llama-server starve a generation you are watching would be a
+bug rather than a setting.
+
+Whatever gets reduced is reported. If your 128k context became 24k to fit
+alongside a checkpoint, the status line says so.
+
+When the image side does need the VRAM back, you choose what happens to the LLM:
+stop the server, which releases every byte and leaves the weights warm in the
+system page cache so a restart reads from RAM rather than disk; or keep it
+running with its weights in system RAM, which avoids the reload and is much
+slower to generate with.
+
+### Taking turns
+
+Models may share VRAM; jobs do not share the GPU. An LLM turn will not start
+while the WebUI has a job running, and a generation waits — once, briefly — for
+an LLM turn already in flight. The wait is bounded in both directions, so a
+wedged runtime delays a generation rather than preventing one.
+
+The one thing this deliberately does *not* do is hold a lock across a whole
+generation. `postprocess` is not called from a `finally`, so a generation that
+raised would leave the lock held and LLM Studio dead until the WebUI restarted —
+a far worse failure than the brief overlap the lock would have prevented.
+
+### If it goes wrong
+
+Nothing in the LLM half can take the image half with it. The tab is built inside
+a guard and renders an explanation rather than raising; a runtime that will not
+start is a sentence in the status line; a reclaim that fails costs an eviction,
+not a generation. If you never open LLM Studio, none of it runs — and the
+Settings toggle removes the tab entirely.
+
 ## Layout
 
 ```
 mc_arch.py            architecture detection + per-architecture geometry
-mc_memory.py          model residency / cache management
+mc_memory.py          image model residency / cache management
 mc_lora.py            prepared LoRA state + stage isolation
 mc_infotext.py        infotext write + paste-field registration
 mc_presets.py         named Stage 2 configurations
 mc_progress.py        whole-job progress model + measured timings
 mc_references.py      Stage 2 supplemental reference routing
 mc_styles.py          style library integration helpers
+
+mc_broker.py          cross-workload residency policy and the workload lock
+mc_gguf.py            GGUF metadata header reader
+mc_llm_context.py     context capacity estimation and its calibration
+mc_llm_runtime.py     the managed llama.cpp process and its placement
+mc_llm_paths.py       where LLM Studio keeps its data
+mc_llm_state.py       shared preferences + the two mode histories
+mc_llm_sessions.py    the three run orchestrations, as streaming generators
+mc_llm_studio.py      the LLM Studio tab shell, status and settings panel
+mc_llm_prompt_panel.py     Prompt Studio workspace
+mc_llm_chat_panel.py       Conversation workspace
+mc_llm_minimax_panel.py    MiniMax H3 workspace
+mc_llm_ui.py          shared UI helpers and the element-id contract
+prompt_master/        vendored LTX business logic (see VENDORED_FROM.txt)
+
 scripts/model_chain.py  Script class, UI, orchestration
-style.css             optional progress-bar appearance
-javascript/           the settings-to-CSS layer for the above
+style.css             optional progress-bar appearance + LLM Studio styling
+javascript/           the settings-to-CSS layer, and LLM Studio polish
 tests/                pytest suite (runs without a WebUI)
-docs/                 revised specifications for the progress work
+docs/                 revised specifications for the progress and LLM work
 ```
+
+The LLM modules stack in one direction and never the other:
+
+```
+mc_llm_*_panel  ->  mc_llm_sessions  ->  mc_llm_runtime  ->  mc_broker
+                                              |                  |
+                                        mc_llm_context      mc_memory
+                                              |
+                                          mc_gguf
+```
+
+`mc_memory.py` does not import `mc_broker`, and that is deliberate rather than
+incidental: the image half stays importable, testable and correct on an
+installation that never loads the LLM half. What it has instead is one optional
+hook, installed by `mc_broker` at import, which it calls when Forge's own
+eviction has fallen short. It never decides *whether* another workload should
+give ground — that is the broker's to hold.
 
 `mc_lora.py` deliberately depends on nothing else in the extension. It is a
 description of two host mechanisms — the extra-network tag syntax and the LoRA
@@ -1130,7 +1302,7 @@ needs no change to the orchestration code.
 ## Tests
 
 ```
-pip install pytest pillow psutil
+pip install pytest pillow numpy psutil httpx
 python -m pytest tests/
 ```
 
@@ -1149,6 +1321,19 @@ four floors, speculative warming of Stage 2, interruption handling, Stage 2
 reference routing in all three modes with its ordering, capability and cleanup
 rules, whole-job progress and its measured calibration, the UI's control-order
 contract, and inertness when disabled.
+
+The LLM half adds: the GGUF metadata reader against synthetic headers and every
+way one can be malformed; per-model context arithmetic, including the
+grouped-query case a constant would get wrong; the model's own context ceiling;
+the calibration that replaces the estimated runtime reserve and survives a
+context change; the residency policy in both modes and all three placement
+policies; rank protection for active and pinned residency; workload
+serialisation and the bounded waits either side of it; placement negotiation and
+the requirement that every reduction is reported; the estimator preview being
+free of side effects; the two mode histories staying separate files; the three
+run orchestrations and their event sequences; the panels assembling with their
+control lists in agreement; and the theme contract — extension-owned element
+ids, no hard-coded colours, no Gradio-generated selectors.
 
 Three of those files are lopsided on purpose, because their failure modes are:
 
