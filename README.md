@@ -1162,8 +1162,12 @@ changes two lines of state and downloads nothing. The **Find the projector
 beside it** button suggests a neighbouring `mmproj` file — check it belongs to
 that model, because nothing in a filename proves it does.
 
-Every path box has a **Browse** button beside it, so none of this has to be
-typed. If you would rather paste, paste anything reasonable: Explorer's *Copy
+Every path box has a **Browse** button beside it, and it opens your operating
+system's own file dialog, so none of this has to be typed. (If the WebUI is
+running with `--listen` or `--share` it is being looked at from another machine
+and a dialog opened on the server would be no use to you, so a folder browser
+opens in the page instead and says why.) If you would rather paste, paste
+anything reasonable: Explorer's *Copy
 as path* quotes (`"C:\models\thing.gguf"`), a dragged `file://` URL,
 `%USERPROFILE%\models`, or the **folder** your models are in — a folder holding
 one model is not an ambiguous answer, and a folder holding six is answered by
@@ -1274,7 +1278,8 @@ mc_llm_context.py     context capacity estimation and its calibration
 mc_llm_runtime.py     the managed llama.cpp process and its placement
 mc_llm_paths.py       where LLM Studio keeps its data
 mc_llm_files.py       what a pasted path means, and what is in a folder
-mc_llm_browse.py      the file picker beside every path box
+mc_llm_browse.py      the Browse button beside every path box
+mc_llm_native.py      the operating system's own file dialog
 mc_llm_setup.py       getting a llama.cpp runtime in place
 mc_llm_state.py       shared preferences + the two mode histories
 mc_llm_sessions.py    the three run orchestrations, as streaming generators
@@ -1297,7 +1302,7 @@ The LLM modules stack in one direction and never the other:
 ```
 mc_llm_*_panel  ->  mc_llm_sessions  ->  mc_llm_runtime  ->  mc_broker
        |                                      |                  |
-mc_llm_browse                           mc_llm_context      mc_memory
+mc_llm_browse  ->  mc_llm_native        mc_llm_context      mc_memory
        |                                      |
 mc_llm_files  <-  mc_llm_setup            mc_gguf
 ```

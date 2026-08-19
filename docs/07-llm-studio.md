@@ -163,12 +163,72 @@ a checkpoint to populate a table would be a worse bug than any it was drawing
 attention to.
 
 
+## 4a. Not every block is the same block
+
+The arithmetic above reads `blocks × kv heads × …` and that is how it was
+first written — one scalar per model, multiplied by the block count. GGUF does
+not promise that. The four attention keys may be **arrays with one entry per
+block**, and llama.cpp writes them that way for every architecture whose blocks
+differ from one another: hybrid attention/state-space models where only some
+blocks attend at all, and interleaved local/global designs where the
+sliding-window blocks are shaped differently from the full-attention ones.
+
+Reading one of those as a scalar is not a rounding error. `int([8, 8, 0, 8])`
+**raises**, and it raised inside a property — so choosing such a model put
+
+> `int() argument must be a string, a bytes-like object or a real number, not 'list'`
+
+in front of a user who had done nothing but pick a file, and put it there again
+on every reply. The estimator panel showed it as a bare "Error" toast, because
+its HTML is one of the outputs of *Use this model* (see 6c).
+
+So `mc_gguf` reads these four keys as **tuples with one entry per block** —
+`head_counts`, `head_counts_kv`, `key_lengths`, `value_lengths` — a scalar
+being the one-entry case that applies to every block. The single-number
+properties (`head_count_kv` and friends) are derived from the tuples for status
+lines, rather than the tuples being derived from them. `_whole()` makes every
+read total: a header that says something unexpected is a reason to estimate
+coarsely and say so, never a reason for a property access to raise into a panel
+that was only drawing itself.
+
+`kv_bytes_per_token` then **sums per block** instead of multiplying. That is
+not only about not crashing: multiplying the widest block by the block count
+overstates a hybrid model's cache by a factor of two or more, which a user sees
+as a context ceiling far below what their card can actually hold. A partial
+offload is costed from the *end* of the model, because that is the end
+llama.cpp offloads.
+
+## 4b. One place the sampling numbers are written down
+
+Conversation's temperature, top-p and reply-token defaults come from
+`prompt_master.chat.characters` — `DEFAULT_TEMPERATURE`, `DEFAULT_TOP_P`,
+`DEFAULT_MAX_REPLY_TOKENS` — and the seed's "draw a fresh one" sentinel comes
+from `core.models.RANDOM_SEED`. The panel had its own literals, which happened
+to hold the same numbers; the point is not the numbers but that a second copy
+of them is how a front end quietly stops matching the engine it is a front end
+for.
+
+`ChatRequest`'s field defaults use `default_factory`, because a dataclass field
+default is evaluated at *import* and nothing in the LLM half may import the
+vendored package then (§18). A factory is evaluated per request, which is late
+enough.
+
+Below that, every control falls back twice: to the value the character was
+saved with, and then to the vendored default. A cleared Gradio number box hands
+the handler `None`, and the answer to that is the character's own setting —
+never a crash, and never a literal invented in the panel.
+
+Prompt Studio and MiniMax already worked this way and were left alone: their
+per-pass temperatures live in `prompt_engine.motion`, `speech` and
+`minimax.enhancer`, which carry upstream's numbers with upstream's reasons
+beside them.
+
 ## 5. Layering, and the one hook
 
 ```
 mc_llm_*_panel  ->  mc_llm_sessions  ->  mc_llm_runtime  ->  mc_broker
        |                                      |                  |
-mc_llm_browse                           mc_llm_context      mc_memory
+mc_llm_browse  ->  mc_llm_native        mc_llm_context      mc_memory
        |                                      |
 mc_llm_files  <-  mc_llm_setup            mc_gguf
 ```
@@ -295,16 +355,39 @@ the panel's four outputs from **Use this model** exist so that a user who
 pasted one thing and got another can see which. A silent correction would be
 the same bug in a nicer coat.
 
-`mc_llm_browse.py` is the other half: a picker, so the paths need not be pasted
-at all. It renders the listing **server-side** rather than opening a native
-dialog, and that is not a stylistic preference — a `tkinter` dialog would open
-on the machine running the WebUI, which is either somebody's desktop (fine) or
-a headless box where the dialog cannot be seen or dismissed and the worker
-thread waits forever (not fine). One picker is built per box because Gradio
-wires outputs statically and a shared one cannot know at build time which box
-it will fill. Navigation binds to `input` where the host has it, because a
-dropdown whose choices the handler replaces fires `change` on the replacement
-and walks a folder deeper on every click.
+`mc_llm_browse.py` is the other half: **Browse**, so the paths need not be
+pasted at all. It opens the operating system's own dialog
+(`mc_llm_native.py`), because that is what the word means to everybody who
+presses the button, and because reaching a models folder eight levels down a
+drive is one keystroke there and eight clicks in anything drawn in a page.
+
+The in-page listing is still there, as the fallback, because the native dialog
+is not always the right thing to open — and this was originally built the other
+way round, which was wrong:
+
+- A WebUI started with `--listen` or `--share` is being looked at from another
+  machine. A dialog opened by the server appears on the *server's* screen, and
+  from the browser's side the button does nothing at all until it times out. So
+  `mc_llm_native.available()` reads the host's own `cmd_opts` and declines
+  before opening anything, and the in-page drawer opens instead **with the
+  reason in it**. A Browse button that silently does nothing is the one outcome
+  worth engineering around.
+- A dialog runs in a **subprocess**, never in the Gradio worker thread. Tk is
+  not thread-safe, a Tk that dies takes its process with it, and a dialog
+  nobody dismisses would otherwise hold a worker forever. A child process can
+  be killed on a timeout; a thread cannot.
+- On Windows the route is **PowerShell and `System.Windows.Forms`** before
+  `tkinter`, because the popular one-click Forge packages ship an embedded
+  Python and an embedded Python has no `tkinter` — missing on precisely the
+  installations most likely to want this. A route that reports itself missing
+  falls through to the next; a route that timed out does not, because somebody
+  who has already left one dialog open does not need a second.
+
+One picker is built per box because Gradio wires outputs statically and a
+shared one cannot know at build time which box it will fill. Navigation binds
+to `input` where the host has it, because a dropdown whose choices the handler
+replaces fires `change` on the replacement and walks a folder deeper on every
+click.
 
 ## 6c. Panels that draw failure instead of raising it
 
@@ -343,7 +426,10 @@ Three are shaped by their failure modes rather than by their feature size:
   UI this size is mostly wiring and wiring fails at build time or not at all;
 - `test_llm_files.py` is a list of real pastes rather than invented edge cases.
   Every string in it is something a clipboard actually produces, which is the
-  only reason any of them is worth handling.
+  only reason any of them is worth handling;
+- `test_gguf.py`'s per-block class is written from the format specification
+  rather than from a model: the smallest model that would exercise it is 16 GB,
+  and a synthetic six-block header exercises it in a millisecond.
 
 `test_llm_setup.py` has one fixture worth reading before adding to it: the
 install root is a *subdirectory* of `tmp_path`, not `tmp_path` itself, so that a

@@ -528,17 +528,72 @@ class TestTheFilePicker:
 
         return mc_llm_browse
 
-    def test_opening_it_lists_the_folder_the_box_already_points_at(self, browse, tmp_path):
+    def test_browse_opens_the_operating_systems_own_dialog(self, browse, tmp_path,
+                                                            monkeypatch):
+        """What "browse" means to everybody who presses the button."""
+        model = tmp_path / "thing.gguf"
+        model.write_bytes(b"x")
+        asked = {}
+
+        def dialog(title, patterns, initial):
+            asked.update({"title": title, "patterns": patterns, "initial": initial})
+            return str(model)
+
+        monkeypatch.setattr(browse.native, "choose_file", dialog)
+
+        panel, *_rest, target = browse._open("", (".gguf",), tmp_path, "Choose a GGUF model")
+
+        assert target == str(model)
+        assert panel["visible"] is False
+        assert asked["title"] == "Choose a GGUF model"
+        assert asked["initial"] == tmp_path
+        assert ("GGUF files", "*.gguf") in asked["patterns"]
+
+    def test_cancelling_the_dialog_changes_nothing(self, browse, tmp_path, monkeypatch):
+        """Opening the in-page picker here would be arguing with somebody who
+        has just said no."""
+        monkeypatch.setattr(browse.native, "choose_file",
+                            lambda *args, **kwargs: None)
+
+        panel, *rest, target = browse._open("", (".gguf",), tmp_path)
+
+        assert panel["visible"] is False
+        assert target == {}
+        assert all(update == {} for update in rest)
+
+    def test_no_native_dialog_falls_back_into_the_page_with_the_reason(self, browse,
+                                                                       tmp_path,
+                                                                       monkeypatch):
+        """A Browse button that silently does nothing is the failure this whole
+        fallback exists to avoid."""
         model = tmp_path / "thing.gguf"
         model.write_bytes(b"x")
 
-        panel, location, _places, _folders, picks, _notice, target = browse._open(
+        def refuse(*args, **kwargs):
+            raise browse.native.Unavailable("This WebUI is being served to other machines")
+
+        monkeypatch.setattr(browse.native, "choose_file", refuse)
+
+        panel, location, _places, _folders, picks, notice, target = browse._open(
             str(model), (".gguf",), None)
 
         assert panel["visible"] is True
         assert location == str(tmp_path)
         assert ("thing.gguf — 0.0 GB", str(model)) in picks["choices"]
+        assert "served to other machines" in notice
         assert target == {}
+
+    def test_a_dialog_that_fails_outright_still_lands_in_the_page(self, browse, tmp_path,
+                                                                  monkeypatch):
+        def explode(*args, **kwargs):
+            raise RuntimeError("tk went away")
+
+        monkeypatch.setattr(browse.native, "choose_file", explode)
+
+        panel, *_rest, notice, _target = browse._open("", (".gguf",), tmp_path)
+
+        assert panel["visible"] is True
+        assert "tk went away" in notice
 
     def test_navigating_replaces_the_listing_and_leaves_the_box_alone(self, browse,
                                                                       tmp_path):
@@ -575,13 +630,48 @@ class TestTheFilePicker:
         assert panel["visible"] is False
         assert all(update == {} for update in rest)
 
-    def test_every_handler_returns_one_value_per_output(self, browse, tmp_path):
+    def test_every_handler_returns_one_value_per_output(self, browse, tmp_path,
+                                                        monkeypatch):
         """The failure mode this catches is a Gradio build-time error that only
         shows up when somebody presses the button."""
+        monkeypatch.setattr(browse.native, "choose_file", lambda *a, **k: None)
+
         assert len(browse._show(tmp_path, (".gguf",))) == 7
         assert len(browse._shut()) == 7
         assert len(browse._choose("", str(tmp_path), (".gguf",))) == 7
         assert len(browse._open("", (".gguf",), tmp_path)) == 7
+
+    def test_the_runtime_box_can_ask_for_a_folder_natively(self, browse, tmp_path,
+                                                           monkeypatch):
+        """A llama.cpp release is adopted by naming the directory as readily as
+        the executable inside it."""
+        asked = {}
+
+        def dialog(title, initial):
+            asked.update({"title": title, "initial": initial})
+            return str(tmp_path)
+
+        monkeypatch.setattr(browse.native, "choose_folder", dialog)
+
+        result = browse._open_folder("", (), tmp_path, "Choose an unpacked llama.cpp release")
+
+        assert len(result) == 7
+        assert result[0]["visible"] is False
+        assert result[-1] == str(tmp_path)
+        assert asked["title"] == "Choose an unpacked llama.cpp release"
+
+    def test_only_the_runtime_box_gets_a_folder_button(self, browse):
+        import gradio as gr
+
+        assert browse.attach(gr.Textbox(), key="a")["open_folder"] is None
+        assert browse.attach(gr.Textbox(), key="b", allow_folders=True)["open_folder"]
+
+    def test_the_filter_list_offers_everything_as_well_as_the_suffix(self, browse):
+        """A projector that a publisher named something unexpected is still
+        choosable, which a .gguf-only filter would prevent."""
+        labels = [label for label, _pattern in browse._patterns((".gguf",))]
+
+        assert labels[-1] == "All files"
 
     def test_every_binding_hands_back_one_value_per_output(self, browse):
         """The wiring failure this catches shows up when somebody presses the
@@ -625,3 +715,184 @@ class TestTheFilePicker:
 
         assert built == ["runtime", "model", "mmproj"]
         assert ui.ident("browse", "model") == "mc-llm-browse-model"
+
+
+class TestNativeDialogAvailability:
+    """Whether the operating system's dialog is the right thing to open.
+
+    It is not always: a WebUI reached from another machine would open one on
+    the server's screen, where nobody is sitting, and from the browser's side
+    the button would do nothing at all until it timed out.
+    """
+
+    def test_a_local_webui_gets_the_native_dialog(self, host, monkeypatch):
+        import mc_llm_native
+
+        monkeypatch.setattr(mc_llm_native, "_served_remotely", lambda: False)
+        monkeypatch.setattr(mc_llm_native, "_has_display", lambda: True)
+
+        assert mc_llm_native.available() == ""
+
+    def test_listen_and_share_take_it_away_with_a_reason(self, host, monkeypatch):
+        import mc_llm_native
+        from modules import shared
+
+        monkeypatch.setattr(mc_llm_native, "_has_display", lambda: True)
+        monkeypatch.setattr(shared.cmd_opts, "listen", True, raising=False)
+
+        assert "served to other machines" in mc_llm_native.available()
+
+    def test_a_headless_machine_says_so_rather_than_hanging(self, host, monkeypatch):
+        import sys
+
+        import mc_llm_native
+
+        monkeypatch.setattr(mc_llm_native, "_served_remotely", lambda: False)
+        monkeypatch.setattr(mc_llm_native, "_has_display", lambda: False)
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        assert "no desktop session" in mc_llm_native.available()
+
+    def test_it_refuses_before_starting_anything_when_unavailable(self, host, monkeypatch):
+        import mc_llm_native
+
+        monkeypatch.setattr(mc_llm_native, "available", lambda: "nope")
+        monkeypatch.setattr(mc_llm_native.subprocess, "run",
+                            lambda *args, **kwargs: pytest.fail("started a dialog anyway"))
+
+        with pytest.raises(mc_llm_native.Unavailable, match="nope"):
+            mc_llm_native.choose_file("Choose", (), None)
+
+    def test_a_cancelled_dialog_is_none_rather_than_an_empty_path(self, host, monkeypatch):
+        import subprocess
+
+        import mc_llm_native
+
+        monkeypatch.setattr(mc_llm_native, "available", lambda: "")
+        monkeypatch.setattr(mc_llm_native.subprocess, "run",
+                            lambda *args, **kwargs: subprocess.CompletedProcess(
+                                args, 0, stdout="\n", stderr=""))
+
+        assert mc_llm_native.choose_file("Choose", (), None) is None
+
+    def test_a_python_without_tkinter_says_which_thing_is_missing(self, host, monkeypatch):
+        import subprocess
+
+        import mc_llm_native
+
+        monkeypatch.setattr(mc_llm_native, "available", lambda: "")
+        monkeypatch.setattr(mc_llm_native.subprocess, "run",
+                            lambda *args, **kwargs: subprocess.CompletedProcess(
+                                args, 2, stdout="", stderr="no tkinter"))
+
+        with pytest.raises(mc_llm_native.Unavailable, match="tkinter"):
+            mc_llm_native.choose_file("Choose", (), None)
+
+    def test_windows_tries_powershell_before_tkinter(self, host, monkeypatch):
+        """The popular one-click packages ship an embedded Python with no
+        tkinter, and System.Windows.Forms is part of Windows itself."""
+        import sys
+
+        import mc_llm_native
+
+        monkeypatch.setattr(sys, "platform", "win32")
+
+        assert [route.__name__ for route in mc_llm_native._routes()] == \
+            ["_powershell", "_tkinter"]
+
+    def test_a_missing_route_falls_through_to_the_next_one(self, host, monkeypatch):
+        import mc_llm_native
+
+        tried = []
+
+        def absent(*args, **kwargs):
+            tried.append("first")
+            raise mc_llm_native.Unavailable("not installed")
+
+        def works(*args, **kwargs):
+            tried.append("second")
+            return "C:\\models\\thing.gguf"
+
+        monkeypatch.setattr(mc_llm_native, "available", lambda: "")
+        monkeypatch.setattr(mc_llm_native, "_routes", lambda: (absent, works))
+
+        assert mc_llm_native.choose_file("Choose", (), None) == "C:\\models\\thing.gguf"
+        assert tried == ["first", "second"]
+
+    def test_a_timeout_does_not_open_a_second_dialog(self, host, monkeypatch):
+        """Somebody who has already left one dialog open for ten minutes does
+        not need a second one at the end of it."""
+        import mc_llm_native
+
+        def expire(*args, **kwargs):
+            raise mc_llm_native._final("still open")
+
+        second = lambda *args, **kwargs: pytest.fail("opened another dialog")
+        monkeypatch.setattr(mc_llm_native, "available", lambda: "")
+        monkeypatch.setattr(mc_llm_native, "_routes", lambda: (expire, second))
+
+        with pytest.raises(mc_llm_native.Unavailable, match="still open"):
+            mc_llm_native.choose_file("Choose", (), None)
+
+    def test_the_windows_filter_is_the_win32_spelling_of_the_tk_one(self):
+        import mc_llm_native
+
+        assert mc_llm_native._ps_filter((("GGUF files", "*.gguf"), ("All files", "*.*"))) == \
+            "GGUF files|*.gguf|All files|*.*"
+
+    def test_a_quote_in_a_path_cannot_end_the_powershell_string(self, host):
+        """The initial folder is a path off the user's disk, and PowerShell
+        ends a single-quoted string at the first quote it sees."""
+        import mc_llm_native
+
+        assert mc_llm_native._ps("C:\\it's\\models") == "C:\\it''s\\models"
+
+    def test_a_dialog_left_open_is_killed_rather_than_held(self, host, monkeypatch):
+        import subprocess
+
+        import mc_llm_native
+
+        def expire(*args, **kwargs):
+            raise subprocess.TimeoutExpired("dialog", mc_llm_native.TIMEOUT_SECONDS)
+
+        monkeypatch.setattr(mc_llm_native, "available", lambda: "")
+        monkeypatch.setattr(mc_llm_native.subprocess, "run", expire)
+
+        with pytest.raises(mc_llm_native.Unavailable, match="still open"):
+            mc_llm_native.choose_file("Choose", (), None)
+
+
+class TestConversationDefaults:
+    """Sampling comes from the vendored package, not from literals here.
+
+    The point is not the numbers. It is that there is exactly one place they
+    are written down, so the panel cannot drift away from the engine it is a
+    front end for.
+    """
+
+    def test_the_sliders_open_on_the_vendored_defaults(self, store):
+        from prompt_master.chat import characters
+
+        built = mc_llm_chat_panel.build()
+
+        assert characters.DEFAULT_TEMPERATURE == 0.85
+        assert mc_llm_chat_panel.sessions.ChatRequest(messages=[]).temperature == \
+            characters.DEFAULT_TEMPERATURE
+        assert mc_llm_chat_panel.sessions.ChatRequest(messages=[]).top_p == \
+            characters.DEFAULT_TOP_P
+        assert mc_llm_chat_panel.sessions.ChatRequest(messages=[]).max_tokens == \
+            characters.DEFAULT_MAX_REPLY_TOKENS
+        assert set(built) == {"status", "transcript", "persona"}
+
+    def test_a_cleared_box_falls_back_to_the_character_then_to_the_default(self):
+        from prompt_master.chat.characters import Character
+
+        saved = Character(name="Ada", temperature=0.4, max_reply_tokens=900)
+
+        assert mc_llm_chat_panel._decimal(None, saved.temperature) == 0.4
+        assert mc_llm_chat_panel._number("", saved.max_reply_tokens) == 900
+        assert mc_llm_chat_panel._number(None, None, 512) == 512
+
+    def test_a_slider_value_still_wins_over_the_saved_one(self):
+        assert mc_llm_chat_panel._decimal(1.2, 0.4) == 1.2
+        assert mc_llm_chat_panel._number(256, 900) == 256

@@ -222,24 +222,32 @@ class Capacity:
 def kv_bytes_per_token(gguf: mc_gguf.Gguf, placement: Placement) -> float:
     """Key/value cache cost of one token, in VRAM, for this placement.
 
-    Only offloaded blocks keep their cache on the card. A partial offload
-    therefore costs proportionally less VRAM and proportionally more system
-    RAM, which is the mechanism behind section 13's graceful degradation --
-    reducing layers reduces both halves of the footprint at once.
+    Summed per block rather than multiplied by a block count, because the
+    blocks are not all the same shape: a hybrid model interleaves blocks that
+    keep no cache at all with blocks that do, and an interleaved local/global
+    design gives them different widths. Multiplying the widest block by the
+    block count overstates such a model's cache by a factor of two or more,
+    which shows up as a context ceiling far lower than the card can actually
+    hold. See ``mc_gguf.Gguf.head_counts_kv``.
+
+    Only offloaded blocks keep their cache on the card, and llama.cpp offloads
+    the *last* ``--n-gpu-layers`` of them, so a partial offload is costed from
+    the end of the model. That is the mechanism behind section 13's graceful
+    degradation: reducing layers reduces both halves of the footprint at once.
     """
     if not placement.on_gpu or not gguf.usable:
         return 0.0
 
-    blocks = gguf.block_count
-    if placement.gpu_layers != ALL_LAYERS:
-        blocks = max(min(int(placement.gpu_layers), blocks), 0)
-    if blocks <= 0:
-        return 0.0
-
-    heads = max(gguf.head_count_kv, 1)
     k_size = KV_TYPE_BYTES.get(placement.kv_type_k, 2.0)
     v_size = KV_TYPE_BYTES.get(placement.kv_type_v, 2.0)
-    return blocks * heads * (gguf.key_length * k_size + gguf.value_length * v_size)
+    per_block = [heads * (key * k_size + value * v_size)
+                 for heads, key, value
+                 in zip(gguf.head_counts_kv, gguf.key_lengths, gguf.value_lengths)]
+
+    if placement.gpu_layers != ALL_LAYERS:
+        offloaded = max(min(int(placement.gpu_layers), len(per_block)), 0)
+        per_block = per_block[len(per_block) - offloaded:] if offloaded else []
+    return float(sum(per_block))
 
 
 def weights_bytes(gguf: mc_gguf.Gguf, placement: Placement) -> int:

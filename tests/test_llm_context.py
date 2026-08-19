@@ -12,7 +12,7 @@ import pytest
 
 import mc_gguf
 import mc_llm_context as ctx
-from test_gguf import _text, _u32, write_gguf  # noqa: F401
+from test_gguf import _text, _u32, _u32s, write_gguf  # noqa: F401
 
 _GB = 1024**3
 _MB = 1024**2
@@ -230,3 +230,43 @@ class TestCalibration:
 
         assert not ctx.record_observation(model, placement, 1024)
         assert not ctx.estimate(model, placement).calibrated
+
+
+class TestHybridModels:
+    """A model whose blocks are not all the same shape.
+
+    Multiplying the widest block by the block count overstates such a model's
+    cache by a factor of two or more, which shows up as a context ceiling far
+    below what the card can actually hold — and, before the header was read per
+    block at all, as a TypeError on every reply.
+    """
+
+    @pytest.fixture
+    def hybrid(self, tmp_path):
+        """Eight blocks, four of which keep a cache."""
+        metadata = b"".join([
+            _text("general.architecture", "llama"),
+            _u32("llama.block_count", 8),
+            _u32("llama.context_length", 8192),
+            _u32("llama.embedding_length", 4096),
+            _u32("llama.attention.head_count", 32),
+            _u32s("llama.attention.head_count_kv", [8, 0, 8, 0, 8, 0, 8, 0]),
+        ])
+        return mc_gguf.read(write_gguf(tmp_path / "hybrid.gguf", metadata, 6))
+
+    def test_only_the_blocks_that_attend_are_paid_for(self, hybrid):
+        per_token = ctx.kv_bytes_per_token(hybrid, ctx.Placement())
+
+        assert per_token == 4 * 8 * (128 + 128) * 2.0
+
+    def test_a_partial_offload_costs_the_blocks_llama_cpp_puts_on_the_card(self, hybrid):
+        """llama.cpp offloads the *last* n layers, and in this model the last
+        two are one that attends and one that does not."""
+        per_token = ctx.kv_bytes_per_token(hybrid, ctx.Placement(gpu_layers=2))
+
+        assert per_token == 1 * 8 * (128 + 128) * 2.0
+
+    def test_a_capacity_estimate_is_produced_rather_than_an_exception(self, hybrid):
+        found = ctx.capacity(hybrid.path, ctx.Placement(), 4 * _GB, gguf=hybrid)
+
+        assert found.usable > 0
