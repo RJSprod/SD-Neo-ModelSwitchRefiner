@@ -672,6 +672,24 @@
     overflow-y: auto;
 }
 
+/* Nothing in the drawer is allowed to be squashed, and this is the rule that
+   says so. The drawer is a flex column inside a workspace of fixed height, and
+   a flex item's default is to *shrink* when its siblings do not fit -- so
+   opening the Threads accordion, which is a list as long as your thread
+   history, took the space out of the sections under it. What that looks like
+   is Character emptying itself into a blank gap: the section is still there,
+   with a height the flex algorithm chose and content that no longer fits in
+   it, and the drawer's own scrollbar never appears because from its point of
+   view everything fitted.
+
+   `flex: 0 0 auto` makes every section as tall as its own contents and lets
+   the total overflow, which is what `overflow-y: auto` above was always for.
+   The stage next door has carried the same rule since it was written; the
+   drawer was the half that did not. */
+#mc-llm-studio .mc-llm-drawer > * {
+    flex: 0 0 auto;
+}
+
 /* The stage is a column, and exactly one thing in it is allowed to grow.
    Everything else — the head, the action bar, the image box, the composer — is
    measured by its contents and never shrinks, and the transcript takes what is
@@ -735,6 +753,15 @@
 #mc-llm-studio .mc-llm-output textarea {
     font-size: 0.95em;
     line-height: 1.55;
+}
+
+/* Whatever the component decides about its own height, the text inside it
+   scrolls. Written here as well as in the panels because the two failures are
+   different: the panel decides that the box does not grow, and this decides
+   that a prompt too long for it is still readable rather than clipped. */
+#mc-llm-studio .mc-llm-output textarea,
+#mc-llm-studio .mc-llm-workspace .mc-llm-composer textarea {
+    overflow-y: auto;
 }
 
 #mc-llm-studio .mc-llm-output-primary textarea {

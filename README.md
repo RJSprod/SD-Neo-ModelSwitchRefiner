@@ -1182,6 +1182,27 @@ knows how long a reply will be — and under `prefers-reduced-motion` it stops
 moving and stays lit. In the top bar, the state chip pulses while the model is
 loading.
 
+### Is it really on the GPU?
+
+The placement line says where the model was *sent*. The line after it says what
+llama.cpp reported when it got there — the layers it offloaded and the size of
+each buffer it allocated, read back from llama-server's own log:
+
+```
+llama-server ready — all layers on the GPU, 7,168 token context, 18.1 GB VRAM
+llama.cpp reports 31/31 layers on the GPU, CUDA0 16.6 GB, CPU_Mapped 0.3 GB, CUDA0 KV 0.9 GB
+```
+
+The same summary is on the state chip's tooltip and in Setup. A small host
+buffer is normal — many models keep their token embeddings there even on a full
+offload. A tenth or more of the weights in system RAM is not, and is called out
+as a warning: it means the card had less room than this extension could see,
+which is either another process holding VRAM (check `nvidia-smi`) or, on
+Windows, the driver spilling the allocation into shared system memory rather
+than failing it — NVIDIA Control Panel → Manage 3D settings → **CUDA — Sysmem
+Fallback Policy**. Both look identical from the outside: the model loads, the
+log says it is resident, and every reply runs at a fraction of the speed.
+
 ### What the console says
 
 Every run reports itself to the WebUI console: llama-server starting with the

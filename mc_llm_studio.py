@@ -491,6 +491,11 @@ def _runtime_detail(state=None) -> str:
     report = state["report"]
     if report is not None and report.placement is not None:
         parts.append(f"Context: {ui.tokens(report.placement.context)}")
+    # What llama.cpp said, not what it was asked for. The two agreeing is the
+    # answer to "is it really all on the GPU?", and that question is only ever
+    # asked by somebody whose replies are slower than they should be.
+    if report is not None and report.offload.known:
+        parts.append(f"llama.cpp: {report.offload.describe()}")
     if not state["sees"]:
         parts.append("No vision projector")
     return " · ".join(parts)
@@ -811,14 +816,21 @@ def _apply_runtime(path, device_value):
         # Not an error in the sense the panel colours red: nothing was attempted
         # and the sentence says what to do instead.
         return ui.notice(str(exc), "warn"), gr.update(), gr.update()
+
+    # Stopped *before* the copy, not after it. The running server holds the
+    # build it was started with -- on Windows it holds every DLL beside it open,
+    # and adopting a build replaces that whole folder, so a server still up made
+    # the copy fail with "[WinError 5] Access is denied:
+    # ...\\runtime\\cublas64_12.dll" and left the runtime half-swapped. The stop
+    # was already here; it was in the wrong place, which is a thing that only
+    # shows on the platform that locks open files.
+    mc_llm_runtime.runtime.stop()
     try:
         executable, note = mc_llm_setup.adopt(chosen.path)
         mc_llm_setup.record(executable, _device_for(device_value))
     except Exception as exc:
         return ui.notice(ui.failure(exc), "error"), gr.update(), gr.update()
 
-    # The running server holds the build it was started with.
-    mc_llm_runtime.runtime.stop()
     return (ui.notice(f"{note} Runtime recorded."), str(executable),
             _model_line(mc_llm_runtime.config()))
 
@@ -845,6 +857,10 @@ def _download_runtime(device_value, progress=gr.Progress()):
     import mc_llm_runtime
     import mc_llm_setup
 
+    # Before the download rather than after it, for the reason ``_apply_runtime``
+    # stops first: extracting the pinned build replaces the runtime folder, and
+    # a running server holds the files in it open.
+    mc_llm_runtime.runtime.stop()
     try:
         chosen = _device_for(device_value)
         executable = mc_llm_setup.download(
@@ -855,7 +871,6 @@ def _download_runtime(device_value, progress=gr.Progress()):
     except Exception as exc:
         return ui.notice(ui.failure(exc), "error"), gr.update()
 
-    mc_llm_runtime.runtime.stop()
     return ui.notice(f"Downloaded and recorded {executable}."), str(executable)
 
 

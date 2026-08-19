@@ -947,3 +947,101 @@ something new — "Starting…" and "Replying…" are separate elements, not one
 element with two texts — so a start time stored on the line resets at each of
 them and a ninety-second reply reads as five. It is kept on the component,
 which survives the run, and cleared when the line stops being busy.
+
+## 10. Four reports from the same afternoon (19 August 2026)
+
+### 10.1 A CUDA library that was not the problem
+
+> `[WinError 5] Access is denied: 'C:\Roots\Neo3\model_chain_llm\runtime\cublas64_12.dll'`
+
+— on pressing **Use this runtime** after changing the device. The filename is
+the reason this took a while to read: it names a CUDA library, so it reads as a
+driver or a permissions problem, and it is neither. Windows will not rename or
+delete a file that a process holds open, llama-server holds every DLL beside it
+open for as long as it runs, and adopting a build replaces that whole folder —
+`_copy_tree` renames the old `runtime/` out of the way, `extract_zips_atomic`
+deletes it outright.
+
+`_apply_runtime` already stopped the server. It stopped it *after* the copy, on
+the reasoning that the running server holds the build it was started with — true,
+and the exact reason the stop has to come first. Both handlers now stop before
+they touch the folder, and both paths turn a `PermissionError` on the
+replacement into a sentence naming the folder and saying to press Unload,
+rather than a Windows error code pointing at cuBLAS.
+
+### 10.2 The character controls that emptied into a blank gap
+
+Open the drawer, open **Threads**, and the **Character** section below it loses
+its contents — leaving the heading, a gap, and no scrollbar.
+
+The drawer is a `gr.Column`, which Gradio renders as a flex column, inside a
+workspace whose height is fixed by `--mc-llm-available`. Its sections are
+therefore flex items with the default `flex-shrink: 1`, and the Threads
+accordion is as tall as the thread history is long. When the total stopped
+fitting, the sections underneath were *shrunk* rather than the drawer being
+scrolled — and `overflow-y: auto` never fired, because from the drawer's point
+of view everything fitted exactly.
+
+```css
+#mc-llm-studio .mc-llm-drawer > * { flex: 0 0 auto; }
+```
+
+The stage next door has carried the same rule since it was written — the
+action bar, the attachment row and the composer are all `flex: 0 0 auto` there,
+so that the transcript is the one thing that gives ground. The drawer was the
+half of that idea that never got written down.
+
+### 10.3 The Stop button that walked off the bottom of the screen
+
+A Gradio `Textbox` grows from `lines` towards `max_lines` as text arrives.
+MiniMax's output box was `lines=18, max_lines=44`, so it grew by twenty-six
+lines *while a generation streamed into it* — carrying the composer, the
+Enhance button and Stop down the page ahead of it, at the one moment somebody
+wants to press Stop. Prompt Studio's two outputs were 16 and 40.
+
+`max_lines == lines` on every box a generation writes into. A box that cannot
+change size cannot move a button, and text longer than the box is read by
+scrolling inside it, which `overflow-y: auto` in the stylesheet guarantees
+whatever the component decides for itself.
+
+### 10.4 "It says GPU only, but it is slow"
+
+The restarts were gone — the log showed one start and then `Preparing…` on every
+message after it, which is what section 9 was for. What remained was a fully
+resident model generating at roughly a fifth of the rate a fully resident model
+on that card generates at, with a prefill to match: fifty-one seconds to the
+first character of a seven-thousand-token context that a 3090 should chew
+through in a few.
+
+Nothing this extension had written down could tell anybody why, and that is the
+finding. `all layers on the GPU` is a *decision*. `18.1 GB VRAM` is a
+measurement of free memory before and after, which cannot tell VRAM that is on
+the card from VRAM the driver has quietly backed with system memory. Between
+those two numbers there was no evidence at all about what llama.cpp actually
+did — and llama.cpp writes it down, in its own log, in the folder nobody opens:
+
+```
+load_tensors: offloaded 31/31 layers to GPU
+load_tensors:        CUDA0 model buffer size = 17000.00 MiB
+load_tensors:   CPU_Mapped model buffer size =   300.00 MiB
+```
+
+So it is read back, from the byte the log ended at before this start, and
+reported on the line after the placement. When a tenth or more of the weights
+are in system RAM, that is a warning rather than a note, and it says where to
+look — another process holding VRAM, or a driver spilling an allocation it
+could not fit, which on Windows is a policy with a name and a setting.
+
+The threshold is not zero on purpose: a full offload still leaves a
+token-embedding buffer on the host for many models, and a warning that fires on
+every load is a warning nobody reads.
+
+One unknown was removed while the instrument was being fitted.
+`--n-gpu-layers` was being passed the word `all`, which is this project's word:
+llama.cpp's own argument is an integer, and every invocation of it in the wild
+passes one. It is now the model's own block count plus one for the output
+layer, or 999 when the header could not be read — deliberately far too big,
+because llama.cpp clamps a count above the model's own while a guess that came
+out too small would silently leave layers on the processor. A build that does
+not understand `all` refuses to start rather than offloading less, so this was
+never the cause of a slow reply; it is one fewer thing a slow reply could be.
