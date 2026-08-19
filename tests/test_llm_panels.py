@@ -417,7 +417,7 @@ class TestMiniMax:
     def test_it_builds(self):
         built = mc_llm_minimax_panel.build()
 
-        assert set(built) == {"status", "output"}
+        assert set(built) == {"status", "output", "stop"}
 
     def test_an_empty_prompt_is_refused(self):
         events = list(mc_llm_minimax_panel._enhance("  ", "fl2va", None, 7))
@@ -1415,3 +1415,42 @@ class TestConversationDefaults:
     def test_a_slider_value_still_wins_over_the_saved_one(self):
         assert mc_llm_chat_panel._decimal(1.2, 0.4) == 1.2
         assert mc_llm_chat_panel._number(256, 900) == 256
+
+
+class TestStoppingGivesTheControlsBack:
+    """``cancels=`` closes the running generator where it stands, which is what
+    makes Stop immediate — and a closed generator never reaches the yield that
+    would have re-enabled the submit button and greyed out Stop. The run
+    stopped, the partial output stayed, and the panel was left permanently busy
+    with no way to ask for anything else. Whatever puts those controls back has
+    to be the stop handler, because it is the only one that still runs.
+    """
+
+    def _restored(self, cancelled):
+        """(submit, stop) interactivity out of a stop handler's return."""
+        _status, submit, stop = cancelled
+        return submit.get("interactive"), stop.get("interactive")
+
+    def test_minimax_can_be_asked_for_another_prompt(self):
+        import mc_llm_minimax_panel
+
+        assert self._restored(mc_llm_minimax_panel._cancel(None)) == (True, False)
+
+    def test_prompt_studio_can_be_asked_for_another_prompt(self):
+        import mc_llm_prompt_panel
+
+        assert self._restored(mc_llm_prompt_panel._cancel(None)) == (True, False)
+
+    def test_conversation_can_be_sent_another_message(self):
+        assert self._restored(mc_llm_chat_panel._cancel(None)) == (True, False)
+
+    def test_the_stop_button_is_wired_to_put_them_back(self):
+        """The handler returning them is not enough on its own: the click has
+        to be told where they go. Outputs of one is the bug."""
+        import mc_llm_minimax_panel
+
+        stop = mc_llm_minimax_panel.build()["stop"]
+        clicks = [kwargs for kind, kwargs in stop._callbacks if kind == "click"]
+
+        assert len(clicks) == 1
+        assert len(clicks[0]["outputs"]) == 3

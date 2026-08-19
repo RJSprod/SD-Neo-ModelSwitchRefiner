@@ -1350,3 +1350,76 @@ placement this extension *asked* for, and a build with its own fitter answers
 with 6,912 tokens against a conversation trimmed to fit 7,168. It now prefers
 the context llama.cpp reported, then the one that was asked for, then the
 setting — most-informed first, which is the only order that is ever right.
+
+## 17. Stop left the panel unable to do anything else
+
+`stop.click(..., cancels=[running])` closes the running generator where it
+stands, which is what makes a stop immediate. It is also why the generator
+never reaches the yield that would have re-enabled the submit button and greyed
+out Stop: there is no code left to run. So the run stopped, the partial output
+stayed — both correct — and the panel sat there permanently busy with no way to
+ask for anything else.
+
+Whatever restores those controls has to be the stop handler, because it is the
+only thing that still runs. All three panels now return the two button updates
+along with the status line, and the click is wired to all three outputs, which
+is the half that is easy to leave out and the half a test can catch.
+
+## 18. Memory this extension does not own
+
+The report that prompted this section is worth quoting, because it is the right
+complaint: *"I should not have had to clear the system RAM from another app to
+make things work."*
+
+Some of that is fixable here and some of it is not, and the honest thing is to
+be exact about which is which.
+
+### 18.1 What was fixable, and is fixed
+
+**The vision projector was being loaded for text-only turns.** llama.cpp
+announces its own worst case for it — 1,285 MiB for this model's f16 projector
+— and that memory comes out of the same budget as the weights. A gigabyte and a
+third on a card that is already within two of its limit is not a rounding
+error: unaccounted for, it is a gigabyte and a third llama.cpp has to find
+somewhere, and where it finds it is by leaving part of the model in system RAM.
+
+It is now loaded for a request that carries an image and for no other, and its
+size is counted against the card when it is. The cost is one restart the first
+time a picture is attached, which is the trade the right way round.
+
+### 18.2 What is not fixable here, and is now said out loud
+
+**Another application's memory.** There is no call this extension can make that
+takes system RAM back from a program that is using it, and there is none that
+takes VRAM back from a process it did not start. Section 12.3 already reports
+VRAM on the card that neither family admits to holding; this adds the other
+half. Before every start, free system RAM is compared against the size of the
+model file — llama.cpp reads a GGUF through `mmap`, so the file goes through
+the page cache whether the weights end up on the card or not — and a shortfall
+is a warning naming both numbers. It is a warning and not a refusal: it is the
+machine's memory, the user may know exactly what else is using it, and
+llama.cpp will make an honest attempt either way. What is not acceptable is for
+it to be slow for a reason nothing on screen mentions.
+
+**llama.cpp's own fitter.** A 2025 build fits the model to what *it* sees free
+and does not say what it decided. Told to put thirty layers on the card, it
+will still move expert tensors into system RAM to make room for its context and
+compute buffers, and the only external sign is the reply rate.
+
+So the last thing this extension can do without reading anybody's log is
+arithmetic on its own measurement: the placement says all thirty layers, the
+weights are seventeen gigabytes, and the card's free memory fell by four. That
+is now a warning naming both figures, and it works on every build of llama.cpp
+because it reads nothing llama.cpp wrote.
+
+### 18.3 What is on screen now
+
+Setup's residency panel carries the four numbers that separate the cases, and
+the console carries all of them at every start:
+
+| what it says | what it means |
+| --- | --- |
+| VRAM in use by something this WebUI is not managing | another process has it; nothing here can reclaim it |
+| only N GB of system RAM is free and the model is M GB | close something, or expect a slow load |
+| the card took N GB where this placement needs M GB | the weights are not all on the card, whatever the placement says |
+| Last reply: llama.cpp measured N tokens/s | the only number that is not a plan |

@@ -601,12 +601,12 @@ class TestTheActivityIndicator:
         assert "Starting llama-server…" not in warm
         assert "Starting llama-server…" in cold
 
-    def test_stopping_is_still_in_flight(self, store):
-        """A stop asks the run to finish; what is already streaming keeps
-        arriving until it does, and the bar is what says so."""
+    def test_a_stopped_run_stops_saying_it_is_working(self, store):
+        """``cancels=`` closes the generator where it stands, so by the time
+        this handler runs there is nothing still in flight to sweep for."""
         import mc_llm_chat_panel as chat
 
-        assert "mc-llm-busy" in chat._cancel(sessions.Cancellation())
+        assert "mc-llm-busy" not in chat._cancel(sessions.Cancellation())[0]
 
     def test_the_chip_pulses_while_the_model_is_loading(self, host, store):
         """The top bar has room for a dot and not for a bar, and Load is the

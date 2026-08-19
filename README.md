@@ -1227,6 +1227,30 @@ is given up is the empty space between the models already loaded.
 If you have seen `cudaMalloc failed: out of memory` on a card with twenty
 gigabytes free, that gap is why.
 
+### When it is slower than it should be
+
+Four numbers separate the causes, and they are all in the console at every
+start and in Setup's residency panel:
+
+- **"N GB of the card is in use by something this WebUI is not managing"** —
+  another process has it. Nothing here can reclaim VRAM it did not allocate;
+  check `nvidia-smi` for a stray `llama-server` from a killed session.
+- **"only N GB of system RAM is free and the model is M GB"** — llama.cpp reads
+  the file through the page cache whatever ends up on the card, so a model
+  larger than free RAM means a slow load and slow replies until something else
+  gives that memory back.
+- **"the card took N GB where this placement needs M GB"** — the weights did
+  not all land on the GPU, whatever the placement line above it says. Either
+  something else is holding VRAM, or llama.cpp'''s own fitter made room for its
+  context and compute buffers by moving weights off the card.
+- **"Last reply: llama.cpp measured N tokens/s"** — the only number here that
+  is a measurement rather than a plan.
+
+The vision projector is loaded only for a request that actually carries an
+image; it costs over a gigabyte of the same VRAM the weights want, and a
+text-only conversation should not pay it. Attaching a picture restarts the
+server once.
+
 ### When it will not start
 
 A card with room on it can still refuse to give that room out in one piece —

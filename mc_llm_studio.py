@@ -501,6 +501,17 @@ def _runtime_detail(state=None) -> str:
     return " · ".join(parts)
 
 
+def _measured_speed() -> str:
+    """What llama.cpp timed for the most recent request, or ""."""
+    import mc_llm_runtime
+
+    try:
+        return mc_llm_runtime.runtime.speed_note()
+    except Exception:
+        logger.debug("Model Chain: could not read llama.cpp's timings", exc_info=True)
+        return ""
+
+
 def _log_path() -> str:
     """Where llama-server writes. Asked for by name often enough to be a function."""
     try:
@@ -553,6 +564,12 @@ def _residency_table() -> str:
         # able to find on a day when the panel itself is not enough.
         f"<li>llama-server log: <code>{ui.escape(_log_path())}</code></li>",
     ]
+    # The measurement, not the plan. Everything above this line is what was
+    # decided; this is what it produced, and the two have differed by a factor
+    # of forty while every line of the plan read "all layers on the GPU".
+    measured = _measured_speed()
+    if measured:
+        summary.append(f"<li>Last reply: <b>{ui.escape(measured)}</b></li>")
     stray = mc_broker.unaccounted_bytes()
     if stray > 0:
         # Named here as well as in the console, because this is the panel
