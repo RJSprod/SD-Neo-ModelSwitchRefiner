@@ -40,7 +40,7 @@ import logging
 import queue
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import mc_broker
 import mc_llm_runtime
@@ -318,8 +318,13 @@ def _chat_stream(client, seed: int, cancel: Cancellation):
     generation reproducible end to end rather than only in its writer pass.
     """
     fallback = int(seed)
+    # The signature's defaults are upstream ``backend.chat_stream``'s, and are
+    # never the ones used: every caller in the prompt engine passes its own
+    # pass's temperature. They are here so the shim is substitutable for the
+    # function it stands in for, not as a policy.
+    writer, writer_top_p = _writer_defaults()
 
-    def stream(messages, *, temperature=0.85, top_p=0.95, max_tokens=900, seed=None):
+    def stream(messages, *, temperature=writer, top_p=writer_top_p, max_tokens=900, seed=None):
         chosen = fallback if seed is None else int(seed)
         return [client.stream_chat(messages, max_tokens, chosen, lambda _text: None,
                                    cancel.event, temperature=temperature, top_p=top_p)]
@@ -327,20 +332,48 @@ def _chat_stream(client, seed: int, cancel: Cancellation):
     return stream
 
 
+def _writer_defaults() -> tuple[float, float]:
+    """Upstream ``backend.chat_stream``'s own sampling, from the vendored copy."""
+    from prompt_master.chat import characters
+
+    return characters.DEFAULT_TEMPERATURE, characters.DEFAULT_TOP_P
+
+
 # --------------------------------------------------------------------------- #
 # Conversation (section 4.3)
 # --------------------------------------------------------------------------- #
 
 
+def _vendored(name: str):
+    """A default read from ``prompt_master.chat.characters`` when it is needed.
+
+    A factory rather than the constant itself because a dataclass field default
+    is evaluated at import, and nothing in this module may import the vendored
+    package then -- section 18's rule that a failure in the LLM half must not
+    reach a WebUI that never opens it. Evaluated per request is late enough.
+    """
+    def read():
+        from prompt_master.chat import characters
+
+        return getattr(characters, name)
+
+    return read
+
+
 @dataclass
 class ChatRequest:
-    """One reply, in the terms ``prompt_master.chat`` already speaks."""
+    """One reply, in the terms ``prompt_master.chat`` already speaks.
+
+    The sampling defaults are the vendored package's own constants rather than
+    literals: they are what the standalone application ships with, and a
+    second copy of them here is how the two quietly stop agreeing.
+    """
 
     messages: list
     needs_vision: bool = False
-    temperature: float = 0.85
-    top_p: float = 0.95
-    max_tokens: int = 512
+    temperature: float = field(default_factory=_vendored("DEFAULT_TEMPERATURE"))
+    top_p: float = field(default_factory=_vendored("DEFAULT_TOP_P"))
+    max_tokens: int = field(default_factory=_vendored("DEFAULT_MAX_REPLY_TOKENS"))
     seed: int = 0
 
 

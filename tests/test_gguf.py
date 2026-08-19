@@ -33,6 +33,13 @@ def _text(key: str, value: str) -> bytes:
     return _pair(key, mc_gguf.STRING, _string(value))
 
 
+def _u32s(key: str, values) -> bytes:
+    """One key whose value is an array of numbers, one per block."""
+    payload = struct.pack("<IQ", mc_gguf.UINT32, len(values))
+    payload += b"".join(struct.pack("<I", value) for value in values)
+    return _pair(key, mc_gguf.ARRAY, payload)
+
+
 def write_gguf(path, metadata: bytes, count: int, version: int = 3,
                tensors: int = 291, padding: int = 4096):
     header = mc_gguf.MAGIC + struct.pack("<I", version) + struct.pack("<QQ", tensors, count)
@@ -174,3 +181,95 @@ class TestRefusals:
 
         assert mc_gguf.describe(path) is None
         assert mc_gguf.describe(tmp_path / "absent.gguf") is None
+
+
+class TestPerBlockAttention:
+    """GGUF lets the attention keys be arrays with one entry per block, and
+    llama.cpp writes them that way for every architecture whose blocks differ:
+    hybrid attention/state-space models where only some blocks attend, and
+    interleaved local/global designs where the two kinds are shaped
+    differently.
+
+    Reading one as a scalar is not a rounding error. ``int([8, 8, 0, 8])``
+    raises, and it raised inside a property — so choosing such a model put
+    "int() argument must be ... not 'list'" in front of a user who had done
+    nothing but pick a file, and did it again on every reply.
+    """
+
+    @pytest.fixture
+    def hybrid(self, tmp_path):
+        """Six blocks; two of them keep no cache at all."""
+        metadata = b"".join([
+            _text("general.architecture", "gemma3"),
+            _u32("gemma3.block_count", 6),
+            _u32("gemma3.context_length", 131072),
+            _u32("gemma3.embedding_length", 4096),
+            _u32("gemma3.attention.head_count", 32),
+            _u32s("gemma3.attention.head_count_kv", [8, 8, 0, 8, 8, 0]),
+        ])
+        return write_gguf(tmp_path / "hybrid.gguf", metadata, 6)
+
+    def test_an_array_of_kv_heads_reads_as_one_entry_per_block(self, hybrid):
+        found = mc_gguf.read(hybrid)
+
+        assert found.head_counts_kv == (8, 8, 0, 8, 8, 0)
+
+    def test_it_is_usable_even_though_some_blocks_keep_no_cache(self, hybrid):
+        assert mc_gguf.read(hybrid).usable
+
+    def test_the_scalar_view_answers_without_raising(self, hybrid):
+        """Everything that only wants one number still gets one."""
+        found = mc_gguf.read(hybrid)
+
+        assert found.head_count_kv == 8
+        assert found.key_length == 128
+        assert found.attending_blocks == 4
+        assert not found.uniform_attention
+
+    def test_a_scalar_still_applies_to_every_block(self, model):
+        found = mc_gguf.read(model)
+
+        assert found.head_counts_kv == (8,) * 32
+        assert found.uniform_attention
+        assert found.attending_blocks == 32
+
+    def test_per_block_key_widths_are_read_and_not_derived(self, tmp_path):
+        metadata = b"".join([
+            _text("general.architecture", "jamba"),
+            _u32("jamba.block_count", 4),
+            _u32("jamba.embedding_length", 4096),
+            _u32("jamba.attention.head_count", 32),
+            _u32s("jamba.attention.head_count_kv", [8, 0, 8, 0]),
+            _u32s("jamba.attention.key_length", [64, 0, 64, 0]),
+            _u32s("jamba.attention.value_length", [64, 0, 64, 0]),
+        ])
+        found = mc_gguf.read(write_gguf(tmp_path / "j.gguf", metadata, 7))
+
+        assert found.key_lengths == (64, 0, 64, 0)
+        assert found.value_lengths == (64, 0, 64, 0)
+
+    def test_a_short_array_is_extended_rather_than_dropped(self, tmp_path):
+        """A header should not contain one; a truncated file does, and a cache
+        sized from four fifths of a model is the worse answer."""
+        metadata = b"".join([
+            _text("general.architecture", "llama"),
+            _u32("llama.block_count", 6),
+            _u32("llama.embedding_length", 4096),
+            _u32("llama.attention.head_count", 32),
+            _u32s("llama.attention.head_count_kv", [8, 8]),
+        ])
+        found = mc_gguf.read(write_gguf(tmp_path / "short.gguf", metadata, 5))
+
+        assert found.head_counts_kv == (8, 8, 8, 8, 8, 8)
+
+    def test_a_value_that_is_not_a_number_does_not_raise_out_of_a_property(self, tmp_path):
+        metadata = b"".join([
+            _text("general.architecture", "llama"),
+            _u32("llama.block_count", 4),
+            _u32("llama.embedding_length", 4096),
+            _text("llama.attention.head_count", "thirty-two"),
+        ])
+        found = mc_gguf.read(write_gguf(tmp_path / "odd.gguf", metadata, 4))
+
+        assert found.head_count == 0
+        assert not found.usable

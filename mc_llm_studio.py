@@ -288,7 +288,8 @@ def _settings_panel() -> dict:
                 placeholder="Path to llama-server, or to the folder holding it",
                 elem_id=ui.ident("settings", "runtime"))
             mc_llm_browse.attach(runtime_path, suffixes=(), key="runtime",
-                                 allow_folders=True,
+                                 allow_folders=True, title="Choose llama-server",
+                                 folder_title="Choose an unpacked llama.cpp release",
                                  fallback=_folder(mc_llm_setup.RUNTIME_DIRNAME))
             device = gr.Dropdown(
                 label="Device", choices=choices, value=_current_device(choices),
@@ -302,19 +303,21 @@ def _settings_panel() -> dict:
             gr.Markdown("#### Which model runs")
             gr.Markdown(
                 "A model can live anywhere on the machine — it is read, not started, so it "
-                "does not have to be copied in. Paste a path or press Browse; a folder is "
-                "as good as a file when it holds one model.",
+                "does not have to be copied in. Press Browse for a file dialog, or paste a "
+                "path; a folder is as good as a file when it holds one model.",
                 elem_classes=ui.classes("hint"))
             model_path = gr.Textbox(
                 label="GGUF model", value=str(configuration.model or ""),
                 placeholder="Path to a .gguf file, or to the folder holding it",
                 elem_id=ui.ident("settings", "model"))
-            mc_llm_browse.attach(model_path, key="model", fallback=_folder("models"))
+            mc_llm_browse.attach(model_path, key="model", title="Choose a GGUF model",
+                                 fallback=_folder("models"))
             mmproj_path = gr.Textbox(
                 label="Vision projector (optional)", value=str(configuration.mmproj or ""),
                 placeholder="Path to an mmproj .gguf, or empty for a text-only model",
                 elem_id=ui.ident("settings", "mmproj"))
-            mc_llm_browse.attach(mmproj_path, key="mmproj", fallback=_folder("models"))
+            mc_llm_browse.attach(mmproj_path, key="mmproj", fallback=_folder("models"),
+                                 title="Choose a vision projector")
             with gr.Row():
                 apply_model = gr.Button("Use this model", variant="primary", size="sm")
                 suggest = gr.Button("Find the projector beside it", size="sm")
@@ -739,6 +742,19 @@ def _estimator_html() -> str:
         return ui.notice(f"What fits could not be estimated: {ui.failure(exc)}", "error")
 
 
+def _attention(described) -> str:
+    """The shape the cache cost comes from, in one clause.
+
+    Worth spelling out when it varies: a hybrid model's cache is a fraction of
+    what its block count suggests, and a reader who sees "62 blocks" beside a
+    small number has no other way to know why.
+    """
+    if described.uniform_attention:
+        return f"{described.block_count} blocks × {described.head_count_kv} KV heads"
+    return (f"{described.attending_blocks} of {described.block_count} blocks keep a cache, "
+            f"up to {described.head_count_kv} KV heads each")
+
+
 def _estimate_html() -> str:
     import mc_gguf
     import mc_llm_context
@@ -790,8 +806,7 @@ def _estimate_html() -> str:
         f"<li>Model ceiling: <b>{ui.tokens(described.context_length)}</b> tokens</li>",
         f"<li>Current context: <b>{ui.tokens(placement.context)}</b> tokens "
         f"({ui.gigabytes(estimate.kv_bytes)} of key/value cache)</li>",
-        f"<li>Cost per token: {per_token:,.0f} bytes "
-        f"({described.block_count} blocks × {described.head_count_kv} KV heads)</li>",
+        f"<li>Cost per token: {per_token:,.0f} bytes ({_attention(described)})</li>",
         f"<li>Weights on the GPU: {ui.gigabytes(estimate.weights_bytes)} "
         f"({ui.escape(placement.describe(described.block_count))})</li>",
         f"<li>Runtime reserve: {ui.megabytes(estimate.compute_bytes)} — "

@@ -50,6 +50,22 @@ class GgufError(ValueError):
     """The file is not a GGUF this module can read."""
 
 
+def _whole(value, default: int = 0) -> int:
+    """One metadata value as an integer, and ``default`` for anything else.
+
+    Total on purpose. Everything below is read out of a file somebody else
+    wrote, and a header that says something unexpected is a reason to estimate
+    coarsely and say so -- never a reason for a property access to raise into a
+    panel that was only drawing itself.
+    """
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass(frozen=True)
 class Gguf:
     """A model's shape, as its own header describes it."""
@@ -60,50 +76,100 @@ class Gguf:
     file_bytes: int
     tensor_count: int
 
-    # -- the five numbers the estimator actually needs -------------------- #
+    # -- the numbers the estimator actually needs ------------------------- #
 
     @property
     def block_count(self) -> int:
         """Transformer blocks. Each one keeps its own K and V cache."""
-        return int(self._arch("block_count", 0))
+        return _whole(self._arch("block_count", 0))
 
     @property
     def context_length(self) -> int:
         """The context the model was trained for -- its own ceiling (section 12)."""
-        return int(self._arch("context_length", 0))
+        return _whole(self._arch("context_length", 0))
 
     @property
     def embedding_length(self) -> int:
-        return int(self._arch("embedding_length", 0))
+        return _whole(self._arch("embedding_length", 0))
+
+    # -- per block, because the attention shape is not always one shape ---- #
+    #
+    # GGUF allows the four attention keys below to be *arrays with one entry
+    # per block*, and llama.cpp writes them that way for every architecture
+    # whose blocks differ from one another: hybrid attention/state-space models
+    # where only some blocks attend at all, and interleaved local/global
+    # designs where the sliding-window blocks are shaped differently from the
+    # full-attention ones. Reading such a value as a scalar is not a rounding
+    # error -- ``int([8, 8, 0, 8])`` raises, and it raised *inside a property*,
+    # which put "int() argument must be ... not 'list'" in front of a user who
+    # had done nothing but choose a model.
+    #
+    # So the per-block tuple is the real answer here and the scalars below are
+    # derived from it, rather than the other way round.
 
     @property
-    def head_count(self) -> int:
-        return int(self._arch("attention.head_count", 0))
+    def head_counts(self) -> tuple[int, ...]:
+        """Attention heads, one entry per block."""
+        return self._spread(self._numbers("attention.head_count"))
 
     @property
-    def head_count_kv(self) -> int:
-        """Key/value heads. Fewer than ``head_count`` under GQA, which is most
-        modern models and is exactly why a per-model figure matters: a
-        grouped-query model's cache can be a quarter the size of what a
-        multi-head estimate would predict for the same width."""
-        return int(self._arch("attention.head_count_kv", self.head_count))
+    def head_counts_kv(self) -> tuple[int, ...]:
+        """Key/value heads per block. Fewer than ``head_counts`` under GQA,
+        which is most modern models and is exactly why a per-model figure
+        matters: a grouped-query model's cache can be a quarter the size of
+        what a multi-head estimate would predict for the same width. Zero for
+        a block that keeps no cache at all, which is what makes a hybrid
+        model's cache a fraction of what its block count suggests."""
+        found = self._numbers("attention.head_count_kv")
+        return self._spread(found) if found else self.head_counts
 
     @property
-    def key_length(self) -> int:
-        """Per-head key width, from the file when it says so.
+    def key_lengths(self) -> tuple[int, ...]:
+        """Per-head key width per block, from the file when it says so.
 
         Only some architectures record it. When they do it is authoritative --
         a model with a different key and value width, or with a head dimension
         that is not ``embedding_length / head_count``, is described correctly
         only by these keys.
         """
-        declared = int(self._arch("attention.key_length", 0))
-        return declared or self._head_dim
+        declared = self._numbers("attention.key_length")
+        return self._spread(declared) if declared else self._head_dims
+
+    @property
+    def value_lengths(self) -> tuple[int, ...]:
+        declared = self._numbers("attention.value_length")
+        return self._spread(declared) if declared else self._head_dims
+
+    # -- one number each, for a status line ------------------------------- #
+
+    @property
+    def head_count(self) -> int:
+        return max(self.head_counts, default=0)
+
+    @property
+    def head_count_kv(self) -> int:
+        return max(self.head_counts_kv, default=0)
+
+    @property
+    def key_length(self) -> int:
+        return max(self.key_lengths, default=0)
 
     @property
     def value_length(self) -> int:
-        declared = int(self._arch("attention.value_length", 0))
-        return declared or self._head_dim
+        return max(self.value_lengths, default=0)
+
+    @property
+    def attending_blocks(self) -> int:
+        """Blocks that keep a cache at all. Equal to ``block_count`` for an
+        ordinary transformer and smaller for a hybrid one."""
+        return sum(1 for heads in self.head_counts_kv if heads > 0)
+
+    @property
+    def uniform_attention(self) -> bool:
+        """Whether every block is shaped the same, which decides only how the
+        panel words itself -- the arithmetic is per block either way."""
+        shapes = set(zip(self.head_counts_kv, self.key_lengths, self.value_lengths))
+        return len(shapes) <= 1
 
     @property
     def name(self) -> str:
@@ -112,13 +178,42 @@ class Gguf:
     @property
     def usable(self) -> bool:
         """Whether the header carried enough to size a cache from."""
-        return bool(self.block_count and self.head_count_kv and (self.key_length or self.value_length))
+        return bool(self.block_count and any(self.head_counts_kv)
+                    and (self.key_length or self.value_length))
 
     @property
-    def _head_dim(self) -> int:
-        if self.head_count <= 0 or self.embedding_length <= 0:
-            return 0
-        return self.embedding_length // self.head_count
+    def _head_dims(self) -> tuple[int, ...]:
+        width = self.embedding_length
+        return tuple(width // heads if heads > 0 and width > 0 else 0
+                     for heads in self.head_counts)
+
+    def _numbers(self, suffix: str) -> tuple[int, ...]:
+        """One architecture key as whole numbers, scalar or array alike."""
+        value = self._arch(suffix, None)
+        if value is None:
+            return ()
+        if isinstance(value, (list, tuple)):
+            return tuple(_whole(entry) for entry in value)
+        return (_whole(value),)
+
+    def _spread(self, values: tuple[int, ...]) -> tuple[int, ...]:
+        """``values`` as exactly one entry per block.
+
+        A scalar applies to every block. A short array -- which a header should
+        not contain, and a truncated one does -- is extended with its last
+        entry rather than dropped, because a cache sized from four fifths of a
+        model is a worse answer than one sized from an assumption stated here.
+        """
+        blocks = self.block_count
+        if blocks <= 0:
+            return tuple(values)
+        if not values:
+            return (0,) * blocks
+        if len(values) == 1:
+            return (values[0],) * blocks
+        if len(values) >= blocks:
+            return tuple(values[:blocks])
+        return tuple(values) + (values[-1],) * (blocks - len(values))
 
     def _arch(self, suffix: str, default):
         return self.metadata.get(f"{self.architecture}.{suffix}", default)

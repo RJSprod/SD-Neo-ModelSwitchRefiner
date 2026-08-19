@@ -38,7 +38,9 @@ logger = logging.getLogger("model_chain")
 
 def build() -> dict:
     """Assemble the panel. Returns the handles the shell needs."""
-    from prompt_master.chat.characters import DEFAULT_MAX_REPLY_TOKENS
+    from prompt_master.chat.characters import (DEFAULT_MAX_REPLY_TOKENS, DEFAULT_TEMPERATURE,
+                                               DEFAULT_TOP_P)
+    from prompt_master.core.models import RANDOM_SEED
 
     prefs = mc_llm_state.preferences()
     who = prefs.get("character") or ""
@@ -111,15 +113,19 @@ def build() -> dict:
                 greeting = gr.Textbox(label="Greeting", lines=3)
                 system = gr.Textbox(label="System prompt override", lines=3,
                                     placeholder="Leave empty to use the built prompt.")
+                # Every default here is the vendored package's own, named rather
+                # than copied: these are the numbers the standalone application
+                # ships with, and a second set of literals in the UI is how a
+                # panel quietly stops matching the engine behind it.
                 with gr.Row():
                     temperature = gr.Slider(label="Temperature", minimum=0.0, maximum=2.0,
-                                            step=0.05, value=0.85)
+                                            step=0.05, value=DEFAULT_TEMPERATURE)
                     top_p = gr.Slider(label="Top-p", minimum=0.0, maximum=1.0, step=0.01,
-                                      value=0.95)
+                                      value=DEFAULT_TOP_P)
                 reply_tokens = gr.Slider(label="Reply tokens", minimum=64, maximum=4096, step=64,
                                          value=DEFAULT_MAX_REPLY_TOKENS)
-                seed = gr.Number(label="Seed", value=-1, precision=0,
-                                 info="-1 draws a fresh seed for every reply.")
+                seed = gr.Number(label="Seed", value=RANDOM_SEED, precision=0,
+                                 info=f"{RANDOM_SEED} draws a fresh seed for every reply.")
                 with gr.Row():
                     save_character = gr.Button("Save character", variant="primary", size="sm")
                     new_character = gr.Button("New", size="sm")
@@ -387,6 +393,8 @@ def _regenerate(who, identifier, temperature, top_p, reply_tokens, seed):
 def _reply(who, identifier, text, image_path, temperature, top_p, reply_tokens, seed,
            regenerate: bool):
     """Stream one reply into the thread, and save the thread when it lands."""
+    from prompt_master.chat.characters import (DEFAULT_MAX_REPLY_TOKENS, DEFAULT_TEMPERATURE,
+                                               DEFAULT_TOP_P)
     from prompt_master.chat.history import ASSISTANT, USER
     from prompt_master.chat.prompt import build, clean_reply
     from prompt_master.core.models import RANDOM_SEED, draw_seed
@@ -443,17 +451,24 @@ def _reply(who, identifier, text, image_path, temperature, top_p, reply_tokens, 
         conversation.append(USER, (text or "").strip(), attachment, attachment_name)
 
     persona = _persona()
-    resolved = int(character.seed)
+    # Every control below falls back to the character's own value, and the
+    # character's own value falls back to the vendored default. A cleared
+    # number box therefore runs at the settings the standalone application
+    # would have used, rather than at a literal typed into this file.
+    tokens = _number(reply_tokens, character.max_reply_tokens, DEFAULT_MAX_REPLY_TOKENS)
+    resolved = _number(character.seed, RANDOM_SEED)
     if resolved == RANDOM_SEED:
         resolved = draw_seed()
+    asked = _number(seed, RANDOM_SEED)
 
     request = sessions.ChatRequest(
         messages=build(character, persona, conversation.messages,
-                       context_size=_context_size(), reply_tokens=int(reply_tokens or 512)),
+                       context_size=_context_size(), reply_tokens=tokens),
         needs_vision=bool(attachment) or _has_image(conversation),
-        temperature=float(temperature), top_p=float(top_p),
-        max_tokens=int(reply_tokens or 512),
-        seed=int(seed) if int(seed or RANDOM_SEED) != RANDOM_SEED else resolved,
+        temperature=_decimal(temperature, character.temperature, DEFAULT_TEMPERATURE),
+        top_p=_decimal(top_p, character.top_p, DEFAULT_TOP_P),
+        max_tokens=tokens,
+        seed=asked if asked != RANDOM_SEED else resolved,
     )
 
     cancel = sessions.Cancellation()
@@ -497,6 +512,31 @@ def _reply(who, identifier, text, image_path, temperature, top_p, reply_tokens, 
 
     store.save(conversation)
     yield cancel, _transcript(conversation), "", None, ui.notice("Reply complete."), *idle
+
+
+def _number(value, *fallbacks) -> int:
+    """``value`` as a whole number, or the first fallback that is one.
+
+    Exists because a Gradio number box that has been cleared hands back
+    ``None`` and a slider that has never been touched can hand back whatever
+    the browser last had -- and the answer to either is the value the character
+    was saved with, never a crash and never a literal invented here.
+    """
+    for candidate in (value,) + fallbacks:
+        try:
+            return int(float(candidate))
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _decimal(value, *fallbacks) -> float:
+    for candidate in (value,) + fallbacks:
+        try:
+            return float(candidate)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
 
 
 def _cancel(cancel):
@@ -558,10 +598,13 @@ def _save_character(previous, name, context, greeting, system, temperature, top_
 
     if not (name or "").strip():
         return gr.update(), ui.notice("A character needs a name.", "warn")
+    blank = Character(name="")
     character = Character(
         name=name.strip(), context=context or "", greeting=greeting or "",
-        temperature=float(temperature), top_p=float(top_p),
-        max_reply_tokens=int(reply_tokens or 512), seed=int(seed or -1), system=system or "")
+        temperature=_decimal(temperature, blank.temperature),
+        top_p=_decimal(top_p, blank.top_p),
+        max_reply_tokens=_number(reply_tokens, blank.max_reply_tokens),
+        seed=_number(seed, blank.seed), system=system or "")
     try:
         _characters().save(character, previous_name=previous or None)
     except Exception as exc:
