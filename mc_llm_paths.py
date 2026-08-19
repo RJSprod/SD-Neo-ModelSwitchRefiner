@@ -1,0 +1,107 @@
+"""Where LLM Studio keeps its data inside a WebUI installation.
+
+The vendored ``prompt_master`` package discovers its own install root by
+looking for the standalone app's ``app.py`` and falling back to a per-user
+application-data directory. Neither answer is right inside an extension: the
+first file does not exist here, and the second puts a user's characters and
+chat threads somewhere unrelated to the WebUI that is showing them.
+
+So the root is decided here instead and handed to ``AppPaths`` directly. The
+order below is deliberate:
+
+1. ``PROMPT_MASTER_ROOT``. Upstream's own escape hatch, honoured unchanged, so
+   an existing standalone install can be pointed at and reused as-is --
+   runtime, weights, characters, chats and all. That is the whole reason to
+   resolve the environment variable first rather than last: somebody who
+   already provisioned 20 GB of GGUF for the standalone app should not have to
+   provision it again to use it here.
+2. The ``model_chain_llm_root`` setting, for the same reuse without an
+   environment variable, and for putting the weights on a different drive.
+3. ``<WebUI data directory>/model_chain_llm``. The same convention presets
+   already use: under the data directory rather than in the extension folder,
+   so updating or reinstalling the extension does not throw away a user's
+   threads, characters, or a 20 GB model.
+
+Nothing here creates directories. Provisioning does that when it runs, and a
+user who never opens LLM Studio should not find folders they did not ask for.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+
+logger = logging.getLogger("model_chain")
+"""Handler is attached once, in mc_memory."""
+
+OPT_ROOT = "model_chain_llm_root"
+
+DIRNAME = "model_chain_llm"
+
+ROOT_ENV = "PROMPT_MASTER_ROOT"
+"""Upstream's own name for this, from ``prompt_master.core.paths``.
+
+Spelled out rather than imported so this module can answer before the vendored
+package is importable, which matters when the answer is what makes it
+importable.
+"""
+
+
+def data_root() -> Path:
+    """The install root LLM Studio should use. See the module docstring."""
+    override = os.environ.get(ROOT_ENV)
+    if override:
+        return Path(override).expanduser().resolve()
+
+    configured = _setting(OPT_ROOT)
+    if configured:
+        return Path(str(configured)).expanduser().resolve()
+
+    return (_webui_data_path() / DIRNAME).resolve()
+
+
+def app_paths():
+    """``AppPaths`` rooted at :func:`data_root`.
+
+    Constructed rather than discovered: ``AppPaths.discover()`` would go
+    looking for the standalone app's marker file and land in a per-user
+    directory that has nothing to do with this WebUI.
+    """
+    from prompt_master.core.paths import AppPaths
+
+    return AppPaths(data_root())
+
+
+def configured() -> bool:
+    """Whether a setup run has left usable state behind.
+
+    Answered without importing the vendored package, so the tab can say "not
+    set up yet" on an installation where the package's own dependencies are
+    missing -- which is exactly the installation most likely to be asking.
+    """
+    try:
+        return (data_root() / "data" / "setup-state.json").is_file()
+    except OSError:
+        return False
+
+
+def _webui_data_path() -> Path:
+    try:
+        from modules import paths
+
+        base = Path(paths.data_path)
+    except Exception:
+        # No host: the extension root is the only directory we can be sure
+        # exists. Tests and standalone imports land here.
+        base = Path(__file__).resolve().parent
+    return base
+
+
+def _setting(name: str):
+    try:
+        from modules import shared
+
+        return getattr(shared.opts, name, None)
+    except Exception:
+        return None

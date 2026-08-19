@@ -20,7 +20,11 @@ import time
 import gradio as gr
 
 import mc_arch
+import mc_broker
 import mc_infotext
+import mc_llm_paths
+import mc_llm_runtime
+import mc_llm_studio
 import mc_lora
 import mc_memory
 import mc_presets
@@ -276,6 +280,63 @@ shared.options_templates.update(
             ).info(
                 "once, when the whole job is done — in a chained generation that is after "
                 "Stage 2, never at the end of Stage 1. Applies to every theme"
+            ),
+            # -- LLM Studio and cross-workload residency ------------------- #
+            #
+            # These describe the machine and the policy for sharing it, not
+            # the image being made, so they belong here rather than in the
+            # accordion for the same reason the VRAM settings above do: a
+            # residency strategy says nothing useful in an infotext.
+            mc_llm_studio.OPT_ENABLE: shared.OptionInfo(
+                True,
+                "Show the LLM Studio tab",
+            ).info(
+                "the local-LLM workspace: LTX prompt generation, conversation and the "
+                "MiniMax H3 enhancer. Turn it off to keep this extension to its image "
+                "features — nothing about ordinary generation changes either way"
+            ),
+            mc_broker.OPT_MODE: shared.OptionInfo(
+                mc_broker.MODE_HYBRID,
+                "VRAM residency mode",
+                gr.Radio,
+                {"choices": [label for _, label in mc_broker.MODES]},
+            ).info(
+                "Hybrid keeps an image model and an LLM resident together whenever they "
+                "both fit, so alternating between them costs nothing. Exclusive gives one "
+                "family the whole card at a time, which is more predictable and leaves more "
+                "headroom for a single large workload"
+            ),
+            mc_broker.OPT_POLICY: shared.OptionInfo(
+                mc_broker.POLICY_ADAPTIVE,
+                "When the LLM and the image model do not both fit",
+                gr.Radio,
+                {"choices": [label for _, label in mc_broker.POLICIES]},
+            ).info(
+                "Adaptive lowers the LLM's context before moving a checkpoint, because a "
+                "context nobody is using is cheaper to give up than a model somebody is "
+                "about to. Preserve image never moves the checkpoint and shrinks the LLM "
+                "instead. LLM priority does the opposite. An image generation always "
+                "outranks an idle LLM whichever is chosen"
+            ),
+            mc_llm_runtime.OPT_RELEASE: shared.OptionInfo(
+                mc_llm_runtime.RELEASE_STOP,
+                "When the image side needs the LLM's VRAM back",
+                gr.Radio,
+                {"choices": [label for _, label in mc_llm_runtime.RELEASE_MODES]},
+            ).info(
+                "stopping llama-server releases every byte of it and leaves the weights in "
+                "the system page cache, so restarting reads from RAM rather than disk. "
+                "Keeping it running moves the model to system RAM instead: no reload, much "
+                "slower generation, and the RAM stays spent"
+            ),
+            mc_llm_paths.OPT_ROOT: shared.OptionInfo(
+                "",
+                "LLM data directory",
+                gr.Textbox,
+            ).info(
+                "where LLM Studio keeps the runtime, the model, characters and chats. Empty "
+                "uses a folder in your WebUI data directory. Point it at an existing Prompt "
+                "Master install to reuse a model you have already downloaded"
             ),
         },
     )
@@ -1418,6 +1479,23 @@ class ScriptModelChain(scripts.Script):
         joined = entered
         prepared = entered
         freed = 0
+
+        # An LLM turn already in flight gets to finish before this generation
+        # touches the card (section 15). This waits; it does not take a lock,
+        # because there is no hook paired with this one that is guaranteed to
+        # run afterwards and a lock left held here would block LLM Studio until
+        # the WebUI restarted. Bounded, so a wedged runtime delays a generation
+        # rather than preventing one.
+        mc_broker.await_idle()
+        # Claim VRAM ownership for the image family. The number is zero on
+        # purpose: in Hybrid mode a generation starting is not a reason to move
+        # anything, so this does nothing at all, and the real demotion happens
+        # later, from make_vram_room, only if the pass actually does not fit.
+        # In Exclusive mode it is the handover -- ownership there is a promise
+        # rather than an optimisation, so the LLM leaves VRAM whether or not
+        # this generation would have needed the room (sections 8 and 10).
+        mc_broker.request_vram(mc_broker.FAMILY_IMAGE, 0,
+                               reason="an image generation started", margin=0)
 
         # Always reinstate a checkpoint we ourselves left swapped out, even when
         # the extension has since been disabled -- that is cleanup of our own
@@ -2707,11 +2785,22 @@ class ScriptModelChain(scripts.Script):
 
 def _on_script_unloaded():
     mc_memory.release_all()
+    # The LLM lives in another process, so releasing our own references would
+    # leave it running and holding VRAM after the extension has gone. It is
+    # stopped first, and the residency register cleared after, so a reload
+    # starts from an empty picture rather than from stale entries describing
+    # models that are no longer anywhere.
+    try:
+        mc_llm_runtime.shutdown()
+    except Exception:
+        errors.report("Model Chain: failed to stop the LLM runtime", exc_info=True)
+    mc_broker.clear()
 
 
 try:
     from modules import script_callbacks
 
     script_callbacks.on_script_unloaded(_on_script_unloaded)
+    script_callbacks.on_ui_tabs(mc_llm_studio.on_ui_tabs)
 except Exception:
-    errors.report("Model Chain: failed to register the unload callback", exc_info=True)
+    errors.report("Model Chain: failed to register the extension callbacks", exc_info=True)

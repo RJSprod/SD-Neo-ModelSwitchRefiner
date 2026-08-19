@@ -519,3 +519,184 @@
         opacity: 0;
     }
 }
+
+/* ==========================================================================
+   LLM Studio
+   ==========================================================================
+
+   Section 5 of the design intent: the tab has to survive substantial
+   third-party restyling, Lobe-like themes in particular. Three rules make
+   that possible and every selector below obeys all three.
+
+   1. Everything is scoped under #mc-llm-studio, the one element this
+      extension owns and names. Nothing here can reach a control the host or
+      another extension drew.
+   2. Every selector matches a class this extension put in the page --
+      .mc-llm-* -- never a class Gradio generated. Gradio's internal DOM is
+      not an API and a theme is free to replace it; a rule written against
+      .svelte-1a2b3c is a rule that breaks on the next release, with or
+      without a theme involved.
+   3. No colour is stated. Every one below is a var() reference to the host's
+      own custom properties, so a light/dark switch, a theme's palette and a
+      user's accent colour all arrive here without this file being told they
+      exist. The fallbacks after each comma are for a host that does not
+      define the property at all, not for a theme that redefines it.
+
+   Layout is flex with wrapping rather than a fixed three-column grid: on a
+   narrow display the rails wrap under the stage instead of squeezing it,
+   which is section 4.5's requirement that the columns collapse rather than
+   stay permanently cramped.
+   ========================================================================== */
+
+#mc-llm-studio .mc-llm-topbar {
+    align-items: center;
+    gap: 0.75em;
+    margin-bottom: 0.5em;
+}
+
+#mc-llm-studio .mc-llm-modes label {
+    font-weight: 600;
+}
+
+#mc-llm-studio .mc-llm-workspace {
+    align-items: stretch;
+    flex-wrap: wrap;
+    gap: 0.75em;
+}
+
+/* The output column never drops below a readable measure. Below that the
+   flex-wrap above moves the rails out of its way instead. */
+#mc-llm-studio .mc-llm-stage {
+    flex: 4 1 420px;
+    min-width: 0;
+}
+
+#mc-llm-studio .mc-llm-rail {
+    flex: 1 1 200px;
+    min-width: 0;
+}
+
+#mc-llm-studio .mc-llm-inspector {
+    flex: 2 1 250px;
+    min-width: 0;
+}
+
+/* The response is the product (section 4.5): it gets the emphasis, and the
+   negative beside it gets the same treatment one step quieter. */
+#mc-llm-studio .mc-llm-output textarea {
+    font-size: 0.95em;
+    line-height: 1.55;
+}
+
+#mc-llm-studio .mc-llm-output-primary textarea {
+    font-size: 1em;
+}
+
+#mc-llm-studio .mc-llm-transcript {
+    border-radius: var(--radius-lg, 8px);
+    min-height: 320px;
+}
+
+#mc-llm-studio .mc-llm-composer {
+    align-items: flex-end;
+    gap: 0.5em;
+    margin-top: 0.5em;
+}
+
+#mc-llm-studio .mc-llm-actions {
+    flex-wrap: wrap;
+    gap: 0.5em;
+    margin-top: 0.5em;
+}
+
+#mc-llm-studio .mc-llm-hint {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 0.85em;
+    line-height: 1.4;
+    opacity: 0.85;
+}
+
+/* -- status lines ---------------------------------------------------------
+   Three kinds, distinguished by weight and a left rule rather than by a
+   background wash: a wash is the thing that looks wrong first under a theme
+   that changed the surface behind it. */
+
+#mc-llm-studio .mc-llm-notice {
+    border-left: 3px solid var(--border-color-primary, currentColor);
+    color: var(--body-text-color, inherit);
+    font-size: 0.9em;
+    line-height: 1.5;
+    padding: 0.35em 0.7em;
+}
+
+#mc-llm-studio .mc-llm-notice-warn {
+    border-left-color: var(--color-accent, currentColor);
+    font-weight: 600;
+}
+
+#mc-llm-studio .mc-llm-notice-error {
+    border-left-color: var(--error-border-color, var(--color-accent, currentColor));
+    color: var(--error-text-color, var(--body-text-color, inherit));
+    font-weight: 600;
+}
+
+/* -- the residency and estimator tables ----------------------------------- */
+
+#mc-llm-studio .mc-llm-residency,
+#mc-llm-studio .mc-llm-estimator {
+    font-size: 0.9em;
+    line-height: 1.55;
+}
+
+#mc-llm-studio .mc-llm-residency ul,
+#mc-llm-studio .mc-llm-estimator ul {
+    margin: 0 0 0.6em;
+    padding-left: 1.1em;
+}
+
+#mc-llm-studio .mc-llm-residency h4 {
+    font-size: 0.95em;
+    font-weight: 600;
+    margin: 0.8em 0 0.3em;
+}
+
+#mc-llm-studio .mc-llm-table {
+    border-collapse: collapse;
+    width: 100%;
+}
+
+#mc-llm-studio .mc-llm-table th,
+#mc-llm-studio .mc-llm-table td {
+    border-bottom: 1px solid var(--border-color-primary, currentColor);
+    padding: 0.3em 0.6em;
+    text-align: left;
+}
+
+#mc-llm-studio .mc-llm-table th {
+    font-weight: 600;
+    opacity: 0.8;
+}
+
+/* Numbers line up when they are read down a column, which is the whole point
+   of a table of capacities. */
+#mc-llm-studio .mc-llm-table td:nth-child(n + 2) {
+    font-variant-numeric: tabular-nums;
+}
+
+/* -- narrow displays ------------------------------------------------------
+   The rails stop being rails and become full-width rows above and below the
+   stage. Nothing is hidden: a control that exists on a desktop exists on a
+   tablet, which is what makes the tab usable on a touch machine rather than
+   merely rendered on one. */
+
+@media (max-width: 900px) {
+    #mc-llm-studio .mc-llm-rail,
+    #mc-llm-studio .mc-llm-inspector,
+    #mc-llm-studio .mc-llm-stage {
+        flex-basis: 100%;
+    }
+
+    #mc-llm-studio .mc-llm-transcript {
+        min-height: 260px;
+    }
+}

@@ -44,19 +44,57 @@ class _Component:
         self._callbacks = []
 
     def change(self, **kwargs):
-        self._callbacks.append(("change", kwargs))
+        return self._record("change", kwargs)
 
     def click(self, **kwargs):
-        self._callbacks.append(("click", kwargs))
+        return self._record("click", kwargs)
 
     def select(self, **kwargs):
-        self._callbacks.append(("select", kwargs))
+        return self._record("select", kwargs)
+
+    def submit(self, **kwargs):
+        return self._record("submit", kwargs)
+
+    def upload(self, **kwargs):
+        return self._record("upload", kwargs)
+
+    def load(self, **kwargs):
+        return self._record("load", kwargs)
+
+    def _record(self, kind, kwargs):
+        """Register a handler and hand back a dependency.
+
+        Gradio 4 returns an object from every event binding, and the two things
+        callers do with it are chain a ``.then()`` and pass it to another
+        binding's ``cancels=``. Both are what the LLM Studio panels do, so the
+        return value has to be real rather than None -- a stub returning None
+        would make `.then()` an AttributeError at UI-build time and nothing
+        below would ever be exercised.
+        """
+        self._callbacks.append((kind, kwargs))
+        return _Dependency(self, kind, kwargs)
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
         return False
+
+
+class _Dependency:
+    """What a Gradio event binding returns: chainable, and passable to cancels."""
+
+    def __init__(self, component, kind, kwargs):
+        self.component, self.kind, self.kwargs = component, kind, kwargs
+        self.chained = []
+
+    def then(self, **kwargs):
+        dependency = _Dependency(self.component, "then", kwargs)
+        self.chained.append(dependency)
+        return dependency
+
+    def success(self, **kwargs):
+        return self.then(**kwargs)
 
 
 class _Update(dict):
@@ -69,7 +107,8 @@ def _make_gradio() -> types.ModuleType:
     for name in (
         "Dropdown", "Radio", "Textbox", "Slider", "Number", "Checkbox",
         "Markdown", "Row", "Column", "Group", "Accordion", "Button", "HTML",
-        "State", "Gallery", "Image",
+        "State", "Gallery", "Image", "Chatbot", "File", "Blocks", "Tab",
+        "DownloadButton",
     ):
         setattr(gradio, name, type(name, (_Component,), {}))
 
@@ -423,7 +462,16 @@ def _install_modules() -> None:
     ]
 
     script_callbacks = types.ModuleType("modules.script_callbacks")
-    script_callbacks.on_script_unloaded = lambda cb, **k: None
+    # Callbacks are recorded rather than discarded. The extension registers
+    # them inside a try/except -- correctly, since a failure there must not stop
+    # the rest of it loading -- which means a misnamed host function would
+    # otherwise be swallowed and never noticed until somebody looked for a tab
+    # that was not there.
+    script_callbacks.registered = {"script_unloaded": [], "ui_tabs": []}
+    script_callbacks.on_script_unloaded = lambda cb, **k: (
+        script_callbacks.registered["script_unloaded"].append(cb))
+    script_callbacks.on_ui_tabs = lambda cb, **k: (
+        script_callbacks.registered["ui_tabs"].append(cb))
 
     modules.errors = errors
     modules.images = images
