@@ -49,7 +49,7 @@ still emits one stream of reply text.
 
 | § | Requirement | Where |
 | --- | --- | --- |
-| 4.1 | One top-level Forge tab, compact mode selector, three dedicated workspaces | `mc_llm_studio.py` |
+| 4.1 | One top-level Forge tab, compact mode selector, dedicated workspaces | `mc_llm_studio.py` |
 | 4.2–4.4 | Three modes that share a runtime and share nothing else | three `mc_llm_*_panel.py` modules |
 | 4.5 | Output first, then session, composer, contextual controls, advanced | panel layouts + `style.css` |
 | 5 | Extension-owned ids, scoped CSS, no Gradio-generated selectors, no hard-coded colours | `mc_llm_ui.py`, `style.css`, asserted in `tests/test_llm_panels.py` |
@@ -287,9 +287,11 @@ Recorded so it is a decision rather than an oversight:
   one. Two lessons worth keeping: an error message inherited from another front
   end may name a way out that this one does not have, and a two-step setup
   offered second-step-first is not a setup flow.
-- **No per-message affordances in Conversation.** Gradio 4's `Chatbot` has
-  nowhere to hang them, so branching copies a thread from its last turn and
-  "copy then delete back" replaces branching from a chosen point.
+- **No response prefix in Conversation.** The standalone application can write
+  the first words of a reply and have the model carry on from them
+  (`prompt.prefix_instruction`, `Conversation.response_prefix`); the storage and
+  the instruction are both vendored and unused here. It is a composer feature
+  rather than a per-message one and was left for a later pass.
 
 
 ## 6a. The containment rule, and what it costs
@@ -442,3 +444,179 @@ What still needs real hardware: that a GGUF loads and answers, that a vision
 projector actually sees an attached image, that co-residency of a real
 checkpoint and a real LLM behaves as the estimator predicts, that calibration
 converges on a real card, and that the tab survives a third-party theme.
+
+
+## 8. The Conversation redesign (19 August 2026)
+
+Six complaints, one shape. They are recorded together because four of them turn
+out to be the same mistake made in four places: *the tab was laid out as though
+it were a page rather than an application*.
+
+### 8.1 The tab opened on the wrong mode
+
+`_build` restored the mode selector from preferences and hard-coded
+`visible=True` on Prompt Studio's column. A tab left on Conversation therefore
+opened with the selector reading **Conversation** and Prompt Studio's panel
+underneath it. Both controls were telling the truth about different things,
+which reads — correctly — as the mode selector not working.
+
+The fix is one expression (`visible=(value == initial)`), and the lesson is the
+one §6c already records about the memory radios: **a control restored from
+storage and a layout decided at build time are two states, and two states of
+one fact will disagree.** Anything read out of preferences has to be read once
+and used everywhere it is expressed.
+
+### 8.2 Three columns, and the conversation in the middle of them
+
+§4.3 asks for the conversation to receive most of the visual space, and the
+first version answered it with proportions: a 1-part rail, a 4-part stage, a
+2-part inspector. Proportions are not the same answer. A rail that is always
+there is not secondary, it is *narrow*, and it costs the transcript a third of
+the window permanently to hold controls that are looked at once a session.
+
+So the two side columns are one drawer, hidden with `visible=False` rather than
+made small. That distinction is the whole of it: Gradio does not render a
+hidden column at all, so the stage is not "given more space", it is given the
+window. Threads, the character and the persona are accordions inside it.
+
+Choosing, editing and creating a character are also one section rather than
+three places, because they are three things done to the same object: the
+drop-down is who you are talking to, and the editor under it is that same
+character, opened when it is being changed.
+
+### 8.3 The transcript's height came from a number
+
+`gr.Chatbot(height=560)` is an inline style, and an inline style is the end of
+the argument — no stylesheet can respond to the window after it. So the panel
+was 560px of transcript plus however much composer, action row and status the
+mode happened to have, and whatever that added up to is what the page scrolled
+to show. Scrolling a page to reach the box you type into is the one thing a
+chat window must never make anybody do.
+
+The component is now built with no height at all, and the height is decided in
+two halves:
+
+* `javascript/llm_studio.js` measures the distance from the top of the tab to
+  the bottom of the viewport and publishes it as `--mc-llm-available`. This is
+  the half that cannot be done in CSS: where the tab starts depends on the
+  browser chrome, the host's header, how many rows the tab strip wrapped to and
+  any theme in play.
+* `style.css` makes the workspace that tall, makes the stage a flex column, and
+  lets exactly one child grow. Everything else — the head, the action bar, the
+  attachment row, the composer — is `flex: 0 0 auto` and measured by its
+  contents.
+
+Every `var(--mc-llm-available, …)` carries a pure-CSS fallback of the same
+quantity, so the tab lays out correctly with the script absent and exactly with
+it — which is §5's rule about JavaScript being enhancement, applied to layout.
+
+Two escape hatches: below 900px the drawer becomes a full-width row above the
+stage, and below 620px of *height* the page gets its scroll bar back, because a
+transcript squeezed under six ems is not a transcript.
+
+### 8.4 The upload box overlapped the buttons beside it
+
+`gr.Image` was a column inside the composer row, sharing it with the message
+box. A drop target has a minimum size of its own and does not shrink into the
+gap left for a text box, so it drew over the send controls. It is now a row of
+its own, hidden until **Attach** opens it — which also means the composer is
+two controls rather than three for everybody not sending a picture, and that
+the "this model has no vision projector" warning arrives when the box is
+opened rather than when the reply fails.
+
+### 8.5 Per-message actions, and the constraint that was mistaken for a wall
+
+§6 recorded "no per-message affordances in Conversation" because Gradio 4's
+`Chatbot` has nowhere to hang a `⋯`, and branching was reduced to "copy the
+thread from its last turn, then delete back". That was the wrong trade. The
+actions are the feature; the component only decides *where they are drawn*.
+
+`Chatbot` has a `select` event. So a click nominates a message, and the actions
+are one bar under the transcript applying to whichever message is nominated —
+edit, regenerate, continue, send again from here, branch from here, delete,
+delete from here, and the version pager. Everything the standalone application's
+menu offers, in one row instead of sixty menus.
+
+Three details are load-bearing:
+
+- **The row/column a click reports is not a message index.** `Chatbot` takes
+  `[user, bot]` pairs, so one exchange is one row holding two messages and two
+  replies in a row are two rows with an empty left side. The map is built *with*
+  the transcript, in one pass, and carried in a `gr.State`. Deriving it a second
+  time somewhere else is how a click would come to name the message beside the
+  one clicked.
+- **Regenerating pages rather than replaces.** `history.Message` has kept its
+  versions all along (`add_version`, `show`, `drop_version`) and the Gradio
+  panel was throwing them away by deleting the reply and appending a new one.
+  It now does what the standalone application does, which is what makes a
+  regenerate reversible: the attempt that came back worse is undone with `◀`
+  rather than by regenerating until luck returns.
+- **The transcript is rebuilt, not patched.** Every action returns the whole
+  view — rows, position map, selection, action bar — from one function, because
+  they are one fact about one conversation and a handler that returned three of
+  the four would leave the fourth describing a thread that is no longer on
+  screen.
+
+`Regenerate`, `Undo` and `Clear thread` are gone from the bottom of the panel.
+The first is per-message now; the second is "delete from here" on your own
+message; the third was a thread deletion with the file left behind.
+
+### 8.6 Setup was a footnote to whichever chat was open
+
+"Models, hardware and memory" was an accordion under the mode views. Two things
+were wrong with that, and they pull in opposite directions.
+
+Everything in it that is a **plain value** — context sizing, the buffer, the
+context size, the two cache types, the residency mode, the policy, the release
+behaviour, the folders — describes the installation rather than the click being
+made. That is exactly the test this extension already applies to decide that a
+control belongs on the Settings page (see the comments on `OPT_VRAM_RESERVE`
+and the progress theme). So they are registered as Forge settings, the host
+persists them in `config.json` with everything else, and they survive a restart
+without this extension writing a line of storage code for them.
+
+Everything in it that is **not** a plain value — the OS file dialogs, the
+pinned-build download, the estimator, the residency table — cannot be drawn on
+the Settings page at all: `ui_settings` builds one control per registered option
+and there is no hook for a panel. Those are now **Setup**, a fourth mode in the
+same selector as the other three.
+
+`mc_llm_state.preferences()` is what keeps this from being a migration. It
+reads three layers — the defaults, the preferences file, then the Settings page
+for the five keys in `HOSTED` — so `mc_llm_runtime.config()` and the estimator
+ask the same function the same question they always asked, and a headless
+install with no `modules.shared` still answers from the file. `remember()`
+writes both, because writing only the file for a key the Settings page is
+authoritative for would make it look like it had worked and change nothing
+anybody could observe.
+
+One shape worth keeping if this is refactored: the option **default** for a
+radio is a *label*, not a value (`label_for_context_mode`). What a Gradio radio
+stores is the string it displayed, which is also why `mc_broker.resolve`
+accepts either half of the pair.
+
+### 8.7 What is left on the tab
+
+A model chooser, `↻`, **Load**, **Unload**, and the status line.
+
+The chooser is filled by `mc_llm_files.library()`, which walks the models folder
+(`mc_llm_paths.models_root()`, its own setting because a models folder is very
+often on another drive and shared with another front end) and drops the three
+things nobody would choose to *run*: vision projectors, every shard of a split
+model but the first, and anything below a depth cap so pointing it at a whole
+drive costs a bounded walk. The **currently recorded model is added even when it
+is outside that folder** — a model may be recorded from anywhere, and a chooser
+showing nothing selected on an installation that works perfectly reads as the
+model having been lost.
+
+Choosing and loading are separate presses because they cost differently:
+recording is a line in a file, loading is twenty gigabytes off a disk, and a
+dropdown that loaded on every change would make scrolling the list an expensive
+mistake. The chooser binds to `input` and not `change` for the reason §6b
+already records for the picker's dropdowns — this code refills it on load and on
+every rescan, and `change` fires on the refill.
+
+The projector is deliberately not carried across a model switch or inferred from
+the new model's folder. `model_choice`'s own reasoning stands: a projector has to
+match the model it was made for and a file name does not prove that it does. One
+sitting beside the new model is mentioned, and applying it is a press in Setup.

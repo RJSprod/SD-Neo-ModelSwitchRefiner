@@ -543,19 +543,49 @@
       define the property at all, not for a theme that redefines it.
 
    Layout is flex with wrapping rather than a fixed three-column grid: on a
-   narrow display the rails wrap under the stage instead of squeezing it,
+   narrow display a side column wraps under the stage instead of squeezing it,
    which is section 4.5's requirement that the columns collapse rather than
    stay permanently cramped.
+
+   Height is the other half of the layout and is where this file does its least
+   obvious work. The tab is meant to fit the window: the page itself should not
+   scroll, and the only thing that scrolls is the transcript, because scrolling
+   the page to reach the box you type into is the one thing a chat window must
+   never make anybody do. So the workspace is given a height rather than a
+   height being left to accumulate out of its contents, and that height comes
+   from --mc-llm-available, which javascript/llm_studio.js measures from where
+   the tab actually starts on screen. The fallback in every var() below is a
+   pure-CSS estimate of the same thing, so the layout is right without the
+   script and exact with it.
    ========================================================================== */
+
+/* The tab fills the window it is in. Scoped to this extension's own element:
+   the host's container is shared with every other tab and is not ours to
+   widen. */
+#mc-llm-studio {
+    max-width: none;
+    width: 100%;
+}
 
 #mc-llm-studio .mc-llm-topbar {
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.75em;
     margin-bottom: 0.5em;
 }
 
 #mc-llm-studio .mc-llm-modes label {
     font-weight: 600;
+}
+
+/* The model chooser, its rescan, and Load/Unload sit on one line and stay on
+   it: they are one control between them -- which model, and is it running --
+   and a Load button that wraps away from the name of what it would load is a
+   button that has to be aimed rather than pressed. */
+#mc-llm-studio .mc-llm-model-bar > * {
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 0.4em;
 }
 
 #mc-llm-studio .mc-llm-workspace {
@@ -565,7 +595,7 @@
 }
 
 /* The output column never drops below a readable measure. Below that the
-   flex-wrap above moves the rails out of its way instead. */
+   flex-wrap above moves a side column out of its way instead. */
 #mc-llm-studio .mc-llm-stage {
     flex: 4 1 420px;
     min-width: 0;
@@ -581,6 +611,57 @@
     min-width: 0;
 }
 
+/* -- Conversation: one column, and a drawer that is not in the layout ------
+   The drawer is hidden by Gradio rather than by CSS -- a hidden column is not
+   rendered at all, which is what actually gives the transcript the window
+   instead of the window minus two rails. What is here is only how it looks
+   when it is open: a fixed measure beside a transcript that takes everything
+   else, and its own scroll so a long thread list cannot push the composer off
+   the bottom of a stage that is meant to fit. */
+
+#mc-llm-studio .mc-llm-chat-workspace {
+    flex-wrap: nowrap;
+    height: var(--mc-llm-available, calc(100vh - 16em));
+    min-height: 22em;
+}
+
+#mc-llm-studio .mc-llm-drawer {
+    flex: 0 0 22em;
+    max-width: 22em;
+    min-width: 0;
+    overflow-y: auto;
+}
+
+/* The stage is a column of four things, and exactly one of them is allowed to
+   grow: everything else is measured by its contents, and the transcript takes
+   what is left. That is what makes the height of the thread follow the window
+   rather than the window follow the height of the thread. */
+#mc-llm-studio .mc-llm-chat-stage {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    gap: 0.4em;
+    min-height: 0;
+    min-width: 0;
+}
+
+#mc-llm-studio .mc-llm-stage-head {
+    align-items: center;
+    flex: 0 0 auto;
+    gap: 0.6em;
+}
+
+#mc-llm-studio .mc-llm-drawer-toggle {
+    flex: 0 0 auto;
+    max-width: 16em;
+}
+
+#mc-llm-studio .mc-llm-chat-stage .mc-llm-message-actions,
+#mc-llm-studio .mc-llm-chat-stage .mc-llm-attachment,
+#mc-llm-studio .mc-llm-chat-stage .mc-llm-composer {
+    flex: 0 0 auto;
+}
+
 /* The response is the product (section 4.5): it gets the emphasis, and the
    negative beside it gets the same treatment one step quieter. */
 #mc-llm-studio .mc-llm-output textarea {
@@ -592,21 +673,100 @@
     font-size: 1em;
 }
 
+/* Height is taken, not given. gr.Chatbot(height=...) writes an inline style,
+   which would win over anything here, so the component is built without one
+   and the height is this rule's to decide -- the space the stage has left
+   after the head, the action bar and the composer have taken theirs. The
+   !important is aimed at Gradio's own inline default rather than at a theme:
+   a theme that wants a different transcript is welcome to it, and none of them
+   set an inline height on our element to get one. */
 #mc-llm-studio .mc-llm-transcript {
     border-radius: var(--radius-lg, 8px);
-    min-height: 320px;
+    /* flex-basis 0 rather than auto: the transcript takes the space that is
+       left, not the space its messages want, which is what stops a long thread
+       pushing the composer off the bottom. It also gives the element a height
+       the flex algorithm decided, and Gradio's own inner wrapper is height:100%
+       over a scrolling body -- so this is the one rule that makes the thread,
+       and not the page, the thing that scrolls. */
+    flex: 1 1 0 !important;
+    height: auto !important;
+    min-height: 12em !important;
+    overflow: hidden !important;
 }
 
 #mc-llm-studio .mc-llm-composer {
-    align-items: flex-end;
+    align-items: stretch;
     gap: 0.5em;
-    margin-top: 0.5em;
+}
+
+/* Send, Stop and Attach stack beside the box rather than under it, so the
+   composer is as tall as what is being written and no taller. */
+#mc-llm-studio .mc-llm-composer-side {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35em;
+    justify-content: flex-end;
+    min-width: 0;
+}
+
+/* The image box is a row of its own, opened by Attach. It used to be a column
+   inside the composer, where it overlapped the buttons beside it: a drop
+   target has a minimum size of its own and does not shrink into a gap left for
+   a text box. */
+#mc-llm-studio .mc-llm-attachment {
+    margin: 0;
 }
 
 #mc-llm-studio .mc-llm-actions {
     flex-wrap: wrap;
     gap: 0.5em;
     margin-top: 0.5em;
+}
+
+/* -- the per-message action bar -------------------------------------------
+   Drawn under the transcript and only when a message has been clicked, so it
+   costs nothing until it is wanted. Its rows wrap, because which actions apply
+   depends on the message and a row sized for the longest case would be mostly
+   empty for every other one. */
+
+#mc-llm-studio .mc-llm-message-actions {
+    border-left: 3px solid var(--color-accent, currentColor);
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+    padding: 0.4em 0.6em;
+}
+
+#mc-llm-studio .mc-llm-message-actions-head {
+    align-items: center;
+    gap: 0.5em;
+}
+
+#mc-llm-studio .mc-llm-message-actions-close {
+    flex: 0 0 auto;
+}
+
+#mc-llm-studio .mc-llm-message-actions-row {
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.35em;
+}
+
+#mc-llm-studio .mc-llm-message-actions-row > * {
+    flex: 0 0 auto;
+}
+
+/* "2/3" is the only thing that says an earlier attempt is still there, so it
+   is read as a number rather than as prose. */
+#mc-llm-studio .mc-llm-pager {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    padding: 0 0.3em;
+    white-space: nowrap;
+}
+
+#mc-llm-studio .mc-llm-message-editor {
+    margin-top: 0.3em;
 }
 
 #mc-llm-studio .mc-llm-hint {
@@ -712,7 +872,38 @@
         flex-basis: 100%;
     }
 
+    /* The drawer stops being a drawer and becomes a row above the stage. It is
+       still only there when it has been asked for, so nothing is squeezed by
+       it -- what changes is that on a phone it gets the width rather than a
+       fifth of it. */
+    #mc-llm-studio .mc-llm-chat-workspace {
+        flex-wrap: wrap;
+        height: auto;
+    }
+
+    #mc-llm-studio .mc-llm-drawer {
+        flex: 1 1 100%;
+        max-height: 40vh;
+        max-width: none;
+    }
+
+    #mc-llm-studio .mc-llm-chat-stage {
+        flex-basis: 100%;
+        height: var(--mc-llm-available, calc(100vh - 16em));
+        min-height: 22em;
+    }
+}
+
+/* A window too short to lay the tab out in is the one case where the page is
+   allowed to scroll: a transcript squeezed under six ems is not a transcript,
+   and a composer nobody can reach is worse than a scroll bar. */
+@media (max-height: 620px) {
+    #mc-llm-studio .mc-llm-chat-workspace,
+    #mc-llm-studio .mc-llm-chat-stage {
+        height: auto;
+    }
+
     #mc-llm-studio .mc-llm-transcript {
-        min-height: 260px;
+        min-height: 18em !important;
     }
 }

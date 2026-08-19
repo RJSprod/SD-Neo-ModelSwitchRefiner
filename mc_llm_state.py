@@ -65,8 +65,40 @@ def _path(filename: str) -> Path:
 
 
 # --------------------------------------------------------------------------- #
-# Shared preferences (section 16)
+# Shared preferences (section 16), and the half of them the Settings page owns
 # --------------------------------------------------------------------------- #
+
+OPT_CONTEXT_MODE = "model_chain_llm_context_mode"
+OPT_CONTEXT_BUFFER = "model_chain_llm_context_buffer_gb"
+OPT_CONTEXT_SIZE = "model_chain_llm_context_size"
+OPT_KV_TYPE_K = "model_chain_llm_kv_type_k"
+OPT_KV_TYPE_V = "model_chain_llm_kv_type_v"
+
+CONTEXT_MODES = (
+    ("auto", "Automatic — fill what is free"),
+    ("fixed", "Fixed buffer"),
+)
+"""How the key/value cache is budgeted (section 11), as ``(value, label)``.
+
+The same shape ``mc_broker.MODES`` uses, and for the same reason: what a Gradio
+radio on the Settings page stores is the string it displayed, so the stored
+value is a label and everything downstream wants the value.
+"""
+
+HOSTED = (OPT_CONTEXT_MODE, OPT_CONTEXT_BUFFER, OPT_CONTEXT_SIZE,
+          OPT_KV_TYPE_K, OPT_KV_TYPE_V)
+"""Preference keys the WebUI's Settings page is the front end for.
+
+These five describe the installation rather than anything a mode is doing, so
+they were moved out of the tab and on to the Settings page, where the host
+persists them in ``config.json`` and shows them beside the residency settings
+they belong with.
+
+The file below is still written and still read: it is what answers on a
+headless install, during a test, and before the host has registered anything.
+:func:`preferences` layers the host's value over the file's when there is one,
+so the two cannot disagree about which is authoritative.
+"""
 
 
 DEFAULTS: dict = {
@@ -88,24 +120,156 @@ DEFAULTS: dict = {
 }
 
 
+def label_for_context_mode(value: str) -> str:
+    """:data:`CONTEXT_MODES`' display text for ``value``.
+
+    What a Gradio radio on the Settings page stores is the string it displayed,
+    so the option's *default* has to be a label too -- registering ``"auto"``
+    there would make the page show a radio with nothing selected until it was
+    touched.
+    """
+    for candidate, label in CONTEXT_MODES:
+        if candidate == value:
+            return label
+    return value
+
+
 def preferences() -> dict:
-    """Shared runtime preferences, with every default filled in."""
+    """Shared runtime preferences, with every default filled in.
+
+    Read in three layers, most specific last: the defaults above, the
+    preferences file, and then whatever the Settings page holds for the five
+    keys in :data:`HOSTED`. The last layer is what makes the Settings page
+    authoritative for them without any caller having to know that it is --
+    ``mc_llm_runtime.config()`` and the estimator ask this function the same
+    question they always asked.
+    """
     stored = _read(PREFERENCES_FILE, {})
     merged = dict(DEFAULTS)
     for key, value in stored.items():
         if key in merged or key == "version":
             merged[key] = value
+    merged.update(_hosted(merged))
     return merged
 
 
+def _hosted(current: dict) -> dict:
+    """The Settings page's answer for :data:`HOSTED`, where it has one.
+
+    A setting the host has never heard of, or a host that is not there at all,
+    contributes nothing -- which is what leaves the file in charge on a
+    headless install rather than replacing it with a default.
+    """
+    found: dict = {}
+    context_mode = _option(OPT_CONTEXT_MODE)
+    if context_mode is not None:
+        found["context_mode"] = _resolve(context_mode, CONTEXT_MODES,
+                                         str(current.get("context_mode", "auto")))
+    for key, name, cast in (("context_buffer_gb", OPT_CONTEXT_BUFFER, float),
+                            ("context_size", OPT_CONTEXT_SIZE, int)):
+        raw = _option(name)
+        if raw is None:
+            continue
+        try:
+            found[key] = cast(float(raw))
+        except (TypeError, ValueError):
+            continue
+    for key, name in (("kv_type_k", OPT_KV_TYPE_K), ("kv_type_v", OPT_KV_TYPE_V)):
+        raw = _option(name)
+        if raw is not None:
+            found[key] = _kv_type(raw, str(current.get(key, "f16")))
+    return found
+
+
+def _option(name: str):
+    """One Forge setting, or ``None`` when there is no host or no answer."""
+    try:
+        from modules import shared
+
+        value = getattr(shared.opts, name, None)
+    except Exception:
+        return None
+    return None if value in (None, "") else value
+
+
+def _resolve(raw, table, default: str) -> str:
+    """``raw`` as one of ``table``'s values, accepting either half of the pair.
+
+    Restated here rather than imported from :mod:`mc_broker`: this module is
+    the bottom of the LLM half's import graph -- the panels, the runtime and
+    the estimator all read it -- and giving it a dependency on the broker would
+    make the preferences file unreadable on an installation where the broker
+    will not import.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return default
+    folded = text.casefold()
+    for value, label in table:
+        if folded in (value.casefold(), label.casefold()):
+            return value
+    return default
+
+
+def _kv_type(raw, default: str) -> str:
+    """A cache type as ``llama.cpp`` spells it, from whatever the box holds."""
+    try:
+        import mc_llm_context
+
+        table = tuple(mc_llm_context.KV_TYPE_LABELS)
+    except Exception:
+        return str(raw or default)
+    return _resolve(raw, table, default)
+
+
 def remember(**values) -> dict:
-    """Update shared preferences. Returns the stored result."""
+    """Update shared preferences. Returns the stored result.
+
+    Anything in :data:`HOSTED` is written to the Settings page as well as to
+    the file, because the Settings page is what :func:`preferences` reads back
+    for those keys: writing only the file would make ``remember`` look like it
+    had worked and change nothing anybody could observe.
+    """
     with _lock:
         current = preferences()
         current.update({k: v for k, v in values.items() if v is not None})
         current["version"] = SCHEMA_VERSION
         _write(PREFERENCES_FILE, current)
+        _publish(values)
         return current
+
+
+# What each hosted preference is called on the Settings page, and how a value
+# has to be spelled to survive the round trip through a Gradio control there.
+_PUBLISHED = (
+    ("context_mode", OPT_CONTEXT_MODE, label_for_context_mode),
+    ("context_buffer_gb", OPT_CONTEXT_BUFFER, float),
+    ("context_size", OPT_CONTEXT_SIZE, int),
+    ("kv_type_k", OPT_KV_TYPE_K, str),
+    ("kv_type_v", OPT_KV_TYPE_V, str),
+)
+
+
+def _publish(values: dict) -> None:
+    """Write the hosted half of ``values`` back to the Settings page.
+
+    Best-effort in every direction: no host, an option the host has not
+    registered, or a value it will not take are all reasons to leave the
+    setting alone and let the file answer, never reasons to lose the write that
+    has already succeeded.
+    """
+    wanted = [(name, cast(values[key])) for key, name, cast in _PUBLISHED
+              if values.get(key) is not None]
+    if not wanted:
+        return
+    try:
+        from modules import shared
+
+        for name, value in wanted:
+            shared.opts.set(name, value)
+        shared.opts.save(shared.config_filename)
+    except Exception:
+        logger.debug("Model Chain: could not persist LLM settings to the host", exc_info=True)
 
 
 # --------------------------------------------------------------------------- #

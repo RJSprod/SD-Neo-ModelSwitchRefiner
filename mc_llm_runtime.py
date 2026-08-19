@@ -230,7 +230,7 @@ def negotiate(configuration: Config | None = None,
     configuration = configuration or config()
     if not configuration.configured:
         raise NotConfigured(
-            "No local model is configured yet. Choose a GGUF under Models and Hardware."
+            "No local model is configured yet. Choose a GGUF in LLM Studio’s Setup mode."
         )
 
     described = gguf if gguf is not None else mc_gguf.describe(configuration.model)
@@ -458,7 +458,7 @@ class Runtime:
             if not configuration.configured:
                 raise NotConfigured(
                     "No local model is configured yet. Choose a GGUF and a llama.cpp runtime "
-                    "under Models and Hardware."
+                    "in LLM Studio’s Setup mode."
                 )
             for label, path in (("llama-server", configuration.runtime),
                                 ("model", configuration.model),
@@ -468,8 +468,8 @@ class Runtime:
             if needs_vision and configuration.mmproj is None:
                 raise RuntimeError(
                     "This request carries an image, and the model running has no vision "
-                    "projector. Choose one under Models and Hardware, or send the request "
-                    "without the image; text-only fallback is disabled."
+                    "projector. Choose one in LLM Studio’s Setup mode, or send the "
+                    "request without the image; text-only fallback is disabled."
                 )
 
             negotiated = negotiate(configuration)

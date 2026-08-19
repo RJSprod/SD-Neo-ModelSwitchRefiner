@@ -139,7 +139,7 @@ def _enhance(prompt, variant, image_path, seed):
         if not mc_llm_runtime.config().sees:
             yield (None, "", hidden,
                    ui.notice("The model running has no vision projector, so the reference frame "
-                             "cannot be sent to it. Choose one under Models and Hardware, or "
+                             "cannot be sent to it. Choose one in Setup, or "
                              "remove the image.", "error"), *idle)
             return
         try:

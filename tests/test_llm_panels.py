@@ -173,6 +173,193 @@ class TestConversation:
         assert mc_llm_chat_panel._thread_choices("", "") == []
 
 
+class TestPerMessageActions:
+    """The actions the standalone application hangs on every bubble.
+
+    Gradio 4\u2019s Chatbot has nowhere to hang them, which is why they are one
+    bar under the transcript applying to whichever message was clicked. The two
+    things that can silently go wrong with that shape are both tested here: the
+    map from a click to a message, and the arity of the updates the bar is
+    redrawn from -- a handler one value short would put a label into a
+    visibility and nothing would raise.
+    """
+
+    def _thread(self, store, turns=2):
+        from prompt_master.chat.history import ASSISTANT, ChatStore, USER
+
+        chats = ChatStore(store / "chats")
+        conversation = chats.new("Ada")
+        for index in range(turns):
+            conversation.append(USER, f"ask {index}")
+            conversation.append(ASSISTANT, f"reply {index}")
+        chats.save(conversation)
+        return conversation
+
+    def test_the_map_names_the_message_the_click_lands_on(self):
+        from prompt_master.chat.history import ASSISTANT, Conversation, USER
+
+        conversation = Conversation(identifier="x", character="Ada")
+        conversation.append(USER, "hello")
+        conversation.append(ASSISTANT, "hi")
+        conversation.append(ASSISTANT, "and again")
+
+        rows, positions = mc_llm_chat_panel._view(conversation)
+
+        assert rows == [["hello", "hi"], [None, "and again"]]
+        assert mc_llm_chat_panel._message_at(positions, 0, 0) == 0
+        assert mc_llm_chat_panel._message_at(positions, 0, 1) == 1
+        assert mc_llm_chat_panel._message_at(positions, 1, 1) == 2
+
+    def test_a_click_on_nothing_is_not_a_message(self):
+        _, positions = mc_llm_chat_panel._view(None)
+
+        assert mc_llm_chat_panel._message_at(positions, 0, 0) == \
+            mc_llm_chat_panel.NO_SELECTION
+        assert mc_llm_chat_panel._message_at([[0, 0, 0]], 4, 1) == \
+            mc_llm_chat_panel.NO_SELECTION
+
+    def test_the_bar_and_the_updates_that_redraw_it_are_the_same_length(self):
+        bar = mc_llm_chat_panel._action_bar()
+
+        assert len(bar["outputs"]) == len(mc_llm_chat_panel._selection_updates(None, -1))
+
+    def test_which_actions_apply_depends_on_the_message(self, store):
+        conversation = self._thread(store)
+        names = ["bar", "heading", "back", "pager", "forward", "drop",
+                 "regenerate", "continue", "resend", "editor", "editor_box"]
+
+        for index, expected in ((0, "resend"), (1, "regenerate")):
+            shown = dict(zip(names, mc_llm_chat_panel._selection_updates(conversation, index)))
+            assert shown["bar"].get("visible") is True
+            assert shown[expected].get("visible") is True
+
+        # Continue is offered only on the reply still at the end: anything
+        # before it would be carrying on with a turn already answered.
+        last = len(conversation.messages) - 1
+        assert mc_llm_chat_panel._selection_updates(
+            conversation, last)[7].get("visible") is True
+        assert mc_llm_chat_panel._selection_updates(
+            conversation, 1)[7].get("visible") is False
+
+    def test_the_version_pager_appears_once_there_is_more_than_one(self, store):
+        conversation = self._thread(store)
+        message = conversation.messages[1]
+        message.add_version("a second attempt")
+
+        shown = mc_llm_chat_panel._selection_updates(conversation, 1)
+
+        assert shown[2].get("visible") is True          # back
+        assert "2/2" in shown[3].get("value")           # the pager itself
+        assert shown[4].get("interactive") is False     # nothing after the last
+        assert shown[5].get("visible") is True          # delete this version
+
+    def test_paging_back_shows_the_earlier_attempt(self, store):
+        conversation = self._thread(store)
+        conversation.messages[1].add_version("second attempt")
+        mc_llm_chat_panel._chats().save(conversation)
+
+        mc_llm_chat_panel._page_version(-1)("Ada", conversation.identifier, 1)
+        reloaded = mc_llm_chat_panel._load("Ada", conversation.identifier)
+
+        assert reloaded.messages[1].text == "reply 0"
+
+    def test_branching_copies_up_to_the_chosen_message(self, store):
+        conversation = self._thread(store)
+
+        result = mc_llm_chat_panel._branch_here("Ada", conversation.identifier, 1, "")
+        branched = mc_llm_chat_panel._load("Ada", result[1])
+
+        assert [message.text for message in branched.messages] == ["ask 0", "reply 0"]
+        # The thread it came from is untouched, which is what "a branch is a
+        # copy" has to mean for it to survive being reloaded.
+        assert len(mc_llm_chat_panel._load("Ada", conversation.identifier).messages) == 4
+
+    def test_deleting_from_here_takes_the_message_and_everything_after(self, store):
+        conversation = self._thread(store)
+
+        mc_llm_chat_panel._delete_from("Ada", conversation.identifier, 2)
+        reloaded = mc_llm_chat_panel._load("Ada", conversation.identifier)
+
+        assert [message.text for message in reloaded.messages] == ["ask 0", "reply 0"]
+
+    def test_editing_writes_the_showing_version_and_nothing_else(self, store):
+        conversation = self._thread(store)
+        conversation.messages[1].add_version("second attempt")
+        mc_llm_chat_panel._chats().save(conversation)
+
+        mc_llm_chat_panel._commit_edit("Ada", conversation.identifier, 1, "  edited  ")
+        reloaded = mc_llm_chat_panel._load("Ada", conversation.identifier)
+
+        assert reloaded.messages[1].versions == ["reply 0", "edited"]
+
+    def test_every_action_hands_back_one_value_per_output(self, store):
+        """The bar is redrawn from the same list by every one of them, so one
+        handler returning a short list is one handler putting a value in the
+        wrong control."""
+        conversation = self._thread(store)
+        identifier = conversation.identifier
+        width = 4 + len(mc_llm_chat_panel._action_bar()["outputs"])
+
+        for result in (
+            mc_llm_chat_panel._close_selection("Ada", identifier),
+            mc_llm_chat_panel._page_version(1)("Ada", identifier, 1),
+            mc_llm_chat_panel._drop_version("Ada", identifier, 1),
+            mc_llm_chat_panel._commit_edit("Ada", identifier, 0, "changed"),
+            mc_llm_chat_panel._delete_message("Ada", identifier, 3),
+            mc_llm_chat_panel._delete_from("Ada", identifier, 2),
+            mc_llm_chat_panel._select_message("Ada", identifier, [[0, 0, 0]]),
+            mc_llm_chat_panel._open_thread("Ada", identifier)[1:],
+        ):
+            assert len(result) == width
+
+    def test_regenerate_falls_back_to_the_last_reply(self, store):
+        """"Again" is about the end of the thread unless somebody has said
+        otherwise, so the button still works with nothing selected."""
+        conversation = self._thread(store)
+
+        assert mc_llm_chat_panel._last_reply(conversation, -1) == 3
+        assert mc_llm_chat_panel._last_reply(conversation, 1) == 1
+        assert mc_llm_chat_panel._last_reply(conversation, None) == 3
+
+    def test_a_reply_that_never_arrived_is_taken_away(self, store):
+        from prompt_master.chat.history import ASSISTANT
+
+        conversation = self._thread(store)
+        conversation.append(ASSISTANT, "")
+
+        mc_llm_chat_panel._tidy(conversation, len(conversation.messages) - 1)
+
+        assert len(conversation.messages) == 4
+
+    def test_a_failed_regenerate_falls_back_to_the_attempt_it_had(self, store):
+        conversation = self._thread(store)
+        conversation.messages[1].add_version("")
+
+        mc_llm_chat_panel._tidy(conversation, 1)
+
+        assert conversation.messages[1].text == "reply 0"
+        assert len(conversation.messages) == 4
+
+
+class TestTheDrawer:
+    def test_it_starts_closed_and_toggles(self):
+        opened, update = mc_llm_chat_panel._toggle_drawer(False)
+
+        assert opened is True and update.get("visible") is True
+        assert mc_llm_chat_panel._toggle_drawer(True)[1].get("visible") is False
+
+    def test_the_image_box_warns_before_a_message_is_written(self, store, monkeypatch):
+        """Whether a picture can be sent depends on the model running, and
+        finding that out after writing the message is finding it out late."""
+        class Blind:
+            sees = False
+
+        monkeypatch.setattr(mc_llm_chat_panel.mc_llm_runtime, "config", lambda: Blind())
+        _, _, note = mc_llm_chat_panel._toggle_attachment(False)
+
+        assert "no vision projector" in note
+
+
 class TestMiniMax:
     def test_it_builds(self):
         built = mc_llm_minimax_panel.build()
@@ -194,14 +381,20 @@ class TestMiniMax:
 
 
 class TestShell:
-    def test_the_three_modes_are_three_views(self):
+    def test_every_mode_is_its_own_view(self):
         """Section 4.1: the modes may share panels but must not be collapsed
         into one workflow. Exactly one view is visible at a time."""
+        modes = len(mc_llm_studio.MODES)
         for _, chosen in mc_llm_studio.MODES:
             updates = mc_llm_studio._switch(chosen)
-            visible = [update.get("visible") for update in updates[:3]]
+            visible = [update.get("visible") for update in updates[:modes]]
 
             assert visible.count(True) == 1
+
+    def test_setup_is_a_mode_rather_than_an_accordion(self):
+        """The plain values went to the Settings page; what is left needs a
+        workspace, not a footnote under whichever chat happened to be open."""
+        assert "setup" in [value for _, value in mc_llm_studio.MODES]
 
     def test_the_chosen_mode_is_remembered(self):
         import mc_llm_state
@@ -209,6 +402,19 @@ class TestShell:
         mc_llm_studio._switch("minimax")
 
         assert mc_llm_state.preferences()["mode"] == "minimax"
+
+    def test_the_tab_opens_on_the_mode_it_was_left_on(self, store):
+        """The selector was restored from preferences and the views were not:
+        a tab left on Conversation opened with the selector reading
+        Conversation and Prompt Studio's panel underneath it."""
+        import mc_llm_state
+
+        mc_llm_state.remember(mode="chat")
+        opening = mc_llm_studio._initial_mode()
+
+        assert opening == "chat"
+        shown = [value for _, value in mc_llm_studio.MODES if value == opening]
+        assert shown == ["chat"]
 
     def test_an_unknown_stored_mode_falls_back_to_prompt_studio(self):
         import mc_llm_state
@@ -249,6 +455,153 @@ class TestShell:
         assert len(tabs) == 1
         assert tabs[0][1] == mc_llm_studio.TAB_LABEL
         assert tabs[0][2] == mc_llm_studio.TAB_ID
+
+
+class TestTheModelChooser:
+    """Switching models from the top of the tab, without a path box.
+
+    Load and Unload are the two presses this is meant to reduce a model switch
+    to; the chooser is what makes them mean anything, so what it offers is
+    worth being exact about.
+    """
+
+    def _gguf(self, folder, name, size=32):
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / name
+        path.write_bytes(b"GGUF" + b"\0" * size)
+        return path
+
+    def test_the_scan_offers_models_and_not_their_projectors(self, store):
+        import mc_llm_files
+
+        self._gguf(store / "models", "thinker-Q4_K_M.gguf")
+        self._gguf(store / "models", "mmproj-thinker-f16.gguf")
+
+        found = mc_llm_files.library(store / "models")
+
+        assert [path.name for path in found.models] == ["thinker-Q4_K_M.gguf"]
+
+    def test_only_the_first_shard_of_a_split_model_is_offered(self, store):
+        import mc_llm_files
+
+        for part in (1, 2, 3):
+            self._gguf(store / "models", f"big-{part:05d}-of-00003.gguf")
+
+        found = mc_llm_files.library(store / "models")
+
+        assert [path.name for path in found.models] == ["big-00001-of-00003.gguf"]
+
+    def test_it_looks_into_the_folders_a_downloader_makes(self, store):
+        import mc_llm_files
+
+        self._gguf(store / "models" / "publisher" / "repo", "one.gguf")
+
+        found = mc_llm_files.library(store / "models")
+
+        assert [path.name for path in found.models] == ["one.gguf"]
+
+    def test_a_walk_stops_at_the_depth_limit(self, store, monkeypatch):
+        import mc_llm_files
+
+        monkeypatch.setattr(mc_llm_files, "MAX_LIBRARY_DEPTH", 1)
+        self._gguf(store / "models" / "a" / "b" / "c", "deep.gguf")
+
+        assert mc_llm_files.library(store / "models").models == ()
+
+    def test_a_folder_that_is_not_there_is_an_empty_library(self, store):
+        import mc_llm_files
+
+        found = mc_llm_files.library(store / "nowhere")
+
+        assert not found and found.models == ()
+
+    def test_the_running_model_is_offered_even_from_outside_the_folder(self, store,
+                                                                      monkeypatch):
+        """A model may be recorded from anywhere on the machine. A chooser
+        filled only from the scan would show nothing selected on an install
+        that is working perfectly, which reads as the model having been lost."""
+        elsewhere = self._gguf(store / "elsewhere", "hand-picked.gguf")
+        self._gguf(store / "models", "in-the-folder.gguf")
+        monkeypatch.setattr(mc_llm_studio, "_current_model", lambda: str(elsewhere))
+
+        values = [value for _, value in mc_llm_studio._model_choices()]
+
+        assert str(elsewhere) in values
+        assert str(store / "models" / "in-the-folder.gguf") in values
+
+    def test_a_model_is_named_by_where_it_sits_under_the_folder(self, store):
+        root = store / "models"
+        self._gguf(root / "publisher", "one.gguf")
+
+        labels = [label for label, _ in mc_llm_studio._model_choices()]
+
+        assert "publisher/one.gguf" in labels
+
+    def test_an_empty_folder_says_which_folder_and_what_to_do(self, store):
+        _, note = mc_llm_studio._rescan_models()
+
+        assert "No .gguf files under" in note and "models folder setting" in note
+
+    def test_choosing_a_model_without_a_runtime_names_setup(self, store):
+        self._gguf(store / "models", "one.gguf")
+
+        note = mc_llm_studio._choose_model(str(store / "models" / "one.gguf"))[0]
+
+        assert "no llama.cpp runtime" in note and "Setup" in note
+
+    def test_unloading_reports_rather_than_raising(self, store):
+        status, residency = mc_llm_studio._unload_model()
+
+        assert mc_llm_studio.ui.PREFIX in status
+        assert mc_llm_studio.ui.PREFIX in residency
+
+
+class TestSettingsOwnThePlainValues:
+    """The five preferences the WebUI's Settings page is now the front end for.
+
+    The file underneath them is still read -- it is what answers headless -- so
+    which of the two wins, and whether a write reaches both, are the two things
+    that can quietly go wrong.
+    """
+
+    def test_the_settings_page_wins_over_the_file(self, store, monkeypatch):
+        import mc_llm_state
+        from modules import shared
+
+        mc_llm_state.remember(context_size=4096)
+        monkeypatch.setattr(shared.opts, mc_llm_state.OPT_CONTEXT_SIZE, 65536,
+                            raising=False)
+
+        assert mc_llm_state.preferences()["context_size"] == 65536
+
+    def test_a_label_from_a_radio_is_read_as_its_value(self, store, monkeypatch):
+        import mc_llm_state
+        from modules import shared
+
+        monkeypatch.setattr(shared.opts, mc_llm_state.OPT_CONTEXT_MODE,
+                            mc_llm_state.label_for_context_mode("fixed"), raising=False)
+
+        assert mc_llm_state.preferences()["context_mode"] == "fixed"
+
+    def test_remembering_writes_through_to_the_settings_page(self, store):
+        import mc_llm_state
+        from modules import shared
+
+        mc_llm_state.remember(context_size=32768, kv_type_k="q8_0")
+
+        assert getattr(shared.opts, mc_llm_state.OPT_CONTEXT_SIZE) == 32768
+        assert mc_llm_state.preferences()["context_size"] == 32768
+        assert mc_llm_state.preferences()["kv_type_k"] == "q8_0"
+
+    def test_a_setting_the_host_has_never_heard_of_leaves_the_file_in_charge(self,
+                                                                            store,
+                                                                            monkeypatch):
+        import mc_llm_state
+
+        monkeypatch.setattr(mc_llm_state, "_option", lambda name: None)
+        mc_llm_state.remember(context_buffer_gb=9.5)
+
+        assert mc_llm_state.preferences()["context_buffer_gb"] == 9.5
 
 
 class TestThemeContract:
@@ -396,19 +749,14 @@ class TestRuntimeSetup:
     def test_the_device_dropdown_always_offers_something(self, store):
         assert mc_llm_studio._device_choices()
 
-    def test_a_cleared_context_box_is_answered_rather_than_raised(self, store):
-        """A gr.Number that has been emptied hands the handler None."""
-        assert "have to be numbers" in mc_llm_studio._save_context("auto", 4.0, None,
-                                                                   "f16", "f16")
+    def test_the_setup_panel_says_where_the_plain_values_went(self, store):
+        """A control that used to be here and is not any more is, from the
+        reader\u2019s side, indistinguishable from one that was removed."""
+        pointer = mc_llm_studio._settings_pointer()
 
-    def test_saving_the_context_settings_keeps_them(self, store):
-        import mc_llm_state
-
-        mc_llm_studio._save_context("fixed", 6.0, 32768, "q8_0", "q8_0")
-
-        prefs = mc_llm_state.preferences()
-        assert prefs["context_size"] == 32768
-        assert prefs["kv_type_k"] == "q8_0"
+        assert "Settings" in pointer and "Model Chain" in pointer
+        for missing in ("Context sizing", "cache types", "residency mode"):
+            assert missing in pointer
 
 
 class TestChoosingAModelByPath:
@@ -709,7 +1057,7 @@ class TestTheFilePicker:
 
         mc_llm_browse.attach = record
         try:
-            mc_llm_studio._settings_panel()
+            mc_llm_studio._setup_panel()
         finally:
             mc_llm_browse.attach = original
 
@@ -882,7 +1230,7 @@ class TestConversationDefaults:
             characters.DEFAULT_TOP_P
         assert mc_llm_chat_panel.sessions.ChatRequest(messages=[]).max_tokens == \
             characters.DEFAULT_MAX_REPLY_TOKENS
-        assert set(built) == {"status", "transcript", "persona"}
+        assert set(built) == {"status", "transcript", "persona", "drawer"}
 
     def test_a_cleared_box_falls_back_to_the_character_then_to_the_default(self):
         from prompt_master.chat.characters import Character
