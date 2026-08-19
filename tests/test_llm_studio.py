@@ -218,6 +218,81 @@ class TestConversationRun:
         assert client.calls[0]["seed"] == 99
 
 
+class TestWhatTheConsoleIsTold:
+    """Every run narrates itself to the WebUI console, and narrates no content.
+
+    The second half is the one worth a test. A status line saying a reply is
+    2,300 characters long is a status line; one quoting it is a transcript of a
+    private conversation in a file somebody else may read, and the difference
+    between the two is one careless format string.
+    """
+
+    def test_a_run_says_that_it_started_and_that_it_finished(self, client, caplog):
+        with caplog.at_level("INFO", logger="model_chain"):
+            drain(sessions.conversation(sessions.ChatRequest(messages=[]),
+                                        sessions.Cancellation()))
+
+        said = "\n".join(record.getMessage() for record in caplog.records)
+        assert "LLM run started" in said
+        assert "LLM run finished" in said
+        assert "characters in" in said
+
+    def test_nothing_that_was_said_reaches_the_console(self, client, caplog):
+        """The prompt, the reply and the character are content. Sizes and
+        stages are not."""
+        secret = "the-private-thing-somebody-typed"
+        client.pieces = [secret]
+        request = sessions.ChatRequest(
+            messages=[{"role": "user", "content": secret}])
+
+        with caplog.at_level("DEBUG", logger="model_chain"):
+            drain(sessions.conversation(request, sessions.Cancellation()))
+
+        for record in caplog.records:
+            assert secret not in record.getMessage()
+
+    def test_a_failure_is_logged_with_the_sentence_that_explains_it(self, client, monkeypatch,
+                                                                    caplog):
+        monkeypatch.setattr(sessions, "_client",
+                            lambda needs_vision=False: FakeClient(fail=RuntimeError("no server")))
+
+        with caplog.at_level("INFO", logger="model_chain"):
+            drain(sessions.conversation(sessions.ChatRequest(messages=[]),
+                                        sessions.Cancellation()))
+
+        assert any("no server" in record.getMessage() for record in caplog.records)
+
+    def test_a_cancelled_run_says_so_rather_than_going_quiet(self, client, caplog):
+        cancel = sessions.Cancellation()
+        cancel.cancel()
+
+        with caplog.at_level("INFO", logger="model_chain"):
+            drain(sessions.conversation(sessions.ChatRequest(messages=[]), cancel))
+
+        assert any("cancelled" in record.getMessage() for record in caplog.records)
+
+    def test_tracing_does_not_change_what_the_panel_receives(self, client):
+        """The wrapper is a passthrough. Every panel reads event.kind."""
+        request = sessions.ChatRequest(messages=[])
+
+        events = drain(sessions.conversation(request, sessions.Cancellation()))
+
+        assert texts(events, sessions.CHUNK) == ["Hello", " there"]
+        assert texts(events, sessions.DONE) == ["Hello there"]
+
+    def test_an_abandoned_run_is_logged_and_still_releases_the_gpu(self, client, caplog):
+        """Gradio cancels by closing the generator, and the wrapper must let
+        that reach the inner one -- the GPU is given back in its finally."""
+        with caplog.at_level("INFO", logger="model_chain"):
+            run = sessions.conversation(sessions.ChatRequest(messages=[]),
+                                        sessions.Cancellation())
+            next(run)
+            run.close()
+
+        assert mc_broker.active() is None
+        assert any("abandoned" in record.getMessage() for record in caplog.records)
+
+
 class TestMinimaxRun:
     def test_it_emits_no_caption_without_an_image(self, client):
         events = drain(sessions.minimax("a shot", "fl2va", None, 7, sessions.Cancellation()))

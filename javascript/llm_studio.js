@@ -11,19 +11,20 @@
 //   * the transcript follows a streaming reply, unless the reader has scrolled
 //     up to read something, in which case it stays where they put it;
 //   * Escape stops a run;
-//   * the tab is measured against the window, so the layout can fit the space
-//     it actually has rather than a space guessed in a stylesheet.
+//   * the conversation workspace is measured against the window, so the layout
+//     can fit the space it actually has rather than a space guessed in a
+//     stylesheet.
 //
-// The measuring is the one that needs a word. The tab is meant to fit the
+// The measuring is the one that needs a word. The workspace is meant to fit the
 // window -- the page does not scroll, the transcript does -- and how much room
-// the tab has depends on where it starts on screen, which depends on the
-// browser chrome, the host's header, the width the tabs wrapped to and any
-// theme in play. None of that is knowable from CSS. So the distance from the
-// top of the tab to the bottom of the viewport is measured here and published
-// as one custom property, --mc-llm-available, and style.css does the layout.
-// Every var() reading it carries a fallback that is a pure-CSS estimate of the
-// same number, so the tab is laid out correctly without this file and exactly
-// with it.
+// it has depends on where it starts on screen, which depends on the browser
+// chrome, the host's header, the width the tabs wrapped to, the rows the top
+// bar wrapped to and any theme in play. None of that is knowable from CSS. So
+// the distance from the top of the workspace to the bottom of the viewport is
+// measured here and published as one custom property, --mc-llm-available, and
+// style.css does the layout. Every var() reading it carries a fallback that is
+// a pure-CSS estimate of the same number, so the tab is laid out correctly
+// without this file and exactly with it.
 //
 // Everything is found by this extension's own element ids. Section 5 again:
 // no selector below depends on a class Gradio generated, so a theme that
@@ -129,40 +130,83 @@
         observer.observe(holder, {childList: true, subtree: true, characterData: true});
     }
 
-    // -- fit the tab to the window ----------------------------------------- //
+    // -- fit the workspace to the window ------------------------------------ //
 
-    // Left under the tab so a status line or a wrapped row of buttons has
-    // somewhere to grow into before anything is pushed off the bottom.
-    const BOTTOM_MARGIN_PX = 24;
+    // Left under the workspace so a status line or a wrapped row of buttons
+    // has somewhere to grow into before anything is pushed off the bottom.
+    const BOTTOM_MARGIN_PX = 16;
 
     // Below this there is no layout worth doing, and style.css hands the page
     // back its scroll bar instead. Matching the max-height media query there.
-    const MIN_AVAILABLE_PX = 320;
+    const MIN_AVAILABLE_PX = 260;
 
-    function fit() {
-        const studio = byId("mc-llm-studio");
-        if (!studio) return;
-        const box = studio.getBoundingClientRect();
-        // getBoundingClientRect on a tab that is not the open one returns
-        // zeroes; measuring that would publish a height of nothing to every
-        // tab, so it is skipped and the fallback in the CSS stands until this
-        // tab is looked at.
-        if (box.height === 0 && box.top === 0) return;
-        const available = window.innerHeight - box.top - BOTTOM_MARGIN_PX;
+    // What is measured, and what the height is published on. The *workspace*
+    // and not the whole tab: the mode selector, the model chooser and the
+    // status line sit above it, and measuring from the top of the tab gave the
+    // workspace their height as well -- which is exactly how far below the fold
+    // the composer ended up.
+    const FITTED = ["mc-llm-chat"];
+
+    function documentTop(element) {
+        // The distance from the top of the *document*, not of the viewport.
+        //
+        // This is the whole correctness argument for this function, so it is
+        // worth stating. getBoundingClientRect().top alone falls as the page
+        // scrolls, so "innerHeight - top" grows as the page scrolls -- and
+        // since this sets the height of an element on that page, a taller
+        // element means more page to scroll, which means a larger measurement
+        // next time. That is a feedback loop, and what it looks like from the
+        // outside is a panel that grows a little every time you click, with
+        // blank space under the messages.
+        //
+        // Adding the scroll offset back makes the measurement scroll-
+        // invariant: it is where the element sits in the document, which does
+        // not depend on the height being set here, because nothing above it
+        // does either.
+        const scrolled = window.scrollY || document.documentElement.scrollTop || 0;
+        return element.getBoundingClientRect().top + scrolled;
+    }
+
+    function fitOne(element) {
+        // An element in a tab that is not open measures as nothing at all.
+        // Publishing that would hand every tab a height of zero, so it is
+        // skipped and the fallback in the CSS stands until this tab is looked
+        // at. offsetParent is null for a display:none ancestor, which is how
+        // Gradio hides the tab that is not showing.
+        if (!element.offsetParent) return;
+
+        const available = window.innerHeight - documentTop(element) - BOTTOM_MARGIN_PX;
         if (available < MIN_AVAILABLE_PX) {
-            studio.style.removeProperty("--mc-llm-available");
+            element.style.removeProperty("--mc-llm-available");
             return;
         }
-        studio.style.setProperty("--mc-llm-available", Math.round(available) + "px");
+        // Never taller than the window, whatever the arithmetic said. A
+        // measurement that has somehow gone wrong should cost a workspace that
+        // is a little short, never one that cannot be scrolled back out of.
+        const height = Math.round(Math.min(available, window.innerHeight - BOTTOM_MARGIN_PX));
+        const wanted = height + "px";
+        // Written only when it changes: this runs on every click, and setting
+        // a custom property invalidates layout whether or not the value moved.
+        if (element.style.getPropertyValue("--mc-llm-available") === wanted) return;
+        element.style.setProperty("--mc-llm-available", wanted);
+    }
+
+    function fit() {
+        FITTED.forEach(function (id) {
+            const element = byId(id);
+            if (element) fitOne(element);
+        });
     }
 
     function watchWindow() {
         if (window.mcLlmFitWired) return;
         window.mcLlmFitWired = true;
         window.addEventListener("resize", fit);
-        // A tab switch changes where the panel starts without resizing
+        // A tab switch changes where the workspace starts without resizing
         // anything, and nothing fires for it, so the click that does it is
-        // what is listened to.
+        // what is listened to. Deliberately not scroll: the measurement above
+        // does not depend on the scroll position, and re-running it on every
+        // scroll event would be work for a value that cannot have changed.
         document.addEventListener("click", function () {
             window.setTimeout(fit, 0);
         }, true);

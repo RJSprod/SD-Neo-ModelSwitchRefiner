@@ -218,6 +218,36 @@ class TestPerMessageActions:
         assert mc_llm_chat_panel._message_at([[0, 0, 0]], 4, 1) == \
             mc_llm_chat_panel.NO_SELECTION
 
+    def test_tapping_the_same_message_again_puts_the_bar_away(self, store):
+        """One gesture opens and closes it: a Chatbot bubble has no second
+        affordance to dismiss from."""
+        class Click:
+            index = [0, 0]
+
+        conversation = self._thread(store)
+        _, positions = mc_llm_chat_panel._view(conversation)
+
+        opened = mc_llm_chat_panel._select_message("Ada", conversation.identifier, positions,
+                                                   mc_llm_chat_panel.NO_SELECTION, Click())
+        closed = mc_llm_chat_panel._select_message("Ada", conversation.identifier, positions,
+                                                   opened[2], Click())
+
+        assert opened[2] == 0 and opened[4].get("visible") is True
+        assert closed[2] == mc_llm_chat_panel.NO_SELECTION
+        assert closed[4].get("visible") is False
+
+    def test_tapping_a_different_message_moves_the_bar_to_it(self, store):
+        class Click:
+            index = [0, 1]
+
+        conversation = self._thread(store)
+        _, positions = mc_llm_chat_panel._view(conversation)
+
+        moved = mc_llm_chat_panel._select_message("Ada", conversation.identifier, positions,
+                                                  0, Click())
+
+        assert moved[2] == 1 and moved[4].get("visible") is True
+
     def test_the_bar_and_the_updates_that_redraw_it_are_the_same_length(self):
         bar = mc_llm_chat_panel._action_bar()
 
@@ -307,7 +337,8 @@ class TestPerMessageActions:
             mc_llm_chat_panel._commit_edit("Ada", identifier, 0, "changed"),
             mc_llm_chat_panel._delete_message("Ada", identifier, 3),
             mc_llm_chat_panel._delete_from("Ada", identifier, 2),
-            mc_llm_chat_panel._select_message("Ada", identifier, [[0, 0, 0]]),
+            mc_llm_chat_panel._select_message("Ada", identifier, [[0, 0, 0]],
+                                             mc_llm_chat_panel.NO_SELECTION),
             mc_llm_chat_panel._open_thread("Ada", identifier)[1:],
         ):
             assert len(result) == width

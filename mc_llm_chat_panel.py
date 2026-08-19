@@ -202,8 +202,12 @@ def build() -> dict:
                                       elem_id=ui.ident("chat", "image"))
 
             with gr.Row(elem_classes=ui.classes("composer")):
+                # Three lines, and never more than six. The composer is the
+                # one thing that must stay on screen, so it is not allowed to
+                # grow into the space the transcript is living on; a message
+                # longer than six lines scrolls inside its own box.
                 message = gr.Textbox(
-                    label=None, lines=3, max_lines=12, show_label=False, scale=6,
+                    label=None, lines=3, max_lines=6, show_label=False, scale=6,
                     placeholder="Write a message. Shift+Enter for a new line.",
                     elem_id=ui.ident("chat", "message"))
                 with gr.Column(scale=1, min_width=120,
@@ -248,7 +252,8 @@ def build() -> dict:
 
     # -- the per-message actions ------------------------------------------ #
 
-    transcript.select(fn=_select_message, inputs=[character, thread_state, positions],
+    transcript.select(fn=_select_message,
+                      inputs=[character, thread_state, positions, selected],
                       outputs=view, queue=False)
     actions["close"].click(fn=_close_selection, inputs=[character, thread_state],
                            outputs=view, queue=False)
@@ -673,8 +678,14 @@ def _rename_thread(who, identifier, title, filter_text):
 # --------------------------------------------------------------------------- #
 
 
-def _select_message(who, identifier, positions, event: gr.SelectData = None):
-    """A click on a bubble nominates the message the action bar applies to."""
+def _select_message(who, identifier, positions, current, event: gr.SelectData = None):
+    """A click on a bubble nominates the message the action bar applies to.
+
+    Clicking the message that is already nominated puts the bar away again.
+    The same gesture opens and closes it because there is only one gesture: a
+    Chatbot bubble has no second affordance to dismiss from, and a bar that can
+    only be closed from its own ✕ is a bar that stays open while you read.
+    """
     conversation = _load(who, identifier)
     index = NO_SELECTION
     where = getattr(event, "index", None)
@@ -687,7 +698,17 @@ def _select_message(who, identifier, positions, event: gr.SelectData = None):
     if index == NO_SELECTION:
         return _refresh(conversation,
                         "That part of the transcript is not a message.", "warn")
+    if _selection(current) == index:
+        return _refresh(conversation, "Ready.")
     return _refresh(conversation, "Ready.", index=index)
+
+
+def _selection(value) -> int:
+    """``value`` as a message index. A State that has never been set is None."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return NO_SELECTION
 
 
 def _close_selection(who, identifier):

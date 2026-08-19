@@ -548,15 +548,17 @@
    stay permanently cramped.
 
    Height is the other half of the layout and is where this file does its least
-   obvious work. The tab is meant to fit the window: the page itself should not
-   scroll, and the only thing that scrolls is the transcript, because scrolling
-   the page to reach the box you type into is the one thing a chat window must
-   never make anybody do. So the workspace is given a height rather than a
-   height being left to accumulate out of its contents, and that height comes
-   from --mc-llm-available, which javascript/llm_studio.js measures from where
-   the tab actually starts on screen. The fallback in every var() below is a
-   pure-CSS estimate of the same thing, so the layout is right without the
-   script and exact with it.
+   obvious work. Conversation is meant to fit the window: the page itself should
+   not scroll, and the only thing that scrolls is the transcript, because
+   scrolling the page to reach the box you type into is the one thing a chat
+   window must never make anybody do. So the workspace is given a height rather
+   than a height being left to accumulate out of its contents, and that height
+   comes from --mc-llm-available, which javascript/llm_studio.js publishes on
+   the workspace itself -- measured from where the *workspace* starts on screen
+   and not from the top of the tab, because the mode selector and the model
+   chooser sit in between and their height is not the workspace's to spend. The
+   fallback in every var() below is a pure-CSS estimate of the same thing, so
+   the layout is right without the script and exact with it.
    ========================================================================== */
 
 /* The tab fills the window it is in. Scoped to this extension's own element:
@@ -619,10 +621,21 @@
    else, and its own scroll so a long thread list cannot push the composer off
    the bottom of a stage that is meant to fit. */
 
+/* One definite height, and everything below divides it up. --mc-llm-available
+   is published on this element by javascript/llm_studio.js, measured from
+   where this element starts rather than from the top of the tab: the mode
+   selector, the model chooser and the status line sit above it and their
+   height is not this element's to spend.
+
+   overflow: hidden is load-bearing rather than tidy. It stops a child that
+   has mis-measured itself from making the page taller, which is what would
+   turn one bad frame into a workspace that grows on every click. */
 #mc-llm-studio .mc-llm-chat-workspace {
     flex-wrap: nowrap;
-    height: var(--mc-llm-available, calc(100vh - 16em));
-    min-height: 22em;
+    height: var(--mc-llm-available, calc(100vh - 20em));
+    max-height: var(--mc-llm-available, calc(100vh - 20em));
+    min-height: 18em;
+    overflow: hidden;
 }
 
 #mc-llm-studio .mc-llm-drawer {
@@ -632,10 +645,12 @@
     overflow-y: auto;
 }
 
-/* The stage is a column of four things, and exactly one of them is allowed to
-   grow: everything else is measured by its contents, and the transcript takes
-   what is left. That is what makes the height of the thread follow the window
-   rather than the window follow the height of the thread. */
+/* The stage is a column, and exactly one thing in it is allowed to grow.
+   Everything else — the head, the action bar, the image box, the composer — is
+   measured by its contents and never shrinks, and the transcript takes what is
+   left. That ordering is the priority stated the only way a layout can state
+   one: what you type into is sized first and sits on the bottom edge, and the
+   thread gets the rest, however much or little that is. */
 #mc-llm-studio .mc-llm-chat-stage {
     display: flex;
     flex-direction: column;
@@ -643,6 +658,7 @@
     gap: 0.4em;
     min-height: 0;
     min-width: 0;
+    overflow: hidden;
 }
 
 #mc-llm-studio .mc-llm-stage-head {
@@ -660,6 +676,31 @@
 #mc-llm-studio .mc-llm-chat-stage .mc-llm-attachment,
 #mc-llm-studio .mc-llm-chat-stage .mc-llm-composer {
     flex: 0 0 auto;
+}
+
+/* Two things that are allowed to be long are given a ceiling and their own
+   scroll, because both sit between the transcript and the bottom of the window
+   and neither is worth the composer for. */
+#mc-llm-studio .mc-llm-chat-stage .mc-llm-message-actions {
+    max-height: 40%;
+    overflow-y: auto;
+}
+
+#mc-llm-studio .mc-llm-chat-stage .mc-llm-attachment {
+    max-height: 30%;
+    overflow-y: auto;
+}
+
+/* The composer is as tall as what is being written, up to a third of the
+   stage. A message long enough to need more than that is long enough to be
+   scrolled inside its own box. */
+#mc-llm-studio .mc-llm-chat-stage .mc-llm-composer {
+    max-height: 33%;
+}
+
+#mc-llm-studio .mc-llm-chat-stage .mc-llm-composer textarea {
+    max-height: 100%;
+    overflow-y: auto;
 }
 
 /* The response is the product (section 4.5): it gets the emphasis, and the
@@ -690,7 +731,11 @@
        and not the page, the thing that scrolls. */
     flex: 1 1 0 !important;
     height: auto !important;
-    min-height: 12em !important;
+    /* Small, deliberately. This is a floor on the transcript and therefore a
+       ceiling on everything under it, and the composer being reachable beats
+       the thread being tall -- a thread that is too short to read is scrolled,
+       a composer below the fold is not usable at all. */
+    min-height: 6em !important;
     overflow: hidden !important;
 }
 
@@ -879,6 +924,8 @@
     #mc-llm-studio .mc-llm-chat-workspace {
         flex-wrap: wrap;
         height: auto;
+        max-height: none;
+        overflow: visible;
     }
 
     #mc-llm-studio .mc-llm-drawer {
@@ -889,21 +936,23 @@
 
     #mc-llm-studio .mc-llm-chat-stage {
         flex-basis: 100%;
-        height: var(--mc-llm-available, calc(100vh - 16em));
-        min-height: 22em;
+        height: var(--mc-llm-available, calc(100vh - 20em));
+        min-height: 18em;
     }
 }
 
 /* A window too short to lay the tab out in is the one case where the page is
    allowed to scroll: a transcript squeezed under six ems is not a transcript,
    and a composer nobody can reach is worse than a scroll bar. */
-@media (max-height: 620px) {
+@media (max-height: 560px) {
     #mc-llm-studio .mc-llm-chat-workspace,
     #mc-llm-studio .mc-llm-chat-stage {
         height: auto;
+        max-height: none;
+        overflow: visible;
     }
 
     #mc-llm-studio .mc-llm-transcript {
-        min-height: 18em !important;
+        min-height: 14em !important;
     }
 }

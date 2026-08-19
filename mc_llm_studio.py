@@ -345,6 +345,7 @@ def _choose_model(path):
 
     # The running server holds the weights it was started with.
     mc_llm_runtime.runtime.stop()
+    logger.info("Model Chain: LLM Studio — model set to %s", chosen.path.name)
     notes = list(chosen.notes) + _projector_hint(chosen.path)
     updated = mc_llm_runtime.config()
     return (_runtime_line(), str(chosen.path), _estimator_html(),
@@ -362,11 +363,13 @@ def _load_model(progress=gr.Progress()):
     """
     import mc_llm_runtime
 
+    logger.info("Model Chain: LLM Studio — Load pressed")
     try:
         progress(0, desc="Starting llama-server…")
         mc_llm_runtime.runtime.client()
     except Exception as exc:
-        logger.warning("Model Chain: llama-server could not be started", exc_info=True)
+        logger.warning("Model Chain: llama-server could not be started: %s", ui.failure(exc))
+        logger.debug("Model Chain: the llama-server start failed", exc_info=True)
         return (ui.notice(ui.failure(exc), "error"), _residency_html(), _estimator_html())
     return _runtime_line(), _residency_html(), _estimator_html()
 
@@ -375,6 +378,10 @@ def _unload_model():
     """Stop llama-server, releasing every byte of VRAM it held."""
     import mc_llm_runtime
 
+    logger.info("Model Chain: LLM Studio — Unload pressed")
+    if not mc_llm_runtime.runtime.running():
+        return (ui.notice("Nothing is loaded — llama-server is not running."),
+                _residency_html())
     try:
         mc_llm_runtime.runtime.stop()
     except Exception:
