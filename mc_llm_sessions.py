@@ -235,6 +235,23 @@ def _preparing() -> str:
     return "Starting llama-server…"
 
 
+def _measured() -> str:
+    """llama.cpp's own timing for the reply that just finished, if it said one.
+
+    Characters per second is what this module can count and is not what anybody
+    means by speed: it depends on the tokenizer, the language and how chatty
+    the model was feeling. The server measures the real thing per request and
+    writes it to its log, and a line that carries both is a line somebody can
+    compare across two placements without arithmetic.
+    """
+    try:
+        note = mc_llm_runtime.runtime.speed_note()
+    except Exception:
+        logger.debug("Model Chain: could not read llama.cpp's timings", exc_info=True)
+        return ""
+    return f" ({note})" if note else ""
+
+
 def _placement_notes() -> list[Event]:
     """Report anything negotiation changed (section 13)."""
     report = mc_llm_runtime.runtime.report
@@ -565,9 +582,9 @@ def _traced(label: str, events):
                 logger.info("Model Chain: LLM %s — %s", label, event.text)
             elif event.kind == DONE:
                 finished = True
-                logger.info("Model Chain: LLM run finished — %s, %s characters in %.1fs",
+                logger.info("Model Chain: LLM run finished — %s, %s characters in %.1fs%s",
                             label, f"{max(streamed, len(event.text or '')):,}",
-                            time.monotonic() - started)
+                            time.monotonic() - started, _measured())
             elif event.kind == CANCELLED:
                 finished = True
                 logger.info("Model Chain: LLM run cancelled — %s after %.1fs",
