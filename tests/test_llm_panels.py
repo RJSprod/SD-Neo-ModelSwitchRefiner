@@ -232,9 +232,9 @@ class TestPerMessageActions:
         closed = mc_llm_chat_panel._select_message("Ada", conversation.identifier, positions,
                                                    opened[2], Click())
 
-        assert opened[2] == 0 and opened[4].get("visible") is True
+        assert opened[2] == 0 and opened[5].get("visible") is True
         assert closed[2] == mc_llm_chat_panel.NO_SELECTION
-        assert closed[4].get("visible") is False
+        assert closed[5].get("visible") is False
 
     def test_tapping_a_different_message_moves_the_bar_to_it(self, store):
         class Click:
@@ -246,21 +246,19 @@ class TestPerMessageActions:
         moved = mc_llm_chat_panel._select_message("Ada", conversation.identifier, positions,
                                                   0, Click())
 
-        assert moved[2] == 1 and moved[4].get("visible") is True
+        assert moved[2] == 1 and moved[5].get("visible") is True
 
-    def test_the_bar_and_the_updates_that_redraw_it_are_the_same_length(self):
-        bar = mc_llm_chat_panel._action_bar()
-
-        assert len(bar["outputs"]) == len(mc_llm_chat_panel._selection_updates(None, -1))
+    def test_the_sheet_and_the_updates_that_redraw_it_are_the_same_length(self):
+        assert len(mc_llm_chat_panel.SELECTION_ORDER) == \
+            len(mc_llm_chat_panel._selection_updates(None, -1))
 
     def test_which_actions_apply_depends_on_the_message(self, store):
         conversation = self._thread(store)
-        names = ["bar", "heading", "back", "pager", "forward", "drop",
-                 "regenerate", "continue", "resend", "editor", "editor_box"]
+        names = mc_llm_chat_panel.SELECTION_ORDER
 
         for index, expected in ((0, "resend"), (1, "regenerate")):
             shown = dict(zip(names, mc_llm_chat_panel._selection_updates(conversation, index)))
-            assert shown["bar"].get("visible") is True
+            assert shown["sheet"].get("visible") is True
             assert shown[expected].get("visible") is True
 
         # Continue is offered only on the reply still at the end: anything
@@ -328,7 +326,8 @@ class TestPerMessageActions:
         wrong control."""
         conversation = self._thread(store)
         identifier = conversation.identifier
-        width = 4 + len(mc_llm_chat_panel._action_bar()["outputs"])
+        # The four leading values, the header, and one per action-sheet control.
+        width = 5 + len(mc_llm_chat_panel.SELECTION_ORDER)
 
         for result in (
             mc_llm_chat_panel._close_selection("Ada", identifier),
@@ -372,34 +371,157 @@ class TestPerMessageActions:
         assert len(conversation.messages) == 4
 
 
-class TestTheDrawer:
-    def test_it_starts_closed_and_toggles(self):
-        opened, update, label = mc_llm_chat_panel._toggle_drawer(False)
+class TestTheSurfaces:
+    """Conversation is the home state, and everything else is temporary.
 
-        assert opened is True and update.get("visible") is True
-        assert mc_llm_chat_panel._toggle_drawer(True)[1].get("visible") is False
+    The old drawer was a column, so it was in the layout: on a phone Gradio
+    wrapped it above the stage and pushed the composer off the bottom of the
+    window. Every configuration surface is now an overlay, and the rules that
+    used to be spread over a toggle, three section flags and a media query are
+    one function -- which is what these tests are about.
+    """
 
-    def test_the_button_says_which_way_it_will_go_next(self):
-        """The open/closed flag lives in a State and the visibility lives in the
-        component, and nothing in Gradio keeps two such things in step. A
-        button that reads "Close panel" over an open panel is one whose next
-        press is predictable -- and one that reads it over a *shut* panel is a
-        bug somebody can see rather than a control that feels dead."""
-        _open, _update, label = mc_llm_chat_panel._toggle_drawer(False)
-        assert label.get("value") == mc_llm_chat_panel.CLOSE_LABEL
+    def _thread(self, store):
+        from prompt_master.chat.history import ASSISTANT, ChatStore, USER
 
-        assert mc_llm_chat_panel._toggle_drawer(True)[2].get("value") == \
-            mc_llm_chat_panel.OPEN_LABEL
+        chats = ChatStore(store / "chats")
+        conversation = chats.new("Ada")
+        conversation.append(USER, "ask")
+        conversation.append(ASSISTANT, "reply")
+        chats.save(conversation)
+        return conversation
 
-    def test_one_section_is_shown_and_the_others_are_not(self):
-        """Always stacked, always one at a time: the drawer is a fixed-height
-        column, and two open sections in it is two half-readable ones."""
-        shown = mc_llm_chat_panel._show_section("character")
+    def test_one_surface_is_open_and_the_others_are_not(self):
+        shown = [update.get("visible") for update in mc_llm_chat_panel._screens("character")]
 
-        assert [update.get("visible") for update in shown] == [False, True, False]
+        assert shown.count(True) == 1
+        assert shown[mc_llm_chat_panel.SCREENS.index("character")] is True
 
-    def test_a_section_it_has_never_heard_of_falls_back_to_the_first(self):
-        assert mc_llm_chat_panel._show_section("")[0].get("visible") is True
+    def test_closing_leaves_the_conversation_alone_on_screen(self):
+        assert all(update.get("visible") is False
+                   for update in mc_llm_chat_panel._close_screens())
+
+    def test_a_surface_it_has_never_heard_of_opens_nothing(self):
+        """Better a menu that did not open than a screen drawn over another."""
+        assert all(update.get("visible") is False
+                   for update in mc_llm_chat_panel._screens("elsewhere"))
+
+    def test_opening_the_menu_puts_the_message_actions_away(self, store):
+        """The action sheet applies to a message the reader can no longer see,
+        and a sheet left open under another sheet is the second half of every
+        "why is this still here?"."""
+        conversation = self._thread(store)
+        screens = len(mc_llm_chat_panel.SCREENS)
+
+        answered = mc_llm_chat_panel._open_nav("Ada", conversation.identifier)
+
+        assert answered[screens + 2] == mc_llm_chat_panel.NO_SELECTION
+        assert answered[screens + 5].get("visible") is False
+
+    def test_tapping_a_thread_opens_it_and_comes_home(self, store):
+        conversation = self._thread(store)
+
+        answered = mc_llm_chat_panel._open_thread_home("Ada", conversation.identifier)
+
+        assert answered[0] == conversation.identifier
+        assert all(update.get("visible") is False
+                   for update in answered[-len(mc_llm_chat_panel.SCREENS):])
+
+    def test_a_new_thread_comes_home_too(self, store):
+        self._thread(store)
+
+        answered = mc_llm_chat_panel._new_thread("Ada", "")
+
+        assert all(update.get("visible") is False
+                   for update in answered[-len(mc_llm_chat_panel.SCREENS):])
+
+    def test_the_threads_screen_opens_on_the_current_list(self, store):
+        self._thread(store)
+
+        answered = mc_llm_chat_panel._open_threads("Ada", "")
+
+        assert answered[mc_llm_chat_panel.SCREENS.index("threads")].get("visible") is True
+        assert len(answered[-1].get("choices")) == 1
+
+    def test_the_persona_screen_opens_on_what_is_saved(self, store):
+        from prompt_master.chat.characters import Persona, save_persona
+        import mc_llm_paths
+
+        save_persona(mc_llm_paths.app_paths(), Persona(name="Rin", description="a reader"))
+
+        answered = mc_llm_chat_panel._open_persona()
+
+        assert answered[-2:] == ["Rin", "a reader"]
+
+
+class TestTheComposer:
+    """Send becomes Stop in the same place, and editing borrows that place."""
+
+    def _thread(self, store):
+        from prompt_master.chat.history import ASSISTANT, ChatStore, USER
+
+        chats = ChatStore(store / "chats")
+        conversation = chats.new("Ada")
+        conversation.append(USER, "ask")
+        conversation.append(ASSISTANT, "reply")
+        chats.save(conversation)
+        return conversation
+
+    def test_only_one_of_send_and_stop_is_ever_on_screen(self):
+        idle_send, idle_stop = mc_llm_chat_panel.IDLE
+        busy_send, busy_stop = mc_llm_chat_panel.BUSY
+
+        assert (idle_send.get("visible"), idle_stop.get("visible")) == (True, False)
+        assert (busy_send.get("visible"), busy_stop.get("visible")) == (False, True)
+        # And the one that is not on screen is disabled as well, so a keyboard
+        # shortcut aimed at a hidden Stop finds a control that refuses rather
+        # than one that quietly cancels nothing.
+        assert idle_stop.get("interactive") is False
+        assert busy_send.get("interactive") is False
+
+    def test_editing_replaces_the_composer_rather_than_growing_the_panel(self, store):
+        conversation = self._thread(store)
+
+        row, box, composer, sheet = mc_llm_chat_panel._open_editor(
+            "Ada", conversation.identifier, 1)
+
+        assert row.get("visible") is True
+        assert box.get("value") == "reply"
+        assert composer.get("visible") is False
+        assert sheet.get("visible") is False
+
+    def test_saving_an_edit_comes_back_to_the_composer(self, store):
+        conversation = self._thread(store)
+        order = mc_llm_chat_panel.SELECTION_ORDER
+
+        saved = mc_llm_chat_panel._commit_edit("Ada", conversation.identifier, 1, "changed")
+        shown = dict(zip(order, saved[5:]))
+
+        assert shown["edit"].get("visible") is False
+        assert shown["composer"].get("visible") is True
+
+    def test_the_header_says_who_and_which_thread(self, store):
+        conversation = self._thread(store)
+        conversation.title = "harbour at night"
+
+        heading = mc_llm_chat_panel._heading(None, conversation)
+
+        assert "Ada" in heading and "harbour at night" in heading
+
+    def test_the_header_survives_having_no_thread_at_all(self):
+        assert "No thread" in mc_llm_chat_panel._heading("", None)
+
+    def test_the_attachment_is_not_in_the_layout_until_it_is_asked_for(self):
+        _open, row, _note = mc_llm_chat_panel._clear_attachment()[:3]
+
+        assert row.get("visible") is False
+
+    def test_removing_the_picture_clears_the_box_as_well(self):
+        """A row put away with an image still in it is an image that goes with
+        the next message and cannot be seen."""
+        opened, _row, image, _note = mc_llm_chat_panel._clear_attachment()
+
+        assert opened is False and image is None
 
     def test_the_image_box_warns_before_a_message_is_written(self, store, monkeypatch):
         """Whether a picture can be sent depends on the model running, and
@@ -443,6 +565,67 @@ class TestShell:
             visible = [update.get("visible") for update in updates[:modes]]
 
             assert visible.count(True) == 1
+
+    def test_the_shell_bar_gives_way_to_conversations_own_header(self):
+        """Two menus and two state chips above one transcript is one of each
+        too many: Conversation draws them beside the character and the thread,
+        so the shell\u2019s bar is not drawn at all while it is open."""
+        modes = len(mc_llm_studio.MODES)
+
+        opened = mc_llm_studio._switch("chat")
+        elsewhere = mc_llm_studio._switch("prompt")
+
+        assert opened[modes + 1].get("visible") is False
+        assert elsewhere[modes + 1].get("visible") is True
+
+    def test_switching_workspace_closes_the_sheet_that_chose_it(self):
+        """A mode chooser still open over the mode it has just chosen is a
+        control asking the question again."""
+        modes = len(mc_llm_studio.MODES)
+        answered = mc_llm_studio._switch("minimax")
+
+        sheets = answered[modes + 3:modes + 3 + len(mc_llm_studio.SHEETS)]
+        assert all(update.get("visible") is False for update in sheets)
+
+    def test_one_sheet_is_open_at_a_time(self):
+        shown = [update.get("visible") for update in mc_llm_studio._sheet("model")]
+
+        assert shown.count(True) == 1
+        assert shown[mc_llm_studio.SHEETS.index("model")] is True
+        assert all(update.get("visible") is False for update in mc_llm_studio._sheet(""))
+
+    def test_the_state_control_says_the_state_in_one_word(self, store, monkeypatch):
+        """A button\u2019s label is text, and text is the one thing a theme
+        cannot restyle into invisibility."""
+        import mc_llm_runtime
+
+        def status(configured=True, running=False):
+            return {"configured": configured, "has_runtime": configured,
+                    "has_model": configured, "running": running, "model": "thinker.gguf",
+                    "quantization": "Q4_K_M", "device": "RTX 3090", "mode": "gpu",
+                    "sees": True, "placement": None, "report": mc_llm_runtime.Report(),
+                    "resident_bytes": 0}
+
+        monkeypatch.setattr(mc_llm_runtime.runtime, "status", lambda: status(running=True))
+        assert "Loaded" in mc_llm_studio._chip_label()
+
+        monkeypatch.setattr(mc_llm_runtime.runtime, "status", lambda: status(running=False))
+        assert "Unloaded" in mc_llm_studio._chip_label()
+
+        monkeypatch.setattr(mc_llm_runtime.runtime, "status", lambda: status(configured=False))
+        assert "Not set up" in mc_llm_studio._chip_label()
+        assert mc_llm_studio.LOADING in mc_llm_studio._chip_label(mc_llm_studio.LOADING)
+
+    def test_every_state_control_on_the_tab_says_the_same_thing(self, store):
+        """The one in the shell bar and the one in Conversation\u2019s header
+        are two controls describing one runtime."""
+        said = [update.get("value") for update in mc_llm_studio._chips()]
+
+        assert len(said) == 2 and len(set(said)) == 1
+
+    def test_the_workspace_name_is_the_selector_s_own_label(self):
+        assert "MiniMax H3" in mc_llm_studio._mode_title("minimax")
+        assert "LLM Studio" in mc_llm_studio._mode_title("nothing-of-the-kind")
 
     def test_setup_is_a_mode_rather_than_an_accordion(self):
         """The plain values went to the Settings page; what is left needs a
@@ -762,20 +945,53 @@ class TestThemeContract:
                 assert not re.search(r":\s*#[0-9a-fA-F]{3,8}\b", stripped), stripped
                 assert not re.search(r":\s*rgba?\(", stripped), stripped
 
-    def test_nothing_in_the_drawer_can_be_squashed_out_of_existence(self):
-        """The drawer is a flex column inside a workspace of fixed height, so
-        its sections shrink by default when they do not all fit -- and opening
-        the Threads accordion, which is as long as your thread history, took
-        that space out of Character underneath it. What that looks like is the
-        character controls emptying into a blank gap, with no scrollbar,
-        because from the drawer's point of view everything fitted."""
+    def test_nothing_in_a_sheet_can_be_squashed_out_of_existence(self):
+        """A sheet is a flex column of fixed height, so its children shrink by
+        default when they do not all fit -- and a thread list as long as your
+        history took that space out of the controls underneath it. What that
+        looks like is a screen emptying into a blank gap, with no scrollbar,
+        because from the sheet's point of view everything fitted."""
         from pathlib import Path
 
         css = (Path(__file__).resolve().parent.parent / "style.css").read_text(encoding="utf-8")
-        rule = css.split("#mc-llm-studio .mc-llm-drawer > *", 1)
+        rule = css.split("#mc-llm-studio .mc-llm-sheet > *", 1)
 
-        assert len(rule) == 2, "the drawer's sections may still be shrunk"
+        assert len(rule) == 2, "a sheet's contents may still be shrunk"
         assert "flex: 0 0 auto" in rule[1].split("}", 1)[0]
+
+    def test_a_sheet_is_an_overlay_rather_than_a_row_in_the_layout(self):
+        """The whole responsive contract in one declaration: a surface that
+        opens takes no room, so nothing it opens over can be pushed anywhere --
+        least of all the composer, off the bottom of a phone."""
+        from pathlib import Path
+
+        css = (Path(__file__).resolve().parent.parent / "style.css").read_text(encoding="utf-8")
+        rule = css.split("#mc-llm-studio .mc-llm-sheet {", 1)[1].split("}", 1)[0]
+
+        assert "position: absolute" in rule
+        assert "inset: 0" in rule
+
+    def test_the_tab_root_is_the_box_the_shell_s_sheets_are_measured_against(self):
+        """Otherwise they are positioned against whatever the host happens to
+        have positioned further up the page, which is a different element under
+        every theme."""
+        from pathlib import Path
+
+        css = (Path(__file__).resolve().parent.parent / "style.css").read_text(encoding="utf-8")
+        rule = css.split("#mc-llm-studio {", 1)[1].split("}", 1)[0]
+
+        assert "position: relative" in rule
+
+    def test_the_conversation_workspace_is_the_box_the_sheets_are_measured_against(self):
+        """An overlay is only an overlay if something near it is positioned;
+        without this the sheets would be laid out against the page."""
+        from pathlib import Path
+
+        css = (Path(__file__).resolve().parent.parent / "style.css").read_text(encoding="utf-8")
+        rule = css.split("#mc-llm-studio .mc-llm-chat-workspace {", 1)[1].split("}", 1)[0]
+
+        assert "position: relative" in rule
+        assert "100dvh" in rule, "the fallback should survive a phone's address bar"
 
     def test_the_escaping_helper_neutralises_metadata_from_a_model_file(self):
         """general.name is free text out of somebody else's file, and it lands
@@ -1401,7 +1617,10 @@ class TestConversationDefaults:
             characters.DEFAULT_TOP_P
         assert mc_llm_chat_panel.sessions.ChatRequest(messages=[]).max_tokens == \
             characters.DEFAULT_MAX_REPLY_TOKENS
-        assert set(built) == {"status", "transcript", "persona", "drawer"}
+        # What the shell wires: the two state chips, the three secondary nav
+        # entries, and the handles it refreshes.
+        assert set(built) == {"status", "transcript", "header", "persona",
+                              "model", "setup", "modes", "chip"}
 
     def test_a_cleared_box_falls_back_to_the_character_then_to_the_default(self):
         from prompt_master.chat.characters import Character

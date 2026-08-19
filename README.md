@@ -1115,14 +1115,27 @@ output format, or a screen. Switching modes hides a workspace rather than
 rebuilding it, so a half-read reply survives a trip to Prompt Studio and back.
 The tab opens on the mode you left it on.
 
+### Getting about
+
+The top of the tab is a menu, the name of the workspace you are in, and a state
+chip reading *Loaded*, *Unloaded* or *Not set up*. **☰** opens the workspace
+chooser; the chip opens the model sheet. Both are overlays: they open over the
+tab and close again, so no workspace is ever laid out around them, and on a
+phone nothing they contain can push the thing you were using off the bottom of
+the window.
+
+Conversation hides that bar and draws the same three affordances into its own
+header, beside the character and the thread. **Model / Runtime**, **Setup** and
+**Switch mode** are also in its menu, which is where you leave Conversation from
+without going back to a row of pills above the transcript.
+
 ### Switching models
 
-The top of the tab is one line: the mode selector, a model **chooser**, a
-rescan, **Load**, **Unload**, and a state chip reading *Loaded*, *Unloaded*,
-*Loading…* or *Not set up*. Hovering the chip gives the detail — which model, on
-which device, at what context — and Setup\u2019s residency view has all of it in
-full. It is deliberately small: everything the top bar takes is taken from the
-conversation under it.
+The model sheet — the state chip, or **Model / Runtime** in either menu — holds
+a model **chooser**, a rescan, **Load**, **Unload**, and the state in full:
+which model, on which device, at what context, with a route on to Setup for the
+residency and the estimate. It is a sheet rather than a permanent row because
+everything a top bar takes is taken from the conversation under it.
 
 The chooser lists every `.gguf` under your models folder — the **LLM models
 folder** setting, or `models/` inside the LLM data directory — walked a few
@@ -1145,8 +1158,9 @@ is mentioned, and applying it is a press in **Setup**.
 
 ### Conversation, per message
 
-Click a message in the transcript and the actions for that message appear under
-it:
+Tap a message in the transcript and the actions for that message open in a
+sheet over the bottom of it — nothing is inserted between the transcript and the
+composer, so neither of them moves:
 
 | Action | What it does |
 | --- | --- |
@@ -1157,8 +1171,11 @@ it:
 | **Branch from here** | Copy the thread up to this message into a new one. The thread it came from is untouched. |
 | **Delete message** / **Delete from here** | One message, or that one and everything after it. |
 
-Tapping the same message again puts the bar away; tapping a different one moves
-it there. There is no per-message copy button — select the text and copy it.
+Tapping the same message again puts the sheet away; tapping a different one
+moves it there. **Edit** replaces the composer with an *Editing message* row
+rather than opening an editor between the transcript and the composer; Cancel
+gives you back whatever you had half-written. There is no per-message copy
+button — select the text and copy it.
 
 The transcript follows a reply while you are at the end of it and holds your
 place while you are not: scroll up to read something and new messages arrive
@@ -1166,14 +1183,23 @@ below without moving what you are looking at; scroll back to the bottom and it
 starts following again.
 
 The threads list, the character (chat with, edit, or create) and your persona
-are in a drawer behind **☰ Threads & character**, closed by default — with it
-closed the conversation has the whole browser window. The drawer holds one
-section at a time, chosen at its top, so the one you are using has the room;
-the button that opened it reads **✕ Close panel** while it is open, and puts it
-away again. The workspace sizes itself
-to the window: the composer is measured first and sits on the bottom edge, the
-transcript takes whatever is left, and the page does not scroll — the thread
-does.
+are behind **☰** in the header, each on its own screen, and every one of them is
+an overlay: it opens over the conversation, has a way back, and leaves the
+transcript exactly where it was — same scroll position, same unsent message —
+when it closes. One at a time, always.
+
+The composer is one row: attach, the message box, and one primary action that
+reads **Send** and becomes **Stop** in the same place while a reply is
+streaming. Enter sends, Shift+Enter starts a new line, Ctrl/Cmd+Enter sends from
+anywhere in the box, and Escape stops a run. An attached image is a small chip
+above the composer, there only once you have attached one, with **Remove**
+beside it.
+
+The workspace sizes itself to the window: the header and the composer are
+measured first, the transcript takes whatever is left, and the page does not
+scroll — the thread does. That is the same layout at 320px as on a desktop; what
+changes with the width is that the sheets become a side panel instead of
+covering the screen.
 
 ### While it is working
 
@@ -1182,8 +1208,8 @@ in flight, with the seconds it has been running beside it, and both go away when
 the run ends. It sits inside the status line that is already there, so nothing
 on the page moves when a reply starts. It is indeterminate on purpose — nothing
 knows how long a reply will be — and under `prefers-reduced-motion` it stops
-moving and stays lit. In the top bar, the state chip pulses while the model is
-loading.
+moving and stays lit. The state chip says *Loading…* while the model is being
+read off the disk.
 
 ### Where the log is
 
@@ -1205,7 +1231,7 @@ llama-server ready — all layers on the GPU, 7,168 token context, 18.1 GB VRAM
 llama.cpp reports 31/31 layers on the GPU, CUDA0 16.6 GB, CPU_Mapped 0.3 GB, CUDA0 KV 0.9 GB
 ```
 
-The same summary is on the state chip's tooltip and in Setup. A small host
+The same summary is in the model sheet and in Setup. A small host
 buffer is normal — many models keep their token embeddings there even on a full
 offload. A tenth or more of the weights in system RAM is not, and is called out
 as a warning: it means the card had less room than this extension could see,

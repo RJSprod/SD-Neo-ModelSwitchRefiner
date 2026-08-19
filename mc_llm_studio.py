@@ -2,8 +2,18 @@
 
 This module is the shell. It builds the tab, switches between the modes, and
 owns the two things all of them share -- the residency status that makes memory
-decisions visible (section 14), and a top bar carrying the one control every
-mode needs, which is *which model is running*.
+decisions visible (section 14), and the one control every mode needs, which is
+*which model is running*.
+
+Both of those used to be a top bar: a mode selector, a model chooser, a rescan,
+Load, Unload and a status line, above every workspace, at all times. That is six
+controls' worth of configuration a reader has to look past to reach the thing
+they opened the tab for, and on a narrow display it wrapped to four rows and
+pushed the workspace under it off the bottom of the window. So the bar is now a
+menu, a title and a state chip, and everything it used to carry lives in two
+sheets that open over the tab and close again -- the workspace chooser and the
+model sheet. Nothing is gone; it is one tap away instead of permanently on
+screen, which is the difference between chrome and content.
 
 Where setup went, and why
 -------------------------
@@ -20,8 +30,8 @@ in its own right and had no business being a footnote to a chat window.
 So the plain values are registered as Forge settings (see
 ``scripts/model_chain.py``, ``mc_llm_state.HOSTED`` and
 ``mc_llm_paths.OPT_MODELS``) and the panel is a mode of its own, **Setup**,
-reached from the same selector as the other three. What is left in the top bar
-is a model chooser filled from the models folder, and Load and Unload -- start
+reached from the same selector as the other three. What is left in the model
+sheet is a chooser filled from the models folder, and Load and Unload -- start
 the thing with what was chosen last, or give the VRAM back -- because that is
 the whole of what switching models day to day actually needs.
 
@@ -122,34 +132,82 @@ def _build():
     with gr.Blocks(analytics_enabled=False) as block:
         with gr.Column(elem_id=ui.ident("studio"), elem_classes=ui.classes("studio")):
 
-            # One row, six controls, no nested columns. The nesting was what
-            # let the status line be given a column of its own and wrap into
-            # ten lines: a Column takes the width a Row's scale gives it and
-            # then makes its contents fit *that*, however tall that turns out
-            # to be. Flat, every control is sized by what it is -- the chooser
-            # takes the slack, everything else is as wide as its own text --
-            # and the bar is one line tall.
-            with gr.Row(elem_classes=ui.classes("topbar")):
+            # -- the shell bar: a menu, a title and a state ----------------- #
+            #
+            # Three controls, one line, and none of them is a model filename.
+            # This bar used to carry the mode selector, the chooser, a rescan,
+            # Load, Unload and a status line, which is six controls' worth of
+            # configuration above every workspace at all times -- and on a
+            # phone it wrapped to four rows and pushed the conversation off the
+            # bottom of the window. What replaced it is what application
+            # chrome is for: a way in to everything, and nothing else.
+            #
+            # It is hidden while Conversation is open, because Conversation
+            # draws the same three affordances into its own header, where they
+            # sit beside the character and the thread rather than above them.
+            with gr.Row(visible=(initial != "chat"),
+                        elem_id=ui.ident("shellbar"),
+                        elem_classes=ui.classes("shellbar")) as shellbar:
+                menu = gr.Button("\u2630", size="sm", scale=0, min_width=44,
+                                 elem_id=ui.ident("menu"),
+                                 elem_classes=ui.classes("icon-button"))
+                title = gr.HTML(_mode_title(initial), elem_id=ui.ident("mode", "title"),
+                                elem_classes=ui.classes("shell-title"))
+                chip = gr.Button(_chip_label(), size="sm", scale=0, min_width=0,
+                                 elem_id=ui.ident("runtime"),
+                                 elem_classes=ui.classes("chip-button"))
+
+            # -- the sheets ------------------------------------------------- #
+            #
+            # Both are absolutely positioned inside this column by style.css,
+            # so opening either costs the workspace under it nothing: no mode
+            # is re-laid-out, no composer moves, and closing one puts back
+            # exactly what was there. Only one is ever open, which is what
+            # every handler below returns rather than toggles.
+
+            with gr.Column(visible=False, elem_id=ui.ident("mode", "sheet"),
+                           elem_classes=ui.classes("sheet", "sheet-shell")) as mode_sheet:
+                with gr.Row(elem_classes=ui.classes("sheet-head")):
+                    gr.Markdown("#### Workspace")
+                    close_modes = gr.Button("\u2715", size="sm", scale=0, min_width=44,
+                                            elem_classes=ui.classes("icon-button"))
+                # The selector is still one Radio over one list of modes -- the
+                # same control, in a sheet instead of a bar. Which mode is open
+                # is a thing a radio says by construction, and four buttons
+                # would have had to be told.
                 mode = gr.Radio(
                     label=None, show_label=False, choices=list(MODES), value=initial,
-                    scale=0, min_width=0,
+                    container=False,
                     elem_id=ui.ident("mode"), elem_classes=ui.classes("modes"))
-                chooser = gr.Dropdown(
-                    label=None, show_label=False, choices=_model_choices(),
-                    value=_current_model(), scale=1, min_width=160,
-                    elem_id=ui.ident("model"),
-                    elem_classes=ui.classes("model-choice"))
-                rescan = gr.Button("\u21bb", size="sm", scale=0, min_width=0,
-                                   elem_id=ui.ident("model", "rescan"),
-                                   elem_classes=ui.classes("icon-button"))
-                load = gr.Button("Load", variant="primary", size="sm", scale=0, min_width=0,
-                                 elem_id=ui.ident("load"),
-                                 elem_classes=ui.classes("topbar-button"))
-                unload = gr.Button("Unload", variant="stop", size="sm", scale=0, min_width=0,
-                                   elem_id=ui.ident("unload"),
-                                   elem_classes=ui.classes("topbar-button"))
+                model_from_modes = gr.Button("Model / Runtime", size="sm",
+                                             elem_classes=ui.classes("nav-entry"))
+
+            with gr.Column(visible=False, elem_id=ui.ident("model", "sheet"),
+                           elem_classes=ui.classes("sheet", "sheet-shell")) as model_sheet:
+                with gr.Row(elem_classes=ui.classes("sheet-head")):
+                    gr.Markdown("#### Model and runtime")
+                    close_model = gr.Button("\u2715", size="sm", scale=0, min_width=44,
+                                            elem_classes=ui.classes("icon-button"))
                 runtime_status = gr.HTML(_runtime_line(), elem_id=ui.ident("runtime", "status"),
                                          elem_classes=ui.classes("runtime-state"))
+                chooser = gr.Dropdown(
+                    label="Model", choices=_model_choices(),
+                    value=_current_model(),
+                    elem_id=ui.ident("model"),
+                    elem_classes=ui.classes("model-choice"))
+                with gr.Row():
+                    rescan = gr.Button("\u21bb Rescan", size="sm",
+                                       elem_id=ui.ident("model", "rescan"))
+                    load = gr.Button("Load", variant="primary", size="sm",
+                                     elem_id=ui.ident("load"))
+                    unload = gr.Button("Unload", variant="stop", size="sm",
+                                       elem_id=ui.ident("unload"))
+                # The route out of the sheet and into the panel that has the
+                # runtime, the residency and the estimator in full. A model
+                # chooser can say which model; only Setup can say why it did
+                # not fit.
+                to_setup = gr.Button("Open Setup", size="sm",
+                                     elem_classes=ui.classes("nav-entry"))
 
             # Keyed by mode rather than zipped against MODES: a mode added to
             # the selector without a panel behind it should fail here, where
@@ -159,7 +217,7 @@ def _build():
                         "chat": mc_llm_chat_panel.build,
                         "minimax": mc_llm_minimax_panel.build,
                         "setup": _setup_panel}
-            views, settings = [], None
+            views, settings, conversation = [], None, None
             for _, value in MODES:
                 # visible= comes from the stored mode rather than being
                 # hard-coded. It used to be hard-coded to Prompt Studio while
@@ -174,31 +232,122 @@ def _build():
                     built = builders[value]()
                     if value == "setup":
                         settings = built
+                    if value == "chat":
+                        conversation = built
                 views.append(view)
 
-        mode.change(fn=_switch, inputs=[mode], outputs=views + [runtime_status], queue=False)
+        # -- wiring ------------------------------------------------------- #
 
-        rescan.click(fn=_rescan_models, outputs=[chooser, runtime_status], queue=False)
+        sheets = [mode_sheet, model_sheet]
+        # Both state controls say the same thing and are updated together: the
+        # one in this bar, and the one Conversation draws in its own header.
+        chips = [chip, conversation["chip"]]
+
+        mode.change(fn=_switch, inputs=[mode],
+                    outputs=views + [runtime_status, shellbar, title] + sheets + chips,
+                    queue=False)
+
+        menu.click(fn=lambda: _sheet("mode"), outputs=sheets, queue=False)
+        close_modes.click(fn=lambda: _sheet(""), outputs=sheets, queue=False)
+        close_model.click(fn=lambda: _sheet(""), outputs=sheets, queue=False)
+        # Conversation's own way in to the same two sheets. The panel has
+        # already closed its own surfaces by the time this runs; all that is
+        # left is to open the shell's.
+        for control in conversation["model"] + [chip, model_from_modes]:
+            control.click(fn=lambda: _sheet("model"), outputs=sheets, queue=False)
+        conversation["modes"].click(fn=lambda: _sheet("mode"), outputs=sheets, queue=False)
+        # Setup is a workspace, so getting to it is a mode switch: the radio is
+        # moved, which is what redraws the views and the bar through _switch.
+        for control in (to_setup, conversation["setup"]):
+            control.click(fn=lambda: (gr.update(value="setup"),) + tuple(_sheet("")),
+                          outputs=[mode] + sheets, queue=False)
+
+        rescanning = rescan.click(fn=_rescan_models, outputs=[chooser, runtime_status],
+                                  queue=False)
         # ``input`` and not ``change``: this code refills the chooser on load
         # and on every rescan, and ``change`` fires on the refill -- which
         # would re-record the model, and stop the running server, every time
         # the tab was opened.
-        _picked(chooser)(fn=_choose_model, inputs=[chooser],
-                         outputs=[runtime_status, settings["model"], settings["estimator"],
-                                  settings["notice"]], queue=False)
-        load.click(fn=_load_model,
-                   outputs=[runtime_status, settings["residency"], settings["estimator"]])
-        unload.click(fn=_unload_model,
-                     outputs=[runtime_status, settings["residency"]], queue=False)
+        chosen = _picked(chooser)(fn=_choose_model, inputs=[chooser],
+                                  outputs=[runtime_status, settings["model"],
+                                           settings["estimator"], settings["notice"]],
+                                  queue=False)
+        loading = load.click(
+            fn=_load_model,
+            outputs=[runtime_status, settings["residency"], settings["estimator"]])
+        # Said before the load rather than after it: reading twenty gigabytes
+        # off a disk is long enough that a control which looks inert gets
+        # pressed twice, and the chip is the only thing on screen that can say
+        # the press landed.
+        load.click(fn=lambda: _chips(LOADING), outputs=chips, queue=False)
+        unloading = unload.click(fn=_unload_model,
+                                 outputs=[runtime_status, settings["residency"]], queue=False)
 
-        # The status line and the residency view are built once, when the WebUI
-        # starts, and read settings the Settings page can change afterwards.
-        # Refreshing them on load is what stops the tab describing a placement
-        # decided under a policy that has since been changed.
-        block.load(fn=_on_load,
-                   outputs=[runtime_status, settings["residency"], chooser], queue=False)
+        # The state chips are refreshed after anything that can have changed
+        # the runtime's state, rather than by every one of those handlers
+        # returning two more values: what they each return is the *detail*,
+        # and the chip is one word read back off the runtime itself.
+        opened = block.load(fn=_on_load,
+                            outputs=[runtime_status, settings["residency"], chooser],
+                            queue=False)
+        for dependency in (chosen, loading, unloading, opened, rescanning):
+            dependency.then(fn=_chips, outputs=chips, queue=False)
 
     return block
+
+
+def _sheet(name: str = "") -> list:
+    """Show one shell sheet and hide the other. ``""`` closes both."""
+    return [gr.update(visible=(name == key)) for key in SHEETS]
+
+
+SHEETS = ("mode", "model")
+"""The shell's overlay sheets, in the order :func:`_sheet` answers in."""
+
+
+def _mode_title(chosen: str) -> str:
+    """Which workspace is open, for the shell bar.
+
+    The selector's own label, looked up rather than restated: a title that has
+    its own copy of the mode names is a title that can disagree with the
+    control that set it.
+    """
+    named = dict((value, label) for label, value in MODES).get(chosen, "LLM Studio")
+    return (f'<div class="{ui.PREFIX}-heading">'
+            f'<span class="{ui.PREFIX}-heading-who">{ui.escape(named)}</span>'
+            f'</div>')
+
+
+def _chip_label(label: str | None = None) -> str:
+    """The runtime's state as a button label: a mark and one word.
+
+    The same words the status chip carries, and a mark rather than a colour in
+    front of them: a button's label is text, and text is the one thing a theme
+    cannot restyle into invisibility. What the mark cannot say -- loaded as
+    what, on which device, at what context -- is a tap away in the model sheet,
+    which is also the only place anything can be done about it.
+    """
+    try:
+        return _chip_words(label)
+    except Exception:
+        logger.debug("Model Chain: could not read the runtime state", exc_info=True)
+        return "\u25cc Unavailable"
+
+
+def _chip_words(label: str | None = None) -> str:
+    import mc_llm_runtime
+
+    if label:
+        return f"\u25cc {label}"
+    state = mc_llm_runtime.runtime.status()
+    if not state["configured"]:
+        return "\u26a0 Not set up"
+    return "\u25cf Loaded" if state["running"] else "\u25cb Unloaded"
+
+
+def _chips(label: str | None = None) -> tuple:
+    """The same label for every state chip on the tab."""
+    return tuple(gr.update(value=_chip_label(label)) for _ in range(2))
 
 
 def _picked(component):
@@ -230,11 +379,19 @@ def _switch(chosen):
     Rebuilding would lose whatever was on screen -- a half-read reply, a prompt
     someone is editing -- every time the selector moved, which is the one thing
     a mode switch must not do.
+
+    Everything after the views is the chrome the switch decides: the runtime
+    line, whether the shell bar is drawn at all (Conversation carries its own),
+    which workspace the title names, and the sheets, which close -- a mode
+    chooser that stayed open over the mode it had just chosen would be asking
+    the question again.
     """
     import mc_llm_state
 
     mc_llm_state.remember(mode=chosen)
-    return [gr.update(visible=(chosen == value)) for _, value in MODES] + [_runtime_line()]
+    return ([gr.update(visible=(chosen == value)) for _, value in MODES]
+            + [_runtime_line(), gr.update(visible=(chosen != "chat")), _mode_title(chosen)]
+            + _sheet("") + list(_chips()))
 
 
 # --------------------------------------------------------------------------- #
@@ -655,8 +812,8 @@ def _setup_panel() -> dict:
                 "A model can live anywhere on the machine — it is read, not started, so it "
                 "does not have to be copied in. Press Browse for a file dialog, or paste a "
                 "path; a folder is as good as a file when it holds one model. Anything under "
-                f"the models folder ({_models_folder()}) is also offered in the chooser at the "
-                "top of the tab, so it can be switched to without coming back here.",
+                f"the models folder ({_models_folder()}) is also offered in the chooser in the "
+                "model sheet, so it can be switched to without coming back here.",
                 elem_classes=ui.classes("hint"))
             model_path = gr.Textbox(
                 label="GGUF model", value=str(configuration.model or ""),

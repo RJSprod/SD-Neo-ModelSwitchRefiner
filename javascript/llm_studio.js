@@ -97,9 +97,11 @@
 
         field.addEventListener("keydown", function (event) {
             if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-                // Plain Enter and Shift+Enter both keep their normal meaning:
-                // a newline. A composer that sends on Enter loses a paragraph
-                // the first time somebody writes one.
+                // Ctrl/Cmd+Enter submits from any composer, however tall it
+                // is. Plain Enter is left to the host: Gradio submits a box
+                // declared one line tall -- Conversation's -- and breaks the
+                // line in the taller ones, which is what a composer somebody
+                // is writing a paragraph in should do.
                 if (press(panel.submit)) {
                     event.preventDefault();
                     event.stopPropagation();
@@ -208,15 +210,16 @@
 
     // -- a section that opens stays where it can be read -------------------- //
 
-    // The drawer is a fixed-height scrolling column: the threads, the
-    // character and the persona, in as much room as the window has left. Open
-    // a section near the bottom of it and what you opened is below the fold,
-    // which is a thing browsers do not fix for you -- the click landed on the
-    // heading, and the heading was already visible.
+    // Conversation's screens are fixed-height scrolling sheets: the menu, the
+    // threads, the character, the persona, in the room the workspace has. Open
+    // a disclosure near the bottom of one -- the character editor, the advanced
+    // sampling settings -- and what you opened is below the fold, which is a
+    // thing browsers do not fix for you: the click landed on the heading, and
+    // the heading was already visible.
     //
     // So the section is brought back after it has opened. Not by the browser's
     // own scrollIntoView: that scrolls every scrollable ancestor including the
-    // page, and the page is not meant to move. This scrolls the drawer, by the
+    // page, and the page is not meant to move. This scrolls the sheet, by the
     // smallest amount that helps, and nothing else.
 
     // How long to wait for the section to have opened. A frame is not enough
@@ -224,7 +227,7 @@
     // notice would feel like the panel jumping on its own.
     const OPEN_SETTLE_MS = 80;
 
-    // What the drawer's scroll position should become once a section has
+    // What the sheet's scroll position should become once a section has
     // opened, or null to leave it alone. Split out from the DOM so the rule
     // can be read and tested as arithmetic.
     function sectionScroll(section, view) {
@@ -232,7 +235,7 @@
         const bottom = top + section.height;
         const seen = view.scrollTop + view.clientHeight;
         if (top >= view.scrollTop && bottom <= seen) return null;   // all of it is there
-        // Taller than the drawer: show its beginning, because that is where
+        // Taller than the sheet: show its beginning, because that is where
         // the control you just pressed is.
         if (section.height >= view.clientHeight) return top;
         // Otherwise the smallest move that brings the end of it into view.
@@ -240,30 +243,44 @@
         return top;
     }
 
-    function keepInView(drawer, target) {
+    function keepInView(sheet, target) {
         let section = target;
-        while (section && section.parentElement !== drawer) section = section.parentElement;
+        while (section && section.parentElement !== sheet) section = section.parentElement;
         if (!section) return;
         const wanted = sectionScroll(
-            {top: section.offsetTop - drawer.offsetTop, height: section.offsetHeight},
-            {scrollTop: drawer.scrollTop, clientHeight: drawer.clientHeight});
-        if (wanted !== null) drawer.scrollTop = wanted;
+            {top: section.offsetTop - sheet.offsetTop, height: section.offsetHeight},
+            {scrollTop: sheet.scrollTop, clientHeight: sheet.clientHeight});
+        if (wanted !== null) sheet.scrollTop = wanted;
     }
 
-    function wireDrawer() {
-        const drawer = byId("mc-llm-chat-drawer");
-        if (!drawer || drawer.dataset.mcLlmInView === "1") return;
-        drawer.dataset.mcLlmInView = "1";
-        drawer.addEventListener("click", function (event) {
+    // The scrolling surfaces this applies to, by this extension's own ids.
+    const SHEETS = [
+        "mc-llm-chat-nav",
+        "mc-llm-chat-threads",
+        "mc-llm-chat-character",
+        "mc-llm-chat-persona",
+        "mc-llm-model-sheet",
+        "mc-llm-mode-sheet",
+    ];
+
+    function wireSheet(id) {
+        const sheet = byId(id);
+        if (!sheet || sheet.dataset.mcLlmInView === "1") return;
+        sheet.dataset.mcLlmInView = "1";
+        sheet.addEventListener("click", function (event) {
             const target = event.target;
             window.setTimeout(function () {
                 try {
-                    keepInView(drawer, target);
+                    keepInView(sheet, target);
                 } catch (error) {
-                    console.error("Model Chain: could not keep the drawer in view", error);
+                    console.error("Model Chain: could not keep the sheet in view", error);
                 }
             }, OPEN_SETTLE_MS);
         });
+    }
+
+    function wireSheets() {
+        SHEETS.forEach(wireSheet);
     }
 
     // -- how long the request in flight has been in flight ------------------ //
@@ -418,7 +435,7 @@
         try {
             PANELS.forEach(wireComposer);
             wireTranscript();
-            wireDrawer();
+            wireSheets();
             watchActivity();
             tick();
             watchWindow();
