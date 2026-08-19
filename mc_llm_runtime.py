@@ -675,6 +675,8 @@ class Runtime:
             configuration = config()
             return {
                 "configured": configuration.configured,
+                "has_runtime": configuration.runtime is not None,
+                "has_model": configuration.model is not None,
                 "running": self._running,
                 "model": Path(configuration.model).name if configuration.model else "",
                 "quantization": configuration.quantization,
