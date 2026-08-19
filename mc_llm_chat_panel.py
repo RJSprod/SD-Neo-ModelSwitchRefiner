@@ -1004,7 +1004,7 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
     # reliable about starting with the space that needs.
     join_space = bool(opening) and not opening[-1].isspace()
     rows, positions = _view(conversation)
-    yield cancel, rows, positions, "", None, ui.notice("Starting…"), *busy
+    yield cancel, rows, positions, "", None, ui.working("Starting…"), *busy
 
     try:
         for event in sessions.conversation(request, cancel):
@@ -1018,7 +1018,7 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
                 yield cancel, rows, positions, "", None, gr.update(), *busy
             elif event.kind == sessions.STATUS:
                 rows, positions = _view(conversation)
-                yield cancel, rows, positions, "", None, ui.notice(event.text), *busy
+                yield cancel, rows, positions, "", None, ui.working(event.text), *busy
             elif event.kind in (sessions.DONE, sessions.CANCELLED):
                 whole = event.text if event.kind == sessions.DONE and not opening else streamed
                 message.text = clean_reply(whole or streamed, character, persona)
@@ -1103,7 +1103,9 @@ def _decimal(value, *fallbacks) -> float:
 def _cancel(cancel):
     if cancel is not None:
         cancel.cancel()
-    return ui.notice("Stopping…", "warn")
+    # Still busy: a stop asks the run to finish, and what is already streaming
+    # keeps arriving until it does. The bar stays until the run says it stopped.
+    return ui.working("Stopping…", "warn")
 
 
 def _context_size() -> int:

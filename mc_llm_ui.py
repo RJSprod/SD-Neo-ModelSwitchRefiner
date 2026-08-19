@@ -124,6 +124,37 @@ def notice(text: str, kind: str = "info") -> str:
             f'{escape(text)}</div>')
 
 
+def working(text: str, kind: str = "info") -> str:
+    """A status line for something that is still happening.
+
+    The same line :func:`notice` draws, plus one class. Everything the class
+    turns on is drawn by ``style.css`` in space the line already occupies -- a
+    two-pixel bar along its bottom edge -- because the one thing a progress
+    indicator in a chat window must not do is push the conversation down every
+    time a reply starts. It is deliberately indeterminate: nothing here knows
+    how many tokens a reply will be, and a bar that fills to a number somebody
+    invented is a worse answer than one that only claims the request is alive.
+
+    Which lines get it is a decision about *truth*, not about decoration: a
+    busy line is one a run is still working behind. "Reply complete." and
+    "Cancelled." are not, and neither is an error -- a bar still sweeping under
+    a finished run says the opposite of what the sentence beside it says.
+
+    The text is wrapped rather than left bare so that the elapsed-time readout
+    ``llm_studio.js`` adds has somewhere to sit that is not inside the
+    sentence. Without that file the line reads exactly as it does here.
+
+    The bar is an element rather than a ``::after`` on the line, for the reason
+    the stylesheet gives about the host's own progress bar and its tests then
+    hold the whole file to: a pseudo-element is somewhere a theme may already
+    be drawing, and an element this extension created is somewhere no theme
+    has ever heard of.
+    """
+    return (f'<div class="{PREFIX}-notice {PREFIX}-notice-{kind} {PREFIX}-busy" role="status">'
+            f'<span class="{PREFIX}-busy-text">{escape(text)}</span>'
+            f'<span class="{PREFIX}-busy-bar" aria-hidden="true"></span></div>')
+
+
 def state(label: str, kind: str = "info", detail: str = "") -> str:
     """The runtime's state as one word, with the detail on hover.
 

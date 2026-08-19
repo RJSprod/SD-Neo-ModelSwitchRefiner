@@ -4,7 +4,7 @@
 // JavaScript focused on enhancement, not core business logic. Python should
 // remain authoritative for model state, persistence, inference, and memory
 // decisions." Nothing here talks to a model, stores anything, or decides
-// anything. It does four things a browser is better placed to do than a
+// anything. It does five things a browser is better placed to do than a
 // server round trip:
 //
 //   * Ctrl/Cmd+Enter submits the composer that has focus;
@@ -13,7 +13,18 @@
 //   * Escape stops a run;
 //   * the conversation workspace is measured against the window, so the layout
 //     can fit the space it actually has rather than a space guessed in a
-//     stylesheet.
+//     stylesheet;
+//   * a status line that says something is in progress counts the seconds it
+//     has been in progress for.
+//
+// The counter is the one that has to justify itself, because the server could
+// in principle have written the number. It could not have kept writing it: a
+// status is repainted when the run yields, and the whole complaint that led to
+// this was runs that yield nothing for a minute at a time while llama-server
+// loads and reprocesses a prompt. A clock that stops during the wait it is
+// there to measure is worse than no clock. So the sweeping bar is CSS, which
+// runs without this file, and the number beside it is here, which is the only
+// place a second can pass without a round trip.
 //
 // The measuring is the one that needs a word. The workspace is meant to fit the
 // window -- the page does not scroll, the transcript does -- and how much room
@@ -195,6 +206,72 @@
         if (target) watch(target);
     }
 
+    // -- how long the request in flight has been in flight ------------------ //
+
+    // The status lines that can be busy. Named rather than searched for, for
+    // the same reason everything else here is: this file may not depend on
+    // Gradio's own DOM, and an id this extension chose is the only thing it
+    // can rely on being there.
+    const STATUSES = ["mc-llm-prompt-status", "mc-llm-chat-status", "mc-llm-minimax-status"];
+
+    // Below this the number says nothing anybody needs: every request is
+    // "starting" for a moment, and a readout that flickers 0s-1s-gone on a
+    // reply that arrived immediately is noise where the point was reassurance.
+    const ELAPSED_QUIET_SECONDS = 2;
+
+    function elapsedLabel(seconds) {
+        const whole = Math.max(Math.floor(seconds), 0);
+        if (whole < ELAPSED_QUIET_SECONDS) return "";
+        if (whole < 60) return whole + "s";
+        return Math.floor(whole / 60) + "m " + (whole % 60) + "s";
+    }
+
+    // One status line, at one moment. Returns the label it wrote, which is
+    // what makes the rule testable without a browser: a busy line that has
+    // just appeared starts the clock, a busy line that was already there keeps
+    // the clock it started with, and a line that is not busy stops it.
+    //
+    // The start time is kept on the holder rather than on the notice, because
+    // the notice is replaced wholesale every time the run says something new
+    // -- "Starting…", "Replying…" are three separate elements -- and a clock
+    // stored on it would restart at each of them. The holder is the component,
+    // and it survives the run.
+    function tickStatus(holder, now) {
+        const busy = holder.querySelector(".mc-llm-busy");
+        if (!busy) {
+            delete holder.dataset.mcLlmSince;
+            return "";
+        }
+        if (!holder.dataset.mcLlmSince) holder.dataset.mcLlmSince = String(now);
+
+        const label = elapsedLabel((now - Number(holder.dataset.mcLlmSince)) / 1000);
+        let readout = busy.querySelector(".mc-llm-busy-elapsed");
+        if (!readout) {
+            readout = document.createElement("span");
+            readout.className = "mc-llm-busy-elapsed";
+            busy.appendChild(readout);
+        }
+        if (readout.textContent !== label) readout.textContent = label;
+        return label;
+    }
+
+    function tick() {
+        const now = Date.now();
+        STATUSES.forEach(function (id) {
+            const holder = byId(id);
+            if (holder) tickStatus(holder, now);
+        });
+    }
+
+    function watchActivity() {
+        if (window.mcLlmElapsedWired) return;
+        window.mcLlmElapsedWired = true;
+        // A second, because the number is in seconds. Three querySelectors a
+        // second on an idle tab is not a cost worth optimising away, and an
+        // observer would fire far more often for the same answer.
+        window.setInterval(tick, 1000);
+    }
+
     // -- fit the workspace to the window ------------------------------------ //
 
     // Left under the workspace so a status line or a wrapped row of buttons
@@ -281,6 +358,8 @@
         try {
             PANELS.forEach(wireComposer);
             wireTranscript();
+            watchActivity();
+            tick();
             watchWindow();
             fit();
         } catch (error) {

@@ -292,6 +292,21 @@ class TestWhatTheConsoleIsTold:
         assert mc_broker.active() is None
         assert any("abandoned" in record.getMessage() for record in caplog.records)
 
+    def test_a_run_that_finished_is_not_also_called_abandoned(self, client, caplog):
+        """Gradio closes a handler's generator once it has consumed the last
+        event, so every completed reply raised GeneratorExit here a moment
+        after saying it was complete -- and a console reporting both read as
+        though every reply in the conversation had gone wrong at the end."""
+        with caplog.at_level("INFO", logger="model_chain"):
+            run = sessions.conversation(sessions.ChatRequest(messages=[]),
+                                        sessions.Cancellation())
+            drain(run)
+            run.close()
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("run finished" in message for message in messages)
+        assert not any("abandoned" in message for message in messages)
+
 
 class TestMinimaxRun:
     def test_it_emits_no_caption_without_an_image(self, client):
@@ -527,3 +542,75 @@ class TestRegistration:
         model_chain._on_script_unloaded()
 
         assert mc_broker.residencies() == []
+
+
+# --------------------------------------------------------------------------- #
+# The activity indicator
+# --------------------------------------------------------------------------- #
+#
+# What is being guarded here is not that a bar is drawn -- style.css draws it,
+# and a stylesheet is not a thing a test can watch move. It is *which lines get
+# it*, because that is the part that can be wrong: a status line still sweeping
+# under a run that finished says the opposite of the sentence printed on it,
+# and the whole point of the indicator is to be believed.
+
+
+class TestTheActivityIndicator:
+    def test_a_busy_line_is_a_notice_with_one_more_class(self, store):
+        """So a theme that styles notices still styles this, and the bar is the
+        only difference between the two."""
+        import mc_llm_ui as ui
+
+        assert 'class="mc-llm-notice mc-llm-notice-info mc-llm-busy"' in ui.working("Replying…")
+        assert "mc-llm-busy-bar" in ui.working("Replying…")
+        assert "mc-llm-busy" not in ui.notice("Reply complete.")
+
+    def test_it_escapes_what_it_is_given_like_every_other_status(self, store):
+        import mc_llm_ui as ui
+
+        assert "&lt;b&gt;" in ui.working("<b>")
+
+    def test_a_run_in_flight_says_so_and_a_finished_one_stops_saying_it(self, client, store):
+        """Read off one real run: every line up to the last carries the bar,
+        and the line that says the prompt is complete does not."""
+        import mc_llm_minimax_panel as minimax
+
+        drawn = [frame[3] for frame in minimax._enhance("a car", "video", None, 1234)
+                 if isinstance(frame[3], str)]
+
+        assert drawn, "the run drew no status at all"
+        assert all("mc-llm-busy" in line for line in drawn[:-1])
+        assert "mc-llm-busy" not in drawn[-1]
+
+    def test_a_warm_run_does_not_claim_to_be_starting_a_server(self, client, store,
+                                                               monkeypatch):
+        """It used to say "Starting llama-server…" before every message, which
+        was true when every message restarted it. A warm turn starts nothing."""
+        import mc_llm_runtime
+
+        monkeypatch.setattr(mc_llm_runtime.runtime, "running", lambda: True)
+        warm = texts(drain(sessions.conversation(sessions.ChatRequest(messages=[]),
+                                                 sessions.Cancellation())), sessions.STATUS)
+
+        monkeypatch.setattr(mc_llm_runtime.runtime, "running", lambda: False)
+        cold = texts(drain(sessions.conversation(sessions.ChatRequest(messages=[]),
+                                                 sessions.Cancellation())), sessions.STATUS)
+
+        assert "Starting llama-server…" not in warm
+        assert "Starting llama-server…" in cold
+
+    def test_stopping_is_still_in_flight(self, store):
+        """A stop asks the run to finish; what is already streaming keeps
+        arriving until it does, and the bar is what says so."""
+        import mc_llm_chat_panel as chat
+
+        assert "mc-llm-busy" in chat._cancel(sessions.Cancellation())
+
+    def test_the_chip_pulses_while_the_model_is_loading(self, host, store):
+        """The top bar has room for a dot and not for a bar, and Load is the
+        one press long enough that a chip which looks inert gets pressed
+        twice."""
+        import mc_llm_studio
+
+        assert "mc-llm-state-busy" in mc_llm_studio._runtime_line(mc_llm_studio.LOADING)
+        assert "mc-llm-state-busy" not in mc_llm_studio._runtime_line()

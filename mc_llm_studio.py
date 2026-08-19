@@ -452,7 +452,10 @@ def _runtime_state(label: str | None = None) -> str:
     detail = _runtime_detail(state)
 
     if label:
-        return ui.state(label, "info", detail)
+        # "busy" and not "info": the only thing that overrides the chip is a
+        # state it was told about because nothing has happened yet, and every
+        # one of them is a state something is happening *in*.
+        return ui.state(label, "busy", detail)
     if not state["configured"]:
         # Which of the two is missing decides what to do about it, so the
         # tooltip says which -- the chip only has room to say that neither is
@@ -991,11 +994,20 @@ def _estimate_html() -> str:
             f"header, so context capacity cannot be estimated for it. The context size you set "
             f"is still used.", "warn")
 
+    # VRAM the running server is holding. It belongs on the free side of every
+    # figure below, for the reason it belongs there in the negotiation itself:
+    # a re-placement stops that server first, so its own footprint is not a
+    # constraint on where it can go. A table drawn without this term reads a
+    # loaded model as a card with no room on it, and reports that the model
+    # currently answering at 7,168 tokens could not be given a context at all.
+    ours = mc_llm_runtime.runtime.resident_bytes()
+
     try:
         # reclaim=False: this panel is drawn when the tab is built and whenever
         # the accordion opens, and drawing a table is not a reason to evict
         # anybody's checkpoint.
-        negotiated = mc_llm_runtime.negotiate(configuration, described, reclaim=False)
+        negotiated = mc_llm_runtime.negotiate(configuration, described, reclaim=False,
+                                              already_ours=ours)
     except Exception as exc:
         return ui.notice(ui.failure(exc), "error")
 
@@ -1003,7 +1015,7 @@ def _estimate_html() -> str:
     estimate = negotiated.estimate
     per_token = estimate.kv_bytes_per_token
     reserve = mc_broker.safety_margin_bytes()
-    free = mc_broker.free_vram_bytes()
+    free = mc_broker.free_vram_bytes() + ours
     image_resident = mc_broker.resident_bytes(mc_broker.FAMILY_IMAGE)
 
     rows = []
