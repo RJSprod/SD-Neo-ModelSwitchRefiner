@@ -46,6 +46,15 @@ class _Component:
     def change(self, **kwargs):
         return self._record("change", kwargs)
 
+    def input(self, **kwargs):
+        """Gradio 4's user-input-only event.
+
+        Faithful because the distinction is load-bearing: ``change`` also fires
+        when the server replaces a value, so a picker that navigates on
+        ``change`` walks a folder deeper every time it refills its own dropdown.
+        """
+        return self._record("input", kwargs)
+
     def click(self, **kwargs):
         return self._record("click", kwargs)
 

@@ -375,7 +375,7 @@ class TestRuntimeSetup:
 
     def test_choosing_a_model_without_a_runtime_names_this_tab(self, store):
         """Not "Run Models and Hardware setup first", which is a dead end here."""
-        notice, _estimator = mc_llm_studio._apply_model("/models/thing.gguf", "")
+        notice, *_rest = mc_llm_studio._apply_model("/models/thing.gguf", "")
 
         assert "llama.cpp runtime above" in notice
         assert "Models and Hardware" not in notice
@@ -395,3 +395,233 @@ class TestRuntimeSetup:
 
     def test_the_device_dropdown_always_offers_something(self, store):
         assert mc_llm_studio._device_choices()
+
+    def test_a_cleared_context_box_is_answered_rather_than_raised(self, store):
+        """A gr.Number that has been emptied hands the handler None."""
+        assert "have to be numbers" in mc_llm_studio._save_context("auto", 4.0, None,
+                                                                   "f16", "f16")
+
+    def test_saving_the_context_settings_keeps_them(self, store):
+        import mc_llm_state
+
+        mc_llm_studio._save_context("fixed", 6.0, 32768, "q8_0", "q8_0")
+
+        prefs = mc_llm_state.preferences()
+        assert prefs["context_size"] == 32768
+        assert prefs["kv_type_k"] == "q8_0"
+
+
+class TestChoosingAModelByPath:
+    """The panel's second step, and the one a user got stuck on.
+
+    A path arrives from a text box, which means it arrives with whatever the
+    clipboard put around it. What these pin down is that the panel answers with
+    the file the user meant, and says so when that is not the file they typed.
+    """
+
+    @pytest.fixture
+    def ready(self, store, tmp_path_factory):
+        """An install with a runtime recorded, and a models folder outside it.
+
+        Outside deliberately: weights are located rather than contained, and a
+        user's 20 GB of GGUF lives on whichever drive had room for it.
+        """
+        import mc_llm_setup
+
+        runtime = store / mc_llm_setup.RUNTIME_DIRNAME
+        runtime.mkdir(parents=True)
+        server = runtime / "llama-server"
+        server.write_bytes(b"")
+        mc_llm_setup.record(server)
+        return tmp_path_factory.mktemp("models")
+
+    def test_a_windows_copy_as_path_is_accepted(self, ready):
+        model = ready / "thing.gguf"
+        model.write_bytes(b"x")
+
+        notice, _estimator, written, _mmproj = mc_llm_studio._apply_model(f'"{model}"', "")
+
+        assert "thing.gguf" in notice
+        assert written == str(model)
+
+    def test_pasting_the_models_folder_picks_the_model_in_it(self, ready):
+        """"My models path" is a folder to most people, and a folder holding
+        one model is not an ambiguous answer."""
+        model = ready / "thing.gguf"
+        model.write_bytes(b"x")
+
+        notice, _estimator, written, _mmproj = mc_llm_studio._apply_model(str(ready), "")
+
+        assert written == str(model)
+        assert "only model in that folder" in notice
+
+    def test_a_folder_of_several_asks_which_rather_than_failing_blankly(self, ready):
+        (ready / "a.gguf").write_bytes(b"x")
+        (ready / "b.gguf").write_bytes(b"x")
+
+        notice, _estimator, written, _mmproj = mc_llm_studio._apply_model(str(ready), "")
+
+        assert "2 models" in notice
+        assert written == {}  # gr.update() -- the box is left as the user typed it
+
+    def test_a_projector_beside_an_unpaired_model_is_mentioned_not_used(self, ready):
+        model = ready / "thing.gguf"
+        model.write_bytes(b"x")
+        (ready / "mmproj-thing-f16.gguf").write_bytes(b"x")
+
+        notice, _estimator, _written, mmproj = mc_llm_studio._apply_model(str(model), "")
+
+        assert mmproj == ""
+        assert "may be its vision projector" in notice
+
+    def test_a_projector_given_by_folder_is_resolved_into_the_box(self, ready):
+        model = ready / "thing.gguf"
+        model.write_bytes(b"x")
+        projector = ready / "mmproj-thing-f16.gguf"
+        projector.write_bytes(b"x")
+
+        _notice, _estimator, _written, mmproj = mc_llm_studio._apply_model(
+            str(model), str(ready))
+
+        assert mmproj == str(projector)
+
+    def test_a_missing_file_is_answered_with_a_sentence_and_not_a_toast(self, ready):
+        notice, _estimator, _written, _mmproj = mc_llm_studio._apply_model(
+            str(ready / "absent.gguf"), "")
+
+        assert "There is nothing at" in notice
+
+    def test_the_estimator_never_takes_the_click_down_with_it(self, ready, monkeypatch):
+        """Its output is one of four, so anything it raises used to lose the
+        other three -- the model was recorded and the panel said nothing."""
+        model = ready / "thing.gguf"
+        model.write_bytes(b"x")
+        monkeypatch.setattr(mc_llm_studio, "_estimate_html",
+                            lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+        notice, estimator, written, _mmproj = mc_llm_studio._apply_model(str(model), "")
+
+        assert "thing.gguf" in notice
+        assert written == str(model)
+        assert "boom" in estimator
+
+    def test_the_projector_suggestion_reads_a_quoted_path_too(self, ready):
+        model = ready / "thing.gguf"
+        model.write_bytes(b"x")
+        projector = ready / "mmproj-thing-f16.gguf"
+        projector.write_bytes(b"x")
+
+        suggested, notice = mc_llm_studio._suggest_projector(f'"{model}"')
+
+        assert suggested == str(projector)
+        assert "mmproj-thing-f16.gguf" in notice
+
+
+class TestTheFilePicker:
+    """A path box with no picker beside it is a text box asking for something
+    only a file manager knows. These are about the picker's handlers, which is
+    where its behaviour is -- the components themselves are Gradio's."""
+
+    @pytest.fixture
+    def browse(self):
+        import mc_llm_browse
+
+        return mc_llm_browse
+
+    def test_opening_it_lists_the_folder_the_box_already_points_at(self, browse, tmp_path):
+        model = tmp_path / "thing.gguf"
+        model.write_bytes(b"x")
+
+        panel, location, _places, _folders, picks, _notice, target = browse._open(
+            str(model), (".gguf",), None)
+
+        assert panel["visible"] is True
+        assert location == str(tmp_path)
+        assert ("thing.gguf — 0.0 GB", str(model)) in picks["choices"]
+        assert target == {}
+
+    def test_navigating_replaces_the_listing_and_leaves_the_box_alone(self, browse,
+                                                                      tmp_path):
+        (tmp_path / "sub").mkdir()
+
+        _panel, location, _places, folders, _picks, _notice, target = browse._show(
+            tmp_path, (".gguf",))
+
+        assert location == str(tmp_path)
+        assert ("sub", str(tmp_path / "sub")) in folders["choices"]
+        assert target == {}
+
+    def test_picking_a_file_fills_the_box_and_closes_the_picker(self, browse, tmp_path):
+        model = tmp_path / "thing.gguf"
+        model.write_bytes(b"x")
+
+        panel, *_rest, target = browse._choose(str(model), str(tmp_path), (".gguf",))
+
+        assert panel["visible"] is False
+        assert target == str(model)
+
+    def test_an_empty_pick_never_empties_the_box(self, browse, tmp_path):
+        """What a dropdown being refilled looks like on a host with no input
+        event. Emptying the box somebody just filled would be the worst answer
+        available."""
+        panel, *_rest, target = browse._choose("", str(tmp_path), (".gguf",))
+
+        assert panel["visible"] is True
+        assert target == {}
+
+    def test_closing_it_changes_nothing_else(self, browse):
+        panel, *rest = browse._shut()
+
+        assert panel["visible"] is False
+        assert all(update == {} for update in rest)
+
+    def test_every_handler_returns_one_value_per_output(self, browse, tmp_path):
+        """The failure mode this catches is a Gradio build-time error that only
+        shows up when somebody presses the button."""
+        assert len(browse._show(tmp_path, (".gguf",))) == 7
+        assert len(browse._shut()) == 7
+        assert len(browse._choose("", str(tmp_path), (".gguf",))) == 7
+        assert len(browse._open("", (".gguf",), tmp_path)) == 7
+
+    def test_every_binding_hands_back_one_value_per_output(self, browse):
+        """The wiring failure this catches shows up when somebody presses the
+        button, not when the tab is built."""
+        import gradio as gr
+
+        built = browse.attach(gr.Textbox(), key="test", allow_folders=True)
+
+        bound = [kwargs for component in built.values()
+                 for _kind, kwargs in getattr(component, "_callbacks", [])]
+        assert bound
+        for kwargs in bound:
+            assert len(kwargs["outputs"]) == 7
+
+    def test_navigation_binds_to_input_where_the_host_offers_it(self, browse):
+        """``change`` also fires when the server refills a dropdown, which
+        would walk a folder deeper on every click."""
+        import gradio as gr
+
+        built = browse.attach(gr.Textbox(), key="test")
+
+        assert [kind for kind, _kwargs in built["folders"]._callbacks] == ["input"]
+
+    def test_the_panel_carries_a_picker_for_each_path_box(self, store):
+        """Three boxes, three pickers, and ids that are this extension's."""
+        import mc_llm_browse
+        import mc_llm_ui as ui
+
+        built = []
+        original = mc_llm_browse.attach
+
+        def record(target, **kwargs):
+            built.append(kwargs.get("key"))
+            return original(target, **kwargs)
+
+        mc_llm_browse.attach = record
+        try:
+            mc_llm_studio._settings_panel()
+        finally:
+            mc_llm_browse.attach = original
+
+        assert built == ["runtime", "model", "mmproj"]
+        assert ui.ident("browse", "model") == "mc-llm-browse-model"

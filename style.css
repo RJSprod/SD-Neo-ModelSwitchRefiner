@@ -640,6 +640,22 @@
     font-weight: 600;
 }
 
+/* -- the file picker ------------------------------------------------------
+   Opened by the Browse button beside a path box and closed the moment
+   something is picked, so it is styled as a drawer under the box it belongs to
+   rather than as a panel of its own: an inset edge, and no background wash
+   that a theme could leave unreadable. */
+
+#mc-llm-studio .mc-llm-browse {
+    border-left: 3px solid var(--border-color-primary, currentColor);
+    margin: 0.25em 0 0.6em;
+    padding: 0.5em 0.6em;
+}
+
+#mc-llm-studio .mc-llm-browse-open {
+    align-self: flex-start;
+}
+
 /* -- the residency and estimator tables ----------------------------------- */
 
 #mc-llm-studio .mc-llm-residency,

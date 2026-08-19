@@ -45,6 +45,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import mc_llm_files
 import mc_llm_paths
 
 logger = logging.getLogger("model_chain")
@@ -181,7 +182,12 @@ def adopt(source: str | Path) -> tuple[Path, str]:
     done, which the panel shows -- the single-file case in particular has a
     caveat worth reading.
     """
-    chosen = Path(str(source).strip()).expanduser()
+    # Cleaned rather than trusted: this is reached from a text box, and the
+    # obvious way to get a path into one on Windows adds quotes around it. See
+    # mc_llm_files.
+    chosen = mc_llm_files.to_path(source)
+    if chosen is None:
+        raise SetupError("Enter the path to llama-server, or to the folder holding it.")
     if not chosen.exists():
         raise SetupError(f"There is nothing at {chosen}")
 
@@ -465,7 +471,7 @@ def record(executable: str | Path, device=None) -> dict:
     from prompt_master.provisioning.installer import DEFAULT_CONTEXT_SIZE, FULL_OFFLOAD
 
     paths = mc_llm_paths.app_paths()
-    path = Path(executable).expanduser().resolve()
+    path = (mc_llm_files.to_path(executable) or Path("")).resolve()
     if not path.is_file():
         raise SetupError(f"There is no llama-server at {path}")
     try:

@@ -1162,6 +1162,15 @@ changes two lines of state and downloads nothing. The **Find the projector
 beside it** button suggests a neighbouring `mmproj` file — check it belongs to
 that model, because nothing in a filename proves it does.
 
+Every path box has a **Browse** button beside it, so none of this has to be
+typed. If you would rather paste, paste anything reasonable: Explorer's *Copy
+as path* quotes (`"C:\models\thing.gguf"`), a dragged `file://` URL,
+`%USERPROFILE%\models`, or the **folder** your models are in — a folder holding
+one model is not an ambiguous answer, and a folder holding six is answered by
+naming them. Point it at the wrong shard of a split model and it takes the
+first, because that is the one llama.cpp wants. Whatever it works out is
+written back into the box, so what was recorded is always visible.
+
 ### Context, and what it costs
 
 Three budgets, kept separate because they behave differently:
@@ -1264,6 +1273,8 @@ mc_gguf.py            GGUF metadata header reader
 mc_llm_context.py     context capacity estimation and its calibration
 mc_llm_runtime.py     the managed llama.cpp process and its placement
 mc_llm_paths.py       where LLM Studio keeps its data
+mc_llm_files.py       what a pasted path means, and what is in a folder
+mc_llm_browse.py      the file picker beside every path box
 mc_llm_setup.py       getting a llama.cpp runtime in place
 mc_llm_state.py       shared preferences + the two mode histories
 mc_llm_sessions.py    the three run orchestrations, as streaming generators
@@ -1285,10 +1296,10 @@ The LLM modules stack in one direction and never the other:
 
 ```
 mc_llm_*_panel  ->  mc_llm_sessions  ->  mc_llm_runtime  ->  mc_broker
-                                              |                  |
-                                        mc_llm_context      mc_memory
-                                              |
-                                          mc_gguf
+       |                                      |                  |
+mc_llm_browse                           mc_llm_context      mc_memory
+       |                                      |
+mc_llm_files  <-  mc_llm_setup            mc_gguf
 ```
 
 `mc_memory.py` does not import `mc_broker`, and that is deliberate rather than

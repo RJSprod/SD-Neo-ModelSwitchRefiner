@@ -27,6 +27,7 @@ import logging
 import gradio as gr
 
 import mc_broker
+import mc_llm_files
 import mc_llm_paths
 import mc_llm_ui as ui
 
@@ -114,10 +115,30 @@ def _build():
 
         views = [prompt_view, chat_view, minimax_view]
         mode.change(fn=_switch, inputs=[mode], outputs=views + [runtime_status], queue=False)
-        block.load(fn=lambda: (_runtime_line(), _residency_html()),
-                   outputs=[runtime_status, settings["residency"]], queue=False)
+        # The radios below are built once, when the WebUI starts, and read
+        # settings that the Settings page can change afterwards. Refreshing
+        # them on load is what stops the panel showing Hybrid while the
+        # residency view underneath it says Exclusive.
+        block.load(fn=_on_load,
+                   outputs=[runtime_status, settings["residency"], settings["memory_mode"],
+                            settings["policy"], settings["release"]], queue=False)
 
     return block
+
+
+def _on_load():
+    """What the tab shows the moment it is opened, rather than at build time."""
+    import mc_llm_runtime
+
+    return (_runtime_line(), _residency_html(),
+            gr.update(value=mc_broker.label_for(mc_broker.MODES, mc_broker.mode())),
+            gr.update(value=mc_broker.label_for(mc_broker.POLICIES, mc_broker.policy())),
+            gr.update(value=mc_broker.label_for(
+                mc_llm_runtime.RELEASE_MODES,
+                mc_broker.resolve(mc_broker.option(mc_llm_runtime.OPT_RELEASE,
+                                                   mc_llm_runtime.RELEASE_STOP),
+                                  mc_llm_runtime.RELEASE_MODES,
+                                  mc_llm_runtime.RELEASE_STOP))))
 
 
 def _initial_mode() -> str:
@@ -148,11 +169,16 @@ def _switch(chosen):
 def _runtime_line() -> str:
     """The concise status. Detail belongs in the collapsible panel below it."""
     try:
-        import mc_llm_runtime
-
-        state = mc_llm_runtime.runtime.status()
+        return _runtime_text()
     except Exception:
+        logger.warning("Model Chain: the LLM status line could not be drawn", exc_info=True)
         return ui.notice("LLM runtime unavailable — see the console.", "error")
+
+
+def _runtime_text() -> str:
+    import mc_llm_runtime
+
+    state = mc_llm_runtime.runtime.status()
 
     if not state["configured"]:
         # Which of the two is missing decides what to do about it, so the line
@@ -178,12 +204,17 @@ def _runtime_line() -> str:
 def _residency_html() -> str:
     """The detailed residency view (section 14), kept out of the main UI."""
     try:
-        import mc_llm_runtime
-
-        status = mc_broker.status()
-        state = mc_llm_runtime.runtime.status()
+        return _residency_table()
     except Exception:
-        return ui.notice("Residency information unavailable.", "warn")
+        logger.warning("Model Chain: the residency view could not be drawn", exc_info=True)
+        return ui.notice("Residency information unavailable — see the console.", "warn")
+
+
+def _residency_table() -> str:
+    import mc_llm_runtime
+
+    status = mc_broker.status()
+    state = mc_llm_runtime.runtime.status()
 
     rows = []
     for entry in status.residencies:
@@ -232,8 +263,10 @@ def _residency_html() -> str:
 
 def _settings_panel() -> dict:
     """Everything about what runs and where, in one collapsible place."""
+    import mc_llm_browse
     import mc_llm_context
     import mc_llm_runtime
+    import mc_llm_setup
     import mc_llm_state
 
     configuration = mc_llm_runtime.config()
@@ -254,6 +287,9 @@ def _settings_panel() -> dict:
                 label="llama-server", value=str(found.recorded or found.found or ""),
                 placeholder="Path to llama-server, or to the folder holding it",
                 elem_id=ui.ident("settings", "runtime"))
+            mc_llm_browse.attach(runtime_path, suffixes=(), key="runtime",
+                                 allow_folders=True,
+                                 fallback=_folder(mc_llm_setup.RUNTIME_DIRNAME))
             device = gr.Dropdown(
                 label="Device", choices=choices, value=_current_device(choices),
                 elem_id=ui.ident("settings", "device"))
@@ -264,14 +300,21 @@ def _settings_panel() -> dict:
                                           interactive=found.downloadable)
 
             gr.Markdown("#### Which model runs")
+            gr.Markdown(
+                "A model can live anywhere on the machine — it is read, not started, so it "
+                "does not have to be copied in. Paste a path or press Browse; a folder is "
+                "as good as a file when it holds one model.",
+                elem_classes=ui.classes("hint"))
             model_path = gr.Textbox(
                 label="GGUF model", value=str(configuration.model or ""),
-                placeholder="Full path to a .gguf file",
+                placeholder="Path to a .gguf file, or to the folder holding it",
                 elem_id=ui.ident("settings", "model"))
+            mc_llm_browse.attach(model_path, key="model", fallback=_folder("models"))
             mmproj_path = gr.Textbox(
                 label="Vision projector (optional)", value=str(configuration.mmproj or ""),
-                placeholder="Full path to an mmproj .gguf, or empty for a text-only model",
+                placeholder="Path to an mmproj .gguf, or empty for a text-only model",
                 elem_id=ui.ident("settings", "mmproj"))
+            mc_llm_browse.attach(mmproj_path, key="mmproj", fallback=_folder("models"))
             with gr.Row():
                 apply_model = gr.Button("Use this model", variant="primary", size="sm")
                 suggest = gr.Button("Find the projector beside it", size="sm")
@@ -351,7 +394,8 @@ def _settings_panel() -> dict:
                         outputs=[runtime_notice, runtime_path])
 
     apply_model.click(fn=_apply_model, inputs=[model_path, mmproj_path],
-                      outputs=[model_notice, estimator], queue=False)
+                      outputs=[model_notice, estimator, model_path, mmproj_path],
+                      queue=False)
     suggest.click(fn=_suggest_projector, inputs=[model_path],
                   outputs=[mmproj_path, model_notice], queue=False)
 
@@ -368,22 +412,46 @@ def _settings_panel() -> dict:
     refresh_residency.click(fn=_residency_html, outputs=[residency], queue=False)
     stop_server.click(fn=_stop_server, outputs=[residency], queue=False)
 
-    return {"residency": residency, "estimator": estimator}
+    return {"residency": residency, "estimator": estimator, "memory_mode": memory_mode,
+            "policy": hybrid_policy, "release": release_mode}
 
 
-def _model_line(configuration) -> str:
+def _model_line(configuration, notes=()) -> str:
+    """What is set up to run, and anything that was decided on the way there.
+
+    ``notes`` carries what :mod:`mc_llm_files` had to work out from what was
+    typed — a folder resolved to the one model in it, a shard corrected to the
+    first, a name matched case-insensitively. None of those is an error and all
+    of them are things somebody should be told happened, because the path now
+    recorded is not the path they entered.
+    """
     if configuration.runtime is None:
         return ui.notice("Set up a llama.cpp runtime above before choosing a model.", "warn")
     if configuration.model is None:
-        return ui.notice("No model chosen yet. Enter the path to a .gguf file.", "warn")
-    return ui.notice(
-        f"{configuration.model.name} · "
-        f"{'vision projector loaded' if configuration.sees else 'text only'}")
+        return ui.notice("No model chosen yet. Enter the path to a .gguf file, or press "
+                         "Browse.", "warn")
+    line = (f"{configuration.model.name} · "
+            f"{'vision projector loaded' if configuration.sees else 'text only'}")
+    return ui.notice(" ".join([line] + [str(note) for note in notes]))
 
 
 # --------------------------------------------------------------------------- #
 # Runtime setup
 # --------------------------------------------------------------------------- #
+
+
+def _folder(name: str):
+    """A folder under the install root, for a picker to open at.
+
+    Best-effort: the pickers fall back to the first of
+    :func:`mc_llm_files.places` when the root cannot be read, which is the
+    right answer on an installation that has not been set up yet.
+    """
+    try:
+        return mc_llm_paths.data_root() / name
+    except Exception:
+        logger.debug("Model Chain: could not read the LLM data directory", exc_info=True)
+        return None
 
 
 def _runtime_status():
@@ -464,12 +532,14 @@ def _apply_runtime(path, device_value):
     import mc_llm_runtime
     import mc_llm_setup
 
-    if not (path or "").strip():
-        return (ui.notice("Enter the path to llama-server, or to the folder holding it.",
-                          "warn"),
-                gr.update(), gr.update())
     try:
-        executable, note = mc_llm_setup.adopt(path)
+        chosen = mc_llm_files.resolve_runtime(path)
+    except mc_llm_files.PathError as exc:
+        # Not an error in the sense the panel colours red: nothing was attempted
+        # and the sentence says what to do instead.
+        return ui.notice(str(exc), "warn"), gr.update(), gr.update()
+    try:
+        executable, note = mc_llm_setup.adopt(chosen.path)
         mc_llm_setup.record(executable, _device_for(device_value))
     except Exception as exc:
         return ui.notice(ui.failure(exc), "error"), gr.update(), gr.update()
@@ -517,14 +587,17 @@ def _download_runtime(device_value, progress=gr.Progress()):
 
 
 def _apply_model(model, mmproj):
-    """Point the install at a different GGUF, without re-provisioning anything."""
-    from pathlib import Path
+    """Point the install at a different GGUF, without re-provisioning anything.
 
+    Four outputs rather than two: the two path boxes are written back with what
+    was actually recorded. A user who pasted a folder, or a quoted path, or the
+    third shard of a split model has just had it turned into something else,
+    and the box they typed into is where they will look to find out what.
+    """
     import mc_llm_runtime
     from prompt_master.inference import model_choice
 
-    if not (model or "").strip():
-        return ui.notice("Enter the path to a .gguf file.", "warn"), gr.update()
+    unchanged = (gr.update(), gr.update(), gr.update())
     if mc_llm_runtime.config().runtime is None:
         # Checked here so the answer names something in this tab. Upstream's own
         # refusal ends "Run Models and Hardware setup first", which is a Qt
@@ -532,38 +605,87 @@ def _apply_model(model, mmproj):
         # instruction.
         return (ui.notice("There is no llama.cpp runtime yet, so there is nothing to run a "
                           "model with. Set one up under llama.cpp runtime above first.",
-                          "warn"),
-                gr.update())
+                          "warn"),) + unchanged
+
     try:
-        model_choice.choose(mc_llm_paths.app_paths(), Path(model.strip()),
-                            Path(mmproj.strip()) if (mmproj or "").strip() else None)
+        chosen = mc_llm_files.resolve_model(model)
+        projector = mc_llm_files.resolve_projector(mmproj, chosen.path)
+    except mc_llm_files.PathError as exc:
+        return (ui.notice(str(exc), "warn"),) + unchanged
     except Exception as exc:
-        return ui.notice(ui.failure(exc), "error"), gr.update()
+        return (ui.notice(ui.failure(exc), "error"),) + unchanged
+
+    try:
+        model_choice.choose(mc_llm_paths.app_paths(), chosen.path,
+                            projector.path if projector is not None else None)
+    except Exception as exc:
+        return (ui.notice(ui.failure(exc), "error"),) + unchanged
 
     # The running server holds the weights it was started with, so it is
     # stopped rather than left to answer as the previous model.
     mc_llm_runtime.runtime.stop()
-    return _model_line(mc_llm_runtime.config()), _estimator_html()
+    notes = list(chosen.notes) + list(projector.notes if projector is not None else ())
+    if projector is None:
+        notes.extend(_projector_hint(chosen.path))
+    return (_model_line(mc_llm_runtime.config(), notes), _estimator_html(),
+            str(chosen.path), str(projector.path) if projector is not None else "")
+
+
+def _projector_hint(model) -> list[str]:
+    """Mention a projector sitting beside a model chosen without one.
+
+    Mentioned and not used: a projector has to match the model it was made for
+    and a file name does not prove that it does, which is the vendored module's
+    own reasoning for asking rather than inferring. What is unhelpful is saying
+    nothing at all, because "text only" on a vision model reads as a bug.
+    """
+    from prompt_master.inference import model_choice
+
+    try:
+        found = model_choice.projector_beside(model)
+    except Exception:
+        logger.debug("Model Chain: could not look for a projector", exc_info=True)
+        return []
+    if found is None:
+        return []
+    return [f"{found.name} sits beside it and may be its vision projector — press Find the "
+            f"projector beside it to use it."]
 
 
 def _suggest_projector(model):
-    from pathlib import Path
-
     from prompt_master.inference import model_choice
 
-    if not (model or "").strip():
-        return gr.update(), ui.notice("Enter the model path first.", "warn")
-    found = model_choice.projector_beside(Path(model.strip()))
+    try:
+        chosen = mc_llm_files.resolve_model(model)
+    except mc_llm_files.PathError as exc:
+        return gr.update(), ui.notice(str(exc), "warn")
+    found = model_choice.projector_beside(chosen.path)
     if found is None:
-        return gr.update(), ui.notice("No projector was found beside that model.", "warn")
-    return str(found), ui.notice(f"Suggested {found.name} — check it belongs to this model.")
+        return gr.update(), ui.notice(
+            f"No projector was found beside that model. {chosen.path.parent} holds nothing "
+            f"named mmproj or projector — a text-only model simply has none.", "warn")
+    return str(found), ui.notice(f"Suggested {found.name} — check it belongs to this model, "
+                                 f"then press Use this model.")
 
 
 def _save_context(context_mode, buffer_gb, context_size, kv_k, kv_v):
+    """Store the context settings. Its output is the estimator, so it says why
+    rather than raising: a cleared number box hands this ``None``, and losing a
+    click to a toast reading "Error" is not a useful answer to an empty field.
+    """
+    import mc_llm_runtime
     import mc_llm_state
 
-    mc_llm_state.remember(context_mode=context_mode, context_buffer_gb=float(buffer_gb),
-                          context_size=int(context_size), kv_type_k=kv_k, kv_type_v=kv_v)
+    try:
+        size = max(int(float(context_size)), mc_llm_runtime.MINIMUM_CONTEXT)
+        buffer_bytes = max(float(buffer_gb), 0.0)
+    except (TypeError, ValueError):
+        return ui.notice(
+            f"Context size and buffer have to be numbers — context in tokens (at least "
+            f"{mc_llm_runtime.MINIMUM_CONTEXT:,}), buffer in gigabytes.", "warn")
+
+    mc_llm_state.remember(context_mode=context_mode, context_buffer_gb=buffer_bytes,
+                          context_size=size, kv_type_k=kv_k, kv_type_v=kv_v)
     return _estimator_html()
 
 
@@ -585,7 +707,11 @@ def _setter(name: str):
 def _stop_server():
     import mc_llm_runtime
 
-    mc_llm_runtime.runtime.stop()
+    try:
+        mc_llm_runtime.runtime.stop()
+    except Exception:
+        logger.warning("Model Chain: llama-server could not be stopped", exc_info=True)
+        return ui.notice("llama-server could not be stopped — see the console.", "error")
     return _residency_html()
 
 
@@ -599,7 +725,21 @@ def _estimator_html() -> str:
 
     Everything shown is per model. When the header cannot be read the panel
     says so rather than filling the table with a constant.
+
+    Wrapped, and the wrapper is the point. This is an output of *Use this
+    model*, so anything it raises takes the whole handler down with it: the
+    model is recorded, nothing on screen changes, and the only thing the user
+    is told is the word "Error" in a toast. A panel that cannot draw a table
+    has to say which panel and why, and let the rest of the click stand.
     """
+    try:
+        return _estimate_html()
+    except Exception as exc:
+        logger.warning("Model Chain: the context estimator could not be drawn", exc_info=True)
+        return ui.notice(f"What fits could not be estimated: {ui.failure(exc)}", "error")
+
+
+def _estimate_html() -> str:
     import mc_gguf
     import mc_llm_context
     import mc_llm_runtime
