@@ -575,6 +575,35 @@ def free_vram_bytes() -> int:
         return 0
 
 
+def device_free_vram_bytes() -> int:
+    """Free VRAM as *another process* would find it (section 6's boundary).
+
+    :func:`free_vram_bytes` is the host's own accounting and includes what its
+    allocator is holding cached, which the host may reuse and llama-server may
+    not. Every figure the LLM side places against is this one; every figure the
+    image side places against is the other. Two numbers because there are two
+    questions, and answering the second with the first is how a card with
+    twenty-two gigabytes free refuses an allocation of ten.
+    """
+    try:
+        import mc_memory
+
+        return int(mc_memory.device_free_vram_bytes())
+    except Exception:
+        return free_vram_bytes()
+
+
+def release_cached_vram() -> int:
+    """Give the image allocator's cached blocks back to the driver, for the LLM."""
+    try:
+        import mc_memory
+
+        return int(mc_memory.release_cached_vram())
+    except Exception:
+        logger.debug("Model Chain: could not release cached VRAM", exc_info=True)
+        return 0
+
+
 def total_vram_bytes() -> int:
     try:
         import mc_memory
@@ -624,7 +653,12 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
     needed = max(int(needed_bytes), 0)
     reserve = safety_margin_bytes() if margin is None else int(margin)
     target = needed + reserve
-    free = free_vram_bytes()
+    # Which "free" this is depends on who is asking. An image pass can spend
+    # the host allocator's cache; llama.cpp is another process and cannot, so
+    # asking on its behalf against the host's figure frees nothing and reports
+    # a shortfall that is not there -- or, worse, no shortfall when there is.
+    reading = device_free_vram_bytes if family == FAMILY_LLM else free_vram_bytes
+    free = reading()
     actions: list[str] = []
     freed = 0
     # Read once. A setting that changed between the two branches below would
@@ -645,7 +679,7 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
                             sweep=True)
         freed += released.freed
         actions.extend(released.actions)
-        free = free_vram_bytes()
+        free = reading()
 
     if free <= 0:
         # VRAM could not be queried. Guessing at a deficit here would evict on
@@ -669,7 +703,7 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
             freed += released.freed
             actions.extend(released.actions)
 
-    after = free_vram_bytes()
+    after = reading()
     remaining = max(target - max(after, free + freed), 0)
     result = Reclaim(needed, free, freed, remaining, tuple(actions))
 

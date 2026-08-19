@@ -725,6 +725,36 @@
    the total overflow, which is what `overflow-y: auto` above was always for.
    The stage next door has carried the same rule since it was written; the
    drawer was the half that did not. */
+/* -- the drawer's three sections -------------------------------------------
+   A chooser and three panels, only one of them in the layout at a time. The
+   chooser stays put at the top of the drawer while the section under it
+   scrolls, because a control that scrolls away is a control you have to go
+   looking for. */
+
+#mc-llm-studio .mc-llm-sections {
+    flex: 0 0 auto;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    /* Opaque, or the section scrolling underneath shows through it. */
+    background: var(--background-fill-primary, inherit);
+    padding-bottom: 0.2em;
+}
+
+#mc-llm-studio .mc-llm-sections label {
+    font-weight: 600;
+    padding: 0.25em 0.55em;
+    white-space: nowrap;
+}
+
+/* The one showing gets the room, which is the whole reason only one shows. */
+#mc-llm-studio .mc-llm-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4em;
+    min-width: 0;
+}
+
 #mc-llm-studio .mc-llm-drawer > * {
     flex: 0 0 auto;
     /* And never wider than the drawer. A flex item's automatic minimum size

@@ -1236,3 +1236,117 @@ Two changes, and the order matters:
 
 Only an out-of-memory failure is retried. A corrupt file, a missing projector
 or a port already in use fails once, immediately, with its own sentence.
+
+## 14. Free memory that was not free (19 August 2026)
+
+The retry ladder from §13.4 worked exactly as designed and did not help:
+
+```
+allocating 18231.52 MiB on device 0: cudaMalloc failed: out of memory
+allocating 15244.86 MiB on device 0: cudaMalloc failed: out of memory
+allocating 10588.65 MiB on device 0: cudaMalloc failed: out of memory
+```
+
+Three placements, each smaller than the last, every one refused — on a card
+whose own start-up line said `24575 MiB, 23304 MiB free`, sixteen times in one
+session. A driver that will not hand out ten gigabytes of the twenty-two it
+says it has is not being cautious about fragmentation. It does not have them.
+
+### 14.1 Two questions, one number
+
+`mc_memory.free_vram_bytes` is the host's own figure, and the host computes it
+the way every ComfyUI derivative does:
+
+```python
+mem_free_cuda, _  = torch.cuda.mem_get_info(dev)
+mem_free_torch    = mem_reserved - mem_active      # the allocator's cache
+mem_free_total    = mem_free_cuda + mem_free_torch
+```
+
+That second term is right, and it is right *for the host*. PyTorch keeps the
+blocks it has finished with, because keeping them is what makes the next
+allocation fast, and it will reuse them before it asks the driver for anything.
+Counting them as free is how a checkpoint knows it can load.
+
+For another process they do not exist. llama-server cannot be handed a block
+PyTorch is sitting on, and llama-server is the whole point of this half of the
+extension: section 6's separate process, chosen deliberately, and paid for in
+exactly this coin. Every placement decision in `mc_llm_runtime` was being made
+against a number that included between twelve and nineteen gigabytes of memory
+the model it was placing could never have — so the arithmetic said "all thirty
+layers fit", the driver said "out of memory", and the extension's own reading
+of the card agreed with the arithmetic right up until the process died.
+
+It also explains the forty-fold speed spread in §13.3 without any new theory. A
+build with its own memory fitter reads the *driver's* free memory, not the
+host's, and quietly leaves expert tensors in system RAM to fit what it really
+sees. Two starts, the same placement on paper, 106 tokens per second and 2.68.
+
+### 14.2 The fix, and the part of it that is not arithmetic
+
+`device_free_vram_bytes()` asks the driver — `torch.cuda.mem_get_info`, without
+the allocator's cache added back — and every figure the LLM side places against
+is now that one. Two functions because there are two questions: what can *this*
+process spend, and what can *another* process be given. Answering the second
+with the first is the whole of this bug, and the broker now picks by family:
+an image pass gets the host's figure, an LLM request gets the driver's.
+
+Reporting it honestly would have been enough to stop the crashes and not enough
+to make anything work — a truthful four gigabytes places two layers of thirty
+on the card and runs the rest from system RAM. So the cache is handed back
+before a server is placed. `release_cached_vram()` is `soft_empty_cache`, which
+unloads nothing and moves no model: what it gives up is the *empty* space
+between the things that are loaded, which is worth doing exactly once, at the
+one moment another process is about to be asked to fit in it.
+
+Only on a path that is really going to start a server. A warm turn touches
+nothing, and neither does the preview `_outgrown` runs before every request —
+emptying an allocator to answer a question nobody asked would be a fine way to
+turn this fix into the next regression.
+
+## 15. The drawer, again, and for the last time
+
+Three reports, one shape: sections side by side, sections cut off, a toggle
+that would not close. Every fix so far has been a CSS property the stage next
+door already had, and each one moved the problem rather than removing it,
+because the thing being fixed was a layout the host was free to disagree with.
+
+So the accordions are gone. The drawer is a chooser and three sections, exactly
+one of which is in the layout:
+
+```
+[ Threads | Character | You ]     <- a radio, stuck to the top of the drawer
+[ the chosen section              ]
+```
+
+What was asked for was "always vertically stacked, one open at a time, and the
+open one takes the emphasis until I close the drawer". An accordion cannot
+promise any of the three — it is laid out by the host, it opens independently
+of its neighbours, and it is as tall as whatever is inside it. Three columns
+and a radio promise all three by construction, in a drawer of fixed height
+where two open at once would leave neither readable.
+
+The toggle button now carries its own next action as its label: **☰ Threads &
+character** when the drawer is shut, **✕ Close panel** when it is open. That is
+not decoration either. The open/closed flag lives in a `gr.State` and the
+visibility lives in the component, and nothing in Gradio keeps two such things
+in step: a reload can leave the state saying "closed" underneath a drawer that
+is on screen, and then the press that should close it opens it again — which is
+exactly what "it opens but does not toggle close" looks like from outside. A
+button that says which way it is about to go is one whose next press is
+predictable, and one that says the wrong thing is a bug somebody can see and
+report rather than a control that feels dead.
+
+## 16. The context window was already rolling
+
+Worth writing down because it is the kind of thing that gets asked twice.
+`prompt.build` sizes a budget from the context, subtracts the system prompt and
+the reply allowance, and keeps the newest messages that fit — oldest first out,
+last message always in. A conversation longer than the window has never been
+sent whole.
+
+What it was sized against had drifted, though. The budget came from the
+placement this extension *asked* for, and a build with its own fitter answers
+with 6,912 tokens against a conversation trimmed to fit 7,168. It now prefers
+the context llama.cpp reported, then the one that was asked for, then the
+setting — most-informed first, which is the only order that is ever right.

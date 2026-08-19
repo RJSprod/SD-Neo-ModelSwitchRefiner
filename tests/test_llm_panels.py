@@ -374,10 +374,32 @@ class TestPerMessageActions:
 
 class TestTheDrawer:
     def test_it_starts_closed_and_toggles(self):
-        opened, update = mc_llm_chat_panel._toggle_drawer(False)
+        opened, update, label = mc_llm_chat_panel._toggle_drawer(False)
 
         assert opened is True and update.get("visible") is True
         assert mc_llm_chat_panel._toggle_drawer(True)[1].get("visible") is False
+
+    def test_the_button_says_which_way_it_will_go_next(self):
+        """The open/closed flag lives in a State and the visibility lives in the
+        component, and nothing in Gradio keeps two such things in step. A
+        button that reads "Close panel" over an open panel is one whose next
+        press is predictable -- and one that reads it over a *shut* panel is a
+        bug somebody can see rather than a control that feels dead."""
+        _open, _update, label = mc_llm_chat_panel._toggle_drawer(False)
+        assert label.get("value") == mc_llm_chat_panel.CLOSE_LABEL
+
+        assert mc_llm_chat_panel._toggle_drawer(True)[2].get("value") == \
+            mc_llm_chat_panel.OPEN_LABEL
+
+    def test_one_section_is_shown_and_the_others_are_not(self):
+        """Always stacked, always one at a time: the drawer is a fixed-height
+        column, and two open sections in it is two half-readable ones."""
+        shown = mc_llm_chat_panel._show_section("character")
+
+        assert [update.get("visible") for update in shown] == [False, True, False]
+
+    def test_a_section_it_has_never_heard_of_falls_back_to_the_first(self):
+        assert mc_llm_chat_panel._show_section("")[0].get("visible") is True
 
     def test_the_image_box_warns_before_a_message_is_written(self, store, monkeypatch):
         """Whether a picture can be sent depends on the model running, and

@@ -1053,7 +1053,7 @@ def _estimate_html() -> str:
     estimate = negotiated.estimate
     per_token = estimate.kv_bytes_per_token
     reserve = mc_broker.safety_margin_bytes()
-    free = mc_broker.free_vram_bytes() + ours
+    free = mc_broker.device_free_vram_bytes() + ours
     image_resident = mc_broker.resident_bytes(mc_broker.FAMILY_IMAGE)
 
     rows = []

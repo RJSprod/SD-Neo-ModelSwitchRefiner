@@ -361,8 +361,15 @@ def _free_vram(already_ours: int = 0) -> int:
     time anything is placed in them. Nothing here may be used to decide that a
     *running* placement fits, which is a different question with a different
     answer -- see :meth:`Runtime.client`.
+
+    The base figure is the *driver's*, not the host's. The host counts the
+    blocks its allocator is holding cached as free, because for the host they
+    are; llama.cpp is a different process and cannot have them. Sized against
+    the host's number, a placement asks for VRAM that exists only inside this
+    process -- and what comes back is ``cudaMalloc failed: out of memory`` on a
+    card reporting twenty-two gigabytes free.
     """
-    return mc_broker.free_vram_bytes() + max(int(already_ours), 0)
+    return mc_broker.device_free_vram_bytes() + max(int(already_ours), 0)
 
 
 def _fits(estimate: mc_llm_context.Estimate, reserve: int, already_ours: int = 0) -> bool:
@@ -923,6 +930,17 @@ class Runtime:
                 return LlamaClient(f"http://127.0.0.1:{self._process.port}",
                                    self._process.api_key)
 
+            # Before anything is measured, and only on a path that is really
+            # going to start a server. The image allocator keeps the blocks it
+            # has finished with, which is free memory to this process and to no
+            # other -- so it is handed back to the driver first, and the
+            # placement below is decided against what llama.cpp will actually
+            # be able to allocate.
+            recovered = mc_broker.release_cached_vram()
+            if recovered:
+                logger.info("Model Chain: returned %.1f GB of cached VRAM to the driver before "
+                            "placing the LLM", recovered / _GB)
+
             negotiated = negotiate(configuration, already_ours=ours)
             placement = negotiated.placement
             signature = (configuration.runtime, configuration.model, configuration.mmproj,
@@ -978,7 +996,7 @@ class Runtime:
         from prompt_master.inference.device_detection import CPU_DEVICE, NO_OFFLOAD
         from prompt_master.inference.service import CPU_READY_TIMEOUT, GPU_READY_TIMEOUT
 
-        before = mc_broker.free_vram_bytes()
+        before = mc_broker.device_free_vram_bytes()
         layers = _layers_argument(placement, mc_gguf.describe(configuration.model))
         paths = mc_llm_paths.app_paths()
         paths.logs.mkdir(parents=True, exist_ok=True)
@@ -1016,7 +1034,7 @@ class Runtime:
             said = read_failure(_text_since(log_path, written_before))
             raise _StartFailed(said.text or str(exc), said.out_of_memory) from exc
 
-        observed = max(before - mc_broker.free_vram_bytes(), 0) if before > 0 else 0
+        observed = max(before - mc_broker.device_free_vram_bytes(), 0) if before > 0 else 0
         return process, observed, _await_offload(log_path, written_before)
 
     def _outgrown(self, configuration: Config, ours: int) -> bool:
