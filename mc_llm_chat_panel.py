@@ -149,6 +149,10 @@ def build() -> dict:
     # the component because an Image has no value for a handler to be given --
     # only a State can be an input to the click that flips it.
     attachment_open = gr.State(False)
+    # Which overlay is open, by name. Held here rather than read back off the
+    # components because a Column has no value a handler can be given -- and
+    # without it the menu button could only ever open the menu, never close it.
+    surface = gr.State("")
 
     # position: relative in the stylesheet, and every sheet below is absolutely
     # positioned inside it. That is the whole of the responsive strategy: a
@@ -389,12 +393,14 @@ def build() -> dict:
             + [selection[key] for key in SELECTION_ORDER])
     stream = [cancellation, transcript, positions, message, attachment, status, send, stop]
     sampling = [temperature, top_p, reply_tokens, seed]
-    screens = [nav, threads_screen, character_screen, persona_screen]
+    # The State first, then one visibility per surface: the order
+    # :func:`_screens` answers in.
+    screens = [surface, nav, threads_screen, character_screen, persona_screen]
 
     # -- getting about ---------------------------------------------------- #
 
-    menu.click(fn=_open_nav, inputs=[character, thread_state], outputs=screens + view,
-               queue=False)
+    menu.click(fn=_toggle_nav, inputs=[surface, character, thread_state],
+               outputs=screens + view, queue=False)
     close_nav.click(fn=_close_screens, outputs=screens, queue=False)
     for control in (threads_back, character_back, persona_back):
         control.click(fn=_close_screens, outputs=screens, queue=False)
@@ -807,27 +813,37 @@ def _reopen(who, identifier, note: str, kind: str = "info",
 
 
 def _screens(name: str = "") -> list:
-    """Show one overlay and hide the rest. ``""`` returns to CHAT_HOME.
+    """Which surface is open, and one visibility per surface.
 
-    Every handler that opens a surface returns this whole answer rather than
-    toggling one component, which is what makes "only one open at a time" a
-    property of the code instead of a rule somebody has to remember.
+    The name comes back first because it is the answer the ``surface`` State
+    holds, and the State is what makes ``\u2630`` a toggle rather than a
+    control that can only ever open something. Everything else is derived from
+    it, so "only one open at a time" is a property of this function rather than
+    a rule every handler has to remember.
     """
-    return [gr.update(visible=(name == key)) for key in SCREENS]
+    wanted = name if name in SCREENS else ""
+    return [wanted] + [gr.update(visible=(wanted == key)) for key in SCREENS]
 
 
 def _close_screens() -> list:
     return _screens("")
 
 
-def _open_nav(who, identifier) -> list:
-    """The menu, over a conversation with nothing selected.
+def _toggle_nav(open_now, who, identifier) -> list:
+    """The menu button: open the menu, or put away whatever is open.
 
-    Opening the menu also drops the message selection: the action sheet applies
-    to a message the reader can no longer see, and a sheet left open under
-    another sheet is the second half of every "why is this still here?".
+    A menu that only opens is a menu you cannot dismiss from the control you
+    opened it with -- which is exactly what "the menus are not toggling open
+    and close" was. The state it is toggling against is a State rather than the
+    component's own visibility, because a Column has no value a handler can be
+    given.
+
+    Opening also drops the message selection: the action sheet applies to a
+    message the reader can no longer see, and a sheet left open under another
+    sheet is the second half of every "why is this still here?".
     """
-    return _screens("nav") + _close_selection(who, identifier)
+    wanted = "" if open_now == "nav" else "nav"
+    return _screens(wanted) + _close_selection(who, identifier)
 
 
 def _open_threads(who, filter_text) -> list:
@@ -914,7 +930,7 @@ def _new_thread(who, filter_text):
     if not who:
         return ([gr.update(), ""]
                 + _refresh(None, "Choose a character first.", "warn")
-                + _screens("threads"))
+                + _screens("threads"))  # stay where the message can be read
     store = _chats()
     conversation = store.new(who)
     _greet(conversation, who)

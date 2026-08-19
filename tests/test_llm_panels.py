@@ -391,56 +391,95 @@ class TestTheSurfaces:
         chats.save(conversation)
         return conversation
 
-    def test_one_surface_is_open_and_the_others_are_not(self):
-        shown = [update.get("visible") for update in mc_llm_chat_panel._screens("character")]
+    def _visible(self, answered):
+        """The visibilities out of a ``_screens``-shaped answer, without its
+        leading State."""
+        return [update.get("visible")
+                for update in answered[1:1 + len(mc_llm_chat_panel.SCREENS)]]
 
+    def test_one_surface_is_open_and_the_others_are_not(self):
+        answered = mc_llm_chat_panel._screens("character")
+        shown = self._visible(answered)
+
+        assert answered[0] == "character"
         assert shown.count(True) == 1
         assert shown[mc_llm_chat_panel.SCREENS.index("character")] is True
 
     def test_closing_leaves_the_conversation_alone_on_screen(self):
-        assert all(update.get("visible") is False
-                   for update in mc_llm_chat_panel._close_screens())
+        answered = mc_llm_chat_panel._close_screens()
+
+        assert answered[0] == ""
+        assert all(shown is False for shown in self._visible(answered))
 
     def test_a_surface_it_has_never_heard_of_opens_nothing(self):
         """Better a menu that did not open than a screen drawn over another."""
-        assert all(update.get("visible") is False
-                   for update in mc_llm_chat_panel._screens("elsewhere"))
+        answered = mc_llm_chat_panel._screens("elsewhere")
+
+        assert answered[0] == ""
+        assert all(shown is False for shown in self._visible(answered))
+
+    def test_the_menu_button_closes_the_menu_it_opened(self, store):
+        """A menu that can only open is a menu you cannot dismiss from the
+        control you opened it with, which is what "the menus are not toggling
+        open and close" was."""
+        conversation = self._thread(store)
+
+        opened = mc_llm_chat_panel._toggle_nav("", "Ada", conversation.identifier)
+        closed = mc_llm_chat_panel._toggle_nav("nav", "Ada", conversation.identifier)
+
+        assert opened[0] == "nav"
+        assert self._visible(opened)[mc_llm_chat_panel.SCREENS.index("nav")] is True
+        assert closed[0] == ""
+        assert all(shown is False for shown in self._visible(closed))
+
+    def test_the_menu_button_replaces_whatever_else_was_open(self, store):
+        """Pressing it from a screen is asking for the menu, not for that
+        screen to be closed and nothing put in its place."""
+        conversation = self._thread(store)
+
+        answered = mc_llm_chat_panel._toggle_nav("threads", "Ada", conversation.identifier)
+
+        assert answered[0] == "nav"
 
     def test_opening_the_menu_puts_the_message_actions_away(self, store):
         """The action sheet applies to a message the reader can no longer see,
         and a sheet left open under another sheet is the second half of every
         "why is this still here?"."""
         conversation = self._thread(store)
-        screens = len(mc_llm_chat_panel.SCREENS)
+        screens = 1 + len(mc_llm_chat_panel.SCREENS)
 
-        answered = mc_llm_chat_panel._open_nav("Ada", conversation.identifier)
+        answered = mc_llm_chat_panel._toggle_nav("", "Ada", conversation.identifier)
 
         assert answered[screens + 2] == mc_llm_chat_panel.NO_SELECTION
         assert answered[screens + 5].get("visible") is False
 
     def test_tapping_a_thread_opens_it_and_comes_home(self, store):
         conversation = self._thread(store)
+        screens = 1 + len(mc_llm_chat_panel.SCREENS)
 
         answered = mc_llm_chat_panel._open_thread_home("Ada", conversation.identifier)
 
         assert answered[0] == conversation.identifier
-        assert all(update.get("visible") is False
-                   for update in answered[-len(mc_llm_chat_panel.SCREENS):])
+        assert answered[-screens] == ""
+        assert all(update.get("visible") is False for update in answered[-screens + 1:])
 
     def test_a_new_thread_comes_home_too(self, store):
         self._thread(store)
+        screens = 1 + len(mc_llm_chat_panel.SCREENS)
 
         answered = mc_llm_chat_panel._new_thread("Ada", "")
 
-        assert all(update.get("visible") is False
-                   for update in answered[-len(mc_llm_chat_panel.SCREENS):])
+        assert answered[-screens] == ""
+        assert all(update.get("visible") is False for update in answered[-screens + 1:])
 
     def test_the_threads_screen_opens_on_the_current_list(self, store):
         self._thread(store)
 
         answered = mc_llm_chat_panel._open_threads("Ada", "")
 
-        assert answered[mc_llm_chat_panel.SCREENS.index("threads")].get("visible") is True
+        assert answered[0] == "threads"
+        assert self._visible(answered)[
+            mc_llm_chat_panel.SCREENS.index("threads")] is True
         assert len(answered[-1].get("choices")) == 1
 
     def test_the_persona_screen_opens_on_what_is_saved(self, store):
@@ -584,15 +623,33 @@ class TestShell:
         modes = len(mc_llm_studio.MODES)
         answered = mc_llm_studio._switch("minimax")
 
-        sheets = answered[modes + 3:modes + 3 + len(mc_llm_studio.SHEETS)]
+        # The runtime line, the bar and the title, then the sheets: a name and
+        # one visibility each.
+        assert answered[modes + 3] == ""
+        sheets = answered[modes + 4:modes + 4 + len(mc_llm_studio.SHEETS)]
         assert all(update.get("visible") is False for update in sheets)
 
     def test_one_sheet_is_open_at_a_time(self):
-        shown = [update.get("visible") for update in mc_llm_studio._sheet("model")]
+        answered = mc_llm_studio._sheet("model")
+        shown = [update.get("visible") for update in answered[1:]]
 
+        assert answered[0] == "model"
         assert shown.count(True) == 1
         assert shown[mc_llm_studio.SHEETS.index("model")] is True
-        assert all(update.get("visible") is False for update in mc_llm_studio._sheet(""))
+        assert all(update.get("visible") is False for update in mc_llm_studio._sheet("")[1:])
+
+    def test_the_menu_button_closes_the_sheet_it_opened(self):
+        """The shell bar's menu is not covered by what it opens on a desktop,
+        so a press that appears to do nothing is a press that did nothing."""
+        opened = mc_llm_studio._toggle_sheet("mode")("")
+        closed = mc_llm_studio._toggle_sheet("mode")("mode")
+
+        assert opened[0] == "mode"
+        assert closed[0] == ""
+        assert all(update.get("visible") is False for update in closed[1:])
+
+    def test_a_sheet_that_is_not_a_sheet_closes_everything(self):
+        assert mc_llm_studio._sheet("elsewhere")[0] == ""
 
     def test_the_state_control_says_the_state_in_one_word(self, store, monkeypatch):
         """A button\u2019s label is text, and text is the one thing a theme
@@ -992,6 +1049,60 @@ class TestThemeContract:
 
         assert "position: relative" in rule
         assert "100dvh" in rule, "the fallback should survive a phone's address bar"
+
+    def test_no_rule_sets_display_on_anything_gradio_hides(self):
+        """The bug this whole contract exists to prevent, and the one that got
+        through: Gradio hides a container with a class whose rule is
+        ``display: none`` at *class* specificity, so any rule of ours that
+        names ``#mc-llm-studio`` and sets ``display`` outranks it and the
+        hidden thing stays on screen for ever. What that looked like was a
+        model sheet floating over the tab that Close would not close, a menu
+        that appeared not to toggle, and no way back to Conversation.
+
+        The list of classes at risk is read out of the panels rather than
+        written down here, so a surface added tomorrow with ``visible=False``
+        is covered by this test the moment it exists.
+        """
+        import ast
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+
+        hidden = set()
+        for name in ("mc_llm_chat_panel.py", "mc_llm_studio.py", "mc_llm_prompt_panel.py",
+                     "mc_llm_minimax_panel.py", "mc_llm_browse.py"):
+            tree = ast.parse((root / name).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                given = {keyword.arg: keyword.value for keyword in node.keywords if keyword.arg}
+                classes = given.get("elem_classes")
+                # "visible" given at all, not "visible=False": a container the
+                # panel decides the visibility of is a container Gradio may
+                # hide, whichever way it opens.
+                if "visible" not in given or not isinstance(classes, ast.Call):
+                    continue
+                if getattr(classes.func, "attr", "") != "classes":
+                    continue
+                for argument in classes.args:
+                    if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+                        hidden.add(f"mc-llm-{argument.value}")
+
+        assert "mc-llm-sheet" in hidden, "the sheets are supposed to be hideable"
+
+        css = re.sub(r"/\*.*?\*/", "", (root / "style.css").read_text(encoding="utf-8"),
+                     flags=re.S)
+        for rule in re.finditer(r"([^{}]*)\{([^{}]*)\}", css):
+            selector, body = rule.group(1).strip(), rule.group(2)
+            if not selector.startswith("#mc-llm-studio"):
+                continue
+            declared = [line.strip() for line in body.splitlines()
+                        if re.match(r"\s*display\s*:", line) and "none" not in line]
+            if not declared:
+                continue
+            for name in hidden:
+                assert f".{name}" not in selector, f"{selector} → {declared}"
 
     def test_the_escaping_helper_neutralises_metadata_from_a_model_file(self):
         """general.name is free text out of somebody else's file, and it lands

@@ -132,6 +132,11 @@ def _build():
     with gr.Blocks(analytics_enabled=False) as block:
         with gr.Column(elem_id=ui.ident("studio"), elem_classes=ui.classes("studio")):
 
+            # Which sheet is open, by name. A Column has no value a handler can
+            # be given, so the one control that has to *know* -- the menu, which
+            # closes what it opened -- reads it from here.
+            sheet_state = gr.State("")
+
             # -- the shell bar: a menu, a title and a state ----------------- #
             #
             # Three controls, one line, and none of them is a model filename.
@@ -238,7 +243,9 @@ def _build():
 
         # -- wiring ------------------------------------------------------- #
 
-        sheets = [mode_sheet, model_sheet]
+        # The State first, then one visibility per sheet: the order
+        # :func:`_sheet` answers in.
+        sheets = [sheet_state, mode_sheet, model_sheet]
         # Both state controls say the same thing and are updated together: the
         # one in this bar, and the one Conversation draws in its own header.
         chips = [chip, conversation["chip"]]
@@ -247,15 +254,22 @@ def _build():
                     outputs=views + [runtime_status, shellbar, title] + sheets + chips,
                     queue=False)
 
-        menu.click(fn=lambda: _sheet("mode"), outputs=sheets, queue=False)
-        close_modes.click(fn=lambda: _sheet(""), outputs=sheets, queue=False)
-        close_model.click(fn=lambda: _sheet(""), outputs=sheets, queue=False)
+        # Toggles, not openers. A menu that can only open is a menu you cannot
+        # dismiss from the button you opened it with, and on a desktop that
+        # button is not even covered by what it opened -- so pressing it again
+        # looked like a dead control.
+        menu.click(fn=_toggle_sheet("mode"), inputs=[sheet_state], outputs=sheets,
+                   queue=False)
+        close_modes.click(fn=_sheet, outputs=sheets, queue=False)
+        close_model.click(fn=_sheet, outputs=sheets, queue=False)
         # Conversation's own way in to the same two sheets. The panel has
         # already closed its own surfaces by the time this runs; all that is
         # left is to open the shell's.
         for control in conversation["model"] + [chip, model_from_modes]:
-            control.click(fn=lambda: _sheet("model"), outputs=sheets, queue=False)
-        conversation["modes"].click(fn=lambda: _sheet("mode"), outputs=sheets, queue=False)
+            control.click(fn=_toggle_sheet("model"), inputs=[sheet_state], outputs=sheets,
+                          queue=False)
+        conversation["modes"].click(fn=_toggle_sheet("mode"), inputs=[sheet_state],
+                                    outputs=sheets, queue=False)
         # Setup is a workspace, so getting to it is a mode switch: the radio is
         # moved, which is what redraws the views and the bar through _switch.
         for control in (to_setup, conversation["setup"]):
@@ -297,8 +311,23 @@ def _build():
 
 
 def _sheet(name: str = "") -> list:
-    """Show one shell sheet and hide the other. ``""`` closes both."""
-    return [gr.update(visible=(name == key)) for key in SHEETS]
+    """Which sheet is open, and one visibility per sheet.
+
+    The name comes back first because it is what the ``sheet`` State holds, and
+    that State is what makes ``\u2630`` a toggle rather than a control that can
+    only ever open something -- a Column has no value a handler can be given,
+    so the open sheet has to be remembered somewhere a handler can read.
+    """
+    wanted = name if name in SHEETS else ""
+    return [wanted] + [gr.update(visible=(wanted == key)) for key in SHEETS]
+
+
+def _toggle_sheet(name: str):
+    """A control that opens ``name``, or closes it if it is already open."""
+    def toggle(open_now):
+        return _sheet("" if open_now == name else name)
+
+    return toggle
 
 
 SHEETS = ("mode", "model")

@@ -1549,3 +1549,51 @@ now sends, because the message box is bound to `_send` through its `submit`
 event as well as through the button. Ctrl/Cmd+Enter still submits and Escape
 still stops, from `javascript/llm_studio.js`, which is also where the workspace
 is still measured against the window into `--mc-llm-available`.
+
+### 19.6 The sheet that would not close (19 August 2026)
+
+The first build of the rebuild shipped with every sheet permanently on screen.
+What that looked like: the model sheet floating over Setup with its ✕ doing
+nothing, **☰** apparently dead, and no way back to Conversation — because the
+mode sheet was there too, underneath the model sheet, and the model sheet was
+covering the radio that would have got you out.
+
+The cause is one declaration:
+
+```css
+#mc-llm-studio .mc-llm-sheet { display: flex; }   /* wrong */
+```
+
+Gradio hides a `Column` by putting a class on it whose rule is `display: none`
+at *class* specificity. Any rule of ours that names `#mc-llm-studio` and sets
+`display` outranks it, so `visible=False` had no effect on anything carrying
+`.mc-llm-sheet`. The handlers were firing and their updates were being applied
+the whole time — pressing **Open Setup** switched the workspace, which proves
+it — and the element simply would not go away.
+
+The mode views next door are the same component hidden the same way, have never
+had a `display` rule, and have never failed to hide. That is the experiment run
+both ways round in one screenshot.
+
+The fix is to state no `display` at all: a Gradio Column is already a flex
+column, so nothing was gained by restating it. `flex-direction` stays, because
+it is inert unless something else makes the element flex.
+
+This is also the real explanation for the report §15 answered with a button
+label — "it opens but does not toggle close" was never a `gr.State` that had
+drifted out of step. It was `#mc-llm-studio .mc-llm-drawer { display: flex; }`,
+added one section earlier to stop the drawer expanding sideways, quietly
+outranking the host's own way of hiding it.
+
+Two things now hold the line:
+
+- `tests/test_llm_panels.py` reads every container the panels build with a
+  `visible=` argument, collects the `elem_classes` those containers carry, and
+  fails if any rule under `#mc-llm-studio` sets `display` on one of them. The
+  list is derived from the source, so a surface added tomorrow is covered the
+  moment it exists.
+- The menu buttons are toggles rather than openers, against a `gr.State` that
+  names the open surface. A menu that can only open is one you cannot dismiss
+  from the control you opened it with — and on a desktop, where the sheet is a
+  corner panel that does not even cover the button, pressing it again looked
+  like a dead control.
