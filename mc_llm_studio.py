@@ -122,26 +122,34 @@ def _build():
     with gr.Blocks(analytics_enabled=False) as block:
         with gr.Column(elem_id=ui.ident("studio"), elem_classes=ui.classes("studio")):
 
+            # One row, six controls, no nested columns. The nesting was what
+            # let the status line be given a column of its own and wrap into
+            # ten lines: a Column takes the width a Row's scale gives it and
+            # then makes its contents fit *that*, however tall that turns out
+            # to be. Flat, every control is sized by what it is -- the chooser
+            # takes the slack, everything else is as wide as its own text --
+            # and the bar is one line tall.
             with gr.Row(elem_classes=ui.classes("topbar")):
                 mode = gr.Radio(
                     label=None, show_label=False, choices=list(MODES), value=initial,
-                    scale=3, min_width=320,
+                    scale=0, min_width=0,
                     elem_id=ui.ident("mode"), elem_classes=ui.classes("modes"))
-                with gr.Column(scale=4, min_width=280,
-                               elem_classes=ui.classes("model-bar")):
-                    with gr.Row():
-                        chooser = gr.Dropdown(
-                            label=None, show_label=False, choices=_model_choices(),
-                            value=_current_model(), scale=5, min_width=180,
-                            elem_id=ui.ident("model"),
-                            elem_classes=ui.classes("model-choice"))
-                        rescan = gr.Button("\u21bb", size="sm", min_width=44,
-                                           elem_id=ui.ident("model", "rescan"))
-                        load = gr.Button("Load", variant="primary", size="sm", min_width=80,
-                                         elem_id=ui.ident("load"))
-                        unload = gr.Button("Unload", variant="stop", size="sm", min_width=80,
-                                           elem_id=ui.ident("unload"))
-                runtime_status = gr.HTML(_runtime_line(), elem_id=ui.ident("runtime", "status"))
+                chooser = gr.Dropdown(
+                    label=None, show_label=False, choices=_model_choices(),
+                    value=_current_model(), scale=1, min_width=160,
+                    elem_id=ui.ident("model"),
+                    elem_classes=ui.classes("model-choice"))
+                rescan = gr.Button("\u21bb", size="sm", scale=0, min_width=0,
+                                   elem_id=ui.ident("model", "rescan"),
+                                   elem_classes=ui.classes("icon-button"))
+                load = gr.Button("Load", variant="primary", size="sm", scale=0, min_width=0,
+                                 elem_id=ui.ident("load"),
+                                 elem_classes=ui.classes("topbar-button"))
+                unload = gr.Button("Unload", variant="stop", size="sm", scale=0, min_width=0,
+                                   elem_id=ui.ident("unload"),
+                                   elem_classes=ui.classes("topbar-button"))
+                runtime_status = gr.HTML(_runtime_line(), elem_id=ui.ident("runtime", "status"),
+                                         elem_classes=ui.classes("runtime-state"))
 
             # Keyed by mode rather than zipped against MODES: a mode added to
             # the selector without a panel behind it should fail here, where
@@ -294,18 +302,25 @@ def _current_model() -> str | None:
 
 
 def _rescan_models():
-    """Walk the models folder again, and say what came back."""
+    """Walk the models folder again, and say what came back.
+
+    What it found goes to the console and to the chooser's own tooltip rather
+    than to the state chip: "6 models under D:/models" is news for a moment and
+    the chip has one job, which is to say whether the model is up.
+    """
     found = _library()
     if not found.models:
+        logger.info("Model Chain: LLM Studio — no .gguf files found under %s", found.folder)
         return (gr.update(choices=_model_choices(), value=_current_model()),
-                ui.notice(f"No .gguf files under {found.folder}. Set the Model Chain LLM "
-                          f"models folder setting, or choose a model by path in Setup.",
-                          "warn"))
+                ui.state("No models", "warn",
+                         f"No .gguf files under {found.folder}. Set the Model Chain LLM "
+                         f"models folder setting, or choose a model by path in Setup."))
     counted = f"{len(found.models)} model{'s' if len(found.models) != 1 else ''}"
     limited = (f" — the scan stopped at {mc_llm_files.MAX_LIBRARY_ENTRIES}"
                if found.truncated else "")
-    return (gr.update(choices=_model_choices(), value=_current_model()),
-            ui.notice(f"{counted} under {found.folder}{limited}."))
+    logger.info("Model Chain: LLM Studio — %s found under %s%s", counted, found.folder,
+                limited)
+    return (gr.update(choices=_model_choices(), value=_current_model()), _runtime_line())
 
 
 def _choose_model(path):
@@ -324,24 +339,31 @@ def _choose_model(path):
     import mc_llm_runtime
     from prompt_master.inference import model_choice
 
+    unchanged = (gr.update(), gr.update(), gr.update())
     if not path:
-        return _runtime_line(), gr.update(), gr.update(), gr.update()
+        return (_runtime_line(),) + unchanged
 
     configuration = mc_llm_runtime.config()
     if configuration.model is not None and str(configuration.model) == str(path):
-        return _runtime_line(), gr.update(), gr.update(), gr.update()
+        return (_runtime_line(),) + unchanged
     if configuration.runtime is None:
-        return (ui.notice("There is no llama.cpp runtime yet, so there is nothing to run a "
-                          "model with. Set one up in Setup first.", "warn"),
-                gr.update(), gr.update(), gr.update())
+        return (ui.state("Not set up", "warn",
+                         "There is no llama.cpp runtime yet, so there is nothing to run a "
+                         "model with. Set one up in Setup first."),
+                gr.update(),
+                gr.update(),
+                ui.notice("There is no llama.cpp runtime yet, so there is nothing to run a "
+                          "model with. Set one up in Setup first.", "warn"))
 
     try:
         chosen = mc_llm_files.resolve_model(path)
         model_choice.choose(mc_llm_paths.app_paths(), chosen.path, None)
     except mc_llm_files.PathError as exc:
-        return ui.notice(str(exc), "warn"), gr.update(), gr.update(), gr.update()
+        return (ui.state("Not set up", "warn", str(exc)), gr.update(), gr.update(),
+                ui.notice(str(exc), "warn"))
     except Exception as exc:
-        return ui.notice(ui.failure(exc), "error"), gr.update(), gr.update(), gr.update()
+        return (ui.state("Failed", "error", ui.failure(exc)), gr.update(), gr.update(),
+                ui.notice(ui.failure(exc), "error"))
 
     # The running server holds the weights it was started with.
     mc_llm_runtime.runtime.stop()
@@ -355,6 +377,10 @@ def _choose_model(path):
 def _load_model(progress=gr.Progress()):
     """Start llama-server on what is recorded, and report where it landed.
 
+    A generator, so the chip can say Loading before the load and Loaded after
+    it. Gradio streams a handler's yields, which is the only way a control can
+    describe a state it is still in.
+
     The one press that makes the tab usable again after an Unload, and the one
     that answers "is it ready?" without sending a message to find out. It asks
     the runtime for a client and throws the client away: starting the server is
@@ -364,14 +390,20 @@ def _load_model(progress=gr.Progress()):
     import mc_llm_runtime
 
     logger.info("Model Chain: LLM Studio — Load pressed")
+    # Yielded before the work rather than after it: reading twenty gigabytes off
+    # a disk is the one press here long enough that a button which looks like it
+    # did nothing gets pressed again.
+    yield _runtime_line(LOADING), gr.update(), gr.update()
     try:
         progress(0, desc="Starting llama-server…")
         mc_llm_runtime.runtime.client()
     except Exception as exc:
         logger.warning("Model Chain: llama-server could not be started: %s", ui.failure(exc))
         logger.debug("Model Chain: the llama-server start failed", exc_info=True)
-        return (ui.notice(ui.failure(exc), "error"), _residency_html(), _estimator_html())
-    return _runtime_line(), _residency_html(), _estimator_html()
+        yield (ui.state("Failed", "error", ui.failure(exc)),
+               _residency_html(), _estimator_html())
+        return
+    yield _runtime_line(), _residency_html(), _estimator_html()
 
 
 def _unload_model():
@@ -380,8 +412,7 @@ def _unload_model():
 
     logger.info("Model Chain: LLM Studio — Unload pressed")
     if not mc_llm_runtime.runtime.running():
-        return (ui.notice("Nothing is loaded — llama-server is not running."),
-                _residency_html())
+        return _runtime_line(), _residency_html()
     try:
         mc_llm_runtime.runtime.stop()
     except Exception:
@@ -396,39 +427,70 @@ def _unload_model():
 # --------------------------------------------------------------------------- #
 
 
-def _runtime_line() -> str:
-    """The concise status. Detail belongs in the collapsible panel below it."""
+LOADING = "Loading…"
+"""What the chip says between pressing Load and the server answering."""
+
+
+def _runtime_line(label: str | None = None) -> str:
+    """The runtime's state, in one word.
+
+    ``label`` overrides what it says without changing what it knows, which is
+    how Load shows :data:`LOADING` while it is still loading -- the state a
+    status can only report by being told, because nothing has changed yet.
+    """
     try:
-        return _runtime_text()
+        return _runtime_state(label)
     except Exception:
         logger.warning("Model Chain: the LLM status line could not be drawn", exc_info=True)
-        return ui.notice("LLM runtime unavailable — see the console.", "error")
+        return ui.state("Unavailable", "error", "See the console for the traceback.")
 
 
-def _runtime_text() -> str:
+def _runtime_state(label: str | None = None) -> str:
     import mc_llm_runtime
 
     state = mc_llm_runtime.runtime.status()
+    detail = _runtime_detail(state)
 
+    if label:
+        return ui.state(label, "info", detail)
     if not state["configured"]:
-        # Which of the two is missing decides what to do about it, so the line
-        # says which rather than making the reader open the panel to find out.
+        # Which of the two is missing decides what to do about it, so the
+        # tooltip says which -- the chip only has room to say that neither is
+        # the reason the model is not running.
         missing = ("a llama.cpp runtime and a model" if not state["has_runtime"]
                    else "a model")
-        return ui.notice(f"LLM Studio needs {missing} — open Setup.",
-                         "warn")
+        return ui.state("Not set up", "warn",
+                        f"LLM Studio needs {missing}. Open Setup.")
+    return ui.state("Loaded" if state["running"] else "Unloaded",
+                    "info" if state["running"] else "idle", detail)
 
-    parts = [f"Model: {state['quantization'] or state['model'] or 'unknown'}"]
-    parts.append(f"Device: {state['device'] or 'unknown'}")
-    parts.append("Server: running" if state["running"] else "Server: stopped")
+
+def _runtime_detail(state=None) -> str:
+    """Everything the chip used to say, for its tooltip and for Setup.
+
+    Kept whole rather than trimmed: it is the answer to "loaded as what?", and
+    the only reason it is not on screen is that it is not the question anybody
+    asks of a status bar forty times an hour.
+    """
+    import mc_llm_runtime
+
+    state = state if state is not None else mc_llm_runtime.runtime.status()
+    if not state["configured"]:
+        missing = ("a llama.cpp runtime and a model" if not state["has_runtime"]
+                   else "a model")
+        return f"LLM Studio needs {missing}. Open Setup."
+
+    parts = [f"Model: {state['quantization'] or state['model'] or 'unknown'}",
+             f"Device: {state['device'] or 'unknown'}",
+             "Server: running" if state["running"] else "Server: stopped"]
     if state["running"] and state["resident_bytes"]:
         parts.append(f"VRAM: {ui.gigabytes(state['resident_bytes'])}")
     report = state["report"]
-    if report.placement is not None:
+    if report is not None and report.placement is not None:
         parts.append(f"Context: {ui.tokens(report.placement.context)}")
     if not state["sees"]:
         parts.append("No vision projector")
-    return ui.notice(" · ".join(parts))
+    return " · ".join(parts)
 
 
 def _residency_html() -> str:
@@ -459,6 +521,10 @@ def _residency_table() -> str:
     running = status.active
     owners = ", ".join(status.owners) or "nothing"
     summary = [
+        # First, and spelled out: the top bar's chip says "Loaded" and this is
+        # where "loaded as what?" is answered. The chip's tooltip carries the
+        # same sentence, but a tooltip is not somewhere anybody reads carefully.
+        f"<li>LLM runtime: {ui.escape(_runtime_detail(state))}</li>",
         f"<li>Mode: <b>{ui.escape(mc_broker.label_for(mc_broker.MODES, status.mode))}</b></li>",
         f"<li>Policy: <b>{ui.escape(mc_broker.label_for(mc_broker.POLICIES, status.policy))}</b></li>",
         f"<li>VRAM: {ui.gigabytes(status.free_vram)} free of "

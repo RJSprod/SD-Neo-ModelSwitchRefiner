@@ -569,25 +569,52 @@
     width: 100%;
 }
 
+/* -- the top bar ----------------------------------------------------------
+   One line, and everything in it sized by what it is. This is the tab's
+   chrome, not its content: every pixel it takes is a pixel of conversation,
+   and the first version of it managed to be four hundred of them by giving a
+   status sentence a column of its own and letting it wrap.
+
+   So the type is a step down, the padding is tight, and nothing here is
+   allowed to grow except the model chooser, which is the only control whose
+   text is not known in advance. */
+
 #mc-llm-studio .mc-llm-topbar {
     align-items: center;
     flex-wrap: wrap;
-    gap: 0.75em;
+    font-size: 0.9em;
+    gap: 0.4em;
     margin-bottom: 0.5em;
+}
+
+#mc-llm-studio .mc-llm-topbar button {
+    padding: var(--size-1-5, 0.375em) var(--size-3, 0.75em);
+    white-space: nowrap;
+}
+
+#mc-llm-studio .mc-llm-icon-button button {
+    padding: var(--size-1-5, 0.375em) var(--size-2-5, 0.625em);
+}
+
+#mc-llm-studio .mc-llm-topbar-button {
+    flex: 0 0 auto;
+}
+
+/* The four modes on one line, as a segmented control rather than four blocks.
+   Gradio draws a radio as one label per choice, and left alone at this size
+   they wrap to two rows and take the height of two rows with them. */
+#mc-llm-studio .mc-llm-modes {
+    flex: 0 0 auto;
 }
 
 #mc-llm-studio .mc-llm-modes label {
     font-weight: 600;
+    padding: 0.25em 0.6em;
+    white-space: nowrap;
 }
 
-/* The model chooser, its rescan, and Load/Unload sit on one line and stay on
-   it: they are one control between them -- which model, and is it running --
-   and a Load button that wraps away from the name of what it would load is a
-   button that has to be aimed rather than pressed. */
-#mc-llm-studio .mc-llm-model-bar > * {
-    align-items: center;
-    flex-wrap: nowrap;
-    gap: 0.4em;
+#mc-llm-studio .mc-llm-model-choice {
+    min-width: 0;
 }
 
 #mc-llm-studio .mc-llm-workspace {
@@ -744,14 +771,31 @@
     gap: 0.5em;
 }
 
-/* Send, Stop and Attach stack beside the box rather than under it, so the
-   composer is as tall as what is being written and no taller. */
+/* Send, Stop and Attach sit beside the box rather than under it, so the
+   composer is as tall as what is being written and no taller. They stretch to
+   whatever height the message box asks for rather than setting it: a stack
+   taller than the thing it sits next to is a stack deciding how tall the
+   composer is, and that height belongs to the transcript. */
 #mc-llm-studio .mc-llm-composer-side {
     display: flex;
     flex-direction: column;
     gap: 0.35em;
-    justify-content: flex-end;
     min-width: 0;
+}
+
+#mc-llm-studio .mc-llm-composer-side > * {
+    flex: 1 1 0;
+    min-height: 0;
+}
+
+#mc-llm-studio .mc-llm-composer-side button {
+    height: 100%;
+    white-space: nowrap;
+}
+
+#mc-llm-studio .mc-llm-composer-side-row {
+    flex-wrap: nowrap;
+    gap: 0.35em;
 }
 
 /* The image box is a row of its own, opened by Attach. It used to be a column
@@ -843,6 +887,60 @@
     border-left-color: var(--error-border-color, var(--color-accent, currentColor));
     color: var(--error-text-color, var(--body-text-color, inherit));
     font-weight: 600;
+}
+
+/* -- the runtime state chip -----------------------------------------------
+   One word and a dot, on one line, forever. The sentence it replaced was
+   accurate and unreadable at a glance, and long enough to wrap the top bar
+   into ten lines; what it said is on the chip's own tooltip, in Setup's
+   residency view, and in the console. */
+
+#mc-llm-studio .mc-llm-state {
+    align-items: center;
+    display: inline-flex;
+    font-size: 0.9em;
+    font-weight: 600;
+    gap: 0.45em;
+    line-height: 1.2;
+    padding: 0.25em 0.2em;
+    white-space: nowrap;
+}
+
+#mc-llm-studio .mc-llm-state-dot {
+    background: currentColor;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    height: 0.55em;
+    width: 0.55em;
+}
+
+/* Idle is the resting state and reads as one: the dot is hollow rather than
+   a second colour, so "not running" is not competing for attention with a
+   warning that something is wrong. */
+#mc-llm-studio .mc-llm-state-idle {
+    opacity: 0.75;
+}
+
+#mc-llm-studio .mc-llm-state-idle .mc-llm-state-dot {
+    background: transparent;
+    box-shadow: inset 0 0 0 1px currentColor;
+}
+
+#mc-llm-studio .mc-llm-state-warn {
+    color: var(--color-accent, inherit);
+}
+
+#mc-llm-studio .mc-llm-state-error {
+    color: var(--error-text-color, var(--color-accent, inherit));
+}
+
+/* The status never grows the bar. If it somehow says more than it should, it
+   is cut rather than allowed to wrap the row it lives in. */
+#mc-llm-studio .mc-llm-runtime-state {
+    flex: 0 1 auto;
+    max-width: 14em;
+    min-width: 0;
+    overflow: hidden;
 }
 
 /* -- the file picker ------------------------------------------------------
