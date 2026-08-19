@@ -1,0 +1,335 @@
+"""Getting a llama.cpp runtime in place from inside Forge.
+
+This exists because the panel could previously reach a state whose only
+recovery instruction — inherited from the standalone application — named a Qt
+wizard this extension does not have. The tests below are mostly about the three
+routes out of that state, and about the containment rule that constrains all of
+them: the runtime is a program this extension *starts*, so it has to live
+inside the install root.
+"""
+
+from __future__ import annotations
+
+import sys
+
+import pytest
+
+import mc_llm_paths
+import mc_llm_setup as setup
+
+
+@pytest.fixture(autouse=True)
+def root(tmp_path, monkeypatch, host):
+    """A throwaway install root, and no cached device list between tests.
+
+    A *subdirectory* of tmp_path, not tmp_path itself, so that a test writing
+    an "existing llama.cpp build somewhere else on the machine" into tmp_path
+    is really writing it outside the root. Rooting the install at tmp_path made
+    every such build contained, and every containment assertion vacuous.
+    """
+    install = tmp_path / "install"
+    install.mkdir()
+    monkeypatch.setattr(mc_llm_paths, "data_root", lambda: install)
+    setup.forget_devices()
+    yield install
+    setup.forget_devices()
+
+
+@pytest.fixture
+def elsewhere(tmp_path):
+    """Somewhere genuinely outside the install root."""
+    return tmp_path / "elsewhere"
+
+
+def make_build(directory, name="llama-server", extras=("libllama.so", "libggml.so",
+                                                       "llama-cli")):
+    """A directory that looks like a llama.cpp release."""
+    directory.mkdir(parents=True, exist_ok=True)
+    server = directory / name
+    server.write_bytes(b"#!/bin/sh\nexit 0\n")
+    server.chmod(0o755)
+    for extra in extras:
+        (directory / extra).write_bytes(b"x")
+    return server
+
+
+class TestStatus:
+    def test_a_bare_install_reports_nothing_ready(self, root):
+        found = setup.status()
+
+        assert not found.ready
+        assert not found.adoptable
+        assert found.recorded is None
+
+    def test_a_build_in_place_but_unrecorded_is_adoptable(self, root):
+        make_build(root / "runtime")
+
+        found = setup.status()
+
+        assert found.adoptable
+        assert found.found is not None
+        assert not found.ready
+
+    def test_a_recorded_runtime_reads_as_ready(self, root):
+        server = make_build(root / "runtime")
+
+        setup.record(server)
+
+        assert setup.status().ready
+
+    def test_a_recorded_runtime_that_has_been_deleted_is_not_ready(self, root):
+        server = make_build(root / "runtime")
+        setup.record(server)
+        server.unlink()
+
+        assert not setup.status().ready
+
+    def test_a_runtime_recorded_outside_the_root_is_refused(self, root, elsewhere):
+        """The one path here that would start a program from somewhere this
+        extension does not own."""
+        from prompt_master.core.config import atomic_write_json
+
+        outside = make_build(elsewhere / "bin")
+        atomic_write_json(root / "data" / "setup-state.json", {"runtime": str(outside)})
+
+        assert setup.recorded_runtime() is None
+
+    def test_downloadability_is_reported_with_a_reason(self, root):
+        found = setup.status()
+
+        assert found.downloadable == (sys.platform == "win32")
+        if not found.downloadable:
+            assert "Windows" in found.detail
+            assert "point the box" in found.detail.casefold()
+
+
+class TestDetect:
+    def test_it_finds_a_server_nested_under_the_runtime_directory(self, root):
+        """Release archives extract into a subdirectory as often as not."""
+        server = make_build(root / "runtime" / "build" / "bin")
+
+        assert setup.detect() == server
+
+    def test_it_finds_nothing_when_there_is_nothing(self, root):
+        assert setup.detect() is None
+
+    def test_it_ignores_things_that_are_not_a_server(self, root):
+        directory = root / "runtime"
+        directory.mkdir(parents=True)
+        (directory / "readme.txt").write_text("hello", encoding="utf-8")
+
+        assert setup.detect() is None
+
+
+class TestAdopt:
+    def test_a_build_already_inside_the_root_is_not_copied(self, root):
+        """Copying it would leave two of a build the user deliberately placed."""
+        server = make_build(root / "runtime")
+
+        adopted, note = setup.adopt(server)
+
+        assert adopted == server.resolve()
+        assert "already in place" in note
+
+    def test_a_release_directory_is_copied_whole(self, root, elsewhere):
+        """llama.cpp loads shared libraries from beside the server, so taking
+        the executable alone would produce a runtime that will not start."""
+        make_build(elsewhere / "llama-b9637" / "bin")
+
+        adopted, note = setup.adopt(elsewhere / "llama-b9637" / "bin" / "llama-server")
+
+        assert (root / "runtime").is_dir()
+        assert adopted.is_file()
+        assert (adopted.parent / "libllama.so").is_file()
+        assert "Copied the llama.cpp build" in note
+
+    def test_a_directory_may_be_pointed_at_instead_of_the_executable(self, root, elsewhere):
+        make_build(elsewhere / "release")
+
+        adopted, _note = setup.adopt(elsewhere / "release")
+
+        assert adopted.name == "llama-server"
+        assert adopted.is_file()
+
+    def test_a_system_binary_directory_yields_the_executable_alone(self, root, elsewhere):
+        """Pointing at /usr/bin must not copy /usr/bin. The single-file route
+        works, with a caveat the caller is told about."""
+        system = elsewhere / "usr" / "bin"
+        make_build(system, extras=("python3", "curl", "tar", "grep"))
+
+        adopted, note = setup.adopt(system / "llama-server")
+
+        assert adopted == root / "runtime" / "llama-server"
+        assert not (root / "runtime" / "curl").exists()
+        assert "only the executable was taken" in note
+
+    def test_the_copied_executable_keeps_its_executable_bit(self, root, elsewhere):
+        if sys.platform == "win32":
+            pytest.skip("no executable bit on Windows")
+        make_build(elsewhere / "release")
+
+        adopted, _note = setup.adopt(elsewhere / "release")
+
+        assert adopted.stat().st_mode & 0o111
+
+    def test_a_second_adopt_replaces_the_first(self, root, elsewhere):
+        make_build(elsewhere / "old", extras=("libllama.so", "libggml.so", "old-marker"))
+        setup.adopt(elsewhere / "old")
+        make_build(elsewhere / "new", extras=("libllama.so", "libggml.so", "new-marker"))
+
+        setup.adopt(elsewhere / "new")
+
+        assert (root / "runtime" / "new-marker").is_file()
+        assert not (root / "runtime" / "old-marker").exists()
+
+    def test_a_missing_path_says_so(self, root, tmp_path):
+        with pytest.raises(setup.SetupError, match="nothing at"):
+            setup.adopt(tmp_path / "nowhere")
+
+    def test_a_directory_with_no_server_says_so(self, root, elsewhere):
+        empty = elsewhere / "empty"
+        empty.mkdir(parents=True)
+
+        with pytest.raises(setup.SetupError, match="no llama-server"):
+            setup.adopt(empty)
+
+    def test_the_wrong_executable_is_named_rather_than_copied(self, root, elsewhere):
+        elsewhere.mkdir(parents=True, exist_ok=True)
+        other = elsewhere / "llama-cli"
+        other.write_bytes(b"x")
+
+        with pytest.raises(setup.SetupError, match="not a llama.cpp server"):
+            setup.adopt(other)
+
+    def test_an_implausibly_large_directory_is_refused(self, root, elsewhere, monkeypatch):
+        """The guard against being pointed at a folder that contains a release
+        rather than at the release."""
+        monkeypatch.setattr(setup, "MAX_ADOPT_BYTES", 8)
+        make_build(elsewhere / "release")
+
+        with pytest.raises(setup.SetupError, match="larger than a llama.cpp release"):
+            setup.adopt(elsewhere / "release")
+
+
+class TestRecord:
+    def test_it_writes_a_usable_state_file_from_nothing(self, root):
+        server = make_build(root / "runtime")
+
+        state = setup.record(server)
+
+        assert state["runtime"] == "runtime/llama-server"
+        assert "gpu_index" in state and "gpu_device" in state
+        assert (root / "data" / "setup-state.json").is_file()
+
+    def test_the_runtime_is_recorded_relative_so_the_install_stays_movable(self, root):
+        server = make_build(root / "runtime" / "bin")
+
+        state = setup.record(server)
+
+        assert not state["runtime"].startswith("/")
+        assert state["runtime"] == "runtime/bin/llama-server"
+
+    def test_an_existing_model_choice_survives_recording_a_runtime(self, root):
+        """Fixing a missing runtime must not cost somebody the model they had
+        already chosen."""
+        from prompt_master.core.config import atomic_write_json
+
+        atomic_write_json(root / "data" / "setup-state.json",
+                          {"model": "models/mine.gguf", "mmproj": "models/proj.gguf"})
+        server = make_build(root / "runtime")
+
+        state = setup.record(server)
+
+        assert state["model"] == "models/mine.gguf"
+        assert state["mmproj"] == "models/proj.gguf"
+
+    def test_a_runtime_outside_the_root_is_refused_with_the_reason(self, root, elsewhere):
+        outside = make_build(elsewhere)
+
+        with pytest.raises(setup.SetupError, match="outside the LLM data directory"):
+            setup.record(outside)
+
+    def test_a_missing_file_is_refused(self, root):
+        with pytest.raises(setup.SetupError, match="no llama-server at"):
+            setup.record(root / "runtime" / "absent")
+
+    def test_recording_makes_the_config_usable(self, root):
+        """The whole point: config().runtime stops being None, which is what
+        the model chooser refuses on."""
+        import mc_llm_runtime
+
+        server = make_build(root / "runtime")
+        setup.record(server)
+
+        assert mc_llm_runtime.config().runtime == server.resolve()
+
+
+class TestDevices:
+    def test_a_device_list_is_always_offered(self, root):
+        """Even with no nvidia-smi: the processor is a real answer, and it is
+        what lets the panel offer CPU execution rather than nothing."""
+        found = setup.devices()
+
+        assert found
+
+    def test_the_list_is_cached_between_calls(self, root, monkeypatch):
+        """Detection is a subprocess with a fifteen-second timeout and the panel
+        wants the answer several times while it is being built."""
+        calls = []
+
+        def counted(*args, **kwargs):
+            calls.append(1)
+            return []
+
+        monkeypatch.setattr("prompt_master.inference.device_detection.detect_devices",
+                            counted)
+        setup.forget_devices()
+
+        setup.devices()
+        setup.devices()
+
+        assert len(calls) == 1
+
+    def test_a_refresh_asks_again(self, root, monkeypatch):
+        calls = []
+        monkeypatch.setattr("prompt_master.inference.device_detection.detect_devices",
+                            lambda *a, **k: calls.append(1) or [])
+        setup.forget_devices()
+
+        setup.devices()
+        setup.devices(refresh=True)
+
+        assert len(calls) == 2
+
+    def test_a_preferred_device_is_always_returned(self, root):
+        assert setup.preferred_device() is not None
+
+
+class TestDownload:
+    def test_it_refuses_with_the_adopt_route_where_there_is_no_pinned_build(
+            self, root, monkeypatch):
+        monkeypatch.setattr(setup, "downloadable", lambda: False)
+
+        with pytest.raises(setup.SetupError, match="Windows x64"):
+            setup.download()
+
+    def test_it_does_not_download_the_pinned_model(self, root, monkeypatch):
+        """installer.provision would also fetch a 16-27 GiB model. Somebody who
+        already has a GGUF wants the runtime and only the runtime."""
+        monkeypatch.setattr(setup, "downloadable", lambda: True)
+        requested = []
+
+        def fake_fetch(component, destination, progress=None, notice=None):
+            requested.append(component.component_id)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"")
+            return destination
+
+        monkeypatch.setattr("prompt_master.provisioning.downloader.download", fake_fetch)
+        monkeypatch.setattr("prompt_master.provisioning.extractor.extract_zips_atomic",
+                            lambda archives, destination: make_build(destination))
+
+        setup.download()
+
+        assert requested
+        assert not any(key.startswith("model-") or key == "mmproj" for key in requested)

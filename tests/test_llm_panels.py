@@ -218,7 +218,7 @@ class TestShell:
         assert mc_llm_studio._initial_mode() == "prompt"
 
     def test_the_runtime_line_says_what_is_missing_before_setup(self):
-        assert "No model configured" in mc_llm_studio._runtime_line()
+        assert "needs a llama.cpp runtime and a model" in mc_llm_studio._runtime_line()
 
     def test_the_residency_panel_renders_with_nothing_resident(self):
         import mc_broker
@@ -336,3 +336,62 @@ class TestPanelsOpenWhereTheyWereLeft:
         mc_llm_minimax_panel.build()
 
         assert mc_llm_state.preferences()["minimax_variant"] == enhancer.REF2VA
+
+
+class TestRuntimeSetup:
+    """The panel's first step, added after a user hit its absence.
+
+    Choosing a model requires a runtime, and the panel used to offer only the
+    second half of that -- so upstream's refusal surfaced, and it ends "Run
+    Models and Hardware setup first", naming a Qt wizard this extension does
+    not have.
+    """
+
+    def test_the_panel_says_what_is_missing_and_how_to_fix_it(self, store):
+        line = mc_llm_studio._runtime_setup_line()
+
+        assert "llama.cpp release you already have" in line
+        assert str(store) in line
+
+    def test_it_offers_to_adopt_a_build_already_in_place(self, store):
+        import mc_llm_setup
+
+        runtime = store / mc_llm_setup.RUNTIME_DIRNAME
+        runtime.mkdir(parents=True)
+        (runtime / "llama-server").write_bytes(b"")
+
+        assert "Press Detect" in mc_llm_studio._runtime_setup_line()
+
+    def test_a_recorded_runtime_reads_as_ready(self, store):
+        import mc_llm_setup
+
+        runtime = store / mc_llm_setup.RUNTIME_DIRNAME
+        runtime.mkdir(parents=True)
+        server = runtime / "llama-server"
+        server.write_bytes(b"")
+        mc_llm_setup.record(server)
+
+        assert "Runtime:" in mc_llm_studio._runtime_setup_line()
+
+    def test_choosing_a_model_without_a_runtime_names_this_tab(self, store):
+        """Not "Run Models and Hardware setup first", which is a dead end here."""
+        notice, _estimator = mc_llm_studio._apply_model("/models/thing.gguf", "")
+
+        assert "llama.cpp runtime above" in notice
+        assert "Models and Hardware" not in notice
+
+    def test_the_top_status_line_distinguishes_the_two_missing_pieces(self, store):
+        assert "runtime and a model" in mc_llm_studio._runtime_line()
+
+    def test_detect_reports_when_there_is_nothing_to_detect(self, store):
+        notice, _path = mc_llm_studio._detect_runtime()
+
+        assert "No llama-server found" in notice
+
+    def test_applying_an_empty_path_asks_for_one(self, store):
+        notice, _path, _model = mc_llm_studio._apply_runtime("", None)
+
+        assert "Enter the path" in notice
+
+    def test_the_device_dropdown_always_offers_something(self, store):
+        assert mc_llm_studio._device_choices()

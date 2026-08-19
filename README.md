@@ -1131,10 +1131,36 @@ weights under a data directory, in this order:
 3. `<WebUI data directory>/model_chain_llm`.
 
 The first two exist so an existing Prompt Master install is reused as-is —
-runtime, weights, characters and chats — rather than downloaded again. Under
-**Models, hardware and memory** you can also point the install at any GGUF on
-disk, with or without a projector; that changes two lines of state and downloads
-nothing.
+runtime, weights, characters and chats — rather than downloaded again.
+
+### First-time setup
+
+Everything is under **Models, hardware and memory**, and it is two steps in
+order: a runtime, then a model. There is nothing to run a GGUF with until the
+first one is done, so the panel does that one first.
+
+**1. llama.cpp runtime.** Three routes, and the panel tells you which apply:
+
+- **Detect** — picks up a build already sitting in `<data directory>/runtime/`,
+  including one left there by a standalone install you pointed at.
+- **Use this runtime** — give it the path to a `llama-server` binary (or the
+  folder holding it) from any llama.cpp release you already have, and it is
+  copied into the data directory. This route works on every platform.
+- **Download the pinned build** — fetches and SHA-256-verifies the build from
+  `release-manifest.json`. Those are **Windows x64 archives only**, so this
+  button is disabled elsewhere and the panel says why.
+
+The runtime is copied in rather than referenced where it lies, because it is a
+program this extension *starts* — unlike the weights, which it only reads. A
+release folder is copied whole, since llama.cpp loads its shared libraries from
+beside the server; a distribution-packaged `llama-server` that finds its
+libraries on the system path is copied on its own, and the panel says so,
+because that one stops working if the package is removed.
+
+**2. Which model runs.** Any GGUF on disk, with or without a projector. That
+changes two lines of state and downloads nothing. The **Find the projector
+beside it** button suggests a neighbouring `mmproj` file — check it belongs to
+that model, because nothing in a filename proves it does.
 
 ### Context, and what it costs
 
@@ -1238,6 +1264,7 @@ mc_gguf.py            GGUF metadata header reader
 mc_llm_context.py     context capacity estimation and its calibration
 mc_llm_runtime.py     the managed llama.cpp process and its placement
 mc_llm_paths.py       where LLM Studio keeps its data
+mc_llm_setup.py       getting a llama.cpp runtime in place
 mc_llm_state.py       shared preferences + the two mode histories
 mc_llm_sessions.py    the three run orchestrations, as streaming generators
 mc_llm_studio.py      the LLM Studio tab shell, status and settings panel

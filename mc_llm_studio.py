@@ -155,7 +155,12 @@ def _runtime_line() -> str:
         return ui.notice("LLM runtime unavailable — see the console.", "error")
 
     if not state["configured"]:
-        return ui.notice("No model configured yet — open Models, hardware and memory.", "warn")
+        # Which of the two is missing decides what to do about it, so the line
+        # says which rather than making the reader open the panel to find out.
+        missing = ("a llama.cpp runtime and a model" if not state["has_runtime"]
+                   else "a model")
+        return ui.notice(f"LLM Studio needs {missing} — open Models, hardware and memory.",
+                         "warn")
 
     parts = [f"Model: {state['quantization'] or state['model'] or 'unknown'}"]
     parts.append(f"Device: {state['device'] or 'unknown'}")
@@ -236,6 +241,28 @@ def _settings_panel() -> dict:
 
     with gr.Row():
         with gr.Column(scale=2, min_width=320):
+            # The runtime comes first because it is first: a model cannot be
+            # chosen until there is something to run it with, and the panel
+            # used to offer the second step without the first.
+            gr.Markdown("#### llama.cpp runtime")
+            # Asked once and reused: each call stats the state file and walks
+            # the runtime directory, and the panel wants three answers from it.
+            found = _runtime_status()
+            choices = _device_choices()
+            runtime_notice = gr.HTML(_runtime_setup_line(found))
+            runtime_path = gr.Textbox(
+                label="llama-server", value=str(found.recorded or found.found or ""),
+                placeholder="Path to llama-server, or to the folder holding it",
+                elem_id=ui.ident("settings", "runtime"))
+            device = gr.Dropdown(
+                label="Device", choices=choices, value=_current_device(choices),
+                elem_id=ui.ident("settings", "device"))
+            with gr.Row():
+                use_runtime = gr.Button("Use this runtime", variant="primary", size="sm")
+                detect_runtime = gr.Button("Detect", size="sm")
+                fetch_runtime = gr.Button("Download the pinned build", size="sm",
+                                          interactive=found.downloadable)
+
             gr.Markdown("#### Which model runs")
             model_path = gr.Textbox(
                 label="GGUF model", value=str(configuration.model or ""),
@@ -316,6 +343,13 @@ def _settings_panel() -> dict:
 
     # -- wiring ----------------------------------------------------------- #
 
+    use_runtime.click(fn=_apply_runtime, inputs=[runtime_path, device],
+                      outputs=[runtime_notice, runtime_path, model_notice], queue=False)
+    detect_runtime.click(fn=_detect_runtime, outputs=[runtime_notice, runtime_path],
+                         queue=False)
+    fetch_runtime.click(fn=_download_runtime, inputs=[device],
+                        outputs=[runtime_notice, runtime_path])
+
     apply_model.click(fn=_apply_model, inputs=[model_path, mmproj_path],
                       outputs=[model_notice, estimator], queue=False)
     suggest.click(fn=_suggest_projector, inputs=[model_path],
@@ -338,16 +372,148 @@ def _settings_panel() -> dict:
 
 
 def _model_line(configuration) -> str:
-    if not configuration.configured:
-        root = mc_llm_paths.data_root()
-        return ui.notice(
-            f"No runtime is provisioned yet. LLM Studio looks in {root}. Point "
-            f"PROMPT_MASTER_ROOT or the Model Chain LLM data directory setting at an existing "
-            f"Prompt Master install to reuse it, or run its console setup to provision one.",
-            "warn")
+    if configuration.runtime is None:
+        return ui.notice("Set up a llama.cpp runtime above before choosing a model.", "warn")
+    if configuration.model is None:
+        return ui.notice("No model chosen yet. Enter the path to a .gguf file.", "warn")
     return ui.notice(
-        f"{configuration.model.name if configuration.model else ''} · "
+        f"{configuration.model.name} · "
         f"{'vision projector loaded' if configuration.sees else 'text only'}")
+
+
+# --------------------------------------------------------------------------- #
+# Runtime setup
+# --------------------------------------------------------------------------- #
+
+
+def _runtime_status():
+    import mc_llm_setup
+
+    try:
+        return mc_llm_setup.status()
+    except Exception:
+        logger.debug("Model Chain: could not read the runtime status", exc_info=True)
+        return mc_llm_setup.RuntimeStatus(None, None, False, "")
+
+
+def _runtime_setup_line(found=None) -> str:
+    """What is missing, and which of the three routes will fix it."""
+    found = found if found is not None else _runtime_status()
+    if found.ready:
+        return ui.notice(f"Runtime: {found.recorded}")
+    if found.adoptable:
+        return ui.notice(
+            f"A llama.cpp build is already in place at {found.found} but is not recorded. "
+            f"Press Detect to use it.", "warn")
+
+    root = mc_llm_paths.data_root()
+    routes = [
+        f"LLM Studio keeps its runtime and models in {root}.",
+        "Point the box below at a llama.cpp release you already have and press "
+        "Use this runtime — it will be copied in.",
+    ]
+    if found.downloadable:
+        routes.append("Or press Download the pinned build to fetch and verify one.")
+    else:
+        routes.append(found.detail)
+    routes.append(
+        "Already have a Prompt Master install? Set the Model Chain LLM data directory "
+        "setting (or PROMPT_MASTER_ROOT) to its root and reuse it whole."
+    )
+    return ui.notice(" ".join(routes), "warn")
+
+
+def _device_choices() -> list[tuple[str, str]]:
+    import mc_llm_setup
+
+    try:
+        return [(mc_llm_setup.describe_device(found), str(found.physical_index))
+                for found in mc_llm_setup.devices()]
+    except Exception:
+        logger.debug("Model Chain: could not list devices", exc_info=True)
+        return []
+
+
+def _current_device(choices=None) -> str | None:
+    import mc_llm_runtime
+
+    index = mc_llm_runtime.config().gpu_index
+    choices = _device_choices() if choices is None else choices
+    values = [value for _, value in choices]
+    if str(index) in values:
+        return str(index)
+    return values[0] if values else None
+
+
+def _device_for(value):
+    """The detected device the dropdown's value refers to."""
+    import mc_llm_setup
+
+    try:
+        wanted = int(value)
+    except (TypeError, ValueError):
+        return mc_llm_setup.preferred_device()
+    for found in mc_llm_setup.devices():
+        if found.physical_index == wanted:
+            return found
+    return mc_llm_setup.preferred_device()
+
+
+def _apply_runtime(path, device_value):
+    """Adopt the build at ``path`` and record it. The panel's first step."""
+    import mc_llm_runtime
+    import mc_llm_setup
+
+    if not (path or "").strip():
+        return (ui.notice("Enter the path to llama-server, or to the folder holding it.",
+                          "warn"),
+                gr.update(), gr.update())
+    try:
+        executable, note = mc_llm_setup.adopt(path)
+        mc_llm_setup.record(executable, _device_for(device_value))
+    except Exception as exc:
+        return ui.notice(ui.failure(exc), "error"), gr.update(), gr.update()
+
+    # The running server holds the build it was started with.
+    mc_llm_runtime.runtime.stop()
+    return (ui.notice(f"{note} Runtime recorded."), str(executable),
+            _model_line(mc_llm_runtime.config()))
+
+
+def _detect_runtime():
+    """Record a build already sitting under the install root."""
+    import mc_llm_setup
+
+    found = mc_llm_setup.detect()
+    if found is None:
+        return (ui.notice(f"No llama-server found under "
+                          f"{mc_llm_paths.data_root() / mc_llm_setup.RUNTIME_DIRNAME}.",
+                          "warn"),
+                gr.update())
+    try:
+        mc_llm_setup.record(found)
+    except Exception as exc:
+        return ui.notice(ui.failure(exc), "error"), gr.update()
+    return ui.notice(f"Found and recorded {found}."), str(found)
+
+
+def _download_runtime(device_value, progress=gr.Progress()):
+    """Fetch the pinned build. Weights are not downloaded here."""
+    import mc_llm_runtime
+    import mc_llm_setup
+
+    try:
+        chosen = _device_for(device_value)
+        executable = mc_llm_setup.download(
+            chosen,
+            on_status=lambda text: progress(0, desc=text),
+            on_progress=lambda fraction: progress(fraction))
+        mc_llm_setup.record(executable, chosen)
+    except Exception as exc:
+        return ui.notice(ui.failure(exc), "error"), gr.update()
+
+    mc_llm_runtime.runtime.stop()
+    return ui.notice(f"Downloaded and recorded {executable}."), str(executable)
 
 
 def _apply_model(model, mmproj):
@@ -359,6 +525,15 @@ def _apply_model(model, mmproj):
 
     if not (model or "").strip():
         return ui.notice("Enter the path to a .gguf file.", "warn"), gr.update()
+    if mc_llm_runtime.config().runtime is None:
+        # Checked here so the answer names something in this tab. Upstream's own
+        # refusal ends "Run Models and Hardware setup first", which is a Qt
+        # wizard this extension does not have -- a dead end rather than an
+        # instruction.
+        return (ui.notice("There is no llama.cpp runtime yet, so there is nothing to run a "
+                          "model with. Set one up under llama.cpp runtime above first.",
+                          "warn"),
+                gr.update())
     try:
         model_choice.choose(mc_llm_paths.app_paths(), Path(model.strip()),
                             Path(mmproj.strip()) if (mmproj or "").strip() else None)

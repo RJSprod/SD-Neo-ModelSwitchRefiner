@@ -112,6 +112,20 @@ def _make_gradio() -> types.ModuleType:
     ):
         setattr(gradio, name, type(name, (_Component,), {}))
 
+    class _Progress:
+        """Stands in for gr.Progress, which Gradio passes to a long-running fn.
+
+        Called as ``progress(fraction, desc=...)``; the real one drives the
+        host's progress bar and returns nothing, so this does the same.
+        """
+
+        def __init__(self, *args, **kwargs):
+            self.reports = []
+
+        def __call__(self, fraction=0, desc=None, **kwargs):
+            self.reports.append((fraction, desc))
+
+    gradio.Progress = _Progress
     gradio.update = lambda **kwargs: _Update(kwargs)
     gradio.skip = lambda: _Update({"__skip__": True})
     gradio.components = types.SimpleNamespace(Component=_Component)

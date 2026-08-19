@@ -207,13 +207,50 @@ Recorded so it is a decision rather than an oversight:
   this work goes through `memory_management.free_memory`, which moves weights to
   their offload device rather than discarding them — so a checkpoint demoted for
   an LLM stays in `mc_memory`'s RAM cache and coming back is still a warm swap.
-- **No provisioning wizard.** Choosing an existing GGUF and projector, and
-  reusing an existing standalone install, are both in the panel. Downloading a
-  pinned runtime is left to the vendored `setup_cli.py`, which already does it
+- **No full provisioning wizard.** `mc_llm_setup.py` covers the runtime — the
+  part with no alternative — by three routes: detect one already in place,
+  adopt one from anywhere on the machine, or download the pinned build where
+  the manifest has one. Choosing a GGUF and a projector, and reusing an
+  existing standalone install whole, are in the panel too. What is *not* here
+  is downloading the pinned 16-27 GiB model, which `setup_cli.py` already does
   and is already tested upstream.
+
+  This was originally left out entirely, and that was wrong: the panel could
+  reach a state whose only recovery instruction was upstream's "Run Models and
+  Hardware setup first" — a Qt wizard that does not exist in this extension. A
+  dead end is worse than a missing feature, because the user cannot tell it is
+  one. Two lessons worth keeping: an error message inherited from another front
+  end may name a way out that this one does not have, and a two-step setup
+  offered second-step-first is not a setup flow.
 - **No per-message affordances in Conversation.** Gradio 4's `Chatbot` has
   nowhere to hang them, so branching copies a thread from its last turn and
   "copy then delete back" replaces branching from a chosen point.
+
+
+## 6a. The containment rule, and what it costs
+
+`AppPaths.contained` requires the runtime to resolve to a path inside the
+install root, and `AppPaths.locate` deliberately does not require that of the
+weights. Upstream's distinction, kept: the runtime is a program this extension
+*starts*, the weights are a file it reads, and a state file that could point the
+launcher at an executable anywhere on the disk is a different kind of object
+from one that points at a model anywhere on the disk.
+
+Three consequences fall out of it, all in `mc_llm_setup.py`:
+
+- **Symlinks are out.** `contained()` calls `resolve()`, which follows them, so
+  a symlink into the root resolves back outside it and is refused. Copying is
+  the only honest way to satisfy the rule.
+- **A release directory is copied whole**, because llama.cpp loads its shared
+  libraries from beside the server and the executable alone would not start.
+- **A system-packaged binary is copied alone**, because its directory is
+  `/usr/bin` and copying that would be absurd. `_is_build_directory` is the test
+  that separates the two cases — it looks for sibling `llama-*`/`ggml-*` files —
+  and the single-file result is reported with its caveat rather than silently.
+
+`MAX_ADOPT_BYTES` and `MAX_ADOPT_ENTRIES` are not a limit on how big a llama.cpp
+release may be. They are the guard against being pointed at a folder that
+*contains* a release rather than at the release.
 
 
 ## 7. Tests
@@ -231,6 +268,13 @@ Three are shaped by their failure modes rather than by their feature size:
   which is where the two bugs found during implementation both were;
 - `test_llm_panels.py` builds every panel against the faked Gradio, because a
   UI this size is mostly wiring and wiring fails at build time or not at all.
+
+`test_llm_setup.py` has one fixture worth reading before adding to it: the
+install root is a *subdirectory* of `tmp_path`, not `tmp_path` itself, so that a
+test writing "a llama.cpp build elsewhere on the machine" is really writing it
+outside the root. Rooting the install at `tmp_path` made every such build
+contained and every containment assertion vacuous — which is how it was written
+the first time, and all six containment tests passed while asserting nothing.
 
 What still needs real hardware: that a GGUF loads and answers, that a vision
 projector actually sees an attached image, that co-residency of a real
