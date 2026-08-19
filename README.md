@@ -1153,10 +1153,27 @@ it:
 | **Branch from here** | Copy the thread up to this message into a new one. The thread it came from is untouched. |
 | **Delete message** / **Delete from here** | One message, or that one and everything after it. |
 
+Tapping the same message again puts the bar away; tapping a different one moves
+it there.
+
 The threads list, the character (chat with, edit, or create) and your persona
 are in a drawer behind **☰ Threads & character**, closed by default — with it
-closed the conversation has the whole browser window. The transcript itself
-sizes to the window: the page does not scroll, the thread does.
+closed the conversation has the whole browser window. The workspace sizes itself
+to the window: the composer is measured first and sits on the bottom edge, the
+transcript takes whatever is left, and the page does not scroll — the thread
+does.
+
+### What the console says
+
+Every run reports itself to the WebUI console: llama-server starting with the
+model, device, placement and context; a run starting, what it is waiting for,
+what it is doing, and a progress line every few seconds while it generates; how
+it ended and how long it took; and llama-server stopping with the VRAM released.
+Load, Unload and a model change are logged too.
+
+None of it is content. No prompt, no reply, no message, no character name, no
+thread title — only what kind of run it was, how far it got, how big and how
+long, and which model on which device.
 
 ### What runs it
 

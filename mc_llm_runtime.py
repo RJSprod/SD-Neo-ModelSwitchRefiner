@@ -495,6 +495,13 @@ class Runtime:
             paths = mc_llm_paths.app_paths()
             paths.logs.mkdir(parents=True, exist_ok=True)
 
+            logger.info(
+                "Model Chain: starting llama-server — %s on %s, %s, %s token context",
+                configuration.quantization or Path(configuration.model).stem,
+                configuration.device_name or configuration.device,
+                placement.describe(),
+                f"{placement.context:,}",
+            )
             process = self._new_process()
             process.start(configuration.runtime, configuration.model, configuration.mmproj,
                           configuration.gpu_index, configuration.device, placement.context,
@@ -658,6 +665,7 @@ class Runtime:
 
     def _stop_locked(self, reason: str) -> None:
         process, self._process = self._process, None
+        held = self.report.observed_bytes if self._placement is not None else 0
         self._signature, self._placement = None, None
         mc_broker.retire(RESIDENCY_KEY)
         if process is None:
@@ -666,6 +674,9 @@ class Runtime:
             process.stop()
         except Exception:
             logger.warning("Model Chain: failed to stop llama-server (%s)", reason, exc_info=True)
+            return
+        logger.info("Model Chain: llama-server stopped — %s%s", reason,
+                    f", {held / _GB:.1f} GB of VRAM released" if held else "")
 
     # -- status ----------------------------------------------------------- #
 

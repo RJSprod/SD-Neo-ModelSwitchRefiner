@@ -511,8 +511,63 @@ quantity, so the tab lays out correctly with the script absent and exactly with
 it — which is §5's rule about JavaScript being enhancement, applied to layout.
 
 Two escape hatches: below 900px the drawer becomes a full-width row above the
-stage, and below 620px of *height* the page gets its scroll bar back, because a
-transcript squeezed under six ems is not a transcript.
+stage, and below 560px of *height* the page gets its scroll bar back, because a
+transcript squeezed into nothing is not a transcript.
+
+### 8.3a Two things the first attempt at that got wrong
+
+Both were reported from a real browser and neither was visible from reading the
+code, which is why `tests/test_llm_studio_js.py` now executes the arithmetic
+under node.
+
+**It measured the wrong element.** `--mc-llm-available` was measured from the
+top of `#mc-llm-studio` and applied to the workspace — but the mode selector,
+the model chooser and the status line sit in between, so the workspace was
+given their height as well. That difference is exactly how far below the fold
+the composer sat. It is measured from `#mc-llm-chat`, the workspace itself, and
+published there.
+
+**It fed itself.** The measurement was `innerHeight - getBoundingClientRect().top`,
+and a rect's `top` falls as the page scrolls. So a scrolled page measured
+*larger*; the workspace was then set taller; a taller workspace makes the page
+taller; a taller page allows more scroll; the next measurement is larger again.
+Over a dozen clicks a 756px workspace became 1485px, with the extra height
+showing as blank space under the messages because Gradio's `.bubble-wrap` is
+`height: 100%` over content that starts at the top.
+
+The fix is to measure the element's position in the *document* —
+`rect.top + scrollY` — which does not depend on the height being set, because
+nothing above the workspace does either. Two guards sit behind it: the result is
+clamped to the window height, so a measurement that has gone wrong costs a
+workspace that is a little short rather than one that cannot be scrolled back
+out of, and the workspace is `overflow: hidden` so a child that mis-measures
+itself cannot make the page taller and start the loop again.
+
+The scroll-invariance is the test worth keeping: same element, same place in the
+document, two scroll positions, one answer.
+
+### 8.3b The composer is sized first
+
+"Fits the window" is not the same requirement as "the transcript is tall", and
+when they conflict the composer wins — a thread too short to read is scrolled, a
+composer below the fold cannot be used at all. So the stage states the priority
+the only way a layout can: the head, the action bar, the image box and the
+composer are `flex: 0 0 auto`, measured by their contents and never shrunk, and
+the transcript is `flex: 1 1 0` with a deliberately small `min-height` and takes
+whatever is left.
+
+Three ceilings keep the fixed half honest, since all three sit between the
+transcript and the bottom of the window: the composer is at most a third of the
+stage (and its textarea stops at six lines rather than twelve), the action bar
+at most 40% with its own scroll, and the image box at most 30%.
+
+### 8.3c One gesture, both ways
+
+A `Chatbot` bubble has one affordance — a click — so the click that opens the
+action bar on a message is also the click that puts it away. Clicking a
+*different* message moves the bar to it. The ✕ stays, because a bar left open
+above the composer wants a way out that is not "find the message again", but it
+is no longer the only one.
 
 ### 8.4 The upload box overlapped the buttons beside it
 
@@ -620,3 +675,28 @@ The projector is deliberately not carried across a model switch or inferred from
 the new model's folder. `model_choice`'s own reasoning stands: a projector has to
 match the model it was made for and a file name does not prove that it does. One
 sitting beside the new model is mentioned, and applying it is a press in Setup.
+
+### 8.8 What the console is told
+
+Every LLM run narrates itself to the WebUI console at INFO, through one wrapper
+— `mc_llm_sessions._traced` — rather than through each mode logging for itself,
+because what is worth saying is the same for all three: it started, what it is
+waiting for or doing, how it ended, and how long it took. A run in progress says
+so every five seconds with a character count, which is slow enough to read in a
+terminal that is also carrying a generation's progress bar and quick enough that
+a run which has stalled is visibly not moving. `mc_llm_runtime` adds the two
+lifecycle lines around the one that was already there — starting llama-server
+with the model, device, placement and context, and stopping it with the VRAM
+released — and the tab logs Load, Unload and a model change.
+
+**Nothing logged is content.** No prompt, no reply, no message, no character
+name, no thread title. What is logged is the kind of run, the stage it reached,
+sizes, elapsed times, and the model and device — which is the same class of
+thing the image half already logs about checkpoints. Failures are logged with
+their message, because the whole purpose of that message is to be read by the
+person who has to fix it, and the vendored layers raise sentences about paths
+and servers rather than about what was said.
+
+`tests/test_llm_studio.py::TestWhatTheConsoleIsTold` asserts the second
+paragraph, because the difference between a status line and a transcript of a
+private conversation is one careless format string.

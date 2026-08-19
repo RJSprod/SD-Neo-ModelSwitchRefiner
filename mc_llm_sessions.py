@@ -226,7 +226,7 @@ def _placement_notes() -> list[Event]:
 # --------------------------------------------------------------------------- #
 
 
-def prompt_studio(request, cancel: Cancellation):
+def _prompt_studio(request, cancel: Cancellation):
     """One LTX prompt generation.
 
     The same order the standalone worker used, and the order matters at two
@@ -377,7 +377,7 @@ class ChatRequest:
     seed: int = 0
 
 
-def conversation(request: ChatRequest, cancel: Cancellation):
+def _conversation(request: ChatRequest, cancel: Cancellation):
     """One streamed reply. Conversation's whole runtime story is this function."""
     gpu = _Gpu("a conversation reply", cancel)
     try:
@@ -421,7 +421,8 @@ def conversation(request: ChatRequest, cancel: Cancellation):
 # --------------------------------------------------------------------------- #
 
 
-def minimax(prompt: str, variant: str, image: str | None, seed: int, cancel: Cancellation):
+def _minimax(prompt: str, variant: str, image: str | None, seed: int,
+             cancel: Cancellation):
     """One H3 prompt, in WanGP's order: caption first, then the prompt built from it.
 
     Kept a separate function from :func:`conversation` even though both stream
@@ -482,3 +483,85 @@ def minimax(prompt: str, variant: str, image: str | None, seed: int, cancel: Can
         yield Event(FAILED, str(exc))
     finally:
         gpu.release()
+
+
+# --------------------------------------------------------------------------- #
+# What the console is told
+# --------------------------------------------------------------------------- #
+
+PROGRESS_SECONDS = 5.0
+"""How often a run in progress says so on the console.
+
+A line per chunk would be a line per token. This is slow enough to read in a
+terminal that is also carrying a generation's progress bar, and quick enough
+that a run which has stalled is visibly not moving.
+"""
+
+
+def _traced(label: str, events):
+    """Pass ``events`` through, and narrate the run to the WebUI console.
+
+    Every mode is wrapped in this rather than each of them logging for itself,
+    because what is worth saying is the same for all three: it started, what it
+    is waiting for or doing, how it ended and how long it took. The three
+    generators below stay about their own products.
+
+    **Nothing written here is content.** The prompt, the reply, the message, the
+    character and the thread are never logged — a status line saying a reply is
+    2,300 characters long is a status line; one quoting it is a transcript of a
+    private conversation in a file somebody else may read. What is logged is the
+    kind of run, what stage it reached, sizes, and elapsed time. Failures are
+    logged with their message, because the whole purpose of that message is to
+    be read by the person who has to fix it, and the vendored layers raise
+    sentences about paths and servers rather than about what was said.
+
+    A ``yield from`` and not a loop, so that closing the outer generator —
+    which is what Gradio's ``cancels=`` does — still closes the inner one and
+    still runs the ``finally`` that gives the GPU back.
+    """
+    started = time.monotonic()
+    streamed = 0
+    spoke_at = started
+    logger.info("Model Chain: LLM run started — %s", label)
+    try:
+        for event in events:
+            if event.kind == CHUNK:
+                streamed += len(event.text or "")
+                now = time.monotonic()
+                if now - spoke_at >= PROGRESS_SECONDS:
+                    spoke_at = now
+                    logger.info("Model Chain: LLM %s — generating, %s characters in %.0fs",
+                                label, f"{streamed:,}", now - started)
+            elif event.kind == STATUS:
+                logger.info("Model Chain: LLM %s — %s", label, event.text)
+            elif event.kind == DONE:
+                logger.info("Model Chain: LLM run finished — %s, %s characters in %.1fs",
+                            label, f"{max(streamed, len(event.text or '')):,}",
+                            time.monotonic() - started)
+            elif event.kind == CANCELLED:
+                logger.info("Model Chain: LLM run cancelled — %s after %.1fs",
+                            label, time.monotonic() - started)
+            elif event.kind == FAILED:
+                logger.warning("Model Chain: LLM run failed — %s after %.1fs: %s",
+                               label, time.monotonic() - started, event.text)
+            yield event
+    except GeneratorExit:
+        logger.info("Model Chain: LLM run abandoned — %s after %.1fs",
+                    label, time.monotonic() - started)
+        raise
+
+
+def prompt_studio(request, cancel: Cancellation):
+    """One LTX prompt generation. See :func:`_prompt_studio`."""
+    yield from _traced("a prompt generation", _prompt_studio(request, cancel))
+
+
+def conversation(request: ChatRequest, cancel: Cancellation):
+    """One streamed conversation reply. See :func:`_conversation`."""
+    yield from _traced("a conversation reply", _conversation(request, cancel))
+
+
+def minimax(prompt: str, variant: str, image: str | None, seed: int, cancel: Cancellation):
+    """One MiniMax enhancement. See :func:`_minimax`."""
+    yield from _traced(f"a MiniMax {variant} enhancement",
+                       _minimax(prompt, variant, image, seed, cancel))
