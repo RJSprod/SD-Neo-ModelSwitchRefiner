@@ -677,12 +677,23 @@
    never teleported out of them: nothing here escapes #mc-llm-studio, so a host
    theme's stacking contexts and overlays are left alone. */
 
+/* No `display` here, and that is the single most important line in this file.
+   Gradio hides a Column by putting a class on it whose rule is `display: none`
+   at class specificity -- so any rule of ours that names `#mc-llm-studio` and
+   sets `display` outranks it, and the "hidden" sheet stays on screen for ever:
+   the menu appears not to toggle, Close does nothing, and the model sheet sits
+   over the tab covering the controls that would have got you out of it. The
+   mode views next door have never had a display rule and have never failed to
+   hide, which is the same experiment run the other way round.
+
+   Nothing is lost by leaving it out. A Gradio Column is already a flex column;
+   `flex-direction` is restated below for a host that has changed the axis, and
+   it is inert on an element that is not flex either way. */
 #mc-llm-studio .mc-llm-sheet {
     background: var(--background-fill-primary, inherit);
     border: 1px solid var(--border-color-primary, currentColor);
     border-radius: var(--radius-lg, 8px);
     box-shadow: var(--shadow-drop-lg, var(--shadow-drop, none));
-    display: flex;
     flex-direction: column;
     gap: 0.5em;
     inset: 0;

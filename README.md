@@ -1119,7 +1119,7 @@ The tab opens on the mode you left it on.
 
 The top of the tab is a menu, the name of the workspace you are in, and a state
 chip reading *Loaded*, *Unloaded* or *Not set up*. **☰** opens the workspace
-chooser; the chip opens the model sheet. Both are overlays: they open over the
+chooser and closes it again; the chip does the same for the model sheet. Both are overlays: they open over the
 tab and close again, so no workspace is ever laid out around them, and on a
 phone nothing they contain can push the thing you were using off the bottom of
 the window.
