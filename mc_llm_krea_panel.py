@@ -24,6 +24,14 @@ This mode generates no images and settles nothing about how they would be
 generated: there is no sampler here, no CFG, no LoRA strength, no mask and no
 negative prompt, because those belong to an image-generation integration and
 this is the thing that writes what such an integration would be given.
+
+The one setting here that *is* a sampler is Creativity, and it is a sampler for
+the language model rather than for a diffusion pass -- how tightly the writer
+is bound to its most probable wording, nothing more. It resolves through
+``prompt_master.krea.variation``, the same function txt2img's Krea Live goes
+through, so a position means one thing across the whole extension. It changes
+no instruction, adds no second request and has no effect on how many times the
+model is asked: one press is one prompt at every value.
 """
 
 from __future__ import annotations
@@ -59,8 +67,14 @@ agreement one side has never been told about is not one.
 
 
 def build() -> dict:
-    """Assemble the panel. Returns the handles the shell needs."""
-    from prompt_master.krea import enhancer
+    """Assemble the panel. Returns the handles the shell wires, and Creativity.
+
+    Creativity is in the map without the shell reading it, because it is the one
+    control here whose *configuration* is a promise -- the range and the default
+    are the compatibility guarantee -- and a promise nothing can ask about is a
+    promise nothing can hold you to.
+    """
+    from prompt_master.krea import enhancer, variation
 
     cancellation = gr.State(None)
 
@@ -78,6 +92,10 @@ def build() -> dict:
             seed = gr.Number(label="Seed", value=-1, precision=0,
                              info="-1 draws a fresh seed for every prompt.",
                              elem_id=ui.ident("krea", "seed"))
+            creativity = gr.Slider(label=variation.LABEL, minimum=variation.MINIMUM,
+                                   maximum=variation.MAXIMUM, step=1,
+                                   value=_remembered_creativity(), info=variation.HELP,
+                                   elem_id=ui.ident("krea", "creativity"))
             gr.Markdown("Krea keeps its own history, separate from Prompt Studio, "
                         "Conversation and MiniMax. The pictures are not saved with it — "
                         "their names and descriptions are.",
@@ -126,7 +144,7 @@ def build() -> dict:
     # -- wiring ----------------------------------------------------------- #
 
     running = generate.click(
-        fn=_generate, inputs=[prompt, seed] + images,
+        fn=_generate, inputs=[prompt, seed, creativity] + images,
         outputs=[cancellation, written, captions, status, generate, stop],
         show_progress="minimal")
     running.then(fn=lambda: gr.update(choices=_history_choices()), outputs=[history])
@@ -135,13 +153,18 @@ def build() -> dict:
                cancels=[running], queue=False)
     clear.click(fn=_clear, outputs=[prompt, written, captions, status] + images, queue=False)
 
+    # Remembered on release rather than on every pixel of the drag: the value
+    # is a preference, and a preferences file rewritten forty times as a slider
+    # travels from 1 to 10 is forty writes for one decision.
+    creativity.release(fn=_remember_creativity, inputs=[creativity], queue=False)
+
     refresh.click(fn=lambda: gr.update(choices=_history_choices()), outputs=[history],
                   queue=False)
     load.click(fn=_load_session, inputs=[history],
                outputs=[prompt, written, captions, status], queue=False)
     drop.click(fn=_delete_session, inputs=[history], outputs=[history, status], queue=False)
 
-    return {"status": status, "output": written, "stop": stop}
+    return {"status": status, "output": written, "stop": stop, "creativity": creativity}
 
 
 # --------------------------------------------------------------------------- #
@@ -211,9 +234,45 @@ def _described(captions) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _generate(prompt, seed, *paths):
+def _remembered_creativity() -> int:
+    """Where the manual slider was left, or the default on a fresh install.
+
+    Read through ``variation.clamp`` rather than trusted: the preferences file
+    is editable, survives downgrades, and is the one place a value from outside
+    the 0-10 range could reach a request.
+    """
+    from prompt_master.krea.variation import DEFAULT, clamp
+
+    try:
+        return clamp(mc_llm_state.preferences().get("krea_manual_creativity", DEFAULT))
+    except Exception:
+        logger.debug("Model Chain: could not read the Krea creativity preference",
+                     exc_info=True)
+        return DEFAULT
+
+
+def _remember_creativity(value) -> None:
+    """Keep the manual slider's position, under its own key.
+
+    Its own key because Krea Live has one too, and the two tasks settle in
+    different places -- authoring a prompt to keep is not iterating images at
+    five-second intervals. What a *value* means is identical in both, which is
+    the half that must never be duplicated and lives in
+    ``prompt_master.krea.variation``.
+    """
+    from prompt_master.krea.variation import clamp
+
+    try:
+        mc_llm_state.remember(krea_manual_creativity=clamp(value))
+    except Exception:
+        logger.debug("Model Chain: could not save the Krea creativity preference",
+                     exc_info=True)
+
+
+def _generate(prompt, seed, creativity, *paths):
     """Stream one Krea prompt. Describe every reference first, in slot order."""
     from prompt_master.core.models import RANDOM_SEED, draw_seed
+    from prompt_master.krea.variation import clamp
 
     busy = (gr.update(interactive=False), gr.update(interactive=True))
     idle = (gr.update(interactive=True), gr.update(interactive=False))
@@ -246,13 +305,14 @@ def _generate(prompt, seed, *paths):
     resolved = int(seed or RANDOM_SEED)
     if resolved == RANDOM_SEED:
         resolved = draw_seed()
+    position = clamp(creativity)
 
     cancel = sessions.Cancellation()
     text, described = "", []
     yield cancel, "", hidden, ui.working("Starting…"), *busy
 
     try:
-        for event in sessions.krea(prompt.strip(), found, resolved, cancel):
+        for event in sessions.krea(prompt.strip(), found, resolved, cancel, position):
             if event.kind == sessions.CHUNK:
                 text += event.text
                 yield cancel, text, gr.update(), gr.update(), *busy
@@ -267,9 +327,10 @@ def _generate(prompt, seed, *paths):
                 yield cancel, text, gr.update(), ui.working(event.text), *busy
             elif event.kind == sessions.DONE:
                 text = event.text
-                _remember(prompt, text, resolved, found, described)
+                _remember(prompt, text, resolved, found, described, position)
                 yield (cancel, text, gr.update(),
-                       ui.notice(f"Complete · Seed: {resolved}"), *idle)
+                       ui.notice(f"Complete · Seed: {resolved} · "
+                                 f"Creativity: {position}"), *idle)
                 return
             elif event.kind == sessions.CANCELLED:
                 yield cancel, text, gr.update(), ui.notice("Cancelled.", "warn"), *idle
@@ -305,11 +366,18 @@ def _clear():
             *[None] * enhancer.MAX_REFERENCES)
 
 
-def _remember(prompt, result, seed, found, captions) -> None:
-    """Save the session -- names and descriptions, never the pictures (§11, §14)."""
+def _remember(prompt, result, seed, found, captions, creativity) -> None:
+    """Save the session -- names and descriptions, never the pictures (§11, §14).
+
+    Creativity is stored beside the seed because the two answer the same
+    question about a saved prompt: what would have to be set to write this
+    again. A prompt that came back unusually adventurous is only reproducible
+    if the position that produced it was written down.
+    """
     try:
         mc_llm_state.save_krea_session(mc_llm_state.KreaSession(
             prompt=(prompt or "").strip(), result=result, seed=int(seed),
+            creativity=int(creativity),
             reference_names=[reference.name for reference in found],
             reference_captions=list(captions)))
     except Exception:
@@ -347,7 +415,8 @@ def _load_session(identifier):
     stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(found.created))
     captions = list(found.reference_captions or [])
     names = list(found.reference_names or [])
-    note = f"Loaded the prompt from {stamp} (seed {found.seed})."
+    note = (f"Loaded the prompt from {stamp} (seed {found.seed}, "
+            f"creativity {found.creativity}).")
     if names:
         listed = ", ".join(f"Image {position}: {name}"
                            for position, name in enumerate(names, start=1))

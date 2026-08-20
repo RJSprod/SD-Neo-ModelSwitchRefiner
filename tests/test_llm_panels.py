@@ -626,7 +626,7 @@ class TestKrea:
     def test_it_builds(self):
         built = mc_llm_krea_panel.build()
 
-        assert set(built) == {"status", "output", "stop"}
+        assert {"status", "output", "stop"} <= set(built)
 
     def test_an_empty_request_is_refused(self):
         frames = list(mc_llm_krea_panel._generate("  ", 7, None, None, None, None))

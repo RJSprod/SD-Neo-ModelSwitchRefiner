@@ -40,9 +40,10 @@ class FakeClient:
         self.calls: list[dict] = []
 
     def stream_chat(self, messages, max_tokens, seed, on_text, cancel=None,
-                    temperature=0.85, top_p=0.95):
+                    temperature=0.85, top_p=0.95, extra_sampling=None):
         self.calls.append({"messages": messages, "max_tokens": max_tokens, "seed": seed,
-                           "temperature": temperature, "top_p": top_p})
+                           "temperature": temperature, "top_p": top_p,
+                           "extra_sampling": dict(extra_sampling or {})})
         if self.fail is not None:
             raise self.fail
         produced = []

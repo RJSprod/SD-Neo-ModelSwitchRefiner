@@ -530,7 +530,7 @@ def _minimax(prompt: str, variant: str, image: str | None, seed: int,
 # --------------------------------------------------------------------------- #
 
 
-def _krea(prompt: str, references, seed: int, cancel: Cancellation):
+def _krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=None):
     """One Krea 2 prompt: every reference described in order, then the writing.
 
     The same caption-first shape as :func:`_minimax` and for the same reason --
@@ -551,10 +551,24 @@ def _krea(prompt: str, references, seed: int, cancel: Cancellation):
     three would either renumber them behind the user's back or write about an
     image that is not there. And an empty finished prompt is an error, not an
     empty box.
+
+    ``creativity`` is the 0-10 Creativity position, resolved to sampling
+    settings by :mod:`prompt_master.krea.variation`. It reaches the *writer*
+    and nothing else. The captioner keeps temperature 0 at every position,
+    because a description of what is in a photograph has nothing for a sampler
+    to be creative about and a creative captioner is a captioner writing about
+    a picture that is not there. ``None`` means the default position, which is
+    defined as the configuration this function used before the control existed.
+
+    Exactly one writer request is made, at every Creativity value. The captions
+    are one request per reference and are reference *processing*, not prompt
+    writing; nothing here multiplies either count by the slider.
     """
     from prompt_master.krea import enhancer
+    from prompt_master.krea.variation import creativity_profile
 
     references = list(references or [])
+    profile = creativity_profile(creativity)
     gpu = _Gpu("a Krea prompt", cancel)
     try:
         acquired = yield from gpu.acquire()
@@ -597,7 +611,8 @@ def _krea(prompt: str, references, seed: int, cancel: Cancellation):
         for chunk, result in _streamed(
                 lambda on_text: client.stream_chat(
                     enhancer.messages(prompt, captions), enhancer.MAX_TOKENS, seed, on_text,
-                    cancel.event, temperature=enhancer.TEMPERATURE, top_p=enhancer.TOP_P)):
+                    cancel.event, temperature=profile.temperature, top_p=profile.top_p,
+                    extra_sampling=profile.optional_request_fields)):
             if chunk is not None:
                 yield Event(CHUNK, chunk)
             else:
@@ -712,14 +727,21 @@ def minimax(prompt: str, variant: str, image: str | None, seed: int, cancel: Can
                        _minimax(prompt, variant, image, seed, cancel))
 
 
-def krea(prompt: str, references, seed: int, cancel: Cancellation):
+def krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=None):
     """One Krea 2 prompt. See :func:`_krea`.
 
     ``references`` is an ordered list of ``prompt_master.krea.references
     .Reference`` -- empty for a text-only prompt. The count reaches the console
     line; the pictures, the paths and the captions do not.
+
+    ``creativity`` reaches the console line as a number, because it is a
+    setting rather than content and a run that came back unusually wild is a
+    run somebody will want to see the slider position for.
     """
+    from prompt_master.krea.variation import clamp
+
     references = list(references or [])
     counted = (f"a Krea prompt from {len(references)} reference"
                f"{'' if len(references) == 1 else 's'}" if references else "a Krea prompt")
-    yield from _traced(counted, _krea(prompt, references, seed, cancel))
+    yield from _traced(f"{counted} at creativity {clamp(creativity)}",
+                       _krea(prompt, references, seed, cancel, creativity))
