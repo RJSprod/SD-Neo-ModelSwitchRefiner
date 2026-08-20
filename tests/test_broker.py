@@ -238,6 +238,27 @@ class TestRanking:
         assert llm.calls[0][0] == 8 * _GB
 
 
+def _taken_by_another_thread(broker, label) -> bool:
+    """Whether a workload on a thread that is not this one gets the GPU.
+
+    Asked from another thread on purpose: the lock is reentrant, so a hold this
+    thread failed to give back is a hold this thread can take again -- which is
+    precisely how a stranded lock hid until a run landed on a different Gradio
+    worker.
+    """
+    taken: list[bool] = []
+
+    def contend():
+        with broker.workload(broker.FAMILY_IMAGE, label, timeout=0.2,
+                             required=False) as held:
+            taken.append(bool(held))
+
+    thread = threading.Thread(target=contend)
+    thread.start()
+    thread.join(2)
+    return taken == [True]
+
+
 class TestSerialization:
     def test_two_workloads_do_not_overlap(self, broker):
         order: list[str] = []
@@ -307,6 +328,45 @@ class TestSerialization:
 
         release.set()
         thread.join(2)
+
+    def test_a_workload_may_be_given_back_from_another_thread(self, broker):
+        """The failure this exists to stop: a Krea run whose generator was
+        finalized by the garbage collector, on whichever thread happened to
+        trigger the collection, could not give the card back at all -- and
+        every later run waited for a job that had finished minutes before."""
+        job = broker.workload(broker.FAMILY_LLM, "a Krea prompt")
+        assert job.__enter__()
+
+        elsewhere = threading.Thread(target=lambda: job.__exit__(None, None, None))
+        elsewhere.start()
+        elsewhere.join(2)
+
+        assert broker.active() is None
+        assert _taken_by_another_thread(broker, "a later pass")
+
+    def test_giving_the_same_workload_back_twice_releases_once(self, broker):
+        """A run that releases explicitly and is then unwound -- or closed after
+        its finally already ran -- must not hand the card to somebody else while
+        the job that took it is still on it."""
+        job = broker.workload(broker.FAMILY_LLM, "a Krea prompt")
+        job.__enter__()
+        job.__exit__(None, None, None)
+
+        with broker.workload(broker.FAMILY_IMAGE, "a pass"):
+            job.__exit__(None, None, None)
+            assert not _taken_by_another_thread(broker, "an intruding turn")
+
+    def test_a_late_release_does_not_take_the_running_job_off_the_list(self, broker):
+        """``active()`` is what a waiting run is told it is waiting for. An exit
+        arriving after a later workload started used to pop that later job's
+        name, leaving a wait with nothing to name."""
+        stale = broker.workload(broker.FAMILY_LLM, "an abandoned turn")
+        stale.__enter__()
+
+        with broker.workload(broker.FAMILY_LLM, "the running turn") as held:
+            assert held
+            stale.__exit__(None, None, None)
+            assert broker.active().label == "the running turn"
 
     def test_a_required_workload_that_times_out_says_who_has_the_gpu(self, broker):
         holding = threading.Event()

@@ -93,6 +93,22 @@ one completion: both are on the card, both are slower, neither is corrupted —
 because co-residency was always allowed and it was only the *timing* that was
 meant to be tidy.
 
+The lock itself is not a `threading.RLock`, for a related reason. A workload
+here is held across a generator, and a generator is not guaranteed to finish on
+the thread that started it: Gradio runs a handler on a worker thread, and an
+abandoned run — a cancelled one, a closed tab, one whose frame ended up in a
+reference cycle because it raised — is finalised by the garbage collector, on
+whichever thread happened to trigger the collection. `RLock.release` from that
+thread raises `RuntimeError: cannot release un-acquired lock`, so the `finally`
+that was giving the card back does not, and the lock stays held for the rest of
+the session; because an `RLock` lets its owning thread re-enter, the damage is
+invisible until a run lands on a different Gradio worker and waits for the GPU
+forever. `mc_broker._JobLock` therefore records an owner for *reentrancy only* —
+a chained generation is still one workload with two stages — and accepts the
+release from anywhere, because `workload` releases exactly once per acquisition
+and it is that pairing, not the thread it happens on, that keeps the count
+honest.
+
 ### 3.2 The broker never asks a family to make room for itself
 
 §9's eviction ranking is implemented for cross-workload decisions only. Image-on-

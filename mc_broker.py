@@ -323,7 +323,64 @@ class Active:
     since: float
 
 
-_gpu = threading.RLock()
+class _JobLock:
+    """The workload lock: reentrant, and owned by a *job* rather than a thread.
+
+    ``threading.RLock`` was the obvious thing and was the wrong thing, for one
+    reason: a workload here is held across a generator, and a generator is not
+    guaranteed to be finished on the thread that started it. Gradio hands a
+    handler's generator to a worker thread, and an abandoned one -- a cancelled
+    run, a closed tab, a run whose frame ended up in a reference cycle because
+    it raised -- is finalized by the garbage collector, on whichever thread
+    happened to trigger the collection. ``RLock.release`` from that thread
+    raises ``RuntimeError: cannot release un-acquired lock``, the ``finally``
+    that was giving the GPU back does not, and the lock stays held for the rest
+    of the session. Every later run on another thread then waits for a job that
+    finished minutes ago, which is exactly the "Waiting for the GPU…" that
+    never ends.
+
+    So ownership is recorded for reentrancy only. ``acquire`` still lets the
+    owning thread nest freely -- a chained generation is one workload with two
+    stages (section 15) -- while ``release`` accepts the handle back from
+    anywhere, because :class:`workload` releases exactly once per acquisition
+    and it is that pairing, not the thread it happens on, that makes the count
+    honest.
+    """
+
+    def __init__(self):
+        self._condition = threading.Condition(threading.Lock())
+        self._owner: int | None = None
+        self._depth = 0
+
+    def acquire(self, timeout: float = -1) -> bool:
+        me = threading.get_ident()
+        deadline = None if timeout is None or timeout < 0 else time.monotonic() + timeout
+        with self._condition:
+            while True:
+                if self._depth == 0 or self._owner == me:
+                    self._owner = me
+                    self._depth += 1
+                    return True
+                remaining = None
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                self._condition.wait(remaining)
+
+    def release(self) -> bool:
+        """Give one acquisition back. False if there was nothing to give back."""
+        with self._condition:
+            if self._depth == 0:
+                return False
+            self._depth -= 1
+            if self._depth == 0:
+                self._owner = None
+                self._condition.notify_all()
+            return True
+
+
+_gpu = _JobLock()
 _active: list[Active] = []
 _active_lock = threading.Lock()
 _background_wait = threading.Event()
@@ -378,6 +435,7 @@ class workload:
         self.timeout, self.background, self.required = timeout, background, required
         self._held: _Held | None = None
         self._counted = False
+        self._entry: Active | None = None
 
     def __enter__(self) -> _Held:
         global _foreground_waiting
@@ -404,16 +462,34 @@ class workload:
             self._held = _Held(self.family, self.label, False)
             return self._held
 
+        self._entry = Active(self.family, self.label, time.monotonic())
         with _active_lock:
-            _active.append(Active(self.family, self.label, time.monotonic()))
+            _active.append(self._entry)
         self._held = _Held(self.family, self.label, True)
         return self._held
 
     def __exit__(self, *exc) -> bool:
-        if self._held is not None and self._held.acquired:
-            with _active_lock:
-                if _active:
-                    _active.pop()
+        """Give the GPU back, once, from wherever the job happens to end.
+
+        Idempotent because the exit can be reached twice -- a caller that
+        releases explicitly and then unwinds, a generator closed after its
+        ``finally`` already ran -- and a second release would hand the card to
+        somebody while the job that took it is still on it. The entry is
+        removed by identity rather than popped, because a release that arrives
+        late (a generator finalized after a later workload started) would
+        otherwise take the running job's name off the list and leave its own.
+        """
+        with _active_lock:
+            held, self._held = self._held, None
+            entry, self._entry = self._entry, None
+            if held is None or not held.acquired:
+                held = None
+            else:
+                for position, running in enumerate(_active):
+                    if running is entry:
+                        del _active[position]
+                        break
+        if held is not None:
             _gpu.release()
         self._release_count()
         return False
@@ -421,10 +497,10 @@ class workload:
     def _release_count(self) -> None:
         global _foreground_waiting
 
-        if not self._counted:
-            return
-        self._counted = False
         with _active_lock:
+            if not self._counted:
+                return
+            self._counted = False
             _foreground_waiting = max(_foreground_waiting - 1, 0)
             if _foreground_waiting == 0:
                 _background_wait.set()
