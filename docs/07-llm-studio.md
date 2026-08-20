@@ -1762,3 +1762,118 @@ What it may never do is redefine what "Image 1" meant to the user, or to the
 prompt it is handed alongside. User order is the semantic source of truth;
 backend order is a detail of whatever eventually draws the picture. Version 1
 ships the first half and leaves the second unclaimed.
+
+## 21. Two ways to lose something (20 August 2026)
+
+Reported together, from one afternoon and one `llama-server.log`: the card was
+full while the tab said *Unloaded*, and the first replies of every old thread
+came back blank.
+
+They are unrelated, and both are the same shape of bug — a thing that exists
+in memory and never reaches the place that outlives memory.
+
+### 21.1 What the log actually said
+
+41 starts. 19 loaded a model, 22 died on `cudaMalloc failed: out of memory`.
+Two things in that are worth reading twice.
+
+The first is a staircase. Four consecutive starts, all successful, all reading
+free VRAM on the way in:
+
+```
+free = 3078 MiB   →   2963   →   2868   →   2766
+```
+
+Roughly a hundred megabytes gone per cycle and never coming back. That is about
+the size of a CUDA context, and those four starts are the *move the model to
+system RAM* path being exercised four times — which is where the leak below
+lives.
+
+The second is nineteen starts in a row failing to allocate while the device
+reported **23304 MiB free**, the same figure to the megabyte on 33 of the 41
+starts. A number that never moves is not a measurement. The genuine readings in
+the same file (22987, 7493, 4744, 3745, 3078, 2963, 2868, 2766) all differ from
+each other, as real ones do. So on this machine llama.cpp's own free-VRAM line
+is not a live reading, and an 18 GB allocation failing under it tells you only
+that *something else has the card* — not what.
+
+The retry ladder is visible too: 18231 MiB → 15244 → 10588, three attempts,
+then the start gives up. All three failed, every time.
+
+### 21.2 The server that outlived its handle
+
+`Runtime._restart_in_system_ram` moves the model off the card without losing
+the loaded server: stop the old process, start a new one with no GPU layers,
+wait for it to answer. Its failure branch logged *"could not move the LLM to
+system RAM; stopping it instead"* and stopped nothing.
+
+`start()` can succeed and `wait_ready()` still fail — a server that came up and
+then died, or one slower than the timeout. What was left behind was a live
+`llama-server` that nothing had a handle to any more. It is launched into its
+own process group and with `CREATE_NO_WINDOW`, which is exactly right while the
+WebUI owns it and exactly wrong once it does not: it outlives its parent, holds
+its CUDA context and its weights, and is invisible anywhere except Task
+Manager.
+
+From the tab, that is a card with no free VRAM, a chip reading *Unloaded* —
+truthfully, about the runtime it knows about — and an Unload button that
+correctly reports it has nothing to stop. Forge's own unload cannot reach it
+either; it is not Forge's process.
+
+The main start path has always stopped its process on this failure. This one
+now does too.
+
+### 21.3 Unload means the card, not the handle
+
+Fixing the leak stops new strays. It does nothing about the ones already
+running, and *"my VRAM is full"* is not a problem you solve by shipping a fix
+that only helps next time.
+
+So `mc_llm_runtime.strays()` looks for `llama-server` processes whose `--alias`
+is the one this extension passes, minus the one this WebUI owns, and Unload
+stops them and says what it found:
+
+> Also stopped 1 stray llama-server left running by an earlier session,
+> releasing 15.9 GB.
+
+From a press rather than at startup, deliberately. Two WebUIs sharing one card
+would each see the other's server as a stray, and a startup that quietly killed
+it would be a worse bug than the one being fixed. A press is somebody asking
+for their card back.
+
+The alias lives in a vendored file that is not ours to edit, so the constant is
+restated in `mc_llm_runtime` and a test asserts the two still agree. Matching is
+on the *value* of `--alias`, not on the word appearing anywhere on the command
+line: a model kept in a folder of that name would otherwise make every server
+on the machine look like ours.
+
+### 21.4 The reply that was on screen and not on disk
+
+`_stream` writes a reply into the conversation and saves it, on four paths:
+finished, cancelled, failed, and raised. There is a fifth, and it was the one
+Stop used.
+
+Stop is wired as `cancels=`, and what Gradio does with that is *close* the
+handler's generator. Closing raises `GeneratorExit`, which derives from
+`BaseException` and goes straight past `except Exception` — so the branch
+holding the only `store.save` never ran. The reply stayed on screen, because
+Gradio keeps the rows it was last given; it was never written to the thread. It
+came back missing the next time the thread was opened, and `_view` rendered
+what was left as a message of yours with nothing under it. A browser refresh
+mid-reply and a dropped queue entry went the same way.
+
+The save now happens in a `finally`, through one idempotent `keep()` that every
+exit goes through. Saving is safe there where yielding would not be: yielding
+during a `GeneratorExit` is a `RuntimeError`, writing a file is not. What gets
+saved is whatever the message holds — a partial reply is a real reply, which is
+what the CANCELLED branch had already decided, and `_tidy` still clears up a
+reply that produced nothing rather than leaving an empty bubble in the thread.
+
+This is the same lesson `mc_llm_sessions._traced` learned about `GeneratorExit`
+and the GPU lock, arriving a second time about a different resource. The rule
+generalises: **anything a streaming handler owns and must not lose belongs in a
+`finally`, because the way these generators most often end is the way that
+skips every `except`.**
+
+The test for it closes the generator after one chunk and reads the thread back
+off disk. Neutering the `finally` fails that test and only that test.

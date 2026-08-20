@@ -677,3 +677,284 @@ class TestSwappingTheRuntime:
                                                 PermissionError("[WinError 5] Access is denied")))
 
         assert "in use" in message and "Unload" in message
+
+
+# --------------------------------------------------------------------------- #
+# The reply that was on screen and not on disk
+# --------------------------------------------------------------------------- #
+
+
+class TestAReplySurvivesWhateverEndsTheGenerator:
+    """Reported: the first replies of every old thread came back blank.
+
+    Stop is wired as ``cancels=``, and what Gradio does with that is *close*
+    the handler's generator. That raises ``GeneratorExit`` -- a
+    ``BaseException`` -- straight past the ``except Exception`` that held the
+    only ``store.save`` on that path. So the reply stayed on screen, because
+    Gradio keeps the rows it was last given, and never reached the thread: the
+    next time it was opened there was a message of yours with nothing under it.
+    A browser refresh and a dropped queue entry went the same way.
+    """
+
+    def _thread(self, store, monkeypatch, pieces=("Hello", " there")):
+        import mc_llm_chat_panel as chat
+        from prompt_master.chat.characters import Persona, save_persona
+        from prompt_master.chat.history import ChatStore
+
+        save_persona(mc_llm_paths.app_paths(), Persona(name="Me", description="a reader"))
+        chats = ChatStore(store / "chats")
+        monkeypatch.setattr(chat, "_chats", lambda: chats)
+
+        from prompt_master.chat.characters import Character
+
+        class Characters:
+            def load(self, who):
+                return Character(name="Ada", context="a reader of maps")
+
+        monkeypatch.setattr(chat, "_characters", lambda: Characters())
+        # Chunks and then DONE, which is the shape the real generator has: the
+        # completed case has to go through the branch that actually runs in
+        # production, or the test proves nothing about it.
+        events = [sessions.Event(sessions.CHUNK, piece) for piece in pieces]
+        events.append(sessions.Event(sessions.DONE, "".join(pieces)))
+        monkeypatch.setattr(chat.sessions, "conversation",
+                            lambda request, cancel: iter(events))
+        conversation = chats.new("Ada")
+        chats.save(conversation)
+        return chat, chats, conversation
+
+    def test_a_closed_generator_still_writes_the_reply_to_the_thread(self, store, host,
+                                                                     monkeypatch):
+        chat, chats, conversation = self._thread(store, monkeypatch)
+
+        run = chat._send("Ada", conversation.identifier, "hello love", None, None, None, None, None)
+        next(run)          # the composer clears and the run starts
+        next(run)          # the first chunk arrives
+        run.close()        # what Stop does
+
+        saved = chats.load("Ada", conversation.identifier)
+        assert [message.role for message in saved.messages] == ["user", "assistant"]
+        assert saved.messages[0].text == "hello love"
+        assert saved.messages[1].text == "Hello", "the partial reply is a real reply"
+
+    def test_a_reply_that_ran_to_completion_is_saved_once_and_kept(self, store, host,
+                                                                   monkeypatch):
+        chat, chats, conversation = self._thread(store, monkeypatch)
+
+        list(chat._send("Ada", conversation.identifier, "hello love", None, None, None, None, None))
+
+        saved = chats.load("Ada", conversation.identifier)
+        assert saved.messages[1].text == "Hello there"
+
+    def test_a_reply_that_never_started_leaves_no_blank_message_behind(self, store, host,
+                                                                       monkeypatch):
+        """``_tidy``'s job, and the reason the save cannot simply be
+        unconditional: a reply that produced nothing is cleared up rather than
+        written to the thread as an empty bubble."""
+        chat, chats, conversation = self._thread(store, monkeypatch, pieces=())
+
+        run = chat._send("Ada", conversation.identifier, "hello love", None, None, None, None, None)
+        next(run)
+        run.close()
+
+        saved = chats.load("Ada", conversation.identifier)
+        assert [message.role for message in saved.messages] == ["user"]
+
+    def test_the_transcript_shows_a_message_with_no_reply_under_it(self, store, host):
+        """What the bug looked like, kept as the description of the shape: a
+        user message whose reply never reached the file is a row with an empty
+        right-hand side, which is the blank bubble in the screenshot."""
+        import mc_llm_chat_panel as chat
+        from prompt_master.chat.history import Conversation, Message
+
+        conversation = Conversation(identifier="x", character="Ada",
+                                    messages=[Message(role="user", versions=["hello love"])])
+        rows, _ = chat._view(conversation)
+
+        assert rows == [["hello love", None]]
+
+
+# --------------------------------------------------------------------------- #
+# Servers that outlived the WebUI (the VRAM that would not come back)
+# --------------------------------------------------------------------------- #
+
+
+class FakeProcess:
+    def __init__(self, pid, name="llama-server.exe", cmdline=None, denied=False):
+        self.info = {"pid": pid, "name": name,
+                     "cmdline": cmdline if cmdline is not None else
+                     ["llama-server", "--model", "m.gguf", "--alias", "prompt-master"]}
+        self.denied = denied
+        self.stopped = False
+        self.killed = False
+        if denied:
+            self.info["cmdline"] = None
+
+    def terminate(self):
+        self.stopped = True
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def fake_psutil(monkeypatch, processes):
+    import types
+
+    module = types.ModuleType("psutil")
+    module.process_iter = lambda attrs=None: list(processes)
+    module.Process = lambda pid: next(p for p in processes if p.info["pid"] == pid)
+    monkeypatch.setitem(__import__("sys").modules, "psutil", module)
+    return module
+
+
+class TestStrayServers:
+    """A llama-server is started in its own process group and with no window,
+    so it survives the WebUI that started it and is invisible outside Task
+    Manager -- while still holding a CUDA context and a model's worth of
+    weights. The tab then reads "Unloaded", truthfully about the runtime it
+    knows about, over a card with no free VRAM and an Unload button with
+    nothing to stop.
+    """
+
+    def test_the_alias_here_is_the_one_the_vendored_starter_actually_passes(self):
+        """The two are in different files and only one of them is ours to edit,
+        so the agreement is asserted rather than assumed."""
+        import mc_llm_runtime
+        from pathlib import Path
+
+        import prompt_master.inference.llama_process as starter
+
+        source = Path(starter.__file__).read_text(encoding="utf-8")
+        assert f'"--alias","{mc_llm_runtime.SERVER_ALIAS}"' in source.replace(", ", ",")
+
+    def test_a_server_carrying_our_alias_is_a_stray(self, monkeypatch):
+        import mc_llm_runtime
+
+        fake_psutil(monkeypatch, [FakeProcess(4321)])
+
+        assert mc_llm_runtime.strays() == [4321]
+
+    def test_somebody_else_s_llama_server_is_left_alone(self, monkeypatch):
+        import mc_llm_runtime
+
+        fake_psutil(monkeypatch, [
+            FakeProcess(1, cmdline=["llama-server", "--alias", "someone-else"]),
+            FakeProcess(2, name="python.exe"),
+        ])
+
+        assert mc_llm_runtime.strays() == []
+
+    def test_a_path_that_merely_contains_the_alias_is_not_a_match(self, monkeypatch):
+        """The alias has to be the value of --alias, not a word on the line: a
+        model kept under a folder of that name would otherwise make every
+        server on the machine look like ours."""
+        import mc_llm_runtime
+
+        fake_psutil(monkeypatch, [FakeProcess(
+            7, cmdline=["llama-server", "--model", "C:/prompt-master/m.gguf"])])
+
+        assert mc_llm_runtime.strays() == []
+
+    def test_the_server_this_webui_owns_is_never_a_stray(self, monkeypatch):
+        import mc_llm_runtime
+
+        fake_psutil(monkeypatch, [FakeProcess(4321), FakeProcess(9999)])
+        owned = types.SimpleNamespace(process=types.SimpleNamespace(pid=4321))
+        monkeypatch.setattr(mc_llm_runtime.runtime, "_process", owned, raising=False)
+
+        assert mc_llm_runtime.strays() == [9999]
+
+    def test_a_process_list_that_cannot_be_read_reports_nothing_rather_than_guessing(
+            self, monkeypatch):
+        import mc_llm_runtime
+
+        fake_psutil(monkeypatch, [FakeProcess(1, denied=True)])
+
+        assert mc_llm_runtime.strays() == []
+
+    def test_releasing_stops_them_and_says_how_many(self, monkeypatch):
+        import mc_llm_runtime
+
+        processes = [FakeProcess(4321), FakeProcess(9999)]
+        fake_psutil(monkeypatch, processes)
+        monkeypatch.setattr(mc_llm_runtime.runtime, "_process", None, raising=False)
+
+        stopped, _freed = mc_llm_runtime.release_strays()
+
+        assert stopped == 2
+        assert all(process.stopped for process in processes)
+
+    def test_releasing_nothing_is_not_an_error(self, monkeypatch):
+        import mc_llm_runtime
+
+        fake_psutil(monkeypatch, [])
+
+        assert mc_llm_runtime.release_strays() == (0, 0)
+
+    def test_unload_stops_a_stray_and_says_so(self, store, host, monkeypatch):
+        """"Unload" is a request for the card back. Until now it could only
+        reach the one server this WebUI had a handle to."""
+        import mc_llm_studio
+
+        monkeypatch.setattr(mc_llm_studio, "_release_strays", lambda: (1, 15 * 1024**3))
+        import mc_llm_runtime
+
+        monkeypatch.setattr(mc_llm_runtime.runtime, "running", lambda: False)
+
+        line, _residency = mc_llm_studio._unload_model()
+
+        assert "stray" in line and "15.0 GB" in line
+
+    def test_a_failure_looking_for_strays_never_costs_unload_its_answer(self, store, host,
+                                                                        monkeypatch):
+        import mc_llm_runtime
+        import mc_llm_studio
+
+        monkeypatch.setattr(mc_llm_runtime, "release_strays",
+                            lambda: (_ for _ in ()).throw(RuntimeError("no process list")))
+        monkeypatch.setattr(mc_llm_runtime.runtime, "running", lambda: False)
+
+        line, _residency = mc_llm_studio._unload_model()
+
+        # Whatever the runtime's own state is, the press is answered with it
+        # rather than with a traceback or an empty panel.
+        assert "mc-llm-state" in line
+
+
+class TestAServerIsNeverLostOnTheWayToSystemRam:
+    def test_a_health_check_that_fails_stops_the_process_it_started(self, store, host,
+                                                                    monkeypatch):
+        """``start`` can succeed and ``wait_ready`` still fail. What was left
+        behind then was a live llama-server nothing had a handle to -- in its
+        own process group, with no window, holding the card, while the panel
+        said "Unloaded" about the runtime it knew about."""
+        import mc_llm_runtime
+
+        started = []
+
+        class Process:
+            def __init__(self):
+                self.stopped = False
+
+            def start(self, *args, **kwargs):
+                started.append(self)
+
+            def wait_ready(self, timeout=None):
+                raise TimeoutError("llama-server did not become ready")
+
+            def stop(self):
+                self.stopped = True
+
+        monkeypatch.setattr(mc_llm_runtime.runtime, "_new_process", lambda: Process())
+        monkeypatch.setattr(mc_llm_runtime.runtime, "_stop_locked", lambda reason: None)
+        monkeypatch.setattr(mc_llm_runtime, "config", lambda: types.SimpleNamespace(
+            configured=True, runtime="llama-server", model="m.gguf", mmproj=None,
+            gpu_index=0, device="CUDA0"))
+
+        freed = mc_llm_runtime.runtime._restart_in_system_ram(0, "an image pass")
+
+        assert freed == 0
+        assert started and started[0].stopped, "the process it started has to be stopped"

@@ -596,19 +596,59 @@ def _load_model(progress=gr.Progress()):
 
 
 def _unload_model():
-    """Stop llama-server, releasing every byte of VRAM it held."""
+    """Stop llama-server, releasing every byte of VRAM it held.
+
+    And then stop anything else of ours still holding some. "Unload" is a
+    request for the card back, and until now it could only reach the one server
+    this WebUI has a handle to -- so a server that had outlived its parent went
+    on holding fifteen gigabytes while this button correctly reported there was
+    nothing to stop. See :func:`mc_llm_runtime.strays`. It is done here, from a
+    press, rather than at startup, because two WebUIs sharing a card would each
+    see the other's server as a stray.
+    """
     import mc_llm_runtime
 
     logger.info("Model Chain: LLM Studio — Unload pressed")
-    if not mc_llm_runtime.runtime.running():
-        return _runtime_line(), _residency_html()
-    try:
-        mc_llm_runtime.runtime.stop()
-    except Exception:
-        logger.warning("Model Chain: llama-server could not be stopped", exc_info=True)
-        return (ui.notice("llama-server could not be stopped — see the console.", "error"),
-                _residency_html())
+    failed = ""
+    if mc_llm_runtime.runtime.running():
+        try:
+            mc_llm_runtime.runtime.stop()
+        except Exception:
+            logger.warning("Model Chain: llama-server could not be stopped", exc_info=True)
+            failed = "llama-server could not be stopped — see the console."
+
+    stopped, freed = _release_strays()
+    if failed:
+        return ui.notice(failed, "error"), _residency_html()
+    if stopped:
+        return _stray_notice(stopped, freed), _residency_html()
     return _runtime_line(), _residency_html()
+
+
+def _release_strays() -> tuple[int, int]:
+    """Stop stray servers. A failure here never costs the Unload its answer."""
+    import mc_llm_runtime
+
+    try:
+        return mc_llm_runtime.release_strays()
+    except Exception:
+        logger.warning("Model Chain: could not look for stray llama-server processes",
+                       exc_info=True)
+        return 0, 0
+
+
+def _stray_notice(stopped: int, freed: int) -> str:
+    """What Unload says when it found something the runtime had lost track of.
+
+    Said out loud rather than done quietly: a process this WebUI did not know
+    about was holding the card, and somebody who has just spent an afternoon
+    wondering where their VRAM went is owed the sentence.
+    """
+    servers = "server" if stopped == 1 else "servers"
+    amount = f", releasing {freed / _GB:.1f} GB" if freed else ""
+    return ui.state("Unloaded", "idle",
+                    f"Also stopped {stopped} stray llama-server {servers} left running by an "
+                    f"earlier session{amount}.")
 
 
 # --------------------------------------------------------------------------- #
