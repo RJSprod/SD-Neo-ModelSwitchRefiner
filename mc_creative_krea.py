@@ -25,20 +25,36 @@ manage work that started without being asked for. When every roll is explicit,
 all of that is answerable by "the user pressed it again": there is nothing to
 debounce, nothing to invalidate, and no loop that could run away.
 
-One thing did survive, and it is the one that was never about Live: the arming
-token. Forge's processing hook still needs a way to be handed an expansion that
-was computed before the image job began, and it still must be impossible for a
-nested or queued generation to spend that permission twice.
-
-Why the model is asked before the image job starts
---------------------------------------------------
+The roll happens inside the generation
+--------------------------------------
+It did not always. Creative Mode was first built so that the roll ran in a
+Gradio handler *before* the native Generate click, because
 ``mc_llm_sessions`` takes the broker's workload lock for a whole run and waits
-while the host is generating, so an LLM completion and a diffusion pass never
-overlap. Asking for an expansion from inside a Forge processing hook would
-therefore be an LLM run waiting for the image job that is waiting for it. So
-this module *requests* the expansion, from a Gradio handler, before anything
-native has started, and the processing hook only ever *applies* one that already
-exists. :meth:`Creative.consume` is the whole of the hook's vocabulary.
+while the host is generating -- so an expansion asked for from inside a Forge
+processing hook was an LLM run waiting for the image job that was waiting for
+it. The ordering was arranged in the browser: intercept the click, roll, then
+click Generate again.
+
+That made every Creative generation depend on a live page. A press started a
+roll and nothing else; the thing that actually started the image was a
+``click()`` from JavaScript, minutes later, from a timer that browsers throttle
+to once a second in a hidden tab and once a minute in a frozen one. Switch
+windows and the image was late. Close the tab and it never came at all, which
+is not a browser being unhelpful -- it is the design saying the job cannot
+finish without one.
+
+So the deadlock was addressed where it was, rather than routed around. A roll
+that the image job is blocked waiting for is not competing with that job, and
+``mc_broker.host_job()`` is how a caller says exactly that, for exactly as long
+as it is true. The roll now runs in ``before_process``, one press starts
+everything, and the browser is a spectator: close it after pressing Generate and
+Forge finishes the job and writes the files, the same as any other generation.
+
+The arming token did not survive it, and did not need to. It was permission for
+one generation to spend a roll made before that generation started; with the
+roll made *by* the generation, the hook that writes the prompt is the hook that
+applies it, on one thread, in one call. What used to be a token is now the shape
+of the code.
 
 Three prompts, and only one of them is on screen
 ------------------------------------------------
@@ -51,7 +67,6 @@ the line in the processing hook that assigns it.
 from __future__ import annotations
 
 import logging
-import secrets
 import threading
 from dataclasses import dataclass, field
 
@@ -133,15 +148,21 @@ class Roll:
 
 
 @dataclass(frozen=True)
-class Armed:
-    """Permission for exactly one native generation to use one roll.
+class Prepared:
+    """One roll, in the form the processing hook substitutes.
 
-    The token is the permission; the rest is what the processing hook needs in
-    order to act on it -- the prompt to substitute, and the values to write into
-    infotext so the image can be explained afterwards.
+    Everything that hook needs and a :class:`Roll` does not carry: the prompt
+    with the pinned networks on the end, and the values to write into infotext so
+    the image can be explained afterwards.
+
+    This used to be called ``Armed`` and used to carry a token, because the roll
+    was made somewhere else -- a Gradio handler, ahead of the click -- and the
+    token was that handler's permission for exactly one generation to spend the
+    result. The roll happens inside the generation now, so there is no handover
+    to authorise: the hook that makes this is the hook that applies it, on the
+    same thread, in the same call.
     """
 
-    token: str
     roll: Roll
     generation: str
     loras: str
@@ -176,6 +197,13 @@ class Armed:
         if self.loras:
             recorded[mc_infotext.CREATIVE_LORAS] = self.loras
         return recorded
+
+
+def prepare(roll: Roll, loras) -> Prepared:
+    """One finished roll, packaged for the processing hook."""
+    return Prepared(roll=roll,
+                    generation=generation_prompt(roll.expanded, loras),
+                    loras=lora_suffix(loras))
 
 
 # --------------------------------------------------------------------------- #
@@ -365,18 +393,26 @@ def forget_history() -> None:
 
 
 class Creative:
-    """Creative Mode's state for one WebUI. Two fields and a lock.
+    """Creative Mode's state for one WebUI. One field and a lock.
 
     Compare the module this replaced, which had a cache, a revision counter, a
     cancellation handle, a failure count and a status machine. All of those
-    existed to manage work nobody had asked for. What is left is the last roll
-    (so the diagnostic view has something to show) and the arming token (so one
-    expansion makes exactly one image).
+    existed to manage work nobody had asked for. What is left is the last roll,
+    so the diagnostic view has something to show -- and it is the *only* thing
+    left, because there is no longer a gap between a roll and the generation
+    that uses it for state to live in.
+
+    There used to be an arming token as well. It was permission for exactly one
+    native generation to spend a roll that had been made ahead of the click, in
+    a Gradio handler, and it existed because that gap existed: between the roll
+    finishing and the browser clicking Generate, the result had to be somewhere,
+    and it had to be impossible for a second or queued generation to pick it up.
+    The roll runs inside the generation now. The gap is gone, and so is
+    everything that guarded it.
     """
 
     def __init__(self):
         self._lock = threading.RLock()
-        self._armed: Armed | None = None
         self._last: Roll | None = None
         self._status = IDLE
 
@@ -393,60 +429,10 @@ class Creative:
         with self._lock:
             return self._last
 
-    @property
-    def armed(self) -> Armed | None:
-        """The pending arming, without consuming it. For status only."""
-        with self._lock:
-            return self._armed
-
-    def disarm(self) -> None:
-        """Throw away any unspent permission.
-
-        Called when Creative Mode is switched off. Without it, turning the
-        feature off between an expansion and a Generate click would leave a
-        token that the next ordinary generation would spend.
-        """
-        with self._lock:
-            self._armed = None
-        self.say(IDLE)
-
-    def arm(self, roll: Roll, loras) -> Armed:
-        """Give one native generation permission to use ``roll``.
-
-        Re-arming replaces any unused token rather than adding a second one.
-        There is one Generate button and one browser; two live tokens would mean
-        one of them belonged to a generation that never happened, waiting to be
-        picked up by one that was about to be armed properly anyway.
-        """
-        armed = Armed(token=secrets.token_hex(8), roll=roll,
-                      generation=generation_prompt(roll.expanded, loras),
-                      loras=lora_suffix(loras))
-        with self._lock:
-            self._armed = armed
-            self._last = roll
-        return armed
-
-    def consume(self, token=None) -> Armed | None:
-        """Take the arming token, once. The processing hook's whole vocabulary.
-
-        Returns ``None`` for a generation this module did not arm -- an ordinary
-        Generate with Creative Mode off, Stage 2's own nested
-        ``process_images`` call, a queued request from a browser tab that has
-        since been closed -- and ``None`` is the answer that leaves Forge's
-        prompt exactly as the user typed it.
-        """
-        with self._lock:
-            armed, self._armed = self._armed, None
-        if armed is None:
-            return None
-        if token and token != armed.token:
-            return None
-        return armed
-
     # -- one roll ---------------------------------------------------------- #
 
     def roll(self, source: str, stored=None, references=(), guard_checkpoint=False,
-             task_id=""):
+             task_id="", own_bar: bool = True):
         """One creative roll: direct locally, then ask the model once.
 
         Yields :class:`mc_llm_sessions.Event` throughout so a caller can put the
@@ -459,12 +445,14 @@ class Creative:
         prompt. That ordering is what makes "exactly one model call" a property
         of the design rather than a thing to be careful about.
 
-        ``task_id`` is a host progress task the browser has already asked Forge
-        to draw a bar for. When one is supplied the roll reports itself on that
-        bar, phase by phase, which is the only thing standing between a user and
-        twenty seconds of a screen that looks broken. Without one -- LLM Studio,
-        or any caller that has not arranged a bar -- everything below behaves
-        exactly as it did.
+        ``task_id`` is a host progress task to report on, phase by phase, which
+        is the only thing standing between a user and twenty seconds of a screen
+        that looks broken. ``own_bar`` says whether that task is this roll's to
+        start and finish. It is false for the txt2img path, where the roll runs
+        inside a generation whose bar the host started and must go on running
+        after the roll ends; there ``task_id`` may be empty as well, because the
+        bar being borrowed already exists whatever it is called. See
+        :mod:`mc_llm_progress`.
         """
         from prompt_master.core.models import draw_seed
         from prompt_master.krea import director
@@ -518,7 +506,8 @@ class Creative:
         run = sessions.krea(source, list(references or []), recipe.llm_seed, cancel,
                             recipe.creativity, recipe.brief, reserve)
         progress = mc_llm_progress.reporter
-        progress.begin(task_id, _prompt_size(source, references, recipe.brief), _warm())
+        progress.begin(task_id, _prompt_size(source, references, recipe.brief), _warm(),
+                       claim=own_bar)
         written = ""
         finished = False
         try:

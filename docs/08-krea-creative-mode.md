@@ -26,13 +26,14 @@ timer can fire. When every roll is explicit, all of them collapse into "the user
 pressed it again", and roughly six hundred lines of Python and JavaScript go with
 them.
 
-One thing survived, and it was never really about Live: the arming token. Forge's
-processing hook still needs to be handed a prompt computed before the image job
-began, and it must still be impossible for a nested or queued generation to spend
-that permission twice.
+One thing survived Live and did not survive what came after it: the arming
+token. It was permission for exactly one native generation to spend a prompt
+computed before that generation began, and §9 is the change that removed the gap
+it guarded.
 
 The other survivor is the ordering constraint (§4.1 below), which is a fact about
-the broker rather than about either design.
+the broker rather than about any of these designs — and §9 is where it is finally
+answered rather than routed around.
 
 
 ## 2. What was built
@@ -46,13 +47,13 @@ the broker rather than about either design.
 | `prompt_master/krea/variation.py` | reduced to the writer's sampling profile |
 | `prompt_master/krea/enhancer.py` | accepts a finished brief for the user turn |
 | `mc_llm_sessions.py` | one writer request, carrying the brief |
-| `mc_creative_krea.py` | settings, roll history, the arming token |
-| `scripts/model_chain_krea_creative.py` | the txt2img panel and the processing hook |
-| `javascript/model_chain_creative_krea.js` | the explicit Generate gate |
+| `mc_creative_krea.py` | settings, roll history, one roll |
+| `scripts/model_chain_krea_creative.py` | the txt2img panel, and the hook that rolls and applies |
+| `javascript/model_chain_creative_krea.js` | the armed indicator, and nothing else (§9) |
 | `mc_llm_krea_panel.py` | the same controls in LLM Studio |
 | `mc_llm_progress.py` | the roll, reported on the host's progress bar (§7) |
 | `tests/test_krea_creative.py` | the library, the Director, the scale, one-call |
-| `tests/test_krea_creative_js.py` | the bypass and the absence of a scheduler |
+| `tests/test_krea_creative_js.py` | that the click is never held, and the absence of a scheduler |
 | `tests/test_krea_progress.py` | the reporting, and the bar always being given back |
 
 
@@ -88,28 +89,43 @@ the broker rather than about either design.
 - **Krea's instruction is untouched** (§9, §14). Every word of art direction
   travels in the user turn. A test asserts the system message is identical at
   Creativity 1, 5 and 10.
-- **The processing hook applies and never requests** (§11). It has one verb:
-  `consume`.
+- **The processing hook is where the prompt is settled** (§11). It used to only
+  apply — one verb, `consume` — because requesting from inside a running job
+  deadlocked. §9 removed the deadlock, so it now requests and applies, and
+  nothing else in the feature can.
 
 
 ## 4. Two things worth knowing before changing this
+
+*Both of these describe the design as it stood until 20 August 2026. They are
+kept because §9 is only readable against them.*
 
 ### 4.1 The model must be asked before the image job starts
 
 `mc_llm_sessions` takes the broker's workload lock for a whole run and waits
 while `mc_broker.host_busy()` is true. A roll requested from inside a Forge
 processing hook would therefore be an LLM run waiting for the image job that is
-waiting for it. This is why the shape is *roll in a Gradio handler, apply in the
-hook*, and why the browser has a bypass flag at all: the roll has to finish
-before the native click is allowed through.
+waiting for it. This was why the shape was *roll in a Gradio handler, apply in
+the hook*, and why the browser had a bypass flag at all: the roll had to finish
+before the native click was allowed through.
 
-### 4.2 The arming token is consumed, not checked
+The constraint is real and has not gone away. What changed is that the hook now
+*declares* that the image job is blocked waiting for it (`mc_broker.host_job()`),
+which is the one case in which waiting for the image job is the wrong thing to
+do. See §9.
 
-`consume()` takes the token and clears it in one locked step, so one roll
-produces exactly one image. That matters for more than tidiness: Stage 2's own
+### 4.2 The arming token was consumed, not checked
+
+`consume()` took the token and cleared it in one locked step, so one roll
+produced exactly one image. That mattered for more than tidiness: Stage 2's own
 nested `process_images()` call, a queued request from a closed tab, and a second
-Generate click during a batch would all otherwise inherit permission granted
-once.
+Generate click during a batch would all otherwise have inherited permission
+granted once.
+
+The token is gone with the gap it guarded (§9). What replaced it is that there
+is nowhere to put one: the hook that writes the prompt is the hook that applies
+it, on one thread, in one call. Re-entrancy is the only part that still needs a
+guard, and it is a flag on the script rather than a nonce.
 
 
 ## 5. Where it was followed differently, and why
@@ -289,16 +305,22 @@ worth about five seconds a roll at Creativity 10.
 ``mc_llm_progress.py``. The design is to use the host's machinery rather than
 draw anything:
 
-- the server mints a task id and sends it down the hidden box the browser is
-  already polling for the arming token, as a ``task:`` message;
-- the browser calls the host's ``requestProgress`` for that id, which is what
-  draws and polls the real bar;
-- the server claims that id with ``modules.progress.add_task_to_queue`` and
-  ``start_task``, which is what ``modules.call_queue`` does, and releases it with
-  ``finish_task``;
+- a task is claimed with ``modules.progress.add_task_to_queue`` and
+  ``start_task``, which is what ``modules.call_queue`` does around every ordinary
+  Gradio GPU call, and released with ``finish_task``;
 - ``shared.state.textinfo`` carries the phase name and ``sampling_step`` /
   ``sampling_steps`` carry streamed characters, so **the existing** ``mc_progress``
   arithmetic describes the roll with no special case anywhere.
+
+Since §9 there are two kinds of caller and the difference is one line. A roll
+that runs *inside* a generation — which is every txt2img roll now — **borrows**
+the bar the host already started for that generation: ``begin(claim=False)``, no
+``start_task``, and above all no ``finish_task``, because finishing the image
+job's task from inside ``before_process`` tells every poller that the generation
+is over. A roll with no generation around it, such as LLM Studio's, **owns** its
+task and does both. The counters are handed back either way; leaving them at a
+finished roll's values would show the generation that follows as already
+complete until its sampler overwrote them.
 
 The three phases are the ones llama.cpp's log distinguishes and the ones a user
 feels differently: *Waiting* (GPU handover, or a cold llama-server), *Reading*
@@ -324,9 +346,13 @@ Three details that are not obvious:
   checkpoint, an empty source, a Director failure and an Interrupt.
 
 Interrupt is wired because the bar carries the button whether or not anything is
-listening, and a button that does nothing is worse than no button. The flag is
-cleared on the way out so the image generation that follows does not inherit a
-stop nobody meant for it.
+listening, and a button that does nothing is worse than no button. What happens
+to the flag afterwards depends on whose bar it is, and the two answers are
+opposite for the same reason. On an owned bar the roll is all that is running, so
+the flag is cleared and a later press does not inherit a stop nobody meant for
+it. On a borrowed bar the roll is the first part of a generation that is already
+running, so Interrupt means *stop this generation* — the flag is left exactly as
+the user set it and the host's own loop reads it a moment later.
 
 ### 7.4 Two things the first attempt at that got wrong
 
@@ -345,9 +371,16 @@ describes, reintroduced through the back door by a progress indicator.
 It was intermittent, which made it worse: any Gradio call finishing nearby
 clears both fields in its own ``finally``, so it hung on a fresh restart and
 sometimes escaped a few seconds later having wasted the wait. Neither field is
-set now, and ``TestTheBarNeverBlocksTheRunItDescribes`` drives the whole txt2img
-gate with the real ``host_busy`` — not the stub every other test in that file
-uses — and asserts it answered False at every frame.
+set now, and ``TestTheBarNeverBlocksTheRunItDescribes`` drives a real roll with
+the real ``host_busy`` — not the stub every other test in that file uses — and
+asserts it answered False at every frame.
+
+Note what this does *not* license, because §9 is easy to misread as a reversal of
+it. The rule is that a progress indicator must never make the host look busy. The
+exception §9 adds is that a caller which the host job is genuinely blocked
+waiting for may skip the *wait*, having said so explicitly. Those are opposite
+halves of the same statement: `host_busy()` must keep telling the truth, and one
+caller is allowed to know that the truth does not apply to it.
 
 The cost is that the host's own progress arithmetic needs ``job_count`` to
 compute a fraction, so with this extension's whole-job reporting switched off
@@ -446,14 +479,138 @@ The package's own `acceptance_cases.json` is read rather than paraphrased, and
 is what will stop the data and the tests drifting apart the next time the library
 is updated.
 
-`tests/test_krea_creative_js.py` runs the browser gate under node against a
-synthetic clock, which is the only way to ask the two questions that matter
-there: does the one-shot bypass let exactly one native click through, and is
-there really no scheduler left. The second is asked by running an hour forward
-with nobody touching anything and asserting that no timer remains armed.
+`tests/test_krea_creative_js.py` runs the browser file under node against a
+synthetic clock and a fake page, which is the only way to ask the questions that
+matter there. A click is dispatched at the real listener list and the native
+submission has to happen; no timer may be armed by a press or by an hour of
+nobody touching anything; and the hidden roll button the old gate pressed has to
+go unpressed. Four assertions read the file rather than run it — no
+`setInterval`, no `preventDefault`, no `.click(`, comments excluded — because a
+file with no timers today grows one the next time somebody wants to know when
+the server has finished something.
 
 `tests/test_krea_progress.py` covers the reporting, and is mostly about the bar
-being *given back*. It also drives the submit hook under node against a fake
-page, because "the id reaches argument zero and the host is asked to draw a bar
-for that same id" is two facts about one function and neither is visible from
-reading it.
+being *given back*. Since §9 it also covers the borrowed bar (the roll must not
+start or finish the generation's task, and must hand the counters back) and the
+deadlock itself: `TestTheRollRunsInsideTheGeneration` sets `shared.state.job` the
+way `call_queue` does, does not stub `host_busy`, and drives `before_process` on
+a thread with a deadline — because a deadlocked hook hangs a test run rather than
+failing it, and the deadline is the assertion.
+
+
+## 9. The browser stopped being load-bearing (20 August 2026)
+
+Reported as: *Creative Mode generations do not complete if the browser window
+loses focus.* Confirmed, and worse than reported — they did not complete if the
+tab was closed either, and that was by construction rather than by accident.
+
+### 9.1 What was actually happening
+
+A press of Generate did not start a generation. `model_chain_creative_krea.js`
+intercepted the click in the capture phase, called `preventDefault()`, pressed a
+hidden Gradio button to run the roll, and polled a hidden textbox on a
+`setInterval` until the server wrote `ready:<token>` into it. Only then did it
+click Generate a second time, with a one-shot flag that let that click through.
+
+Every part of that after the press lived in the page:
+
+- **The poll.** `setInterval(…, 100)` is throttled to one tick a second in a
+  hidden tab and to one a minute under Chromium's intensive throttling after
+  five minutes hidden, and does not run at all in a frozen or closed one. So the
+  image started late — or never — in exact proportion to how little the tab was
+  being looked at.
+- **The timeout.** `TOKEN_TIMEOUT_MS` was fifteen minutes of `Date.now()`, which
+  is wall clock: a throttled poll could burn through it while the roll had long
+  since finished, and the outcome was a resolved-false promise and silence.
+- **The second click.** The thing that actually started the image was a
+  `click()` from JavaScript. Close the tab and the roll's result sat armed on the
+  server with nothing left to spend it.
+
+None of this was a bug in the JavaScript. It was the JavaScript doing exactly
+what it was written to do, and what it was written to do was be the only place
+the *ordering* in §4.1 could be enforced.
+
+### 9.2 The fix is one declaration
+
+`mc_broker.host_job()`: a thread-local, re-entrant context manager that says
+*this thread is the host's own job, for as long as this block runs*.
+`mc_llm_sessions._Gpu.acquire` consults `mc_broker.inside_host_job()` and skips
+the `host_busy()` wait when it is true.
+
+That is not a loosening of the rule so much as the rule read carefully. The wait
+exists so that an LLM turn does not compete with a running image job. A turn the
+image job is itself blocked waiting for is not competing with it — it *is* the
+job, in the part of the job that happens before any sampling. Nothing else is
+relaxed: the workload lock is still taken, so two LLM turns still serialise, and
+that wait terminates because the turn ahead is running rather than waiting on
+anything this generation holds. The image side takes no broker lock at all
+(`mc_broker`'s own comments explain why), so there is no cycle left to close.
+
+The permission is declared, not inferred. Nothing tries to work out whether a
+thread "looks like" a job thread; a caller that knows it is holding up the host
+says so, for exactly as long as that is true, and one function reads it.
+
+### 9.3 What that let happen
+
+`ScriptKreaCreative.before_process` does the roll now. One press of Generate
+starts an ordinary Forge generation, and everything Creative Mode does happens
+inside it, on the thread the host is already running it on. Nothing after the
+press touches a browser.
+
+The ordering §7.5 depends on is preserved rather than sacrificed, which is worth
+saying because it is the non-obvious half: `before_process` runs at the top of
+`process_images`, *before* the checkpoint is (re)loaded, so the writer still
+meets the card in the same state it used to and `image_reserve_bytes()` still
+means what it meant.
+
+Deletions that follow from it:
+
+- the click gate, the hidden run button, the hidden token box, the `task:` /
+  `ready:` / `failed:` channel and the nonce that made two identical outcomes
+  distinguishable;
+- the one-shot bypass flag, and the entire class of bug where a boolean is wrong
+  in one direction if nothing generates and the other if everything generates
+  twice;
+- the arming token, `Creative.arm`, `consume`, `disarm` and `armed` — permission
+  to cross a gap that no longer exists;
+- `after_component`'s capture of the native prompt box. `p.prompt` is what the
+  host is about to generate from, it is present whether the press came from the
+  tab or the API, and it is still there when the tab is not.
+
+`javascript/model_chain_creative_krea.js` is a third of what it was and does one
+cosmetic thing: paint the armed class on Generate while Creative Mode is on. If
+every line of it fails, a button goes unpainted.
+
+### 9.4 What is worse, and why it is worth it
+
+The panel no longer streams the roll's status into its own status line, because
+there is no open Gradio event to stream down: the press became a native
+generation rather than a handler with an output list. Two consequences:
+
+- The phase is on the progress bar instead (§7.3), which is where a user is
+  already looking and is arguably where it belonged.
+- The **Last creative roll** drawer is filled by a button rather than
+  automatically. It reads `Creative.last`, which outlives the page — so a roll
+  made before the tab was closed can be inspected in the tab that opens after
+  it, which the streamed version could not do at all.
+
+Failure behaviour changed too, and deliberately. The gate refused the *click*
+when a roll failed, so a non-Krea checkpoint or a dead `llama-server` produced no
+image. The hook cannot refuse a generation that has already started, and should
+not want to: every failure path now logs why and generates the prompt the user
+typed. For the checkpoint guard in particular that is the better answer anyway —
+a short prompt is exactly what an SD 1.5 checkpoint wanted.
+
+### 9.5 Two guards that had to be added
+
+- **Re-entrancy.** With the roll inside the hook, a nested `process_images()`
+  that carried scripts would start a *second* language-model request while the
+  first was still streaming. Stage 2 runs with `p.scripts` unset so this is belt
+  and braces, but the cost of being wrong is no longer a duplicate image. One
+  flag on the script instance.
+- **Panel values reach the hook.** `ui()` returns every control now, not just
+  the toggle, so `before_process` reads the slider the user just moved rather
+  than the last value written to preferences. They are this script's own
+  arguments and reach neither Model Chain's preset list nor its infotext, which
+  is what §2's "a separate always-on script" was for. A caller with no panel
+  behind it — the API — sends only the flag, and the saved settings answer.

@@ -823,15 +823,17 @@ class TestThereIsNoLiveMode:
             assert "sched" not in imported
             assert "asyncio" not in imported
 
-    def test_the_browser_gate_has_no_timer_and_no_repeat(self):
+    def test_the_browser_file_watches_nothing(self):
+        """The scheduler assertions live in ``test_krea_creative_js.py``, which
+        runs the file; this is the one that belongs with the Python, because it
+        is about the *input* side. Nothing in the page observes the prompt box,
+        so there is no path from "text changed" to anything at all."""
         source = (Path(__file__).resolve().parent.parent / "javascript"
                   / "model_chain_creative_krea.js").read_text(encoding="utf-8")
 
-        assert "setTimeout" not in source
         assert '"input"' not in source
         assert "reroll" not in source.casefold()
-        # One interval only: the poll that waits for the server's answer.
-        assert source.count("setInterval") == 1
+        assert "MutationObserver" not in source
 
     def test_the_live_modules_are_gone(self):
         root = Path(__file__).resolve().parent.parent
@@ -844,13 +846,12 @@ class TestThereIsNoLiveMode:
         "a model was asked". Merely having a session is not a roll."""
         session = mc_creative_krea.Creative()
 
-        assert session.armed is None
         assert session.last is None
         assert client.calls == []
 
 
 # --------------------------------------------------------------------------- #
-# Arming, and the hook that spends it
+# The hook that writes the prompt
 # --------------------------------------------------------------------------- #
 
 
@@ -869,49 +870,94 @@ def script():
     return creative_script.ScriptKreaCreative()
 
 
-def armed(client, source="car", loras="", creativity=10):
+def rolled(client, source="car", loras="", creativity=10):
+    """One roll, packaged the way the processing hook packages it."""
     stored = mc_creative_krea.settings()
     stored["creativity"] = creativity
     stored["loras"] = loras
     list(mc_creative_krea.creative.roll(source, stored))
-    return mc_creative_krea.creative.arm(mc_creative_krea.creative.last, loras)
+    return mc_creative_krea.prepare(mc_creative_krea.creative.last, loras)
+
+
+def panel_values(creativity=10, seed=director.RANDOM_SEED, anti=True, loras=""):
+    """What Forge hands ``before_process`` after the enabled flag.
+
+    The panel's own controls, in the order ``ui()`` returns them: the four
+    scalars and then the axis table, mode and fixed value per axis. Built from
+    the library rather than written out, for the same reason the table is.
+    """
+    values = [creativity, seed, anti, loras]
+    for _key in library_module.library().axis_keys:
+        values.extend([director.VARY, None])
+    return values
+
+
+def generate(script, prompt="car", enabled=True, timeout=20.0, **panel):
+    """One press of Generate, driven the way the host drives it.
+
+    On a thread with a deadline, because the failure this whole change is about
+    is a hook that never returns: an LLM request that waits for the image job to
+    finish, inside the image job. A deadlocked hook would otherwise hang the
+    test run rather than fail it.
+    """
+    import threading
+
+    p = Processing(prompt)
+    error: list[BaseException] = []
+
+    def press():
+        try:
+            script.before_process(p, enabled, *panel_values(**panel))
+        except BaseException as exc:  # surfaced on the calling thread below
+            error.append(exc)
+
+    worker = threading.Thread(target=press, name="press-generate", daemon=True)
+    worker.start()
+    worker.join(timeout)
+
+    assert not worker.is_alive(), "before_process did not return; the roll deadlocked"
+    if error:
+        raise error[0]
+    return p
 
 
 class TestTheProcessingHook:
-    def test_an_unarmed_generation_is_left_exactly_as_it_was(self, script, client):
-        p = Processing("car")
-        script.before_process(p, True)
+    def test_creative_mode_off_leaves_the_prompt_alone(self, script, client):
+        p = generate(script, "car", enabled=False)
 
         assert p.prompt == "car"
         assert p.extra_generation_params == {}
+        assert client.calls == []
 
-    def test_creative_mode_off_leaves_the_prompt_alone(self, script, client):
-        armed(client)
-        p = Processing("car")
-        script.before_process(p, False)
-
-        assert p.prompt == "car"
-
-    def test_an_armed_generation_is_given_the_expansion(self, script, client):
+    def test_the_generation_is_given_the_expansion(self, script, client):
         client.answers = ["A low-angle impasto painting of a car."]
-        armed(client)
-        p = Processing("car")
-        script.before_process(p, True)
+        p = generate(script, "car")
 
         assert p.prompt == "A low-angle impasto painting of a car."
 
+    def test_the_hook_asks_for_the_expansion_itself(self, script, client):
+        """The whole of the change this file was rewritten for.
+
+        The hook used to apply an expansion somebody else had requested, because
+        an LLM run waited for the host to stop generating and one asked for from
+        inside a running image job would have waited for the job that was
+        waiting for it. That ordering is now declared rather than choreographed
+        in a browser, so the request happens here -- which is what makes a press
+        of Generate sufficient on its own.
+        """
+        generate(script, "a car in the rain")
+
+        assert len(client.calls) == 1
+        assert "a car in the rain" in client.turn
+
     def test_the_pinned_loras_arrive_with_it(self, script, client):
         client.answers = ["A painted car."]
-        armed(client, loras="<lora:film:0.8>")
-        p = Processing()
-        script.before_process(p, True)
+        p = generate(script, loras="<lora:film:0.8>")
 
         assert p.prompt == "A painted car. <lora:film:0.8>"
 
     def test_everything_needed_to_roll_it_again_is_recorded(self, script, client):
-        armed(client, source="car", loras="<lora:film:0.8>")
-        p = Processing()
-        script.before_process(p, True)
+        p = generate(script, "car", loras="<lora:film:0.8>")
         recorded = p.extra_generation_params
 
         assert recorded[mc_infotext.CREATIVE_MODE] == "True"
@@ -926,58 +972,138 @@ class TestTheProcessingHook:
     def test_the_expanded_paragraph_is_not_recorded_twice(self, script, client):
         """It is already the generation's own prompt line."""
         client.answers = ["A tall white lighthouse under storm light."]
-        armed(client)
-        p = Processing()
-        script.before_process(p, True)
+        p = generate(script)
 
         assert "A tall white lighthouse" not in "".join(
             str(value) for value in p.extra_generation_params.values())
 
-    def test_one_roll_cannot_make_two_images(self, script, client):
-        armed(client)
-        first, second = Processing("car"), Processing("car")
-        script.before_process(first, True)
-        script.before_process(second, True)
+    def test_each_press_gets_its_own_roll(self, script, client):
+        client.answers = ["First.", "Second."]
+        first = generate(script, "car")
+        second = generate(script, "car")
 
-        assert first.prompt != "car"
-        assert second.prompt == "car"
+        assert (first.prompt, second.prompt) == ("First.", "Second.")
+        assert len(client.calls) == 2
 
-    def test_the_hook_never_asks_for_an_expansion_of_its_own(self, script, client):
-        """It applies; it does not request. An LLM run waits for the host to stop
-        generating, so a hook that asked for one would deadlock against the job
-        it was running inside."""
-        script.before_process(Processing("nothing was armed for this"), True)
+    def test_the_panel_values_are_read_from_the_press_and_not_the_file(self, script,
+                                                                      client, store):
+        """The slider somebody just moved wins over the last value saved."""
+        mc_creative_krea.remember(**{mc_creative_krea.CREATIVITY: 1})
+        generate(script, "car", creativity=10)
 
-        assert client.calls == []
+        assert mc_creative_krea.creative.last.creativity == 10
 
-    def test_turning_creative_mode_off_throws_the_permission_away(self, script, client):
-        armed(client)
-        mc_creative_krea.creative.disarm()
+    def test_an_api_request_with_no_panel_behind_it_uses_the_saved_settings(
+            self, script, client, store):
+        """``before_process`` is reachable without a page: the API passes the
+        script's arguments through, and a caller that sends only the flag must
+        get the installation's own configuration rather than an invented one."""
+        mc_creative_krea.remember(**{mc_creative_krea.CREATIVITY: 4})
         p = Processing("car")
         script.before_process(p, True)
 
+        assert mc_creative_krea.creative.last.creativity == 4
+        assert p.prompt != "car"
+
+    def test_nothing_from_an_earlier_roll_reaches_this_generation(self, script,
+                                                                  client):
+        """There is no state between a roll and the generation that uses it, so
+        an earlier roll cannot be picked up by a later press. This used to be a
+        token with a lifetime; now it is the absence of anywhere to put one."""
+        rolled(client, source="something else")
+        client.answers = ["A fresh roll for this press."]
+        p = generate(script, "car")
+
+        assert p.prompt == "A fresh roll for this press."
+
+    def test_an_empty_prompt_is_left_alone(self, script, client):
+        p = generate(script, "   ")
+
+        assert p.prompt == "   "
+        assert client.calls == []
+
+    def test_a_generation_nested_inside_the_roll_does_not_roll_again(self, script,
+                                                                     client):
+        """Stage 2 runs with ``p.scripts`` unset, so this is belt and braces --
+        and the cost of getting it wrong is not a duplicate image but a second
+        language-model request begun while the first is still streaming."""
+        nested = Processing("car")
+
+        def reenter(*args, **kwargs):
+            script.before_process(nested, True, *panel_values())
+            return "An expanded Krea prompt."
+
+        client.answers = []
+        original = client.stream_chat
+
+        def stream_chat(*args, **kwargs):
+            reenter()
+            return original(*args, **kwargs)
+
+        client.stream_chat = stream_chat
+        outer = generate(script, "car")
+
+        assert outer.prompt != "car"
+        assert nested.prompt == "car"
+        assert len(client.calls) == 1
+
+    def test_a_roll_that_fails_still_generates_what_the_user_typed(self, script,
+                                                                   client, monkeypatch):
+        def explode(*args, **kwargs):
+            raise RuntimeError("llama-server is not running")
+            yield  # pragma: no cover - generator shape only
+
+        monkeypatch.setattr(sessions, "krea", explode)
+        p = generate(script, "car")
+
         assert p.prompt == "car"
+        assert p.extra_generation_params == {}
+
+    def test_a_checkpoint_that_is_not_krea_generates_the_typed_prompt(
+            self, script, client, monkeypatch):
+        """Refusing the expansion is right; refusing the generation is not. The
+        user pressed Generate, and a short prompt is exactly what an SD 1.5
+        checkpoint wanted anyway."""
+        monkeypatch.setattr(mc_creative_krea, "checkpoint_objection",
+                            lambda: "The loaded checkpoint is not Krea 2.")
+        p = generate(script, "car")
+
+        assert p.prompt == "car"
+        assert client.calls == []
 
 
-class TestTheArmingToken:
-    def test_a_roll_arms_exactly_one_generation(self, client):
-        armed(client)
+class TestThereIsNothingToHandOver:
+    """The arming token is gone, and this is what replaced it.
 
-        assert mc_creative_krea.creative.consume() is not None
-        assert mc_creative_krea.creative.consume() is None
+    It was permission for exactly one native generation to spend a roll made
+    ahead of the click, and it existed because the roll and the generation were
+    two separate server calls with a browser in between. They are one call now.
+    The properties the token bought are still properties -- they are just facts
+    about the shape of the code rather than a mechanism to be checked at
+    runtime -- so what is asserted here is that no way of holding a roll for a
+    later generation came back.
+    """
 
-    def test_a_wrong_token_is_refused(self, client):
-        armed(client)
+    def test_the_session_holds_nothing_but_the_last_roll(self, client):
+        rolled(client)
+        session = mc_creative_krea.creative
 
-        assert mc_creative_krea.creative.consume("not-the-token") is None
+        assert session.last is not None
+        assert not [name for name in vars(session) if "arm" in name]
 
-    def test_re_arming_replaces_rather_than_stacks(self, client):
-        first = armed(client).token
-        second = armed(client).token
+    def test_the_session_has_no_way_to_authorise_a_later_generation(self, client):
+        for gone in ("arm", "consume", "disarm", "armed"):
+            assert not hasattr(mc_creative_krea.creative, gone)
 
-        assert first != second
-        assert mc_creative_krea.creative.consume().token == second
-        assert mc_creative_krea.creative.consume() is None
+    def test_the_last_roll_is_a_record_and_not_a_permission(self, script, client):
+        """It is what the diagnostics drawer reads. A generation must never
+        substitute it, or closing and reopening the tab would silently reuse the
+        art direction of whatever was rolled before."""
+        rolled(client, source="a lighthouse")
+        client.answers = ["Something written for this press."]
+        p = generate(script, "car")
+
+        assert p.prompt == "Something written for this press."
 
 
 class TestTheGpuIsGivenBack:
@@ -1004,7 +1130,7 @@ class TestTheGpuIsGivenBack:
 
 class TestPinnedLoras:
     def test_the_language_model_is_never_shown_a_tag(self, client):
-        armed(client, loras="<lora:film:0.8>")
+        rolled(client, loras="<lora:film:0.8>")
 
         assert "lora" not in client.turn
 
@@ -1015,7 +1141,7 @@ class TestPinnedLoras:
 
     def test_they_are_appended_to_the_generation_prompt_only(self, client):
         client.answers = ["A painted car."]
-        record = armed(client, loras="<lora:film:0.8>")
+        record = rolled(client, loras="<lora:film:0.8>")
 
         assert record.generation == "A painted car. <lora:film:0.8>"
         assert record.roll.expanded == "A painted car."
@@ -1067,21 +1193,80 @@ class TestTheTxt2imgSurface:
 
         assert [value for _label, value in values.choices] == expected
 
-    def test_no_handler_can_write_to_the_positive_prompt(self, built):
-        """The visible box keeps the short phrase the user is iterating on."""
-        built._prompt_component = _Native("txt2img_prompt")
-        built.ui(False)
+    def test_no_handler_touches_anything_outside_the_panel(self, built):
+        """The visible prompt box keeps the short phrase the user is iterating
+        on, and the panel has no business with any other native control. Asserted
+        as "every component every handler names is one of ours" rather than as a
+        list of forbidden ids, so a handler wired to something new fails here."""
+        ours = set()
+        for component in built.components.values():
+            for entry in (component if isinstance(component, list) else [component]):
+                ours.add(id(entry))
 
         for kwargs in _handlers(built):
-            assert built._prompt_component not in list(kwargs.get("outputs") or [])
+            for component in (list(kwargs.get("inputs") or [])
+                              + list(kwargs.get("outputs") or [])):
+                assert id(component) in ours
 
-    def test_the_gate_reads_the_positive_prompt_as_its_source(self, built):
-        built._prompt_component = _Native("txt2img_prompt")
-        built.ui(False)
+    def test_the_source_is_the_generation_own_prompt(self, built, client):
+        """Not a component read out of the page. ``p.prompt`` is what the host is
+        about to generate from, it is present whether the press came from the
+        tab or the API, and it is still there when the tab is not."""
+        p = generate(built, "a lighthouse in a storm")
 
-        reading = [kwargs for kwargs in _handlers(built)
-                   if built._prompt_component in list(kwargs.get("inputs") or [])]
-        assert reading
+        assert "a lighthouse in a storm" in client.turn
+        assert mc_creative_krea.creative.last.source == "a lighthouse in a storm"
+
+    def test_the_panel_has_no_hidden_plumbing_for_the_browser(self, built):
+        """The gate's half is gone: no hidden button for JavaScript to press and
+        no hidden box for it to poll. Both existed only to sequence a roll and a
+        click from the page, and both are how a closed tab used to strand a
+        generation."""
+        for name, component in built.components.items():
+            if isinstance(component, list):
+                continue
+            if getattr(component, "visible", True) is False:
+                # The controls that hide with the toggle are a different thing:
+                # they are visible the moment Creative Mode is on.
+                assert name in ("creativity", "status", "controls")
+
+    def test_what_ui_returns_is_what_before_process_reads(self, store, host, client):
+        """The contract that is easiest to break and hardest to notice.
+
+        ``ui()``'s return list becomes this script's arguments, positionally, and
+        ``before_process`` unpacks them by position. Get the order wrong and the
+        seed arrives as the Creativity, which produces a valid roll at a wrong
+        setting rather than an error. So the panel is built, its own values are
+        taken off its own components, and they are passed through in exactly the
+        order the panel returned them.
+        """
+        import model_chain_krea_creative as creative_script
+
+        instance = creative_script.ScriptKreaCreative()
+        returned = instance.ui(False)
+
+        # Distinct values, placed by identity rather than by position, so the
+        # test knows what each control was set to without assuming where it
+        # sits. Two are enough: a Creativity and a seed that arrived in each
+        # other's places would both still be plausible integers.
+        marks = {id(instance.components["enabled"]): True,
+                 id(instance.components["creativity"]): 7,
+                 id(instance.components["seed"]): 12345}
+        values = [marks.get(id(component), getattr(component, "value", None))
+                  for component in returned]
+
+        p = Processing("car")
+        instance.before_process(p, *values)
+        last = mc_creative_krea.creative.last
+
+        assert (last.creativity, last.creative_seed) == (7, 12345)
+        assert p.prompt != "car"
+
+    def test_no_handler_on_the_panel_queues(self, built):
+        """Nothing here does work worth queueing, and nothing here starts,
+        stops or waits for a generation any more."""
+        for kwargs in _handlers(built):
+            assert kwargs.get("queue") is False
 
     def test_it_adds_no_image_controls(self, built):
         """Forge owns the image. Steps, size, sampler, CFG and the image seed

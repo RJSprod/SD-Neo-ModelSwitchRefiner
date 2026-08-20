@@ -1,20 +1,27 @@
-"""The Creative Mode browser gate, executed rather than read.
+"""The Creative Mode browser file, executed rather than read.
 
-One thing in that file is a state machine, and a state machine is worth running.
+There is not much left of it, and the tests are mostly about that.
 
-Creative Mode intercepts the Generate click, does its work, and then clicks the
-very button it just intercepted -- which is an infinite loop unless the second
-click is let through and *only* the second. That is one boolean, and exactly the
-kind of one boolean that is wrong in one direction (nothing ever generates) or
-the other (every click generates twice) with no middle ground. So it is driven
-here through the same capture-phase listener the page installs, with a fake
-button that dispatches the way a real one does.
+This file used to hold a state machine. Creative Mode intercepted the Generate
+click, ran its roll, and then clicked the very button it had just intercepted --
+which is an infinite loop unless the second click is let through and *only* the
+second. That was one boolean, and exactly the kind of one boolean that is wrong
+in one direction (nothing ever generates) or the other (every click generates
+twice), so it was driven here through the real capture-phase listener.
 
-The rest of the file is about what is *not* there. The controller this replaced
-had a debounce, a repeat scheduler and a typing watcher, and the first thing
-anybody will want to know about the replacement is that none of them came back.
-A synthetic clock is the way to ask: run it forward an hour with nobody touching
-anything and assert that nothing happened.
+The boolean is gone because the interception is. A press of Generate is a press
+of Generate again: the roll happens inside the generation, in Python, and
+nothing in the browser stands between the button and the image. That is the
+property this file exists to defend, because it is the difference between a
+generation that survives a closed tab and one that does not -- and it is checked
+the only way it can honestly be checked, by dispatching a click at the real
+listener list and asserting the native submission happened.
+
+The rest is what is *not* there. The controller two designs ago had a debounce,
+a repeat scheduler and a typing watcher; the one before this had a poll loop and
+a fifteen-minute timeout. A synthetic clock is the way to ask whether any of
+them came back: run it forward an hour with nobody touching anything and assert
+that nothing happened, and that nothing is still waiting to.
 
 These run under node, which is not a Forge dependency, so they skip without it.
 """
@@ -40,7 +47,7 @@ HARNESS = """
 // duration, and because "nothing fires on its own" is only checkable if a test
 // can run an hour forward in a millisecond.
 
-const record = {rolls: 0, generates: 0};
+const record = {generates: 0, rolls: 0, prevented: 0};
 
 let now = 0;
 let sequence = 0;
@@ -78,9 +85,6 @@ function advance(ms) {
     now = target;
 }
 
-// Let promise callbacks run: the controller resolves from inside a timer, so a
-// test has to give the microtask queue a turn between moving the clock and
-// reading the result.
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 globalThis.Date.now = () => now;
@@ -134,31 +138,34 @@ function holder(id, map) {
 }
 
 const toggle = input({type: "checkbox", checked: CREATIVE_ON});
-const tokenField = input({value: ""});
 const promptField = input({value: PROMPT_TEXT});
-const statusLine = {tagName: "DIV", textContent: ""};
 
-// Clicking is dispatching, exactly as a browser does it: the capture-phase
-// listener runs first, and the native submission happens only if nothing
-// prevented it. That is what makes the one-shot bypass observable -- the
-// programmatic click the controller makes after a roll goes through the same
-// listener as the user's, and has to spend the flag on the way past.
 const generateButton = button("txt2img_generate", function () {
     dispatchClick(true);
 });
 
+// The gate's half of the page, still present so that a file which went looking
+// for it would find it. Nothing may press this button: a roll started from the
+// browser is the arrangement that made a generation depend on a live tab.
+const runButton = button("mc-krea-creative-run", () => { record.rolls += 1; });
+
 const elements = {
     "mc-krea-creative-toggle": holder("mc-krea-creative-toggle",
         {"input[type=checkbox]": toggle}),
-    "mc-krea-creative-token": holder("mc-krea-creative-token", {"textarea": tokenField}),
-    "mc-krea-creative-status": holder("mc-krea-creative-status", {"div": statusLine}),
-    "mc-krea-creative-run": button("mc-krea-creative-run", () => { record.rolls += 1; }),
+    "mc-krea-creative-token": holder("mc-krea-creative-token", {"textarea": input({value: ""})}),
+    "mc-krea-creative-status": holder("mc-krea-creative-status",
+        {"div": {tagName: "DIV", textContent: ""}}),
+    "mc-krea-creative-run": runButton,
     "txt2img_prompt": holder("txt2img_prompt", {"textarea": promptField}),
     "txt2img_generate": generateButton,
 };
 
 const documentListeners = [];
 
+// Clicking is dispatching, exactly as a browser does it: any capture-phase
+// listener runs first, and the native submission happens only if nothing
+// prevented it. So "the button still generates" is observable rather than
+// argued from the absence of a listener.
 function dispatchClick(trusted) {
     let prevented = false;
     const event = {
@@ -170,7 +177,11 @@ function dispatchClick(trusted) {
     documentListeners
         .filter((entry) => entry.kind === "click")
         .forEach((entry) => entry.fn(event));
-    if (!prevented) record.generates += 1;
+    if (prevented) {
+        record.prevented += 1;
+    } else {
+        record.generates += 1;
+    }
     return prevented;
 }
 
@@ -203,18 +214,13 @@ function type(text) {
     promptField.dispatchEvent({type: "input"});
 }
 
-function answer(value) {
-    tokenField.value = value;
-}
-
 const report = (extra) => console.log(JSON.stringify(Object.assign({
     rolls: record.rolls,
     generates: record.generates,
+    prevented: record.prevented,
     armed: generateButton.classList.contains("mc-krea-creative-armed"),
-    status: statusLine.textContent,
-    rolling: kc.state.rolling,
-    bypass: kc.state.bypass,
     timers: timers.length,
+    clickListeners: documentListeners.filter((e) => e.kind === "click").length,
 }, extra || {})));
 
 BODY
@@ -235,29 +241,103 @@ def run(body: str, creative_on: bool = True, prompt: str = "car") -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# The button is the host's again
+# --------------------------------------------------------------------------- #
+
+
+class TestGenerateIsNeverIntercepted:
+    """The whole point of the change this file was rewritten for.
+
+    While the browser held the click, a press did not start an image -- it
+    started a roll, and a timer in the page started the image afterwards. A
+    hidden tab throttles that timer to one tick a second, a frozen one to a tick
+    a minute, and a closed one never runs it at all, so a Creative generation was
+    late if you changed windows and absent if you closed the tab. Every test
+    below is a way of asking whether the press reaches Forge on its own.
+    """
+
+    def test_a_press_generates_immediately_with_creative_mode_on(self):
+        found = run("""
+            const prevented = clickGenerate();
+            report({returned: prevented});
+        """)
+
+        assert found["returned"] is False
+        assert found["generates"] == 1
+        assert found["prevented"] == 0
+
+    def test_a_press_generates_immediately_with_creative_mode_off(self):
+        found = run("""
+            clickGenerate();
+            report();
+        """, creative_on=False)
+
+        assert found["generates"] == 1
+        assert found["prevented"] == 0
+
+    def test_nothing_in_the_page_presses_the_hidden_roll_button(self):
+        """It is still in the page for anything that looks for it, and this file
+        must never be what looks."""
+        found = run("""
+            clickGenerate();
+            advance(60 * 60 * 1000);
+            await flush();
+            report();
+        """)
+
+        assert found["rolls"] == 0
+
+    def test_the_press_does_not_wait_for_the_page_to_be_told_anything(self):
+        """No second click arrives later, because there is no first one being
+        held back. One press is one generation, decided synchronously."""
+        found = run("""
+            clickGenerate();
+            advance(60 * 60 * 1000);
+            await flush();
+            report();
+        """)
+
+        assert found["generates"] == 1
+
+    def test_three_presses_are_three_generations(self):
+        found = run("""
+            clickGenerate();
+            clickGenerate();
+            clickGenerate();
+            report();
+        """)
+
+        assert found["generates"] == 3
+        assert found["prevented"] == 0
+
+    def test_an_empty_prompt_is_still_the_host_business(self):
+        """Whether an empty prompt generates is Forge's decision and was never
+        this file's to make."""
+        found = run("""
+            clickGenerate();
+            report();
+        """, prompt="   ")
+
+        assert found["prevented"] == 0
+
+    def test_no_click_listener_is_installed_at_all(self):
+        found = run("report();")
+
+        assert found["clickListeners"] == 0
+
+
+# --------------------------------------------------------------------------- #
 # Nothing happens on its own
 # --------------------------------------------------------------------------- #
 
 
 class TestNothingIsScheduled:
     def test_typing_never_starts_anything(self):
-        """The headline difference from what this replaced. Editing the prompt
-        is editing the prompt."""
         found = run("""
             for (const text of ["a", "a c", "a ca", "a car"]) {
                 type(text);
                 advance(1000);
             }
-            report();
-        """)
-
-        assert found["rolls"] == 0
-        assert found["generates"] == 0
-
-    def test_stopping_typing_never_starts_anything(self):
-        found = run("""
-            type("a car");
-            advance(60 * 60 * 1000);
             report();
         """)
 
@@ -273,145 +353,68 @@ class TestNothingIsScheduled:
         """)
 
         assert found["timers"] == 0
-        assert found["rolls"] == 0
+        assert found["generates"] == 0
 
-    def test_a_finished_roll_arms_nothing_for_later(self):
+    def test_a_press_arms_no_timer_either(self):
+        """The poll loop is the specific thing that must not come back: it is
+        the mechanism a background tab throttles and a closed one kills."""
         found = run("""
             clickGenerate();
-            answer("ready:abcd:");
-            advance(200);
             await flush();
-            advance(60 * 60 * 1000);
             report();
         """)
 
-        assert found["generates"] == 1
         assert found["timers"] == 0
 
 
 # --------------------------------------------------------------------------- #
-# The gate
+# What the file may contain at all
 # --------------------------------------------------------------------------- #
 
 
-class TestTheGenerateGate:
-    def test_creative_mode_off_leaves_the_button_completely_alone(self):
-        """The first thing this feature must not break: with the toggle off,
-        txt2img is txt2img."""
-        found = run("""
-            const prevented = clickGenerate();
-            report({prevented: prevented});
-        """, creative_on=False)
+def code() -> str:
+    """The file with its comments taken out.
 
-        assert found["prevented"] is False
-        assert found["rolls"] == 0
-        assert found["generates"] == 1
+    The header explains at length what this file used to do, and it names every
+    mechanism the assertions below forbid. Checking the comments would make the
+    explanation unwritable, which is the wrong way round: the prose is how the
+    next person learns why none of it may come back.
+    """
+    lines = []
+    for line in SCRIPT.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("//"):
+            continue
+        lines.append(line.split("//")[0] if " // " in line else line)
+    return "\n".join(lines)
 
-    def test_creative_mode_on_holds_the_click_and_rolls_first(self):
-        """Before the native submission, never after: an LLM run waits for the
-        host to stop generating, so a roll asked for from inside a running image
-        job would be waiting on the job that is waiting on it."""
-        found = run("""
-            const prevented = clickGenerate();
-            report({prevented: prevented});
-        """)
 
-        assert found["prevented"] is True
-        assert found["rolls"] == 1
-        assert found["generates"] == 0
+class TestTheFileItself:
+    """Read rather than run, for the handful of things whose absence is the
+    feature. A file with no timers today grows one the next time somebody wants
+    to know when the server has finished something."""
 
-    def test_a_ready_roll_releases_exactly_one_native_generation(self):
-        found = run("""
-            clickGenerate();
-            answer("ready:abcd:");
-            advance(200);
-            await flush();
-            report();
-        """)
+    def test_it_never_defers_anything(self):
+        source = code()
 
-        assert found["rolls"] == 1
-        assert found["generates"] == 1
+        assert "setInterval" not in source
+        assert "setTimeout" not in source
+        assert "requestAnimationFrame" not in source
 
-    def test_the_bypass_is_spent_by_the_click_it_was_set_for(self):
-        found = run("""
-            clickGenerate();
-            answer("ready:abcd:");
-            advance(200);
-            await flush();
-            const second = clickGenerate();
-            report({secondPrevented: second});
-        """)
+    def test_it_never_stops_an_event(self):
+        source = code()
 
-        assert found["generates"] == 1
-        assert found["bypass"] is False
-        assert found["secondPrevented"] is True
+        assert "preventDefault" not in source
+        assert "stopImmediatePropagation" not in source
 
-    def test_a_second_press_is_a_second_roll_and_a_second_image(self):
-        """Explicit means explicit. Pressing it again is how you get another
-        one, and it is the only way."""
-        found = run("""
-            clickGenerate();
-            answer("ready:one:");
-            advance(200);
-            await flush();
-            clickGenerate();
-            answer("ready:two:");
-            advance(200);
-            await flush();
-            report();
-        """)
+    def test_it_never_clicks_anything(self):
+        source = code()
 
-        assert found["rolls"] == 2
-        assert found["generates"] == 2
+        assert ".click(" not in source
 
-    def test_a_failed_roll_starts_no_generation(self):
-        found = run("""
-            clickGenerate();
-            answer("failed:abcd:");
-            advance(200);
-            await flush();
-            report();
-        """)
-
-        assert found["generates"] == 0
-        assert found["rolling"] is False
-
-    def test_pressing_again_mid_roll_does_not_start_a_second_one(self):
-        """Swallowed rather than queued: the roll in flight will click Generate
-        itself when it is ready, and a queued second roll would be a second model
-        call nobody asked for."""
-        found = run("""
-            clickGenerate();
-            clickGenerate();
-            clickGenerate();
-            report();
-        """)
-
-        assert found["rolls"] == 1
-        assert "Still writing" in found["status"]
-
-    def test_an_empty_prompt_rolls_nothing(self):
-        found = run("""
-            clickGenerate();
-            report();
-        """, prompt="   ")
-
-        assert found["rolls"] == 0
-        assert found["generates"] == 0
-
-    def test_turning_creative_mode_off_mid_roll_abandons_it(self):
-        found = run("""
-            clickGenerate();
-            toggle.checked = false;
-            advance(200);
-            await flush();
-            answer("ready:abcd:");
-            advance(200);
-            await flush();
-            report();
-        """)
-
-        assert found["generates"] == 0
+    def test_the_page_is_never_asked_to_call_a_js_hook_by_name(self):
+        """Gradio's js= contract is one this extension does not depend on."""
+        assert "mcKreaCreativeSubmit" not in SCRIPT.read_text()
 
 
 # --------------------------------------------------------------------------- #
@@ -420,6 +423,15 @@ class TestTheGenerateGate:
 
 
 class TestTheArmedIndicator:
+    """The only thing left that this file does.
+
+    Generate does still mean something different with Creative Mode on -- it
+    writes a prompt before it makes a picture -- and saying so on the button is
+    worth four lines. It is also the whole blast radius: if every line of this
+    file fails, a button goes unpainted and txt2img generates exactly as it
+    would have.
+    """
+
     def test_it_is_painted_on_the_button_whose_meaning_changed(self):
         assert run("report();")["armed"] is True
 
@@ -434,3 +446,14 @@ class TestTheArmedIndicator:
         """)
 
         assert found["armed"] is False
+
+    def test_a_page_without_the_controls_is_not_an_exception(self):
+        found = run("""
+            delete elements["mc-krea-creative-toggle"];
+            delete elements["txt2img_generate"];
+            kc.wire();
+            clickGenerate();
+            report();
+        """)
+
+        assert found["generates"] == 1

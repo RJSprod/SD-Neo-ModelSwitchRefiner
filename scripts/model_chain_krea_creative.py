@@ -18,20 +18,36 @@ chain down with it. And Creative Mode is txt2img-only for a different reason tha
 Model Chain is, so the two ``show()`` methods happen to agree today without that
 being one decision.
 
-Where the model is called, and where it is not
-----------------------------------------------
-:func:`_gate` calls it, once, from a Gradio handler, before any native
-generation has started. :meth:`ScriptKreaCreative.before_process` never does --
-it applies an expansion that already exists and consumes the token that
-permitted it. That split is not stylistic: an LLM run waits for the host to stop
-generating, so an expansion requested from inside a running image job would be
-waiting on the job that is waiting on it.
+Where the model is called
+-------------------------
+:meth:`ScriptKreaCreative.before_process` calls it, once, at the top of the
+generation the user just started -- before Forge builds ``all_prompts`` and
+before the checkpoint is (re)loaded, which is the same ordering the roll always
+had and the reason the writer can still size itself against a card the image
+model has not taken yet.
+
+It used to be called from a Gradio handler instead, ahead of the click, because
+an LLM run waits for the host to stop generating and a roll asked for from
+inside a running image job would have been waiting on the job that was waiting
+on it. The browser enforced that ordering: it swallowed the Generate click, ran
+the roll, then clicked Generate again itself.
+
+The cost of that arrangement was that a generation could not finish without a
+live page. The press did not start an image; a ``setInterval`` in the tab did,
+once the roll came back -- and browsers throttle those to one tick a second in a
+hidden tab and one a minute in a frozen one, so a Creative generation was late
+if you changed windows and never happened at all if you closed the tab.
+
+So the deadlock is now answered where it lives: :class:`mc_broker.host_job` lets
+this hook say that the image job is blocked waiting for the roll, which is
+precisely the case in which waiting for the image job is the wrong thing to do.
+One press does everything, and nothing after the press needs a browser.
 
 What is not here
 ----------------
-No idle delay, no typing watcher, no repeat toggle, no reroll scheduler and no
-status machine. A roll happens because somebody pressed Generate. Pressing it
-again is how you get another one.
+No idle delay, no typing watcher, no repeat toggle, no reroll scheduler, no
+status machine and no click gate. A roll happens because somebody pressed
+Generate. Pressing it again is how you get another one.
 """
 
 from __future__ import annotations
@@ -73,117 +89,25 @@ def notice(text: str, kind: str = "info") -> str:
             f'{html.escape(str(text or ""))}</div>')
 
 
-READY = "ready"
-FAILED = "failed"
-TASK = "task"
-
-
-def _signal(kind: str, detail: str = "") -> str:
-    """One line for the hidden token box: ``<kind>:<nonce>:<detail>``.
-
-    Three kinds travel this way. ``task`` carries the host progress task id, so
-    the browser can ask Forge to draw its bar for the roll about to start;
-    ``ready`` carries the arming token, which is the browser's cue to let one
-    native Generate click through; ``failed`` carries nothing and means do not.
-
-    Why a textbox and not a Gradio event the browser could subscribe to: the
-    browser has to know *when* each of those happens, and a value it can poll
-    for is the smallest mechanism that does it without this script growing an
-    endpoint of its own. The nonce makes each answer distinguishable from the
-    last, so two identical outcomes in a row are still two events.
-
-    The detail never contains a colon, so the browser splits on the first two
-    and takes the rest whole.
-    """
-    import secrets
-
-    return f"{kind}:{secrets.token_hex(4)}:{detail}"
-
-
-def _task_id() -> str:
-    """A fresh host progress task id, minted here rather than in the browser.
-
-    The browser used to mint it and pass it in through a Gradio ``js=`` hook, on
-    the grounds that the host's own ``submit()`` does exactly that. Minting it
-    here is better for one reason that outweighs the symmetry: there is nothing
-    to hand over. The id goes *out* on the channel the browser is already
-    polling, so no argument has to arrive intact, no component value has to have
-    reached Gradio's state before a click, and no assumption about what a ``js=``
-    hook's return value means has to hold.
-
-    The bar starts a poll interval later than it would have. Against a roll that
-    takes twenty seconds, that is not a cost worth a handshake.
-    """
-    import secrets
-
-    return f"task(mc-{secrets.token_hex(6)})"
-
-
 # --------------------------------------------------------------------------- #
-# The handlers
+# The settings one roll runs with
 # --------------------------------------------------------------------------- #
 
 
-def _gate(source, creativity, seed, anti_repetition, loras, *axis_values):
-    """One creative roll, made available to one native generation.
+def _settings_for(values) -> dict:
+    """This generation's Creative settings, from the panel when it sent them.
 
-    The only place in txt2img that asks the language model for anything, and it
-    asks exactly once. Everything creative has already been decided in Python by
-    the time the request goes out: the Director picks the art direction from a
-    vendored vocabulary with a seeded PRNG, and the model's whole job is to turn
-    one brief into one Krea prompt.
-
-    Streams so the panel can say what is happening while a cold llama-server
-    loads, which is the part of the wait that looks like a hang -- and so the
-    first thing it can stream is the progress task id, which is what turns that
-    wait into a bar.
+    ``values`` is what Forge handed ``before_process`` after the enabled flag:
+    the four scalars and then the axis table, in the order :meth:`ui` returned
+    them. A UI that could not build its axis table sends fewer, and an API
+    request sends none at all, so the length is checked rather than assumed and
+    the saved preferences answer for anything absent.
     """
-    session = mc_creative_krea.creative
-    stored = _stored(creativity, seed, anti_repetition, loras, axis_values)
-    expanded = ""
-    task_id = _task_id()
-
-    # Sent before any work starts. The browser is already polling this box for
-    # the arming token, so this is the whole of the handshake: it learns the id
-    # and asks Forge to draw its progress bar for it while the Director runs.
-    yield (notice("Choosing the art direction…"), _signal(TASK, task_id),
-           gr.update(), gr.update())
-
-    try:
-        for event in session.roll(source, stored, guard_checkpoint=True,
-                                  task_id=task_id):
-            if event.kind == sessions.CHUNK:
-                expanded += event.text
-                yield (notice("Writing the Krea prompt…"), gr.update(),
-                       gr.update(), gr.update(value=expanded))
-            elif event.kind == sessions.STATUS:
-                yield notice(event.text), gr.update(), gr.update(), gr.update()
-            elif event.kind == sessions.DONE:
-                last = session.last
-                if last is None:
-                    yield (notice("The prompt was written but is no longer current.",
-                                  "warn"), _signal(FAILED), gr.update(), gr.update())
-                    return
-                armed = session.arm(last, loras)
-                yield (notice(f"Prompt ready · Creativity {last.creativity} · "
-                              f"Creative seed {last.creative_seed}"),
-                       _signal(READY, armed.token), _recipe_view(last.recipe),
-                       last.expanded)
-                return
-            elif event.kind == sessions.CANCELLED:
-                yield (notice(event.text or "Stopped.", "warn"), _signal(FAILED),
-                       gr.update(), gr.update())
-                return
-            elif event.kind == sessions.FAILED:
-                yield (notice(event.text, "error"), _signal(FAILED),
-                       gr.update(), gr.update())
-                return
-    except Exception as exc:
-        errors.report("Model Chain: the Creative Mode gate failed", exc_info=True)
-        yield notice(str(exc), "error"), _signal(FAILED), gr.update(), gr.update()
-        return
-
-    yield notice("Nothing was written.", "warn"), _signal(FAILED), gr.update(), gr.update()
+    values = tuple(values or ())
+    if len(values) < 4:
+        return mc_creative_krea.settings()
+    creativity, seed, anti_repetition, loras = values[:4]
+    return _stored(creativity, seed, anti_repetition, loras, values[4:])
 
 
 def _stored(creativity, seed, anti_repetition, loras, axis_values) -> dict:
@@ -222,6 +146,12 @@ def _axes_from(axis_values) -> tuple[dict, dict]:
     rather than at each of the handlers that needs it.
     """
     from prompt_master.krea import director
+
+    if not axis_values:
+        # No table to read. Answering with every axis on Vary would be this
+        # function inventing a configuration and handing it to _stored, which
+        # writes it over whatever the user actually set.
+        return {}, {}
 
     try:
         from prompt_master.krea import library as library_module
@@ -267,8 +197,6 @@ def _recipe_view(recipe) -> str:
 
 def _toggled(enabled):
     """Show or hide the controls, and remember the toggle."""
-    if not enabled:
-        mc_creative_krea.creative.disarm()
     mc_creative_krea.remember(**{mc_creative_krea.ENABLED: bool(enabled)})
     shown = gr.update(visible=bool(enabled))
     if enabled:
@@ -325,21 +253,37 @@ def _forget_history():
     return notice("Recent-roll memory cleared; every treatment is available again.")
 
 
+def _last_roll():
+    """The most recent roll, for the diagnostics drawer.
+
+    Reads :attr:`mc_creative_krea.Creative.last`, which the roll writes as its
+    final act and which outlives the page: a generation started before the tab
+    was closed can be inspected in the tab that opens after it.
+    """
+    last = mc_creative_krea.creative.last
+    if last is None:
+        return ("No roll has been made yet in this session.", "")
+    return _recipe_view(last.recipe), last.expanded
+
+
 # --------------------------------------------------------------------------- #
 # The script
 # --------------------------------------------------------------------------- #
 
 
 class ScriptKreaCreative(scripts.Script):
-    """The Creative Mode controls, and the hook that applies what the gate wrote."""
+    """The Creative Mode controls, and the hook that writes the prompt."""
 
     def __init__(self):
         super().__init__()
-        # The native txt2img control Creative Mode reads rather than duplicates.
-        self._prompt_component = None
         # Filled in by ui(); the shell never reads it, and a test asking what
         # the panel is made of has something to ask.
         self.components: dict = {}
+        # True while this hook is inside its own roll. A nested process_images()
+        # -- Stage 2's, or any extension's -- must not start a second one, and
+        # the cost of getting that wrong is not a duplicate image but an LLM
+        # request that begins while the first is still streaming.
+        self._rolling = False
 
     def title(self):
         return "Krea Creative Mode"
@@ -349,11 +293,6 @@ class ScriptKreaCreative(scripts.Script):
         # short idea and the image is made from an expansion of it", and
         # img2img's prompt describes an edit to a picture that already exists.
         return scripts.AlwaysVisible if not is_img2img else None
-
-    def after_component(self, component, **kwargs):
-        """Capture the native positive prompt: the gate's only input from the tab."""
-        if (kwargs.get("elem_id") or "") == "txt2img_prompt":
-            self._prompt_component = component
 
     # -- UI ---------------------------------------------------------------- #
 
@@ -415,8 +354,16 @@ class ScriptKreaCreative(scripts.Script):
                     "every other setting stay exactly where Forge puts them, and the "
                     "image itself is generated by Forge.")
 
+                # Filled on request rather than streamed. The roll happens
+                # inside the generation now, where there is no open Gradio
+                # event to push anything down -- and a drawer nobody opened is
+                # the wrong thing to hold a websocket open for anyway. The
+                # button reads whatever the last roll left behind, which is
+                # still there after the tab has been closed and reopened.
                 with gr.Accordion("Last creative roll", open=False,
                                   elem_id=ident("diagnostics")):
+                    show = gr.Button("Show the last roll", size="sm",
+                                     elem_id=ident("show"))
                     recipe = gr.Textbox(
                         label="Recipe and brief", lines=12, max_lines=12,
                         interactive=False, show_copy_button=True,
@@ -426,19 +373,20 @@ class ScriptKreaCreative(scripts.Script):
                         interactive=False, show_copy_button=True,
                         elem_id=ident("expanded"))
 
-            # -- plumbing the browser drives, and the user never sees -------- #
-            run = gr.Button("Creative Mode: roll", visible=False, elem_id=ident("run"))
-            token = gr.Textbox(value="", visible=False, elem_id=ident("token"))
-
         self.components = {
             "enabled": enabled, "creativity": creativity, "status": status,
             "controls": controls, "seed": seed, "anti": anti, "forget": forget,
-            "loras": loras, "recipe": recipe, "expanded": expanded, "run": run,
-            "token": token, "axes": axis_controls}
+            "loras": loras, "show": show, "recipe": recipe, "expanded": expanded,
+            "axes": axis_controls}
 
         self._wire(enabled, creativity, status, controls, seed, anti, forget, loras,
-                   recipe, expanded, run, token, axis_controls)
-        return [enabled]
+                   show, recipe, expanded, axis_controls)
+
+        # Every control travels to before_process, because that is where the
+        # roll happens and the panel is what the user is looking at. They are
+        # this script's own arguments and reach neither Model Chain's preset
+        # list nor its infotext.
+        return [enabled, creativity, seed, anti, loras] + list(axis_controls)
 
     def _axis_table(self, stored) -> list:
         """One row per axis: what it is called, how it behaves, and its pinned value.
@@ -481,8 +429,14 @@ class ScriptKreaCreative(scripts.Script):
         return rows
 
     def _wire(self, enabled, creativity, status, controls, seed, anti, forget, loras,
-              recipe, expanded, run, token, axis_controls):
-        """Every handler, in one place, so the component list above stays readable."""
+              show, recipe, expanded, axis_controls):
+        """Every handler, in one place, so the component list above stays readable.
+
+        All of them ``queue=False``: not one of these does any work worth
+        queueing, and none of them starts, stops or waits for a generation. The
+        panel is settings and nothing else now -- the roll is in
+        :meth:`before_process`, which is not reachable from here.
+        """
         enabled.change(fn=_toggled, inputs=[enabled],
                        outputs=[creativity, controls, status], queue=False)
         creativity.release(fn=_remember_creativity, inputs=[creativity],
@@ -492,69 +446,128 @@ class ScriptKreaCreative(scripts.Script):
         loras.blur(fn=_remember_loras, inputs=[loras], outputs=[loras, status],
                    queue=False)
         forget.click(fn=_forget_history, outputs=[status], queue=False)
+        show.click(fn=_last_roll, outputs=[recipe, expanded], queue=False)
 
         for control in axis_controls:
             control.change(fn=_remember_axes, inputs=list(axis_controls),
                            outputs=[status], queue=False)
 
-        if self._prompt_component is not None:
-            # show_progress="hidden": the roll reports itself on the host's own
-            # progress bar, in the gallery where image progress appears, and
-            # Gradio's little spinner over the status line would be a second
-            # thing claiming to describe the same wait.
-            run.click(fn=_gate,
-                      inputs=[self._prompt_component, creativity, seed, anti, loras]
-                             + list(axis_controls),
-                      outputs=[status, token, recipe, expanded],
-                      show_progress="hidden")
-        else:
-            # A UI so heavily customised that the positive prompt could not be
-            # found. Creative Mode says so once, here, rather than half-working:
-            # the gate has nothing to read and the browser would be arming
-            # generations from an empty source.
-            run.click(fn=lambda: (notice("The txt2img positive prompt could not be "
-                                         "found, so Creative Mode cannot read your "
-                                         "source text.", "error"), _signal(FAILED)),
-                      outputs=[status, token], queue=False)
-
     # -- generation --------------------------------------------------------- #
 
     def before_process(self, p, enabled=False, *args, **kwargs):
-        """Substitute the expanded prompt, if one was armed for this generation.
+        """Write this generation's prompt, then substitute it.
 
         ``before_process`` and not ``process``: this runs before Forge builds
         ``all_prompts`` from ``p.prompt``, so one assignment reaches the batch,
         the styles pass, the infotext and Stage 2's inherited prompt without any
-        of them having to be told about Creative Mode.
+        of them having to be told about Creative Mode. It also runs before the
+        checkpoint is loaded, which is what lets the writer size itself against
+        a card the image model has not taken yet.
 
-        No inference happens here, ever. The roll was made by a Gradio handler
-        that finished before the Generate click was allowed through, and
-        consuming its token is the whole of this hook's work. It is consumed
-        unconditionally so that a nested or queued generation cannot make a
-        second image out of one roll's permission.
+        Everything one press needs happens here, on the thread the host is
+        already running the job on. Nothing is waited for in a browser and
+        nothing is picked up from one: close the tab after pressing Generate and
+        this still finishes, and Forge writes the files.
+
+        Failure is always "generate what the user typed". A library that will not
+        load, a checkpoint that is not Krea 2, a language model that will not
+        answer, an Interrupt during the roll -- none of them is a reason to
+        refuse a generation the user asked for, and all of them say so in the
+        log.
+
+        Nothing is carried in from before the press. The prompt this generation
+        uses is written during this generation, from the flag and the panel
+        values Forge just handed over, so there is no earlier state to be stale
+        and none to be spent by the wrong image.
         """
-        try:
-            armed = mc_creative_krea.creative.consume()
-        except Exception:
-            errors.report("Model Chain: Creative Mode could not read its arming token",
-                          exc_info=True)
-            return
-        if armed is None:
-            return
         if not enabled:
-            # Armed, then switched off before the click landed. The safe reading
-            # of that is the user's most recent instruction, which was "off".
-            logger.info("Model Chain: Creative Mode was disarmed before the generation "
-                        "started")
+            return
+        if self._rolling:
+            # A process_images() nested inside our own roll. There is nothing to
+            # do for it and a great deal to get wrong.
+            logger.debug("Model Chain: Creative Mode is already rolling; the nested "
+                         "generation is left alone")
             return
 
-        p.prompt = armed.generation
+        written = self._roll(p, args)
+        if written is None:
+            return
+
+        p.prompt = written.generation
         try:
-            p.extra_generation_params.update(armed.metadata)
+            p.extra_generation_params.update(written.metadata)
         except Exception:
             logger.debug("Model Chain: could not record the Creative Mode metadata",
                          exc_info=True)
         logger.info("Model Chain: Creative Mode prompt applied — %s characters from a "
                     "%s-character source at creativity %s, creative seed %s",
-                    f"{len(armed.generation):,}", f"{len(armed.roll.source):,}",
-                    armed.roll.creativity, armed.roll.creative_seed)
+                    f"{len(written.generation):,}", f"{len(written.roll.source):,}",
+                    written.roll.creativity, written.roll.creative_seed)
+
+    def _roll(self, p, values):
+        """One creative roll for this generation, or ``None`` to leave it alone.
+
+        The whole of the deadlock fix is the two lines that matter here: the roll
+        runs inside :class:`mc_broker.host_job`, which is how
+        ``mc_llm_sessions._Gpu.acquire`` is told that the image job is blocked
+        waiting for this request rather than competing with it, and the bar is
+        borrowed rather than claimed, because the host already started one for
+        the generation this is the first part of.
+
+        The events are drained rather than forwarded. There is no open Gradio
+        event to forward them to -- the press became a native generation, not a
+        handler with an output list -- so the progress bar carries the phase and
+        the log carries the rest.
+        """
+        import mc_broker
+
+        source = str(getattr(p, "prompt", "") or "").strip()
+        if not source:
+            logger.info("Model Chain: Creative Mode has no source prompt to work from")
+            return None
+
+        session = mc_creative_krea.creative
+        settings = _settings_for(values)
+        loras = settings.get("loras", "")
+
+        # Held by name and closed explicitly, the way the roll itself holds the
+        # LLM run: every path out of the loop below leaves the generator
+        # suspended, and it is its ``finally`` that gives the progress bar and
+        # the workload lock back. Closing it is what runs that now rather than
+        # whenever the interpreter next collects the frame.
+        events = session.roll(source, settings, guard_checkpoint=True, own_bar=False)
+        written = False
+        self._rolling = True
+        try:
+            with mc_broker.host_job():
+                for event in events:
+                    if event.kind == sessions.STATUS:
+                        logger.debug("Model Chain: Creative Mode — %s", event.text)
+                    elif event.kind == sessions.CANCELLED:
+                        logger.info("Model Chain: the Creative Mode roll was stopped; "
+                                    "the generation continues with the typed prompt")
+                        break
+                    elif event.kind == sessions.FAILED:
+                        logger.warning("Model Chain: the Creative Mode roll failed (%s); "
+                                       "generating from the typed prompt instead",
+                                       event.text)
+                        break
+                    elif event.kind == sessions.DONE:
+                        written = True
+                        break
+        except Exception:
+            errors.report("Model Chain: the Creative Mode roll failed", exc_info=True)
+            return None
+        finally:
+            events.close()
+            self._rolling = False
+
+        if not written:
+            return None
+
+        last = session.last
+        if last is None or not last.expanded.strip():
+            logger.warning("Model Chain: the Creative Mode roll produced nothing; "
+                           "generating from the typed prompt instead")
+            return None
+        return mc_creative_krea.prepare(last, loras)
