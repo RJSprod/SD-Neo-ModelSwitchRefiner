@@ -1,4 +1,4 @@
-"""LLM Studio: one native Forge tab, four distinct workspaces (section 4.1).
+"""LLM Studio: one native Forge tab, five distinct workspaces (section 4.1).
 
 This module is the shell. It builds the tab, switches between the modes, and
 owns the two things all of them share -- the residency status that makes memory
@@ -30,14 +30,14 @@ in its own right and had no business being a footnote to a chat window.
 So the plain values are registered as Forge settings (see
 ``scripts/model_chain.py``, ``mc_llm_state.HOSTED`` and
 ``mc_llm_paths.OPT_MODELS``) and the panel is a mode of its own, **Setup**,
-reached from the same selector as the other three. What is left in the model
+reached from the same selector as the other workspaces. What is left in the model
 sheet is a chooser filled from the models folder, and Load and Unload -- start
 the thing with what was chosen last, or give the VRAM back -- because that is
 the whole of what switching models day to day actually needs.
 
 What this module deliberately does not do is host the modes' logic. Prompt
-Studio, Conversation and MiniMax are built by three separate modules and share
-no state beyond the preferences file, which is section 4.1's requirement that
+Studio, Conversation, MiniMax and Krea 2 are built by four separate modules and
+share no state beyond the preferences file, which is section 4.1's requirement that
 the modes "may reuse shared panels" but "must not be collapsed into a single
 generic chat workflow" enforced at the level of the source tree.
 
@@ -75,6 +75,7 @@ MODES = (
     ("Prompt Studio", "prompt"),
     ("Conversation", "chat"),
     ("MiniMax H3", "minimax"),
+    ("Krea 2", "krea"),
     ("Setup", "setup"),
 )
 """The workspaces, as Gradio choices -- ``(label, value)``.
@@ -124,6 +125,7 @@ def _unavailable():
 
 def _build():
     import mc_llm_chat_panel
+    import mc_llm_krea_panel
     import mc_llm_minimax_panel
     import mc_llm_prompt_panel
 
@@ -221,6 +223,7 @@ def _build():
             builders = {"prompt": mc_llm_prompt_panel.build,
                         "chat": mc_llm_chat_panel.build,
                         "minimax": mc_llm_minimax_panel.build,
+                        "krea": mc_llm_krea_panel.build,
                         "setup": _setup_panel}
             views, settings, conversation = [], None, None
             for _, value in MODES:

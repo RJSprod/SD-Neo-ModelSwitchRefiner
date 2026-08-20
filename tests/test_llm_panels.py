@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 
 import mc_llm_chat_panel
+import mc_llm_krea_panel
 import mc_llm_minimax_panel
 import mc_llm_paths
 import mc_llm_prompt_panel
@@ -594,6 +595,37 @@ class TestMiniMax:
                 != mc_llm_minimax_panel._structure(enhancer.FL2VA))
 
 
+class TestKrea:
+    """The wiring, here; the behaviour is in ``test_llm_krea.py``.
+
+    What this file is for is the questions that are only answerable once the
+    panel has been assembled against a Gradio -- that it assembles at all, that
+    it hands the shell the three handles the shell wires, and that the box a
+    generation streams into cannot grow and push Stop off the screen.
+    """
+
+    def test_it_builds(self):
+        built = mc_llm_krea_panel.build()
+
+        assert set(built) == {"status", "output", "stop"}
+
+    def test_an_empty_request_is_refused(self):
+        frames = list(mc_llm_krea_panel._generate("  ", 7, None, None, None, None))
+
+        assert len(frames) == 1
+        assert "Describe the image you want" in frames[0][3]
+
+    def test_the_reference_slots_are_numbered_by_position_and_nothing_else(self):
+        """Section 4 of the Krea design intent: not the filename, not the
+        upload time, not the temporary path, not what the picture contains."""
+        found, complaint = mc_llm_krea_panel.references(["/tmp/zzz.png", "/tmp/aaa.png",
+                                                         None, None])
+
+        assert complaint == ""
+        assert [reference.ui_index for reference in found] == [1, 2]
+        assert [reference.name for reference in found] == ["zzz.png", "aaa.png"]
+
+
 class TestShell:
     def test_every_mode_is_its_own_view(self):
         """Section 4.1: the modes may share panels but must not be collapsed
@@ -683,6 +715,27 @@ class TestShell:
     def test_the_workspace_name_is_the_selector_s_own_label(self):
         assert "MiniMax H3" in mc_llm_studio._mode_title("minimax")
         assert "LLM Studio" in mc_llm_studio._mode_title("nothing-of-the-kind")
+
+    def test_krea_is_a_workspace_of_its_own(self):
+        """Structurally MiniMax, not a Conversation persona and not an option
+        on LTX Prompt Studio: one task in, one finished Krea prompt out."""
+        assert "krea" in [value for _, value in mc_llm_studio.MODES]
+        assert "Krea 2" in mc_llm_studio._mode_title("krea")
+
+    def test_krea_gets_exactly_one_workspace_view(self):
+        modes = len(mc_llm_studio.MODES)
+        visible = [update.get("visible") for update in mc_llm_studio._switch("krea")[:modes]]
+
+        assert visible.count(True) == 1
+        assert visible[[value for _, value in mc_llm_studio.MODES].index("krea")] is True
+
+    def test_the_krea_workspace_is_remembered(self, store):
+        import mc_llm_state
+
+        mc_llm_studio._switch("krea")
+
+        assert mc_llm_state.preferences()["mode"] == "krea"
+        assert mc_llm_studio._initial_mode() == "krea"
 
     def test_setup_is_a_mode_rather_than_an_accordion(self):
         """The plain values went to the Settings page; what is left needs a
@@ -1071,7 +1124,8 @@ class TestThemeContract:
 
         hidden = set()
         for name in ("mc_llm_chat_panel.py", "mc_llm_studio.py", "mc_llm_prompt_panel.py",
-                     "mc_llm_minimax_panel.py", "mc_llm_browse.py"):
+                     "mc_llm_minimax_panel.py", "mc_llm_krea_panel.py",
+                     "mc_llm_browse.py"):
             tree = ast.parse((root / name).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
@@ -1125,6 +1179,11 @@ class TestBoxesThatDoNotMoveTheButtons:
         import mc_llm_minimax_panel
 
         written = mc_llm_minimax_panel.build()["output"]
+
+        assert written.max_lines == written.lines
+
+    def test_the_krea_output_does_not_grow_while_it_is_written(self):
+        written = mc_llm_krea_panel.build()["output"]
 
         assert written.max_lines == written.lines
 
@@ -1765,6 +1824,9 @@ class TestStoppingGivesTheControlsBack:
         import mc_llm_minimax_panel
 
         assert self._restored(mc_llm_minimax_panel._cancel(None)) == (True, False)
+
+    def test_krea_can_be_asked_for_another_prompt(self):
+        assert self._restored(mc_llm_krea_panel._cancel(None)) == (True, False)
 
     def test_prompt_studio_can_be_asked_for_another_prompt(self):
         import mc_llm_prompt_panel

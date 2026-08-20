@@ -1597,3 +1597,168 @@ Two things now hold the line:
   from the control you opened it with — and on a desktop, where the sheet is a
   corner panel that does not even cover the button, pressing it again looked
   like a dead control.
+
+## 20. Krea 2 (20 August 2026)
+
+A fifth workspace, and the first one added since the shell became a menu. It
+writes Krea 2 image prompts with the local model: text alone, or text plus up
+to four reference images.
+
+Structurally it is MiniMax and not Conversation — one task in, one finished
+prompt out, its own history, its own screen. It is explicitly *not* a
+Conversation persona, not a variant of MiniMax and not an extension of LTX
+Prompt Studio, because a prompt compiler and a chat are different products and
+the tab has spent five sections learning not to merge them.
+
+It generates no images. There is no sampler here, no CFG, no steps, no edit
+LoRA strength, no grounding resolution, no style-reference strength, no
+moodboard, no mask and no negative prompt. Those belong to an
+image-generation integration; this is the thing that writes what such an
+integration would be handed.
+
+### 20.1 Whose words these are
+
+The base system prompt is Krea's own `expansion.txt`, vendored byte-for-byte
+from `krea-ai/krea-2` into `prompt_master/krea/` with its origin, its retrieval
+date and its sha256 in `UPSTREAM_SOURCE.txt`. It is the file Krea's prompting
+guide points at: *"If you wish to use LLM assistance for generating longer
+prompts, check out expansion.txt and use it as a system prompt for LLM of your
+choice."*
+
+Nothing edits it. Everything this extension has to say about reference images
+is a separate `REFERENCE_ADDENDUM` in `enhancer.py`, appended under a heading
+that names it, so anybody reading an assembled system message can see where
+Krea stops and we start. A text-only run gets upstream's file and nothing else,
+which is also why it needs no vision projector and works on any model that can
+hold a conversation.
+
+The tests hold that line rather than trusting it: `test_llm_krea.py` asserts
+the addendum is *not* in the upstream text, and that a text-only system message
+is byte-identical to the vendored file.
+
+One consequence worth stating, because it looks like a bug. Upstream's
+instruction opens with *"Think step by step about the request before writing
+the answer"* and then asks for the paragraph after the thinking. A model that
+emits a visible `<think>` block is therefore obeying a file this package may
+not edit, and the cleaner takes it off afterwards. The cleaner removes a
+thinking block and a single enclosing code fence, and it is deliberately
+incapable of anything else: a cleaner that improved prompts would be a second
+prompt writer nobody can see, running after the one whose instructions are on
+disk.
+
+### 20.2 Image 1 has to stay Image 1
+
+This is the whole feature, and everything else is arranged around it.
+
+The request people actually make is *"replace the face of the woman in image 1
+with the woman from image 2, keeping image 1's body, outfit, pose, framing,
+lighting and background"*. That sentence means nothing at all if image 1 and
+image 2 can trade places somewhere between the upload control and the finished
+prompt — and it fails silently when they do, because what comes back is a
+fluent paragraph describing the wrong edit.
+
+So identity comes from the **slot**, and from nothing else. Not the filename,
+not the upload time, not the temporary path, not the backend's tensor order,
+not the caption text, and never from classifying what a picture appears to
+contain. That rules out a multi-file upload control — a Gradio file list
+reorders itself when an entry is deleted and replaced — so the references are
+four explicit numbered slots.
+
+A gap in the slots is **refused**, not closed up. Filling slot 1 and slot 3 and
+pressing Generate gets a sentence saying Image 2 is empty; it does not quietly
+promote the third picture, because the user has written "image 3" in their
+instruction and would get a prompt about a picture the writer is calling
+Image 2. The same rule governs a reference that cannot be described: the run
+stops, naming the image that failed, rather than writing from the survivors.
+
+The numbering is announced on the page, beside the slots, because the feature
+rests on the user and the model agreeing which picture is which and an
+agreement one side was never told about is not one. It is also announced as
+*ours*: "Image 1" is an LLM Studio convention for talking to the prompt writer,
+not Krea syntax, and the panel says so.
+
+### 20.3 Caption first, in order, one at a time
+
+The same shape MiniMax uses. Each reference is described on its own by the
+vision model; the pass that writes the prompt is a text-only request over those
+descriptions, laid out under their own numbers:
+
+```
+user_prompt:
+Replace the face of the woman in image 1 with the woman from image 2.
+
+reference_images:
+Image 1: <description>
+Image 2: <description>
+```
+
+The writer is never handed a row of unlabelled paragraphs and asked to work out
+which is which — that is the failure this section exists to prevent, arriving
+through the back door.
+
+The captioning loop is sequential, and not for want of a thread pool: one
+server answers one request at a time here anyway. It is sequential because a
+sequential loop emits its captions in slot order *by construction*, which is
+what lets the panel pair the first `CAPTION` event with Image 1 without either
+side carrying an index around. §10 of the design intent allows exactly that,
+and `test_llm_krea.py` tests the guarantee it rests on rather than assuming it.
+
+The captioner is told to describe and nothing else: no naming real people, no
+inferring what is out of frame, no deciding how the picture should be edited.
+It is never shown the user's instruction. A captioner that knows what is about
+to be asked for starts answering that instead, and then the writer writes a
+prompt about the captioner's opinion.
+
+### 20.4 A model that cannot see is told so
+
+Text-only works anywhere. References require a vision projector, and when there
+isn't one the run is refused **before** anything starts, with a sentence saying
+what to do about it. It never falls back to text-only: silently dropping the
+pictures would return a plausible paragraph about a request nobody made, and
+the pictures were the request.
+
+The refusal is stated twice on purpose — once in the panel, where nothing has
+been started and nothing holds the GPU, and once where the client is actually
+obtained, for anything that got past the first check.
+
+Cancellation works during captioning and during writing, and the workload lock
+comes back in a `finally` either way. There is no Krea-specific concurrency,
+threading or GPU arbitration anywhere: it takes the same broker lock every
+other run takes, for the same reason.
+
+### 20.5 What history keeps, and what it refuses to keep
+
+`krea-history.json`, its own file, alongside the others. A session holds the
+request, the finished prompt, the seed, and two parallel ordered lists: the
+reference **names** and the reference **captions**.
+
+No image bytes. No data URLs. No temporary upload paths — a Gradio upload path
+is a directory name nobody chose and a file name that means nothing, and a
+history file that grew a base64 JPEG per entry is one nobody could open. A test
+writes a session from a reference carrying pixels and a `/tmp/gradio/...` path
+and asserts neither reaches the file.
+
+Loading a session restores the text, the prompt and the captions, and says
+which pictures it was written from — as information. It does not refill the
+slots, because the files are not saved and may not exist. Writing another
+reference-aware prompt means attaching them again, and the status line says so
+rather than leaving it to be discovered.
+
+### 20.6 The boundary this leaves open
+
+Prompt synthesis and Krea image-edit conditioning are different systems, and
+the seam between them is where reference order gets quietly redefined.
+
+So a run does not reduce to one string. `prompt_master/krea/references.py`
+keeps a `Reference` — its UI index, its path, its caption, and a
+`semantic_role` that is only ever filled in from something the user said —
+and a `KreaPromptResult` that carries the prompt *and* those references. A
+future backend adapter may need them in a different order than the person
+supplying them saw: a Forge Neo Krea identity edit may present subject-first
+inputs while reordering scene and subject internally to match how the LoRA was
+trained. That reordering is the adapter's to do.
+
+What it may never do is redefine what "Image 1" meant to the user, or to the
+prompt it is handed alongside. User order is the semantic source of truth;
+backend order is a detail of whatever eventually draws the picture. Version 1
+ships the first half and leaves the second unclaimed.

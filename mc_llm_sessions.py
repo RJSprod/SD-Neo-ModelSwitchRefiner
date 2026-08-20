@@ -1,17 +1,20 @@
-"""The three LLM modes, as streaming generators with no UI in them.
+"""The LLM modes, as streaming generators with no UI in them.
 
 Section 4 requires Prompt Studio, Conversation and MiniMax to stay distinct
 products rather than collapsing into one chat workflow, and section 17.B
 requires the LTX business logic to come across without its Qt presentation
 layer. Both are served by the same decision: the orchestration each mode's Qt
-worker used to do lives here, in a form that has never heard of a widget.
+worker used to do lives here, in a form that has never heard of a widget. Krea
+2 arrived later and under the same rule: it is a fourth generator here rather
+than a persona, a variant or an option on somebody else's panel.
 
 Each mode is a generator of :class:`Event`. The Qt version pushed the same
 information out as signals -- ``status``, ``chunk``, ``positive_ready``,
 ``negative_ready``, ``captioned``, ``failed`` -- and the sequence of events
 below is deliberately the same sequence, because that sequence *is* the
 product. Prompt Studio still emits a positive and a negative separately;
-MiniMax still emits its caption before its prompt; Conversation still emits one
+MiniMax still emits its caption before its prompt; Krea emits one caption per
+reference, in the order the user put them in; Conversation still emits one
 stream of reply text. Nothing is merged into a single response blob, which is
 the thing section 4.2 explicitly forbids.
 
@@ -523,6 +526,98 @@ def _minimax(prompt: str, variant: str, image: str | None, seed: int,
 
 
 # --------------------------------------------------------------------------- #
+# Krea 2
+# --------------------------------------------------------------------------- #
+
+
+def _krea(prompt: str, references, seed: int, cancel: Cancellation):
+    """One Krea 2 prompt: every reference described in order, then the writing.
+
+    The same caption-first shape as :func:`_minimax` and for the same reason --
+    the writer is a text pass over descriptions, so no multi-image transport is
+    needed and every description is a thing that can be shown and kept. What is
+    different is that there may be up to four of them, and that their order is
+    load-bearing: "the woman from image 2" is only meaningful if image 2 is the
+    second slot the user filled and stays the second caption the writer reads.
+
+    So the loop is sequential rather than concurrent. Not for want of a thread
+    pool -- one server answers one request at a time here anyway -- but because
+    a sequential loop emits its captions in slot order by construction, and the
+    panel can pair the first CAPTION event with Image 1 without either side
+    carrying an index.
+
+    Two failures are deliberately fatal rather than survivable. A reference that
+    cannot be described stops the run, because writing the prompt from the other
+    three would either renumber them behind the user's back or write about an
+    image that is not there. And an empty finished prompt is an error, not an
+    empty box.
+    """
+    from prompt_master.krea import enhancer
+
+    references = list(references or [])
+    gpu = _Gpu("a Krea prompt", cancel)
+    try:
+        acquired = yield from gpu.acquire()
+        if not acquired:
+            yield Event(CANCELLED, "Cancelled")
+            return
+
+        yield Event(STATUS, _preparing())
+        # Vision is asked for only when there is something to look at, which is
+        # what lets a text-only Krea prompt be written by any model that can
+        # hold a conversation. The panel has already refused a run that would
+        # need a projector the model has not got; this is the same requirement
+        # stated where the client is actually obtained.
+        client = _client(bool(references))
+        for event in _placement_notes():
+            yield event
+
+        captions: list[str] = []
+        for position, reference in enumerate(references, start=1):
+            yield Event(STATUS, enhancer.caption_label(position, len(references)))
+            described = client.stream_chat(
+                enhancer.caption_messages(reference.data_url), enhancer.CAPTION_MAX_TOKENS,
+                seed, lambda _text: None, cancel.event,
+                temperature=enhancer.CAPTION_TEMPERATURE, top_p=enhancer.CAPTION_TOP_P)
+            if cancel.is_set():
+                yield Event(CANCELLED, "Cancelled")
+                return
+            caption = enhancer.clean(described)
+            if not caption:
+                raise RuntimeError(
+                    f"The model returned no description of image {position}. "
+                    "The prompt has not been written: the other references would "
+                    "have to be renumbered to write it without this one.")
+            reference.caption = caption
+            captions.append(caption)
+            yield Event(CAPTION, caption)
+
+        yield Event(STATUS, f"{enhancer.label(len(references))}…")
+        written = ""
+        for chunk, result in _streamed(
+                lambda on_text: client.stream_chat(
+                    enhancer.messages(prompt, captions), enhancer.MAX_TOKENS, seed, on_text,
+                    cancel.event, temperature=enhancer.TEMPERATURE, top_p=enhancer.TOP_P)):
+            if chunk is not None:
+                yield Event(CHUNK, chunk)
+            else:
+                written = result or ""
+
+        if cancel.is_set():
+            yield Event(CANCELLED, "Cancelled")
+            return
+        cleaned = enhancer.clean(written)
+        if not cleaned:
+            raise RuntimeError("The model returned an empty prompt.")
+        yield Event(DONE, cleaned)
+    except Exception as exc:
+        logger.debug("Model Chain: Krea run failed", exc_info=True)
+        yield Event(FAILED, str(exc))
+    finally:
+        gpu.release()
+
+
+# --------------------------------------------------------------------------- #
 # What the console is told
 # --------------------------------------------------------------------------- #
 
@@ -615,3 +710,16 @@ def minimax(prompt: str, variant: str, image: str | None, seed: int, cancel: Can
     """One MiniMax enhancement. See :func:`_minimax`."""
     yield from _traced(f"a MiniMax {variant} enhancement",
                        _minimax(prompt, variant, image, seed, cancel))
+
+
+def krea(prompt: str, references, seed: int, cancel: Cancellation):
+    """One Krea 2 prompt. See :func:`_krea`.
+
+    ``references`` is an ordered list of ``prompt_master.krea.references
+    .Reference`` -- empty for a text-only prompt. The count reaches the console
+    line; the pictures, the paths and the captions do not.
+    """
+    references = list(references or [])
+    counted = (f"a Krea prompt from {len(references)} reference"
+               f"{'' if len(references) == 1 else 's'}" if references else "a Krea prompt")
+    yield from _traced(counted, _krea(prompt, references, seed, cancel))

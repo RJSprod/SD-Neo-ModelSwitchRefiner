@@ -1,15 +1,15 @@
-"""Persistence for LLM Studio: shared preferences, and three separate histories.
+"""Persistence for LLM Studio: shared preferences, and separate histories.
 
 Section 16 draws one line and this module exists to hold it:
 
 * **shared runtime preferences** -- which GGUF, which projector, which device,
-  context and buffer settings -- belong to the installation. All three modes
-  read them and any of them may change them.
+  context and buffer settings -- belong to the installation. Every mode reads
+  them and any of them may change them.
 * **mode content** -- what was generated, asked, or enhanced -- belongs to its
-  mode. Prompt Studio sessions, Conversation threads and MiniMax sessions are
-  three stores and stay three stores, because one LLM serving all three is a
-  fact about the runtime and not a reason to merge a user's writing into a
-  single stream.
+  mode. Prompt Studio sessions, Conversation threads, MiniMax sessions and
+  Krea sessions are four stores and stay four stores, because one LLM serving
+  all of them is a fact about the runtime and not a reason to merge a user's
+  writing into a single stream.
 
 Conversation is the exception in implementation only: it already has stores
 worth keeping in the vendored ``prompt_master.chat`` package -- characters as
@@ -42,6 +42,7 @@ SCHEMA_VERSION = 1
 PREFERENCES_FILE = "preferences.json"
 PROMPT_HISTORY_FILE = "prompt-studio-history.json"
 MINIMAX_HISTORY_FILE = "minimax-history.json"
+KREA_HISTORY_FILE = "krea-history.json"
 
 HISTORY_LIMIT = 200
 """Entries kept per mode history.
@@ -321,6 +322,42 @@ class MinimaxSession:
         return f"{stamp} — {self.prompt[:48] or 'untitled'}"
 
 
+@dataclass
+class KreaSession:
+    """One Krea 2 prompt, and the ordered references it was written about.
+
+    What is *not* here is the point. No image bytes, no data URLs, no temporary
+    upload paths -- section 14 rules all three out, and a history file that
+    quietly grew a base64 JPEG per entry would be a history file nobody could
+    open. What is kept is the two things that stay useful once the files have
+    gone: the names, so a loaded session can say which pictures it was about,
+    and the captions, so it can say what they contained.
+
+    The two lists are parallel and ordered, and that order is the user's
+    visible one: ``reference_names[0]`` and ``reference_captions[0]`` are Image
+    1. Loading a session restores them as information -- it does not pretend
+    the files are still attached, because they are not, and re-generating a
+    reference-aware prompt means re-uploading them.
+    """
+
+    identifier: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    created: float = field(default_factory=time.time)
+    prompt: str = ""
+    result: str = ""
+    seed: int = 0
+    reference_names: list = field(default_factory=list)
+    reference_captions: list = field(default_factory=list)
+
+    @property
+    def label(self) -> str:
+        stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.created))
+        counted = len(self.reference_names)
+        suffix = ""
+        if counted:
+            suffix = f" · {counted} ref{'' if counted == 1 else 's'}"
+        return f"{stamp} — {self.prompt[:48] or 'untitled'}{suffix}"
+
+
 def prompt_sessions() -> list[PromptSession]:
     return [PromptSession(**_fields(PromptSession, row))
             for row in _read(PROMPT_HISTORY_FILE, {}).get("sessions", [])]
@@ -347,6 +384,20 @@ def save_minimax_session(session: MinimaxSession) -> MinimaxSession:
 
 def delete_minimax_session(identifier: str) -> None:
     _remove(MINIMAX_HISTORY_FILE, identifier)
+
+
+def krea_sessions() -> list[KreaSession]:
+    return [KreaSession(**_fields(KreaSession, row))
+            for row in _read(KREA_HISTORY_FILE, {}).get("sessions", [])]
+
+
+def save_krea_session(session: KreaSession) -> KreaSession:
+    _append(KREA_HISTORY_FILE, session)
+    return session
+
+
+def delete_krea_session(identifier: str) -> None:
+    _remove(KREA_HISTORY_FILE, identifier)
 
 
 def clear_history(filename: str) -> None:

@@ -1,0 +1,38 @@
+# Krea 2 prompt expansion instruction — where it came from
+
+expansion.txt is a byte-for-byte copy of docs/expansion.txt in Krea's own
+Krea 2 repository. It is the file Krea's prompting guide points at: "If you
+wish to use LLM assistance for generating longer prompts, check out
+expansion.txt and use it as a system prompt for LLM of your choice."
+(docs/prompting.md, same repository.)
+
+repository:   https://github.com/krea-ai/krea-2
+source-path:  docs/expansion.txt
+branch:       main
+retrieved:    2026-08-20, over https://raw.githubusercontent.com
+commit:       not recorded — the API was unreachable from the machine the file
+              was fetched on, so the content is pinned by digest instead, the
+              same way prompt_master/minimax pins a file that arrived without a
+              checkout behind it.
+unchanged:    yes. Not one character of the file is edited, and nothing in this
+              extension edits it at run time either: everything this extension
+              has to say about reference images is appended as a separate
+              addendum in enhancer.py, so the two can always be told apart.
+
+# vendored file digest (sha256, as received)
+2a5c24a3a83e9d415d4679a4e1853ddf056bd0329f3af315b27ed72b6ad9c2f0  expansion.txt
+
+# attribution and licensing
+The Krea 2 weights are released under Krea's community licence
+(https://www.krea.ai/krea-2-licensing); the repository's docs, this file among
+them, are published there as the prompting guidance for those weights. It is
+vendored rather than fetched so that a prompt written here does not depend on a
+network call (design intent §14), and it is reproduced in full and unmodified
+with its origin recorded above.
+
+Nothing else in this package is Krea's. The reference-image addendum, the
+caption instruction, the sampling numbers and the labelled user turn in
+enhancer.py are this extension's own, and enhancer.py says so beside each of
+them. The "Image 1 / Image 2" convention in particular is an LLM Studio
+convention: Krea does not document it, and this extension does not present it
+as Krea syntax.

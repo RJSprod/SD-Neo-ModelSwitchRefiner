@@ -51,6 +51,7 @@
         {composer: "mc-llm-prompt-intent", submit: "mc-llm-prompt-generate", stop: "mc-llm-prompt-stop"},
         {composer: "mc-llm-chat-message", submit: "mc-llm-chat-send", stop: "mc-llm-chat-stop"},
         {composer: "mc-llm-minimax-prompt", submit: "mc-llm-minimax-enhance", stop: "mc-llm-minimax-stop"},
+        {composer: "mc-llm-krea-prompt", submit: "mc-llm-krea-generate", stop: "mc-llm-krea-stop"},
     ];
 
     // How close to the bottom still counts as "following along". A reader who
@@ -289,7 +290,8 @@
     // the same reason everything else here is: this file may not depend on
     // Gradio's own DOM, and an id this extension chose is the only thing it
     // can rely on being there.
-    const STATUSES = ["mc-llm-prompt-status", "mc-llm-chat-status", "mc-llm-minimax-status"];
+    const STATUSES = ["mc-llm-prompt-status", "mc-llm-chat-status", "mc-llm-minimax-status",
+                      "mc-llm-krea-status"];
 
     // Below this the number says nothing anybody needs: every request is
     // "starting" for a moment, and a readout that flickers 0s-1s-gone on a
