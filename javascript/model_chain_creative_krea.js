@@ -134,13 +134,18 @@
         }
     }
 
-    // Wait for the hidden token box to say something new. Resolves true when a
-    // roll is ready and false for every other outcome, including Creative Mode
-    // being switched off mid-flight -- and false always means "do not start a
-    // native generation", which is the only decision the caller makes from it.
+    // Wait for the hidden box to say something new. Resolves true when a roll is
+    // ready and false for every other outcome, including Creative Mode being
+    // switched off mid-flight -- and false always means "do not start a native
+    // generation", which is the only decision the caller makes from it.
+    //
+    // Three things come down this channel, distinguished by their first word.
+    // "task" is not an outcome: it carries the host progress task id, arrives
+    // first, and is what lets the bar start. Polling continues after it.
     function awaitToken(previous) {
         return new Promise(function (resolve) {
             const started = Date.now();
+            let seen = previous;
             const poll = window.setInterval(function () {
                 let value = "";
                 try {
@@ -149,9 +154,15 @@
                 } catch (error) {
                     value = "";
                 }
-                if (value && value !== previous) {
+                if (value && value !== seen) {
+                    seen = value;
+                    const kind = value.split(":")[0];
+                    if (kind === "task") {
+                        startBar(value.split(":").slice(2).join(":"));
+                        return;
+                    }
                     window.clearInterval(poll);
-                    resolve(value.indexOf("ready:") === 0);
+                    resolve(kind === "ready");
                     return;
                 }
                 if (!isCreative() || Date.now() - started > TOKEN_TIMEOUT_MS) {
@@ -164,47 +175,32 @@
 
     // -- the host's own progress bar ----------------------------------------- //
 
-    // Mint a task id, ask Forge to draw and poll its progress bar for it, and
-    // hand the id to the server as argument zero.
+    // Ask Forge to draw and poll its own progress bar for the roll now running.
     //
-    // This is the host's own submit() idiom, deliberately: ui.js does exactly
-    // these three things around every Generate. Doing it the same way means the
-    // roll gets the real bar -- with its real ETA and its real Interrupt button
-    // -- instead of something this extension drew that looks nearly like one.
+    // The id is the server's, learned off the channel above rather than minted
+    // here and handed over. That direction matters: nothing has to arrive
+    // intact for the roll to work, so a bar that cannot be drawn costs a bar
+    // and never a generation.
     //
-    // A js= hook rather than a hidden textbox because it is race-free. The id is
-    // written into the request as Gradio builds it, rather than into a component
-    // whose value may not have reached Gradio's state by the time the click is
-    // processed.
-    function submitRoll() {
-        const args = Array.prototype.slice.call(arguments);
-        let id;
+    // ``requestProgress`` is the host's, and so is everything it draws -- the
+    // bar, the ETA and the Interrupt button. Drawing our own would have meant
+    // something that looks nearly like the one the image generation uses a
+    // second later, in the same place, which is worse than either.
+    function startBar(taskId) {
+        if (!taskId) return;
         try {
-            id = (typeof randomId === "function")
-                ? randomId()
-                : "task(mckrea" + Math.random().toString(36).slice(2, 9) + ")";
-            args[0] = id;
-        } catch (error) {
-            console.error("Model Chain: could not mint a Creative Mode task id", error);
-            return args;
-        }
-
-        try {
-            if (typeof requestProgress === "function") {
-                const container = byId(IDS.gallery) || byId(IDS.results);
-                if (container) {
-                    // No gallery is passed: a creative roll produces no image and
-                    // has no live preview, and handing over the gallery would
-                    // invite the progress plumbing to redraw one.
-                    requestProgress(id, container, null, function () {});
-                }
-            }
+            if (typeof requestProgress !== "function") return;
+            const container = byId(IDS.gallery) || byId(IDS.results);
+            if (!container) return;
+            // No gallery is passed: a creative roll produces no image and has
+            // no live preview, and handing the gallery over would invite the
+            // progress plumbing to redraw one.
+            requestProgress(taskId, container, null, function () {});
         } catch (error) {
             // A bar that will not draw must never be a roll that will not run.
             console.error("Model Chain: could not start the Creative Mode progress bar",
                 error);
         }
-        return args;
     }
 
     // One roll, then one native generation. The only path to a Creative image.
@@ -309,17 +305,13 @@
         onAfterUiUpdate(wire);
     }
 
-    // Named on window because Gradio resolves a js= hook by name at call time.
-    // This is the one thing in this file the page itself calls.
-    window.mcKreaCreativeSubmit = submitRoll;
-
     // Exposed for the tests, which drive this file under node against a fake
     // page. Nothing in the extension reads it.
     window.modelChainKreaCreative = {
         state: state,
         onGenerateClick: onGenerateClick,
         runRoll: runRoll,
-        submitRoll: submitRoll,
+        startBar: startBar,
         wire: wire,
     };
 })();

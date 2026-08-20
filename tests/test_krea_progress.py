@@ -185,6 +185,130 @@ class TestTheTaskIsClaimed:
         assert events[-1].kind == sessions.DONE
 
 
+class TestTheBarNeverBlocksTheRunItDescribes:
+    """The regression this class exists for, in one sentence: an indicator that
+    tells the host a job is running makes the language model wait for a job that
+    is itself.
+
+    ``mc_broker.host_busy()`` is "``state.job`` or ``state.job_count`` is
+    truthy", and ``mc_llm_sessions._Gpu.acquire`` refuses to start while it is
+    true. A progress claim that set either field therefore hung the roll it was
+    drawing a bar for -- intermittently, because any Gradio call finishing
+    nearby clears both in its own ``finally``.
+    """
+
+    def test_the_host_is_not_busy_at_any_point_during_a_roll(self, client):
+        seen = []
+        original = mc_llm_progress.reporter.enter
+
+        def watch(phase):
+            original(phase)
+            seen.append(mc_broker.host_busy())
+
+        mc_llm_progress.reporter.enter = watch
+        roll()
+
+        assert seen and not any(seen)
+
+    def test_the_reporter_never_touches_the_two_fields_that_mean_busy(self, client):
+        from modules import shared
+
+        shared.state.job = ""
+        shared.state.job_count = 0
+        reporter = mc_llm_progress.Reporter()
+        reporter.begin("task(x)", 2000, warm=True)
+        try:
+            reporter.enter(mc_progress.PHASE_KREA_READ)
+            reporter.enter(mc_progress.PHASE_KREA_WRITE)
+            reporter.wrote("some text")
+
+            assert shared.state.job == ""
+            assert shared.state.job_count == 0
+            assert mc_broker.host_busy() is False
+        finally:
+            reporter.end("some text")
+
+        assert mc_broker.host_busy() is False
+
+    def test_the_gpu_wait_is_not_entered_because_of_us(self, client):
+        """The observable symptom was a console line saying the LLM was waiting
+        for an image generation, on a machine generating nothing."""
+        waited = [event.text for event in roll()
+                  if event.kind == sessions.STATUS and "image generation" in event.text]
+
+        assert waited == []
+
+    def test_an_image_job_that_really_is_running_still_holds_the_llm_back(self, host):
+        """The guard the deadlock fix must not have removed. host_busy() is
+        still consulted and still says yes for a real generation; it simply no
+        longer says yes because of a progress bar.
+
+        Deliberately without the ``client`` fixture, which stubs host_busy out
+        -- a test of host_busy that stubbed host_busy would assert nothing.
+        """
+        from modules import shared
+
+        assert mc_broker.host_busy() is False
+        shared.state.job_count = 1
+        try:
+            assert mc_broker.host_busy() is True
+        finally:
+            shared.state.job_count = 0
+        shared.state.job = "txt2img"
+        try:
+            assert mc_broker.host_busy() is True
+        finally:
+            shared.state.job = ""
+
+    def test_the_whole_gate_runs_with_the_real_broker_watching(self, monkeypatch,
+                                                               host, store):
+        """End to end, with ``host_busy`` *not* stubbed.
+
+        Every other test in this file replaces it, which is right for what they
+        are each about and useless for this one: the deadlock was a real call to
+        a real ``host_busy`` returning a real True. So this drives the actual
+        txt2img gate through the actual ``_Gpu.acquire`` and asserts the answer
+        was False at every frame.
+        """
+        import model_chain_krea_creative as creative_script
+        from prompt_master.krea import director
+        from prompt_master.krea import library as library_module
+
+        mc_broker.clear()
+        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False: FakeClient())
+        monkeypatch.setattr(sessions, "_placement_notes", list)
+        monkeypatch.setattr(mc_creative_krea, "checkpoint_objection", lambda: "")
+        mc_creative_krea.creative = mc_creative_krea.Creative()
+        mc_llm_progress.reporter = mc_llm_progress.Reporter()
+
+        axes: list = []
+        for _ in library_module.library().axis_keys:
+            axes.extend([director.VARY, None])
+
+        busy = []
+        signals = []
+        try:
+            for frame in creative_script._gate("car", 6, -1, True, "", *axes):
+                busy.append(mc_broker.host_busy())
+                if isinstance(frame[1], str):
+                    signals.append(frame[1].split(":")[0])
+        finally:
+            mc_broker.clear()
+
+        assert not any(busy)
+        assert signals[0] == "task"
+        assert signals[-1] == "ready"
+        assert mc_creative_krea.creative.armed is not None
+
+    def test_the_source_says_why(self):
+        """A comment, asserted, because the two lines removed here are exactly
+        the two lines somebody adds back for completeness."""
+        source = Path(mc_llm_progress.__file__).read_text(encoding="utf-8")
+
+        assert "host_busy()" in source
+        assert "state.job" in source
+
+
 # --------------------------------------------------------------------------- #
 # The bar says what is happening
 # --------------------------------------------------------------------------- #
@@ -485,12 +609,25 @@ SCRIPT = (Path(__file__).resolve().parent.parent / "javascript"
           / "model_chain_creative_krea.js")
 
 HARNESS = """
-const record = {progressStarted: [], args: null};
+// A txt2img page whose hidden box a test can put server messages into, so the
+// handshake can be driven exactly as the server drives it.
 
-globalThis.setTimeout = (fn, ms) => 0;
-globalThis.setInterval = (fn, ms) => 0;
-globalThis.clearTimeout = () => {};
-globalThis.clearInterval = () => {};
+const record = {progressStarted: [], generates: 0, rolls: 0};
+
+let queue = [];
+let now = 0;
+globalThis.setInterval = function (fn) { queue.push(fn); return queue.length; };
+globalThis.clearInterval = function (id) { queue[id - 1] = null; };
+globalThis.setTimeout = function () { return 0; };
+globalThis.clearTimeout = function () {};
+globalThis.Date.now = () => now;
+
+// Run every live poll once. The controller polls on an interval; a test needs
+// to say "and then a moment passed" without one.
+function tick() {
+    queue.filter(Boolean).forEach((fn) => fn());
+}
+const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 function holder(id, map) {
     return {
@@ -505,15 +642,31 @@ function holder(id, map) {
     };
 }
 
+const toggle = {type: "checkbox", checked: true, dataset: {}, addEventListener() {}};
+const tokenField = {value: ""};
+const promptField = {value: "car"};
+const statusLine = {tagName: "DIV", textContent: ""};
+
+const generateButton = {
+    id: "txt2img_generate", tagName: "BUTTON", dataset: {},
+    classList: {names: {}, toggle() {}, contains() { return false; }},
+    contains() { return false; }, querySelector() { return null; },
+    addEventListener() {},
+    click() { record.generates += 1; },
+};
+
 const elements = {
     "mc-krea-creative-toggle": holder("mc-krea-creative-toggle",
-        {"input[type=checkbox]": {checked: true}}),
-    "txt2img_generate": {
-        tagName: "BUTTON", dataset: {},
-        classList: {names: {}, toggle() {}, contains() { return false; }},
+        {"input[type=checkbox]": toggle}),
+    "mc-krea-creative-token": holder("mc-krea-creative-token", {"textarea": tokenField}),
+    "mc-krea-creative-status": holder("mc-krea-creative-status", {"div": statusLine}),
+    "mc-krea-creative-run": {
+        id: "mc-krea-creative-run", tagName: "BUTTON", dataset: {},
         contains() { return false; }, querySelector() { return null; },
-        addEventListener() {}, click() {},
+        addEventListener() {}, click() { record.rolls += 1; },
     },
+    "txt2img_prompt": holder("txt2img_prompt", {"textarea": promptField}),
+    "txt2img_generate": generateButton,
     GALLERY_ENTRY
 };
 
@@ -528,32 +681,28 @@ globalThis.gradioApp = () => globalThis.document;
 globalThis.Event = function (type) { this.type = type; };
 globalThis.onUiLoaded = (fn) => fn();
 globalThis.onAfterUiUpdate = () => {};
-
-RANDOM_ID
 PROGRESS_FN
 
 SOURCE
 
-const args = window.mcKreaCreativeSubmit("placeholder", "car", 10);
-console.log(JSON.stringify({
-    args: args,
-    started: record.progressStarted,
-    exposed: typeof window.mcKreaCreativeSubmit === "function",
-}));
+const kc = globalThis.modelChainKreaCreative;
+
+// What the server sends down the hidden box, in order.
+function server(value) { tokenField.value = value; }
+
+BODY
 """
 
 
-def run_js(gallery="txt2img_gallery_container", with_random_id=True,
+def run_js(body: str, gallery="txt2img_gallery_container",
            progress_available=True) -> dict:
     entry = (f'"{gallery}": holder("{gallery}", {{}})' if gallery else "")
-    random_id = ('globalThis.randomId = () => "task(hostmade)";'
-                 if with_random_id else "")
     progress_fn = ("globalThis.requestProgress = function (id, container, gallery, atEnd) "
                    "{ record.progressStarted.push([id, container ? container.id : null, "
                    "gallery]); };" if progress_available else "")
     harness = (HARNESS.replace("SOURCE", SCRIPT.read_text())
+               .replace("BODY", body)
                .replace("GALLERY_ENTRY", entry)
-               .replace("RANDOM_ID", random_id)
                .replace("PROGRESS_FN", progress_fn))
     result = subprocess.run(["node", "--input-type=module", "-e", harness],
                             capture_output=True, text=True, timeout=60)
@@ -561,52 +710,158 @@ def run_js(gallery="txt2img_gallery_container", with_random_id=True,
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+REPORT = """
+console.log(JSON.stringify({
+    started: record.progressStarted,
+    rolls: record.rolls,
+    generates: record.generates,
+    rolling: kc.state.rolling,
+}));
+"""
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-class TestTheSubmitHook:
-    def test_it_puts_a_fresh_task_id_in_argument_zero(self):
-        """The host's own submit() idiom. A hidden textbox would be racy: the
-        value has to be in the request as Gradio builds it, not in a component
-        that may not have reached Gradio's state yet."""
-        found = run_js()
+class TestTheHandshake:
+    """How the browser learns which task the bar is for.
 
-        assert found["args"][0] == "task(hostmade)"
-        assert found["args"][1:] == ["car", 10]
+    It used to mint the id and pass it in through a Gradio ``js=`` hook. Now the
+    server mints it and sends it down the hidden box the browser was already
+    polling for the arming token -- so nothing has to arrive intact for the roll
+    to work, and a bar that cannot be drawn costs a bar rather than a
+    generation.
+    """
 
-    def test_it_mints_its_own_id_when_the_host_has_no_helper(self):
-        found = run_js(with_random_id=False)
+    def test_the_bar_starts_when_the_server_names_the_task(self):
+        found = run_js("""
+            kc.runRoll();
+            server("task:abcd:task(mc-123456)");
+            tick();
+            await flush();
+        """ + REPORT)
 
-        assert found["args"][0].startswith("task(")
-        assert found["args"][0] != "placeholder"
+        assert found["started"] == [["task(mc-123456)", "txt2img_gallery_container", None]]
 
-    def test_it_asks_the_host_to_draw_the_bar_for_that_id(self):
-        found = run_js()
+    def test_naming_the_task_is_not_an_outcome_and_polling_continues(self):
+        """The old shape resolved on the first new value it saw. If it did that
+        now, the task message would be read as "not ready" and no image would
+        ever be generated."""
+        found = run_js("""
+            kc.runRoll();
+            server("task:abcd:task(mc-123456)");
+            tick();
+            await flush();
+        """ + REPORT)
 
-        assert found["started"] == [["task(hostmade)", "txt2img_gallery_container", None]]
+        assert found["rolling"] is True
+        assert found["generates"] == 0
+
+    def test_the_arming_token_still_releases_one_generation(self):
+        found = run_js("""
+            const done = kc.runRoll();
+            server("task:abcd:task(mc-123456)");
+            tick();
+            await flush();
+            server("ready:efgh:armed");
+            tick();
+            await flush();
+            await done;
+        """ + REPORT)
+
+        assert found["generates"] == 1
+        assert found["rolling"] is False
+
+    def test_a_failure_after_the_task_starts_no_generation(self):
+        found = run_js("""
+            const done = kc.runRoll();
+            server("task:abcd:task(mc-123456)");
+            tick();
+            await flush();
+            server("failed:efgh:");
+            tick();
+            await flush();
+            await done;
+        """ + REPORT)
+
+        assert found["generates"] == 0
+
+    def test_a_roll_with_no_bar_available_still_generates(self):
+        """The property the handshake was rearranged for."""
+        found = run_js("""
+            const done = kc.runRoll();
+            server("task:abcd:task(mc-123456)");
+            tick();
+            await flush();
+            server("ready:efgh:armed");
+            tick();
+            await flush();
+            await done;
+        """ + REPORT, progress_available=False)
+
+        assert found["started"] == []
+        assert found["generates"] == 1
+
+    def test_a_page_with_no_gallery_container_still_generates(self):
+        found = run_js("""
+            const done = kc.runRoll();
+            server("task:abcd:task(mc-123456)");
+            tick();
+            await flush();
+            server("ready:efgh:armed");
+            tick();
+            await flush();
+            await done;
+        """ + REPORT, gallery="")
+
+        assert found["started"] == []
+        assert found["generates"] == 1
 
     def test_it_draws_where_image_progress_appears(self):
-        """In the gallery container, so the roll's bar and the image's bar are
-        the same bar in the same place rather than two things in two places."""
-        found = run_js(gallery="txt2img_results")
+        found = run_js("""
+            kc.runRoll();
+            server("task:abcd:task(mc-123456)");
+            tick();
+            await flush();
+        """ + REPORT, gallery="txt2img_results")
 
         assert found["started"][0][1] == "txt2img_results"
 
     def test_it_passes_no_gallery_because_a_roll_makes_no_picture(self):
-        found = run_js()
+        found = run_js("""
+            kc.runRoll();
+            server("task:abcd:task(mc-123456)");
+            tick();
+            await flush();
+        """ + REPORT)
 
         assert found["started"][0][2] is None
 
-    def test_a_host_that_cannot_draw_a_bar_still_gets_the_id(self):
-        """A bar that will not draw must never be a roll that will not run."""
-        found = run_js(progress_available=False)
+    def test_an_empty_task_id_draws_nothing(self):
+        found = run_js("""
+            kc.startBar("");
+        """ + REPORT)
 
-        assert found["args"][0] == "task(hostmade)"
         assert found["started"] == []
 
-    def test_a_page_with_no_gallery_container_still_gets_the_id(self):
-        found = run_js(gallery="")
+    def test_the_page_is_never_asked_to_call_a_js_hook_by_name(self):
+        """Gradio's js= contract is one this extension no longer depends on."""
+        source = SCRIPT.read_text()
 
-        assert found["args"][0] == "task(hostmade)"
-        assert found["started"] == []
+        assert "mcKreaCreativeSubmit" not in source
 
-    def test_the_hook_is_reachable_by_the_name_gradio_resolves(self):
-        assert run_js()["exposed"] is True
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+class TestTheServerMintsTheId:
+    def test_the_gate_names_the_task_before_it_does_any_work(self):
+        """First frame out, so the bar covers the Director and the GPU wait as
+        well as the model call."""
+        import model_chain_krea_creative as creative_script
+
+        assert creative_script._task_id().startswith("task(")
+        assert ":" not in creative_script._task_id()
+
+    def test_two_rolls_never_share_an_id(self):
+        import model_chain_krea_creative as creative_script
+
+        minted = {creative_script._task_id() for _ in range(50)}
+
+        assert len(minted) == 50
