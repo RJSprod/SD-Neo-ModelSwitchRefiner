@@ -362,7 +362,65 @@ polling. Nothing has to arrive intact for the roll to work, so a bar that cannot
 be drawn costs a bar rather than a generation, and the ``js=`` question does not
 arise.
 
-### 7.5 Why not just cache the brief
+### 7.5 Creative Mode inverted the load order, and the card noticed
+
+The third field report, and the one with the clearest evidence in the llama.cpp
+log. Free VRAM at each `llama-server` start, across one user's log:
+
+```
+sessions 35-38:   3078, 2963, 2868, 2766 MiB free    <- image model already loaded
+sessions 39-52:  23304 MiB free, every time          <- empty card
+```
+
+That is the whole bug. Before Creative Mode the order was *image first, language
+model second*: the checkpoint was loaded by generating, and `negotiate` sized the
+LLM into the three gigabytes that were left — which is exactly what it is for,
+and why both fitted. A Creative roll reverses it. The language model now loads
+first, onto a card with nothing on it, llama.cpp's own `-fit` sizes it to
+everything it finds, and the checkpoint that has to run three hundred
+milliseconds later gets the remainder. On a 24 GB card that is the difference
+between "both fit" and "the image model does not".
+
+Nothing leaked. The extension's own reclaim path did not save it either, because
+that path is only reached when *this extension* loads a checkpoint: for an
+ordinary single-model generation Forge loads it directly, so `mc_memory`'s
+eviction and the broker's `_reclaim_for_image` hook are never in the call chain.
+
+The fix is the one `mc_llm_runtime.Runtime.release` already points at in its own
+docstring — *"which is why `negotiate` works hard not to have to ask for image
+VRAM in the first place"*. `negotiate` has always taken an `extra_reserve`; it
+had only ever been used as an out-of-memory retry penalty. A Creative roll now
+passes the image pass's requirement through it:
+
+```
+mc_creative_krea.image_reserve_bytes()      # what the pass needs, minus what
+    -> sessions.krea(..., reserve=)          # the image family already holds
+    -> sessions._client(needs_vision, reserve)
+    -> runtime.client(needs_vision, reserve=)
+    -> negotiate(..., extra_reserve=reserve)
+```
+
+Three details worth keeping:
+
+- **What the image side already holds is subtracted.** Those bytes are the
+  loaded checkpoint. Reserving them a second time would shrink the language
+  model to make room for a model that is already there.
+- **Only the txt2img path reserves anything.** `guard_checkpoint` is that path
+  and only that path, which makes it exactly the condition under which a picture
+  follows. LLM Studio writes a prompt and stops; reserving image VRAM there
+  would shrink the writer for a picture nobody asked for.
+- **Leaving room is much cheaper than reclaiming it.** A running llama-server
+  can only give VRAM back by stopping, so a reserve that is right costs nothing
+  and a reserve that is missing costs a restart per generation.
+
+`hand_back_vram()` is the second half, and it is recovery rather than
+prevention: a server that was already up and holding the card when the reserve
+was introduced cannot shrink in place, so the roll asks the broker for the room
+before handing the prompt over. It is a no-op in the ordinary case —
+`request_vram` returns immediately when what is free already covers the
+requirement — so a correctly sized card never pays for the call.
+
+### 7.6 Why not just cache the brief
 
 Because the brief *is* the variation. Reusing one would mean successive presses
 produced the same art direction, which is the feature working backwards. The

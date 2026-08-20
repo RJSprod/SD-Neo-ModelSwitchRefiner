@@ -108,7 +108,7 @@ def client(monkeypatch, host, store):
     mc_broker.clear()
     monkeypatch.setattr(mc_broker, "host_busy", lambda: False)
     fake = FakeClient()
-    monkeypatch.setattr(sessions, "_client", lambda needs_vision=False: fake)
+    monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0: fake)
     monkeypatch.setattr(sessions, "_placement_notes", list)
     monkeypatch.setattr(mc_creative_krea, "checkpoint_objection", lambda: "")
     monkeypatch.setattr(mc_creative_krea, "_warm", lambda: True)
@@ -275,7 +275,7 @@ class TestTheBarNeverBlocksTheRunItDescribes:
         from prompt_master.krea import library as library_module
 
         mc_broker.clear()
-        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False: FakeClient())
+        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0: FakeClient())
         monkeypatch.setattr(sessions, "_placement_notes", list)
         monkeypatch.setattr(mc_creative_krea, "checkpoint_objection", lambda: "")
         mc_creative_krea.creative = mc_creative_krea.Creative()

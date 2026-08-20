@@ -81,7 +81,7 @@ def client(monkeypatch, host, store):
     mc_broker.clear()
     monkeypatch.setattr(mc_broker, "host_busy", lambda: False)
     fake = FakeClient()
-    monkeypatch.setattr(sessions, "_client", lambda needs_vision=False: fake)
+    monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0: fake)
     monkeypatch.setattr(sessions, "_placement_notes", list)
     # No checkpoint is loaded under the harness; the guard has its own tests.
     monkeypatch.setattr(mc_creative_krea, "checkpoint_objection", lambda: "")
@@ -657,6 +657,135 @@ class TestTheOneCallRule:
 
         assert events[-1].kind == sessions.FAILED
         assert client.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Room for the picture that follows
+# --------------------------------------------------------------------------- #
+
+
+class TestTheImageModelKeepsItsRoom:
+    """Creative Mode inverted an order that used to be safe.
+
+    Before it, the image checkpoint was loaded first and the language model
+    negotiated its placement against whatever was left. A Creative roll loads
+    the language model *first*, onto a card with nothing on it -- so llama.cpp
+    sizes itself to the whole card and the checkpoint that has to run three
+    hundred milliseconds later gets the remainder.
+
+    The fix is to say up front how much to leave. These check that the number
+    is right, that it reaches the placement, and that it is asked for only on
+    the path where a picture actually follows.
+    """
+
+    @pytest.fixture
+    def card(self, monkeypatch, host):
+        """A 24 GB card, an 8 GB checkpoint, and nothing resident."""
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "vram_required_bytes",
+                            lambda name, *a, **k: 8 * 1024 ** 3)
+        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None: 0)
+        from modules import shared
+
+        shared.opts.sd_model_checkpoint = "krea2.safetensors"
+        yield
+
+    def test_it_reserves_what_the_pass_needs(self, card):
+        assert mc_creative_krea.image_reserve_bytes() == 8 * 1024 ** 3
+
+    def test_what_the_image_side_already_holds_is_not_reserved_twice(
+            self, card, monkeypatch):
+        """Those bytes are the loaded checkpoint. Reserving them again would
+        shrink the language model to make room for a model already there."""
+        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None: 6 * 1024 ** 3)
+
+        assert mc_creative_krea.image_reserve_bytes() == 2 * 1024 ** 3
+
+    def test_a_fully_resident_checkpoint_needs_nothing_reserved(self, card, monkeypatch):
+        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None: 20 * 1024 ** 3)
+
+        assert mc_creative_krea.image_reserve_bytes() == 0
+
+    def test_an_unknown_checkpoint_reserves_nothing_rather_than_refusing(self, card):
+        from modules import shared
+
+        shared.opts.sd_model_checkpoint = ""
+
+        assert mc_creative_krea.image_reserve_bytes() == 0
+
+    def test_it_never_raises_however_the_host_answers(self, card, monkeypatch):
+        import mc_memory
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("no such checkpoint")
+
+        monkeypatch.setattr(mc_memory, "vram_required_bytes", explode)
+
+        assert mc_creative_krea.image_reserve_bytes() == 0
+
+    def test_the_reserve_reaches_the_placement(self, client, card, monkeypatch):
+        """All the way to negotiate's extra_reserve, which is the parameter that
+        was there for this and had never been used for it."""
+        seen = []
+        original = sessions._client
+        monkeypatch.setattr(sessions, "_client",
+                            lambda needs_vision=False, reserve=0: (
+                                seen.append(reserve), original(needs_vision))[1])
+
+        stored = mc_creative_krea.settings()
+        list(mc_creative_krea.creative.roll("car", stored, guard_checkpoint=True))
+
+        assert seen == [8 * 1024 ** 3]
+
+    def test_llm_studio_reserves_nothing_because_no_picture_follows(
+            self, client, card, monkeypatch):
+        """Reserving image VRAM there would shrink the writer for a picture
+        nobody asked for."""
+        seen = []
+        original = sessions._client
+        monkeypatch.setattr(sessions, "_client",
+                            lambda needs_vision=False, reserve=0: (
+                                seen.append(reserve), original(needs_vision))[1])
+
+        stored = mc_creative_krea.settings()
+        list(mc_creative_krea.creative.roll("car", stored))
+
+        assert seen == [0]
+
+    def test_the_room_is_asked_for_before_the_prompt_is_handed_over(
+            self, client, card, monkeypatch):
+        """The reserve prevents the problem; this recovers a card that was
+        already full when the roll started."""
+        asked = []
+        monkeypatch.setattr(mc_creative_krea, "hand_back_vram",
+                            lambda *a, **k: asked.append(True) or 0)
+
+        stored = mc_creative_krea.settings()
+        events = list(mc_creative_krea.creative.roll("car", stored, guard_checkpoint=True))
+
+        assert asked == [True]
+        assert events[-1].kind == sessions.DONE
+
+    def test_it_is_not_asked_for_on_the_studio_path(self, client, card, monkeypatch):
+        asked = []
+        monkeypatch.setattr(mc_creative_krea, "hand_back_vram",
+                            lambda *a, **k: asked.append(True) or 0)
+
+        list(mc_creative_krea.creative.roll("car", mc_creative_krea.settings()))
+
+        assert asked == []
+
+    def test_asking_costs_nothing_when_the_card_already_has_room(self, card, monkeypatch):
+        """request_vram returns immediately when what is free covers the
+        requirement, so a correctly sized card never pays for the call."""
+        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None: 20 * 1024 ** 3)
+        called = []
+        monkeypatch.setattr(mc_broker, "request_vram",
+                            lambda *a, **k: called.append(a) or None)
+
+        assert mc_creative_krea.hand_back_vram() == 0
+        assert called == []
 
 
 # --------------------------------------------------------------------------- #

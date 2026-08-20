@@ -509,8 +509,14 @@ class Creative:
         # has the finished prompt, and the statement that gives the GPU back is
         # in that run's ``finally``. Closing it is what runs that finally now
         # rather than whenever the interpreter next collects the frame.
+        # ``guard_checkpoint`` is the txt2img path and only the txt2img path, so
+        # it is also exactly the condition under which an image generation
+        # follows this roll -- which makes it the right thing to key the VRAM
+        # reserve on. LLM Studio writes a prompt and stops; reserving image VRAM
+        # there would shrink the writer for a picture nobody asked for.
+        reserve = image_reserve_bytes() if guard_checkpoint else 0
         run = sessions.krea(source, list(references or []), recipe.llm_seed, cancel,
-                            recipe.creativity, recipe.brief)
+                            recipe.creativity, recipe.brief, reserve)
         progress = mc_llm_progress.reporter
         progress.begin(task_id, _prompt_size(source, references, recipe.brief), _warm())
         written = ""
@@ -560,6 +566,19 @@ class Creative:
             self._last = Roll(recipe=recipe, source=source, expanded=written.strip())
         if stored.get("anti_repetition"):
             note_roll(recipe)
+
+        # The last thing before the prompt is handed over, and only on the path
+        # that is about to generate an image. The reserve above should mean
+        # there is nothing to do; this is what recovers a card that was already
+        # full when the roll started.
+        if guard_checkpoint:
+            freed = hand_back_vram()
+            if freed:
+                logger.info("Model Chain: freed %.1f GB for the image generation that "
+                            "follows the Krea roll", freed / (1024 ** 3))
+                yield sessions.Event(sessions.STATUS,
+                                     "Handing the card back for the image…")
+
         self.say(READY)
         yield sessions.Event(sessions.DONE, written.strip())
 
@@ -583,6 +602,75 @@ def _prompt_size(source: str, references, brief: str) -> int:
         logger.debug("Model Chain: could not size the Krea prompt", exc_info=True)
         return max(len(source or "") + len(brief or ""), 1)
     return max(size, 1)
+
+
+def image_reserve_bytes() -> int:
+    """VRAM to keep clear for the image generation this roll is about to trigger.
+
+    Creative Mode inverted an order that used to be safe. Before it, the image
+    checkpoint was loaded first and the language model negotiated its placement
+    against whatever was left -- which is why an LLM that had to squeeze into
+    three gigabytes did so, and why both fitted. A Creative roll loads the
+    language model *first*, onto a card with nothing on it, so llama.cpp sizes
+    itself to the whole thing and the checkpoint that has to run three hundred
+    milliseconds later gets the remainder. On a 24 GB card that is the
+    difference between "both fit" and "the image model does not".
+
+    So the roll says up front how much room to leave. ``negotiate`` already
+    takes exactly this number and works hard to honour it by shrinking context
+    or offloading blocks; leaving the room is very much cheaper than reclaiming
+    it afterwards, because a running llama-server can only give VRAM back by
+    stopping.
+
+    What is already the image family's is subtracted. Those bytes are not free
+    -- they are the loaded checkpoint -- and reserving them a second time would
+    have the language model shrink to make room for a model that is already
+    there.
+
+    Zero on any failure, and zero is the old behaviour: an unknown checkpoint
+    is not a reason to refuse to write a prompt.
+    """
+    try:
+        import mc_broker
+        import mc_memory
+        from modules import shared
+
+        name = str(getattr(shared.opts, "sd_model_checkpoint", "") or "")
+        if not name:
+            return 0
+        required = int(mc_memory.vram_required_bytes(name))
+        held = int(mc_broker.resident_bytes(mc_broker.FAMILY_IMAGE))
+        return max(required - max(held, 0), 0)
+    except Exception:
+        logger.debug("Model Chain: could not size the image reserve for a Creative roll",
+                     exc_info=True)
+        return 0
+
+
+def hand_back_vram(reason: str = "a Krea image generation follows") -> int:
+    """Ask for the room the coming image pass needs, if something else holds it.
+
+    The reserve above prevents the problem; this recovers from it. A
+    llama-server that was already up when the reserve was introduced -- or that
+    was placed for a different checkpoint, or before the user changed the image
+    model -- is holding VRAM nobody can shrink in place, and the only way to get
+    it back is to ask the broker, which stops the server.
+
+    It is a no-op in the ordinary case: ``request_vram`` returns immediately
+    when what is free already covers the requirement, so a card that was sized
+    correctly by the reserve never pays for this call.
+    """
+    needed = image_reserve_bytes()
+    if needed <= 0:
+        return 0
+    try:
+        import mc_broker
+
+        return mc_broker.request_vram(mc_broker.FAMILY_IMAGE, needed, reason=reason).freed
+    except Exception:
+        logger.debug("Model Chain: could not ask for image VRAM after a Creative roll",
+                     exc_info=True)
+        return 0
 
 
 def _warm() -> bool:
