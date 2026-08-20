@@ -309,7 +309,8 @@ def negotiate(configuration: Config | None = None,
     if reclaim and mc_broker.mode() == mc_broker.MODE_EXCLUSIVE:
         mc_broker.request_vram(mc_broker.FAMILY_LLM,
                                max(estimate.total_bytes - already_ours, 0),
-                               reason="LLM took VRAM ownership (Exclusive mode)", margin=reserve)
+                               reason="the LLM taking VRAM ownership in Exclusive mode",
+                               margin=reserve)
         estimate = mc_llm_context.estimate(configuration.model, wanted, described)
 
     if _fits(estimate, reserve, already_ours):

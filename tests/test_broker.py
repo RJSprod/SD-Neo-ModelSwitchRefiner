@@ -40,6 +40,30 @@ class Recorder:
         return self.label
 
 
+class Server:
+    """An LLM reclaimer that can say whether its process is up.
+
+    A llama-server placed in system RAM is running and holding nothing here,
+    which is the whole of the case worth a fake: the register has no entry for
+    it, and only asking the runtime distinguishes it from no server at all.
+    """
+
+    def __init__(self, running=False, holds=0):
+        self.up, self.holds = running, holds
+
+    def running(self):
+        return self.up
+
+    def resident_bytes(self):
+        return self.holds
+
+    def release(self, needed_bytes, reason=""):
+        return 0
+
+    def describe(self):
+        return "llama-server"
+
+
 @pytest.fixture
 def broker(host, monkeypatch):
     """A broker with an empty register, a known VRAM figure and no reserve."""
@@ -550,3 +574,80 @@ class TestVramNobodyAdmitsTo:
 
         said = [entry.text for entry in mc_broker.decisions()]
         assert any("not managing" in text for text in said), said
+
+    def test_our_own_server_s_cuda_context_is_not_somebody_else_s_stray(
+            self, broker, monkeypatch):
+        """A llama-server placed in system RAM holds no weights on the card and
+        declares none -- but its process is still there, and a CUDA context is
+        hundreds of megabytes before a single weight is loaded. Counting that
+        as VRAM nobody admits to sent the user hunting for an orphan process
+        that does not exist."""
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 22.5 * _GB)
+        broker.register_reclaimer(broker.FAMILY_LLM, Server(running=True))
+
+        assert mc_broker.unaccounted_bytes() == 0
+
+    def test_a_server_that_is_on_the_card_gets_no_second_allowance(
+            self, broker, monkeypatch):
+        """A placement on the card is measured as a change in free VRAM, so the
+        context is already inside the declared figure. Subtracting it twice
+        would hide a gigabyte of real residency."""
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 4 * _GB)
+        broker.register_reclaimer(broker.FAMILY_LLM, Server(running=True, holds=5 * _GB))
+
+        assert round(mc_broker.unaccounted_bytes() / _GB) == 14
+
+    def test_a_stray_is_blamed_on_our_own_server_only_when_we_have_one(
+            self, broker, monkeypatch):
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 4 * _GB)
+
+        assert "previous session" in mc_broker.stray_explanation()
+
+        broker.register_reclaimer(broker.FAMILY_LLM, Server(running=True))
+
+        explained = mc_broker.stray_explanation()
+        assert "previous session" not in explained
+        assert "Unload" in explained
+
+
+class TestTheReasonReadsAsASentence:
+    """Every message built from a ``reason`` reads it as a noun phrase -- "X is
+    short 2 GB", "freed 2 GB for X", "released 2 GB of image VRAM for X". A
+    reason written as a clause turns all three into nonsense, which is how "a
+    Krea image generation follows is short 18.5 GB" reached a user's console.
+    """
+
+    def test_a_request_that_falls_short_names_what_fell_short(self, broker, monkeypatch):
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 4 * _GB)
+
+        mc_broker.request_vram(mc_broker.FAMILY_IMAGE, 18 * _GB,
+                               reason="the image generation that follows a Krea roll")
+
+        said = [entry.text for entry in mc_broker.decisions()]
+        assert any(text.startswith("the image generation that follows a Krea roll is short")
+                   for text in said), said
+
+    def test_a_request_that_did_not_say_why_still_reads_as_a_sentence(
+            self, broker, monkeypatch):
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 4 * _GB)
+
+        mc_broker.request_vram(mc_broker.FAMILY_LLM, 18 * _GB)
+
+        said = [entry.text for entry in mc_broker.decisions()]
+        assert any(text.startswith("the LLM workload is short") for text in said), said
+
+    def test_the_reason_an_exclusive_sweep_gives_is_a_noun_phrase(self, broker, monkeypatch):
+        monkeypatch.setattr(mc_broker, "mode", lambda: mc_broker.MODE_EXCLUSIVE)
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        set_free(monkeypatch, 4)
+        image = Recorder(holds=6 * _GB, label="the image checkpoint")
+        broker.register_reclaimer(broker.FAMILY_IMAGE, image)
+
+        mc_broker.request_vram(mc_broker.FAMILY_LLM, 8 * _GB)
+
+        assert image.calls[0][1] == "the LLM workload taking VRAM ownership"

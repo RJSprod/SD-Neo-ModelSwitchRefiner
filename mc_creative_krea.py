@@ -647,7 +647,7 @@ def image_reserve_bytes() -> int:
         return 0
 
 
-def hand_back_vram(reason: str = "a Krea image generation follows") -> int:
+def hand_back_vram(reason: str = "the image generation that follows a Krea roll") -> int:
     """Ask for the room the coming image pass needs, if something else holds it.
 
     The reserve above prevents the problem; this recovers from it. A
