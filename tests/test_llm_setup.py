@@ -11,6 +11,8 @@ inside the install root.
 from __future__ import annotations
 
 import sys
+import types
+from pathlib import Path
 
 import pytest
 
@@ -227,6 +229,110 @@ class TestAdopt:
 
         with pytest.raises(setup.SetupError, match="larger than a llama.cpp release"):
             setup.adopt(elsewhere / "release")
+
+
+class TestReplacingWhatIsAlreadyThere:
+    """A replacement that cannot happen must leave the install as it was.
+
+    Reported: pressing Download the pinned build over a runtime whose
+    ``cublas64_12.dll`` was held open by a llama-server left from an earlier
+    session did not fail cleanly -- the extractor clears its destination with
+    ``rmtree`` first, and ``rmtree`` walks a folder file by file, so it deleted
+    its way to the locked DLL and stopped. An install with a working llama.cpp
+    before the press had none after it, and the panel came back with an empty
+    runtime box.
+    """
+
+    def prepared(self, root):
+        """A finished new build, and a runtime folder in place to be replaced."""
+        runtime = root / "runtime"
+        make_build(runtime)
+        (runtime / "cublas64_12.dll").write_bytes(b"old")
+        incoming = root / "incoming"
+        make_build(incoming)
+        (incoming / "cublas64_12.dll").write_bytes(b"new")
+        return incoming, runtime
+
+    def test_a_runtime_that_cannot_be_moved_aside_is_not_touched(self, root, monkeypatch):
+        incoming, runtime = self.prepared(root)
+        original = Path.rename
+
+        def refuse(self, target):
+            if self == runtime:
+                raise PermissionError(
+                    r"[WinError 5] Access is denied: 'runtime\\cublas64_12.dll'")
+            return original(self, target)
+
+        monkeypatch.setattr(Path, "rename", refuse)
+
+        with pytest.raises(setup.SetupError, match="in use"):
+            setup._replace_directory(incoming, runtime)
+
+        assert (runtime / "llama-server").is_file()
+        assert (runtime / "cublas64_12.dll").read_bytes() == b"old"
+
+    def test_a_swap_that_fails_after_the_move_puts_the_old_one_back(self, root, monkeypatch):
+        """The window where the runtime is neither the old one nor the new one.
+        It is one rename wide, and it is the one that loses a build."""
+        incoming, runtime = self.prepared(root)
+        original = Path.rename
+
+        def refuse(self, target):
+            if self == incoming:
+                raise PermissionError("[WinError 5] Access is denied")
+            return original(self, target)
+
+        monkeypatch.setattr(Path, "rename", refuse)
+
+        with pytest.raises(setup.SetupError):
+            setup._replace_directory(incoming, runtime)
+
+        assert (runtime / "cublas64_12.dll").read_bytes() == b"old"
+        assert setup.detect() is not None
+
+    def test_a_replacement_that_works_leaves_the_new_build_and_no_leftovers(self, root):
+        incoming, runtime = self.prepared(root)
+
+        setup._replace_directory(incoming, runtime)
+
+        assert (runtime / "cublas64_12.dll").read_bytes() == b"new"
+        assert not incoming.exists()
+        assert not (root / "runtime.previous").exists()
+
+    def test_a_download_that_cannot_replace_the_runtime_keeps_it(self, root, monkeypatch):
+        """The whole route, not just the swap: the archives are extracted
+        beside the runtime, so the one in place is never opened until there is
+        a complete build to put in its place."""
+        import zipfile
+
+        runtime = root / "runtime"
+        make_build(runtime)
+        archive = root / "build.zip"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("llama-server", "#!/bin/sh\nexit 0\n")
+            bundle.writestr("libllama.so", "x")
+        monkeypatch.setattr(setup, "downloadable", lambda: True)
+        component = types.SimpleNamespace(destination="runtime.zip")
+        monkeypatch.setattr("prompt_master.provisioning.installer.load_components",
+                            lambda: {"runtime": component})
+        monkeypatch.setattr("prompt_master.provisioning.installer.runtime_component_ids",
+                            lambda gpu: ["runtime"])
+        monkeypatch.setattr("prompt_master.provisioning.downloader.download",
+                            lambda component, destination, report: archive)
+        original = Path.rename
+
+        def refuse(self, target):
+            if self == runtime:
+                raise PermissionError(r"[WinError 5] Access is denied: 'cublas64_12.dll'")
+            return original(self, target)
+
+        monkeypatch.setattr(Path, "rename", refuse)
+
+        with pytest.raises(setup.SetupError, match="in use"):
+            setup.download()
+
+        assert (runtime / "llama-server").is_file()
+        assert not (root / ".runtime.incoming").exists()
 
 
 class TestRecord:

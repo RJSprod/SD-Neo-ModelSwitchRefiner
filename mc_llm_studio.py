@@ -1106,27 +1106,44 @@ def _device_for(value):
 
 
 def _apply_runtime(path, device_value):
-    """Adopt the build at ``path`` and record it. The panel's first step."""
+    """Adopt the build at ``path`` and record it, with the device beside it.
+
+    The panel's first step, and also the only way to change the device -- so an
+    empty box is not a missing answer when there is already a runtime in place.
+    It means "this one", and the button is then doing the other half of its
+    job: recording which device the model runs on. Making somebody re-enter a
+    path to switch to mixed mode is how a device change turned into a runtime
+    replacement, and a runtime replacement is the operation that can fail.
+    """
     import mc_llm_runtime
     import mc_llm_setup
 
-    try:
-        chosen = mc_llm_files.resolve_runtime(path)
-    except mc_llm_files.PathError as exc:
-        # Not an error in the sense the panel colours red: nothing was attempted
-        # and the sentence says what to do instead.
-        return ui.notice(str(exc), "warn"), gr.update(), gr.update()
+    source = mc_llm_files.to_path(path)
+    if source is None:
+        source = mc_llm_setup.recorded_runtime() or mc_llm_setup.detect()
+        if source is None:
+            return (ui.notice("Enter the path to llama-server, or to the folder holding it, "
+                              "or press Browse to find it.", "warn"),
+                    gr.update(), gr.update())
+    else:
+        try:
+            source = mc_llm_files.resolve_runtime(source).path
+        except mc_llm_files.PathError as exc:
+            # Not an error in the sense the panel colours red: nothing was
+            # attempted and the sentence says what to do instead.
+            return ui.notice(str(exc), "warn"), gr.update(), gr.update()
 
-    # Stopped *before* the copy, not after it. The running server holds the
-    # build it was started with -- on Windows it holds every DLL beside it open,
-    # and adopting a build replaces that whole folder, so a server still up made
-    # the copy fail with "[WinError 5] Access is denied:
-    # ...\\runtime\\cublas64_12.dll" and left the runtime half-swapped. The stop
-    # was already here; it was in the wrong place, which is a thing that only
-    # shows on the platform that locks open files.
-    mc_llm_runtime.runtime.stop()
+    # Stopped *before* the copy, not after it, and only when there is a copy.
+    # The running server holds the build it was started with -- on Windows it
+    # holds every DLL beside it open, and adopting a build from elsewhere
+    # replaces that whole folder, so a server still up made the copy fail with
+    # "[WinError 5] Access is denied: ...\\runtime\\cublas64_12.dll". A build
+    # already in place is not copied at all, and unloading a model to record a
+    # device beside it would cost a reload for nothing.
+    if not mc_llm_setup.in_place(source):
+        mc_llm_runtime.runtime.stop()
     try:
-        executable, note = mc_llm_setup.adopt(chosen.path)
+        executable, note = mc_llm_setup.adopt(source)
         mc_llm_setup.record(executable, _device_for(device_value))
     except Exception as exc:
         return ui.notice(ui.failure(exc), "error"), gr.update(), gr.update()

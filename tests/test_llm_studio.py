@@ -637,18 +637,62 @@ class TestSwappingTheRuntime:
         import mc_llm_setup
         import mc_llm_studio
 
+        elsewhere = store.parent / "elsewhere" / "llama-server"
         order = []
         monkeypatch.setattr(mc_llm_runtime.runtime, "stop", lambda: order.append("stop"))
         monkeypatch.setattr(mc_llm_files, "resolve_runtime",
-                            lambda path: types.SimpleNamespace(path=store / "llama-server"))
+                            lambda path: types.SimpleNamespace(path=elsewhere))
         monkeypatch.setattr(mc_llm_setup, "adopt",
                             lambda source: (order.append("copy"), (source, "Copied."))[1])
         monkeypatch.setattr(mc_llm_setup, "record",
                             lambda executable, device=None: order.append("record"))
 
-        mc_llm_studio._apply_runtime(str(store / "llama-server"), "0")
+        mc_llm_studio._apply_runtime(str(elsewhere), "gpu:0")
 
         assert order == ["stop", "copy", "record"]
+
+    def test_a_build_already_in_place_is_not_unloaded_to_record_a_device(
+            self, host, store, monkeypatch):
+        """Changing the device replaces no files, and a stop here costs a
+        reload of the whole model to record one line of state."""
+        import mc_llm_files
+        import mc_llm_runtime
+        import mc_llm_setup
+        import mc_llm_studio
+
+        order = []
+        monkeypatch.setattr(mc_llm_runtime.runtime, "stop", lambda: order.append("stop"))
+        monkeypatch.setattr(mc_llm_files, "resolve_runtime",
+                            lambda path: types.SimpleNamespace(path=store / "runtime"
+                                                               / "llama-server"))
+        monkeypatch.setattr(mc_llm_setup, "adopt",
+                            lambda source: (source, "Using the build already in place."))
+        monkeypatch.setattr(mc_llm_setup, "record",
+                            lambda executable, device=None: order.append("record"))
+
+        mc_llm_studio._apply_runtime(str(store / "runtime" / "llama-server"), "mixed:0")
+
+        assert order == ["record"]
+
+    def test_an_empty_box_records_the_device_against_the_runtime_in_place(
+            self, host, store, monkeypatch):
+        """The only way to change the device is this button, so an empty box
+        with a runtime already recorded means "this one" rather than "you
+        forgot something"."""
+        import mc_llm_setup
+        import mc_llm_studio
+
+        in_place = store / "runtime" / "llama-server"
+        in_place.parent.mkdir(parents=True)
+        in_place.write_bytes(b"")
+        recorded = []
+        monkeypatch.setattr(mc_llm_setup, "record",
+                            lambda executable, device=None: recorded.append((executable, device)))
+
+        notice, path, _model = mc_llm_studio._apply_runtime("", "mixed:0")
+
+        assert recorded and recorded[0][0] == in_place
+        assert "already in place" in notice
 
     def test_the_download_stops_it_too(self, host, store, monkeypatch):
         """The pinned build is extracted over the same folder."""

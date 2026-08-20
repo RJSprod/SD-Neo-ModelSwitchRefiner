@@ -174,6 +174,25 @@ def _no_download_reason() -> str:
 # --------------------------------------------------------------------------- #
 
 
+def in_place(path: str | Path) -> bool:
+    """Whether ``path`` is already under the install root.
+
+    The question behind it is "will this replace any files?", which is what
+    decides whether a running server has to be stopped first and whether a
+    failure can cost somebody the build they had. Adopting something already in
+    place copies nothing, so it does neither.
+    """
+    candidate = mc_llm_files.to_path(path)
+    if candidate is None:
+        return False
+    try:
+        root = mc_llm_paths.app_paths().root.resolve()
+        resolved = candidate.resolve()
+    except OSError:
+        return False
+    return root == resolved or root in resolved.parents
+
+
 def adopt(source: str | Path) -> tuple[Path, str]:
     """Place an existing llama.cpp build under the install root.
 
@@ -201,10 +220,9 @@ def adopt(source: str | Path) -> tuple[Path, str]:
         )
 
     paths = mc_llm_paths.app_paths()
-    root = paths.root.resolve()
     resolved = executable.resolve()
 
-    if root == resolved or root in resolved.parents:
+    if in_place(resolved):
         # Already inside the install root -- nothing to copy, and copying would
         # duplicate a build the user deliberately put there.
         return resolved, f"Using the llama.cpp build already in place at {resolved}."
@@ -291,18 +309,76 @@ def in_use_error(destination: Path, exc: BaseException) -> SetupError:
     server first; this is what is said when something else is holding it.
     """
     return SetupError(
-        f"{destination} is in use and could not be replaced ({exc}). Something still has "
-        f"the runtime open — press Unload in LLM Studio, close any other copy of the WebUI, "
-        f"and try again."
+        f"{destination} is in use and could not be replaced ({exc}). {_who_holds_it()} "
+        f"Nothing was changed — the runtime that was there is still there."
     )
+
+
+def _who_holds_it() -> str:
+    """Who to go and stop, named when the process list will say.
+
+    "Something still has the runtime open" is true and useless. A llama-server
+    left over from a previous session is the usual answer and the invisible
+    one: it was started in its own process group with no console window, so it
+    outlives the WebUI that started it and shows up nowhere but Task Manager.
+    Naming it turns the sentence into an instruction.
+    """
+    try:
+        import mc_llm_runtime
+
+        stray = mc_llm_runtime.strays()
+    except Exception:
+        logger.debug("Model Chain: could not look for stray llama-servers", exc_info=True)
+        stray = []
+    if stray:
+        which = ", ".join(str(pid) for pid in stray)
+        return (f"A llama-server from an earlier session is still running (PID {which}) and "
+                f"holds the files in it open — press Unload in LLM Studio to stop it, then "
+                f"try again.")
+    return ("Something still has the runtime open — press Unload in LLM Studio, close any "
+            "other copy of the WebUI, and try again.")
+
+
+def _replace_directory(prepared: Path, destination: Path) -> None:
+    """Swap ``prepared`` into place as ``destination``, or change nothing at all.
+
+    The rule this exists to keep is that a replacement which cannot happen
+    leaves the install exactly as it was. Deleting the destination first breaks
+    it: ``rmtree`` walks a folder file by file, so a runtime whose
+    ``cublas64_12.dll`` is held open by something is not left alone, it is left
+    half-deleted -- and an install that had a working llama.cpp before the
+    attempt has none after it. A rename fails whole or not at all, which is why
+    the old directory is moved aside rather than removed, and put back if the
+    new one cannot take its place.
+    """
+    previous = destination.with_name(destination.name + ".previous")
+    shutil.rmtree(previous, ignore_errors=True)
+    moved = False
+    try:
+        if destination.exists():
+            destination.rename(previous)
+            moved = True
+        prepared.rename(destination)
+    except OSError as exc:
+        if moved and not destination.exists():
+            try:
+                previous.rename(destination)
+            except OSError:
+                logger.error("Model Chain: could not put %s back after a failed replacement; "
+                             "it is at %s", destination, previous, exc_info=True)
+        if isinstance(exc, PermissionError):
+            raise in_use_error(destination, exc) from None
+        raise SetupError(f"{destination} could not be replaced ({exc})") from None
+    shutil.rmtree(previous, ignore_errors=True)
 
 
 def _copy_tree(source: Path, destination: Path) -> Path:
     """Copy ``source`` into ``destination``, replacing what was there.
 
-    Through a staging directory and a rename, for the reason
-    ``extract_zips_atomic`` uses one: a half-copied runtime that a later launch
-    finds and tries to start is worse than no runtime at all.
+    Through a staging directory, so that a half-copied runtime a later launch
+    finds and tries to start is never what is in place, and through
+    :func:`_replace_directory`, so that a swap which cannot happen leaves the
+    build that is there where it is.
     """
     import tempfile
 
@@ -312,12 +388,7 @@ def _copy_tree(source: Path, destination: Path) -> Path:
     try:
         target = staging / "build"
         shutil.copytree(source, target)
-        previous = destination.with_name(destination.name + ".previous")
-        shutil.rmtree(previous, ignore_errors=True)
-        if destination.exists():
-            destination.rename(previous)
-        target.rename(destination)
-        shutil.rmtree(previous, ignore_errors=True)
+        _replace_directory(target, destination)
     except PermissionError as exc:
         raise in_use_error(destination, exc) from None
     finally:
@@ -383,10 +454,21 @@ def download(device=None, on_status=None, on_progress=None) -> Path:
     say("Extracting the runtime…")
     tick(share * len(ids))
     destination = paths.root / RUNTIME_DIRNAME
+    # Extracted beside the runtime and swapped in, rather than over it. The
+    # vendored extractor clears its destination with ``rmtree`` before moving
+    # the new build into place, and a runtime with a file held open is then
+    # half-deleted rather than left alone: a download that failed took the
+    # working llama.cpp with it. Nothing here touches the old directory until
+    # there is a complete new one to put in its place.
+    incoming = paths.root / f".{RUNTIME_DIRNAME}.incoming"
+    shutil.rmtree(incoming, ignore_errors=True)
     try:
-        extract_zips_atomic(archives, destination)
-    except PermissionError as exc:
-        raise in_use_error(destination, exc) from None
+        extract_zips_atomic(archives, incoming)
+        if _server_in(incoming) is None:
+            raise SetupError("The downloaded archives contain no llama-server executable")
+        _replace_directory(incoming, destination)
+    finally:
+        shutil.rmtree(incoming, ignore_errors=True)
     executable = _server_in(destination)
     if executable is None:
         raise SetupError("The downloaded archives contain no llama-server executable")
