@@ -1314,6 +1314,25 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
     # A continuation is joined to what is already there, and the model is not
     # reliable about starting with the space that needs.
     join_space = bool(opening) and not opening[-1].isspace()
+
+    kept = False
+
+    def keep() -> None:
+        """Put what the message holds on to disk. Idempotent, and never raises.
+
+        Every exit from the loop below goes through this, including the one
+        that cannot yield anything afterwards, which is why it is a function
+        rather than three copies of the same three lines.
+        """
+        nonlocal kept
+        try:
+            _tidy(conversation, index)
+            conversation.retitle()
+            store.save(conversation)
+            kept = True
+        except Exception:
+            logger.warning("Model Chain: could not save the conversation", exc_info=True)
+
     rows, positions = _view(conversation)
     yield cancel, rows, positions, "", None, ui.working("Starting…"), *busy
 
@@ -1333,9 +1352,7 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
             elif event.kind in (sessions.DONE, sessions.CANCELLED):
                 whole = event.text if event.kind == sessions.DONE and not opening else streamed
                 message.text = clean_reply(whole or streamed, character, persona)
-                _tidy(conversation, index)
-                conversation.retitle()
-                store.save(conversation)
+                keep()
                 note = "Stopped." if event.kind == sessions.CANCELLED else "Reply complete."
                 rows, positions = _view(conversation)
                 yield (cancel, rows, positions, "", None,
@@ -1345,19 +1362,36 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
             elif event.kind == sessions.FAILED:
                 # The half-written reply goes; your turn stays, so the message
                 # you typed is not lost to a server that would not start.
-                _tidy(conversation, index)
-                store.save(conversation)
+                keep()
                 rows, positions = _view(conversation)
                 yield cancel, rows, positions, "", None, ui.notice(event.text, "error"), *idle
                 return
     except Exception as exc:
-        _tidy(conversation, index)
-        store.save(conversation)
+        keep()
         rows, positions = _view(conversation)
         yield cancel, rows, positions, "", None, ui.notice(ui.failure(exc), "error"), *idle
         return
+    finally:
+        # The reply you were reading has to survive whatever ended this
+        # generator, and one of the things that ends it cannot be caught above.
+        #
+        # Stop is wired as ``cancels=``, and what that does is *close* the
+        # generator where it stands -- which raises GeneratorExit, a
+        # BaseException, straight past the ``except Exception``. So the branch
+        # that saves never ran: the reply stayed on screen, because Gradio
+        # keeps the rows it was last given, and was never written to the
+        # thread. It came back missing the next time the thread was opened,
+        # and the transcript showed a message of yours with nothing under it.
+        # The same hole swallowed a browser refresh and a dropped queue entry.
+        #
+        # A ``finally`` runs on all of them. Saving is not yielding, so it is
+        # safe here: yielding during a GeneratorExit would be a RuntimeError,
+        # writing a file is not. What is saved is what the message holds --
+        # a partial reply is a real reply, which is what the CANCELLED branch
+        # already decided.
+        if not kept:
+            keep()
 
-    store.save(conversation)
     rows, positions = _view(conversation)
     yield cancel, rows, positions, "", None, ui.notice("Reply complete."), *idle
 

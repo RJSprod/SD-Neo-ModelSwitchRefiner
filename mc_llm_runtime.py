@@ -38,6 +38,7 @@ reloading it somewhere else.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
@@ -1350,6 +1351,21 @@ class Runtime:
                           paths.logs / "llama-server.log", gpu_layers=NO_OFFLOAD)
             process.wait_ready(CPU_READY_TIMEOUT)
         except Exception:
+            # The process is stopped before the handle to it is dropped, which
+            # is the whole point of this branch and is what it was missing.
+            #
+            # ``start`` can succeed and ``wait_ready`` still fail -- a server
+            # that came up and then died, or one that took longer than the
+            # timeout. What was left behind then was a live llama-server that
+            # nothing had a handle to any more: started in its own process
+            # group and with no window, so it outlived the WebUI, held its
+            # CUDA context and its weights, and was invisible outside Task
+            # Manager. The panel said "Unloaded" -- truthfully, about the
+            # runtime it knew about -- while the card stayed full and neither
+            # Unload here nor Forge's own unload could reach the thing holding
+            # it. The main start path has always stopped its process on this
+            # failure; this one said "stopping it instead" and stopped nothing.
+            _discard(process, "the LLM could not be moved to system RAM")
             logger.warning("Model Chain: could not move the LLM to system RAM; stopping it instead",
                            exc_info=True)
             return 0
@@ -1449,3 +1465,134 @@ mc_broker.register_reclaimer(mc_broker.FAMILY_LLM, runtime)
 def shutdown() -> None:
     """Stop the server. Called from ``on_script_unloaded``."""
     runtime.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Servers this extension started and no longer owns
+# --------------------------------------------------------------------------- #
+
+SERVER_ALIAS = "prompt-master"
+"""``--alias`` on every llama-server this extension starts.
+
+It is set in ``prompt_master/inference/llama_process.py``, which is vendored
+and not ours to edit, so the value is restated here and a test asserts the two
+still agree. It is what makes one of these processes recognisable as ours in a
+process list, which is the whole of how a stray is found.
+"""
+
+
+def _discard(process, reason: str) -> None:
+    """Stop a server this module is about to lose its handle to.
+
+    Never raises: every caller is already on a failure path and has something
+    more useful to report than the failure of the cleanup. What it must not do
+    is return without trying, because the handle is gone after this and nothing
+    will ever be able to try again.
+    """
+    try:
+        process.stop()
+    except Exception:
+        logger.warning("Model Chain: could not stop llama-server after %s; it may still be "
+                       "running and holding VRAM", reason, exc_info=True)
+
+
+def _own_pid() -> int:
+    process = runtime._process
+    inner = getattr(process, "process", None) if process is not None else None
+    return int(getattr(inner, "pid", 0) or 0)
+
+
+def strays() -> list[int]:
+    """llama-server processes carrying our alias that this WebUI does not own.
+
+    A stray is what is left when a server outlives the thing that started it:
+    the WebUI was killed rather than closed, a start failed in a way that lost
+    the handle, or a previous version of this extension dropped one. It is
+    started in its own process group and with no console window, so it survives
+    its parent and is invisible outside Task Manager -- and it is still holding
+    a CUDA context and a model's worth of weights. What that looks like from
+    the tab is a card with no free VRAM, a chip reading "Unloaded", and an
+    Unload button that truthfully reports it has nothing to stop.
+
+    Never raises, and returns nothing rather than guessing when the process
+    list cannot be read: psutil may be absent, and a process belonging to
+    another user answers ``AccessDenied`` rather than a command line.
+    """
+    try:
+        import psutil
+    except Exception:
+        logger.debug("Model Chain: psutil is not available, so strays cannot be looked for",
+                     exc_info=True)
+        return []
+
+    ours = _own_pid()
+    found: list[int] = []
+    try:
+        for process in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                if process.info["pid"] in (ours, os.getpid()):
+                    continue
+                name = (process.info.get("name") or "").casefold()
+                if "llama-server" not in name:
+                    continue
+                command = process.info.get("cmdline") or []
+                # The alias has to be the *value* of --alias rather than a word
+                # somewhere on the line, so that a path which happens to
+                # contain it cannot make somebody else's server look like ours.
+                if SERVER_ALIAS not in _alias_of(command):
+                    continue
+                found.append(int(process.info["pid"]))
+            except Exception:
+                continue
+    except Exception:
+        logger.debug("Model Chain: could not read the process list", exc_info=True)
+        return []
+    return found
+
+
+def _alias_of(command) -> str:
+    """The ``--alias`` argument on a command line, or ""."""
+    arguments = [str(part) for part in (command or [])]
+    for position, part in enumerate(arguments[:-1]):
+        if part == "--alias":
+            return arguments[position + 1]
+    return ""
+
+
+def release_strays() -> tuple[int, int]:
+    """Stop every stray, and say how many and how much VRAM came back.
+
+    Deliberately not automatic. Two WebUIs sharing one card would each see the
+    other's server as a stray, and a startup that quietly killed it would be a
+    worse bug than the one this fixes. So it runs from Unload, where somebody
+    has asked for their VRAM back and this is the only remaining thing holding
+    it.
+    """
+    pids = strays()
+    if not pids:
+        return 0, 0
+    try:
+        import psutil
+    except Exception:
+        return 0, 0
+
+    before = mc_broker.free_vram_bytes()
+    stopped = 0
+    for pid in pids:
+        try:
+            process = psutil.Process(pid)
+            process.terminate()
+            try:
+                process.wait(10)
+            except Exception:
+                process.kill()
+                process.wait(5)
+            stopped += 1
+        except Exception:
+            logger.warning("Model Chain: could not stop the stray llama-server at pid %s", pid,
+                           exc_info=True)
+    freed = max(mc_broker.free_vram_bytes() - before, 0)
+    if stopped:
+        logger.info("Model Chain: stopped %d stray llama-server process(es)%s", stopped,
+                    f", {freed / _GB:.1f} GB of VRAM released" if freed else "")
+    return stopped, freed
