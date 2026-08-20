@@ -1,0 +1,57 @@
+{
+  "source": "car",
+  "creativity": 10,
+  "example_recipe": [
+    {
+      "axis": "medium",
+      "id": "oil_impasto",
+      "tier": "extreme"
+    },
+    {
+      "axis": "style",
+      "id": "maximalist",
+      "tier": "extreme"
+    },
+    {
+      "axis": "lighting",
+      "id": "chiaroscuro",
+      "tier": "extreme"
+    },
+    {
+      "axis": "composition",
+      "id": "negative_space",
+      "tier": "extreme"
+    },
+    {
+      "axis": "viewpoint",
+      "id": "low_angle",
+      "tier": "extreme"
+    },
+    {
+      "axis": "lens_zoom",
+      "id": "wide24",
+      "tier": "extreme"
+    },
+    {
+      "axis": "palette",
+      "id": "warm_earth",
+      "tier": "extreme"
+    },
+    {
+      "axis": "texture",
+      "id": "impasto",
+      "tier": "extreme"
+    },
+    {
+      "axis": "mood",
+      "id": "monumental",
+      "tier": "extreme"
+    },
+    {
+      "axis": "detail_emphasis",
+      "id": "materials",
+      "tier": "extreme"
+    }
+  ],
+  "intent": "Maximum art direction. Another random seed should choose a materially different compatible set."
+}

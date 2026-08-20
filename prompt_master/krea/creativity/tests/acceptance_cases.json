@@ -1,0 +1,55 @@
+{
+  "acceptance_cases": [
+    {
+      "id": "one_call",
+      "assert": "One explicit Creative roll invokes the Krea writer exactly once."
+    },
+    {
+      "id": "no_planner_llm",
+      "assert": "Creative Director makes zero model calls."
+    },
+    {
+      "id": "no_live",
+      "assert": "Typing/stopping does not start a roll."
+    },
+    {
+      "id": "natural_omit",
+      "axis": "texture",
+      "mode": "natural",
+      "assert": "No texture directive appears."
+    },
+    {
+      "id": "fixed_repeat",
+      "axis": "texture",
+      "mode": "fixed",
+      "fixed_id": "paper_grain",
+      "assert": "Fixed variant repeats across random seeds unless source conflicts."
+    },
+    {
+      "id": "source_wins",
+      "source": "oil painting of a car",
+      "axis": "medium",
+      "mode": "vary",
+      "assert": "Medium is not replaced."
+    },
+    {
+      "id": "c2_tier",
+      "creativity": 2,
+      "assert": "All varied items use light tier and active Vary count is 1-2."
+    },
+    {
+      "id": "c10_tier",
+      "creativity": 10,
+      "assert": "All eligible Vary axes activate and use extreme tier."
+    },
+    {
+      "id": "fixed_seed",
+      "assert": "Same fixed Creative seed + same inputs reproduces local recipe and derived LLM seed."
+    },
+    {
+      "id": "anti_repeat",
+      "creativity": 10,
+      "assert": "Recent variant IDs are maximally penalized when alternatives exist."
+    }
+  ]
+}

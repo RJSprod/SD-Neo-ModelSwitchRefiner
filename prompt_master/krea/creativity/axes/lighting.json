@@ -1,0 +1,303 @@
+{
+  "axis": "lighting",
+  "entries": [
+    {
+      "id": "soft_daylight",
+      "label": "Soft daylight",
+      "family": "natural",
+      "aliases": [
+        "soft daylight"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "natural"
+      ],
+      "expressions": {
+        "light": "a light soft diffuse daylight",
+        "moderate": "a deliberate soft diffuse daylight, with gentle tonal modeling, broad fill, subtle reflections, and quiet shadow transitions",
+        "strong": "a pronounced soft diffuse daylight, strongly emphasizing gentle tonal modeling, broad fill, subtle reflections, and quiet shadow transitions",
+        "extreme": "an extreme soft diffuse daylight interpretation, with gentle tonal modeling, broad fill, subtle reflections, and quiet shadow transitions; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "golden_hour",
+      "label": "Golden hour",
+      "family": "natural",
+      "aliases": [
+        "golden hour"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "natural"
+      ],
+      "expressions": {
+        "light": "a light golden-hour light",
+        "moderate": "a deliberate golden-hour light, with long sculptural shadows, warm rim illumination, reflective bounce, and saturated atmospheric depth",
+        "strong": "a pronounced golden-hour light, strongly emphasizing long sculptural shadows, warm rim illumination, reflective bounce, and saturated atmospheric depth",
+        "extreme": "an extreme golden-hour light interpretation, with long sculptural shadows, warm rim illumination, reflective bounce, and saturated atmospheric depth; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "blue_hour",
+      "label": "Blue hour",
+      "family": "natural",
+      "aliases": [
+        "blue hour"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "natural"
+      ],
+      "expressions": {
+        "light": "a light blue-hour ambience",
+        "moderate": "a deliberate blue-hour ambience, with cool low-level ambient light, warm practical contrast, delicate sky color, and subdued reflective surfaces",
+        "strong": "a pronounced blue-hour ambience, strongly emphasizing cool low-level ambient light, warm practical contrast, delicate sky color, and subdued reflective surfaces",
+        "extreme": "an extreme blue-hour ambience interpretation, with cool low-level ambient light, warm practical contrast, delicate sky color, and subdued reflective surfaces; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "chiaroscuro",
+      "label": "Chiaroscuro",
+      "family": "dramatic",
+      "aliases": [
+        "chiaroscuro"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "dramatic"
+      ],
+      "expressions": {
+        "light": "a light chiaroscuro lighting",
+        "moderate": "a deliberate chiaroscuro lighting, with narrow highlight hierarchy, deep shadow masses, sculptural modeling, and theatrical light concentration",
+        "strong": "a pronounced chiaroscuro lighting, strongly emphasizing narrow highlight hierarchy, deep shadow masses, sculptural modeling, and theatrical light concentration",
+        "extreme": "an extreme chiaroscuro lighting interpretation, with narrow highlight hierarchy, deep shadow masses, sculptural modeling, and theatrical light concentration; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "direct_flash",
+      "label": "Direct flash",
+      "family": "flash",
+      "aliases": [
+        "direct flash"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "flash"
+      ],
+      "expressions": {
+        "light": "a light direct-flash lighting",
+        "moderate": "a deliberate direct-flash lighting, with hard on-axis highlights, abrupt falloff, near-black ambient depth, and raw snapshot character",
+        "strong": "a pronounced direct-flash lighting, strongly emphasizing hard on-axis highlights, abrupt falloff, near-black ambient depth, and raw snapshot character",
+        "extreme": "an extreme direct-flash lighting interpretation, with hard on-axis highlights, abrupt falloff, near-black ambient depth, and raw snapshot character; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "neon",
+      "label": "Neon practicals",
+      "family": "colored",
+      "aliases": [
+        "neon lighting"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "colored"
+      ],
+      "expressions": {
+        "light": "a light neon practical lighting",
+        "moderate": "a deliberate neon practical lighting, with saturated color spill, competing color temperatures, reflective accents, and layered luminous depth",
+        "strong": "a pronounced neon practical lighting, strongly emphasizing saturated color spill, competing color temperatures, reflective accents, and layered luminous depth",
+        "extreme": "an extreme neon practical lighting interpretation, with saturated color spill, competing color temperatures, reflective accents, and layered luminous depth; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "overcast",
+      "label": "Overcast",
+      "family": "natural",
+      "aliases": [
+        "overcast"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "natural"
+      ],
+      "expressions": {
+        "light": "a light overcast illumination",
+        "moderate": "a deliberate overcast illumination, with low contrast, cool tonal separation, soft surface detail, and quiet documentary realism",
+        "strong": "a pronounced overcast illumination, strongly emphasizing low contrast, cool tonal separation, soft surface detail, and quiet documentary realism",
+        "extreme": "an extreme overcast illumination interpretation, with low contrast, cool tonal separation, soft surface detail, and quiet documentary realism; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "backlight",
+      "label": "Backlight",
+      "family": "dramatic",
+      "aliases": [
+        "backlit",
+        "backlight"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "dramatic"
+      ],
+      "expressions": {
+        "light": "a light strong backlighting",
+        "moderate": "a deliberate strong backlighting, with luminous rim separation, partial silhouette, controlled flare, and atmospheric scattering",
+        "strong": "a pronounced strong backlighting, strongly emphasizing luminous rim separation, partial silhouette, controlled flare, and atmospheric scattering",
+        "extreme": "an extreme strong backlighting interpretation, with luminous rim separation, partial silhouette, controlled flare, and atmospheric scattering; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "high_key",
+      "label": "High-key studio",
+      "family": "studio",
+      "aliases": [
+        "high key"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "studio"
+      ],
+      "expressions": {
+        "light": "a light high-key studio lighting",
+        "moderate": "a deliberate high-key studio lighting, with large-source softness, controlled fill, clean speculars, and crisp material readability",
+        "strong": "a pronounced high-key studio lighting, strongly emphasizing large-source softness, controlled fill, clean speculars, and crisp material readability",
+        "extreme": "an extreme high-key studio lighting interpretation, with large-source softness, controlled fill, clean speculars, and crisp material readability; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "hard_sun",
+      "label": "Hard sun",
+      "family": "natural",
+      "aliases": [
+        "hard sunlight"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "natural",
+        "hard"
+      ],
+      "expressions": {
+        "light": "a light hard midday sunlight",
+        "moderate": "a deliberate hard midday sunlight, with razor cast shadows, bright exposed surfaces, graphic geometry, and unforgiving local contrast",
+        "strong": "a pronounced hard midday sunlight, strongly emphasizing razor cast shadows, bright exposed surfaces, graphic geometry, and unforgiving local contrast",
+        "extreme": "an extreme hard midday sunlight interpretation, with razor cast shadows, bright exposed surfaces, graphic geometry, and unforgiving local contrast; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "firelight",
+      "label": "Firelight",
+      "family": "warm",
+      "aliases": [
+        "firelight",
+        "candlelight"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "warm"
+      ],
+      "expressions": {
+        "light": "a light localized firelight",
+        "moderate": "a deliberate localized firelight, with amber flicker, rapid falloff, glowing highlights, and layered warm shadow color",
+        "strong": "a pronounced localized firelight, strongly emphasizing amber flicker, rapid falloff, glowing highlights, and layered warm shadow color",
+        "extreme": "an extreme localized firelight interpretation, with amber flicker, rapid falloff, glowing highlights, and layered warm shadow color; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "projector",
+      "label": "Projected light",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "graphic"
+      ],
+      "expressions": {
+        "light": "a light projected patterned light",
+        "moderate": "a deliberate projected patterned light, with shaped beams, image/pattern spill, interrupted surfaces, and deliberate graphic illumination",
+        "strong": "a pronounced projected patterned light, strongly emphasizing shaped beams, image/pattern spill, interrupted surfaces, and deliberate graphic illumination",
+        "extreme": "an extreme projected patterned light interpretation, with shaped beams, image/pattern spill, interrupted surfaces, and deliberate graphic illumination; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "underlight",
+      "label": "Underlighting",
+      "family": "dramatic",
+      "aliases": [],
+      "min_creativity": 4,
+      "weight": 1.0,
+      "tags": [
+        "dramatic",
+        "uncanny"
+      ],
+      "expressions": {
+        "light": "a light underlighting",
+        "moderate": "a deliberate underlighting, with upward-cast shadows, unusual facial/form modeling, and an uncanny inversion of normal light direction",
+        "strong": "a pronounced underlighting, strongly emphasizing upward-cast shadows, unusual facial/form modeling, and an uncanny inversion of normal light direction",
+        "extreme": "an extreme underlighting interpretation, with upward-cast shadows, unusual facial/form modeling, and an uncanny inversion of normal light direction; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "silhouette",
+      "label": "Silhouette light",
+      "family": "dramatic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "dramatic"
+      ],
+      "expressions": {
+        "light": "a light silhouette lighting",
+        "moderate": "a deliberate silhouette lighting, with bright background separation, reduced foreground detail, and strong shape readability",
+        "strong": "a pronounced silhouette lighting, strongly emphasizing bright background separation, reduced foreground detail, and strong shape readability",
+        "extreme": "an extreme silhouette lighting interpretation, with bright background separation, reduced foreground detail, and strong shape readability; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "window_slash",
+      "label": "Window slash",
+      "family": "dramatic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "dramatic"
+      ],
+      "expressions": {
+        "light": "a light hard window-slice lighting",
+        "moderate": "a deliberate hard window-slice lighting, with narrow directional bands, graphic cast shadows, dust/air visibility, and selective illuminated detail",
+        "strong": "a pronounced hard window-slice lighting, strongly emphasizing narrow directional bands, graphic cast shadows, dust/air visibility, and selective illuminated detail",
+        "extreme": "an extreme hard window-slice lighting interpretation, with narrow directional bands, graphic cast shadows, dust/air visibility, and selective illuminated detail; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "softbox_close",
+      "label": "Close softbox",
+      "family": "studio",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "studio"
+      ],
+      "expressions": {
+        "light": "a light close softbox illumination",
+        "moderate": "a deliberate close softbox illumination, with wraparound highlights, rapid soft falloff, clean surface modeling, and intimate studio control",
+        "strong": "a pronounced close softbox illumination, strongly emphasizing wraparound highlights, rapid soft falloff, clean surface modeling, and intimate studio control",
+        "extreme": "an extreme close softbox illumination interpretation, with wraparound highlights, rapid soft falloff, clean surface modeling, and intimate studio control; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    }
+  ]
+}

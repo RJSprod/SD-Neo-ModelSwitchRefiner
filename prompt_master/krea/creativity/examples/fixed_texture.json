@@ -1,0 +1,11 @@
+{
+  "source": "car",
+  "creativity": 10,
+  "setting": {
+    "texture": {
+      "mode": "fixed",
+      "fixed_id": "paper_grain"
+    }
+  },
+  "expected": "paper_grain repeats every roll unless explicit source text conflicts."
+}

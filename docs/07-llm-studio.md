@@ -18,16 +18,16 @@ at commit `eb80c60`, with two directories removed and **no edits at all**:
   chooser and setup wizard;
 - `app.py` — the standalone Qt entry point.
 
-Everything else was byte-identical, which is the point (§17): the prompt engine,
+Everything else is byte-identical, which is the point (§17): the prompt engine,
 its vendored upstream, the MiniMax enhancer, the chat stores, the llama.cpp
 client and the provisioning pipeline still `diff -r` clean against their
 sources, and the parity tooling those trees carry still describes them
 accurately. Updating means re-copying and re-deleting, not merging.
 
-One edit has since been made, to `inference/llama_client.py`, for the Krea
-Creativity control; it is recorded in `prompt_master/VENDORED_FROM.txt` and in
-`docs/08-krea-live.md`, and updating now means re-copying, re-deleting and
-re-applying that one diff.
+`krea/creativity/` is a second vendored package under the first, and is data
+only — it carries its own provenance in
+`prompt_master/krea/CREATIVITY_LIBRARY_SOURCE.txt` and is not from the
+LTX_Video_Prompt_Claude tree at all. See `docs/08-krea-creative-mode.md`.
 
 Two consequences are recorded in `prompt_master/VENDORED_FROM.txt` and repeated
 here because they will otherwise be rediscovered the hard way:

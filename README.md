@@ -1084,155 +1084,146 @@ if a checkpoint switch had already happened, those weights would be written into
 Model B. When the built-in Refiner is enabled, Model Chain skips itself for that
 generation and says so rather than corrupting the loaded model.
 
-## Krea Live
+## Krea Creative Mode
 
-Type a short idea in the ordinary txt2img prompt box, stop typing, and get a
-Krea 2 image made from a full Krea prompt the local model wrote for you.
+Type a short idea in the ordinary txt2img prompt box, press Generate, and get a
+Krea 2 image made from a full art-direction brief the extension wrote *locally*
+and one Krea prompt the local model expanded from it.
 
 ```
-Krea Live off:   positive prompt ------------------------> Forge
-Krea Live on:    positive prompt -> Krea writer -> prompt -> Forge
+Creative Mode off:  positive prompt --------------------------------> Forge
+Creative Mode on:   positive prompt -> Creative Director -> Krea 2 -> Forge
+                                        (no model)         (one call)
 ```
 
-It is a mode layered onto the normal txt2img workflow, not another tab. Forge
-still owns the image entirely: the checkpoint, the sampler and scheduler, the
-size, the CFG, the image seed, the extra networks, every other extension's
-hooks, the saving, the PNG metadata and the gallery. The language model's job
-ends the moment one expanded positive prompt exists.
+The Creative Director is ordinary Python over a vendored vocabulary of 164
+variant families. It chooses a medium, a lighting treatment, a composition, a
+palette and so on with a seeded PRNG, assembles them into a brief, and hands
+that to the Krea writer. **No model is asked what to vary.** There is no planner
+pass, no candidate generation, no judge and no rewrite — one press is one model
+request, at every setting.
 
-### One model request per prompt
-
-This is the rule the whole feature is built on, and everything else follows from
-it.
-
-> One source prompt → one LLM request → one expanded Krea prompt.
-
-No candidate generation, no "best of N", no judge pass, no hidden follow-up
-call. Higher Creativity means broader sampling **inside that one request**.
-
-Rerolling reuses the prompt that was already written and only varies the image
-seed, so a run of twenty images is one model request and twenty diffusion
-passes. A new request happens only when something the model actually sees has
-changed:
-
-| Changed | Next generation |
-| --- | --- |
-| the prompt text | one new LLM request |
-| Creativity | one new LLM request |
-| the prompt seed | one new LLM request |
-| the LLM chosen in Setup | one new LLM request |
-| Steps, image seed, size, sampler, scheduler, CFG | no LLM request |
-| pinned LoRAs, or their weights | no LLM request |
-| reroll, however many times | no LLM request |
+Nothing happens on its own. There is no idle timer, no typing watcher, no repeat
+loop. A creative roll happens because you pressed a button.
 
 ### Turning it on
 
-The checkbox is under the txt2img prompt. That is the whole footprint when Live
-is off — the positive prompt must not be able to change meaning without
-something visible saying so.
-
-Turning it on opens one compact strip:
+The checkbox is under the txt2img prompt, and off on a fresh install:
 
 ```
-[Krea Live ✓]  Creativity 1  Idle delay 5s  Steps 8  Reroll ☐   Prompt ready
+[ Creative Mode ]   Creativity [0----5----10]   ▸ Creative Controls
 ```
 
-- **Creativity** — 0 to 10. The same scale as LLM Studio's Krea 2 workspace.
-- **Idle delay** — how long you have to stop typing before the prompt is
-  written. 0.5 to 30 seconds, 5 by default.
-- **Steps** — a quick handle on the *native* Steps slider, not a second value.
-  Change either and both move, so the number in the PNG metadata is the number
-  that was used.
-- **Reroll** — keep drawing new image seeds from the same expanded prompt.
+That is the whole surface until you open the drawer. Forge still owns the image
+entirely — the checkpoint, the sampler and scheduler, the size, Steps, the CFG,
+the image seed, the extra networks, every other extension's hooks, the saving,
+the PNG metadata and the gallery.
 
-Right-clicking **Generate** adds three entries to Forge's existing menu, beside
-its own *Generate forever*: **Generate with Krea Live once**, **Start Krea
-Live** and **Stop Krea Live**. The one-shot works with the toggle off.
-
-`Krea Live configuration` holds the things you set once rather than per image:
-pinned LoRAs, the prompt seed, and a read-only view of the last written prompt.
-
-### What stays on screen
-
-The positive prompt box keeps **your** text. The expanded paragraph is
-substituted at the processing boundary and never typed back over what you are
-editing — a box that fills with four hundred words every time you pause is a box
-you cannot iterate in.
-
-Three prompts exist, and only the first is visible:
-
-| | |
-| --- | --- |
-| **source** | what you typed, and keep editing |
-| **expanded** | the writer's one result |
-| **generation** | that, plus your pinned LoRA tags — what Forge is given |
-
-The infotext records the source phrase, the Creativity position, the prompt seed
-and the pinned tags. It does not record the expanded prompt a second time: it is
-already the image's own `Prompt:` line.
-
-### Pinned LoRAs
-
-The pinned-LoRA box contributes `<lora:name:weight>` tags to the generation
-prompt and nothing else — prose typed there is discarded in front of you rather
-than reaching the image model as a second, invisible prompt input. The language
-model is never shown a tag.
-
-### What it will not do
-
-- **Reference images.** Live is text-only. A reference has to be captioned by
-  the vision model before a prompt can be written about it, and that is a second
-  model request per image — which is a different feature from "one request per
-  prompt". Use **LLM Studio → Krea 2** for prompts written from references.
-- **The negative prompt.** Unchanged, and not sent to the writer.
-- **A non-Krea checkpoint.** Live refuses to arm and says which architecture is
-  selected. A Krea 2 prompt is a long natural-language paragraph, and handing
-  one to SD 1.5 would look like the extension was broken.
-- **Native *Generate forever*.** Refused while Live is on, with a notice. Two
-  repeat schedulers pressing the same button is not something worth refereeing;
-  Live's own Reroll knows how to reuse the expansion.
-- **Overlap the GPU.** The prompt is written first, the LLM releases the card,
-  and then the image is generated. That ordering is why the model is asked from
-  the browser's Generate gate rather than from inside a running image job.
+The same controls are in **LLM Studio → Krea 2**, sharing one settings file and
+one Director, where they write a prompt and generate no image.
 
 ### Creativity
 
-One control, on both surfaces, resolving through one function
-(`prompt_master/krea/variation.py`). It changes **model sampling only** —
-Krea's own expansion instruction is vendored verbatim and is never edited,
-appended to, or worked around.
+One integer, 0 to 10, and it is a *semantic* control rather than a temperature
+slider. It decides four separate things at once:
 
-| Value | Temperature | Top-P | Extra | Meaning |
-| --- | --- | --- | --- | --- |
-| 0 | 0.00 | 1.00 | — | deterministic end |
-| **1** | **0.60** | **0.90** | **—** | **exactly what Krea 2 did before this control existed** |
-| 2 | 0.68 | 0.92 | top_k 50, min_p 0.05 | slightly more creative |
-| 3 | 0.76 | 0.94 | top_k 60, min_p 0.05 | more exploratory |
-| 4 | 0.84 | 0.95 | top_k 70, min_p 0.04 | broader wording |
-| 5 | 0.92 | 0.96 | top_k 80, min_p 0.04 | clearly creative |
-| 6 | 1.00 | 0.97 | top_k 100, min_p 0.03 | broad exploration |
-| 7 | 1.06 | 0.98 | top_k 120, min_p 0.03 | high exploration |
-| 8 | 1.12 | 0.99 | top_k 140, min_p 0.02 | very high |
-| 9 | 1.18 | 1.00 | top_k 160, min_p 0.02 | near-maximal breadth |
-| 10 | 1.24 | 1.00 | top_k 200, min_p 0.01 | maximum |
+- **whether an axis activates at all** — none at 0–1, one at 2, all of them at 10;
+- **which variants are eligible** — some treatments only unlock higher up;
+- **how strongly the chosen one is expressed** — four written tiers per variant;
+- **how hard recent choices are pushed away**.
 
-**1 is the default, and is a compatibility guarantee rather than a tuning
-opinion.** At 1 the request carries temperature 0.6 and top_p 0.9 and none of
-the extra sampler fields — omitted from the payload entirely, not sent with a
-guessed neutral value. Installing this update and pressing *Generate Krea
-Prompt* gives you the prompt you got before it.
+| Creativity | Axes active | Tier | What a Medium line looks like |
+| --- | --- | --- | --- |
+| 0 | none | — | *(nothing)* |
+| **1** | none | — | *(nothing — legacy behaviour)* |
+| 2–3 | 1–2 | light | "a restrained ink-and-wash drawing" |
+| 4–6 | 2–5 | moderate | "a clearly authored impasto oil painting, with thick blotches of pigment…" |
+| 7–8 | 5–8 | strong | "a pronounced impasto oil painting, strongly emphasizing…" |
+| 9–10 | 8–all | extreme | "a fully committed impasto oil painting interpretation… push this treatment far enough to define the visual language" |
 
-At 0, temperature 0 and top_p 1 with nothing added. "Deterministic" describes
-the intent; it is not a promise of identical bytes across llama.cpp builds,
-model revisions, offload splits or kernels.
+Sampling climbs gently alongside — 0.60/0.90 at 1 up to 0.96/0.98 at 10 — because
+the *brief* is what makes 10 different from 2. A temperature high enough to
+create that difference on its own produces prompts with broken grammar in them.
 
-A medium you state yourself survives every position: *"oil painting of a
-lighthouse"* is still an oil painting at 10. Where you have not named one, a
-high position may well choose one — which is the point of it.
+**Creativity 1 is a compatibility guarantee.** At 1 the writer gets temperature
+0.6, top_p 0.9, no extra sampler fields, and a user turn with nothing added to
+it: byte-identical to the request made before any of this existed. 0 is the
+deterministic end — temperature 0, top_p 1 — and describes intent, not a promise
+of identical bytes across llama.cpp builds, model revisions or kernels.
 
-LLM Studio and Krea Live remember their slider positions separately, because
-authoring a prompt to keep and iterating images every five seconds settle in
-different places. A *value* means the same thing in both.
+At 10, a bare `car` reaches impasto oil painting, children's-book illustration,
+anime keyframes, direct-flash editorial photography, risograph, gouache,
+collage, stylized 3D and a dozen more across successive seeds — with different
+lighting, framing, palette, texture, mood and detail direction each time.
+
+### The ten axes
+
+Open **Creative Controls** and each axis has three modes:
+
+| Mode | What it does |
+| --- | --- |
+| **Natural** | leaves the axis out of the brief entirely — the model decides as it would without Creative Mode. Not a hedged line: *no* line. |
+| **Vary** | lets the Director choose, scaled by Creativity. |
+| **Fixed** | repeats your chosen value every roll. |
+
+Medium, Style, Lighting, Composition, Viewpoint, Lens / Zoom, Palette, Texture,
+Mood and Detail emphasis. Fresh-install defaults are Vary everywhere except
+Texture, which is Natural.
+
+**Your own words always win.** Type *oil painting of a car* and Medium stays oil
+painting however Medium is configured — the Director detects the constraint from
+the library's aliases and skips the axis, and every brief also carries the rule
+in words for the phrases no alias list will ever catch. Precedence is: your
+prompt, then Fixed, then Vary, then Natural.
+
+### Seeds
+
+The **Creative seed** reproduces the art direction. `-1` rolls a new one each
+press; a fixed value gives you the same recipe every time. From it the Director
+derives the writer's own seed, so one number reproduces the whole chain — the
+recipe *and* the way the model was asked about it. Forge's image seed stays
+completely independent, which means you can hold the art direction still and
+vary the picture, or the other way round.
+
+Every generated image records `Krea Creative Seed`, `Krea Creativity`,
+`Krea Creative Recipe` (compact `axis=variant_id` ids), `Krea LLM Seed`,
+`Krea Source Prompt` and the library version. The expanded prompt is not
+recorded separately — it is already the image's own `Prompt:` line.
+
+### Anti-repetition
+
+At Creativity 7 and above the Director remembers the last eight rolls' variant
+ids and pushes them away; at 10 it avoids them outright whenever a compatible
+alternative exists. It also steers the one writer call away from the usual
+visual clichés — *35mm cinematic still*, *ultra detailed*, *masterpiece* — before
+it writes, rather than stripping words afterwards. Anything you asked for
+yourself is never suppressed: type "ultra detailed" and it stays.
+
+**Clear recent memory** in the drawer resets it. Ids are stored, never prompts.
+
+### What it will not do
+
+- **Reference images.** Creative Mode is text-only in txt2img. A reference needs
+  a captioning pass before a prompt can be written about it, which is a second
+  model request per image. LLM Studio → Krea 2 has the reference slots.
+- **The negative prompt.** Unchanged, and not sent to the writer.
+- **A non-Krea checkpoint.** Creative Mode refuses to arm in txt2img and says
+  which architecture is selected. LLM Studio does not consult this — writing a
+  prompt settles nothing about what draws it.
+- **Duplicate a Forge control.** Steps, size, sampler, CFG and the image seed
+  stay where they are. A duplicate would put a number in the PNG metadata that
+  never happened.
+- **Overlap the GPU.** The prompt is written first, the LLM releases the card,
+  then the image is generated.
+
+### Extending the vocabulary
+
+`prompt_master/krea/creativity/` is a versioned, data-only package: ten axis
+files, an activation and sampling policy, compatibility rules and an
+anti-repetition policy. Adding a variant family or an axis, or retuning how many
+axes activate at Creativity 6, is a JSON edit — `library.py` is written so none
+of it needs a code change. Provenance and the two rules that matter (stable ids,
+all four tiers) are in `prompt_master/krea/CREATIVITY_LIBRARY_SOURCE.txt`.
 
 ## LLM Studio
 
@@ -1241,9 +1232,9 @@ A local-LLM workspace, in the same extension and on the same card. It is the
 application's feature set brought into Forge as a native Gradio tab rather than
 as an embedded Qt window: the prompt engine, the conversation system, the
 MiniMax enhancer and the llama.cpp runtime are the same code, vendored under
-`prompt_master/` with its provenance — and the single edit made to it since —
-recorded in `prompt_master/VENDORED_FROM.txt`. The presentation layer is new;
-nothing underneath it is.
+`prompt_master/` with its provenance recorded in
+`prompt_master/VENDORED_FROM.txt`. The presentation layer is new; nothing
+underneath it is.
 
 It lives here rather than in a separate extension for one reason: **whoever
 decides when a model leaves VRAM has to decide it for both kinds of model.** Two
@@ -1258,7 +1249,7 @@ Chain already owns image residency, so it owns the LLM's too.
 | **Prompt Studio** | LTX video-prompt generation. Text-to-video and image-to-video, a positive and a negative prompt as two separate outputs, the smart-negative second pass, and the full control set — style, motion, camera, transition, POV, wardrobe, accent and strength, dialogue budget, extra speech, music, duration, FPS, dimensions, output format, lexicon, extra negative terms and seed. |
 | **Conversation** | Threaded chat with persistent histories, and per-message actions. Characters are files in a `characters/` folder in the layout oobabooga uses, so cards import and export; chats are documents filed per character. |
 | **MiniMax H3** | The prompt enhancer, as its own workflow. FL2VA and REF2VA variants, an optional reference frame that is captioned first and shown to you, and its own history. |
-| **Krea 2** | Krea 2 image prompts, written by the local model from Krea's own prompt expansion instruction. Text alone, or text plus up to four reference images numbered by the slot they sit in — each one described first, in order, so that "the woman from image 2" survives the trip into the finished prompt. A **Creativity** slider from 0 to 10, shared with [Krea Live](#krea-live). Writes prompts; generates no images. Its own history. |
+| **Krea 2** | Krea 2 image prompts, written by the local model from Krea's own prompt expansion instruction. Text alone, or text plus up to four reference images numbered by the slot they sit in — each one described first, in order, so that "the woman from image 2" survives the trip into the finished prompt. [Creative Mode](#krea-creative-mode) and its ten art-direction axes, shared with txt2img. Writes prompts; generates no images. Its own history. |
 | **Setup** | The runtime, which GGUF runs, what context fits, and what is currently resident on the card. Everything here needs a file dialog, a download, an estimate or a table — the plain values live on the Settings page instead. |
 
 They share one loaded model and one runtime. They do not share a history, an
@@ -1648,14 +1639,17 @@ mc_llm_chat_panel.py       Conversation workspace
 mc_llm_minimax_panel.py    MiniMax H3 workspace
 mc_llm_krea_panel.py       Krea 2 workspace
 mc_llm_ui.py          shared UI helpers and the element-id contract
-mc_live_krea.py       Krea Live: the prompt cache, the arming token, the one call
+mc_creative_krea.py   Creative Mode: settings, roll history, the arming token
 prompt_master/        vendored LTX business logic (see VENDORED_FROM.txt)
+prompt_master/krea/creativity/    the versioned creative vocabulary (data only)
+prompt_master/krea/library.py     loads and validates that package
+prompt_master/krea/director.py    the local Creative Director; no inference
 prompt_master/krea/variation.py   Creativity 0-10, as sampling settings
 
-scripts/model_chain.py            Script class, UI, orchestration
-scripts/model_chain_krea_live.py  the txt2img Krea Live strip and its hook
+scripts/model_chain.py                Script class, UI, orchestration
+scripts/model_chain_krea_creative.py  the txt2img Creative Mode panel and its hook
 style.css             optional progress-bar appearance + LLM Studio styling
-javascript/           the settings-to-CSS layer, LLM Studio polish, Krea Live
+javascript/           the settings-to-CSS layer, LLM Studio polish, Creative Mode
 tests/                pytest suite (runs without a WebUI)
 docs/                 revised specifications for the progress and LLM work
 ```
@@ -1741,19 +1735,22 @@ run orchestrations and their event sequences; the panels assembling with their
 control lists in agreement; and the theme contract — extension-owned element
 ids, no hard-coded colours, no Gradio-generated selectors.
 
-Krea Live adds a request counter. Almost every assertion in
-`tests/test_krea_live.py` is a number of completions llama.cpp was asked for:
-one for a new source prompt, zero for a reroll, zero for a changed LoRA weight
-or Steps value, one for a moved Creativity slider — because "one model request
-per prompt" is the product rather than an optimisation. Beside it are the
-compatibility anchor checked as a *payload* (Creativity 1 sends temperature 0.6,
-top_p 0.9 and no field that did not exist before), the monotonicity of the
-table, the arming token being spendable exactly once, and the processing hook
-never asking for an expansion of its own.
+Creative Mode adds two kinds of test. `tests/test_krea_creative.py` measures the
+Director over hundreds of rolls, because its promises are properties of a
+distribution rather than of a function: that a bare "car" at Creativity 10
+reaches a dozen different mediums, that a stated medium is never replaced, that
+a Natural axis produces no line at any position, that Fixed survives Creativity
+0, that a fixed Creative seed reproduces the recipe *and* the derived writer
+seed, and that recent variants are avoided at 10 without the pool ever emptying.
+It also counts model calls — always exactly one per roll, at every position —
+checks Creativity 1 as a payload *and* as a message, and reads the package's own
+`acceptance_cases.json`, failing if the data grows a promise no test claims.
 
-`tests/test_krea_live_js.py` runs the browser controller under node against a
-synthetic clock, because the debounce and the one-shot bypass are state machines
-and reading them proves nothing. It skips where node is absent, as
+`tests/test_krea_creative_js.py` runs the browser gate under node against a
+synthetic clock. The one-shot bypass is a state machine that is wrong in one
+direction if nothing ever generates and in the other if every click generates
+twice, and the absence of a scheduler is only checkable by running an hour
+forward with nobody touching anything. It skips where node is absent, as
 `tests/test_llm_studio_js.py` does.
 
 Three of those files are lopsided on purpose, because their failure modes are:

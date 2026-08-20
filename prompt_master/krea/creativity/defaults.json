@@ -1,0 +1,19 @@
+{
+  "creative_mode_enabled": false,
+  "creativity": 5,
+  "creative_seed": -1,
+  "anti_repetition": true,
+  "axis_modes": {
+    "medium": "vary",
+    "style": "vary",
+    "lighting": "vary",
+    "composition": "vary",
+    "viewpoint": "vary",
+    "lens_zoom": "vary",
+    "palette": "vary",
+    "texture": "natural",
+    "mood": "vary",
+    "detail_emphasis": "vary"
+  },
+  "fixed_values": {}
+}

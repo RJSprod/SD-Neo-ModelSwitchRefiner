@@ -1,0 +1,45 @@
+LOCAL DIRECTOR PSEUDOCODE
+
+creative_roll(source, creativity, creative_seed, axis_settings, recent_history):
+
+  seed = random_uint32() if creative_seed == -1 else creative_seed
+  director_rng = Random(stable_hash(seed, "director"))
+  llm_seed = stable_hash(seed, "llm") & 0xffffffff
+
+  explicit_locks = detect_common_explicit_constraints(source, library_aliases)
+
+  recipe = []
+
+  # Fixed settings are user intent, below explicit source text.
+  for axis in axes:
+      if mode(axis) == FIXED and axis not in explicit_locks:
+          recipe += render(fixed_variant(axis), tier_for(creativity))
+
+  # Natural axes are completely omitted.
+  eligible = axes where mode == VARY and axis not in explicit_locks
+
+  active_axes = choose_axis_count_and_subset(eligible, creativity, director_rng)
+
+  for axis in active_axes:
+      candidates = library[axis]
+      candidates = filter_min_creativity(candidates, creativity)
+      candidates = filter_compatibility(candidates, recipe)
+      candidates = penalize_recent_ids(candidates, recent_history, creativity)
+      chosen = weighted_choice(candidates, director_rng)
+      recipe += render(chosen, tier_for(creativity))
+
+  brief = assemble_creative_direction(
+      source_priority_rule=True,
+      recipe=recipe,
+      anti_repeat_note=anti_repeat_note(recent_history, creativity)
+  )
+
+  # EXACTLY ONE LLM CALL:
+  expanded = krea_writer(
+      source_prompt=source,
+      creative_direction=brief,
+      seed=llm_seed,
+      sampling=creativity_sampling(creativity)
+  )
+
+  return expanded

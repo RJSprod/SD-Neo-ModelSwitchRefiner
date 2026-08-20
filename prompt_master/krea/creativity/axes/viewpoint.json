@@ -1,0 +1,255 @@
+{
+  "axis": "viewpoint",
+  "entries": [
+    {
+      "id": "eye_level",
+      "label": "Eye level",
+      "family": "neutral",
+      "aliases": [
+        "eye level"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "neutral"
+      ],
+      "expressions": {
+        "light": "a mild eye-level viewpoint",
+        "moderate": "a deliberate eye-level viewpoint, with direct human-scale observation and balanced spatial relationships",
+        "strong": "a dramatic eye-level viewpoint, strongly emphasizing direct human-scale observation and balanced spatial relationships",
+        "extreme": "an extreme eye-level viewpoint interpretation, with direct human-scale observation and balanced spatial relationships; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "low_angle",
+      "label": "Low angle",
+      "family": "low",
+      "aliases": [
+        "low angle"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "low"
+      ],
+      "expressions": {
+        "light": "a mild low-angle viewpoint",
+        "moderate": "a deliberate low-angle viewpoint, with looming form, exaggerated vertical presence, and forceful foreground scale",
+        "strong": "a dramatic low-angle viewpoint, strongly emphasizing looming form, exaggerated vertical presence, and forceful foreground scale",
+        "extreme": "an extreme low-angle viewpoint interpretation, with looming form, exaggerated vertical presence, and forceful foreground scale; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "high_angle",
+      "label": "High angle",
+      "family": "high",
+      "aliases": [
+        "high angle"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "high"
+      ],
+      "expressions": {
+        "light": "a mild high-angle viewpoint",
+        "moderate": "a deliberate high-angle viewpoint, with compressed subject/environment relationship and observational distance",
+        "strong": "a dramatic high-angle viewpoint, strongly emphasizing compressed subject/environment relationship and observational distance",
+        "extreme": "an extreme high-angle viewpoint interpretation, with compressed subject/environment relationship and observational distance; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "overhead",
+      "label": "Top-down",
+      "family": "overhead",
+      "aliases": [
+        "top down",
+        "top-down",
+        "overhead"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "overhead"
+      ],
+      "expressions": {
+        "light": "a mild top-down viewpoint",
+        "moderate": "a deliberate top-down viewpoint, with flattened spatial relationships and strong shape organization",
+        "strong": "a dramatic top-down viewpoint, strongly emphasizing flattened spatial relationships and strong shape organization",
+        "extreme": "an extreme top-down viewpoint interpretation, with flattened spatial relationships and strong shape organization; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "ground_level",
+      "label": "Ground level",
+      "family": "low",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "low"
+      ],
+      "expressions": {
+        "light": "a mild ground-level viewpoint",
+        "moderate": "a deliberate ground-level viewpoint, with near-surface scale distortion, oversized foreground forms, and visceral spatial depth",
+        "strong": "a dramatic ground-level viewpoint, strongly emphasizing near-surface scale distortion, oversized foreground forms, and visceral spatial depth",
+        "extreme": "an extreme ground-level viewpoint interpretation, with near-surface scale distortion, oversized foreground forms, and visceral spatial depth; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "dutch",
+      "label": "Dutch tilt",
+      "family": "tilted",
+      "aliases": [
+        "dutch angle"
+      ],
+      "min_creativity": 4,
+      "weight": 1.0,
+      "tags": [
+        "tilted"
+      ],
+      "expressions": {
+        "light": "a mild dutch-angle viewpoint",
+        "moderate": "a deliberate dutch-angle viewpoint, with canted horizon, diagonal tension, and intentional instability",
+        "strong": "a dramatic dutch-angle viewpoint, strongly emphasizing canted horizon, diagonal tension, and intentional instability",
+        "extreme": "an extreme dutch-angle viewpoint interpretation, with canted horizon, diagonal tension, and intentional instability; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "close_observer",
+      "label": "Intimate observer",
+      "family": "close",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "close"
+      ],
+      "expressions": {
+        "light": "a mild intimate near-subject viewpoint",
+        "moderate": "a deliberate intimate near-subject viewpoint, with physical proximity, partial occlusion, tactile immediacy, and reduced personal distance",
+        "strong": "a dramatic intimate near-subject viewpoint, strongly emphasizing physical proximity, partial occlusion, tactile immediacy, and reduced personal distance",
+        "extreme": "an extreme intimate near-subject viewpoint interpretation, with physical proximity, partial occlusion, tactile immediacy, and reduced personal distance; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "distant_observer",
+      "label": "Distant observer",
+      "family": "distant",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "distant"
+      ],
+      "expressions": {
+        "light": "a mild distant observational viewpoint",
+        "moderate": "a deliberate distant observational viewpoint, with subject reduced against context, emotional detachment, and environmental scale",
+        "strong": "a dramatic distant observational viewpoint, strongly emphasizing subject reduced against context, emotional detachment, and environmental scale",
+        "extreme": "an extreme distant observational viewpoint interpretation, with subject reduced against context, emotional detachment, and environmental scale; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "rear_follow",
+      "label": "Rear follow",
+      "family": "dynamic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "dynamic"
+      ],
+      "expressions": {
+        "light": "a mild rear-follow viewpoint",
+        "moderate": "a deliberate rear-follow viewpoint, with subject seen from behind with directional momentum and forward spatial pull",
+        "strong": "a dramatic rear-follow viewpoint, strongly emphasizing subject seen from behind with directional momentum and forward spatial pull",
+        "extreme": "an extreme rear-follow viewpoint interpretation, with subject seen from behind with directional momentum and forward spatial pull; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "three_quarter_front",
+      "label": "Three-quarter front",
+      "family": "neutral",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "neutral"
+      ],
+      "expressions": {
+        "light": "a mild three-quarter front viewpoint",
+        "moderate": "a deliberate three-quarter front viewpoint, with clear form description, depth, and a strong but conventional sense of volume",
+        "strong": "a dramatic three-quarter front viewpoint, strongly emphasizing clear form description, depth, and a strong but conventional sense of volume",
+        "extreme": "an extreme three-quarter front viewpoint interpretation, with clear form description, depth, and a strong but conventional sense of volume; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "profile_side",
+      "label": "Pure profile",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "graphic"
+      ],
+      "expressions": {
+        "light": "a mild pure side-profile viewpoint",
+        "moderate": "a deliberate pure side-profile viewpoint, with flattened silhouette, graphic readability, and reduced perspective complexity",
+        "strong": "a dramatic pure side-profile viewpoint, strongly emphasizing flattened silhouette, graphic readability, and reduced perspective complexity",
+        "extreme": "an extreme pure side-profile viewpoint interpretation, with flattened silhouette, graphic readability, and reduced perspective complexity; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "interior_pov",
+      "label": "Interior / embedded POV",
+      "family": "close",
+      "aliases": [],
+      "min_creativity": 4,
+      "weight": 1.0,
+      "tags": [
+        "close"
+      ],
+      "expressions": {
+        "light": "a mild embedded point-of-view",
+        "moderate": "a deliberate embedded point-of-view, with viewpoint located within the subject's immediate environment, emphasizing experiential presence",
+        "strong": "a dramatic embedded point-of-view, strongly emphasizing viewpoint located within the subject's immediate environment, emphasizing experiential presence",
+        "extreme": "an extreme embedded point-of-view interpretation, with viewpoint located within the subject's immediate environment, emphasizing experiential presence; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "worm_eye",
+      "label": "Worm's-eye",
+      "family": "low",
+      "aliases": [],
+      "min_creativity": 5,
+      "weight": 1.0,
+      "tags": [
+        "low"
+      ],
+      "expressions": {
+        "light": "a mild worm's-eye viewpoint",
+        "moderate": "a deliberate worm's-eye viewpoint, with extreme upward scale, dominant underside forms, and exaggerated vertical convergence",
+        "strong": "a dramatic worm's-eye viewpoint, strongly emphasizing extreme upward scale, dominant underside forms, and exaggerated vertical convergence",
+        "extreme": "an extreme worm's-eye viewpoint interpretation, with extreme upward scale, dominant underside forms, and exaggerated vertical convergence; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "birds_eye_oblique",
+      "label": "Bird's-eye oblique",
+      "family": "high",
+      "aliases": [],
+      "min_creativity": 4,
+      "weight": 1.0,
+      "tags": [
+        "high"
+      ],
+      "expressions": {
+        "light": "a mild bird's-eye oblique viewpoint",
+        "moderate": "a deliberate bird's-eye oblique viewpoint, with high spatial overview with enough angle to retain depth, volume, and scene structure",
+        "strong": "a dramatic bird's-eye oblique viewpoint, strongly emphasizing high spatial overview with enough angle to retain depth, volume, and scene structure",
+        "extreme": "an extreme bird's-eye oblique viewpoint interpretation, with high spatial overview with enough angle to retain depth, volume, and scene structure; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    }
+  ]
+}

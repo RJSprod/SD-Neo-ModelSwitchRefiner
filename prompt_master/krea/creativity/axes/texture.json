@@ -1,0 +1,297 @@
+{
+  "axis": "texture",
+  "entries": [
+    {
+      "id": "smooth_clean",
+      "label": "Smooth / clean",
+      "family": "clean",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "clean"
+      ],
+      "expressions": {
+        "light": "a subtle smooth clean surface",
+        "moderate": "a visible smooth clean surface, with controlled material response, minimal incidental grain, and deliberately pristine finish",
+        "strong": "a pronounced smooth clean surface, strongly emphasizing controlled material response, minimal incidental grain, and deliberately pristine finish",
+        "extreme": "an extreme smooth clean surface interpretation, with controlled material response, minimal incidental grain, and deliberately pristine finish; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "canvas_tooth",
+      "label": "Canvas tooth",
+      "family": "painting",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "painting",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a subtle visible canvas tooth",
+        "moderate": "a visible visible canvas tooth, with woven fiber pattern, pigment catches, dry-brush skips, and tactile painted support",
+        "strong": "a pronounced visible canvas tooth, strongly emphasizing woven fiber pattern, pigment catches, dry-brush skips, and tactile painted support",
+        "extreme": "an extreme visible canvas tooth interpretation, with woven fiber pattern, pigment catches, dry-brush skips, and tactile painted support; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "impasto",
+      "label": "Impasto paint",
+      "family": "painting",
+      "aliases": [
+        "impasto"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "impasto",
+        "painting",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a subtle heavy impasto texture",
+        "moderate": "a visible heavy impasto texture, with thick blotches, palette-knife ridges, piled pigment, broken peaks, and obvious physical paint thickness",
+        "strong": "a pronounced heavy impasto texture, strongly emphasizing thick blotches, palette-knife ridges, piled pigment, broken peaks, and obvious physical paint thickness",
+        "extreme": "an extreme heavy impasto texture interpretation, with thick blotches, palette-knife ridges, piled pigment, broken peaks, and obvious physical paint thickness; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "paper_grain",
+      "label": "Paper grain",
+      "family": "paper",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "paper",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a subtle rough paper grain",
+        "moderate": "a visible rough paper grain, with visible fibers, uneven absorption, tactile tooth, tiny defects, and handmade surface character",
+        "strong": "a pronounced rough paper grain, strongly emphasizing visible fibers, uneven absorption, tactile tooth, tiny defects, and handmade surface character",
+        "extreme": "an extreme rough paper grain interpretation, with visible fibers, uneven absorption, tactile tooth, tiny defects, and handmade surface character; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "film_grain",
+      "label": "Film grain",
+      "family": "photographic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "photographic"
+      ],
+      "expressions": {
+        "light": "a subtle analog grain texture",
+        "moderate": "a visible analog grain texture, with uneven density, subtle chroma irregularity, organic noise, and tactile photographic surface without generic cinematic wording",
+        "strong": "a pronounced analog grain texture, strongly emphasizing uneven density, subtle chroma irregularity, organic noise, and tactile photographic surface without generic cinematic wording",
+        "extreme": "an extreme analog grain texture interpretation, with uneven density, subtle chroma irregularity, organic noise, and tactile photographic surface without generic cinematic wording; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "halftone",
+      "label": "Halftone",
+      "family": "print",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "halftone",
+        "print",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a subtle halftone print texture",
+        "moderate": "a visible halftone print texture, with coarse dots, dot breakup, rough ink edges, slight registration drift, and mass-produced print character",
+        "strong": "a pronounced halftone print texture, strongly emphasizing coarse dots, dot breakup, rough ink edges, slight registration drift, and mass-produced print character",
+        "extreme": "an extreme halftone print texture interpretation, with coarse dots, dot breakup, rough ink edges, slight registration drift, and mass-produced print character; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "crayon",
+      "label": "Crayon",
+      "family": "drawing",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "drawing",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a subtle waxy crayon texture",
+        "moderate": "a visible waxy crayon texture, with uneven pressure, blunt marks, wax buildup, overlapping scribble direction, and paper gaps",
+        "strong": "a pronounced waxy crayon texture, strongly emphasizing uneven pressure, blunt marks, wax buildup, overlapping scribble direction, and paper gaps",
+        "extreme": "an extreme waxy crayon texture interpretation, with uneven pressure, blunt marks, wax buildup, overlapping scribble direction, and paper gaps; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "worn",
+      "label": "Worn / distressed",
+      "family": "distressed",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "distressed",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a subtle distressed surface wear",
+        "moderate": "a visible distressed surface wear, with scratches, rubbed highlights, stains, faded patches, chipped edges, and layered evidence of handling",
+        "strong": "a pronounced distressed surface wear, strongly emphasizing scratches, rubbed highlights, stains, faded patches, chipped edges, and layered evidence of handling",
+        "extreme": "an extreme distressed surface wear interpretation, with scratches, rubbed highlights, stains, faded patches, chipped edges, and layered evidence of handling; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "watercolor_bloom",
+      "label": "Watercolor blooms",
+      "family": "painting",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "watercolor",
+        "painting",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a subtle watercolor bloom texture",
+        "moderate": "a visible watercolor bloom texture, with pigment pooling, cauliflower edges, granulation, paper absorption, and irregular translucent stains",
+        "strong": "a pronounced watercolor bloom texture, strongly emphasizing pigment pooling, cauliflower edges, granulation, paper absorption, and irregular translucent stains",
+        "extreme": "an extreme watercolor bloom texture interpretation, with pigment pooling, cauliflower edges, granulation, paper absorption, and irregular translucent stains; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "dry_brush",
+      "label": "Dry brush",
+      "family": "painting",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "painting",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a subtle dry-brush texture",
+        "moderate": "a visible dry-brush texture, with broken bristle marks, skipped surface, rough pigment drag, and exposed support texture",
+        "strong": "a pronounced dry-brush texture, strongly emphasizing broken bristle marks, skipped surface, rough pigment drag, and exposed support texture",
+        "extreme": "an extreme dry-brush texture interpretation, with broken bristle marks, skipped surface, rough pigment drag, and exposed support texture; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "ink_bleed",
+      "label": "Ink bleed",
+      "family": "drawing",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "drawing",
+        "ink",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a subtle bleeding ink texture",
+        "moderate": "a visible bleeding ink texture, with feathered edges, pooled darks, capillary spread, paper absorption, and handmade irregularity",
+        "strong": "a pronounced bleeding ink texture, strongly emphasizing feathered edges, pooled darks, capillary spread, paper absorption, and handmade irregularity",
+        "extreme": "an extreme bleeding ink texture interpretation, with feathered edges, pooled darks, capillary spread, paper absorption, and handmade irregularity; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "newsprint",
+      "label": "Newsprint",
+      "family": "print",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "print",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a subtle newsprint texture",
+        "moderate": "a visible newsprint texture, with coarse pulp paper, imperfect ink density, visible dot structure, and cheap printed ephemerality",
+        "strong": "a pronounced newsprint texture, strongly emphasizing coarse pulp paper, imperfect ink density, visible dot structure, and cheap printed ephemerality",
+        "extreme": "an extreme newsprint texture interpretation, with coarse pulp paper, imperfect ink density, visible dot structure, and cheap printed ephemerality; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "glossy",
+      "label": "Glossy synthetic",
+      "family": "clean",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "clean",
+        "synthetic"
+      ],
+      "expressions": {
+        "light": "a subtle glossy synthetic surface",
+        "moderate": "a visible glossy synthetic surface, with hard specular response, smooth polished material, crisp reflections, and artificial slickness",
+        "strong": "a pronounced glossy synthetic surface, strongly emphasizing hard specular response, smooth polished material, crisp reflections, and artificial slickness",
+        "extreme": "an extreme glossy synthetic surface interpretation, with hard specular response, smooth polished material, crisp reflections, and artificial slickness; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "dusty_matte",
+      "label": "Dusty matte",
+      "family": "distressed",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "distressed",
+        "matte"
+      ],
+      "expressions": {
+        "light": "a subtle dusty matte texture",
+        "moderate": "a visible dusty matte texture, with powdery surface, low sheen, fine abrasion, soft dirt accumulation, and muted material response",
+        "strong": "a pronounced dusty matte texture, strongly emphasizing powdery surface, low sheen, fine abrasion, soft dirt accumulation, and muted material response",
+        "extreme": "an extreme dusty matte texture interpretation, with powdery surface, low sheen, fine abrasion, soft dirt accumulation, and muted material response; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "fabric_weave",
+      "label": "Fabric weave",
+      "family": "textile",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "textile",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a subtle woven fabric texture",
+        "moderate": "a visible woven fabric texture, with visible threads, weave direction, soft fiber fuzz, stitch-like irregularity, and tactile cloth structure",
+        "strong": "a pronounced woven fabric texture, strongly emphasizing visible threads, weave direction, soft fiber fuzz, stitch-like irregularity, and tactile cloth structure",
+        "extreme": "an extreme woven fabric texture interpretation, with visible threads, weave direction, soft fiber fuzz, stitch-like irregularity, and tactile cloth structure; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "ceramic_crackle",
+      "label": "Ceramic crackle",
+      "family": "ceramic",
+      "aliases": [],
+      "min_creativity": 4,
+      "weight": 1.0,
+      "tags": [
+        "ceramic",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a subtle crackled ceramic texture",
+        "moderate": "a visible crackled ceramic texture, with fine glaze fractures, glossy islands, subtle staining, and kiln-made surface variation",
+        "strong": "a pronounced crackled ceramic texture, strongly emphasizing fine glaze fractures, glossy islands, subtle staining, and kiln-made surface variation",
+        "extreme": "an extreme crackled ceramic texture interpretation, with fine glaze fractures, glossy islands, subtle staining, and kiln-made surface variation; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    }
+  ]
+}

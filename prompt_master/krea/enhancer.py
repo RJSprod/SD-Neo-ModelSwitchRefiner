@@ -29,11 +29,19 @@ no inferring what is out of frame, no deciding how the picture should be
 edited. A captioner that starts editing produces a caption the writer then
 writes a prompt about, and the user's actual instruction is what loses.
 
-*The user turn is labelled.* ``user_prompt:`` and then, when there are
-references, ``reference_images:`` with one numbered line each. The writer is
-never handed a row of unlabelled paragraphs and asked to work out which is
-which -- that is the failure §4 spends a page forbidding, arriving through the
-back door.
+*The user turn is labelled.* ``user_prompt:``, then ``creative_direction:`` when
+Creative Mode assembled one, then ``reference_images:`` when there are
+references, with one numbered line each. The writer is never handed a row of
+unlabelled paragraphs and asked to work out which is which -- that is the
+failure §4 spends a page forbidding, arriving through the back door.
+
+*The creative direction is the caller's, and is already written.* Creative Mode
+assembles it in :mod:`prompt_master.krea.director`, out of a vendored vocabulary,
+with no model involved; this module only places it in the turn under its own
+label. That is why :func:`messages` takes a finished block of text rather than a
+recipe object -- there is nothing left here to decide, and a function that could
+decide something would be a second prompt writer sitting between the Director
+and the model.
 
 Nothing here writes prompt text on the user's behalf. :func:`clean` takes
 formatting off the end result and is deliberately incapable of rewriting it.
@@ -172,6 +180,11 @@ Low enough that "lightly polish and finalize" (upstream rule 7) is what a
 detailed prompt actually gets, and 1024 tokens is comfortably more than the one
 paragraph the instruction asks for, with room for a model that thinks out loud
 before it writes -- :func:`clean` takes that off.
+
+These two numbers are the *legacy* sampling and are kept here under their
+original names because that is what they are: what this module asked for before
+Creativity existed. :mod:`prompt_master.krea.variation` is what a run actually
+samples at now, and its Creativity-1 row is asserted equal to these.
 """
 
 BUTTON_LABEL = "Generate Krea Prompt"
@@ -209,26 +222,43 @@ def reference_block(captions) -> str:
                      for position, caption in enumerate(captions, start=1))
 
 
-def user_content(prompt: str, captions=None) -> str:
-    """The user turn: what was asked for, and what the references are.
+def user_content(prompt: str, captions=None, direction: str = "") -> str:
+    """The user turn: what was asked for, how to treat it, and what the references are.
 
     The user's wording is passed through untouched -- stripped of surrounding
     whitespace and nothing else. Tidying it before the model sees it would mean
-    the prompt was written about a paraphrase, which is the one edit this
-    module is least entitled to make.
+    the prompt was written about a paraphrase, which is the one edit this module
+    is least entitled to make.
+
+    ``direction`` is Creative Mode's finished block, already labelled and already
+    carrying its own "the source prompt wins" rule. It goes *after* the request
+    and *before* the references, which is the order of authority: what the user
+    asked for, then how this extension suggests treating it, then the material.
+    An empty string -- Creative Mode off, or Creativity 0 or 1, or every axis set
+    to Natural -- adds nothing at all, so the turn is exactly the turn this
+    function has always built.
     """
     text = str(prompt or "").strip()
     described = [caption for caption in (captions or [])]
-    if not described:
-        return f"user_prompt:\n{text}"
-    return f"user_prompt:\n{text}\n\nreference_images:\n{reference_block(described)}"
+    blocks = [f"user_prompt:\n{text}"]
+    if str(direction or "").strip():
+        blocks.append(str(direction).strip())
+    if described:
+        blocks.append(f"reference_images:\n{reference_block(described)}")
+    return "\n\n".join(blocks)
 
 
-def messages(prompt: str, captions=None) -> list[dict[str, str]]:
-    """The whole writing request: the instructions, and the request under them."""
+def messages(prompt: str, captions=None, direction: str = "") -> list[dict[str, str]]:
+    """The whole writing request: the instructions, and the request under them.
+
+    The system half is untouched by Creative Mode. Every word of art direction
+    travels in the user turn, where it reads as part of this request rather than
+    as part of Krea's standing instructions -- which matters the moment somebody
+    reads a transcript and asks which half of it Krea wrote.
+    """
     described = [caption for caption in (captions or [])]
     return [{"role": "system", "content": system_prompt(bool(described))},
-            {"role": "user", "content": user_content(prompt, described)}]
+            {"role": "user", "content": user_content(prompt, described, direction)}]
 
 
 # --------------------------------------------------------------------------- #

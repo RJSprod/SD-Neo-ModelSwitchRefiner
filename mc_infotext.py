@@ -78,33 +78,39 @@ REFERENCE_DECOUPLED_MODE = "Decoupled"
 """The one mode whose reference sizing Model Chain owns."""
 
 # --------------------------------------------------------------------------- #
-# Krea Live
+# Krea Creative Mode
 # --------------------------------------------------------------------------- #
 
-LIVE_SOURCE = "Krea Live Source Prompt"
-LIVE_CREATIVITY = "Krea Live Creativity"
-LIVE_PROMPT_SEED = "Krea Live Prompt Seed"
-LIVE_LORAS = "Krea Live LoRAs"
-"""What a Krea Live generation records, and what it deliberately does not.
+CREATIVE_MODE = "Krea Creative Mode"
+CREATIVE_CREATIVITY = "Krea Creativity"
+CREATIVE_SEED = "Krea Creative Seed"
+CREATIVE_LLM_SEED = "Krea LLM Seed"
+CREATIVE_RECIPE = "Krea Creative Recipe"
+CREATIVE_SOURCE = "Krea Source Prompt"
+CREATIVE_LIBRARY = "Krea Creativity Library"
+CREATIVE_LORAS = "Krea Pinned LoRAs"
+"""What a Creative Mode generation records, and what it deliberately does not.
+
+Between them these answer one question: how would somebody make this picture
+again. The Creative seed reproduces the local recipe exactly, the recipe ids say
+what that recipe was without needing the seed re-rolled, the library version
+says which vocabulary those ids were drawn from, and the LLM seed and Creativity
+say how the one writer request was made. The source prompt is the short phrase
+the user actually typed, which nothing else in the file preserves.
 
 The expanded Krea prompt is absent from this list because it is not missing: it
-is the generation's own ``Prompt:`` line, which is what Live substituted before
-sampling began. Recording it a second time under a key of ours would add a few
-hundred bytes to every PNG in order to repeat what the file already says, and
-would create a second copy that a later paste could disagree with.
-
-What is *not* recoverable from an ordinary infotext is the three lines above --
-the short phrase the user actually typed, where the Creativity slider was, and
-which prompt seed the writer ran at -- plus the pinned tags, which are the
-difference between the writer's paragraph and the prompt that was generated
-from. With those four, the expansion can be recovered from the prompt line
-exactly and the run can be repeated.
+is the generation's own ``Prompt:`` line, which is what Creative Mode
+substituted before sampling began. Recording it a second time under a key of
+ours would add a few hundred bytes to every PNG in order to repeat what the file
+already says, and would create a second copy that a later paste could disagree
+with.
 
 These are diagnostic rather than pasteable, and are not registered as paste
-fields. A pasted Krea Live source prompt would have to either overwrite the
-positive prompt box -- destroying whatever the user was iterating on -- or
-silently re-run the language model on a paste, and neither is a thing a paste
-button should do.
+fields. A pasted Krea source prompt would have to either overwrite the positive
+prompt box -- destroying whatever the user was iterating on -- or silently re-run
+the language model on a paste, and neither is a thing a paste button should do.
+The Creative seed is the field somebody copies by hand, into the seed box, on
+purpose.
 """
 
 MODULE_PREFIX = "Model Chain Module "

@@ -1,24 +1,29 @@
-"""Krea 2: Krea's own prompt expansion instruction, plus ordered references.
+"""Krea 2: Krea's own instruction, ordered references, and local art direction.
 
-Four files, and the split between them is the one ``prompt_master.minimax``
-already makes. ``expansion.txt`` is vendored verbatim from Krea's Krea 2
-repository and holds every word of the base instruction; ``enhancer.py`` is the
-calling convention around it and the one thing Krea does not cover, which is
-what to do when the user has attached reference images; ``references.py`` is
-the ordered-reference model that keeps "Image 1" meaning what the user meant by
-it, all the way from the upload slot to whatever eventually generates a picture;
-``variation.py`` is the Creativity control, which is a table of sampler settings
-and deliberately nothing else.
+``expansion.txt`` is vendored verbatim from Krea's Krea 2 repository and holds
+every word of the base instruction. ``enhancer.py`` is the calling convention
+around it and the one thing Krea does not cover, which is what to do when the
+user has attached reference images. ``references.py`` is the ordered-reference
+model that keeps "Image 1" meaning what the user meant by it, all the way from
+the upload slot to whatever eventually generates a picture.
 
-``variation.py`` is on the near side of the same line. A creativity control is
+The other three are Creative Mode, and they are the reason this package now has
+opinions about *content*:
+
+* ``creativity/`` is a versioned, data-only vocabulary -- ten axes, 164 variant
+  families, four written expression tiers each, plus the activation,
+  compatibility and anti-repetition policies. Vendored whole, with its own
+  provenance in ``CREATIVITY_LIBRARY_SOURCE.txt``.
+* ``library.py`` reads and validates that package and hands back typed objects.
+* ``director.py`` chooses one art-direction brief out of it, with a seeded PRNG
+  and no model whatsoever.
+* ``variation.py`` maps the same Creativity position to the writer's sampling.
+
+The whole point of the split is where the line falls. Choosing what to vary is
 the most tempting possible reason to reach into ``expansion.txt`` and add "be
-more adventurous" to it, and that is exactly why it may not: it has no file
-access, no message building and no import of ``enhancer``, so the only thing it
-can change is how the model samples. What the model is *asked* stays Krea's, at
-every position on the slider.
-
-The separation is deliberate and is checked by the tests: upstream's text is
-never edited in place to add local behaviour, and everything local is appended
-as a clearly marked addendum, so a reader can always tell which half of the
-system message came from Krea.
+more adventurous" to it, and none of these may: the Director's output travels in
+the *user* turn under its own label, ``variation.py`` cannot read a file or
+import ``enhancer``, and upstream's text is never edited in place. A reader of a
+transcript can always tell which half of the system message came from Krea --
+because all of it did.
 """

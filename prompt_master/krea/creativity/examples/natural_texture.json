@@ -1,0 +1,10 @@
+{
+  "source": "car",
+  "creativity": 10,
+  "setting": {
+    "texture": {
+      "mode": "natural"
+    }
+  },
+  "expected": "No Texture directive is inserted; the LLM decides naturally."
+}

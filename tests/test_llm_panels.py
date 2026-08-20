@@ -18,6 +18,7 @@ import pytest
 
 import mc_llm_chat_panel
 import mc_llm_krea_panel
+from prompt_master.krea import library
 import mc_llm_minimax_panel
 import mc_llm_paths
 import mc_llm_prompt_panel
@@ -629,10 +630,14 @@ class TestKrea:
         assert {"status", "output", "stop"} <= set(built)
 
     def test_an_empty_request_is_refused(self):
-        frames = list(mc_llm_krea_panel._generate("  ", 7, None, None, None, None))
+        axes = []
+        for _ in library.library().axis_keys:
+            axes.extend(["vary", None])
+        frames = list(mc_llm_krea_panel._generate("  ", 7, False, 1, -1, False,
+                                                  *axes, None, None, None, None))
 
         assert len(frames) == 1
-        assert "Describe the image you want" in frames[0][3]
+        assert "Describe the image you want" in frames[0][4]
 
     def test_the_reference_slots_are_numbered_by_position_and_nothing_else(self):
         """Section 4 of the Krea design intent: not the filename, not the

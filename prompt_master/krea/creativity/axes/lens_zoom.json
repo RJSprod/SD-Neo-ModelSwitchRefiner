@@ -1,0 +1,230 @@
+{
+  "axis": "lens_zoom",
+  "entries": [
+    {
+      "id": "wide24",
+      "label": "Wide 24mm feel",
+      "family": "wide",
+      "aliases": [
+        "24mm"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "wide"
+      ],
+      "expressions": {
+        "light": "a subtle wide 24mm-like perspective",
+        "moderate": "a clear wide 24mm-like perspective, with foreground expansion, immersive environment, and energetic depth separation",
+        "strong": "a pronounced wide 24mm-like perspective, strongly emphasizing foreground expansion, immersive environment, and energetic depth separation",
+        "extreme": "an extreme wide 24mm-like perspective interpretation, with foreground expansion, immersive environment, and energetic depth separation; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "ultrawide16",
+      "label": "Ultra-wide 16mm feel",
+      "family": "wide",
+      "aliases": [
+        "16mm"
+      ],
+      "min_creativity": 4,
+      "weight": 1.0,
+      "tags": [
+        "wide"
+      ],
+      "expressions": {
+        "light": "a subtle ultra-wide perspective",
+        "moderate": "a clear ultra-wide perspective, with dramatic near-field scale, sweeping context, edge expansion, and exaggerated depth",
+        "strong": "a pronounced ultra-wide perspective, strongly emphasizing dramatic near-field scale, sweeping context, edge expansion, and exaggerated depth",
+        "extreme": "an extreme ultra-wide perspective interpretation, with dramatic near-field scale, sweeping context, edge expansion, and exaggerated depth; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "normal50",
+      "label": "Normal 50mm feel",
+      "family": "normal",
+      "aliases": [
+        "50mm"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "normal"
+      ],
+      "expressions": {
+        "light": "a subtle 50mm-like normal perspective",
+        "moderate": "a clear 50mm-like normal perspective, with familiar proportions, moderate depth, and human-scale observation",
+        "strong": "a pronounced 50mm-like normal perspective, strongly emphasizing familiar proportions, moderate depth, and human-scale observation",
+        "extreme": "an extreme 50mm-like normal perspective interpretation, with familiar proportions, moderate depth, and human-scale observation; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "portrait85",
+      "label": "Portrait compression",
+      "family": "telephoto",
+      "aliases": [
+        "85mm"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "telephoto",
+        "compressed"
+      ],
+      "expressions": {
+        "light": "a subtle 85mm-like compressed perspective",
+        "moderate": "a clear 85mm-like compressed perspective, with flattened depth layers, selective isolation, and refined long-lens spatial character",
+        "strong": "a pronounced 85mm-like compressed perspective, strongly emphasizing flattened depth layers, selective isolation, and refined long-lens spatial character",
+        "extreme": "an extreme 85mm-like compressed perspective interpretation, with flattened depth layers, selective isolation, and refined long-lens spatial character; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "long200",
+      "label": "Long-lens observation",
+      "family": "telephoto",
+      "aliases": [
+        "200mm",
+        "telephoto"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "telephoto",
+        "compressed"
+      ],
+      "expressions": {
+        "light": "a subtle 200mm-like long-lens perspective",
+        "moderate": "a clear 200mm-like long-lens perspective, with heavy spatial compression, stacked background planes, and detached observation",
+        "strong": "a pronounced 200mm-like long-lens perspective, strongly emphasizing heavy spatial compression, stacked background planes, and detached observation",
+        "extreme": "an extreme 200mm-like long-lens perspective interpretation, with heavy spatial compression, stacked background planes, and detached observation; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "macro",
+      "label": "Macro / close focus",
+      "family": "macro",
+      "aliases": [
+        "macro"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "macro",
+        "close"
+      ],
+      "expressions": {
+        "light": "a subtle macro-like close focus",
+        "moderate": "a clear macro-like close focus, with magnified surface detail, tiny spatial scale, and intense near-field specificity",
+        "strong": "a pronounced macro-like close focus, strongly emphasizing magnified surface detail, tiny spatial scale, and intense near-field specificity",
+        "extreme": "an extreme macro-like close focus interpretation, with magnified surface detail, tiny spatial scale, and intense near-field specificity; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "fisheye",
+      "label": "Fisheye",
+      "family": "wide",
+      "aliases": [
+        "fisheye"
+      ],
+      "min_creativity": 5,
+      "weight": 1.0,
+      "tags": [
+        "fisheye",
+        "wide"
+      ],
+      "expressions": {
+        "light": "a subtle fisheye perspective",
+        "moderate": "a clear fisheye perspective, with curved geometry, bulging near-field scale, sweeping edge distortion, and unconventional energy",
+        "strong": "a pronounced fisheye perspective, strongly emphasizing curved geometry, bulging near-field scale, sweeping edge distortion, and unconventional energy",
+        "extreme": "an extreme fisheye perspective interpretation, with curved geometry, bulging near-field scale, sweeping edge distortion, and unconventional energy; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "compact_snapshot",
+      "label": "Compact-camera snapshot",
+      "family": "snapshot",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "snapshot"
+      ],
+      "expressions": {
+        "light": "a subtle compact-camera perspective",
+        "moderate": "a clear compact-camera perspective, with modest optical polish, close working distance, abrupt framing, and everyday immediacy",
+        "strong": "a pronounced compact-camera perspective, strongly emphasizing modest optical polish, close working distance, abrupt framing, and everyday immediacy",
+        "extreme": "an extreme compact-camera perspective interpretation, with modest optical polish, close working distance, abrupt framing, and everyday immediacy; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "telephoto_flat",
+      "label": "Flat telephoto",
+      "family": "telephoto",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "telephoto",
+        "compressed"
+      ],
+      "expressions": {
+        "light": "a subtle flat telephoto perspective",
+        "moderate": "a clear flat telephoto perspective, with subtle compression, reduced perspective drama, and calm graphic stacking of planes",
+        "strong": "a pronounced flat telephoto perspective, strongly emphasizing subtle compression, reduced perspective drama, and calm graphic stacking of planes",
+        "extreme": "an extreme flat telephoto perspective interpretation, with subtle compression, reduced perspective drama, and calm graphic stacking of planes; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "close_wide",
+      "label": "Close wide-angle",
+      "family": "wide",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "wide",
+        "close"
+      ],
+      "expressions": {
+        "light": "a subtle close wide-angle perspective",
+        "moderate": "a clear close wide-angle perspective, with intimate near-field exaggeration with strong environmental context and energetic spatial pull",
+        "strong": "a pronounced close wide-angle perspective, strongly emphasizing intimate near-field exaggeration with strong environmental context and energetic spatial pull",
+        "extreme": "an extreme close wide-angle perspective interpretation, with intimate near-field exaggeration with strong environmental context and energetic spatial pull; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "orthographic",
+      "label": "Near-orthographic",
+      "family": "technical",
+      "aliases": [],
+      "min_creativity": 4,
+      "weight": 1.0,
+      "tags": [
+        "technical"
+      ],
+      "expressions": {
+        "light": "a subtle near-orthographic perspective",
+        "moderate": "a clear near-orthographic perspective, with minimal convergence, diagram-like clarity, and flattened design-focused spatial reading",
+        "strong": "a pronounced near-orthographic perspective, strongly emphasizing minimal convergence, diagram-like clarity, and flattened design-focused spatial reading",
+        "extreme": "an extreme near-orthographic perspective interpretation, with minimal convergence, diagram-like clarity, and flattened design-focused spatial reading; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "tilt_shift",
+      "label": "Tilt-shift / miniature feel",
+      "family": "special",
+      "aliases": [],
+      "min_creativity": 5,
+      "weight": 1.0,
+      "tags": [
+        "special"
+      ],
+      "expressions": {
+        "light": "a subtle tilt-shift perspective",
+        "moderate": "a clear tilt-shift perspective, with selective plane emphasis, miniature-like spatial impression, and deliberately manipulated depth cues",
+        "strong": "a pronounced tilt-shift perspective, strongly emphasizing selective plane emphasis, miniature-like spatial impression, and deliberately manipulated depth cues",
+        "extreme": "an extreme tilt-shift perspective interpretation, with selective plane emphasis, miniature-like spatial impression, and deliberately manipulated depth cues; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    }
+  ]
+}

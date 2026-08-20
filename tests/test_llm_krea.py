@@ -107,6 +107,31 @@ def refs(count: int) -> list[Reference]:
                       data_url=f"data:image/png;base64,PIC{position}")
             for position in range(1, count + 1)]
 
+def undirected(prompt, seed=7, *paths):
+    """One panel run with Creative Mode off, whatever the axis table is made of.
+
+    The handler takes two variable-length groups -- the axis controls and the
+    reference slots -- flattened into one argument list, because Gradio has no
+    other shape for them. A test that spelled the axis half out would be a test
+    that has to be edited whenever the creativity package grows an axis, so it
+    is built from the library here instead.
+    """
+    from prompt_master.krea import director
+    from prompt_master.krea import library as library_module
+
+    axes = []
+    for _ in library_module.library().axis_keys:
+        axes.extend([director.VARY, None])
+    return list(panel._generate(prompt, seed, False, 1, -1, False, *axes, *paths))
+
+
+STATUS = 4
+"""Which of the panel's yielded values is the status line.
+
+Named because it moved when the recipe view was added, and a test that says
+``frames[0][4]`` is a test nobody can check without counting an outputs list.
+"""
+
 
 # --------------------------------------------------------------------------- #
 # The prompt package (design intent §3, §6, §7)
@@ -540,10 +565,10 @@ class TestThePanel:
         assert written.max_lines == written.lines
 
     def test_an_empty_request_is_refused_before_the_runtime_is_touched(self, store, host):
-        frames = list(panel._generate("   ", 7, 1))
+        frames = undirected("   ", 7)
 
         assert len(frames) == 1
-        assert "Describe the image you want" in frames[0][3]
+        assert "Describe the image you want" in frames[0][STATUS]
 
     def test_stop_gives_the_controls_back(self):
         """``cancels=`` closes the generator where it stands, so the handler
@@ -651,7 +676,7 @@ class TestVisionIsRequiredOnlyForReferences:
         monkeypatch.setattr(panel.sessions, "krea",
                             lambda *a, **k: iter([sessions.Event(sessions.DONE, "a prompt")]))
 
-        frames = list(panel._generate("a rainy street", 7, 1, None, None, None, None))
+        frames = undirected("a rainy street", 7, None, None, None, None)
 
         assert asked == []
         assert frames[-1][1] == "a prompt"
@@ -664,11 +689,11 @@ class TestVisionIsRequiredOnlyForReferences:
         monkeypatch.setattr(panel.mc_llm_runtime, "config", lambda: self.Blind())
         monkeypatch.setattr(panel.sessions, "krea", lambda *a, **k: started.append(True))
 
-        frames = list(panel._generate("edit it", 7, 1, "/tmp/a.png", None, None, None))
+        frames = undirected("edit it", 7, "/tmp/a.png", None, None, None)
 
         assert started == []
         assert len(frames) == 1
-        assert "no vision projector" in frames[0][3]
+        assert "no vision projector" in frames[0][STATUS]
 
     def test_a_gap_is_refused_before_the_runtime_is_consulted(self, store, host,
                                                               monkeypatch):
@@ -676,10 +701,10 @@ class TestVisionIsRequiredOnlyForReferences:
         started = []
         monkeypatch.setattr(panel.sessions, "krea", lambda *a, **k: started.append(True))
 
-        frames = list(panel._generate("edit it", 7, 1, "/tmp/a.png", None, "/tmp/c.png", None))
+        frames = undirected("edit it", 7, "/tmp/a.png", None, "/tmp/c.png", None)
 
         assert started == []
-        assert "Image 2 is empty" in frames[0][3]
+        assert "Image 2 is empty" in frames[0][STATUS]
 
     def test_the_order_shown_in_the_ui_is_the_order_handed_to_the_session(
             self, store, host, monkeypatch):
@@ -687,15 +712,16 @@ class TestVisionIsRequiredOnlyForReferences:
         monkeypatch.setattr(panel.mc_llm_runtime, "config", lambda: self.Seeing())
         monkeypatch.setattr(panel.ui, "data_url", lambda path: f"data:{path}")
 
-        def record(prompt, references, seed, cancel, creativity=None):
+        def record(prompt, references, seed, cancel, creativity=None, direction=""):
             handed["references"] = list(references)
             handed["creativity"] = creativity
+            handed["direction"] = direction
             return iter([sessions.Event(sessions.DONE, "a prompt")])
 
         monkeypatch.setattr(panel.sessions, "krea", record)
 
-        list(panel._generate("use image 1 and image 2", 7, 1,
-                             "/tmp/first.png", "/tmp/second.png", None, None))
+        undirected("use image 1 and image 2", 7,
+                             "/tmp/first.png", "/tmp/second.png", None, None)
 
         assert [(r.ui_index, r.path) for r in handed["references"]] == [
             (1, "/tmp/first.png"), (2, "/tmp/second.png")]
@@ -709,11 +735,11 @@ class TestVisionIsRequiredOnlyForReferences:
         started = []
         monkeypatch.setattr(panel.sessions, "krea", lambda *a, **k: started.append(True))
 
-        frames = list(panel._generate("use them", 7, 1,
-                                      "/tmp/first.png", "/tmp/second.png", None, None))
+        frames = undirected("use them", 7,
+                                      "/tmp/first.png", "/tmp/second.png", None, None)
 
         assert started == []
-        assert "Image 2 could not be read" in frames[0][3]
+        assert "Image 2 could not be read" in frames[0][STATUS]
 
 
 class TestTheCaptionsArriveInOrder:
@@ -729,7 +755,7 @@ class TestTheCaptionsArriveInOrder:
             sessions.Event(sessions.CAPTION, "a red coat"),
             sessions.Event(sessions.DONE, "the prompt")]))
 
-        frames = list(panel._generate("use them", 7, 1, "/tmp/a.png", "/tmp/b.png", None, None))
+        frames = undirected("use them", 7, "/tmp/a.png", "/tmp/b.png", None, None)
 
         shown = [frame[2].get("value") for frame in frames if isinstance(frame[2], dict)
                  and frame[2].get("value")]
@@ -854,10 +880,10 @@ class TestAPictureThatWillNotEncode:
         started = []
         monkeypatch.setattr(panel.sessions, "krea", lambda *a, **k: started.append(True))
 
-        frames = list(panel._generate("use them", 7, 1,
+        frames = undirected("use them", 7,
                                       "/tmp/gradio/first.png", "/tmp/gradio/second.png",
-                                      None, None))
+                                      None, None)
 
         assert started == []
-        assert "Image 2 could not be read" in frames[0][3]
-        assert "/tmp/gradio" not in frames[0][3]
+        assert "Image 2 could not be read" in frames[0][STATUS]
+        assert "/tmp/gradio" not in frames[0][STATUS]
