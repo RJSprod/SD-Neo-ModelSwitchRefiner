@@ -41,6 +41,24 @@ def elsewhere(tmp_path):
     return tmp_path / "elsewhere"
 
 
+@pytest.fixture
+def a_card(monkeypatch):
+    """One CUDA card in the machine, faked at the nvidia-smi boundary.
+
+    Below the pairing rather than above it, so what the tests see is the list
+    the panel sees: every card offered once holding the weights and once in
+    mixed mode, with the processor after them.
+    """
+    from prompt_master.core.models import GpuInfo
+
+    card = GpuInfo(0, "GPU-0000", "NVIDIA GeForce RTX 3090", 24576, 23304, "560.94", 8.6)
+    monkeypatch.setattr("prompt_master.inference.device_detection.detect_gpus",
+                        lambda *args, **kwargs: [card])
+    setup.forget_devices()
+    yield card
+    setup.forget_devices()
+
+
 def make_build(directory, name="llama-server", extras=("libllama.so", "libggml.so",
                                                        "llama-cli")):
     """A directory that looks like a llama.cpp release."""
@@ -212,6 +230,48 @@ class TestAdopt:
 
 
 class TestRecord:
+    def test_choosing_mixed_mode_records_no_resident_layers(self, root, a_card):
+        """The whole of the setting: the card is still named on --device, and
+        the weights stay in system RAM."""
+        server = make_build(root / "runtime")
+
+        state = setup.record(server, setup.device_for_token("mixed:0"))
+
+        assert state["mode"] == "mixed"
+        assert state["gpu_layers"] == "0"
+
+    def test_choosing_the_card_itself_still_records_a_full_offload(self, root, a_card):
+        server = make_build(root / "runtime")
+
+        state = setup.record(server, setup.device_for_token("gpu:0"))
+
+        assert state["mode"] == "gpu"
+        assert state["gpu_layers"] == "all"
+
+    def test_recording_a_runtime_again_leaves_a_mixed_install_mixed(self, root, a_card):
+        """Detect answers "which llama-server", and nothing else. Answering it
+        with "and put the weights back on the card" is how somebody who chose
+        mixed mode ends up watching their VRAM fill."""
+        server = make_build(root / "runtime")
+        setup.record(server, setup.device_for_token("mixed:0"))
+
+        state = setup.record(server)
+
+        assert state["mode"] == "mixed"
+        assert state["gpu_layers"] == "0"
+
+    def test_a_mixed_install_is_never_read_back_as_a_full_offload(self, root, a_card):
+        """What every reader downstream turns into --n-gpu-layers."""
+        import mc_llm_runtime
+
+        server = make_build(root / "runtime")
+        setup.record(server, setup.device_for_token("mixed:0"))
+
+        configuration = mc_llm_runtime.config()
+
+        assert configuration.gpu_layers == "0"
+        assert not configuration.on_gpu
+
     def test_it_writes_a_usable_state_file_from_nothing(self, root):
         server = make_build(root / "runtime")
 
@@ -303,6 +363,30 @@ class TestDevices:
 
     def test_a_preferred_device_is_always_returned(self, root):
         assert setup.preferred_device() is not None
+
+    def test_a_card_is_offered_both_ways_under_two_different_tokens(self, root, a_card):
+        """The index alone is not an identity: the same card appears twice, and
+        keyed on the index the mixed entry is indistinguishable from the entry
+        that fills the card."""
+        tokens = [setup.device_token(found) for found in setup.devices()]
+
+        assert len(tokens) == len(set(tokens))
+        assert "mixed:0" in tokens and "gpu:0" in tokens
+
+    def test_a_token_resolves_to_the_device_it_names(self, root, a_card):
+        assert setup.device_for_token("mixed:0").is_mixed
+        assert not setup.device_for_token("gpu:0").is_mixed
+        assert setup.device_for_token("cpu:-1").is_cpu
+
+    def test_a_bare_index_still_names_what_it_named_before(self, root, a_card):
+        """What earlier builds wrote into the menu, and what it meant there:
+        the first device with that index, card or processor."""
+        assert not setup.device_for_token("0").is_mixed
+        assert setup.device_for_token("-1").is_cpu
+
+    def test_a_token_for_a_device_that_is_not_there_resolves_to_nothing(self, root, a_card):
+        assert setup.device_for_token("gpu:7") is None
+        assert setup.device_for_token("") is None
 
 
 class TestDownload:

@@ -7,6 +7,7 @@ import platform
 import re
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from prompt_master.core.models import CPU_INDEX, GpuInfo
@@ -139,6 +140,61 @@ def detect_devices(timeout: float = 15) -> list[GpuInfo]:
     for gpu in gpus:
         offered += [gpu, mixed_device(gpu)]
     return [*offered, detect_cpu()]
+
+
+def recorded_mode(mode: str = "", device: str = "", gpu_layers: str = "") -> str:
+    """Which of the three ways a recorded install is using its device.
+
+    The state file's own ``mode`` when it has one, and otherwise read off the
+    two settings that say the same thing in older files: no CUDA device at all
+    is CPU mode, and a card with no resident layers is mixed mode. Written once
+    because the three callers that need it — the menu, the runtime and the
+    setup writer — disagreeing about which mode an install is in is the same
+    bug as not recording the mode at all.
+    """
+    from prompt_master.core.models import CPU_MODE, GPU_MODE, MIXED_MODE
+
+    named = str(mode or "").strip().casefold()
+    if named in (GPU_MODE, MIXED_MODE, CPU_MODE):
+        return named
+    if str(device or "").strip().casefold() == CPU_DEVICE:
+        return CPU_MODE
+    return MIXED_MODE if str(gpu_layers) == NO_OFFLOAD else GPU_MODE
+
+
+def device_token(device: GpuInfo) -> str:
+    """A device's identity as one string, for a dropdown value or a saved choice.
+
+    The physical index alone is not an identity: a CUDA card is offered twice,
+    once holding the weights and once in mixed mode, and both entries carry the
+    same index. Keyed on the index alone the two options collapse into one, and
+    the one that survives is whichever was listed first — which is how choosing
+    "mixed" in a menu records a full offload and fills the card it was meant to
+    keep free. The mode is the half that tells them apart, so it is in here.
+    """
+    return f"{device.mode}:{device.physical_index}"
+
+
+def device_for_token(token: str, offered: Sequence[GpuInfo]) -> GpuInfo | None:
+    """The device in ``offered`` that ``token`` names, or None.
+
+    A bare index is still understood, and still means exactly what it meant
+    when it was all the menu wrote: the first device with that index, which is
+    the card itself for a card and the processor for -1. A menu value saved by
+    an earlier version therefore selects the same device it selected then.
+    """
+    text = str(token or "").strip().casefold()
+    if not text:
+        return None
+    mode, separator, index = text.partition(":")
+    try:
+        wanted = int(index if separator else text)
+    except ValueError:
+        return None
+    for device in offered:
+        if device.physical_index == wanted and (not separator or device.mode == mode):
+            return device
+    return None
 
 
 def describe(device: GpuInfo) -> str:

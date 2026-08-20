@@ -111,6 +111,26 @@ class Config:
     device_name: str = ""
     mode: str = "gpu"
 
+    def __post_init__(self) -> None:
+        """The mode has the last word on where the weights go.
+
+        Mixed mode *is* "no resident layers": the card is named on ``--device``
+        and given the work llama.cpp can hand it, and the weights stay in
+        system RAM. A state file that says ``mixed`` and also carries a layer
+        count is not describing two settings to be reconciled -- it is
+        describing one setting written twice, once wrongly, and the mode is the
+        half the user chose in the menu. Settling it here, once, is what stops
+        a mixed install from being started as a full offload by whichever
+        reader did not think to look at the mode: the layer count every one of
+        them reads is already the right one.
+        """
+        from prompt_master.core.models import CPU_MODE, MIXED_MODE
+        from prompt_master.inference.device_detection import NO_OFFLOAD
+
+        if (str(self.mode).strip().casefold() in (MIXED_MODE, CPU_MODE)
+                and str(self.gpu_layers) != NO_OFFLOAD):
+            object.__setattr__(self, "gpu_layers", NO_OFFLOAD)
+
     @property
     def on_gpu(self) -> bool:
         from prompt_master.inference.device_detection import CPU_DEVICE, NO_OFFLOAD
