@@ -1106,6 +1106,16 @@ request, at every setting.
 Nothing happens on its own. There is no idle timer, no typing watcher, no repeat
 loop. A creative roll happens because you pressed a button.
 
+The roll happens **inside the generation**, on the server, in the hook that runs
+before Forge builds the batch. One press of Generate starts everything, and
+nothing after the press needs the page: switch windows, lock the screen or close
+the browser and Forge finishes the job and writes the files, exactly as it does
+for any other generation. (This is a change. Creative Mode used to sequence the
+roll and the image from JavaScript, which meant a press started a roll and a
+timer in the tab started the image — and browsers throttle those timers to one
+tick a second in a hidden tab and one a minute in a frozen one, so a hidden tab
+made the image late and a closed one meant it never came.)
+
 ### Turning it on
 
 The checkbox is under the txt2img prompt, and off on a fresh install:
@@ -1192,8 +1202,9 @@ recorded separately — it is already the image's own `Prompt:` line.
 
 ### What it costs, and what the bar shows
 
-A creative roll is real work and it all happens *before* the image job starts.
-Two spans dominate, and both scale with Creativity:
+A creative roll is real work and it all happens at the start of the image job,
+before a single sampling step. Two spans dominate, and both scale with
+Creativity:
 
 | | What it is | Why it costs what it does |
 | --- | --- | --- |
@@ -1224,11 +1235,12 @@ Generate. Switching to a much larger checkpoint while a language model is
 already resident is the case that still costs a restart of `llama-server`, and
 the console says so when it happens.
 
-All of it is now reported on Forge's own progress bar, in the gallery, before
-the image bar appears — the phase name, a moving bar and an ETA, with Interrupt
-wired up. The prediction is time-proportional and self-calibrating: the first
-roll on a fresh install uses a built-in guess, and every roll after that uses
-what your machine actually measured.
+All of it is reported on Forge's own progress bar — the generation's own bar,
+since the roll is the first part of that generation — with the phase name, a
+moving bar and an ETA. Interrupt during the roll stops the generation. The
+prediction is time-proportional and self-calibrating: the first roll on a fresh
+install uses a built-in guess, and every roll after that uses what your machine
+actually measured.
 
 ### Anti-repetition
 
@@ -1247,9 +1259,11 @@ yourself is never suppressed: type "ultra detailed" and it stays.
   a captioning pass before a prompt can be written about it, which is a second
   model request per image. LLM Studio → Krea 2 has the reference slots.
 - **The negative prompt.** Unchanged, and not sent to the writer.
-- **A non-Krea checkpoint.** Creative Mode refuses to arm in txt2img and says
-  which architecture is selected. LLM Studio does not consult this — writing a
-  prompt settles nothing about what draws it.
+- **A non-Krea checkpoint.** Creative Mode skips the expansion in txt2img and
+  says which architecture is selected in the console; the generation goes ahead
+  with the prompt you typed, which is what that checkpoint wanted anyway. LLM
+  Studio does not consult this — writing a prompt settles nothing about what
+  draws it.
 - **Duplicate a Forge control.** Steps, size, sampler, CFG and the image seed
   stay where they are. A duplicate would put a number in the PNG metadata that
   never happened.
@@ -1679,7 +1693,7 @@ mc_llm_chat_panel.py       Conversation workspace
 mc_llm_minimax_panel.py    MiniMax H3 workspace
 mc_llm_krea_panel.py       Krea 2 workspace
 mc_llm_ui.py          shared UI helpers and the element-id contract
-mc_creative_krea.py   Creative Mode: settings, roll history, the arming token
+mc_creative_krea.py   Creative Mode: settings, roll history, one roll
 mc_llm_progress.py    the Krea roll, reported on the host's progress bar
 prompt_master/        vendored LTX business logic (see VENDORED_FROM.txt)
 prompt_master/krea/creativity/    the versioned creative vocabulary (data only)
@@ -1787,12 +1801,20 @@ It also counts model calls — always exactly one per roll, at every position �
 checks Creativity 1 as a payload *and* as a message, and reads the package's own
 `acceptance_cases.json`, failing if the data grows a promise no test claims.
 
-`tests/test_krea_creative_js.py` runs the browser gate under node against a
-synthetic clock. The one-shot bypass is a state machine that is wrong in one
-direction if nothing ever generates and in the other if every click generates
-twice, and the absence of a scheduler is only checkable by running an hour
-forward with nobody touching anything. It skips where node is absent, as
-`tests/test_llm_studio_js.py` does.
+`tests/test_krea_creative_js.py` runs the browser file under node against a
+synthetic clock and a fake page. What it defends is an absence: a click
+dispatched at the real listener list has to reach the native submission, no
+timer may be armed by a press or by an hour of nobody touching anything, and the
+hidden roll button the old gate pressed has to go unpressed. Those are the
+properties that make a generation survive a hidden tab and a closed one. It
+skips where node is absent, as `tests/test_llm_studio_js.py` does.
+
+`tests/test_krea_progress.py` covers the other half of the same change: that the
+roll reports itself on the bar the generation already has without ever starting
+or finishing that task, and — driven on a thread with a deadline, because a
+deadlock hangs a test run rather than failing it — that a roll requested from
+inside a running image job completes instead of waiting for the job that is
+waiting for it.
 
 Three of those files are lopsided on purpose, because their failure modes are:
 

@@ -170,13 +170,23 @@ class _Gpu:
         could see. The second is re-checked after the lock is taken, because
         the check and the acquisition are not atomic and the point of checking
         is to be right at the moment work actually begins.
+
+        The second condition has one exception, and it is
+        ``mc_broker.inside_host_job()``: a turn the image generation is itself
+        blocked waiting for is not a turn competing with that generation. Krea
+        Creative Mode's roll runs from inside ``before_process``, so waiting for
+        the host to go idle there would be waiting for the job that is waiting
+        for this. The lock is still taken -- two LLM turns still serialise --
+        and that wait terminates, because the turn ahead is running rather than
+        waiting on anything the image job holds.
         """
         started = time.monotonic()
         announced = False
         while True:
             if self.cancel.is_set():
                 return False
-            if mc_broker.host_busy():
+            ours = mc_broker.inside_host_job()
+            if mc_broker.host_busy() and not ours:
                 announced = yield from self._announce(started, announced, "image generation")
                 time.sleep(WAIT_POLL_SECONDS)
                 continue
@@ -184,7 +194,7 @@ class _Gpu:
                                                 timeout=WAIT_POLL_SECONDS, required=False)
             self._held = self._workload.__enter__()
             if self._held:
-                if not mc_broker.host_busy():
+                if ours or not mc_broker.host_busy():
                     return True
                 self.release()
                 continue

@@ -1,21 +1,34 @@
 """The Krea roll, on Forge's own progress bar.
 
-A Creative Mode roll takes twenty seconds on a mixed-placement 26B model, all of
-it before the image job starts, and until this module existed it took them
-behind a UI that showed nothing whatsoever. That is the worst possible way to
-spend twenty seconds: a button that has visibly done nothing is a button people
-press again.
+A Creative Mode roll takes twenty seconds on a mixed-placement 26B model, and
+until this module existed it took them behind a UI that showed nothing
+whatsoever. That is the worst possible way to spend twenty seconds: a button
+that has visibly done nothing is a button people press again.
 
 What this module does is small and deliberately unoriginal -- it makes the roll
 look like every other long job the host runs, by using the host's own machinery
 rather than drawing something of its own:
 
-    browser mints a task id, asks the host to draw and poll its bar for it
-        -> this module claims that task id with modules.progress
+    a task the bar is drawn and polled for
         -> shared.state carries the label and the token counters
         -> mc_progress supplies the fraction and the ETA, as it does for a chain
-        -> the task is released, the bar disappears
-        -> the native Generate click starts a second, ordinary bar
+        -> the counters are handed back
+
+Owned bars and borrowed ones
+----------------------------
+There are two kinds of caller and the difference is one line of behaviour.
+
+Creative Mode's txt2img roll runs *inside* the image generation, from
+``before_process``, so the host has already started a task and the browser is
+already polling its bar. That roll **borrows** it: ``begin(claim=False)``, no
+``start_task``, no ``finish_task``, and Interrupt means stop the generation
+rather than stop the roll. Nothing about the bar is this module's to end,
+because the generation it describes has not finished.
+
+A caller with no generation around it -- LLM Studio, or anything that wants a
+bar of its own -- **owns** its task: ``start_task`` on the way in,
+``finish_task`` on the way out, and an Interrupt that stops the roll and goes no
+further.
 
 Nothing here is a second progress implementation. The bar, the polling, the
 Interrupt button and the arithmetic are all the host's and this extension's
@@ -75,6 +88,15 @@ _LABELS = {
     mc_progress.PHASE_KREA_WRITE: WRITING,
 }
 
+ADOPTED = "(the host's own bar)"
+"""Stands in for a task id when the roll is borrowing a bar rather than owning one.
+
+A borrowed bar has no task of this module's to name -- the id belongs to the
+image generation the roll is running inside, and this module must not touch it.
+Something non-empty is still needed, because every method below is a no-op while
+no roll is in progress and "no roll in progress" is spelled ``_task is None``.
+"""
+
 MINIMUM_REPLY = 200.0
 """Shortest expected reply, in characters, however short the last one was.
 
@@ -107,6 +129,7 @@ class Reporter:
     def __init__(self):
         self._lock = threading.RLock()
         self._task: str | None = None
+        self._claimed = False
         self._written = 0
         self._expected = 0.0
         self._phase = ""
@@ -118,8 +141,9 @@ class Reporter:
         with self._lock:
             return self._task
 
-    def begin(self, task_id, prompt_characters: int, warm: bool = None) -> bool:
-        """Claim ``task_id`` and plan the roll. Returns whether the bar will show.
+    def begin(self, task_id, prompt_characters: int, warm: bool = None,
+              claim: bool = True) -> bool:
+        """Plan the roll and put it on a bar. Returns whether the bar will show.
 
         ``prompt_characters`` is everything the model is about to read -- Krea's
         instruction, the user's line and the creative brief -- because that is
@@ -132,8 +156,17 @@ class Reporter:
         server is a lock acquisition and a cold one is twenty seconds of reading
         weights off a disk. The caller knows; this module would have to import
         the runtime to find out.
+
+        ``claim`` says whether this roll owns the host task or is borrowing one.
+        A roll that runs *inside* an image generation -- which is where Creative
+        Mode's roll runs -- is described by the bar the host already started for
+        that generation, so it must neither start a task nor finish one:
+        ``finish_task`` on somebody else's task tells the browser the image job
+        ended, and the browser believes it. Borrowed or owned, everything else
+        below is identical; only the two lines that talk to
+        ``modules.progress`` are skipped.
         """
-        task_id = str(task_id or "").strip()
+        task_id = str(task_id or "").strip() or (ADOPTED if not claim else "")
         if not task_id:
             return False
 
@@ -148,11 +181,12 @@ class Reporter:
         job.add(mc_progress.PHASE_KREA_WRITE, WRITING, rate_keys=("krea:write",),
                 units=expected, weights=(expected,))
 
-        if not self._claim(task_id):
+        if claim and not self._claim(task_id):
             return False
 
         with self._lock:
             self._task = task_id
+            self._claimed = bool(claim)
             self._written = 0
             self._expected = expected
             self._phase = ""
@@ -204,6 +238,7 @@ class Reporter:
         """
         with self._lock:
             task, self._task = self._task, None
+            claimed, self._claimed = self._claimed, False
             self._phase = ""
         if task is None:
             return
@@ -212,7 +247,7 @@ class Reporter:
         if length > 0:
             mc_progress.learn("krea:reply", float(length))
         mc_progress.end()
-        self._release(task)
+        self._release(task, claimed)
 
     def abandon(self) -> None:
         """Give the bar back without recording anything.
@@ -223,11 +258,12 @@ class Reporter:
         """
         with self._lock:
             task, self._task = self._task, None
+            claimed, self._claimed = self._claimed, False
             self._phase = ""
         if task is None:
             return
         mc_progress.abandon()
-        self._release(task)
+        self._release(task, claimed)
 
     # -- what the user can do to it ---------------------------------------- #
 
@@ -236,13 +272,22 @@ class Reporter:
 
         Asked once per streamed chunk by the caller. The bar the host draws
         carries Interrupt and Skip whether or not anything is listening, and a
-        button that does nothing is worse than no button -- so the roll listens,
-        and the flag is cleared on the way out so the image generation that
-        follows does not inherit a stop nobody meant for it.
+        button that does nothing is worse than no button -- so the roll listens.
+
+        What happens to the flag afterwards depends on whose bar this is, and
+        the two answers are opposite for the same reason. On an owned bar the
+        roll is the whole of what is running, and the image generation that
+        follows it is a separate press: the flag is cleared, so that generation
+        does not inherit a stop nobody meant for it. On a borrowed bar the roll
+        is the first part of a generation that is already running, and Interrupt
+        during it means *stop this generation* -- so the flag is left exactly as
+        the user set it, and the host's own processing loop reads it a moment
+        later and stops.
         """
         with self._lock:
             if self._task is None:
                 return False
+            claimed = self._claimed
         try:
             from modules import shared
 
@@ -250,9 +295,10 @@ class Reporter:
                     or getattr(shared.state, "stopping_generation", False)
                     or getattr(shared.state, "skipped", False)):
                 return False
-            shared.state.interrupted = False
-            shared.state.stopping_generation = False
-            shared.state.skipped = False
+            if claimed:
+                shared.state.interrupted = False
+                shared.state.stopping_generation = False
+                shared.state.skipped = False
         except Exception:
             return False
         return True
@@ -308,14 +354,34 @@ class Reporter:
             return False
         return True
 
-    def _release(self, task_id: str) -> None:
+    def _release(self, task_id: str, claimed: bool = True) -> None:
+        """Hand the bar back: always the counters, only sometimes the task.
+
+        The counters are this reporter's own writing whichever kind of bar it
+        was drawing on, and leaving them at a finished roll's values would show
+        the image generation that follows as already complete until its sampler
+        overwrites them. So they are always cleared.
+
+        ``finish_task`` is different, and is exactly the line that must not run
+        on a borrowed bar. On an owned task it makes the roll's bar disappear;
+        on the host's own task it tells the browser -- and anything else polling
+        the progress endpoint -- that the image generation has finished, in the
+        middle of ``before_process``.
+        """
         try:
-            from modules import progress as host_progress
             from modules import shared
 
             shared.state.sampling_step = 0
             shared.state.sampling_steps = 0
             shared.state.textinfo = None
+        except Exception:
+            logger.debug("Model Chain: the roll's progress counters could not be cleared",
+                         exc_info=True)
+        if not claimed:
+            return
+        try:
+            from modules import progress as host_progress
+
             # job and job_count are not cleared here because they are never set
             # -- see _claim. Clearing a field this module does not own would be
             # this reporter tidying away somebody else's running generation.

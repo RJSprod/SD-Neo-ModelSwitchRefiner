@@ -260,20 +260,17 @@ class TestTheBarNeverBlocksTheRunItDescribes:
         finally:
             shared.state.job = ""
 
-    def test_the_whole_gate_runs_with_the_real_broker_watching(self, monkeypatch,
-                                                               host, store):
+    def test_a_roll_with_no_generation_around_it_never_makes_the_host_look_busy(
+            self, monkeypatch, host, store):
         """End to end, with ``host_busy`` *not* stubbed.
 
         Every other test in this file replaces it, which is right for what they
         are each about and useless for this one: the deadlock was a real call to
-        a real ``host_busy`` returning a real True. So this drives the actual
-        txt2img gate through the actual ``_Gpu.acquire`` and asserts the answer
-        was False at every frame.
+        a real ``host_busy`` returning a real True. So this drives a real roll
+        through the actual ``_Gpu.acquire`` and asserts the answer was False at
+        every frame -- because nothing was generating, and a progress bar is not
+        a generation.
         """
-        import model_chain_krea_creative as creative_script
-        from prompt_master.krea import director
-        from prompt_master.krea import library as library_module
-
         mc_broker.clear()
         monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0: FakeClient())
         monkeypatch.setattr(sessions, "_placement_notes", list)
@@ -281,24 +278,19 @@ class TestTheBarNeverBlocksTheRunItDescribes:
         mc_creative_krea.creative = mc_creative_krea.Creative()
         mc_llm_progress.reporter = mc_llm_progress.Reporter()
 
-        axes: list = []
-        for _ in library_module.library().axis_keys:
-            axes.extend([director.VARY, None])
-
+        stored = mc_creative_krea.settings()
         busy = []
-        signals = []
         try:
-            for frame in creative_script._gate("car", 6, -1, True, "", *axes):
+            events = []
+            for event in mc_creative_krea.creative.roll("car", stored,
+                                                        task_id="task(abc)"):
                 busy.append(mc_broker.host_busy())
-                if isinstance(frame[1], str):
-                    signals.append(frame[1].split(":")[0])
+                events.append(event)
         finally:
             mc_broker.clear()
 
         assert not any(busy)
-        assert signals[0] == "task"
-        assert signals[-1] == "ready"
-        assert mc_creative_krea.creative.armed is not None
+        assert events[-1].kind == sessions.DONE
 
     def test_the_source_says_why(self):
         """A comment, asserted, because the two lines removed here are exactly
@@ -539,7 +531,10 @@ class TestInterrupt:
         assert shared.state.interrupted is False
         assert shared.state.skipped is False
 
-    def test_an_interrupted_roll_arms_nothing(self, client):
+    def test_an_interrupted_roll_records_no_result(self, client):
+        """``last`` is what the diagnostics drawer shows and what any later
+        reader would take for this roll's output. A run that was stopped has
+        none, and must not leave the previous one looking like it."""
         from modules import shared
 
         original = mc_llm_progress.reporter.wrote
@@ -547,7 +542,7 @@ class TestInterrupt:
             original(text), setattr(shared.state, "interrupted", True))[0]
         roll()
 
-        assert mc_creative_krea.creative.consume() is None
+        assert mc_creative_krea.creative.last is None
 
     def test_an_untouched_run_is_never_treated_as_interrupted(self, client):
         events = roll()
@@ -601,267 +596,241 @@ class TestItDoesNotDisturbTheGenerationItPrecedes:
 
 
 # --------------------------------------------------------------------------- #
-# The browser half
+# The bar the roll borrows
 # --------------------------------------------------------------------------- #
 
 
-SCRIPT = (Path(__file__).resolve().parent.parent / "javascript"
-          / "model_chain_creative_krea.js")
+class TestABorrowedBar:
+    """Creative Mode's txt2img roll runs inside the generation, so the bar it
+    reports on belongs to that generation and is still needed after the roll.
 
-HARNESS = """
-// A txt2img page whose hidden box a test can put server messages into, so the
-// handshake can be driven exactly as the server drives it.
-
-const record = {progressStarted: [], generates: 0, rolls: 0};
-
-let queue = [];
-let now = 0;
-globalThis.setInterval = function (fn) { queue.push(fn); return queue.length; };
-globalThis.clearInterval = function (id) { queue[id - 1] = null; };
-globalThis.setTimeout = function () { return 0; };
-globalThis.clearTimeout = function () {};
-globalThis.Date.now = () => now;
-
-// Run every live poll once. The controller polls on an interval; a test needs
-// to say "and then a moment passed" without one.
-function tick() {
-    queue.filter(Boolean).forEach((fn) => fn());
-}
-const flush = () => new Promise((resolve) => setImmediate(resolve));
-
-function holder(id, map) {
-    return {
-        id: id, tagName: "DIV", dataset: {},
-        querySelector(selector) {
-            const keys = selector.split(",").map((part) => part.trim());
-            for (const key of keys) { if (map[key]) return map[key]; }
-            return null;
-        },
-        querySelectorAll() { return []; },
-        addEventListener() {},
-    };
-}
-
-const toggle = {type: "checkbox", checked: true, dataset: {}, addEventListener() {}};
-const tokenField = {value: ""};
-const promptField = {value: "car"};
-const statusLine = {tagName: "DIV", textContent: ""};
-
-const generateButton = {
-    id: "txt2img_generate", tagName: "BUTTON", dataset: {},
-    classList: {names: {}, toggle() {}, contains() { return false; }},
-    contains() { return false; }, querySelector() { return null; },
-    addEventListener() {},
-    click() { record.generates += 1; },
-};
-
-const elements = {
-    "mc-krea-creative-toggle": holder("mc-krea-creative-toggle",
-        {"input[type=checkbox]": toggle}),
-    "mc-krea-creative-token": holder("mc-krea-creative-token", {"textarea": tokenField}),
-    "mc-krea-creative-status": holder("mc-krea-creative-status", {"div": statusLine}),
-    "mc-krea-creative-run": {
-        id: "mc-krea-creative-run", tagName: "BUTTON", dataset: {},
-        contains() { return false; }, querySelector() { return null; },
-        addEventListener() {}, click() { record.rolls += 1; },
-    },
-    "txt2img_prompt": holder("txt2img_prompt", {"textarea": promptField}),
-    "txt2img_generate": generateButton,
-    GALLERY_ENTRY
-};
-
-globalThis.document = {
-    querySelector: (selector) => elements[selector.replace("#", "")] || null,
-    querySelectorAll: () => [],
-    addEventListener() {},
-    readyState: "complete",
-};
-globalThis.window = globalThis;
-globalThis.gradioApp = () => globalThis.document;
-globalThis.Event = function (type) { this.type = type; };
-globalThis.onUiLoaded = (fn) => fn();
-globalThis.onAfterUiUpdate = () => {};
-PROGRESS_FN
-
-SOURCE
-
-const kc = globalThis.modelChainKreaCreative;
-
-// What the server sends down the hidden box, in order.
-function server(value) { tokenField.value = value; }
-
-BODY
-"""
-
-
-def run_js(body: str, gallery="txt2img_gallery_container",
-           progress_available=True) -> dict:
-    entry = (f'"{gallery}": holder("{gallery}", {{}})' if gallery else "")
-    progress_fn = ("globalThis.requestProgress = function (id, container, gallery, atEnd) "
-                   "{ record.progressStarted.push([id, container ? container.id : null, "
-                   "gallery]); };" if progress_available else "")
-    harness = (HARNESS.replace("SOURCE", SCRIPT.read_text())
-               .replace("BODY", body)
-               .replace("GALLERY_ENTRY", entry)
-               .replace("PROGRESS_FN", progress_fn))
-    result = subprocess.run(["node", "--input-type=module", "-e", harness],
-                            capture_output=True, text=True, timeout=60)
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout.strip().splitlines()[-1])
-
-
-REPORT = """
-console.log(JSON.stringify({
-    started: record.progressStarted,
-    rolls: record.rolls,
-    generates: record.generates,
-    rolling: kc.state.rolling,
-}));
-"""
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-class TestTheHandshake:
-    """How the browser learns which task the bar is for.
-
-    It used to mint the id and pass it in through a Gradio ``js=`` hook. Now the
-    server mints it and sends it down the hidden box the browser was already
-    polling for the arming token -- so nothing has to arrive intact for the roll
-    to work, and a bar that cannot be drawn costs a bar rather than a
-    generation.
+    Every assertion here is a variation on one line: ``finish_task`` must not be
+    called. The host serves ``finished_tasks`` membership even on an otherwise
+    active response, so finishing the image job's task from inside
+    ``before_process`` tells every poller that the generation is over -- the bar
+    is torn down, the gallery stops waiting, and the image arrives into a page
+    that has stopped listening for it.
     """
 
-    def test_the_bar_starts_when_the_server_names_the_task(self):
-        found = run_js("""
-            kc.runRoll();
-            server("task:abcd:task(mc-123456)");
-            tick();
-            await flush();
-        """ + REPORT)
+    def borrowed(self, source="car", task_id=""):
+        stored = mc_creative_krea.settings()
+        return list(mc_creative_krea.creative.roll(source, stored, task_id=task_id,
+                                                   own_bar=False))
 
-        assert found["started"] == [["task(mc-123456)", "txt2img_gallery_container", None]]
+    def test_it_reports_the_phases_without_a_task_id_of_its_own(self, client):
+        seen = []
+        original = mc_llm_progress.reporter.enter
 
-    def test_naming_the_task_is_not_an_outcome_and_polling_continues(self):
-        """The old shape resolved on the first new value it saw. If it did that
-        now, the task message would be read as "not ready" and no image would
-        ever be generated."""
-        found = run_js("""
-            kc.runRoll();
-            server("task:abcd:task(mc-123456)");
-            tick();
-            await flush();
-        """ + REPORT)
+        def watch(phase):
+            original(phase)
+            seen.append(_label())
 
-        assert found["rolling"] is True
-        assert found["generates"] == 0
+        mc_llm_progress.reporter.enter = watch
+        events = self.borrowed()
 
-    def test_the_arming_token_still_releases_one_generation(self):
-        found = run_js("""
-            const done = kc.runRoll();
-            server("task:abcd:task(mc-123456)");
-            tick();
-            await flush();
-            server("ready:efgh:armed");
-            tick();
-            await flush();
-            await done;
-        """ + REPORT)
+        assert events[-1].kind == sessions.DONE
+        assert mc_llm_progress.WRITING in seen
 
-        assert found["generates"] == 1
-        assert found["rolling"] is False
+    def test_it_never_starts_a_task(self, client):
+        from modules import progress
 
-    def test_a_failure_after_the_task_starts_no_generation(self):
-        found = run_js("""
-            const done = kc.runRoll();
-            server("task:abcd:task(mc-123456)");
-            tick();
-            await flush();
-            server("failed:efgh:");
-            tick();
-            await flush();
-            await done;
-        """ + REPORT)
+        during = []
+        original = mc_llm_progress.reporter.wrote
+        mc_llm_progress.reporter.wrote = lambda text: (
+            original(text), during.append(progress.current_task))[0]
+        self.borrowed()
 
-        assert found["generates"] == 0
+        assert during and all(task is None for task in during)
 
-    def test_a_roll_with_no_bar_available_still_generates(self):
-        """The property the handshake was rearranged for."""
-        found = run_js("""
-            const done = kc.runRoll();
-            server("task:abcd:task(mc-123456)");
-            tick();
-            await flush();
-            server("ready:efgh:armed");
-            tick();
-            await flush();
-            await done;
-        """ + REPORT, progress_available=False)
+    def test_it_never_finishes_the_generation_task(self, client):
+        """The one line that must not run. The host's own task is set here the
+        way ``modules.call_queue`` sets it around every GPU call."""
+        from modules import progress
 
-        assert found["started"] == []
-        assert found["generates"] == 1
+        progress.add_task_to_queue("task(the-image-job)")
+        progress.start_task("task(the-image-job)")
+        try:
+            self.borrowed()
 
-    def test_a_page_with_no_gallery_container_still_generates(self):
-        found = run_js("""
-            const done = kc.runRoll();
-            server("task:abcd:task(mc-123456)");
-            tick();
-            await flush();
-            server("ready:efgh:armed");
-            tick();
-            await flush();
-            await done;
-        """ + REPORT, gallery="")
+            assert progress.current_task == "task(the-image-job)"
+            assert "task(the-image-job)" not in progress.finished_tasks
+        finally:
+            progress.finish_task("task(the-image-job)")
 
-        assert found["started"] == []
-        assert found["generates"] == 1
+    def test_it_hands_the_counters_back_for_the_sampler(self, client):
+        """Not the task, but very much the counters: leaving them at a finished
+        roll's values shows the generation as complete until the sampler
+        overwrites them."""
+        from modules import shared
 
-    def test_it_draws_where_image_progress_appears(self):
-        found = run_js("""
-            kc.runRoll();
-            server("task:abcd:task(mc-123456)");
-            tick();
-            await flush();
-        """ + REPORT, gallery="txt2img_results")
+        self.borrowed()
 
-        assert found["started"][0][1] == "txt2img_results"
+        assert (shared.state.sampling_step, shared.state.sampling_steps) == (0, 0)
+        assert mc_llm_progress.reporter.task is None
 
-    def test_it_passes_no_gallery_because_a_roll_makes_no_picture(self):
-        found = run_js("""
-            kc.runRoll();
-            server("task:abcd:task(mc-123456)");
-            tick();
-            await flush();
-        """ + REPORT)
+    def test_a_failed_roll_hands_them_back_too(self, client):
+        from modules import shared
 
-        assert found["started"][0][2] is None
+        client.fail = RuntimeError("llama-server went away")
+        events = self.borrowed()
 
-    def test_an_empty_task_id_draws_nothing(self):
-        found = run_js("""
-            kc.startBar("");
-        """ + REPORT)
+        assert events[-1].kind == sessions.FAILED
+        assert (shared.state.sampling_step, shared.state.sampling_steps) == (0, 0)
+        assert mc_progress.active() is False
 
-        assert found["started"] == []
+    def test_interrupt_is_left_set_so_the_generation_stops_too(self, client):
+        """Opposite to the owned-bar case, and for the same reason. On an owned
+        bar the roll is all that is running and the flag would leak into a later
+        press; on a borrowed one the roll is the first part of a generation that
+        is already running, and Interrupt means stop that generation."""
+        from modules import shared
 
-    def test_the_page_is_never_asked_to_call_a_js_hook_by_name(self):
-        """Gradio's js= contract is one this extension no longer depends on."""
-        source = SCRIPT.read_text()
+        original = mc_llm_progress.reporter.wrote
+        mc_llm_progress.reporter.wrote = lambda text: (
+            original(text), setattr(shared.state, "interrupted", True))[0]
+        try:
+            events = self.borrowed()
+        finally:
+            interrupted = shared.state.interrupted
+            shared.state.interrupted = False
 
-        assert "mcKreaCreativeSubmit" not in source
+        assert events[-1].kind == sessions.CANCELLED
+        assert interrupted is True
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-class TestTheServerMintsTheId:
-    def test_the_gate_names_the_task_before_it_does_any_work(self):
-        """First frame out, so the bar covers the Director and the GPU wait as
-        well as the model call."""
+class TestTheRollRunsInsideTheGeneration:
+    """The deadlock, driven rather than reasoned about.
+
+    ``mc_llm_sessions._Gpu.acquire`` refuses to start an LLM turn while
+    ``host_busy()`` is true, and inside ``before_process`` it is true -- the host
+    set ``state.job`` before calling the hook. A roll that waited for it would
+    wait for the generation that is waiting for the roll, for ever. Nothing here
+    stubs ``host_busy``: the point is that it really does return True.
+    """
+
+    @pytest.fixture
+    def running(self, monkeypatch, host, store):
+        """A host in the middle of a job, the way call_queue leaves it.
+
+        Everything the ``client`` fixture arranges except the one thing this
+        class is about: ``host_busy`` is the real function here, and it is
+        answering about a job that really is running.
+        """
+        from modules import shared
+
+        mc_broker.clear()
+        fake = FakeClient()
+        monkeypatch.setattr(sessions, "_client",
+                            lambda needs_vision=False, reserve=0: fake)
+        monkeypatch.setattr(sessions, "_placement_notes", list)
+        monkeypatch.setattr(mc_creative_krea, "checkpoint_objection", lambda: "")
+        monkeypatch.setattr(mc_creative_krea, "_warm", lambda: True)
+        mc_creative_krea.creative = mc_creative_krea.Creative()
+        mc_llm_progress.reporter = mc_llm_progress.Reporter()
+
+        shared.state.job = "txt2img"
+        shared.state.job_count = 1
+        yield fake
+        shared.state.job = ""
+        shared.state.job_count = 0
+        mc_llm_progress.reporter.abandon()
+        mc_creative_krea.creative = mc_creative_krea.Creative()
+        mc_broker.clear()
+
+    def press(self, timeout=20.0, prompt="car"):
+        """One press of Generate, on a thread with a deadline.
+
+        A deadlocked hook does not fail a test, it hangs the run -- so the
+        deadline is the assertion.
+        """
+        import threading
+
         import model_chain_krea_creative as creative_script
+        from prompt_master.krea import director
+        from prompt_master.krea import library as library_module
 
-        assert creative_script._task_id().startswith("task(")
-        assert ":" not in creative_script._task_id()
+        script = creative_script.ScriptKreaCreative()
+        values = [10, director.RANDOM_SEED, True, ""]
+        for _key in library_module.library().axis_keys:
+            values.extend([director.VARY, None])
 
-    def test_two_rolls_never_share_an_id(self):
-        import model_chain_krea_creative as creative_script
+        class Processing:
+            def __init__(self):
+                self.prompt = prompt
+                self.extra_generation_params = {}
 
-        minted = {creative_script._task_id() for _ in range(50)}
+        p = Processing()
+        error: list[BaseException] = []
 
-        assert len(minted) == 50
+        def run():
+            try:
+                script.before_process(p, True, *values)
+            except BaseException as exc:  # surfaced on the calling thread below
+                error.append(exc)
+
+        worker = threading.Thread(target=run, name="press-generate", daemon=True)
+        worker.start()
+        worker.join(timeout)
+
+        assert not worker.is_alive(), "before_process never returned: the roll deadlocked"
+        if error:
+            raise error[0]
+        return p
+
+    def test_the_host_really_is_busy_while_the_hook_runs(self, running):
+        assert mc_broker.host_busy() is True
+
+    def test_the_roll_completes_anyway(self, running):
+        p = self.press()
+
+        assert p.prompt != "car"
+        assert running.calls
+
+    def test_it_never_says_it_is_waiting_for_the_image_generation(self, running):
+        """The symptom the old arrangement produced if the roll was ever moved
+        here: a console line saying the LLM is waiting for a generation, on the
+        thread that generation is blocked on."""
+        said = []
+        original = sessions._Gpu._announce
+
+        def watch(self, started, announced, what):
+            said.append(what)
+            return (yield from original(self, started, announced, what))
+
+        sessions._Gpu._announce = watch
+        try:
+            self.press()
+        finally:
+            sessions._Gpu._announce = original
+
+        assert "image generation" not in said
+
+    def test_the_permission_is_scoped_to_the_hook(self, running):
+        """It is granted for the roll and not for the session. An LLM turn
+        started from anywhere else while a generation runs still waits, which is
+        the guard the whole broker exists to provide."""
+        self.press()
+
+        assert mc_broker.inside_host_job() is False
+
+    def test_it_is_scoped_to_the_thread_as_well(self, running):
+        """Declared per thread, so a worker started inside the block does not
+        inherit a permission nothing is blocked waiting for."""
+        import threading
+
+        seen = []
+        with mc_broker.host_job():
+            worker = threading.Thread(target=lambda: seen.append(
+                mc_broker.inside_host_job()))
+            worker.start()
+            worker.join()
+
+            assert mc_broker.inside_host_job() is True
+
+        assert seen == [False]
+        assert mc_broker.inside_host_job() is False
+
+    def test_the_workload_lock_is_still_given_back(self, running):
+        self.press()
+
+        assert mc_broker.active() is None

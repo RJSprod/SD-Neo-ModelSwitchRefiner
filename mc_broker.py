@@ -562,6 +562,64 @@ def host_busy() -> bool:
     return bool(getattr(state, "job_count", 0))
 
 
+# --------------------------------------------------------------------------- #
+# The one caller that must not wait for the host
+# --------------------------------------------------------------------------- #
+#
+# `host_busy()` above is the rule that keeps an LLM turn from starting on top of
+# an image generation. It has exactly one legitimate exception, and it is not a
+# loosening of the rule so much as the rule read carefully: the wait exists so
+# that an LLM turn does not *compete* with a running image job, and a turn the
+# image job is itself blocked waiting for is not competing with it. It is the
+# job, in the part of the job that happens before any sampling.
+#
+# That is what Krea Creative Mode does. The generation cannot proceed until the
+# prompt has been written, so `before_process` writes it -- and if that request
+# waited for `host_busy()` to go false, it would be waiting for the generation
+# that is waiting for it. Forever.
+#
+# The permission is scoped, thread-local and declared rather than inferred:
+# nothing here tries to work out whether the calling thread "looks like" a job
+# thread. A caller that knows it holds up the host job says so, for exactly as
+# long as that is true, and `mc_llm_sessions._Gpu.acquire` is the only reader.
+#
+# What is deliberately *not* relaxed: the workload lock itself. Two LLM turns
+# still serialise, so an in-job roll queues behind a turn LLM Studio started and
+# that wait terminates, because the turn ahead of it is running rather than
+# waiting on anything this generation holds. The image side takes no broker lock
+# at all (see above), so there is no cycle left to close.
+
+
+_host_job = threading.local()
+
+
+class host_job:
+    """Declare that this thread is the host's own job, for as long as it is.
+
+    Re-entrant and nestable, so a caller does not have to know whether it is
+    already inside one. Everything about it is scoped to the thread that entered
+    it: a worker thread started from inside the block is *not* the host job, and
+    should not be, because nothing is blocked waiting for it.
+    """
+
+    def __enter__(self) -> "host_job":
+        _host_job.depth = getattr(_host_job, "depth", 0) + 1
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        _host_job.depth = max(getattr(_host_job, "depth", 0) - 1, 0)
+        return False
+
+
+def inside_host_job() -> bool:
+    """Whether this thread is running as part of the host's own image job.
+
+    True only inside :class:`host_job`. The one thing it licenses is skipping
+    the ``host_busy()`` wait -- it grants no lock, no VRAM and no priority.
+    """
+    return getattr(_host_job, "depth", 0) > 0
+
+
 def await_idle(timeout: float = 120.0) -> bool:
     """Block until no LLM workload holds the GPU. Returns whether it went idle.
 

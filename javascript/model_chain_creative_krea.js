@@ -1,72 +1,50 @@
 // Model Chain -- Krea Creative Mode, browser side.
 //
-// One job: when Creative Mode is on, a press of Generate has to run the
-// creative roll first and the native image job second. Everything else about
-// the feature is Python.
+// One job, and it is cosmetic: while Creative Mode is on, say so on the button
+// it changes the behaviour of. Everything else about the feature is Python.
 //
-// Why it needs a browser at all
-// -----------------------------
-// The roll ends in a Krea writer call, and an LLM run waits for the host to
-// stop generating -- so a roll asked for from inside a running image job would
-// be waiting on the job that is waiting on it. The order has to be enforced
-// before the native submission, and the only place that can happen is in front
-// of the click.
+// Why there is so little here
+// ---------------------------
+// There used to be a gate. A press of Generate was intercepted, a hidden button
+// was pressed to run the creative roll, a hidden textbox was polled until the
+// server said the prompt was ready, and only then was Generate clicked again
+// with a one-shot flag that let that click through. The order mattered -- the
+// roll ends in a language-model request, and one of those used to refuse to
+// start while the host was generating -- and in front of the click was the only
+// place the browser could enforce it.
 //
-// So: intercept the click, press a hidden button that does the roll, wait for
-// the server to say it is ready, then click Generate again with a one-shot flag
-// that lets exactly that click through.
+// The price was that a generation could not finish without this file running.
+// The press started a roll and nothing else; what actually started the image
+// was a setInterval callback, and browsers throttle those to one tick a second
+// in a hidden tab, one a minute in a frozen one, and none at all in a tab that
+// has been closed. Change windows and the image was late. Close the tab and the
+// roll's result sat armed on the server with nothing left to spend it.
+//
+// So the ordering is enforced in Python now, where the thing being ordered
+// lives: the roll runs inside the generation, from before_process, and
+// mc_broker.host_job() tells the language model that the image job is blocked
+// waiting for it rather than competing with it. Generate is an ordinary
+// Generate again. Press it and close the browser; Forge finishes the job and
+// writes the files, exactly as it does for every other generation.
 //
 // What is deliberately absent
 // ---------------------------
-// No idle timer. No observer on the prompt box. No repeat loop. No status
-// machine. This file has one entry point that is not wiring, and it fires when
-// somebody presses a button. That is the whole difference between this and the
-// Live controller it replaces, and it is most of why this file is a third of
-// the length.
-//
-// Failure posture, as everywhere else in this extension's JavaScript: if
-// anything here throws, txt2img must still generate images. Every entry point
-// is wrapped and every fallback is "behave as though Creative Mode were off".
+// No click listener. No idle timer. No observer on the prompt box. No repeat
+// loop. No status machine. Nothing here can stop, delay or start a generation,
+// which is the property worth keeping: the worst this file can do if every line
+// of it fails is leave a button unpainted.
 
 (function () {
     "use strict";
 
     const IDS = {
         toggle: "mc-krea-creative-toggle",
-        run: "mc-krea-creative-run",
-        token: "mc-krea-creative-token",
-        status: "mc-krea-creative-status",
-        prompt: "txt2img_prompt",
         generate: "txt2img_generate",
-        // Where the host draws its progress bar for txt2img. The second is what
-        // older layouts call it; whichever exists is where the roll's bar goes,
-        // so it appears exactly where image progress appears rather than in a
-        // place of this extension's choosing.
-        gallery: "txt2img_gallery_container",
-        results: "txt2img_results",
-        images: "txt2img_gallery",
     };
-
-    // How often the token box is read while a roll is in flight. It is a
-    // property read on one element, so the cost is nil; the number is about how
-    // quickly the image starts once the prompt is ready, and a tenth of a
-    // second is under what anybody notices.
-    const TOKEN_POLL_MS = 100;
-
-    // How long to keep reading it before giving up. Generous on purpose: a cold
-    // llama-server reads its weights off disk before it answers the first
-    // request, and twenty seconds of that is normal rather than a fault.
-    const TOKEN_TIMEOUT_MS = 15 * 60 * 1000;
 
     const ARMED_CLASS = "mc-krea-creative-armed";
 
     const state = {
-        // Set when the native click is ours rather than the user's, and spent
-        // by the very next click. One boolean, wrong in one direction if
-        // nothing ever generates and in the other if every click generates
-        // twice, which is why the tests drive it through the real listener.
-        bypass: false,
-        rolling: false,
         wired: false,
     };
 
@@ -89,17 +67,9 @@
         return holder.tagName === "BUTTON" ? holder : holder.querySelector("button");
     }
 
-    function field(id, selector) {
-        const holder = byId(id);
-        return holder ? holder.querySelector(selector) : null;
-    }
-
     function toggleBox() {
-        return field(IDS.toggle, "input[type=checkbox]");
-    }
-
-    function tokenBox() {
-        return field(IDS.token, "textarea, input");
+        const holder = byId(IDS.toggle);
+        return holder ? holder.querySelector("input[type=checkbox]") : null;
     }
 
     function isCreative() {
@@ -107,168 +77,12 @@
         return !!(box && box.checked);
     }
 
-    function sourceText() {
-        const box = field(IDS.prompt, "textarea");
-        return box ? String(box.value || "").trim() : "";
-    }
-
-    // The one visible sign that Generate has changed meaning, painted on the
-    // button whose meaning changed. A state indicator on the other side of the
-    // panel is a state indicator nobody reads in time.
+    // The one visible sign that Generate will write a prompt before it makes a
+    // picture, painted on the button that will do it. A state indicator on the
+    // other side of the panel is a state indicator nobody reads in time.
     function paintIndicator() {
         const button = clickable(IDS.generate);
         if (button) button.classList.toggle(ARMED_CLASS, isCreative());
-    }
-
-    // Put a line in the status element without a round trip. The server owns
-    // that element and overwrites this on its next update, which is correct:
-    // this is only for the thing the server never hears about, which is a click
-    // the browser declined to pass on.
-    function sayLocally(text) {
-        try {
-            const holder = byId(IDS.status);
-            if (!holder) return;
-            (holder.querySelector("div") || holder).textContent = text;
-        } catch (error) {
-            // A status line is not worth an exception.
-        }
-    }
-
-    // Wait for the hidden box to say something new. Resolves true when a roll is
-    // ready and false for every other outcome, including Creative Mode being
-    // switched off mid-flight -- and false always means "do not start a native
-    // generation", which is the only decision the caller makes from it.
-    //
-    // Three things come down this channel, distinguished by their first word.
-    // "task" is not an outcome: it carries the host progress task id, arrives
-    // first, and is what lets the bar start. Polling continues after it.
-    function awaitToken(previous) {
-        return new Promise(function (resolve) {
-            const started = Date.now();
-            let seen = previous;
-            const poll = window.setInterval(function () {
-                let value = "";
-                try {
-                    const box = tokenBox();
-                    value = box ? String(box.value || "") : "";
-                } catch (error) {
-                    value = "";
-                }
-                if (value && value !== seen) {
-                    seen = value;
-                    const kind = value.split(":")[0];
-                    if (kind === "task") {
-                        startBar(value.split(":").slice(2).join(":"));
-                        return;
-                    }
-                    window.clearInterval(poll);
-                    resolve(kind === "ready");
-                    return;
-                }
-                if (!isCreative() || Date.now() - started > TOKEN_TIMEOUT_MS) {
-                    window.clearInterval(poll);
-                    resolve(false);
-                }
-            }, TOKEN_POLL_MS);
-        });
-    }
-
-    // -- the host's own progress bar ----------------------------------------- //
-
-    // Ask Forge to draw and poll its own progress bar for the roll now running.
-    //
-    // The id is the server's, learned off the channel above rather than minted
-    // here and handed over. That direction matters: nothing has to arrive
-    // intact for the roll to work, so a bar that cannot be drawn costs a bar
-    // and never a generation.
-    //
-    // ``requestProgress`` is the host's, and so is everything it draws -- the
-    // bar, the ETA and the Interrupt button. Drawing our own would have meant
-    // something that looks nearly like the one the image generation uses a
-    // second later, in the same place, which is worse than either.
-    function startBar(taskId) {
-        if (!taskId) return;
-        try {
-            if (typeof requestProgress !== "function") return;
-            const container = byId(IDS.gallery) || byId(IDS.results);
-            if (!container) return;
-            // No gallery is passed: a creative roll produces no image and has
-            // no live preview, and handing the gallery over would invite the
-            // progress plumbing to redraw one.
-            requestProgress(taskId, container, null, function () {});
-        } catch (error) {
-            // A bar that will not draw must never be a roll that will not run.
-            console.error("Model Chain: could not start the Creative Mode progress bar",
-                error);
-        }
-    }
-
-    // One roll, then one native generation. The only path to a Creative image.
-    function runRoll() {
-        if (state.rolling) return Promise.resolve(false);
-        if (!sourceText()) return Promise.resolve(false);
-
-        const button = clickable(IDS.run);
-        if (!button) return Promise.resolve(false);
-
-        const box = tokenBox();
-        const previous = box ? String(box.value || "") : "";
-
-        state.rolling = true;
-        button.click();
-
-        return awaitToken(previous).then(function (ready) {
-            state.rolling = false;
-            if (!ready) return false;
-            const generate = clickable(IDS.generate);
-            if (!generate) return false;
-            state.bypass = true;
-            generate.click();
-            return true;
-        }).catch(function (error) {
-            console.error("Model Chain: the Creative Mode roll failed", error);
-            state.rolling = false;
-            return false;
-        });
-    }
-
-    // Capture phase, on the document, so this runs before any handler the host
-    // or another extension attached to the button itself.
-    function onGenerateClick(event) {
-        try {
-            const button = clickable(IDS.generate);
-            if (!button || !event.target) return;
-            if (event.target !== button && !button.contains(event.target)) return;
-            if (!isCreative()) return;
-
-            if (state.bypass) {
-                // Ours, and exactly one of them. Cleared before the click
-                // proceeds, so a second programmatic click cannot ride through
-                // on the same permission.
-                state.bypass = false;
-                return;
-            }
-
-            // A roll is already in flight and somebody pressed Generate again.
-            // Swallowed rather than queued: the roll in flight will click
-            // Generate itself when it is ready, and a queued second roll would
-            // be a second model call nobody asked for.
-            if (state.rolling) {
-                event.preventDefault();
-                event.stopImmediatePropagation();
-                sayLocally("Still writing the prompt for the last press.");
-                return;
-            }
-
-            event.preventDefault();
-            event.stopImmediatePropagation();
-            runRoll();
-        } catch (error) {
-            // A gate that throws must not be a Generate button that does
-            // nothing: the click is left alone and txt2img behaves natively.
-            console.error("Model Chain: the Creative Mode gate failed, generating natively",
-                error);
-        }
     }
 
     function wire() {
@@ -280,19 +94,15 @@
                 toggle.dataset.mcKreaCreative = "1";
                 toggle.addEventListener("change", paintIndicator);
             }
-
-            if (!state.wired) {
-                state.wired = true;
-                document.addEventListener("click", onGenerateClick, true);
-            }
+            state.wired = true;
         } catch (error) {
             console.error("Model Chain: Creative Mode wiring failed", error);
         }
     }
 
     // Re-applied rather than installed once: Gradio rebuilds parts of the tab
-    // on some updates. Both wirings are idempotent -- one through a dataset
-    // flag, one through a flag on state -- so re-running costs a query.
+    // on some updates. The wiring is idempotent -- one dataset flag -- so
+    // re-running costs a query.
     if (typeof onUiLoaded === "function") {
         onUiLoaded(wire);
     } else if (document.readyState !== "loading") {
@@ -309,9 +119,7 @@
     // page. Nothing in the extension reads it.
     window.modelChainKreaCreative = {
         state: state,
-        onGenerateClick: onGenerateClick,
-        runRoll: runRoll,
-        startBar: startBar,
+        paintIndicator: paintIndicator,
         wire: wire,
     };
 })();
