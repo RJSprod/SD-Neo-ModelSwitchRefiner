@@ -1055,6 +1055,62 @@ class TestThemeContract:
                 assert not re.search(r":\s*#[0-9a-fA-F]{3,8}\b", stripped), stripped
                 assert not re.search(r":\s*rgba?\(", stripped), stripped
 
+    def test_the_transcript_never_takes_a_surface_from_an_accent_colour(self):
+        """Reported against the Lobe theme: every message you had sent rendered
+        as a solid white box with nothing in it, beside replies that were dark
+        and perfectly readable.
+
+        Gradio’s Chatbot paints the user bubble from the accent family and the
+        bot bubble from the neutral surface, which is why exactly one of the two
+        survived the theme. A theme is entitled to a light accent; it is not
+        entitled to make half a conversation unreadable. So the transcript
+        redefines those properties on this extension’s own element, and the
+        replacements come from the neutral family the bot bubble already proves
+        readable.
+        """
+        import re
+        from pathlib import Path
+
+        css = Path(__file__).resolve().parent.parent / "style.css"
+        text = css.read_text(encoding="utf-8")
+
+        block = re.search(
+            r"#mc-llm-studio \.mc-llm-transcript \{[^}]*--color-accent-soft[^}]*\}", text)
+        assert block, "the transcript has to neutralise the accent surface"
+
+        body = block.group(0)
+        for name in ("--color-accent-soft", "--border-color-accent-subdued"):
+            replacement = re.search(rf"{re.escape(name)}\s*:\s*([^;]+);", body)
+            assert replacement, name
+            # Replaced with the neutral family, never with another accent and
+            # never with a literal this file would have to keep in step with a
+            # theme it has never seen.
+            assert "accent" not in replacement.group(1)
+            assert "var(--" in replacement.group(1)
+
+        assert re.search(r"color:\s*var\(--body-text-color", body), \
+            "the text colour has to be stated beside the surface, not assumed"
+
+    def test_the_one_rule_that_names_a_gradio_class_names_no_generated_one(self):
+        """The fallback for a theme that paints the bubble directly rather than
+        through the variables. Gradio’s ``.message`` and ``.user`` have been
+        stable across the 4.x line; a ``.svelte-`` hash is regenerated on every
+        build and is the reason the rest of this file depends on none of it."""
+        import re
+        from pathlib import Path
+
+        css = (Path(__file__).resolve().parent.parent / "style.css").read_text(encoding="utf-8")
+        section = css.split("LLM Studio", 1)[1]
+
+        reaching = [line.strip() for line in section.splitlines()
+                    if line.strip().startswith("#mc-llm-studio")
+                    and re.search(r"\.(message|user|bot|message-row)\b", line)]
+
+        assert reaching, "the fallback rule is supposed to exist"
+        for selector in reaching:
+            assert ".svelte" not in selector, selector
+            assert selector.startswith("#mc-llm-studio .mc-llm-"), selector
+
     def test_nothing_in_a_sheet_can_be_squashed_out_of_existence(self):
         """A sheet is a flex column of fixed height, so its children shrink by
         default when they do not all fit -- and a thread list as long as your
