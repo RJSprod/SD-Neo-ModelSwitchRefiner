@@ -77,6 +77,36 @@ infotext it had before the feature existed."""
 REFERENCE_DECOUPLED_MODE = "Decoupled"
 """The one mode whose reference sizing Model Chain owns."""
 
+# --------------------------------------------------------------------------- #
+# Krea Live
+# --------------------------------------------------------------------------- #
+
+LIVE_SOURCE = "Krea Live Source Prompt"
+LIVE_CREATIVITY = "Krea Live Creativity"
+LIVE_PROMPT_SEED = "Krea Live Prompt Seed"
+LIVE_LORAS = "Krea Live LoRAs"
+"""What a Krea Live generation records, and what it deliberately does not.
+
+The expanded Krea prompt is absent from this list because it is not missing: it
+is the generation's own ``Prompt:`` line, which is what Live substituted before
+sampling began. Recording it a second time under a key of ours would add a few
+hundred bytes to every PNG in order to repeat what the file already says, and
+would create a second copy that a later paste could disagree with.
+
+What is *not* recoverable from an ordinary infotext is the three lines above --
+the short phrase the user actually typed, where the Creativity slider was, and
+which prompt seed the writer ran at -- plus the pinned tags, which are the
+difference between the writer's paragraph and the prompt that was generated
+from. With those four, the expansion can be recovered from the prompt line
+exactly and the run can be repeated.
+
+These are diagnostic rather than pasteable, and are not registered as paste
+fields. A pasted Krea Live source prompt would have to either overwrite the
+positive prompt box -- destroying whatever the user was iterating on -- or
+silently re-run the language model on a paste, and neither is a thing a paste
+button should do.
+"""
+
 MODULE_PREFIX = "Model Chain Module "
 """Numbered VAE / text encoder keys: "Model Chain Module 1", "... 2", and so on.
 

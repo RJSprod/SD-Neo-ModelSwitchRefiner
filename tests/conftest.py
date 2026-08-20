@@ -58,6 +58,25 @@ class _Component:
     def click(self, **kwargs):
         return self._record("click", kwargs)
 
+    def blur(self, **kwargs):
+        """Gradio 4's "the box lost focus" event.
+
+        Krea Live's pinned-LoRA field rewrites itself with the tags it kept, and
+        doing that on ``input`` would move the caret while somebody was still
+        typing.
+        """
+        return self._record("blur", kwargs)
+
+    def release(self, **kwargs):
+        """Gradio 4's slider event: fired once, when the handle is let go.
+
+        Distinct from ``change`` for the reason the Krea panel uses it -- a
+        slider dragged from 1 to 10 fires ``change`` at every step it passes
+        through, and a handler that writes a preferences file would write it
+        nine times for one decision.
+        """
+        return self._record("release", kwargs)
+
     def select(self, **kwargs):
         return self._record("select", kwargs)
 

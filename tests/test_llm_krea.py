@@ -50,9 +50,10 @@ class FakeClient:
         self.calls: list[dict] = []
 
     def stream_chat(self, messages, max_tokens, seed, on_text, cancel=None,
-                    temperature=0.85, top_p=0.95):
+                    temperature=0.85, top_p=0.95, extra_sampling=None):
         self.calls.append({"messages": messages, "max_tokens": max_tokens, "seed": seed,
-                           "temperature": temperature, "top_p": top_p})
+                           "temperature": temperature, "top_p": top_p,
+                           "extra_sampling": dict(extra_sampling or {})})
         if self.fail is not None:
             raise self.fail
         if self.answers:
@@ -525,9 +526,11 @@ class TestWhatTheConsoleIsTold:
 
 class TestThePanel:
     def test_it_builds_and_exposes_what_the_shell_needs(self, store, host):
+        """A superset check, not an exact one: the shell wires these three and
+        the panel is free to hand back more of itself than the shell reads."""
         built = panel.build()
 
-        assert set(built) == {"status", "output", "stop"}
+        assert {"status", "output", "stop"} <= set(built)
 
     def test_the_output_box_does_not_grow_while_it_is_written(self, store, host):
         """A box that grows walks Stop off the bottom of the window at the one
@@ -537,7 +540,7 @@ class TestThePanel:
         assert written.max_lines == written.lines
 
     def test_an_empty_request_is_refused_before_the_runtime_is_touched(self, store, host):
-        frames = list(panel._generate("   ", 7))
+        frames = list(panel._generate("   ", 7, 1))
 
         assert len(frames) == 1
         assert "Describe the image you want" in frames[0][3]
@@ -648,7 +651,7 @@ class TestVisionIsRequiredOnlyForReferences:
         monkeypatch.setattr(panel.sessions, "krea",
                             lambda *a, **k: iter([sessions.Event(sessions.DONE, "a prompt")]))
 
-        frames = list(panel._generate("a rainy street", 7, None, None, None, None))
+        frames = list(panel._generate("a rainy street", 7, 1, None, None, None, None))
 
         assert asked == []
         assert frames[-1][1] == "a prompt"
@@ -661,7 +664,7 @@ class TestVisionIsRequiredOnlyForReferences:
         monkeypatch.setattr(panel.mc_llm_runtime, "config", lambda: self.Blind())
         monkeypatch.setattr(panel.sessions, "krea", lambda *a, **k: started.append(True))
 
-        frames = list(panel._generate("edit it", 7, "/tmp/a.png", None, None, None))
+        frames = list(panel._generate("edit it", 7, 1, "/tmp/a.png", None, None, None))
 
         assert started == []
         assert len(frames) == 1
@@ -673,7 +676,7 @@ class TestVisionIsRequiredOnlyForReferences:
         started = []
         monkeypatch.setattr(panel.sessions, "krea", lambda *a, **k: started.append(True))
 
-        frames = list(panel._generate("edit it", 7, "/tmp/a.png", None, "/tmp/c.png", None))
+        frames = list(panel._generate("edit it", 7, 1, "/tmp/a.png", None, "/tmp/c.png", None))
 
         assert started == []
         assert "Image 2 is empty" in frames[0][3]
@@ -684,13 +687,14 @@ class TestVisionIsRequiredOnlyForReferences:
         monkeypatch.setattr(panel.mc_llm_runtime, "config", lambda: self.Seeing())
         monkeypatch.setattr(panel.ui, "data_url", lambda path: f"data:{path}")
 
-        def record(prompt, references, seed, cancel):
+        def record(prompt, references, seed, cancel, creativity=None):
             handed["references"] = list(references)
+            handed["creativity"] = creativity
             return iter([sessions.Event(sessions.DONE, "a prompt")])
 
         monkeypatch.setattr(panel.sessions, "krea", record)
 
-        list(panel._generate("use image 1 and image 2", 7,
+        list(panel._generate("use image 1 and image 2", 7, 1,
                              "/tmp/first.png", "/tmp/second.png", None, None))
 
         assert [(r.ui_index, r.path) for r in handed["references"]] == [
@@ -705,7 +709,7 @@ class TestVisionIsRequiredOnlyForReferences:
         started = []
         monkeypatch.setattr(panel.sessions, "krea", lambda *a, **k: started.append(True))
 
-        frames = list(panel._generate("use them", 7,
+        frames = list(panel._generate("use them", 7, 1,
                                       "/tmp/first.png", "/tmp/second.png", None, None))
 
         assert started == []
@@ -725,7 +729,7 @@ class TestTheCaptionsArriveInOrder:
             sessions.Event(sessions.CAPTION, "a red coat"),
             sessions.Event(sessions.DONE, "the prompt")]))
 
-        frames = list(panel._generate("use them", 7, "/tmp/a.png", "/tmp/b.png", None, None))
+        frames = list(panel._generate("use them", 7, 1, "/tmp/a.png", "/tmp/b.png", None, None))
 
         shown = [frame[2].get("value") for frame in frames if isinstance(frame[2], dict)
                  and frame[2].get("value")]
@@ -783,7 +787,7 @@ class TestKreaHistory:
         panel._remember("edit it", "A quiet street.", 7,
                         [Reference(ui_index=1, path="/tmp/gradio/xyz/portrait.png",
                                    data_url="data:image/png;base64,SECRETPIXELS")],
-                        ["a woman on a balcony"])
+                        ["a woman on a balcony"], 1)
 
         written = (store / "data" / state.KREA_HISTORY_FILE).read_text(encoding="utf-8")
         assert "SECRETPIXELS" not in written
@@ -850,7 +854,7 @@ class TestAPictureThatWillNotEncode:
         started = []
         monkeypatch.setattr(panel.sessions, "krea", lambda *a, **k: started.append(True))
 
-        frames = list(panel._generate("use them", 7,
+        frames = list(panel._generate("use them", 7, 1,
                                       "/tmp/gradio/first.png", "/tmp/gradio/second.png",
                                       None, None))
 

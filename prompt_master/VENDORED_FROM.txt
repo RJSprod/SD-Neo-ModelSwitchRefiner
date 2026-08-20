@@ -2,8 +2,8 @@ Vendored from https://github.com/RJSprod/LTX_Video_Prompt_Claude
 commit eb80c6099b38a134856ecb6b132f390062c535ee (2026-08-04)
 path in source repository: src/prompt_master/
 
-Everything under this directory is a byte-identical copy of that tree with two
-exclusions, one addition and no edits:
+Everything under this directory is a copy of that tree with two exclusions, one
+addition and one recorded edit:
 
   * ui/     -- the PySide6 window, chat page, MiniMax page, character editor,
                model chooser and setup wizard. Section 17.B of the design
@@ -17,11 +17,29 @@ Krea's own docs/expansion.txt vendored from github.com/krea-ai/krea-2. It
 carries its own provenance in krea/UPSTREAM_SOURCE.txt and is the one directory
 here that a `diff -r` against LTX_Video_Prompt_Claude will report as extra.
 
-Nothing else was removed and nothing was rewritten, which is the point. The
-prompt engine, its vendored upstream, the MiniMax enhancer, the chat stores,
-the llama.cpp client and the provisioning pipeline are all still comparable
-against their own sources with `diff -r`, and the parity tooling those trees
-carry (prompt_engine/UPSTREAM_COMMIT.txt, minimax/UPSTREAM_SOURCE.txt,
+There is now exactly one edit, and it is recorded here rather than left for a
+`diff -r` to discover:
+
+  * inference/llama_client.py -- LlamaClient.stream_chat() gained an optional
+    `extra_sampling` argument, and the module gained SAMPLING_FIELDS and
+    sampling_fields() to filter it. This is the Krea Creativity control (design
+    intent §8.2), which needs llama.cpp sampler fields upstream never sends.
+
+    It is an addition and not a rewrite: the parameter defaults to None, the
+    filter returns an empty dict for None, and the payload built for every
+    existing caller is byte-for-byte the payload built before it existed. The
+    whitelist is here rather than in an mc_llm_* wrapper because it is a
+    statement about what *this client's* request may contain, and a wrapper
+    that filtered on the way in could be bypassed by anything holding the
+    client -- which mc_llm_sessions does.
+
+    Re-vendoring means re-applying this one diff. It is small on purpose.
+
+Nothing else was removed and nothing else was rewritten, which is the point.
+The prompt engine, its vendored upstream, the MiniMax enhancer, the chat stores
+and the provisioning pipeline are all still comparable against their own sources
+with `diff -r`, and the parity tooling those trees carry
+(prompt_engine/UPSTREAM_COMMIT.txt, minimax/UPSTREAM_SOURCE.txt,
 prompt_engine/upstream/README.md) still describes them accurately.
 
 Two consequences of dropping the src/ layer are worth knowing about:
@@ -37,5 +55,7 @@ Two consequences of dropping the src/ layer are worth knowing about:
     before the WebUI starts).
 
 To update: re-copy src/prompt_master/ from a newer commit, delete ui/ and
-app.py again, and record the new commit here. Do not hand-edit these files --
-changes belong in the mc_llm_* modules that sit on top of them.
+app.py again, re-apply the one recorded edit above, and record the new commit
+here. Do not hand-edit these files otherwise -- changes belong in the mc_llm_*
+modules that sit on top of them, and anything that genuinely cannot live there
+gets a paragraph in this file before it gets a line of code.

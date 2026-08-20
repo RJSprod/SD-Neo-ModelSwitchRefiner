@@ -118,6 +118,17 @@ DEFAULTS: dict = {
     "thread": "",
     # MiniMax's last variant.
     "minimax_variant": "fl2va",
+    # Where each surface left the Krea Creativity slider. Two keys and one
+    # meaning: authoring a prompt by hand and iterating images live are
+    # different tasks that settle at different positions, but Creativity 7 is
+    # the same sampling configuration in both -- the split is about where the
+    # slider was left, never about what a value does.
+    "krea_manual_creativity": 1,
+    "krea_live_creativity": 1,
+    # Krea Live's own controls, remembered so the strip opens where it was left.
+    "krea_live_delay": 5.0,
+    "krea_live_loras": "",
+    "krea_live_seed": -1,
 }
 
 
@@ -338,6 +349,12 @@ class KreaSession:
     1. Loading a session restores them as information -- it does not pretend
     the files are still attached, because they are not, and re-generating a
     reference-aware prompt means re-uploading them.
+
+    ``creativity`` defaults to 1 rather than to 0, and the default is what a
+    session written before the slider existed reads back as. That is not a
+    guess: 1 is defined as the configuration the Krea writer used before there
+    was anything to choose, so an old entry is being labelled with the value it
+    actually ran at.
     """
 
     identifier: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
@@ -345,6 +362,7 @@ class KreaSession:
     prompt: str = ""
     result: str = ""
     seed: int = 0
+    creativity: int = 1
     reference_names: list = field(default_factory=list)
     reference_captions: list = field(default_factory=list)
 
