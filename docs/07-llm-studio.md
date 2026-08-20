@@ -93,6 +93,22 @@ one completion: both are on the card, both are slower, neither is corrupted —
 because co-residency was always allowed and it was only the *timing* that was
 meant to be tidy.
 
+The lock itself is not a `threading.RLock`, for a related reason. A workload
+here is held across a generator, and a generator is not guaranteed to finish on
+the thread that started it: Gradio runs a handler on a worker thread, and an
+abandoned run — a cancelled one, a closed tab, one whose frame ended up in a
+reference cycle because it raised — is finalised by the garbage collector, on
+whichever thread happened to trigger the collection. `RLock.release` from that
+thread raises `RuntimeError: cannot release un-acquired lock`, so the `finally`
+that was giving the card back does not, and the lock stays held for the rest of
+the session; because an `RLock` lets its owning thread re-enter, the damage is
+invisible until a run lands on a different Gradio worker and waits for the GPU
+forever. `mc_broker._JobLock` therefore records an owner for *reentrancy only* —
+a chained generation is still one workload with two stages — and accepts the
+release from anywhere, because `workload` releases exactly once per acquisition
+and it is that pairing, not the thread it happens on, that keeps the count
+honest.
+
 ### 3.2 The broker never asks a family to make room for itself
 
 §9's eviction ranking is implemented for cross-workload decisions only. Image-on-
@@ -1134,6 +1150,31 @@ gigabyte for the driver and the desktop, from what the card says is in use.
 When the remainder is real it is named — in the shortfall note, and in Setup's
 residency panel, which is the panel somebody opens when a placement makes no
 sense and is the one explanation no row in its table can ever show.
+
+It also subtracts a second gigabyte when a llama-server of *ours* is up holding
+nothing on the card. A server placed in system RAM reports nothing resident and
+declares nothing, which is right — its weights are not there and the image side
+must not come looking for them — but its process is on the card all the same,
+and a CUDA context is hundreds of megabytes before a single weight is loaded.
+That is what the driver's own gigabyte allows for, so a second CUDA process
+gets a second allowance. Without it a user running the LLM entirely in system
+RAM was told, on every roll, that 0.9 GB was held by "a llama-server left
+running by a previous session" — which was their own, running on purpose, and
+not something any amount of hunting through `nvidia-smi` would have fixed.
+`stray_explanation()` therefore branches on whether we have a server up, and is
+shared by the console note and the panel so the two cannot drift into two
+accounts of one card.
+
+### 12.4 A reason is a noun phrase
+
+Every message built from a `reason` reads it as the subject of a sentence:
+"X is short 2 GB", "freed 2 GB for X", "released 2 GB of image VRAM for X".
+Half the callers passed a clause instead, and the same user's console read
+`a Krea image generation follows is short 18.5 GB`. The reasons are noun
+phrases now — "the image generation that follows a Krea roll", "the LLM
+workload taking VRAM ownership" — and so is the fallback for a request that
+did not say, which used to be the bare family key and produced "llm is short
+2 GB".
 
 ## 13. The drawer, and a llama-server that would not start (19 August 2026)
 

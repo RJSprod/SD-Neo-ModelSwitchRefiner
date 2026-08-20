@@ -824,10 +824,8 @@ def _residency_table() -> str:
         # somebody opens when a placement makes no sense, and VRAM held by
         # another process is the explanation that no row in the table below
         # can ever show.
-        summary.append(
-            f"<li><b>{ui.gigabytes(stray)}</b> of the card is in use by something this "
-            f"WebUI is not managing — another program on the same GPU, or a llama-server "
-            f"left running by a previous session. Nothing here can reclaim it.</li>")
+        summary.append(f"<li><b>{ui.gigabytes(stray)}</b> "
+                       f"{ui.escape(mc_broker.stray_explanation())}.</li>")
     report = state.get("report")
     if report is not None and report.placement is not None:
         summary.append(

@@ -17,6 +17,8 @@ could not be described.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 import mc_broker
@@ -529,6 +531,27 @@ class TestTheWorkloadIsAlwaysGivenBack:
         stream.close()
 
         assert self._free()
+
+    def test_after_a_generator_collected_on_a_different_thread(self, client):
+        """The hang this exists to stop. An abandoned run whose frame ended up
+        in a reference cycle is finalized by the garbage collector, on whatever
+        thread happened to trigger it -- so the ``finally`` that gives the card
+        back runs on a thread that never took it. That release used to raise,
+        the lock stayed held for the rest of the session, and the next run to
+        land on another Gradio worker waited for the GPU forever."""
+        stream = sessions.krea("a shot", [], 7, sessions.Cancellation())
+        next(stream)
+
+        collector = threading.Thread(target=stream.close)
+        collector.start()
+        collector.join(2)
+
+        taken: list[bool] = []
+        later = threading.Thread(target=lambda: taken.append(self._free()))
+        later.start()
+        later.join(2)
+
+        assert taken == [True]
 
 
 class TestWhatTheConsoleIsTold:

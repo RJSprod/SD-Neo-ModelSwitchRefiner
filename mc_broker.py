@@ -115,6 +115,15 @@ whatever the exact boundary is.
 """
 
 
+def _named(family: str) -> str:
+    """A family as it is written in a sentence rather than looked up in a dict.
+
+    ``FAMILY_LLM`` is ``"llm"`` because it is a key, and "llm workload needed
+    VRAM" is not a sentence anybody wrote on purpose.
+    """
+    return "LLM" if family == FAMILY_LLM else "image"
+
+
 def option(name: str, default):
     """Read one of this extension's settings, falling back before the UI exists."""
     try:
@@ -323,7 +332,64 @@ class Active:
     since: float
 
 
-_gpu = threading.RLock()
+class _JobLock:
+    """The workload lock: reentrant, and owned by a *job* rather than a thread.
+
+    ``threading.RLock`` was the obvious thing and was the wrong thing, for one
+    reason: a workload here is held across a generator, and a generator is not
+    guaranteed to be finished on the thread that started it. Gradio hands a
+    handler's generator to a worker thread, and an abandoned one -- a cancelled
+    run, a closed tab, a run whose frame ended up in a reference cycle because
+    it raised -- is finalized by the garbage collector, on whichever thread
+    happened to trigger the collection. ``RLock.release`` from that thread
+    raises ``RuntimeError: cannot release un-acquired lock``, the ``finally``
+    that was giving the GPU back does not, and the lock stays held for the rest
+    of the session. Every later run on another thread then waits for a job that
+    finished minutes ago, which is exactly the "Waiting for the GPU…" that
+    never ends.
+
+    So ownership is recorded for reentrancy only. ``acquire`` still lets the
+    owning thread nest freely -- a chained generation is one workload with two
+    stages (section 15) -- while ``release`` accepts the handle back from
+    anywhere, because :class:`workload` releases exactly once per acquisition
+    and it is that pairing, not the thread it happens on, that makes the count
+    honest.
+    """
+
+    def __init__(self):
+        self._condition = threading.Condition(threading.Lock())
+        self._owner: int | None = None
+        self._depth = 0
+
+    def acquire(self, timeout: float = -1) -> bool:
+        me = threading.get_ident()
+        deadline = None if timeout is None or timeout < 0 else time.monotonic() + timeout
+        with self._condition:
+            while True:
+                if self._depth == 0 or self._owner == me:
+                    self._owner = me
+                    self._depth += 1
+                    return True
+                remaining = None
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                self._condition.wait(remaining)
+
+    def release(self) -> bool:
+        """Give one acquisition back. False if there was nothing to give back."""
+        with self._condition:
+            if self._depth == 0:
+                return False
+            self._depth -= 1
+            if self._depth == 0:
+                self._owner = None
+                self._condition.notify_all()
+            return True
+
+
+_gpu = _JobLock()
 _active: list[Active] = []
 _active_lock = threading.Lock()
 _background_wait = threading.Event()
@@ -378,6 +444,7 @@ class workload:
         self.timeout, self.background, self.required = timeout, background, required
         self._held: _Held | None = None
         self._counted = False
+        self._entry: Active | None = None
 
     def __enter__(self) -> _Held:
         global _foreground_waiting
@@ -404,16 +471,34 @@ class workload:
             self._held = _Held(self.family, self.label, False)
             return self._held
 
+        self._entry = Active(self.family, self.label, time.monotonic())
         with _active_lock:
-            _active.append(Active(self.family, self.label, time.monotonic()))
+            _active.append(self._entry)
         self._held = _Held(self.family, self.label, True)
         return self._held
 
     def __exit__(self, *exc) -> bool:
-        if self._held is not None and self._held.acquired:
-            with _active_lock:
-                if _active:
-                    _active.pop()
+        """Give the GPU back, once, from wherever the job happens to end.
+
+        Idempotent because the exit can be reached twice -- a caller that
+        releases explicitly and then unwinds, a generator closed after its
+        ``finally`` already ran -- and a second release would hand the card to
+        somebody while the job that took it is still on it. The entry is
+        removed by identity rather than popped, because a release that arrives
+        late (a generator finalized after a later workload started) would
+        otherwise take the running job's name off the list and leave its own.
+        """
+        with _active_lock:
+            held, self._held = self._held, None
+            entry, self._entry = self._entry, None
+            if held is None or not held.acquired:
+                held = None
+            else:
+                for position, running in enumerate(_active):
+                    if running is entry:
+                        del _active[position]
+                        break
+        if held is not None:
             _gpu.release()
         self._release_count()
         return False
@@ -421,10 +506,10 @@ class workload:
     def _release_count(self) -> None:
         global _foreground_waiting
 
-        if not self._counted:
-            return
-        self._counted = False
         with _active_lock:
+            if not self._counted:
+                return
+            self._counted = False
             _foreground_waiting = max(_foreground_waiting - 1, 0)
             if _foreground_waiting == 0:
                 _background_wait.set()
@@ -634,6 +719,15 @@ def fits(needed_bytes: int, *, margin: int | None = None) -> bool:
     return free_vram_bytes() >= int(needed_bytes) + int(reserve)
 
 
+def _reason_for(family: str) -> str:
+    """What to call a request that did not say what it was for.
+
+    Every message built from a ``reason`` reads it as a noun phrase -- "X is
+    short 2 GB", "freed 2 GB for X" -- so the fallback has to be one too.
+    """
+    return f"the {_named(family)} workload"
+
+
 def request_vram(family: str, needed_bytes: int, *, reason: str = "",
                  margin: int | None = None, exclusive_sweep: bool = True) -> Reclaim:
     """Make room for ``needed_bytes`` of ``family`` work, moving as little as possible.
@@ -675,7 +769,8 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
     # (sections 10 and 18).
     if sweeping:
         other = FAMILY_LLM if family == FAMILY_IMAGE else FAMILY_IMAGE
-        released = _release(other, target, reason or f"{family} took VRAM ownership",
+        released = _release(other, target,
+                            reason or f"the {_named(family)} workload taking VRAM ownership",
                             sweep=True)
         freed += released.freed
         actions.extend(released.actions)
@@ -689,7 +784,7 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
     if free >= target:
         result = Reclaim(needed, free, freed, 0, tuple(actions))
         if actions:
-            note(family, f"{reason or family}: {result.describe()}")
+            note(family, f"{reason or _reason_for(family)}: {result.describe()}")
         return result
 
     deficit = target - free
@@ -699,7 +794,7 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
             if freed >= deficit:
                 break
             released = _release(victim_family, deficit - freed,
-                                reason or f"{family} workload needed VRAM")
+                                reason or f"the {_named(family)} workload")
             freed += released.freed
             actions.extend(released.actions)
 
@@ -709,12 +804,13 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
 
     if actions:
         note(family,
-             f"freed {freed / _GB:.1f} GB for {reason or family} "
+             f"freed {freed / _GB:.1f} GB for {reason or _reason_for(family)} "
              f"({free / _GB:.1f} GB -> {max(after, free) / _GB:.1f} GB free): {result.describe()}")
     elif remaining > 0:
         note(family,
-             f"{reason or family} is short {remaining / _GB:.1f} GB and nothing evictable "
-             f"was found; expect the driver to spill into system memory{_unaccounted_note()}")
+             f"{reason or _reason_for(family)} is short {remaining / _GB:.1f} GB and nothing "
+             f"evictable was found; expect the driver to spill into system memory"
+             f"{_unaccounted_note()}")
 
     return result
 
@@ -734,7 +830,8 @@ def unaccounted_bytes() -> int:
         return 0
     accounted = sum(max(resident_bytes(family), reported_bytes(family))
                     for family in (FAMILY_IMAGE, FAMILY_LLM))
-    return max(total - free_vram_bytes() - accounted - _DRIVER_OVERHEAD, 0)
+    return max(total - free_vram_bytes() - accounted - _DRIVER_OVERHEAD
+               - _own_llm_context_bytes(), 0)
 
 
 _DRIVER_OVERHEAD = 1 * _GB
@@ -746,6 +843,67 @@ a CUDA context is hundreds of megabytes before a single weight is loaded. A
 gigabyte is generous for that and small enough that the case worth reporting --
 a whole model somebody cannot see -- still clears it easily.
 """
+
+
+def _own_llm_running() -> bool:
+    """Whether the llama-server this WebUI started is up right now."""
+    asking = getattr(_reclaimer(FAMILY_LLM), "running", None)
+    if not callable(asking):
+        return False
+    try:
+        return bool(asking())
+    except Exception:
+        logger.debug("Model Chain: could not ask whether llama-server is running",
+                     exc_info=True)
+        return False
+
+
+def _own_llm_context_bytes() -> int:
+    """The card our own llama-server holds without holding any weights there.
+
+    A server placed in system RAM reports nothing resident and declares
+    nothing, which is correct: its weights are not on the card and the image
+    side must not be told to come looking for them. Its *process* is on the
+    card all the same -- a CUDA context is hundreds of megabytes before a
+    single weight is loaded, which is exactly what :data:`_DRIVER_OVERHEAD`
+    allows for -- so a second CUDA process gets a second allowance, and the
+    figure below stops describing our own server as somebody else's stray.
+
+    Only when it holds nothing here. A placement on the card is measured as a
+    change in free VRAM at startup, so the context is already inside the
+    declared figure, and subtracting it again would hide a gigabyte of real
+    residency.
+    """
+    if not _own_llm_running():
+        return 0
+    if max(resident_bytes(FAMILY_LLM), reported_bytes(FAMILY_LLM)) > 0:
+        return 0
+    return _DRIVER_OVERHEAD
+
+
+def stray_explanation() -> str:
+    """What VRAM neither family is holding is, as a sentence about the card.
+
+    Returned without the amount so that each caller can format its own -- the
+    console writes a figure into a log line, LLM Studio bolds one in a list --
+    and shared so that the two cannot drift into two accounts of one card.
+
+    Which sentence it is depends on whether a llama-server of ours is up. "A
+    llama-server left running by a previous session" is a good guess when there
+    is none of ours to blame, and is simply wrong when there is: the server
+    this WebUI started keeps a CUDA context on the card even with its weights
+    in system RAM. Telling somebody to go hunting for an orphaned process sends
+    them looking for something that is not there, and the thing that would
+    actually give those bytes back -- Unload -- is a button they already have.
+    """
+    if _own_llm_running():
+        return ("of the card is in use by something outside both families. The "
+                "llama-server this WebUI started keeps a CUDA context there even with "
+                "its weights in system RAM, and any other program on the same GPU keeps "
+                "its own; Unload in LLM Studio releases ours. Check nvidia-smi for the rest")
+    return ("of the card is in use by something this WebUI is not managing — another "
+            "program on the same GPU, or a llama-server left running by a previous "
+            "session. Nothing here can reclaim that; check nvidia-smi")
 
 
 def _unaccounted_note() -> str:
@@ -760,9 +918,7 @@ def _unaccounted_note() -> str:
     stray = unaccounted_bytes()
     if stray <= 0:
         return ""
-    return (f". {stray / _GB:.1f} GB of the card is in use by something this WebUI is not "
-            f"managing — another program on the same GPU, or a llama-server left running by "
-            f"a previous session. Nothing here can reclaim that; check nvidia-smi")
+    return f". {stray / _GB:.1f} GB {stray_explanation()}"
 
 
 def _victim_order(family: str) -> tuple[str, ...]:
@@ -849,7 +1005,7 @@ def _describe(family: str, reclaimer) -> str:
     entries = residencies(family)
     if entries:
         return ", ".join(e.label for e in entries)
-    return f"the {family} workload"
+    return _reason_for(family)
 
 
 # --------------------------------------------------------------------------- #
@@ -873,9 +1029,9 @@ class Status:
     def owners(self) -> tuple[str, ...]:
         families = []
         if self.image_bytes > 0:
-            families.append("image")
+            families.append(_named(FAMILY_IMAGE))
         if self.llm_bytes > 0:
-            families.append("LLM")
+            families.append(_named(FAMILY_LLM))
         return tuple(families)
 
 

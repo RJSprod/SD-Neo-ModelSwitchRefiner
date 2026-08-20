@@ -40,6 +40,30 @@ class Recorder:
         return self.label
 
 
+class Server:
+    """An LLM reclaimer that can say whether its process is up.
+
+    A llama-server placed in system RAM is running and holding nothing here,
+    which is the whole of the case worth a fake: the register has no entry for
+    it, and only asking the runtime distinguishes it from no server at all.
+    """
+
+    def __init__(self, running=False, holds=0):
+        self.up, self.holds = running, holds
+
+    def running(self):
+        return self.up
+
+    def resident_bytes(self):
+        return self.holds
+
+    def release(self, needed_bytes, reason=""):
+        return 0
+
+    def describe(self):
+        return "llama-server"
+
+
 @pytest.fixture
 def broker(host, monkeypatch):
     """A broker with an empty register, a known VRAM figure and no reserve."""
@@ -238,6 +262,27 @@ class TestRanking:
         assert llm.calls[0][0] == 8 * _GB
 
 
+def _taken_by_another_thread(broker, label) -> bool:
+    """Whether a workload on a thread that is not this one gets the GPU.
+
+    Asked from another thread on purpose: the lock is reentrant, so a hold this
+    thread failed to give back is a hold this thread can take again -- which is
+    precisely how a stranded lock hid until a run landed on a different Gradio
+    worker.
+    """
+    taken: list[bool] = []
+
+    def contend():
+        with broker.workload(broker.FAMILY_IMAGE, label, timeout=0.2,
+                             required=False) as held:
+            taken.append(bool(held))
+
+    thread = threading.Thread(target=contend)
+    thread.start()
+    thread.join(2)
+    return taken == [True]
+
+
 class TestSerialization:
     def test_two_workloads_do_not_overlap(self, broker):
         order: list[str] = []
@@ -307,6 +352,45 @@ class TestSerialization:
 
         release.set()
         thread.join(2)
+
+    def test_a_workload_may_be_given_back_from_another_thread(self, broker):
+        """The failure this exists to stop: a Krea run whose generator was
+        finalized by the garbage collector, on whichever thread happened to
+        trigger the collection, could not give the card back at all -- and
+        every later run waited for a job that had finished minutes before."""
+        job = broker.workload(broker.FAMILY_LLM, "a Krea prompt")
+        assert job.__enter__()
+
+        elsewhere = threading.Thread(target=lambda: job.__exit__(None, None, None))
+        elsewhere.start()
+        elsewhere.join(2)
+
+        assert broker.active() is None
+        assert _taken_by_another_thread(broker, "a later pass")
+
+    def test_giving_the_same_workload_back_twice_releases_once(self, broker):
+        """A run that releases explicitly and is then unwound -- or closed after
+        its finally already ran -- must not hand the card to somebody else while
+        the job that took it is still on it."""
+        job = broker.workload(broker.FAMILY_LLM, "a Krea prompt")
+        job.__enter__()
+        job.__exit__(None, None, None)
+
+        with broker.workload(broker.FAMILY_IMAGE, "a pass"):
+            job.__exit__(None, None, None)
+            assert not _taken_by_another_thread(broker, "an intruding turn")
+
+    def test_a_late_release_does_not_take_the_running_job_off_the_list(self, broker):
+        """``active()`` is what a waiting run is told it is waiting for. An exit
+        arriving after a later workload started used to pop that later job's
+        name, leaving a wait with nothing to name."""
+        stale = broker.workload(broker.FAMILY_LLM, "an abandoned turn")
+        stale.__enter__()
+
+        with broker.workload(broker.FAMILY_LLM, "the running turn") as held:
+            assert held
+            stale.__exit__(None, None, None)
+            assert broker.active().label == "the running turn"
 
     def test_a_required_workload_that_times_out_says_who_has_the_gpu(self, broker):
         holding = threading.Event()
@@ -490,3 +574,80 @@ class TestVramNobodyAdmitsTo:
 
         said = [entry.text for entry in mc_broker.decisions()]
         assert any("not managing" in text for text in said), said
+
+    def test_our_own_server_s_cuda_context_is_not_somebody_else_s_stray(
+            self, broker, monkeypatch):
+        """A llama-server placed in system RAM holds no weights on the card and
+        declares none -- but its process is still there, and a CUDA context is
+        hundreds of megabytes before a single weight is loaded. Counting that
+        as VRAM nobody admits to sent the user hunting for an orphan process
+        that does not exist."""
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 22.5 * _GB)
+        broker.register_reclaimer(broker.FAMILY_LLM, Server(running=True))
+
+        assert mc_broker.unaccounted_bytes() == 0
+
+    def test_a_server_that_is_on_the_card_gets_no_second_allowance(
+            self, broker, monkeypatch):
+        """A placement on the card is measured as a change in free VRAM, so the
+        context is already inside the declared figure. Subtracting it twice
+        would hide a gigabyte of real residency."""
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 4 * _GB)
+        broker.register_reclaimer(broker.FAMILY_LLM, Server(running=True, holds=5 * _GB))
+
+        assert round(mc_broker.unaccounted_bytes() / _GB) == 14
+
+    def test_a_stray_is_blamed_on_our_own_server_only_when_we_have_one(
+            self, broker, monkeypatch):
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 4 * _GB)
+
+        assert "previous session" in mc_broker.stray_explanation()
+
+        broker.register_reclaimer(broker.FAMILY_LLM, Server(running=True))
+
+        explained = mc_broker.stray_explanation()
+        assert "previous session" not in explained
+        assert "Unload" in explained
+
+
+class TestTheReasonReadsAsASentence:
+    """Every message built from a ``reason`` reads it as a noun phrase -- "X is
+    short 2 GB", "freed 2 GB for X", "released 2 GB of image VRAM for X". A
+    reason written as a clause turns all three into nonsense, which is how "a
+    Krea image generation follows is short 18.5 GB" reached a user's console.
+    """
+
+    def test_a_request_that_falls_short_names_what_fell_short(self, broker, monkeypatch):
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 4 * _GB)
+
+        mc_broker.request_vram(mc_broker.FAMILY_IMAGE, 18 * _GB,
+                               reason="the image generation that follows a Krea roll")
+
+        said = [entry.text for entry in mc_broker.decisions()]
+        assert any(text.startswith("the image generation that follows a Krea roll is short")
+                   for text in said), said
+
+    def test_a_request_that_did_not_say_why_still_reads_as_a_sentence(
+            self, broker, monkeypatch):
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 4 * _GB)
+
+        mc_broker.request_vram(mc_broker.FAMILY_LLM, 18 * _GB)
+
+        said = [entry.text for entry in mc_broker.decisions()]
+        assert any(text.startswith("the LLM workload is short") for text in said), said
+
+    def test_the_reason_an_exclusive_sweep_gives_is_a_noun_phrase(self, broker, monkeypatch):
+        monkeypatch.setattr(mc_broker, "mode", lambda: mc_broker.MODE_EXCLUSIVE)
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
+        set_free(monkeypatch, 4)
+        image = Recorder(holds=6 * _GB, label="the image checkpoint")
+        broker.register_reclaimer(broker.FAMILY_IMAGE, image)
+
+        mc_broker.request_vram(mc_broker.FAMILY_LLM, 8 * _GB)
+
+        assert image.calls[0][1] == "the LLM workload taking VRAM ownership"
