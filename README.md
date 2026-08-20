@@ -1190,6 +1190,38 @@ Every generated image records `Krea Creative Seed`, `Krea Creativity`,
 `Krea Source Prompt` and the library version. The expanded prompt is not
 recorded separately — it is already the image's own `Prompt:` line.
 
+### What it costs, and what the bar shows
+
+A creative roll is real work and it all happens *before* the image job starts.
+Two spans dominate, and both scale with Creativity:
+
+| | What it is | Why it costs what it does |
+| --- | --- | --- |
+| **Reading the prompt** | prompt evaluation | The brief is different every roll, so llama.cpp can reuse its cached prefix only as far as Krea's instruction. Everything after that is evaluated fresh, every time. |
+| **Writing the Krea prompt** | token generation | A richer brief produces a longer expansion. |
+
+The brief grows roughly twelvefold from Creativity 2 to Creativity 10 — one
+short line to ten fully-expressed axes — so the reading half grows with it.
+Measured on a 26B mixture-of-experts model in **Mixed** placement (weights in
+system RAM, compute on the card, ~36 tokens/sec reading and ~14 writing):
+
+```
+Creative Mode off, cached      ~19 prompt tokens     0.7s read  +  7.5s write
+Creativity 10                 ~370 prompt tokens    10.3s read  + 12.4s write
+```
+
+If that is slower than you want, the levers in order of effect are: put the LLM
+on the GPU (**Setup → placement**) — every prompt token costs ~27 ms in Mixed
+and a fraction of that resident; drop Creativity a notch or two, which shortens
+the brief directly; or set axes you do not care about to **Natural**, since each
+one removes its whole line from the brief.
+
+All of it is now reported on Forge's own progress bar, in the gallery, before
+the image bar appears — the phase name, a moving bar and an ETA, with Interrupt
+wired up. The prediction is time-proportional and self-calibrating: the first
+roll on a fresh install uses a built-in guess, and every roll after that uses
+what your machine actually measured.
+
 ### Anti-repetition
 
 At Creativity 7 and above the Director remembers the last eight rolls' variant
@@ -1640,6 +1672,7 @@ mc_llm_minimax_panel.py    MiniMax H3 workspace
 mc_llm_krea_panel.py       Krea 2 workspace
 mc_llm_ui.py          shared UI helpers and the element-id contract
 mc_creative_krea.py   Creative Mode: settings, roll history, the arming token
+mc_llm_progress.py    the Krea roll, reported on the host's progress bar
 prompt_master/        vendored LTX business logic (see VENDORED_FROM.txt)
 prompt_master/krea/creativity/    the versioned creative vocabulary (data only)
 prompt_master/krea/library.py     loads and validates that package

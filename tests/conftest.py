@@ -400,6 +400,34 @@ def _install_modules() -> None:
 
     shared.total_tqdm = FakeTotalTqdm()
 
+    # modules.progress, faithful in the three functions the extension calls and
+    # in the one rule that matters: a task is "active" only while it is the
+    # current one. Reproduced rather than stubbed because Krea Creative Mode
+    # claims a task the same way modules.call_queue does, and a stub that always
+    # said yes would hide a claim that never took.
+    progress_mod = types.ModuleType("modules.progress")
+    progress_mod.current_task = None
+    progress_mod.pending_tasks = {}
+    progress_mod.finished_tasks = []
+
+    def add_task_to_queue(id_job):
+        progress_mod.pending_tasks[id_job] = 0.0
+
+    def start_task(id_task):
+        progress_mod.current_task = id_task
+        progress_mod.pending_tasks.pop(id_task, None)
+
+    def finish_task(id_task):
+        if progress_mod.current_task == id_task:
+            progress_mod.current_task = None
+        progress_mod.finished_tasks.append(id_task)
+        if len(progress_mod.finished_tasks) > 16:
+            progress_mod.finished_tasks.pop(0)
+
+    progress_mod.add_task_to_queue = add_task_to_queue
+    progress_mod.start_task = start_task
+    progress_mod.finish_task = finish_task
+
     scripts_mod = types.ModuleType("modules.scripts")
     scripts_mod.Script = FakeScript
     scripts_mod.AlwaysVisible = FakeScript.AlwaysVisible
@@ -518,6 +546,7 @@ def _install_modules() -> None:
     modules.errors = errors
     modules.images = images
     modules.shared = shared
+    modules.progress = progress_mod
     modules.scripts = scripts_mod
     modules.processing = processing
     modules.infotext_utils = infotext_utils
@@ -609,6 +638,7 @@ def _install_modules() -> None:
         "modules.errors": errors,
         "modules.images": images,
         "modules.shared": shared,
+        "modules.progress": progress_mod,
         "modules.scripts": scripts_mod,
         "modules.processing": processing,
         "modules.infotext_utils": infotext_utils,
