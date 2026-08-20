@@ -1,0 +1,84 @@
+# Krea 2 Creative Mode starter library — where it came from
+
+creativity/ is a byte-for-byte copy of the krea2_creativity_library data package
+delivered with the Krea 2 Creative Mode design intent. It is data only: axis
+vocabulary, expression tiers, activation and sampling policy, compatibility
+rules, anti-repetition policy, worked examples and acceptance cases. There is no
+code in it and nothing in it is executed.
+
+package:      krea2_creativity_library.zip
+delivered:    2026-08-20, with krea2_creative_mode_design_intent.txt
+library:      Krea 2 Creative Mode Starter Library
+version:      1.0.0 (library_manifest.json), schema_version 1
+contents:     10 axis files, 164 variant families
+unchanged:    yes. Not one byte of the package is edited. The directory layout
+              inside creativity/ is the layout inside the ZIP.
+
+# zip digest (sha256, as received)
+0eb5c7133a6c4560b432d5e2eaa96fd319d97f604e142c637755d18d17c2305d  krea2_creativity_library.zip
+
+# vendored file digests (sha256), relative to creativity/
+bca2225eb9c3c85fbad02e01980965927bae450867fdbfb657d96b0f49f2689d  README.txt
+84043e4368246169b42b4034ea0bed222a48b568130af24fd0d022b9d23ad28f  anti_repetition.json
+611c8e62411afae3949bc42d513178bba2431bb50e028ffc1e83756206301428  axes/composition.json
+53306aa08d14cd73af3119a0f2520e8b0a71c975c6f244f1fda9d5d72f4ef87b  axes/detail_emphasis.json
+a8fa84ce661651d2bdb8f4b61fb8594b45419d1f99872161785df5728a45eaa5  axes/lens_zoom.json
+595e4df5d8305fac22080cab470535c4bb092dd8a35bb02d02818c621df30a60  axes/lighting.json
+aaadd59956dddb96159993f01b0c37771668cd740b3119aebc39e91951b76a8c  axes/medium.json
+e95dc80898f32814550e594a242141a0d55609c81f51998c5b41f61b672a6ad1  axes/mood.json
+3d6489d4dc57ea5b50c9b2086fe85f7078be0e09ea1b7aa3da5958128fe3eb26  axes/palette.json
+baaa36878d545cdc70d893b68657d31aca1381634871fc778101cb21e3f78fb9  axes/style.json
+5a6f461a0bb8e65bd61a62f56c9b95228bb5f04fb3fb55f6924bc9ab5fb2a83e  axes/texture.json
+38a6748da11a20003721d2d3af68695dbff8ec31615844db6da02915e5ddf07f  axes/viewpoint.json
+6ef052c945b667404ea50fa2c65fddb80aa33b3dd106c04f1a786db0b840e5e6  compatibility.json
+e10fcd4f7120042c2cb2e5ba3d2863353a55e1ffaaa2ddc5f67b5d2a3bccb2b1  creativity_policy.json
+f4d95add5800461133f3460e83c5ab4c475b2f91a30fbf2f6da8605eab0b73b0  defaults.json
+b1a1c6eba6ee53da8d98aba7b64faa25ee87a02691b1f03b55ceef2f2492c68a  developer_pseudocode.txt
+fdd4d4069a7c3831f9920fd0703c05e62d16c887bac5ca4dbbe5ab3ea3ac93f0  examples/car_creativity_10.json
+abbbb2b4cfd0aec4c4fd4813aec92e4fb5255c370d8d34ccc789b9f8be7a346b  examples/car_creativity_2.json
+727c98477a7afb57e8baab5c40a1c83a39382d38bfc171865b3dddb6979c3f34  examples/fixed_texture.json
+610e3b849247da85afe88864cc2407ab5f18c5244f5813453dcd3d84142ebcdf  examples/locked_medium.json
+24285352b64849280d09be4429947450ce82f80ec956dc38c177a6200ac0e917  examples/natural_texture.json
+288aeb86f2226f43b671c38dedb349694d10e0c69cea7afedece09cb80c474da  library_manifest.json
+421cd2336478964d2082dd67e44b29ad2a931da47d5ea5cb882a93ec3fdfc975  schema.json
+75a559562454622a9b5b5459f78a8413dbdad3893187b62bdbdd2466d9995b61  tests/acceptance_cases.json
+
+# why it is vendored rather than fetched
+
+The same reason expansion.txt is (see UPSTREAM_SOURCE.txt): a prompt written
+here does not depend on a network call. It is also why the package is copied
+whole rather than trimmed — examples/ and tests/ are not loaded at run time, but
+they are what a later version of the library will be diffed against, and a
+vendored package that dropped half its files is a package nobody can update
+cleanly.
+
+# what may and may not be edited
+
+The package is independently versioned and is meant to be extended: adding a
+variant family, adding an axis entry, or retuning the activation counts is a
+data edit, and `library.py` is written so that those need no code change.
+
+Two rules, both from the package's own README:
+
+  * Stable IDs must not be renamed after release. A saved Fixed axis selection
+    stores a variant id, so renaming one silently changes what a user's saved
+    configuration means.
+  * Every entry needs all four expression tiers. `library.py` refuses to load an
+    entry that is missing one rather than falling back to a neighbouring tier,
+    because a silently substituted tier is a Creativity slider that stops
+    scaling on one axis and says nothing about it.
+
+To update: replace creativity/ wholesale from a newer package, record the new
+version and digests here, and run the tests — `tests/test_krea_creative.py`
+checks the library against its own schema, its own examples and its own
+acceptance cases, so a package that has drifted from its promises fails there
+rather than in somebody's prompt.
+
+# one number that is deliberately duplicated in code
+
+`creativity_policy.json` carries the Krea writer's sampling table, and
+`prompt_master/krea/variation.py` carries the same eleven rows as Python
+literals. That is not an oversight and not a cache: Creativity 0 and 1 are
+compatibility guarantees, and a library that failed to load must not be able to
+change what the writer samples at those positions. A test asserts the two agree,
+so the duplication cannot drift — it can only fail loudly.

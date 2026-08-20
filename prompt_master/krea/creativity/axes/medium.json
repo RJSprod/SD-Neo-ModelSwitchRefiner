@@ -1,0 +1,482 @@
+{
+  "axis": "medium",
+  "entries": [
+    {
+      "id": "editorial_photo",
+      "label": "Editorial photography",
+      "family": "photography",
+      "aliases": [
+        "photo",
+        "photograph",
+        "photography"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "photography",
+        "editorial"
+      ],
+      "expressions": {
+        "light": "a restrained editorial photography",
+        "moderate": "a clearly authored editorial photography, with deliberate art direction, specific framing, material-aware light, and a non-generic photographic identity",
+        "strong": "a pronounced editorial photography, strongly emphasizing deliberate art direction, specific framing, material-aware light, and a non-generic photographic identity",
+        "extreme": "a fully committed editorial photography interpretation, with deliberate art direction, specific framing, material-aware light, and a non-generic photographic identity; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "direct_flash_photo",
+      "label": "Direct-flash photography",
+      "family": "photography",
+      "aliases": [
+        "direct flash",
+        "flash photo"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "photography",
+        "flash"
+      ],
+      "expressions": {
+        "light": "a restrained direct-flash editorial photography",
+        "moderate": "a clearly authored direct-flash editorial photography, with hard on-axis flash, abrupt falloff, punchy highlights, deep ambient backgrounds, and raw snapshot immediacy",
+        "strong": "a pronounced direct-flash editorial photography, strongly emphasizing hard on-axis flash, abrupt falloff, punchy highlights, deep ambient backgrounds, and raw snapshot immediacy",
+        "extreme": "a fully committed direct-flash editorial photography interpretation, with hard on-axis flash, abrupt falloff, punchy highlights, deep ambient backgrounds, and raw snapshot immediacy; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "documentary_photo",
+      "label": "Documentary photography",
+      "family": "photography",
+      "aliases": [
+        "documentary photograph"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "photography",
+        "documentary"
+      ],
+      "expressions": {
+        "light": "a restrained observational documentary photography",
+        "moderate": "a clearly authored observational documentary photography, with available-light honesty, imperfect timing, environmental context, and an unpolished sense of presence",
+        "strong": "a pronounced observational documentary photography, strongly emphasizing available-light honesty, imperfect timing, environmental context, and an unpolished sense of presence",
+        "extreme": "a fully committed observational documentary photography interpretation, with available-light honesty, imperfect timing, environmental context, and an unpolished sense of presence; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "large_format_photo",
+      "label": "Large-format still photography",
+      "family": "photography",
+      "aliases": [
+        "large format"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "photography"
+      ],
+      "expressions": {
+        "light": "a restrained large-format still photography",
+        "moderate": "a clearly authored large-format still photography, with precise geometry, patient composition, rich tonal separation, and a quiet physically observed quality",
+        "strong": "a pronounced large-format still photography, strongly emphasizing precise geometry, patient composition, rich tonal separation, and a quiet physically observed quality",
+        "extreme": "a fully committed large-format still photography interpretation, with precise geometry, patient composition, rich tonal separation, and a quiet physically observed quality; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "oil_impasto",
+      "label": "Oil painting / impasto",
+      "family": "painting",
+      "aliases": [
+        "oil painting",
+        "impasto"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "painting",
+        "impasto",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a restrained impasto oil painting",
+        "moderate": "a clearly authored impasto oil painting, with thick blotches of pigment, palette-knife ridges, layered brush strokes, tactile canvas tooth, and visibly physical paint",
+        "strong": "a pronounced impasto oil painting, strongly emphasizing thick blotches of pigment, palette-knife ridges, layered brush strokes, tactile canvas tooth, and visibly physical paint",
+        "extreme": "a fully committed impasto oil painting interpretation, with thick blotches of pigment, palette-knife ridges, layered brush strokes, tactile canvas tooth, and visibly physical paint; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "oil_glazed",
+      "label": "Glazed oil painting",
+      "family": "painting",
+      "aliases": [
+        "oil painting"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "painting"
+      ],
+      "expressions": {
+        "light": "a restrained glazed oil painting",
+        "moderate": "a clearly authored glazed oil painting, with layered translucent color, luminous depth, soft modeled transitions, and old-master-like material richness",
+        "strong": "a pronounced glazed oil painting, strongly emphasizing layered translucent color, luminous depth, soft modeled transitions, and old-master-like material richness",
+        "extreme": "a fully committed glazed oil painting interpretation, with layered translucent color, luminous depth, soft modeled transitions, and old-master-like material richness; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "watercolor",
+      "label": "Watercolor",
+      "family": "painting",
+      "aliases": [
+        "watercolor",
+        "watercolour"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "painting",
+        "watercolor"
+      ],
+      "expressions": {
+        "light": "a restrained watercolor painting",
+        "moderate": "a clearly authored watercolor painting, with pigment blooms, translucent washes, broken edges, dry-brush accents, pooling color, and visible paper grain",
+        "strong": "a pronounced watercolor painting, strongly emphasizing pigment blooms, translucent washes, broken edges, dry-brush accents, pooling color, and visible paper grain",
+        "extreme": "a fully committed watercolor painting interpretation, with pigment blooms, translucent washes, broken edges, dry-brush accents, pooling color, and visible paper grain; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "gouache",
+      "label": "Gouache",
+      "family": "painting",
+      "aliases": [
+        "gouache"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "painting",
+        "poster"
+      ],
+      "expressions": {
+        "light": "a restrained gouache painting",
+        "moderate": "a clearly authored gouache painting, with opaque matte pigment, hand-painted edges, flattened color masses, visible brush drag, and poster-like density",
+        "strong": "a pronounced gouache painting, strongly emphasizing opaque matte pigment, hand-painted edges, flattened color masses, visible brush drag, and poster-like density",
+        "extreme": "a fully committed gouache painting interpretation, with opaque matte pigment, hand-painted edges, flattened color masses, visible brush drag, and poster-like density; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "ink_wash",
+      "label": "Ink and wash",
+      "family": "drawing",
+      "aliases": [
+        "ink wash",
+        "ink-and-wash"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "drawing",
+        "ink"
+      ],
+      "expressions": {
+        "light": "a restrained ink-and-wash drawing",
+        "moderate": "a clearly authored ink-and-wash drawing, with fluid brush marks, pooled ink, dry-brush scratches, open paper, and expressive tonal economy",
+        "strong": "a pronounced ink-and-wash drawing, strongly emphasizing fluid brush marks, pooled ink, dry-brush scratches, open paper, and expressive tonal economy",
+        "extreme": "a fully committed ink-and-wash drawing interpretation, with fluid brush marks, pooled ink, dry-brush scratches, open paper, and expressive tonal economy; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "graphite",
+      "label": "Graphite drawing",
+      "family": "drawing",
+      "aliases": [
+        "pencil drawing",
+        "graphite"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "drawing",
+        "traditional"
+      ],
+      "expressions": {
+        "light": "a restrained graphite drawing",
+        "moderate": "a clearly authored graphite drawing, with layered construction lines, pressure variation, smudged tonal modeling, erased highlights, and paper tooth",
+        "strong": "a pronounced graphite drawing, strongly emphasizing layered construction lines, pressure variation, smudged tonal modeling, erased highlights, and paper tooth",
+        "extreme": "a fully committed graphite drawing interpretation, with layered construction lines, pressure variation, smudged tonal modeling, erased highlights, and paper tooth; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "charcoal",
+      "label": "Charcoal drawing",
+      "family": "drawing",
+      "aliases": [
+        "charcoal"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "drawing",
+        "traditional"
+      ],
+      "expressions": {
+        "light": "a restrained charcoal drawing",
+        "moderate": "a clearly authored charcoal drawing, with powdery black masses, dragged smears, broken edges, erased light, and raw hand pressure",
+        "strong": "a pronounced charcoal drawing, strongly emphasizing powdery black masses, dragged smears, broken edges, erased light, and raw hand pressure",
+        "extreme": "a fully committed charcoal drawing interpretation, with powdery black masses, dragged smears, broken edges, erased light, and raw hand pressure; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "childrens_book",
+      "label": "Children's-book illustration",
+      "family": "illustration",
+      "aliases": [
+        "children's book",
+        "storybook"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "illustration",
+        "childrens_book",
+        "storybook"
+      ],
+      "expressions": {
+        "light": "a restrained hand-drawn children's-book illustration",
+        "moderate": "a clearly authored hand-drawn children's-book illustration, with playful linework, charming imperfect proportions, simplified hand-colored fills, warm narrative staging, and an unmistakable illustrator's hand",
+        "strong": "a pronounced hand-drawn children's-book illustration, strongly emphasizing playful linework, charming imperfect proportions, simplified hand-colored fills, warm narrative staging, and an unmistakable illustrator's hand",
+        "extreme": "a fully committed hand-drawn children's-book illustration interpretation, with playful linework, charming imperfect proportions, simplified hand-colored fills, warm narrative staging, and an unmistakable illustrator's hand; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "anime_keyframe",
+      "label": "Anime keyframe",
+      "family": "illustration",
+      "aliases": [
+        "anime",
+        "cel shaded"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "illustration",
+        "anime"
+      ],
+      "expressions": {
+        "light": "a restrained anime keyframe",
+        "moderate": "a clearly authored anime keyframe, with bold cel-shadow shapes, crisp contour design, stylized highlights, expressive perspective, and animation-ready visual clarity",
+        "strong": "a pronounced anime keyframe, strongly emphasizing bold cel-shadow shapes, crisp contour design, stylized highlights, expressive perspective, and animation-ready visual clarity",
+        "extreme": "a fully committed anime keyframe interpretation, with bold cel-shadow shapes, crisp contour design, stylized highlights, expressive perspective, and animation-ready visual clarity; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "manga_ink",
+      "label": "Manga ink drawing",
+      "family": "illustration",
+      "aliases": [
+        "manga"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "illustration",
+        "manga"
+      ],
+      "expressions": {
+        "light": "a restrained manga-style ink drawing",
+        "moderate": "a clearly authored manga-style ink drawing, with decisive black shapes, speed-line rhythm, screentone logic, expressive contour weight, and panel-ready graphic clarity",
+        "strong": "a pronounced manga-style ink drawing, strongly emphasizing decisive black shapes, speed-line rhythm, screentone logic, expressive contour weight, and panel-ready graphic clarity",
+        "extreme": "a fully committed manga-style ink drawing interpretation, with decisive black shapes, speed-line rhythm, screentone logic, expressive contour weight, and panel-ready graphic clarity; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "comic_painted",
+      "label": "Painted comic art",
+      "family": "illustration",
+      "aliases": [
+        "comic book"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "illustration",
+        "comic"
+      ],
+      "expressions": {
+        "light": "a restrained painted comic-book illustration",
+        "moderate": "a clearly authored painted comic-book illustration, with strong contour hierarchy, dramatic color blocking, authored anatomy/forms, and richly painted graphic surfaces",
+        "strong": "a pronounced painted comic-book illustration, strongly emphasizing strong contour hierarchy, dramatic color blocking, authored anatomy/forms, and richly painted graphic surfaces",
+        "extreme": "a fully committed painted comic-book illustration interpretation, with strong contour hierarchy, dramatic color blocking, authored anatomy/forms, and richly painted graphic surfaces; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "risograph",
+      "label": "Risograph print",
+      "family": "print",
+      "aliases": [
+        "risograph",
+        "riso"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "print",
+        "halftone",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a restrained risograph print",
+        "moderate": "a clearly authored risograph print, with limited spot inks, coarse grain, porous paper, offset registration, imperfect overlap, and tactile print artifacts",
+        "strong": "a pronounced risograph print, strongly emphasizing limited spot inks, coarse grain, porous paper, offset registration, imperfect overlap, and tactile print artifacts",
+        "extreme": "a fully committed risograph print interpretation, with limited spot inks, coarse grain, porous paper, offset registration, imperfect overlap, and tactile print artifacts; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "screenprint",
+      "label": "Screen print",
+      "family": "print",
+      "aliases": [
+        "screen print",
+        "silkscreen"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "print",
+        "graphic"
+      ],
+      "expressions": {
+        "light": "a restrained hand-pulled screen print",
+        "moderate": "a clearly authored hand-pulled screen print, with chunky separated inks, rough stencil edges, visible mesh texture, slight misregistration, and poster-like reduction",
+        "strong": "a pronounced hand-pulled screen print, strongly emphasizing chunky separated inks, rough stencil edges, visible mesh texture, slight misregistration, and poster-like reduction",
+        "extreme": "a fully committed hand-pulled screen print interpretation, with chunky separated inks, rough stencil edges, visible mesh texture, slight misregistration, and poster-like reduction; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "woodcut",
+      "label": "Woodcut print",
+      "family": "print",
+      "aliases": [
+        "woodcut",
+        "linocut"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "print",
+        "traditional"
+      ],
+      "expressions": {
+        "light": "a restrained woodcut print",
+        "moderate": "a clearly authored woodcut print, with carved black-and-white shape logic, gouged line texture, rough ink transfer, and strong hand-cut rhythm",
+        "strong": "a pronounced woodcut print, strongly emphasizing carved black-and-white shape logic, gouged line texture, rough ink transfer, and strong hand-cut rhythm",
+        "extreme": "a fully committed woodcut print interpretation, with carved black-and-white shape logic, gouged line texture, rough ink transfer, and strong hand-cut rhythm; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "mixed_collage",
+      "label": "Mixed-media collage",
+      "family": "mixed_media",
+      "aliases": [
+        "collage",
+        "mixed media"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "mixed_media",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a restrained mixed-media collage",
+        "moderate": "a clearly authored mixed-media collage, with torn paper, found-print fragments, tape seams, paint marks, mismatched scale, tactile layering, and intentional visual discontinuity",
+        "strong": "a pronounced mixed-media collage, strongly emphasizing torn paper, found-print fragments, tape seams, paint marks, mismatched scale, tactile layering, and intentional visual discontinuity",
+        "extreme": "a fully committed mixed-media collage interpretation, with torn paper, found-print fragments, tape seams, paint marks, mismatched scale, tactile layering, and intentional visual discontinuity; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "stylized_3d",
+      "label": "Stylized 3D render",
+      "family": "render",
+      "aliases": [
+        "3d render",
+        "cgi"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "render",
+        "3d"
+      ],
+      "expressions": {
+        "light": "a restrained stylized 3D interpretation",
+        "moderate": "a clearly authored stylized 3D interpretation, with bold material design, sculptural exaggeration, unconventional surface response, and carefully authored depth",
+        "strong": "a pronounced stylized 3D interpretation, strongly emphasizing bold material design, sculptural exaggeration, unconventional surface response, and carefully authored depth",
+        "extreme": "a fully committed stylized 3D interpretation interpretation, with bold material design, sculptural exaggeration, unconventional surface response, and carefully authored depth; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "clay_model",
+      "label": "Clay model / maquette",
+      "family": "render",
+      "aliases": [
+        "clay model",
+        "maquette"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "render",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a restrained hand-built clay maquette treatment",
+        "moderate": "a clearly authored hand-built clay maquette treatment, with fingered surfaces, imperfect sculpting, matte clay response, small-scale physicality, and studio-crafted charm",
+        "strong": "a pronounced hand-built clay maquette treatment, strongly emphasizing fingered surfaces, imperfect sculpting, matte clay response, small-scale physicality, and studio-crafted charm",
+        "extreme": "a fully committed hand-built clay maquette treatment interpretation, with fingered surfaces, imperfect sculpting, matte clay response, small-scale physicality, and studio-crafted charm; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "retro_airbrush",
+      "label": "Retro airbrush illustration",
+      "family": "illustration",
+      "aliases": [
+        "airbrush"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "illustration",
+        "retro"
+      ],
+      "expressions": {
+        "light": "a restrained retro commercial airbrush illustration",
+        "moderate": "a clearly authored retro commercial airbrush illustration, with immaculate gradient modeling, exaggerated gleam, poster polish, nostalgic color handling, and pre-digital commercial craft",
+        "strong": "a pronounced retro commercial airbrush illustration, strongly emphasizing immaculate gradient modeling, exaggerated gleam, poster polish, nostalgic color handling, and pre-digital commercial craft",
+        "extreme": "a fully committed retro commercial airbrush illustration interpretation, with immaculate gradient modeling, exaggerated gleam, poster polish, nostalgic color handling, and pre-digital commercial craft; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "paper_cut",
+      "label": "Paper-cut illustration",
+      "family": "craft",
+      "aliases": [
+        "paper cut",
+        "papercut"
+      ],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "craft",
+        "tactile"
+      ],
+      "expressions": {
+        "light": "a restrained layered paper-cut illustration",
+        "moderate": "a clearly authored layered paper-cut illustration, with cut edges, stacked paper planes, cast-paper shadows, simplified shapes, and hand-crafted dimensionality",
+        "strong": "a pronounced layered paper-cut illustration, strongly emphasizing cut edges, stacked paper planes, cast-paper shadows, simplified shapes, and hand-crafted dimensionality",
+        "extreme": "a fully committed layered paper-cut illustration interpretation, with cut edges, stacked paper planes, cast-paper shadows, simplified shapes, and hand-crafted dimensionality; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    }
+  ]
+}

@@ -1,0 +1,352 @@
+{
+  "axis": "style",
+  "entries": [
+    {
+      "id": "minimal_graphic",
+      "label": "Minimal graphic",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "graphic"
+      ],
+      "expressions": {
+        "light": "a restrained minimal graphic art direction",
+        "moderate": "a clear minimal graphic art direction, with radical reduction, iconic shapes, strict hierarchy, and removal of incidental visual noise",
+        "strong": "a strong minimal graphic art direction, strongly emphasizing radical reduction, iconic shapes, strict hierarchy, and removal of incidental visual noise",
+        "extreme": "an extreme minimal graphic art direction interpretation, with radical reduction, iconic shapes, strict hierarchy, and removal of incidental visual noise; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "maximalist",
+      "label": "Maximalist",
+      "family": "decorative",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "decorative"
+      ],
+      "expressions": {
+        "light": "a restrained maximalist art direction",
+        "moderate": "a clear maximalist art direction, with dense motifs, layered ornament, visual abundance, repeated detail, and extravagant but readable richness",
+        "strong": "a strong maximalist art direction, strongly emphasizing dense motifs, layered ornament, visual abundance, repeated detail, and extravagant but readable richness",
+        "extreme": "an extreme maximalist art direction interpretation, with dense motifs, layered ornament, visual abundance, repeated detail, and extravagant but readable richness; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "brutalist",
+      "label": "Brutalist graphic",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "graphic"
+      ],
+      "expressions": {
+        "light": "a restrained brutalist visual language",
+        "moderate": "a clear brutalist visual language, with hard geometry, abrupt scale shifts, raw spacing, severe edges, and uncompromising visual force",
+        "strong": "a strong brutalist visual language, strongly emphasizing hard geometry, abrupt scale shifts, raw spacing, severe edges, and uncompromising visual force",
+        "extreme": "an extreme brutalist visual language interpretation, with hard geometry, abrupt scale shifts, raw spacing, severe edges, and uncompromising visual force; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "storybook",
+      "label": "Storybook",
+      "family": "storybook",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "storybook",
+        "illustration"
+      ],
+      "expressions": {
+        "light": "a restrained storybook art direction",
+        "moderate": "a clear storybook art direction, with whimsical shape language, narrative staging, charming imperfections, and a clearly authored illustrator's voice",
+        "strong": "a strong storybook art direction, strongly emphasizing whimsical shape language, narrative staging, charming imperfections, and a clearly authored illustrator's voice",
+        "extreme": "an extreme storybook art direction interpretation, with whimsical shape language, narrative staging, charming imperfections, and a clearly authored illustrator's voice; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "anime",
+      "label": "Anime",
+      "family": "anime",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "anime",
+        "illustration"
+      ],
+      "expressions": {
+        "light": "a restrained anime visual language",
+        "moderate": "a clear anime visual language, with keyframe staging, stylized motion/readability, crisp graphic shadow logic, and expressive contours",
+        "strong": "a strong anime visual language, strongly emphasizing keyframe staging, stylized motion/readability, crisp graphic shadow logic, and expressive contours",
+        "extreme": "an extreme anime visual language interpretation, with keyframe staging, stylized motion/readability, crisp graphic shadow logic, and expressive contours; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "editorial_fashion",
+      "label": "Fashion editorial",
+      "family": "editorial",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "editorial"
+      ],
+      "expressions": {
+        "light": "a restrained fashion-editorial art direction",
+        "moderate": "a clear fashion-editorial art direction, with striking styling logic, assertive negative space, concept-driven pose, and magazine-spread identity",
+        "strong": "a strong fashion-editorial art direction, strongly emphasizing striking styling logic, assertive negative space, concept-driven pose, and magazine-spread identity",
+        "extreme": "an extreme fashion-editorial art direction interpretation, with striking styling logic, assertive negative space, concept-driven pose, and magazine-spread identity; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "documentary",
+      "label": "Documentary",
+      "family": "documentary",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "documentary"
+      ],
+      "expressions": {
+        "light": "a restrained documentary visual language",
+        "moderate": "a clear documentary visual language, with unvarnished observation, real-world clutter, imperfect framing, and environmental honesty",
+        "strong": "a strong documentary visual language, strongly emphasizing unvarnished observation, real-world clutter, imperfect framing, and environmental honesty",
+        "extreme": "an extreme documentary visual language interpretation, with unvarnished observation, real-world clutter, imperfect framing, and environmental honesty; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "surreal",
+      "label": "Surreal",
+      "family": "surreal",
+      "aliases": [],
+      "min_creativity": 4,
+      "weight": 1.0,
+      "tags": [
+        "surreal"
+      ],
+      "expressions": {
+        "light": "a restrained surreal art direction",
+        "moderate": "a clear surreal art direction, with uncanny scale, improbable but coherent relationships, dream logic, and transformation without losing the subject",
+        "strong": "a strong surreal art direction, strongly emphasizing uncanny scale, improbable but coherent relationships, dream logic, and transformation without losing the subject",
+        "extreme": "an extreme surreal art direction interpretation, with uncanny scale, improbable but coherent relationships, dream logic, and transformation without losing the subject; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "retro_futurist",
+      "label": "Retro-futurist",
+      "family": "retro",
+      "aliases": [],
+      "min_creativity": 4,
+      "weight": 1.0,
+      "tags": [
+        "retro"
+      ],
+      "expressions": {
+        "light": "a restrained retro-futurist art direction",
+        "moderate": "a clear retro-futurist art direction, with period materials, analog interfaces, speculative geometry, and coherent alternate-history design",
+        "strong": "a strong retro-futurist art direction, strongly emphasizing period materials, analog interfaces, speculative geometry, and coherent alternate-history design",
+        "extreme": "an extreme retro-futurist art direction interpretation, with period materials, analog interfaces, speculative geometry, and coherent alternate-history design; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "folk_art",
+      "label": "Folk art",
+      "family": "folk",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "folk",
+        "traditional"
+      ],
+      "expressions": {
+        "light": "a restrained folk-art visual language",
+        "moderate": "a clear folk-art visual language, with symbolic flattening, repeated handmade motifs, imperfect symmetry, and crafted ornamental rhythm",
+        "strong": "a strong folk-art visual language, strongly emphasizing symbolic flattening, repeated handmade motifs, imperfect symmetry, and crafted ornamental rhythm",
+        "extreme": "an extreme folk-art visual language interpretation, with symbolic flattening, repeated handmade motifs, imperfect symmetry, and crafted ornamental rhythm; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "noir",
+      "label": "Noir",
+      "family": "noir",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "noir"
+      ],
+      "expressions": {
+        "light": "a restrained noir art direction",
+        "moderate": "a clear noir art direction, with severe light/shadow geometry, tense spacing, smoky depth, and compressed visual danger without generic cinematic boilerplate",
+        "strong": "a strong noir art direction, strongly emphasizing severe light/shadow geometry, tense spacing, smoky depth, and compressed visual danger without generic cinematic boilerplate",
+        "extreme": "an extreme noir art direction interpretation, with severe light/shadow geometry, tense spacing, smoky depth, and compressed visual danger without generic cinematic boilerplate; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "pop_art",
+      "label": "Pop art",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "graphic",
+        "pop"
+      ],
+      "expressions": {
+        "light": "a restrained pop-art visual language",
+        "moderate": "a clear pop-art visual language, with hard-edged color, repeated iconography, print-process texture, and amplified commercial-art energy",
+        "strong": "a strong pop-art visual language, strongly emphasizing hard-edged color, repeated iconography, print-process texture, and amplified commercial-art energy",
+        "extreme": "an extreme pop-art visual language interpretation, with hard-edged color, repeated iconography, print-process texture, and amplified commercial-art energy; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "psychedelic",
+      "label": "Psychedelic",
+      "family": "psychedelic",
+      "aliases": [],
+      "min_creativity": 5,
+      "weight": 1.0,
+      "tags": [
+        "psychedelic"
+      ],
+      "expressions": {
+        "light": "a restrained psychedelic visual language",
+        "moderate": "a clear psychedelic visual language, with warped pattern, saturated color relationships, flowing contour logic, and controlled visual hallucination",
+        "strong": "a strong psychedelic visual language, strongly emphasizing warped pattern, saturated color relationships, flowing contour logic, and controlled visual hallucination",
+        "extreme": "an extreme psychedelic visual language interpretation, with warped pattern, saturated color relationships, flowing contour logic, and controlled visual hallucination; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "art_nouveau",
+      "label": "Art Nouveau",
+      "family": "decorative",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "decorative"
+      ],
+      "expressions": {
+        "light": "a restrained Art Nouveau-inspired art direction",
+        "moderate": "a clear Art Nouveau-inspired art direction, with flowing organic lines, ornamental framing, botanical rhythm, and elegant surface pattern",
+        "strong": "a strong Art Nouveau-inspired art direction, strongly emphasizing flowing organic lines, ornamental framing, botanical rhythm, and elegant surface pattern",
+        "extreme": "an extreme Art Nouveau-inspired art direction interpretation, with flowing organic lines, ornamental framing, botanical rhythm, and elegant surface pattern; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "bauhaus",
+      "label": "Bauhaus",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "graphic"
+      ],
+      "expressions": {
+        "light": "a restrained Bauhaus-inspired visual language",
+        "moderate": "a clear Bauhaus-inspired visual language, with geometric reduction, primary structure, functional balance, and disciplined modernist layout",
+        "strong": "a strong Bauhaus-inspired visual language, strongly emphasizing geometric reduction, primary structure, functional balance, and disciplined modernist layout",
+        "extreme": "an extreme Bauhaus-inspired visual language interpretation, with geometric reduction, primary structure, functional balance, and disciplined modernist layout; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "naive_art",
+      "label": "Naive / outsider art",
+      "family": "folk",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "folk",
+        "handmade"
+      ],
+      "expressions": {
+        "light": "a restrained naive outsider-art treatment",
+        "moderate": "a clear naive outsider-art treatment, with direct handmade marks, unconventional proportion, awkward charm, and emotionally immediate construction",
+        "strong": "a strong naive outsider-art treatment, strongly emphasizing direct handmade marks, unconventional proportion, awkward charm, and emotionally immediate construction",
+        "extreme": "an extreme naive outsider-art treatment interpretation, with direct handmade marks, unconventional proportion, awkward charm, and emotionally immediate construction; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "luxury_minimal",
+      "label": "Luxury minimal",
+      "family": "editorial",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "editorial",
+        "minimal"
+      ],
+      "expressions": {
+        "light": "a restrained luxury-minimal art direction",
+        "moderate": "a clear luxury-minimal art direction, with precise restraint, expensive material cues, generous negative space, and immaculate hierarchy",
+        "strong": "a strong luxury-minimal art direction, strongly emphasizing precise restraint, expensive material cues, generous negative space, and immaculate hierarchy",
+        "extreme": "an extreme luxury-minimal art direction interpretation, with precise restraint, expensive material cues, generous negative space, and immaculate hierarchy; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "grunge",
+      "label": "Grunge",
+      "family": "distressed",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "distressed"
+      ],
+      "expressions": {
+        "light": "a restrained grunge art direction",
+        "moderate": "a clear grunge art direction, with distressed surfaces, rough collage logic, torn edges, abrasion, and intentionally imperfect composition",
+        "strong": "a strong grunge art direction, strongly emphasizing distressed surfaces, rough collage logic, torn edges, abrasion, and intentionally imperfect composition",
+        "extreme": "an extreme grunge art direction interpretation, with distressed surfaces, rough collage logic, torn edges, abrasion, and intentionally imperfect composition; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "technical_diagram",
+      "label": "Technical diagram",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "graphic",
+        "technical"
+      ],
+      "expressions": {
+        "light": "a restrained technical-diagram visual language",
+        "moderate": "a clear technical-diagram visual language, with precise annotation-like structure, exploded relationships, disciplined line logic, and information-first clarity",
+        "strong": "a strong technical-diagram visual language, strongly emphasizing precise annotation-like structure, exploded relationships, disciplined line logic, and information-first clarity",
+        "extreme": "an extreme technical-diagram visual language interpretation, with precise annotation-like structure, exploded relationships, disciplined line logic, and information-first clarity; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "dreamy_soft",
+      "label": "Dreamlike soft",
+      "family": "dreamlike",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "dreamlike"
+      ],
+      "expressions": {
+        "light": "a restrained dreamlike visual treatment",
+        "moderate": "a clear dreamlike visual treatment, with soft transitions, gentle spatial ambiguity, luminous color bleed, and emotionally suspended atmosphere",
+        "strong": "a strong dreamlike visual treatment, strongly emphasizing soft transitions, gentle spatial ambiguity, luminous color bleed, and emotionally suspended atmosphere",
+        "extreme": "an extreme dreamlike visual treatment interpretation, with soft transitions, gentle spatial ambiguity, luminous color bleed, and emotionally suspended atmosphere; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    }
+  ]
+}

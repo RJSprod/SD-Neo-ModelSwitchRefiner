@@ -1,0 +1,279 @@
+{
+  "axis": "palette",
+  "entries": [
+    {
+      "id": "natural",
+      "label": "Natural color",
+      "family": "natural",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "natural"
+      ],
+      "expressions": {
+        "light": "a restrained natural color palette",
+        "moderate": "a deliberate natural color palette, with material-specific local color, nuanced neutrals, and no heavy global cast",
+        "strong": "a strong natural color palette, strongly emphasizing material-specific local color, nuanced neutrals, and no heavy global cast",
+        "extreme": "an extreme natural color palette interpretation, with material-specific local color, nuanced neutrals, and no heavy global cast; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "warm_earth",
+      "label": "Warm earth",
+      "family": "warm",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "warm"
+      ],
+      "expressions": {
+        "light": "a restrained warm earth palette",
+        "moderate": "a deliberate warm earth palette, with burnt sienna, ochre, dark umber, faded cream, and oxidized red hierarchy",
+        "strong": "a strong warm earth palette, strongly emphasizing burnt sienna, ochre, dark umber, faded cream, and oxidized red hierarchy",
+        "extreme": "an extreme warm earth palette interpretation, with burnt sienna, ochre, dark umber, faded cream, and oxidized red hierarchy; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "cyan_red",
+      "label": "Cyan and red",
+      "family": "complementary",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "complementary"
+      ],
+      "expressions": {
+        "light": "a restrained cyan/red complementary palette",
+        "moderate": "a deliberate cyan/red complementary palette, with oxidized cyan, deep vermilion, restrained neutrals, and strong warm/cool tension",
+        "strong": "a strong cyan/red complementary palette, strongly emphasizing oxidized cyan, deep vermilion, restrained neutrals, and strong warm/cool tension",
+        "extreme": "an extreme cyan/red complementary palette interpretation, with oxidized cyan, deep vermilion, restrained neutrals, and strong warm/cool tension; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "pastel",
+      "label": "Pastel",
+      "family": "soft",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "soft"
+      ],
+      "expressions": {
+        "light": "a restrained pastel palette",
+        "moderate": "a deliberate pastel palette, with chalk pink, faded mint, powder blue, pale apricot, and warm off-white softness",
+        "strong": "a strong pastel palette, strongly emphasizing chalk pink, faded mint, powder blue, pale apricot, and warm off-white softness",
+        "extreme": "an extreme pastel palette interpretation, with chalk pink, faded mint, powder blue, pale apricot, and warm off-white softness; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "monochrome",
+      "label": "Monochrome",
+      "family": "mono",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "mono"
+      ],
+      "expressions": {
+        "light": "a restrained near-monochrome palette",
+        "moderate": "a deliberate near-monochrome palette, with one dominant hue family, carefully separated tonal values, and minimal accent deviation",
+        "strong": "a strong near-monochrome palette, strongly emphasizing one dominant hue family, carefully separated tonal values, and minimal accent deviation",
+        "extreme": "an extreme near-monochrome palette interpretation, with one dominant hue family, carefully separated tonal values, and minimal accent deviation; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "jewel",
+      "label": "Jewel tones",
+      "family": "saturated",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "saturated"
+      ],
+      "expressions": {
+        "light": "a restrained jewel-tone palette",
+        "moderate": "a deliberate jewel-tone palette, with emerald, cobalt, ruby, amethyst, and blackened shadow colors with luxurious saturation",
+        "strong": "a strong jewel-tone palette, strongly emphasizing emerald, cobalt, ruby, amethyst, and blackened shadow colors with luxurious saturation",
+        "extreme": "an extreme jewel-tone palette interpretation, with emerald, cobalt, ruby, amethyst, and blackened shadow colors with luxurious saturation; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "acid",
+      "label": "Acid fluorescent",
+      "family": "fluorescent",
+      "aliases": [],
+      "min_creativity": 5,
+      "weight": 1.0,
+      "tags": [
+        "fluorescent"
+      ],
+      "expressions": {
+        "light": "a restrained acid fluorescent palette",
+        "moderate": "a deliberate acid fluorescent palette, with electric lime, hot magenta, cyan, warning orange, and deep neutral anchors",
+        "strong": "a strong acid fluorescent palette, strongly emphasizing electric lime, hot magenta, cyan, warning orange, and deep neutral anchors",
+        "extreme": "an extreme acid fluorescent palette interpretation, with electric lime, hot magenta, cyan, warning orange, and deep neutral anchors; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "vintage_faded",
+      "label": "Vintage faded",
+      "family": "retro",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "retro"
+      ],
+      "expressions": {
+        "light": "a restrained faded vintage palette",
+        "moderate": "a deliberate faded vintage palette, with sun-faded primaries, warm cast, oxidized reds, dull cyan shadows, and period-like color response",
+        "strong": "a strong faded vintage palette, strongly emphasizing sun-faded primaries, warm cast, oxidized reds, dull cyan shadows, and period-like color response",
+        "extreme": "an extreme faded vintage palette interpretation, with sun-faded primaries, warm cast, oxidized reds, dull cyan shadows, and period-like color response; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "black_red",
+      "label": "Black and red",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "graphic"
+      ],
+      "expressions": {
+        "light": "a restrained black-and-red palette",
+        "moderate": "a deliberate black-and-red palette, with dominant near-black fields, intense red accents, and severe high-contrast hierarchy",
+        "strong": "a strong black-and-red palette, strongly emphasizing dominant near-black fields, intense red accents, and severe high-contrast hierarchy",
+        "extreme": "an extreme black-and-red palette interpretation, with dominant near-black fields, intense red accents, and severe high-contrast hierarchy; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "blue_orange",
+      "label": "Blue and orange",
+      "family": "complementary",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "complementary"
+      ],
+      "expressions": {
+        "light": "a restrained blue/orange palette",
+        "moderate": "a deliberate blue/orange palette, with deep blue fields, burnt orange accents, warm reflected highlights, and controlled complementary balance",
+        "strong": "a strong blue/orange palette, strongly emphasizing deep blue fields, burnt orange accents, warm reflected highlights, and controlled complementary balance",
+        "extreme": "an extreme blue/orange palette interpretation, with deep blue fields, burnt orange accents, warm reflected highlights, and controlled complementary balance; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "green_magenta",
+      "label": "Green and magenta",
+      "family": "complementary",
+      "aliases": [],
+      "min_creativity": 4,
+      "weight": 1.0,
+      "tags": [
+        "complementary"
+      ],
+      "expressions": {
+        "light": "a restrained green/magenta palette",
+        "moderate": "a deliberate green/magenta palette, with moss/acid greens against magenta accents with deliberately unusual complementary tension",
+        "strong": "a strong green/magenta palette, strongly emphasizing moss/acid greens against magenta accents with deliberately unusual complementary tension",
+        "extreme": "an extreme green/magenta palette interpretation, with moss/acid greens against magenta accents with deliberately unusual complementary tension; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "sepia",
+      "label": "Sepia / warm mono",
+      "family": "retro",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "retro",
+        "mono"
+      ],
+      "expressions": {
+        "light": "a restrained sepia palette",
+        "moderate": "a deliberate sepia palette, with warm brown tonal range, cream highlights, and restrained antique photographic color logic",
+        "strong": "a strong sepia palette, strongly emphasizing warm brown tonal range, cream highlights, and restrained antique photographic color logic",
+        "extreme": "an extreme sepia palette interpretation, with warm brown tonal range, cream highlights, and restrained antique photographic color logic; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "candy",
+      "label": "Candy color",
+      "family": "bright",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "bright"
+      ],
+      "expressions": {
+        "light": "a restrained candy-colored palette",
+        "moderate": "a deliberate candy-colored palette, with bright confectionery pinks, blues, yellows, and mint tones with playful saturation",
+        "strong": "a strong candy-colored palette, strongly emphasizing bright confectionery pinks, blues, yellows, and mint tones with playful saturation",
+        "extreme": "an extreme candy-colored palette interpretation, with bright confectionery pinks, blues, yellows, and mint tones with playful saturation; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "desaturated_cool",
+      "label": "Desaturated cool",
+      "family": "cool",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "cool"
+      ],
+      "expressions": {
+        "light": "a restrained desaturated cool palette",
+        "moderate": "a deliberate desaturated cool palette, with steel blue, gray-green, muted cyan, cold neutrals, and sparse warm accents",
+        "strong": "a strong desaturated cool palette, strongly emphasizing steel blue, gray-green, muted cyan, cold neutrals, and sparse warm accents",
+        "extreme": "an extreme desaturated cool palette interpretation, with steel blue, gray-green, muted cyan, cold neutrals, and sparse warm accents; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "sun_bleached",
+      "label": "Sun-bleached",
+      "family": "warm",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "warm",
+        "faded"
+      ],
+      "expressions": {
+        "light": "a restrained sun-bleached palette",
+        "moderate": "a deliberate sun-bleached palette, with faded warm surfaces, pale sky colors, dusty neutrals, and low-saturation heat",
+        "strong": "a strong sun-bleached palette, strongly emphasizing faded warm surfaces, pale sky colors, dusty neutrals, and low-saturation heat",
+        "extreme": "an extreme sun-bleached palette interpretation, with faded warm surfaces, pale sky colors, dusty neutrals, and low-saturation heat; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "primary_graphic",
+      "label": "Primary graphic",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "graphic"
+      ],
+      "expressions": {
+        "light": "a restrained primary-color graphic palette",
+        "moderate": "a deliberate primary-color graphic palette, with bold red, blue, yellow, black, and white with decisive geometric separation",
+        "strong": "a strong primary-color graphic palette, strongly emphasizing bold red, blue, yellow, black, and white with decisive geometric separation",
+        "extreme": "an extreme primary-color graphic palette interpretation, with bold red, blue, yellow, black, and white with decisive geometric separation; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    }
+  ]
+}

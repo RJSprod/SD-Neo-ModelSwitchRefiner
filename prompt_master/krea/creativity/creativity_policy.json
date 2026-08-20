@@ -1,0 +1,113 @@
+{
+  "axis_activation": {
+    "0": {
+      "min": 0,
+      "max": 0,
+      "tier": "none"
+    },
+    "1": {
+      "min": 0,
+      "max": 0,
+      "tier": "none"
+    },
+    "2": {
+      "min": 1,
+      "max": 2,
+      "tier": "light"
+    },
+    "3": {
+      "min": 1,
+      "max": 2,
+      "tier": "light"
+    },
+    "4": {
+      "min": 2,
+      "max": 3,
+      "tier": "moderate"
+    },
+    "5": {
+      "min": 3,
+      "max": 4,
+      "tier": "moderate"
+    },
+    "6": {
+      "min": 4,
+      "max": 5,
+      "tier": "moderate"
+    },
+    "7": {
+      "min": 5,
+      "max": 6,
+      "tier": "strong"
+    },
+    "8": {
+      "min": 6,
+      "max": 8,
+      "tier": "strong"
+    },
+    "9": {
+      "min": 8,
+      "max": 9,
+      "tier": "extreme"
+    },
+    "10": {
+      "all_eligible": true,
+      "tier": "extreme"
+    }
+  },
+  "sampling": {
+    "0": {
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "1": {
+      "temperature": 0.6,
+      "top_p": 0.9,
+      "legacy_exact": true
+    },
+    "2": {
+      "temperature": 0.64,
+      "top_p": 0.91
+    },
+    "3": {
+      "temperature": 0.68,
+      "top_p": 0.92
+    },
+    "4": {
+      "temperature": 0.72,
+      "top_p": 0.93
+    },
+    "5": {
+      "temperature": 0.76,
+      "top_p": 0.94
+    },
+    "6": {
+      "temperature": 0.8,
+      "top_p": 0.95
+    },
+    "7": {
+      "temperature": 0.84,
+      "top_p": 0.96
+    },
+    "8": {
+      "temperature": 0.88,
+      "top_p": 0.97
+    },
+    "9": {
+      "temperature": 0.92,
+      "top_p": 0.98
+    },
+    "10": {
+      "temperature": 0.96,
+      "top_p": 0.98
+    }
+  },
+  "precedence": [
+    "explicit_source",
+    "fixed_axis",
+    "varied_axis",
+    "natural_llm"
+  ],
+  "fixed_axis_strength": "Fixed uses the master creativity tier unless a future UI adds separate fixed intensity.",
+  "natural_axis_rule": "Natural means omit the axis completely from the Creative Direction brief."
+}

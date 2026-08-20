@@ -118,17 +118,26 @@ DEFAULTS: dict = {
     "thread": "",
     # MiniMax's last variant.
     "minimax_variant": "fl2va",
-    # Where each surface left the Krea Creativity slider. Two keys and one
-    # meaning: authoring a prompt by hand and iterating images live are
-    # different tasks that settle at different positions, but Creativity 7 is
-    # the same sampling configuration in both -- the split is about where the
-    # slider was left, never about what a value does.
-    "krea_manual_creativity": 1,
-    "krea_live_creativity": 1,
-    # Krea Live's own controls, remembered so the strip opens where it was left.
-    "krea_live_delay": 5.0,
-    "krea_live_loras": "",
-    "krea_live_seed": -1,
+    # Krea Creative Mode. One set of settings for both surfaces on purpose: the
+    # axes, the Creativity position and the seed describe how this installation
+    # does art direction, and somebody who has spent five minutes configuring
+    # ten axes in LLM Studio should not have to do it again in txt2img.
+    #
+    # Every default here is a fallback for a headless read; the authoritative
+    # ones are the creativity package's own defaults.json, which
+    # mc_creative_krea.settings() layers over these.
+    "krea_creative_enabled": False,
+    "krea_creativity": 5,
+    "krea_creative_seed": -1,
+    "krea_creative_anti_repetition": True,
+    "krea_creative_axis_modes": {},
+    "krea_creative_fixed": {},
+    "krea_creative_loras": "",
+    # The variant ids of the last few rolls, newest last. Ids, never prompts:
+    # what anti-repetition needs to know is "did we just use the impasto
+    # medium", and storing the prompts to answer that would be keeping a
+    # transcript of everything anybody asked for in a preferences file.
+    "krea_creative_history": [],
 }
 
 
@@ -355,6 +364,13 @@ class KreaSession:
     guess: 1 is defined as the configuration the Krea writer used before there
     was anything to choose, so an old entry is being labelled with the value it
     actually ran at.
+
+    ``creative_seed`` and ``recipe`` are Creative Mode's, and are what make a
+    saved prompt something you can go back to rather than only read. The recipe
+    is stored as its compact ``axis=variant_id`` form: the ids are stable across
+    library versions by contract, and storing the rendered sentences instead
+    would be storing a paragraph of English that a later package could no longer
+    explain. Both are empty on a session written without Creative Mode.
     """
 
     identifier: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
@@ -363,6 +379,8 @@ class KreaSession:
     result: str = ""
     seed: int = 0
     creativity: int = 1
+    creative_seed: int = -1
+    recipe: str = ""
     reference_names: list = field(default_factory=list)
     reference_captions: list = field(default_factory=list)
 

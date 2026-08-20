@@ -1,0 +1,260 @@
+{
+  "axis": "composition",
+  "entries": [
+    {
+      "id": "centered",
+      "label": "Centered",
+      "family": "balanced",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "balanced"
+      ],
+      "expressions": {
+        "light": "a mild centered composition",
+        "moderate": "a deliberate centered composition, with formal balance, clear hierarchy, and deliberate breathing room",
+        "strong": "a strong centered composition, strongly emphasizing formal balance, clear hierarchy, and deliberate breathing room",
+        "extreme": "an extreme centered composition interpretation, with formal balance, clear hierarchy, and deliberate breathing room; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "negative_space",
+      "label": "Negative space",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "graphic"
+      ],
+      "expressions": {
+        "light": "a mild asymmetrical negative-space composition",
+        "moderate": "a deliberate asymmetrical negative-space composition, with large quiet fields, decisive off-center placement, and editorial graphic tension",
+        "strong": "a strong asymmetrical negative-space composition, strongly emphasizing large quiet fields, decisive off-center placement, and editorial graphic tension",
+        "extreme": "an extreme asymmetrical negative-space composition interpretation, with large quiet fields, decisive off-center placement, and editorial graphic tension; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "extreme_crop",
+      "label": "Extreme close crop",
+      "family": "close",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "close"
+      ],
+      "expressions": {
+        "light": "a mild extreme close crop",
+        "moderate": "a deliberate extreme close crop, with bold edge cuts, abstracted shape reading, and one dominant identifying feature",
+        "strong": "a strong extreme close crop, strongly emphasizing bold edge cuts, abstracted shape reading, and one dominant identifying feature",
+        "extreme": "an extreme extreme close crop interpretation, with bold edge cuts, abstracted shape reading, and one dominant identifying feature; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "environmental_wide",
+      "label": "Environmental wide",
+      "family": "distant",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "distant_environmental"
+      ],
+      "expressions": {
+        "light": "a mild environmental wide composition",
+        "moderate": "a deliberate environmental wide composition, with context-rich framing, layered spatial cues, and the subject integrated into a larger world",
+        "strong": "a strong environmental wide composition, strongly emphasizing context-rich framing, layered spatial cues, and the subject integrated into a larger world",
+        "extreme": "an extreme environmental wide composition interpretation, with context-rich framing, layered spatial cues, and the subject integrated into a larger world; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "diagonal",
+      "label": "Dynamic diagonal",
+      "family": "dynamic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "dynamic"
+      ],
+      "expressions": {
+        "light": "a mild dynamic diagonal composition",
+        "moderate": "a deliberate dynamic diagonal composition, with overlapping depth, directional momentum, off-axis balance, and energetic edge cuts",
+        "strong": "a strong dynamic diagonal composition, strongly emphasizing overlapping depth, directional momentum, off-axis balance, and energetic edge cuts",
+        "extreme": "an extreme dynamic diagonal composition interpretation, with overlapping depth, directional momentum, off-axis balance, and energetic edge cuts; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "overhead_graphic",
+      "label": "Graphic overhead",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "graphic"
+      ],
+      "expressions": {
+        "light": "a mild overhead graphic composition",
+        "moderate": "a deliberate overhead graphic composition, with flattened depth, deliberate spacing, clear shape rhythm, and poster-like organization",
+        "strong": "a strong overhead graphic composition, strongly emphasizing flattened depth, deliberate spacing, clear shape rhythm, and poster-like organization",
+        "extreme": "an extreme overhead graphic composition interpretation, with flattened depth, deliberate spacing, clear shape rhythm, and poster-like organization; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "layered_depth",
+      "label": "Layered depth",
+      "family": "depth",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "depth"
+      ],
+      "expressions": {
+        "light": "a mild layered-depth composition",
+        "moderate": "a deliberate layered-depth composition, with foreground occlusion, midground subject placement, deep background cues, and staged reveals",
+        "strong": "a strong layered-depth composition, strongly emphasizing foreground occlusion, midground subject placement, deep background cues, and staged reveals",
+        "extreme": "an extreme layered-depth composition interpretation, with foreground occlusion, midground subject placement, deep background cues, and staged reveals; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "panoramic",
+      "label": "Panoramic",
+      "family": "wide",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "wide"
+      ],
+      "expressions": {
+        "light": "a mild panoramic composition",
+        "moderate": "a deliberate panoramic composition, with extended lateral context, asymmetric placement, and environmental storytelling across width",
+        "strong": "a strong panoramic composition, strongly emphasizing extended lateral context, asymmetric placement, and environmental storytelling across width",
+        "extreme": "an extreme panoramic composition interpretation, with extended lateral context, asymmetric placement, and environmental storytelling across width; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "triptych_logic",
+      "label": "Triptych-like balance",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 4,
+      "weight": 1.0,
+      "tags": [
+        "graphic"
+      ],
+      "expressions": {
+        "light": "a mild triptych-like compositional balance",
+        "moderate": "a deliberate triptych-like compositional balance, with three-part visual rhythm, repeated spacing, and deliberate internal panel-like relationships",
+        "strong": "a strong triptych-like compositional balance, strongly emphasizing three-part visual rhythm, repeated spacing, and deliberate internal panel-like relationships",
+        "extreme": "an extreme triptych-like compositional balance interpretation, with three-part visual rhythm, repeated spacing, and deliberate internal panel-like relationships; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "corner_frame",
+      "label": "Corner-weighted",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 3,
+      "weight": 1.0,
+      "tags": [
+        "graphic"
+      ],
+      "expressions": {
+        "light": "a mild corner-weighted composition",
+        "moderate": "a deliberate corner-weighted composition, with subject mass pushed toward one corner, strong empty counterweight, and unusual visual balance",
+        "strong": "a strong corner-weighted composition, strongly emphasizing subject mass pushed toward one corner, strong empty counterweight, and unusual visual balance",
+        "extreme": "an extreme corner-weighted composition interpretation, with subject mass pushed toward one corner, strong empty counterweight, and unusual visual balance; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "frame_within_frame",
+      "label": "Frame within frame",
+      "family": "depth",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "depth"
+      ],
+      "expressions": {
+        "light": "a mild frame-within-frame composition",
+        "moderate": "a deliberate frame-within-frame composition, with architectural or environmental boundaries that isolate the subject and add layered depth",
+        "strong": "a strong frame-within-frame composition, strongly emphasizing architectural or environmental boundaries that isolate the subject and add layered depth",
+        "extreme": "an extreme frame-within-frame composition interpretation, with architectural or environmental boundaries that isolate the subject and add layered depth; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "radial",
+      "label": "Radial",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "graphic"
+      ],
+      "expressions": {
+        "light": "a mild radial composition",
+        "moderate": "a deliberate radial composition, with visual forces organized around a center, repeated directional cues, and strong rotational rhythm",
+        "strong": "a strong radial composition, strongly emphasizing visual forces organized around a center, repeated directional cues, and strong rotational rhythm",
+        "extreme": "an extreme radial composition interpretation, with visual forces organized around a center, repeated directional cues, and strong rotational rhythm; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "stacked_vertical",
+      "label": "Stacked vertical",
+      "family": "vertical",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "vertical"
+      ],
+      "expressions": {
+        "light": "a mild stacked vertical composition",
+        "moderate": "a deliberate stacked vertical composition, with strong top-to-bottom sequencing, compressed width, and deliberate vertical hierarchy",
+        "strong": "a strong stacked vertical composition, strongly emphasizing strong top-to-bottom sequencing, compressed width, and deliberate vertical hierarchy",
+        "extreme": "an extreme stacked vertical composition interpretation, with strong top-to-bottom sequencing, compressed width, and deliberate vertical hierarchy; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "low_horizon",
+      "label": "Low horizon",
+      "family": "wide",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "wide"
+      ],
+      "expressions": {
+        "light": "a mild low-horizon composition",
+        "moderate": "a deliberate low-horizon composition, with expanded sky/upper field, subject grounded low, and heightened sense of openness or scale",
+        "strong": "a strong low-horizon composition, strongly emphasizing expanded sky/upper field, subject grounded low, and heightened sense of openness or scale",
+        "extreme": "an extreme low-horizon composition interpretation, with expanded sky/upper field, subject grounded low, and heightened sense of openness or scale; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "high_horizon",
+      "label": "High horizon",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "graphic"
+      ],
+      "expressions": {
+        "light": "a mild high-horizon composition",
+        "moderate": "a deliberate high-horizon composition, with expanded foreground field, compressed upper space, and graphic emphasis on ground-plane relationships",
+        "strong": "a strong high-horizon composition, strongly emphasizing expanded foreground field, compressed upper space, and graphic emphasis on ground-plane relationships",
+        "extreme": "an extreme high-horizon composition interpretation, with expanded foreground field, compressed upper space, and graphic emphasis on ground-plane relationships; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    }
+  ]
+}

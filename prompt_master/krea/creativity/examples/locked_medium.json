@@ -1,0 +1,10 @@
+{
+  "source": "oil painting of a car",
+  "creativity": 10,
+  "setting": {
+    "medium": {
+      "mode": "vary"
+    }
+  },
+  "expected": "Source locks Medium; the local director must not replace oil painting."
+}

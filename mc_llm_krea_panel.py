@@ -25,13 +25,19 @@ generated: there is no sampler here, no CFG, no LoRA strength, no mask and no
 negative prompt, because those belong to an image-generation integration and
 this is the thing that writes what such an integration would be given.
 
-The one setting here that *is* a sampler is Creativity, and it is a sampler for
-the language model rather than for a diffusion pass -- how tightly the writer
-is bound to its most probable wording, nothing more. It resolves through
-``prompt_master.krea.variation``, the same function txt2img's Krea Live goes
-through, so a position means one thing across the whole extension. It changes
-no instruction, adds no second request and has no effect on how many times the
-model is asked: one press is one prompt at every value.
+Creative Mode is the one thing here that decides anything about content, and it
+decides it *before* the model is asked and without asking a model. The local
+Creative Director in ``prompt_master.krea.director`` picks an art-direction
+brief out of a vendored vocabulary using a seeded PRNG, that brief is appended
+to the user turn under its own label, and the writer is then called exactly
+once. Turning the slider up does not mean asking the model more times or asking
+it more loudly; it means handing it a different brief.
+
+The whole engine is shared with txt2img's Creative Mode -- the same library, the
+same Director, the same settings file -- so a Creativity position and an axis
+configuration mean the same thing in both places. What is *not* shared is any
+notion of images: this mode still generates none, and Creative Mode adds no
+image controls, no seed that means a diffusion seed, and no gallery.
 """
 
 from __future__ import annotations
@@ -41,6 +47,7 @@ import time
 
 import gradio as gr
 
+import mc_creative_krea
 import mc_llm_runtime
 import mc_llm_sessions as sessions
 import mc_llm_state
@@ -65,17 +72,37 @@ on the user and the model agreeing about which picture is which, and an
 agreement one side has never been told about is not one.
 """
 
+CREATIVE_NOTE = (
+    "**Natural** leaves the axis out of the brief entirely — the model decides as it "
+    "would without Creative Mode. **Vary** lets the local director choose, and the "
+    "Creativity slider decides whether the axis activates at all, how strongly it is "
+    "expressed, and how hard recent choices are pushed away. **Fixed** repeats your "
+    "chosen value every roll.\n\n"
+    "Your own words always win: type *oil painting of a car* and Medium stays oil "
+    "painting however Medium is set. The direction is chosen here, in Python, from a "
+    "vendored vocabulary — no model is asked what to vary, and each press is still "
+    "exactly one Krea writer request.\n\n"
+    "These settings are shared with txt2img's Creative Mode.")
+"""The three modes, explained where they are set rather than in documentation.
+
+Natural is the one that needs saying out loud: it means *no line at all* for
+that axis, not a line telling the model to please itself. A brief that says
+"Texture: your choice" has put texture in the model's foreground, which is the
+opposite of leaving it alone.
+"""
+
 
 def build() -> dict:
-    """Assemble the panel. Returns the handles the shell wires, and Creativity.
+    """Assemble the panel. Returns the handles the shell wires, and Creative Mode's.
 
-    Creativity is in the map without the shell reading it, because it is the one
-    control here whose *configuration* is a promise -- the range and the default
-    are the compatibility guarantee -- and a promise nothing can ask about is a
-    promise nothing can hold you to.
+    The Creative Mode controls are in the map without the shell reading them,
+    because their *configuration* is a promise -- the range, the default, and
+    that the axis table is built from the library rather than from a list here
+    -- and a promise nothing can ask about is a promise nothing can hold you to.
     """
     from prompt_master.krea import enhancer, variation
 
+    stored = mc_creative_krea.settings()
     cancellation = gr.State(None)
 
     with gr.Row(elem_id=ui.ident("krea"), elem_classes=ui.classes("workspace")):
@@ -92,10 +119,17 @@ def build() -> dict:
             seed = gr.Number(label="Seed", value=-1, precision=0,
                              info="-1 draws a fresh seed for every prompt.",
                              elem_id=ui.ident("krea", "seed"))
-            creativity = gr.Slider(label=variation.LABEL, minimum=variation.MINIMUM,
-                                   maximum=variation.MAXIMUM, step=1,
-                                   value=_remembered_creativity(), info=variation.HELP,
-                                   elem_id=ui.ident("krea", "creativity"))
+
+            creative = gr.Checkbox(
+                value=bool(stored["enabled"]), label="Creative Mode",
+                info="direct the prompt locally before expanding it",
+                elem_id=ui.ident("krea", "creative"))
+            creativity = gr.Slider(
+                label=variation.LABEL, minimum=variation.MINIMUM,
+                maximum=variation.MAXIMUM, step=1, value=stored["creativity"],
+                info=variation.HELP, visible=bool(stored["enabled"]),
+                elem_id=ui.ident("krea", "creativity"))
+
             gr.Markdown("Krea keeps its own history, separate from Prompt Studio, "
                         "Conversation and MiniMax. The pictures are not saved with it — "
                         "their names and descriptions are.",
@@ -134,6 +168,31 @@ def build() -> dict:
                                  elem_id=ui.ident("krea", "stop"))
                 clear = gr.Button("Clear")
 
+            with gr.Accordion("Creative Controls", open=False,
+                               visible=bool(stored["enabled"]),
+                               elem_id=ui.ident("krea", "controls")) as controls:
+                gr.Markdown(CREATIVE_NOTE, elem_classes=ui.classes("hint"))
+                axis_controls = _axis_table(stored)
+
+                with gr.Row():
+                    creative_seed = gr.Number(
+                        label="Creative seed", value=stored["seed"], precision=0, scale=2,
+                        info="-1 rolls new art direction each time; a fixed value "
+                             "repeats it. Not the writer's own seed.",
+                        elem_id=ui.ident("krea", "creative-seed"))
+                    anti = gr.Checkbox(
+                        value=bool(stored["anti_repetition"]), scale=1,
+                        label="Avoid recent treatments",
+                        info="pushes the last few rolls' choices away at high Creativity",
+                        elem_id=ui.ident("krea", "anti"))
+                    forget = gr.Button("Clear recent memory", size="sm", scale=1,
+                                       elem_id=ui.ident("krea", "forget"))
+
+                recipe = gr.Textbox(
+                    label="Last creative recipe", lines=10, max_lines=10,
+                    interactive=False, show_copy_button=True, visible=False,
+                    elem_id=ui.ident("krea", "recipe"))
+
             with gr.Accordion("Reference numbering and descriptions", open=False):
                 gr.Markdown(NUMBERING_NOTE, elem_classes=ui.classes("hint"))
                 captions = gr.Textbox(
@@ -144,8 +203,10 @@ def build() -> dict:
     # -- wiring ----------------------------------------------------------- #
 
     running = generate.click(
-        fn=_generate, inputs=[prompt, seed, creativity] + images,
-        outputs=[cancellation, written, captions, status, generate, stop],
+        fn=_generate,
+        inputs=[prompt, seed, creative, creativity, creative_seed, anti] + list(axis_controls)
+               + images,
+        outputs=[cancellation, written, captions, recipe, status, generate, stop],
         show_progress="minimal")
     running.then(fn=lambda: gr.update(choices=_history_choices()), outputs=[history])
 
@@ -153,10 +214,20 @@ def build() -> dict:
                cancels=[running], queue=False)
     clear.click(fn=_clear, outputs=[prompt, written, captions, status] + images, queue=False)
 
+    creative.change(fn=_toggled, inputs=[creative], outputs=[creativity, controls, status],
+                    queue=False)
     # Remembered on release rather than on every pixel of the drag: the value
     # is a preference, and a preferences file rewritten forty times as a slider
     # travels from 1 to 10 is forty writes for one decision.
-    creativity.release(fn=_remember_creativity, inputs=[creativity], queue=False)
+    creativity.release(fn=_remember_creativity, inputs=[creativity], outputs=[status],
+                       queue=False)
+    creative_seed.input(fn=_remember_creative_seed, inputs=[creative_seed],
+                        outputs=[creative_seed], queue=False)
+    anti.change(fn=_remember_anti, inputs=[anti], outputs=[anti], queue=False)
+    forget.click(fn=_forget_history, outputs=[status], queue=False)
+    for control in axis_controls:
+        control.change(fn=_remember_axes, inputs=list(axis_controls), outputs=[status],
+                       queue=False)
 
     refresh.click(fn=lambda: gr.update(choices=_history_choices()), outputs=[history],
                   queue=False)
@@ -164,7 +235,9 @@ def build() -> dict:
                outputs=[prompt, written, captions, status], queue=False)
     drop.click(fn=_delete_session, inputs=[history], outputs=[history, status], queue=False)
 
-    return {"status": status, "output": written, "stop": stop, "creativity": creativity}
+    return {"status": status, "output": written, "stop": stop, "creativity": creativity,
+            "creative": creative, "controls": controls, "recipe": recipe,
+            "axes": axis_controls}
 
 
 # --------------------------------------------------------------------------- #
@@ -234,57 +307,163 @@ def _described(captions) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _remembered_creativity() -> int:
-    """Where the manual slider was left, or the default on a fresh install.
+def _axis_table(stored) -> list:
+    """One row per axis: what it is called, how it behaves, and its pinned value.
 
-    Read through ``variation.clamp`` rather than trusted: the preferences file
-    is editable, survives downgrades, and is the one place a value from outside
-    the 0-10 range could reach a request.
+    Built from the library rather than from a list here, so a package that adds
+    an axis grows a row without this file being edited -- and so that the two
+    surfaces cannot end up offering different axes, which they would within a
+    release if each kept its own list.
     """
-    from prompt_master.krea.variation import DEFAULT, clamp
+    try:
+        from prompt_master.krea import library as library_module
+
+        lib = library_module.library()
+    except Exception as exc:
+        gr.Markdown(f"The creativity library could not be read, so Creative Mode has "
+                    f"no vocabulary to direct with: {exc}",
+                    elem_classes=ui.classes("hint"))
+        return []
+
+    from prompt_master.krea import director
+
+    modes = stored.get("axis_modes") or {}
+    fixed = stored.get("fixed_values") or {}
+    rows = []
+    for key in lib.axis_keys:
+        axis = lib.axis(key)
+        with gr.Row(elem_id=ui.ident("krea", "axis", key)):
+            mode = gr.Radio(
+                label=axis.label, choices=[("Natural", director.NATURAL),
+                                           ("Vary", director.VARY),
+                                           ("Fixed", director.FIXED)],
+                value=modes.get(key, director.VARY), scale=2,
+                elem_id=ui.ident("krea", "axis", key, "mode"))
+            value = gr.Dropdown(
+                label="Fixed value", scale=3, value=fixed.get(key),
+                choices=[(variant.label, variant.identifier) for variant in axis.variants],
+                elem_id=ui.ident("krea", "axis", key, "value"))
+        rows.extend([mode, value])
+    return rows
+
+
+def _axes_from(axis_values) -> tuple[dict, dict]:
+    """The axis controls, as ``(modes, fixed ids)``.
+
+    The values arrive as one flat tuple -- Gradio has no other shape for a
+    variable number of inputs -- laid out mode, fixed, mode, fixed in the
+    library's own axis order. That pairing is the one thing that could go
+    quietly wrong, so it is done in one place.
+    """
+    from prompt_master.krea import director
 
     try:
-        return clamp(mc_llm_state.preferences().get("krea_manual_creativity", DEFAULT))
+        from prompt_master.krea import library as library_module
+
+        keys = library_module.library().axis_keys
     except Exception:
-        logger.debug("Model Chain: could not read the Krea creativity preference",
-                     exc_info=True)
-        return DEFAULT
+        return {}, {}
+
+    modes, fixed = {}, {}
+    for position, key in enumerate(keys):
+        mode = str(axis_values[position * 2] if position * 2 < len(axis_values)
+                   else director.VARY).casefold()
+        chosen = axis_values[position * 2 + 1] if position * 2 + 1 < len(axis_values) else None
+        modes[key] = mode if mode in director.MODES else director.VARY
+        if chosen:
+            fixed[key] = str(chosen)
+    return modes, fixed
 
 
-def _remember_creativity(value) -> None:
-    """Keep the manual slider's position, under its own key.
+def _recipe_view(recipe) -> str:
+    """The last recipe as something a person can read and argue with."""
+    items = getattr(recipe, "items", ())
+    if not items:
+        return (f"No creative direction at Creativity {getattr(recipe, 'creativity', 0)}.\n"
+                "Creativity 0 and 1 direct nothing by design; above that, set at least "
+                "one axis to Vary.")
+    lines = [f"Creative seed: {recipe.creative_seed}   ·   writer seed: {recipe.llm_seed}"
+             f"   ·   library {recipe.library_version}"]
+    if recipe.locked:
+        lines.append("Locked by your prompt: " + ", ".join(recipe.locked))
+    lines.append("")
+    for item in items:
+        lines.append(f"{item.label} [{item.source}] {item.variant_id} — {item.variant_label}")
+    lines.append("")
+    lines.append(recipe.brief)
+    return "\n".join(lines)
 
-    Its own key because Krea Live has one too, and the two tasks settle in
-    different places -- authoring a prompt to keep is not iterating images at
-    five-second intervals. What a *value* means is identical in both, which is
-    the half that must never be duplicated and lives in
-    ``prompt_master.krea.variation``.
+
+def _toggled(enabled):
+    """Show or hide the Creative controls, and remember the toggle."""
+    mc_creative_krea.remember(**{mc_creative_krea.ENABLED: bool(enabled)})
+    shown = gr.update(visible=bool(enabled))
+    told = ("Creative Mode is on. Each press directs the prompt locally, then asks the "
+            "writer once." if enabled else "Creative Mode is off.")
+    return shown, shown, ui.notice(told)
+
+
+def _remember_creativity(value):
+    """Keep the slider's position, shared with txt2img's Creative Mode.
+
+    One position for both surfaces, not two. The axes, the seed and the slider
+    describe how this installation does art direction, and somebody who has
+    spent five minutes configuring ten axes here should not have to do it again
+    in txt2img.
     """
-    from prompt_master.krea.variation import clamp
+    from prompt_master.krea.variation import clamp, describe
 
-    try:
-        mc_llm_state.remember(krea_manual_creativity=clamp(value))
-    except Exception:
-        logger.debug("Model Chain: could not save the Krea creativity preference",
-                     exc_info=True)
+    mc_creative_krea.remember(**{mc_creative_krea.CREATIVITY: clamp(value)})
+    return ui.notice(describe(value))
 
 
-def _generate(prompt, seed, creativity, *paths):
-    """Stream one Krea prompt. Describe every reference first, in slot order."""
+def _remember_creative_seed(value):
+    mc_creative_krea.remember(**{mc_creative_krea.SEED: mc_creative_krea._seed(value)})
+    return gr.update()
+
+
+def _remember_anti(value):
+    mc_creative_krea.remember(**{mc_creative_krea.ANTI_REPETITION: bool(value)})
+    return gr.update()
+
+
+def _remember_axes(*axis_values):
+    modes, fixed = _axes_from(axis_values)
+    mc_creative_krea.remember(**{mc_creative_krea.AXIS_MODES: modes,
+                                 mc_creative_krea.FIXED_VALUES: fixed})
+    return gr.update()
+
+
+def _forget_history():
+    mc_creative_krea.forget_history()
+    return ui.notice("Recent-roll memory cleared; every treatment is available again.")
+
+
+def _generate(prompt, seed, creative, creativity, creative_seed, anti, *rest):
+    """Stream one Krea prompt: directed locally first, then written once.
+
+    The tail of the arguments is the axis table followed by the reference slots,
+    both variable in length, so they are split by the library's axis count
+    rather than unpacked positionally.
+    """
     from prompt_master.core.models import RANDOM_SEED, draw_seed
     from prompt_master.krea.variation import clamp
 
     busy = (gr.update(interactive=False), gr.update(interactive=True))
     idle = (gr.update(interactive=True), gr.update(interactive=False))
     hidden = gr.update(value="", visible=False)
+    keep = gr.update()
+
+    axis_values, paths = _split_tail(rest)
 
     if not (prompt or "").strip():
-        yield None, "", hidden, ui.notice("Describe the image you want first.", "warn"), *idle
+        yield (None, "", hidden, keep,
+               ui.notice("Describe the image you want first.", "warn"), *idle)
         return
 
     found, complaint = references(paths)
     if complaint:
-        yield None, "", hidden, ui.notice(complaint, "warn"), *idle
+        yield None, "", hidden, keep, ui.notice(complaint, "warn"), *idle
         return
 
     if found:
@@ -292,14 +471,14 @@ def _generate(prompt, seed, creativity, *paths):
         # that quietly dropped the references and wrote a text-only prompt
         # would hand back a plausible paragraph about the wrong request (§8).
         if not mc_llm_runtime.config().sees:
-            yield (None, "", hidden,
+            yield (None, "", hidden, keep,
                    ui.notice("The model running has no vision projector, so the reference "
                              "images cannot be read. Choose a model with one in Setup, or "
                              "remove the references and write from text alone.", "error"), *idle)
             return
         unreadable = _encoded(found)
         if unreadable:
-            yield None, "", hidden, ui.notice(unreadable, "error"), *idle
+            yield None, "", hidden, keep, ui.notice(unreadable, "error"), *idle
             return
 
     resolved = int(seed or RANDOM_SEED)
@@ -307,42 +486,108 @@ def _generate(prompt, seed, creativity, *paths):
         resolved = draw_seed()
     position = clamp(creativity)
 
+    # The Director runs here, before anything is streamed and before the GPU is
+    # asked for: it is ordinary Python over a vendored vocabulary, it cannot
+    # fail slowly, and doing it first means the recipe is on screen while the
+    # model is still being waited for.
+    recipe, complaint = _direct(prompt, creative, position, creative_seed, anti, axis_values)
+    if complaint:
+        yield None, "", hidden, keep, ui.notice(complaint, "error"), *idle
+        return
+    direction = getattr(recipe, "brief", "") if recipe is not None else ""
+    shown = (gr.update(value=_recipe_view(recipe), visible=True)
+             if recipe is not None else gr.update(value="", visible=False))
+
     cancel = sessions.Cancellation()
     text, described = "", []
-    yield cancel, "", hidden, ui.working("Starting…"), *busy
+    yield cancel, "", hidden, shown, ui.working("Starting…"), *busy
 
     try:
-        for event in sessions.krea(prompt.strip(), found, resolved, cancel, position):
+        for event in sessions.krea(prompt.strip(), found, resolved, cancel, position,
+                                   direction):
             if event.kind == sessions.CHUNK:
                 text += event.text
-                yield cancel, text, gr.update(), gr.update(), *busy
+                yield cancel, text, keep, keep, keep, *busy
             elif event.kind == sessions.CAPTION:
                 # The captions arrive in slot order, one per reference, which
                 # is what lets this pair the first with Image 1 without either
                 # side carrying an index around.
                 described.append(event.text)
                 yield (cancel, text, gr.update(value=_described(described), visible=True),
-                       ui.working(f"Image {len(described)} described."), *busy)
+                       keep, ui.working(f"Image {len(described)} described."), *busy)
             elif event.kind == sessions.STATUS:
-                yield cancel, text, gr.update(), ui.working(event.text), *busy
+                yield cancel, text, keep, keep, ui.working(event.text), *busy
             elif event.kind == sessions.DONE:
                 text = event.text
-                _remember(prompt, text, resolved, found, described, position)
-                yield (cancel, text, gr.update(),
-                       ui.notice(f"Complete · Seed: {resolved} · "
-                                 f"Creativity: {position}"), *idle)
+                _remember(prompt, text, resolved, found, described, position, recipe)
+                if recipe is not None and anti:
+                    mc_creative_krea.note_roll(recipe)
+                yield (cancel, text, keep, keep,
+                       ui.notice(_completed(resolved, position, recipe)), *idle)
                 return
             elif event.kind == sessions.CANCELLED:
-                yield cancel, text, gr.update(), ui.notice("Cancelled.", "warn"), *idle
+                yield cancel, text, keep, keep, ui.notice("Cancelled.", "warn"), *idle
                 return
             elif event.kind == sessions.FAILED:
-                yield cancel, text, gr.update(), ui.notice(event.text, "error"), *idle
+                yield cancel, text, keep, keep, ui.notice(event.text, "error"), *idle
                 return
     except Exception as exc:
-        yield cancel, text, gr.update(), ui.notice(ui.failure(exc), "error"), *idle
+        yield cancel, text, keep, keep, ui.notice(ui.failure(exc), "error"), *idle
         return
 
-    yield cancel, text, gr.update(), ui.notice("Finished."), *idle
+    yield cancel, text, keep, keep, ui.notice("Finished."), *idle
+
+
+def _split_tail(rest) -> tuple[tuple, tuple]:
+    """The variable argument tail, as ``(axis controls, reference slots)``.
+
+    Two variable-length groups arrive as one flat tuple because Gradio has no
+    other shape for them. The split is by the library's axis count -- two
+    controls per axis -- with the references taking whatever is left, so a
+    library that grows an axis moves the boundary without this being edited.
+    """
+    try:
+        from prompt_master.krea import library as library_module
+
+        width = len(library_module.library().axis_keys) * 2
+    except Exception:
+        width = 0
+    return tuple(rest[:width]), tuple(rest[width:])
+
+
+def _direct(prompt, creative, position, creative_seed, anti, axis_values):
+    """The recipe for this press, or ``(None, "")`` when Creative Mode is off.
+
+    A failure here is fatal to the run and deliberately so: somebody who turned
+    Creative Mode on and pressed Generate asked for art direction, and quietly
+    writing an undirected prompt instead would hand back a plausible paragraph
+    that answers a question they did not ask.
+    """
+    if not creative:
+        return None, ""
+    from prompt_master.krea import director
+
+    modes, fixed = _axes_from(axis_values)
+    settings = {key: director.AxisSetting(mode=mode, fixed_id=fixed.get(key))
+                for key, mode in modes.items()}
+    try:
+        return director.roll(
+            source=prompt.strip(), creativity=position,
+            creative_seed=mc_creative_krea._seed(creative_seed),
+            settings=settings or None,
+            history=mc_creative_krea.recent_ids() if anti else ()), ""
+    except Exception as exc:
+        logger.debug("Model Chain: the Creative Director failed", exc_info=True)
+        return None, f"The creativity library could not be used: {exc}"
+
+
+def _completed(seed, position, recipe) -> str:
+    """The finished line: what the writer ran at, and what directed it."""
+    line = f"Complete · Seed: {seed} · Creativity: {position}"
+    if recipe is None:
+        return line
+    return (f"{line} · Creative seed: {recipe.creative_seed} · "
+            f"{len(recipe.items)} {'axis' if len(recipe.items) == 1 else 'axes'} directed")
 
 
 def _cancel(cancel):
@@ -366,18 +611,21 @@ def _clear():
             *[None] * enhancer.MAX_REFERENCES)
 
 
-def _remember(prompt, result, seed, found, captions, creativity) -> None:
+def _remember(prompt, result, seed, found, captions, creativity, recipe=None) -> None:
     """Save the session -- names and descriptions, never the pictures (§11, §14).
 
-    Creativity is stored beside the seed because the two answer the same
-    question about a saved prompt: what would have to be set to write this
-    again. A prompt that came back unusually adventurous is only reproducible
-    if the position that produced it was written down.
+    Creativity, the Creative seed and the recipe ids are stored beside the
+    writer's seed because together they answer the only interesting question
+    about a saved prompt: what would have to be set to write this again. The
+    recipe goes in as ids rather than as its rendered sentences, because ids are
+    stable across library versions by contract and a paragraph of English is not.
     """
     try:
         mc_llm_state.save_krea_session(mc_llm_state.KreaSession(
             prompt=(prompt or "").strip(), result=result, seed=int(seed),
             creativity=int(creativity),
+            creative_seed=int(getattr(recipe, "creative_seed", -1)),
+            recipe=str(getattr(recipe, "compact", "")),
             reference_names=[reference.name for reference in found],
             reference_captions=list(captions)))
     except Exception:
@@ -417,6 +665,9 @@ def _load_session(identifier):
     names = list(found.reference_names or [])
     note = (f"Loaded the prompt from {stamp} (seed {found.seed}, "
             f"creativity {found.creativity}).")
+    if found.recipe:
+        note += (f" It was directed by creative seed {found.creative_seed}: "
+                 f"{found.recipe}.")
     if names:
         listed = ", ".join(f"Image {position}: {name}"
                            for position, name in enumerate(names, start=1))

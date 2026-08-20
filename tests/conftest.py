@@ -61,8 +61,8 @@ class _Component:
     def blur(self, **kwargs):
         """Gradio 4's "the box lost focus" event.
 
-        Krea Live's pinned-LoRA field rewrites itself with the tags it kept, and
-        doing that on ``input`` would move the caret while somebody was still
+        Creative Mode's pinned-LoRA field rewrites itself with the tags it kept,
+        and doing that on ``input`` would move the caret while somebody was still
         typing.
         """
         return self._record("blur", kwargs)

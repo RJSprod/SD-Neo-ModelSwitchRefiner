@@ -1,0 +1,277 @@
+{
+  "axis": "mood",
+  "entries": [
+    {
+      "id": "quiet",
+      "label": "Quiet / contemplative",
+      "family": "quiet",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "quiet"
+      ],
+      "expressions": {
+        "light": "a light quiet contemplative mood",
+        "moderate": "a clear quiet contemplative mood, with stillness, sparse visual noise, gentle tension, and a sense of held breath",
+        "strong": "a strong quiet contemplative mood, strongly emphasizing stillness, sparse visual noise, gentle tension, and a sense of held breath",
+        "extreme": "an intense quiet contemplative mood interpretation, with stillness, sparse visual noise, gentle tension, and a sense of held breath; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "playful",
+      "label": "Playful",
+      "family": "playful",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "playful"
+      ],
+      "expressions": {
+        "light": "a light playful mood",
+        "moderate": "a clear playful mood, with visual wit, buoyant rhythm, charming exaggeration, and spontaneous delight",
+        "strong": "a strong playful mood, strongly emphasizing visual wit, buoyant rhythm, charming exaggeration, and spontaneous delight",
+        "extreme": "an intense playful mood interpretation, with visual wit, buoyant rhythm, charming exaggeration, and spontaneous delight; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "ominous",
+      "label": "Ominous",
+      "family": "dark",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "dark"
+      ],
+      "expressions": {
+        "light": "a light ominous mood",
+        "moderate": "a clear ominous mood, with unresolved threat, uneasy emptiness, dark tonal pressure, and restrained menace",
+        "strong": "a strong ominous mood, strongly emphasizing unresolved threat, uneasy emptiness, dark tonal pressure, and restrained menace",
+        "extreme": "an intense ominous mood interpretation, with unresolved threat, uneasy emptiness, dark tonal pressure, and restrained menace; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "romantic",
+      "label": "Romantic",
+      "family": "warm",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "warm"
+      ],
+      "expressions": {
+        "light": "a light romantic mood",
+        "moderate": "a clear romantic mood, with intimacy, softness, sympathetic light/color, and idealized emotional warmth",
+        "strong": "a strong romantic mood, strongly emphasizing intimacy, softness, sympathetic light/color, and idealized emotional warmth",
+        "extreme": "an intense romantic mood interpretation, with intimacy, softness, sympathetic light/color, and idealized emotional warmth; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "monumental",
+      "label": "Monumental",
+      "family": "grand",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "grand"
+      ],
+      "expressions": {
+        "light": "a light monumental mood",
+        "moderate": "a clear monumental mood, with visual gravity, scale, mass, stillness, and iconic permanence",
+        "strong": "a strong monumental mood, strongly emphasizing visual gravity, scale, mass, stillness, and iconic permanence",
+        "extreme": "an intense monumental mood interpretation, with visual gravity, scale, mass, stillness, and iconic permanence; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "uncanny",
+      "label": "Uncanny",
+      "family": "uncanny",
+      "aliases": [],
+      "min_creativity": 4,
+      "weight": 1.0,
+      "tags": [
+        "uncanny"
+      ],
+      "expressions": {
+        "light": "a light uncanny mood",
+        "moderate": "a clear uncanny mood, with familiar elements made psychologically strange through scale, spacing, stillness, or color without inventing new objects",
+        "strong": "a strong uncanny mood, strongly emphasizing familiar elements made psychologically strange through scale, spacing, stillness, or color without inventing new objects",
+        "extreme": "an intense uncanny mood interpretation, with familiar elements made psychologically strange through scale, spacing, stillness, or color without inventing new objects; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "joyful",
+      "label": "Joyful",
+      "family": "bright",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "bright"
+      ],
+      "expressions": {
+        "light": "a light joyful mood",
+        "moderate": "a clear joyful mood, with buoyant color relationships, energetic rhythm, open light, and celebratory abundance",
+        "strong": "a strong joyful mood, strongly emphasizing buoyant color relationships, energetic rhythm, open light, and celebratory abundance",
+        "extreme": "an intense joyful mood interpretation, with buoyant color relationships, energetic rhythm, open light, and celebratory abundance; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "melancholic",
+      "label": "Melancholic",
+      "family": "melancholic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "melancholic"
+      ],
+      "expressions": {
+        "light": "a light melancholic mood",
+        "moderate": "a clear melancholic mood, with muted color, emotional distance, visual emptiness, and a lingering sense of memory or absence",
+        "strong": "a strong melancholic mood, strongly emphasizing muted color, emotional distance, visual emptiness, and a lingering sense of memory or absence",
+        "extreme": "an intense melancholic mood interpretation, with muted color, emotional distance, visual emptiness, and a lingering sense of memory or absence; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "tense",
+      "label": "Tense",
+      "family": "tense",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "tense"
+      ],
+      "expressions": {
+        "light": "a light tense mood",
+        "moderate": "a clear tense mood, with compressed spacing, directional pressure, visual imbalance, and restrained anticipation",
+        "strong": "a strong tense mood, strongly emphasizing compressed spacing, directional pressure, visual imbalance, and restrained anticipation",
+        "extreme": "an intense tense mood interpretation, with compressed spacing, directional pressure, visual imbalance, and restrained anticipation; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "dreamlike",
+      "label": "Dreamlike",
+      "family": "dreamlike",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "dreamlike"
+      ],
+      "expressions": {
+        "light": "a light dreamlike mood",
+        "moderate": "a clear dreamlike mood, with soft spatial logic, suspended time, luminous ambiguity, and gentle emotional unreality",
+        "strong": "a strong dreamlike mood, strongly emphasizing soft spatial logic, suspended time, luminous ambiguity, and gentle emotional unreality",
+        "extreme": "an intense dreamlike mood interpretation, with soft spatial logic, suspended time, luminous ambiguity, and gentle emotional unreality; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "triumphant",
+      "label": "Triumphant",
+      "family": "grand",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "grand"
+      ],
+      "expressions": {
+        "light": "a light triumphant mood",
+        "moderate": "a clear triumphant mood, with upward visual energy, clarity, scale, bright emphasis, and assertive celebratory presence",
+        "strong": "a strong triumphant mood, strongly emphasizing upward visual energy, clarity, scale, bright emphasis, and assertive celebratory presence",
+        "extreme": "an intense triumphant mood interpretation, with upward visual energy, clarity, scale, bright emphasis, and assertive celebratory presence; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "lonely",
+      "label": "Lonely",
+      "family": "quiet",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "quiet"
+      ],
+      "expressions": {
+        "light": "a light lonely mood",
+        "moderate": "a clear lonely mood, with distance, isolated placement, sparse context, and emotionally cool visual space",
+        "strong": "a strong lonely mood, strongly emphasizing distance, isolated placement, sparse context, and emotionally cool visual space",
+        "extreme": "an intense lonely mood interpretation, with distance, isolated placement, sparse context, and emotionally cool visual space; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "nostalgic",
+      "label": "Nostalgic",
+      "family": "retro",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "retro"
+      ],
+      "expressions": {
+        "light": "a light nostalgic mood",
+        "moderate": "a clear nostalgic mood, with memory-like softness, period color cues, gentle imperfection, and emotional familiarity",
+        "strong": "a strong nostalgic mood, strongly emphasizing memory-like softness, period color cues, gentle imperfection, and emotional familiarity",
+        "extreme": "an intense nostalgic mood interpretation, with memory-like softness, period color cues, gentle imperfection, and emotional familiarity; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "chaotic",
+      "label": "Chaotic",
+      "family": "dynamic",
+      "aliases": [],
+      "min_creativity": 5,
+      "weight": 1.0,
+      "tags": [
+        "dynamic"
+      ],
+      "expressions": {
+        "light": "a light controlled chaotic mood",
+        "moderate": "a clear controlled chaotic mood, with visual collision, overlapping directions, restless rhythm, and energetic instability while preserving legibility",
+        "strong": "a strong controlled chaotic mood, strongly emphasizing visual collision, overlapping directions, restless rhythm, and energetic instability while preserving legibility",
+        "extreme": "an intense controlled chaotic mood interpretation, with visual collision, overlapping directions, restless rhythm, and energetic instability while preserving legibility; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "mysterious",
+      "label": "Mysterious",
+      "family": "dark",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "dark"
+      ],
+      "expressions": {
+        "light": "a light mysterious mood",
+        "moderate": "a clear mysterious mood, with partial revelation, selective visibility, unresolved spatial cues, and quiet visual questions",
+        "strong": "a strong mysterious mood, strongly emphasizing partial revelation, selective visibility, unresolved spatial cues, and quiet visual questions",
+        "extreme": "an intense mysterious mood interpretation, with partial revelation, selective visibility, unresolved spatial cues, and quiet visual questions; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    },
+    {
+      "id": "serene",
+      "label": "Serene",
+      "family": "quiet",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "quiet"
+      ],
+      "expressions": {
+        "light": "a light serene mood",
+        "moderate": "a clear serene mood, with balanced spacing, gentle light, low visual friction, and calm sustained presence",
+        "strong": "a strong serene mood, strongly emphasizing balanced spacing, gentle light, low visual friction, and calm sustained presence",
+        "extreme": "an intense serene mood interpretation, with balanced spacing, gentle light, low visual friction, and calm sustained presence; push this treatment far enough to define the visual language while preserving the user's subject and explicit constraints"
+      }
+    }
+  ]
+}

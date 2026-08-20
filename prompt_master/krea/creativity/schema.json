@@ -1,0 +1,26 @@
+{
+  "axis_file": {
+    "axis": "string",
+    "entries": [
+      {
+        "id": "stable string",
+        "label": "UI label",
+        "family": "family key",
+        "aliases": [
+          "source-lock aliases"
+        ],
+        "min_creativity": "2..10",
+        "weight": "positive number",
+        "tags": [
+          "compatibility tags"
+        ],
+        "expressions": {
+          "light": "text",
+          "moderate": "text",
+          "strong": "text",
+          "extreme": "text"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "rules": [
+    {
+      "tag": "impasto",
+      "prefer_medium_families": [
+        "painting",
+        "mixed_media"
+      ],
+      "avoid_medium_families": [
+        "photography"
+      ]
+    },
+    {
+      "tag": "watercolor",
+      "prefer_medium_families": [
+        "painting",
+        "illustration",
+        "mixed_media"
+      ]
+    },
+    {
+      "tag": "halftone",
+      "prefer_medium_families": [
+        "print",
+        "graphic",
+        "illustration",
+        "mixed_media"
+      ]
+    },
+    {
+      "tag": "childrens_book",
+      "prefer_style_families": [
+        "storybook",
+        "illustration"
+      ]
+    },
+    {
+      "tag": "anime",
+      "prefer_style_families": [
+        "anime",
+        "illustration"
+      ]
+    },
+    {
+      "tag": "fisheye",
+      "avoid_lens_tags": [
+        "telephoto",
+        "compressed"
+      ]
+    },
+    {
+      "tag": "macro",
+      "avoid_composition_tags": [
+        "distant_environmental"
+      ]
+    },
+    {
+      "tag": "documentary",
+      "avoid_style_tags": [
+        "ornate",
+        "fantasy_maximalist"
+      ]
+    }
+  ],
+  "conflict_resolution": "Resample locally; do not call an LLM."
+}

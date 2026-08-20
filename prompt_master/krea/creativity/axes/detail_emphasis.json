@@ -1,0 +1,277 @@
+{
+  "axis": "detail_emphasis",
+  "entries": [
+    {
+      "id": "materials",
+      "label": "Material surfaces",
+      "family": "materials",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "materials"
+      ],
+      "expressions": {
+        "light": "light emphasis on material-specific detail",
+        "moderate": "clear emphasis on material-specific detail, focusing on reflectivity, roughness, wear, edge condition, tactile texture, and subtle surface response",
+        "strong": "strong emphasis on material-specific detail, richly developing reflectivity, roughness, wear, edge condition, tactile texture, and subtle surface response",
+        "extreme": "dense, highly specific emphasis on material-specific detail: reflectivity, roughness, wear, edge condition, tactile texture, and subtle surface response, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    },
+    {
+      "id": "shape_contour",
+      "label": "Shape and contour",
+      "family": "form",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "form"
+      ],
+      "expressions": {
+        "light": "light emphasis on shape and contour detail",
+        "moderate": "clear emphasis on shape and contour detail, focusing on silhouette, proportion, edge rhythm, curvature changes, and sculptural mass",
+        "strong": "strong emphasis on shape and contour detail, richly developing silhouette, proportion, edge rhythm, curvature changes, and sculptural mass",
+        "extreme": "dense, highly specific emphasis on shape and contour detail: silhouette, proportion, edge rhythm, curvature changes, and sculptural mass, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    },
+    {
+      "id": "micro_detail",
+      "label": "Micro detail",
+      "family": "micro",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "micro"
+      ],
+      "expressions": {
+        "light": "light emphasis on selective micro-detail",
+        "moderate": "clear emphasis on selective micro-detail, focusing on seams, tiny irregularities, edge wear, reflected color, hardware, and physically meaningful small features",
+        "strong": "strong emphasis on selective micro-detail, richly developing seams, tiny irregularities, edge wear, reflected color, hardware, and physically meaningful small features",
+        "extreme": "dense, highly specific emphasis on selective micro-detail: seams, tiny irregularities, edge wear, reflected color, hardware, and physically meaningful small features, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    },
+    {
+      "id": "environment_relation",
+      "label": "Subject/environment relation",
+      "family": "environment",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "environment"
+      ],
+      "expressions": {
+        "light": "light emphasis on subject/environment relationship",
+        "moderate": "clear emphasis on subject/environment relationship, focusing on scale against nearby forms, foreground overlap, background separation, reflected light, and negative-space interaction",
+        "strong": "strong emphasis on subject/environment relationship, richly developing scale against nearby forms, foreground overlap, background separation, reflected light, and negative-space interaction",
+        "extreme": "dense, highly specific emphasis on subject/environment relationship: scale against nearby forms, foreground overlap, background separation, reflected light, and negative-space interaction, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    },
+    {
+      "id": "color_interaction",
+      "label": "Color interaction",
+      "family": "color",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "color"
+      ],
+      "expressions": {
+        "light": "light emphasis on color-interaction detail",
+        "moderate": "clear emphasis on color-interaction detail, focusing on reflected hues, warm/cool opposition, local saturation shifts, accent hierarchy, and material-specific color response",
+        "strong": "strong emphasis on color-interaction detail, richly developing reflected hues, warm/cool opposition, local saturation shifts, accent hierarchy, and material-specific color response",
+        "extreme": "dense, highly specific emphasis on color-interaction detail: reflected hues, warm/cool opposition, local saturation shifts, accent hierarchy, and material-specific color response, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    },
+    {
+      "id": "gesture_motion",
+      "label": "Gesture / motion",
+      "family": "motion",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "motion"
+      ],
+      "expressions": {
+        "light": "light emphasis on gesture and motion detail",
+        "moderate": "clear emphasis on gesture and motion detail, focusing on weight shift, directional flow, tension, implied momentum, and framing-based motion cues",
+        "strong": "strong emphasis on gesture and motion detail, richly developing weight shift, directional flow, tension, implied momentum, and framing-based motion cues",
+        "extreme": "dense, highly specific emphasis on gesture and motion detail: weight shift, directional flow, tension, implied momentum, and framing-based motion cues, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    },
+    {
+      "id": "design_specificity",
+      "label": "Design specificity",
+      "family": "design",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "design"
+      ],
+      "expressions": {
+        "light": "light emphasis on design-specific detail",
+        "moderate": "clear emphasis on design-specific detail, focusing on construction logic, functional features, joins, openings, controls, fasteners, trim, and category-relevant forms",
+        "strong": "strong emphasis on design-specific detail, richly developing construction logic, functional features, joins, openings, controls, fasteners, trim, and category-relevant forms",
+        "extreme": "dense, highly specific emphasis on design-specific detail: construction logic, functional features, joins, openings, controls, fasteners, trim, and category-relevant forms, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    },
+    {
+      "id": "reflections",
+      "label": "Reflections",
+      "family": "materials",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "materials"
+      ],
+      "expressions": {
+        "light": "light emphasis on reflection detail",
+        "moderate": "clear emphasis on reflection detail, focusing on environmental reflections, highlight shape, reflected color, distorted surrounding forms, and surface curvature",
+        "strong": "strong emphasis on reflection detail, richly developing environmental reflections, highlight shape, reflected color, distorted surrounding forms, and surface curvature",
+        "extreme": "dense, highly specific emphasis on reflection detail: environmental reflections, highlight shape, reflected color, distorted surrounding forms, and surface curvature, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    },
+    {
+      "id": "edges_wear",
+      "label": "Edges and wear",
+      "family": "materials",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "materials"
+      ],
+      "expressions": {
+        "light": "light emphasis on edge/wear detail",
+        "moderate": "clear emphasis on edge/wear detail, focusing on chips, rubbed corners, abrasion, accumulation, finish transitions, and evidence of use",
+        "strong": "strong emphasis on edge/wear detail, richly developing chips, rubbed corners, abrasion, accumulation, finish transitions, and evidence of use",
+        "extreme": "dense, highly specific emphasis on edge/wear detail: chips, rubbed corners, abrasion, accumulation, finish transitions, and evidence of use, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    },
+    {
+      "id": "pattern_rhythm",
+      "label": "Pattern and rhythm",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "graphic"
+      ],
+      "expressions": {
+        "light": "light emphasis on pattern/rhythm detail",
+        "moderate": "clear emphasis on pattern/rhythm detail, focusing on repeated forms, spacing, motif cadence, directional repetition, and visual tempo",
+        "strong": "strong emphasis on pattern/rhythm detail, richly developing repeated forms, spacing, motif cadence, directional repetition, and visual tempo",
+        "extreme": "dense, highly specific emphasis on pattern/rhythm detail: repeated forms, spacing, motif cadence, directional repetition, and visual tempo, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    },
+    {
+      "id": "depth_layers",
+      "label": "Depth layers",
+      "family": "depth",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "depth"
+      ],
+      "expressions": {
+        "light": "light emphasis on depth-layer detail",
+        "moderate": "clear emphasis on depth-layer detail, focusing on foreground occlusion, atmospheric separation, overlapping planes, and spatial scale cues",
+        "strong": "strong emphasis on depth-layer detail, richly developing foreground occlusion, atmospheric separation, overlapping planes, and spatial scale cues",
+        "extreme": "dense, highly specific emphasis on depth-layer detail: foreground occlusion, atmospheric separation, overlapping planes, and spatial scale cues, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    },
+    {
+      "id": "silhouette_read",
+      "label": "Silhouette readability",
+      "family": "form",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "form"
+      ],
+      "expressions": {
+        "light": "light emphasis on silhouette emphasis",
+        "moderate": "clear emphasis on silhouette emphasis, focusing on clear outer contour, distinctive profile, negative-space openings, and instantly readable overall form",
+        "strong": "strong emphasis on silhouette emphasis, richly developing clear outer contour, distinctive profile, negative-space openings, and instantly readable overall form",
+        "extreme": "dense, highly specific emphasis on silhouette emphasis: clear outer contour, distinctive profile, negative-space openings, and instantly readable overall form, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    },
+    {
+      "id": "surface_imperfection",
+      "label": "Surface imperfection",
+      "family": "materials",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "materials"
+      ],
+      "expressions": {
+        "light": "light emphasis on surface imperfection detail",
+        "moderate": "clear emphasis on surface imperfection detail, focusing on tiny defects, unevenness, handmade marks, subtle damage, and material irregularity",
+        "strong": "strong emphasis on surface imperfection detail, richly developing tiny defects, unevenness, handmade marks, subtle damage, and material irregularity",
+        "extreme": "dense, highly specific emphasis on surface imperfection detail: tiny defects, unevenness, handmade marks, subtle damage, and material irregularity, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    },
+    {
+      "id": "light_behavior",
+      "label": "Light behavior",
+      "family": "lighting",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "lighting"
+      ],
+      "expressions": {
+        "light": "light emphasis on light-response detail",
+        "moderate": "clear emphasis on light-response detail, focusing on specular rolloff, diffuse bounce, translucent edges, local shadow softness, and material-light interaction",
+        "strong": "strong emphasis on light-response detail, richly developing specular rolloff, diffuse bounce, translucent edges, local shadow softness, and material-light interaction",
+        "extreme": "dense, highly specific emphasis on light-response detail: specular rolloff, diffuse bounce, translucent edges, local shadow softness, and material-light interaction, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    },
+    {
+      "id": "context_clues",
+      "label": "Context clues",
+      "family": "environment",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "environment"
+      ],
+      "expressions": {
+        "light": "light emphasis on contextual detail",
+        "moderate": "clear emphasis on contextual detail, focusing on small environmental cues, scale indicators, surrounding materials, and spatial evidence that support the subject without inventing a new story",
+        "strong": "strong emphasis on contextual detail, richly developing small environmental cues, scale indicators, surrounding materials, and spatial evidence that support the subject without inventing a new story",
+        "extreme": "dense, highly specific emphasis on contextual detail: small environmental cues, scale indicators, surrounding materials, and spatial evidence that support the subject without inventing a new story, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    },
+    {
+      "id": "graphic_shapes",
+      "label": "Graphic shape hierarchy",
+      "family": "graphic",
+      "aliases": [],
+      "min_creativity": 2,
+      "weight": 1.0,
+      "tags": [
+        "graphic"
+      ],
+      "expressions": {
+        "light": "light emphasis on graphic-shape detail",
+        "moderate": "clear emphasis on graphic-shape detail, focusing on dominant masses, secondary shapes, hard/soft edge contrast, and visual grouping",
+        "strong": "strong emphasis on graphic-shape detail, richly developing dominant masses, secondary shapes, hard/soft edge contrast, and visual grouping",
+        "extreme": "dense, highly specific emphasis on graphic-shape detail: dominant masses, secondary shapes, hard/soft edge contrast, and visual grouping, pushed as far as useful without generic quality buzzwords or inventing unrelated content"
+      }
+    }
+  ]
+}

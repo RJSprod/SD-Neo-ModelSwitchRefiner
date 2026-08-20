@@ -1,0 +1,25 @@
+{
+  "library_name": "Krea 2 Creative Mode Starter Library",
+  "schema_version": 1,
+  "library_version": "1.0.0",
+  "data_only": true,
+  "one_llm_call_rule": "The library is selected locally. It never authorizes a planner, candidate, judge, or rewrite LLM call.",
+  "axes": [
+    "medium",
+    "style",
+    "lighting",
+    "composition",
+    "viewpoint",
+    "lens_zoom",
+    "palette",
+    "texture",
+    "mood",
+    "detail_emphasis"
+  ],
+  "tier_mapping": {
+    "2-3": "light",
+    "4-6": "moderate",
+    "7-8": "strong",
+    "9-10": "extreme"
+  }
+}

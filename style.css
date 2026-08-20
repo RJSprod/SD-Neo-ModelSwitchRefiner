@@ -1417,7 +1417,7 @@
 }
 
 /* ------------------------------------------------------------------------- */
-/* Krea Live                                                                 */
+/* Krea Creative Mode                                                        */
 /* ------------------------------------------------------------------------- */
 
 /* txt2img, not LLM Studio, so none of this can sit under #mc-llm-studio and
@@ -1426,34 +1426,21 @@
    one of the host's custom properties, so a theme decides what a warning looks
    like here exactly as it does everywhere else.
 
-   The strip is deliberately quiet when Live is off -- one checkbox, no border,
-   no panel. What is drawn below only applies once the row has been made
-   visible, which is the one moment the positive prompt has changed meaning and
+   The surface is deliberately quiet when Creative Mode is off -- one checkbox,
+   no border, no panel. What is drawn below only applies once the row has been
+   revealed, which is the one moment the positive prompt has changed meaning and
    the interface owes somebody a visible sign of it. */
 
-#mc-krea-live-group {
+#mc-krea-creative-group {
     margin-top: 0.25em;
 }
 
-#mc-krea-live-strip {
-    align-items: flex-end;
-    gap: 0.5em;
-    padding: 0.4em 0.6em;
-    border: 1px solid var(--border-color-primary);
-    border-radius: var(--block-radius, 8px);
-    background: var(--background-fill-secondary);
+#mc-krea-creative-bar {
+    align-items: center;
+    gap: 0.75em;
 }
 
-/* The strip is a shortcut rail, so its controls are sized to be glanced at and
-   nudged rather than read. Left at Gradio's default block sizing they stack
-   four full-height labelled blocks across the width of the prompt area, which
-   is the "duplicate image panel" the design exists to avoid. */
-#mc-krea-live-strip .gradio-number input,
-#mc-krea-live-strip input[type="number"] {
-    text-align: center;
-}
-
-#mc-krea-live-status .mc-krea-live-notice {
+#mc-krea-creative-status .mc-krea-creative-notice {
     padding: 0.35em 0.6em;
     border-radius: var(--block-radius, 8px);
     border-left: 3px solid var(--border-color-primary);
@@ -1463,23 +1450,45 @@
     line-height: 1.4;
 }
 
-#mc-krea-live-status .mc-krea-live-notice-warn {
+#mc-krea-creative-status .mc-krea-creative-notice-warn {
     border-left-color: var(--color-accent, currentColor);
 }
 
-#mc-krea-live-status .mc-krea-live-notice-error {
+#mc-krea-creative-status .mc-krea-creative-notice-error {
     border-left-color: var(--error-text-color, var(--color-accent, currentColor));
 }
 
+/* Ten axis rows is a lot of vertical space at Gradio's default block sizing,
+   and the drawer they live in is one somebody opens to make a quick change
+   rather than to read. Tightening the rows is what keeps the whole table on
+   screen at once, which is the difference between a table you can scan and ten
+   controls you scroll past. */
+#mc-krea-creative-controls [id^="mc-krea-creative-axis-"] {
+    align-items: center;
+    gap: 0.5em;
+    margin-bottom: 0.1em;
+}
+
+#mc-krea-creative-controls [id^="mc-krea-creative-axis-"] label {
+    font-size: var(--text-sm, 0.85em);
+}
+
+/* The recipe view is a record, not prose: the ids in it line up with what the
+   PNG metadata says, and a proportional font makes two rolls hard to compare. */
+#mc-krea-creative-recipe textarea {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: var(--text-sm, 0.85em);
+    line-height: 1.5;
+}
+
 /* The armed state, painted on Forge's own Generate button rather than beside
-   it. Live changes what that button does, and the button is where somebody is
-   looking when they press it -- a state indicator on the other side of the
-   panel is a state indicator nobody reads in time.
+   it. Creative Mode changes what that button does, and the button is where
+   somebody is looking when they press it.
 
    An outline and not a background: the background is the button's variant
    colour and is a thing themes replace wholesale, whereas an outline drawn
    outside the box cannot collide with whatever a theme painted inside it. */
-#txt2img_generate.mc-krea-live-armed {
+#txt2img_generate.mc-krea-creative-armed {
     outline: 2px solid var(--color-accent, currentColor);
     outline-offset: 2px;
 }

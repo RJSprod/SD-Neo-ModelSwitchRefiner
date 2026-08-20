@@ -1,0 +1,12 @@
+{
+  "source": "car",
+  "creativity": 2,
+  "example_recipe": [
+    {
+      "axis": "medium",
+      "id": "oil_impasto",
+      "tier": "light"
+    }
+  ],
+  "intent": "A mild nudge: one or occasionally two Vary axes, using light expressions."
+}
