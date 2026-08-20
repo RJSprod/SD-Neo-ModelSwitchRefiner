@@ -267,6 +267,23 @@ class Reporter:
         the same two functions is what makes the roll indistinguishable from a
         native job as far as the bar is concerned, and means nothing here has to
         know how progress is computed or drawn.
+
+        **``shared.state.job`` and ``shared.state.job_count`` are deliberately
+        not set, and must never be.** ``mc_broker.host_busy()`` is exactly
+        "either of those is truthy", and the LLM run this reporter describes
+        waits for ``host_busy()`` to go false before it will start. Setting them
+        makes the roll wait for an image generation that is itself -- the
+        deadlock this whole architecture is arranged to avoid, reintroduced
+        through the back door by a progress indicator. It is intermittent rather
+        than reliable, because any Gradio call that finishes nearby clears both
+        fields in its own ``finally``, which is what makes it so unpleasant to
+        diagnose: it hangs on a fresh restart and not on the next attempt.
+
+        The cost is one line of the host's own arithmetic, which needs
+        ``job_count`` to compute a fraction. Nothing is lost while this
+        extension's whole-job reporting is on -- ``mc_progress`` overwrites that
+        fraction anyway -- and with it switched off the bar shows the phase name
+        without moving, which is a smaller loss than a hang by any measure.
         """
         try:
             from modules import progress as host_progress
@@ -274,13 +291,15 @@ class Reporter:
 
             host_progress.add_task_to_queue(task_id)
             host_progress.start_task(task_id)
-            shared.state.job = "Krea Creative Mode"
-            shared.state.job_count = 1
-            shared.state.job_no = 0
             shared.state.sampling_step = 0
             shared.state.sampling_steps = 0
             shared.state.interrupted = False
             shared.state.skipped = False
+            # The host's progress endpoint divides by this. It is None until
+            # the first generation of the session, so a roll made straight after
+            # a restart would otherwise take the endpoint down with a
+            # TypeError -- and the browser polls that endpoint four times a
+            # second.
             if not getattr(shared.state, "time_start", None):
                 shared.state.time_start = time.time()
         except Exception:
@@ -297,7 +316,9 @@ class Reporter:
             shared.state.sampling_step = 0
             shared.state.sampling_steps = 0
             shared.state.textinfo = None
-            shared.state.job = ""
+            # job and job_count are not cleared here because they are never set
+            # -- see _claim. Clearing a field this module does not own would be
+            # this reporter tidying away somebody else's running generation.
             host_progress.finish_task(task_id)
         except Exception:
             logger.debug("Model Chain: the host progress endpoint could not be released",

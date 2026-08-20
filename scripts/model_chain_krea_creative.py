@@ -75,21 +75,48 @@ def notice(text: str, kind: str = "info") -> str:
 
 READY = "ready"
 FAILED = "failed"
+TASK = "task"
 
 
 def _signal(kind: str, detail: str = "") -> str:
-    """One line for the hidden token box: ``ready:<nonce>:`` or ``failed:<nonce>:``.
+    """One line for the hidden token box: ``<kind>:<nonce>:<detail>``.
+
+    Three kinds travel this way. ``task`` carries the host progress task id, so
+    the browser can ask Forge to draw its bar for the roll about to start;
+    ``ready`` carries the arming token, which is the browser's cue to let one
+    native Generate click through; ``failed`` carries nothing and means do not.
 
     Why a textbox and not a Gradio event the browser could subscribe to: the
-    browser has to know *when* the expansion is available so it can let one
-    native Generate click through, and a value it can poll for a moment after it
-    asked is the smallest mechanism that does that without this script growing
-    an endpoint of its own. The nonce makes each answer distinguishable from the
+    browser has to know *when* each of those happens, and a value it can poll
+    for is the smallest mechanism that does it without this script growing an
+    endpoint of its own. The nonce makes each answer distinguishable from the
     last, so two identical outcomes in a row are still two events.
+
+    The detail never contains a colon, so the browser splits on the first two
+    and takes the rest whole.
     """
     import secrets
 
     return f"{kind}:{secrets.token_hex(4)}:{detail}"
+
+
+def _task_id() -> str:
+    """A fresh host progress task id, minted here rather than in the browser.
+
+    The browser used to mint it and pass it in through a Gradio ``js=`` hook, on
+    the grounds that the host's own ``submit()`` does exactly that. Minting it
+    here is better for one reason that outweighs the symmetry: there is nothing
+    to hand over. The id goes *out* on the channel the browser is already
+    polling, so no argument has to arrive intact, no component value has to have
+    reached Gradio's state before a click, and no assumption about what a ``js=``
+    hook's return value means has to hold.
+
+    The bar starts a poll interval later than it would have. Against a roll that
+    takes twenty seconds, that is not a cost worth a handshake.
+    """
+    import secrets
+
+    return f"task(mc-{secrets.token_hex(6)})"
 
 
 # --------------------------------------------------------------------------- #
@@ -97,7 +124,7 @@ def _signal(kind: str, detail: str = "") -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _gate(task_id, source, creativity, seed, anti_repetition, loras, *axis_values):
+def _gate(source, creativity, seed, anti_repetition, loras, *axis_values):
     """One creative roll, made available to one native generation.
 
     The only place in txt2img that asks the language model for anything, and it
@@ -106,19 +133,21 @@ def _gate(task_id, source, creativity, seed, anti_repetition, loras, *axis_value
     vendored vocabulary with a seeded PRNG, and the model's whole job is to turn
     one brief into one Krea prompt.
 
-    ``task_id`` is minted in the browser by :js:func:`mcKreaCreativeSubmit`,
-    which has already asked Forge to draw and poll its progress bar for it --
-    the same two steps the host's own Generate does. Passing it as the first
-    argument, from a ``js=`` hook rather than out of a hidden textbox, is the
-    host's idiom and is race-free: the value is put into the request as it is
-    built rather than into a component and hoped for.
-
     Streams so the panel can say what is happening while a cold llama-server
-    loads, which is the part of the wait that looks like a hang.
+    loads, which is the part of the wait that looks like a hang -- and so the
+    first thing it can stream is the progress task id, which is what turns that
+    wait into a bar.
     """
     session = mc_creative_krea.creative
     stored = _stored(creativity, seed, anti_repetition, loras, axis_values)
     expanded = ""
+    task_id = _task_id()
+
+    # Sent before any work starts. The browser is already polling this box for
+    # the arming token, so this is the whole of the handshake: it learns the id
+    # and asks Forge to draw its progress bar for it while the Director runs.
+    yield (notice("Choosing the art direction…"), _signal(TASK, task_id),
+           gr.update(), gr.update())
 
     try:
         for event in session.roll(source, stored, guard_checkpoint=True,
@@ -400,20 +429,15 @@ class ScriptKreaCreative(scripts.Script):
             # -- plumbing the browser drives, and the user never sees -------- #
             run = gr.Button("Creative Mode: roll", visible=False, elem_id=ident("run"))
             token = gr.Textbox(value="", visible=False, elem_id=ident("token"))
-            # Never read as a component. It is here because a Gradio event needs
-            # an input to put the browser's task id into, and the ``js=`` hook
-            # below overwrites the value on its way past -- exactly as the
-            # host's own submit() puts its id_task into argument zero.
-            task = gr.Textbox(value="", visible=False, elem_id=ident("task"))
 
         self.components = {
             "enabled": enabled, "creativity": creativity, "status": status,
             "controls": controls, "seed": seed, "anti": anti, "forget": forget,
             "loras": loras, "recipe": recipe, "expanded": expanded, "run": run,
-            "token": token, "task": task, "axes": axis_controls}
+            "token": token, "axes": axis_controls}
 
         self._wire(enabled, creativity, status, controls, seed, anti, forget, loras,
-                   recipe, expanded, run, token, task, axis_controls)
+                   recipe, expanded, run, token, axis_controls)
         return [enabled]
 
     def _axis_table(self, stored) -> list:
@@ -457,7 +481,7 @@ class ScriptKreaCreative(scripts.Script):
         return rows
 
     def _wire(self, enabled, creativity, status, controls, seed, anti, forget, loras,
-              recipe, expanded, run, token, task, axis_controls):
+              recipe, expanded, run, token, axis_controls):
         """Every handler, in one place, so the component list above stays readable."""
         enabled.change(fn=_toggled, inputs=[enabled],
                        outputs=[creativity, controls, status], queue=False)
@@ -479,10 +503,10 @@ class ScriptKreaCreative(scripts.Script):
             # Gradio's little spinner over the status line would be a second
             # thing claiming to describe the same wait.
             run.click(fn=_gate,
-                      inputs=[task, self._prompt_component, creativity, seed, anti,
-                              loras] + list(axis_controls),
+                      inputs=[self._prompt_component, creativity, seed, anti, loras]
+                             + list(axis_controls),
                       outputs=[status, token, recipe, expanded],
-                      show_progress="hidden", js="mcKreaCreativeSubmit")
+                      show_progress="hidden")
         else:
             # A UI so heavily customised that the positive prompt could not be
             # found. Creative Mode says so once, here, rather than half-working:

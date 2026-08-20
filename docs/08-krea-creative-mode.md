@@ -289,13 +289,10 @@ worth about five seconds a roll at Creativity 10.
 ``mc_llm_progress.py``. The design is to use the host's machinery rather than
 draw anything:
 
-- the browser mints a task id in ``mcKreaCreativeSubmit`` and calls the host's
-  ``requestProgress`` for it — the same two steps ``ui.js``'s own ``submit()``
-  takes around every Generate;
-- the id arrives as argument zero through a Gradio ``js=`` hook, which is
-  race-free where a hidden textbox would not be: the value goes into the request
-  as Gradio builds it rather than into a component whose state may not have
-  caught up;
+- the server mints a task id and sends it down the hidden box the browser is
+  already polling for the arming token, as a ``task:`` message;
+- the browser calls the host's ``requestProgress`` for that id, which is what
+  draws and polls the real bar;
 - the server claims that id with ``modules.progress.add_task_to_queue`` and
   ``start_task``, which is what ``modules.call_queue`` does, and releases it with
   ``finish_task``;
@@ -331,7 +328,41 @@ listening, and a button that does nothing is worse than no button. The flag is
 cleared on the way out so the image generation that follows does not inherit a
 stop nobody meant for it.
 
-### 7.4 Why not just cache the brief
+### 7.4 Two things the first attempt at that got wrong
+
+Both were reported from a real machine on the day it landed, and both are worth
+keeping written down because each is the obvious thing to do.
+
+**The bar deadlocked the run it was drawing.** Claiming the task also set
+``shared.state.job`` and ``shared.state.job_count``, the way a real job does.
+But ``mc_broker.host_busy()`` *is* "either of those is truthy", and
+``mc_llm_sessions._Gpu.acquire`` refuses to start while it is true — so the
+language model sat waiting for an image generation that was itself, printing
+*"Waiting for image generation…"* on a machine generating nothing, while the bar
+crept to its 0.999 ceiling and stopped. This is precisely the deadlock §4.1
+describes, reintroduced through the back door by a progress indicator.
+
+It was intermittent, which made it worse: any Gradio call finishing nearby
+clears both fields in its own ``finally``, so it hung on a fresh restart and
+sometimes escaped a few seconds later having wasted the wait. Neither field is
+set now, and ``TestTheBarNeverBlocksTheRunItDescribes`` drives the whole txt2img
+gate with the real ``host_busy`` — not the stub every other test in that file
+uses — and asserts it answered False at every frame.
+
+The cost is that the host's own progress arithmetic needs ``job_count`` to
+compute a fraction, so with this extension's whole-job reporting switched off
+the bar shows the phase name without moving. That is a smaller loss than a hang.
+
+**The task id came in through a Gradio ``js=`` hook.** That mirrored the host's
+own ``submit()``, and it made the roll depend on a Gradio contract — what a
+``js=`` function's return value means — that this extension had never relied on
+before and could not verify. The id now travels the other way: the server mints
+it and sends it as the first frame down the channel the browser was already
+polling. Nothing has to arrive intact for the roll to work, so a bar that cannot
+be drawn costs a bar rather than a generation, and the ``js=`` question does not
+arise.
+
+### 7.5 Why not just cache the brief
 
 Because the brief *is* the variation. Reusing one would mean successive presses
 produced the same art direction, which is the feature working backwards. The
