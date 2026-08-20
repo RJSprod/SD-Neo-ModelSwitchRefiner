@@ -214,8 +214,15 @@ class _Gpu:
             self._held = None
 
 
-def _client(needs_vision: bool):
-    return mc_llm_runtime.runtime.client(needs_vision)
+def _client(needs_vision: bool, reserve: int = 0):
+    """A ready client, optionally promising to leave ``reserve`` bytes of VRAM.
+
+    Only Krea's Creative Mode passes anything: it is the one caller that knows
+    another workload -- an image generation on a checkpoint several gigabytes
+    wide -- starts moments after the writer finishes. Every other mode leaves
+    it at zero and behaves exactly as it did.
+    """
+    return mc_llm_runtime.runtime.client(needs_vision, reserve=reserve)
 
 
 def _preparing() -> str:
@@ -531,7 +538,7 @@ def _minimax(prompt: str, variant: str, image: str | None, seed: int,
 
 
 def _krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=None,
-          direction: str = ""):
+          direction: str = "", reserve: int = 0):
     """One Krea 2 prompt: every reference described in order, then the writing.
 
     The same caption-first shape as :func:`_minimax` and for the same reason --
@@ -567,6 +574,10 @@ def _krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=N
     that could turn it into a second request. An empty string is the whole of
     what "Creative Mode off" means down here.
 
+    ``reserve`` is VRAM the writer promises to leave alone because an image
+    generation follows it. It reaches :func:`_client` and nothing else, and it
+    is zero for every caller that is not about to make a picture.
+
     Exactly one writer request is made, at every Creativity value and with or
     without a brief. The captions are one request per reference and are
     reference *processing*, not prompt writing; nothing here multiplies either
@@ -590,7 +601,7 @@ def _krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=N
         # hold a conversation. The panel has already refused a run that would
         # need a projector the model has not got; this is the same requirement
         # stated where the client is actually obtained.
-        client = _client(bool(references))
+        client = _client(bool(references), reserve)
         for event in _placement_notes():
             yield event
 
@@ -736,7 +747,7 @@ def minimax(prompt: str, variant: str, image: str | None, seed: int, cancel: Can
 
 
 def krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=None,
-         direction: str = ""):
+         direction: str = "", reserve: int = 0):
     """One Krea 2 prompt. See :func:`_krea`.
 
     ``references`` is an ordered list of ``prompt_master.krea.references
@@ -756,4 +767,5 @@ def krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=No
                f"{'' if len(references) == 1 else 's'}" if references else "a Krea prompt")
     directed = " with creative direction" if str(direction or "").strip() else ""
     yield from _traced(f"{counted} at creativity {resolve(creativity)}{directed}",
-                       _krea(prompt, references, seed, cancel, creativity, direction))
+                       _krea(prompt, references, seed, cancel, creativity, direction,
+                             reserve))

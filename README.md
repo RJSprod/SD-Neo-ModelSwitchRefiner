@@ -1216,6 +1216,14 @@ and a fraction of that resident; drop Creativity a notch or two, which shortens
 the brief directly; or set axes you do not care about to **Natural**, since each
 one removes its whole line from the brief.
 
+**VRAM.** Creative Mode loads the language model immediately *before* the image
+model, which on a fresh restart means it meets an empty card. It is told how
+much to leave clear for the checkpoint that follows, so both fit — but that
+reserve is only as good as the checkpoint you have selected when you press
+Generate. Switching to a much larger checkpoint while a language model is
+already resident is the case that still costs a restart of `llama-server`, and
+the console says so when it happens.
+
 All of it is now reported on Forge's own progress bar, in the gallery, before
 the image bar appears — the phase name, a moving bar and an ETA, with Interrupt
 wired up. The prediction is time-proportional and self-calibrating: the first

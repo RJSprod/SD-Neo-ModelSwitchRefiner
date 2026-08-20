@@ -954,8 +954,21 @@ class Runtime:
 
     # -- lifecycle -------------------------------------------------------- #
 
-    def client(self, needs_vision: bool = False):
+    def client(self, needs_vision: bool = False, reserve: int = 0):
         """A client for a ready server, started or restarted as placement requires.
+
+        ``reserve`` is VRAM this request promises not to take: room for a
+        workload the caller knows is coming. Krea Creative Mode is the caller
+        that has one -- it runs the writer and then, a fraction of a second
+        later, an image generation on a checkpoint that needs several
+        gigabytes. Without the reserve llama.cpp sizes itself to an empty card
+        and the checkpoint gets the remainder, which on a 24 GB card is the
+        difference between "both fit" and "the image model does not".
+
+        Leaving the room is very much cheaper than reclaiming it afterwards.
+        :meth:`release` can only give VRAM back by stopping the server, so a
+        reserve that is right costs nothing and a reserve that is missing costs
+        a restart per generation.
 
         Mirrors ``prompt_master.inference.service.InferenceService.client`` --
         the same validation, the same signature comparison, the same readiness
@@ -1032,7 +1045,8 @@ class Runtime:
                 logger.info("Model Chain: returned %.1f GB of cached VRAM to the driver before "
                             "placing the LLM", recovered / _GB)
 
-            negotiated = negotiate(configuration, already_ours=ours, vision=needs_vision)
+            negotiated = negotiate(configuration, already_ours=ours, vision=needs_vision,
+                                   extra_reserve=reserve)
             placement = negotiated.placement
             signature = (configuration.runtime, configuration.model, projector,
                          configuration.gpu_index, configuration.device,
@@ -1057,7 +1071,8 @@ class Runtime:
             for attempt in range(START_ATTEMPTS):
                 if penalty:
                     negotiated = negotiate(configuration, already_ours=ours,
-                                           extra_reserve=penalty, vision=needs_vision)
+                                           extra_reserve=reserve + penalty,
+                                           vision=needs_vision)
                     placement = negotiated.placement
                     signature = (configuration.runtime, configuration.model, projector,
                                  configuration.gpu_index, configuration.device,
