@@ -50,8 +50,10 @@ the broker rather than about either design.
 | `scripts/model_chain_krea_creative.py` | the txt2img panel and the processing hook |
 | `javascript/model_chain_creative_krea.js` | the explicit Generate gate |
 | `mc_llm_krea_panel.py` | the same controls in LLM Studio |
+| `mc_llm_progress.py` | the roll, reported on the host's progress bar (§7) |
 | `tests/test_krea_creative.py` | the library, the Director, the scale, one-call |
 | `tests/test_krea_creative_js.py` | the bypass and the absence of a scheduler |
+| `tests/test_krea_progress.py` | the reporting, and the bar always being given back |
 
 
 ## 3. Where the design intent was followed exactly
@@ -229,7 +231,116 @@ compatibility guarantees, and a data package that failed to load — or was edit
 by somebody tuning the creative vocabulary — must not be able to move them.
 
 
-## 7. Tests
+## 7. What a roll costs, and how it says so (21 August 2026)
+
+The first thing anybody noticed after Creative Mode landed was that Generate
+took twenty seconds to do anything, with no sign that it was working. Both
+halves of that turned out to be worth writing down.
+
+### 7.1 Where the twenty seconds go
+
+From a llama.cpp server log of a real session, one Creativity-10 roll on a 26B
+mixture-of-experts model in Mixed placement:
+
+```
+params_from_       request arrives
+   +0.16s          prompt-cache housekeeping
+restored context checkpoint (pos_max = 460)      <- Krea's instruction, cached
+erased  invalidated checkpoint (pos_max = 841)   <- last roll's brief, useless
+   +10.3s          prompt eval, 355 tokens at 29 ms each
+   +12.4s          generation, 179 tokens at 69 ms each
+             total 22.7s
+```
+
+Two of those lines are the whole explanation. The server can reuse its cached
+prefix exactly as far as the end of the system prompt, because **the creative
+brief is different on every roll** — so the previous roll's checkpoint is
+*erased as invalidated* and several hundred tokens are evaluated fresh, every
+time. Before Creative Mode the user turn was ~19 tokens and prompt evaluation
+took 0.66 s.
+
+The brief's length is the lever: measured over the shipped vocabulary it grows
+from ~240 characters at Creativity 2 to ~2,900 at Creativity 10, because the
+extreme tier expresses all ten axes in full. Placement is the multiplier: at
+~36 tokens/sec of prompt evaluation, every token of brief costs about 27 ms, and
+a resident model costs a small fraction of that.
+
+So the cost is real, proportional to Creativity, and not a defect. What was a
+defect was that none of it was visible.
+
+### 7.2 One thing worth fixing in the data package
+
+Every ``extreme`` expression ends with the same clause — *"push this treatment
+far enough to define the visual language while preserving the user's subject and
+explicit constraints"* — and at Creativity 10 that clause is repeated once per
+axis, nine or ten times, for roughly 200 tokens of literal duplication. The
+brief already states the preserve-constraints rule once, at the top, in
+``director.SOURCE_PRIORITY_RULE``.
+
+It is not fixed here, and deliberately: those strings are in the vendored data
+package, whose digests are recorded and whose whole point is that it can be
+re-vendored cleanly. Rewriting them at assembly time would be this repository
+editing vendored text at run time, which is the thing ``prompt_master/krea``
+exists to make impossible. It belongs in a 1.0.1 of the library — where it is
+worth about five seconds a roll at Creativity 10.
+
+### 7.3 The roll reports itself on the host's bar
+
+``mc_llm_progress.py``. The design is to use the host's machinery rather than
+draw anything:
+
+- the browser mints a task id in ``mcKreaCreativeSubmit`` and calls the host's
+  ``requestProgress`` for it — the same two steps ``ui.js``'s own ``submit()``
+  takes around every Generate;
+- the id arrives as argument zero through a Gradio ``js=`` hook, which is
+  race-free where a hidden textbox would not be: the value goes into the request
+  as Gradio builds it rather than into a component whose state may not have
+  caught up;
+- the server claims that id with ``modules.progress.add_task_to_queue`` and
+  ``start_task``, which is what ``modules.call_queue`` does, and releases it with
+  ``finish_task``;
+- ``shared.state.textinfo`` carries the phase name and ``sampling_step`` /
+  ``sampling_steps`` carry streamed characters, so **the existing** ``mc_progress``
+  arithmetic describes the roll with no special case anywhere.
+
+The three phases are the ones llama.cpp's log distinguishes and the ones a user
+feels differently: *Waiting* (GPU handover, or a cold llama-server), *Reading*
+(prompt evaluation — reports nothing, and is the phase Creative Mode made long),
+*Writing* (streams, so it is the only one that can say how far through it is).
+
+Characters stand in for tokens throughout. Nothing on this side of the wire has
+a tokenizer, and the error is a constant factor that the calibration store folds
+in on the first measurement and never sees again.
+
+Three details that are not obvious:
+
+- **The reply length is learned, with a floor.** It sizes the writing phase, and
+  one unusually terse answer would otherwise teach the bar to expect eighty
+  characters and leave every normal roll pinned at 99%.
+- **The denominator stretches.** A reply that outruns the estimate grows
+  ``sampling_steps`` rather than pinning the bar at full — ``mc_progress``
+  already refuses to go backwards, so the bar slows instead of rewinding.
+- **The task is released on every path out.** A claimed task that is never
+  released leaves the host believing a job is running, and the next Generate
+  draws a bar that never moves. ``tests/test_krea_progress.py`` checks the
+  release after success, a model that throws, an empty reply, a refused
+  checkpoint, an empty source, a Director failure and an Interrupt.
+
+Interrupt is wired because the bar carries the button whether or not anything is
+listening, and a button that does nothing is worse than no button. The flag is
+cleared on the way out so the image generation that follows does not inherit a
+stop nobody meant for it.
+
+### 7.4 Why not just cache the brief
+
+Because the brief *is* the variation. Reusing one would mean successive presses
+produced the same art direction, which is the feature working backwards. The
+cheap wins are the ones the README lists — resident placement, a lower
+Creativity, more Natural axes — and each of them shortens the brief or the
+per-token cost rather than defeating the point of it.
+
+
+## 8. Tests
 
 `tests/test_krea_creative.py` is mostly measurement. The Director's promises are
 properties of a distribution rather than of a function, so they are checked over
@@ -251,3 +362,9 @@ synthetic clock, which is the only way to ask the two questions that matter
 there: does the one-shot bypass let exactly one native click through, and is
 there really no scheduler left. The second is asked by running an hour forward
 with nobody touching anything and asserting that no timer remains armed.
+
+`tests/test_krea_progress.py` covers the reporting, and is mostly about the bar
+being *given back*. It also drives the submit hook under node against a fake
+page, because "the id reaches argument zero and the host is asked to draw a bar
+for that same id" is two facts about one function and neither is visible from
+reading it.

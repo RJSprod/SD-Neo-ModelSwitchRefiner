@@ -97,7 +97,7 @@ def _signal(kind: str, detail: str = "") -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _gate(source, creativity, seed, anti_repetition, loras, *axis_values):
+def _gate(task_id, source, creativity, seed, anti_repetition, loras, *axis_values):
     """One creative roll, made available to one native generation.
 
     The only place in txt2img that asks the language model for anything, and it
@@ -105,6 +105,13 @@ def _gate(source, creativity, seed, anti_repetition, loras, *axis_values):
     the time the request goes out: the Director picks the art direction from a
     vendored vocabulary with a seeded PRNG, and the model's whole job is to turn
     one brief into one Krea prompt.
+
+    ``task_id`` is minted in the browser by :js:func:`mcKreaCreativeSubmit`,
+    which has already asked Forge to draw and poll its progress bar for it --
+    the same two steps the host's own Generate does. Passing it as the first
+    argument, from a ``js=`` hook rather than out of a hidden textbox, is the
+    host's idiom and is race-free: the value is put into the request as it is
+    built rather than into a component and hoped for.
 
     Streams so the panel can say what is happening while a cold llama-server
     loads, which is the part of the wait that looks like a hang.
@@ -114,7 +121,8 @@ def _gate(source, creativity, seed, anti_repetition, loras, *axis_values):
     expanded = ""
 
     try:
-        for event in session.roll(source, stored, guard_checkpoint=True):
+        for event in session.roll(source, stored, guard_checkpoint=True,
+                                  task_id=task_id):
             if event.kind == sessions.CHUNK:
                 expanded += event.text
                 yield (notice("Writing the Krea prompt…"), gr.update(),
@@ -392,15 +400,20 @@ class ScriptKreaCreative(scripts.Script):
             # -- plumbing the browser drives, and the user never sees -------- #
             run = gr.Button("Creative Mode: roll", visible=False, elem_id=ident("run"))
             token = gr.Textbox(value="", visible=False, elem_id=ident("token"))
+            # Never read as a component. It is here because a Gradio event needs
+            # an input to put the browser's task id into, and the ``js=`` hook
+            # below overwrites the value on its way past -- exactly as the
+            # host's own submit() puts its id_task into argument zero.
+            task = gr.Textbox(value="", visible=False, elem_id=ident("task"))
 
         self.components = {
             "enabled": enabled, "creativity": creativity, "status": status,
             "controls": controls, "seed": seed, "anti": anti, "forget": forget,
             "loras": loras, "recipe": recipe, "expanded": expanded, "run": run,
-            "token": token, "axes": axis_controls}
+            "token": token, "task": task, "axes": axis_controls}
 
         self._wire(enabled, creativity, status, controls, seed, anti, forget, loras,
-                   recipe, expanded, run, token, axis_controls)
+                   recipe, expanded, run, token, task, axis_controls)
         return [enabled]
 
     def _axis_table(self, stored) -> list:
@@ -444,7 +457,7 @@ class ScriptKreaCreative(scripts.Script):
         return rows
 
     def _wire(self, enabled, creativity, status, controls, seed, anti, forget, loras,
-              recipe, expanded, run, token, axis_controls):
+              recipe, expanded, run, token, task, axis_controls):
         """Every handler, in one place, so the component list above stays readable."""
         enabled.change(fn=_toggled, inputs=[enabled],
                        outputs=[creativity, controls, status], queue=False)
@@ -461,11 +474,15 @@ class ScriptKreaCreative(scripts.Script):
                            outputs=[status], queue=False)
 
         if self._prompt_component is not None:
+            # show_progress="hidden": the roll reports itself on the host's own
+            # progress bar, in the gallery where image progress appears, and
+            # Gradio's little spinner over the status line would be a second
+            # thing claiming to describe the same wait.
             run.click(fn=_gate,
-                      inputs=[self._prompt_component, creativity, seed, anti, loras]
-                             + list(axis_controls),
+                      inputs=[task, self._prompt_component, creativity, seed, anti,
+                              loras] + list(axis_controls),
                       outputs=[status, token, recipe, expanded],
-                      show_progress="minimal")
+                      show_progress="hidden", js="mcKreaCreativeSubmit")
         else:
             # A UI so heavily customised that the positive prompt could not be
             # found. Creative Mode says so once, here, rather than half-working:

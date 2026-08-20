@@ -55,8 +55,10 @@ import secrets
 import threading
 from dataclasses import dataclass, field
 
+import mc_llm_progress
 import mc_llm_sessions as sessions
 import mc_llm_state
+import mc_progress
 
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
@@ -443,7 +445,8 @@ class Creative:
 
     # -- one roll ---------------------------------------------------------- #
 
-    def roll(self, source: str, stored=None, references=(), guard_checkpoint=False):
+    def roll(self, source: str, stored=None, references=(), guard_checkpoint=False,
+             task_id=""):
         """One creative roll: direct locally, then ask the model once.
 
         Yields :class:`mc_llm_sessions.Event` throughout so a caller can put the
@@ -455,6 +458,13 @@ class Creative:
         written down; the model's whole job is to turn one brief into one Krea
         prompt. That ordering is what makes "exactly one model call" a property
         of the design rather than a thing to be careful about.
+
+        ``task_id`` is a host progress task the browser has already asked Forge
+        to draw a bar for. When one is supplied the roll reports itself on that
+        bar, phase by phase, which is the only thing standing between a user and
+        twenty seconds of a screen that looks broken. Without one -- LLM Studio,
+        or any caller that has not arranged a bar -- everything below behaves
+        exactly as it did.
         """
         from prompt_master.core.models import draw_seed
         from prompt_master.krea import director
@@ -501,15 +511,32 @@ class Creative:
         # rather than whenever the interpreter next collects the frame.
         run = sessions.krea(source, list(references or []), recipe.llm_seed, cancel,
                             recipe.creativity, recipe.brief)
+        progress = mc_llm_progress.reporter
+        progress.begin(task_id, _prompt_size(source, references, recipe.brief), _warm())
         written = ""
+        finished = False
         try:
             for event in run:
                 if event.kind == sessions.DONE:
                     written = event.text
+                    finished = True
                     break
                 if event.kind in (sessions.FAILED, sessions.CANCELLED):
                     self.say(ERROR if event.kind == sessions.FAILED else IDLE)
                     yield event
+                    return
+                if event.kind == sessions.CHUNK:
+                    # The first chunk is the moment prompt evaluation ended and
+                    # generation began -- the one boundary in the whole run that
+                    # is observable from here, and the one the bar most needs.
+                    progress.enter(mc_progress.PHASE_KREA_WRITE)
+                    progress.wrote(event.text)
+                elif event.kind == sessions.STATUS:
+                    progress.enter(_phase_for(event.text))
+                if progress.interrupted():
+                    cancel.cancel()
+                    self.say(IDLE)
+                    yield sessions.Event(sessions.CANCELLED, "Stopped.")
                     return
                 yield event
         except Exception as exc:
@@ -519,6 +546,10 @@ class Creative:
             return
         finally:
             run.close()
+            if finished:
+                progress.end(written)
+            else:
+                progress.abandon()
 
         if not written.strip():
             self.say(ERROR)
@@ -531,6 +562,58 @@ class Creative:
             note_roll(recipe)
         self.say(READY)
         yield sessions.Event(sessions.DONE, written.strip())
+
+
+def _prompt_size(source: str, references, brief: str) -> int:
+    """How much text the model is about to read, in characters.
+
+    Krea's instruction, the user's line and the creative brief. This is what
+    prompt evaluation is proportional to, and it is the single number that
+    explains why a Creativity-10 roll takes several times as long to start
+    generating as a Creativity-2 one: the brief is hundreds of tokens, and it is
+    different every roll, so nothing past the instruction can be reused from the
+    server's prompt cache.
+    """
+    from prompt_master.krea import enhancer
+
+    try:
+        size = len(enhancer.system_prompt(bool(references)))
+        size += len(enhancer.user_content(source, None, brief))
+    except Exception:
+        logger.debug("Model Chain: could not size the Krea prompt", exc_info=True)
+        return max(len(source or "") + len(brief or ""), 1)
+    return max(size, 1)
+
+
+def _warm() -> bool:
+    """Whether llama-server is already up, for the waiting phase's prediction.
+
+    A wrong answer costs one roll a poor ETA on the phase that is over before
+    anybody reads it, so this never raises and guesses cold -- the pessimistic
+    direction -- when it cannot tell.
+    """
+    try:
+        import mc_llm_runtime
+
+        return bool(mc_llm_runtime.runtime.running())
+    except Exception:
+        return False
+
+
+def _phase_for(status: str) -> str:
+    """Which phase a status line from the session means we have reached.
+
+    The session says what it is doing in prose, for a status area; this maps
+    that back onto a phase. Only one transition matters -- the writer's own
+    status is emitted immediately before the request goes out, so it is the
+    start of prompt evaluation -- and everything else is still waiting.
+    """
+    from prompt_master.krea import enhancer
+
+    text = str(status or "").casefold()
+    if enhancer.label(0).casefold() in text or "writing the krea prompt" in text:
+        return mc_progress.PHASE_KREA_READ
+    return mc_progress.PHASE_KREA_WAIT
 
 
 def _directed(recipe) -> str:

@@ -38,6 +38,13 @@
         status: "mc-krea-creative-status",
         prompt: "txt2img_prompt",
         generate: "txt2img_generate",
+        // Where the host draws its progress bar for txt2img. The second is what
+        // older layouts call it; whichever exists is where the roll's bar goes,
+        // so it appears exactly where image progress appears rather than in a
+        // place of this extension's choosing.
+        gallery: "txt2img_gallery_container",
+        results: "txt2img_results",
+        images: "txt2img_gallery",
     };
 
     // How often the token box is read while a roll is in flight. It is a
@@ -155,6 +162,51 @@
         });
     }
 
+    // -- the host's own progress bar ----------------------------------------- //
+
+    // Mint a task id, ask Forge to draw and poll its progress bar for it, and
+    // hand the id to the server as argument zero.
+    //
+    // This is the host's own submit() idiom, deliberately: ui.js does exactly
+    // these three things around every Generate. Doing it the same way means the
+    // roll gets the real bar -- with its real ETA and its real Interrupt button
+    // -- instead of something this extension drew that looks nearly like one.
+    //
+    // A js= hook rather than a hidden textbox because it is race-free. The id is
+    // written into the request as Gradio builds it, rather than into a component
+    // whose value may not have reached Gradio's state by the time the click is
+    // processed.
+    function submitRoll() {
+        const args = Array.prototype.slice.call(arguments);
+        let id;
+        try {
+            id = (typeof randomId === "function")
+                ? randomId()
+                : "task(mckrea" + Math.random().toString(36).slice(2, 9) + ")";
+            args[0] = id;
+        } catch (error) {
+            console.error("Model Chain: could not mint a Creative Mode task id", error);
+            return args;
+        }
+
+        try {
+            if (typeof requestProgress === "function") {
+                const container = byId(IDS.gallery) || byId(IDS.results);
+                if (container) {
+                    // No gallery is passed: a creative roll produces no image and
+                    // has no live preview, and handing over the gallery would
+                    // invite the progress plumbing to redraw one.
+                    requestProgress(id, container, null, function () {});
+                }
+            }
+        } catch (error) {
+            // A bar that will not draw must never be a roll that will not run.
+            console.error("Model Chain: could not start the Creative Mode progress bar",
+                error);
+        }
+        return args;
+    }
+
     // One roll, then one native generation. The only path to a Creative image.
     function runRoll() {
         if (state.rolling) return Promise.resolve(false);
@@ -257,12 +309,17 @@
         onAfterUiUpdate(wire);
     }
 
+    // Named on window because Gradio resolves a js= hook by name at call time.
+    // This is the one thing in this file the page itself calls.
+    window.mcKreaCreativeSubmit = submitRoll;
+
     // Exposed for the tests, which drive this file under node against a fake
     // page. Nothing in the extension reads it.
     window.modelChainKreaCreative = {
         state: state,
         onGenerateClick: onGenerateClick,
         runRoll: runRoll,
+        submitRoll: submitRoll,
         wire: wire,
     };
 })();

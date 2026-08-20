@@ -73,15 +73,39 @@ BASELINES = {
     "join": 0.0,
     "finalize": 0.4,
     "sample": 0.55,
+    # Krea Creative Mode's language-model run, in seconds per *character*.
+    # Characters rather than tokens because nothing on this side of the wire
+    # has a tokenizer, and a proxy that is consistently wrong by the same
+    # factor is exactly as good for a rate that is learned by measurement --
+    # the store folds the factor in on the first run and never sees it again.
+    "krea:read": 0.0028,
+    "krea:write": 0.0150,
+    # The handover before the request goes out, per roll. Bimodal and kept as
+    # two keys for that reason: a warm llama-server is a lock acquisition, and
+    # a cold one is twenty seconds of reading weights off a disk. Averaging the
+    # two would predict both of them wrongly.
+    "krea:wait:warm": 0.4,
+    "krea:wait:cold": 18.0,
+    "krea:wait": 1.2,
+    # Not a rate: the expected length of one written Krea prompt, in
+    # characters, learned the same way. See ``measured``.
+    "krea:reply": 700.0,
 }
 """First-run guesses, in seconds per unit of whatever the phase measures.
 
 Movement and freeing are per gigabyte, sampling is per step per megapixel per
-image, and the rest are flat per-job costs. These are deliberately coarse. They
-are what the very first chained generation on a fresh install has to work from,
-and they are overwritten by measurement from the second one onwards -- so the
-cost of a wrong entry here is one job's worth of a poor ETA, not a permanently
-wrong prediction.
+image, the Krea entries are per character, and the rest are flat per-job costs.
+These are deliberately coarse. They are what the very first chained generation
+on a fresh install has to work from, and they are overwritten by measurement
+from the second one onwards -- so the cost of a wrong entry here is one job's
+worth of a poor ETA, not a permanently wrong prediction.
+
+The Krea numbers are taken from a 26B mixture-of-experts model running in Mixed
+placement, which is the slow end of what people actually run: weights in system
+RAM, compute on the card, roughly 36 tokens per second reading and 14 writing.
+Guessing high is deliberate here for the reason given under ``move:``, one
+paragraph up -- a bar that stalls at the end reads as a hang, and one that
+finishes early merely reads as fast.
 """
 
 _REFERENCE_VRAM_GB = 24.0
@@ -136,6 +160,25 @@ measured rate for the phase includes the decode too -- consistently, every time
 # --------------------------------------------------------------------------- #
 # Phases
 # --------------------------------------------------------------------------- #
+
+PHASE_KREA_WAIT = "krea_wait"
+PHASE_KREA_READ = "krea_read"
+PHASE_KREA_WRITE = "krea_write"
+"""The three spans of one Krea Creative Mode roll.
+
+Separate from the image phases below and never mixed with them: a creative roll
+finishes before the native generation it precedes is even submitted, so the two
+are consecutive jobs rather than phases of one. Sharing the phase list would
+have meant an image job's bar starting at whatever fraction the language model
+had reached.
+
+The split is the one the llama.cpp log makes, because it is the one the user
+feels. *Wait* is the GPU handover and, on a cold start, twenty seconds of
+llama-server reading weights off disk. *Read* is prompt evaluation, which
+reports nothing at all while it runs and is proportional to how long the
+creative brief is. *Write* is token generation, which streams, and is the only
+one of the three that can say how far through it is.
+"""
 
 PHASE_JOIN = "join"
 PHASE_STAGE1_PREPARE = "stage1_prepare"
@@ -324,6 +367,32 @@ def rates() -> dict[str, float]:
     """A copy of the measured rates currently in force."""
     with _lock:
         return dict(_load())
+
+
+def measured(key: str, default: float = 0.0) -> float:
+    """One learned value, or ``default`` when nothing has been measured yet.
+
+    The store holds "value per unit", and a phase's unit is whatever that phase
+    counts. Most entries are seconds per gigabyte or per step; ``krea:reply``
+    is characters per reply, which is the same shape and is why it can live in
+    the same file and be smoothed by the same arithmetic.
+    """
+    value = _load().get(key)
+    if value:
+        return float(value)
+    return float(BASELINES.get(key, default) or default)
+
+
+def learn(key: str, value: float, units: float = 1.0) -> None:
+    """Fold one measurement into the store by hand.
+
+    :class:`Phase` records itself when it closes, which covers every phase of a
+    chained job. This is for the measurements that are not a phase's duration --
+    the length of a written prompt, which is a property of the answer rather
+    than of the time it took.
+    """
+    with _lock:
+        _record((key,), value, units)
 
 
 def _baseline(rate_key: str) -> float:
