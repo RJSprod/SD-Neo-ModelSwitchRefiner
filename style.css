@@ -918,6 +918,59 @@
     overflow: hidden !important;
 }
 
+/* -- the two bubbles, and the theme that painted one of them white ---------
+   Reported against the Lobe theme: every message you had sent rendered as a
+   solid white box with nothing in it, while the replies beside them were dark
+   and perfectly readable. The text was still there — it was
+   `var(--body-text-color)`, which is near-white in a dark theme, on a
+   background that had become white underneath it.
+
+   Nothing in this extension asked for that box. Gradio's own Chatbot paints
+   the *user* bubble from the accent family — `--color-accent-soft` for the
+   fill, `--border-color-accent-subdued` for the edge — while the bot bubble
+   uses the neutral surface, which is exactly why one of the two survived the
+   theme and the other did not. Lobe supplies its own value for the accent
+   family, that value is light, and a light fill under light text is an empty
+   box. A theme is entitled to its accent colour; what it cannot be allowed to
+   do is decide that half a conversation is unreadable.
+
+   So the fix is to stop the transcript deriving a *surface* from an accent at
+   all. The two declarations below redefine those two custom properties on this
+   extension's own element, and they inherit from there down to whatever Gradio
+   builds inside it. That is deliberately not a rule about Gradio's DOM: it
+   names no message class, no row class and no generated class, so it keeps
+   working across Gradio versions that rename them, and it holds under any
+   theme that sets its colours the ordinary way — through the variables.
+
+   Contrast is stated rather than assumed. Both replacements come from the same
+   neutral surface family the rest of this file uses and that the bot bubble
+   already proves readable in this theme, and the colour is the host's own body
+   text, so the pair moves together when a theme or a light/dark toggle moves
+   either of them. Which message is whose is still legible: Gradio puts yours on
+   the right and the reply on the left, and the border keeps its own weight. */
+#mc-llm-studio .mc-llm-transcript {
+    --color-accent-soft:
+        var(--background-fill-secondary, var(--background-fill-primary, transparent));
+    --border-color-accent-subdued: var(--border-color-primary, currentColor);
+    color: var(--body-text-color, inherit);
+}
+
+/* The same guarantee for a theme that reaches past the variables and paints the
+   bubble directly. This is the one place in this file that names something
+   Gradio generated, and it is kept to the two class names Gradio's chatbot has
+   carried unchanged across the 4.x line -- never a `.svelte-` hash, which is
+   the part that is regenerated on every build and the reason the rest of this
+   file refuses to depend on any of it. If a future Gradio renames these, the
+   rule above still does the work and this one becomes inert rather than wrong.
+
+   Background and colour only. The radius, the padding and the alignment are
+   the theme's business, and a bubble that is legible in the wrong font is a
+   fixed bug where a bubble this file has fully restyled is a running fight. */
+#mc-llm-studio .mc-llm-transcript .message.user {
+    background: var(--background-fill-secondary, var(--background-fill-primary, transparent));
+    color: var(--body-text-color, inherit);
+}
+
 /* One line, the same height whether it says "Ready." or nothing anybody needs
    to read, so that a reply starting does not move the transcript or the
    composer by a pixel. A long error is scrolled inside it rather than allowed
