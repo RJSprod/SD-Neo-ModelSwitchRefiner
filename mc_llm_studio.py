@@ -697,6 +697,25 @@ def _runtime_state(label: str | None = None) -> str:
                     "info" if state["running"] else "idle", detail)
 
 
+def _device_detail(state) -> str:
+    """The recorded device, and what it was chosen to do with the weights.
+
+    Naming the card alone reads the same in all three modes, and the mode is
+    the thing somebody watching their VRAM fill up needs to see: a mixed-mode
+    install that is holding twenty gigabytes is a bug, and one that says
+    "gpu" beside the same card is doing what it was told.
+    """
+    from prompt_master.core.models import CPU_MODE, MIXED_MODE
+
+    name = state["device"] or "unknown"
+    mode = str(state.get("mode", "")).strip().casefold()
+    if mode == MIXED_MODE:
+        return f"{name} — mixed, weights in system RAM"
+    if mode == CPU_MODE:
+        return f"{name} — CPU, no card used"
+    return name
+
+
 def _runtime_detail(state=None) -> str:
     """Everything the chip used to say, for its tooltip and for Setup.
 
@@ -713,7 +732,7 @@ def _runtime_detail(state=None) -> str:
         return f"LLM Studio needs {missing}. Open Setup."
 
     parts = [f"Model: {state['quantization'] or state['model'] or 'unknown'}",
-             f"Device: {state['device'] or 'unknown'}",
+             f"Device: {_device_detail(state)}",
              "Server: running" if state["running"] else "Server: stopped"]
     if state["running"] and state["resident_bytes"]:
         parts.append(f"VRAM: {ui.gigabytes(state['resident_bytes'])}")
@@ -1039,10 +1058,19 @@ def _runtime_setup_line(found=None) -> str:
 
 
 def _device_choices() -> list[tuple[str, str]]:
+    """Every device the install can be pinned to, labelled and keyed.
+
+    Keyed by :func:`device_token` rather than by the card's index, because a
+    CUDA card is offered twice — once holding the weights, once in mixed mode —
+    and two options sharing one value are one option as far as a dropdown is
+    concerned. That is not cosmetic: it is what made choosing mixed mode record
+    a full offload of the same card, so the setting that exists to keep VRAM
+    free filled it instead.
+    """
     import mc_llm_setup
 
     try:
-        return [(mc_llm_setup.describe_device(found), str(found.physical_index))
+        return [(mc_llm_setup.describe_device(found), mc_llm_setup.device_token(found))
                 for found in mc_llm_setup.devices()]
     except Exception:
         logger.debug("Model Chain: could not list devices", exc_info=True)
@@ -1050,28 +1078,31 @@ def _device_choices() -> list[tuple[str, str]]:
 
 
 def _current_device(choices=None) -> str | None:
+    """The dropdown value for the device the install is recorded as using."""
     import mc_llm_runtime
 
-    index = mc_llm_runtime.config().gpu_index
+    configuration = mc_llm_runtime.config()
     choices = _device_choices() if choices is None else choices
     values = [value for _, value in choices]
-    if str(index) in values:
-        return str(index)
+    token = f"{_recorded_mode(configuration)}:{configuration.gpu_index}"
+    if token in values:
+        return token
     return values[0] if values else None
+
+
+def _recorded_mode(configuration) -> str:
+    """Which of the three ways the recorded device is being used."""
+    from prompt_master.inference.device_detection import recorded_mode
+
+    return recorded_mode(configuration.mode, configuration.device, configuration.gpu_layers)
 
 
 def _device_for(value):
     """The detected device the dropdown's value refers to."""
     import mc_llm_setup
 
-    try:
-        wanted = int(value)
-    except (TypeError, ValueError):
-        return mc_llm_setup.preferred_device()
-    for found in mc_llm_setup.devices():
-        if found.physical_index == wanted:
-            return found
-    return mc_llm_setup.preferred_device()
+    found = mc_llm_setup.device_for_token(value, mc_llm_setup.devices())
+    return found if found is not None else mc_llm_setup.preferred_device()
 
 
 def _apply_runtime(path, device_value):

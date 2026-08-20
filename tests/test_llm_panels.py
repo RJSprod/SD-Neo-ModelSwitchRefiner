@@ -30,6 +30,25 @@ def store(tmp_path, monkeypatch, host):
     yield tmp_path
 
 
+@pytest.fixture
+def a_card(monkeypatch):
+    """One CUDA card in the machine, so the device list offers it both ways.
+
+    Faked at the nvidia-smi boundary rather than above it, so what is under
+    test includes the pairing itself: every card is offered once holding the
+    weights and once in mixed mode.
+    """
+    import mc_llm_setup
+    from prompt_master.core.models import GpuInfo
+
+    card = GpuInfo(0, "GPU-0000", "NVIDIA GeForce RTX 3090", 24576, 23304, "560.94", 8.6)
+    monkeypatch.setattr("prompt_master.inference.device_detection.detect_gpus",
+                        lambda *args, **kwargs: [card])
+    mc_llm_setup.forget_devices()
+    yield card
+    mc_llm_setup.forget_devices()
+
+
 class TestPromptStudio:
     def test_it_builds_and_exposes_both_outputs(self):
         built = mc_llm_prompt_panel.build()
@@ -1361,6 +1380,64 @@ class TestRuntimeSetup:
 
     def test_the_device_dropdown_always_offers_something(self, store):
         assert mc_llm_studio._device_choices()
+
+    def test_each_way_of_using_a_card_is_its_own_option(self, store, a_card):
+        """A card is offered twice — holding the weights, and in mixed mode —
+        and two options sharing one value are one option to a dropdown. When
+        they shared the card's index, picking mixed mode recorded a full
+        offload of the same card and filled the VRAM it exists to keep free."""
+        values = [value for _label, value in mc_llm_studio._device_choices()]
+
+        assert len(values) == len(set(values))
+
+    def test_the_mixed_option_resolves_to_a_mixed_device(self, store, a_card):
+        chosen = mc_llm_studio._device_for("mixed:0")
+
+        assert chosen.is_mixed
+
+    def test_the_plain_option_resolves_to_the_card_itself(self, store, a_card):
+        chosen = mc_llm_studio._device_for("gpu:0")
+
+        assert not chosen.is_mixed and not chosen.is_cpu
+
+    def test_an_index_written_by_an_older_build_still_means_the_card(self, store, a_card):
+        chosen = mc_llm_studio._device_for("0")
+
+        assert not chosen.is_mixed and not chosen.is_cpu
+
+    def test_choosing_mixed_mode_records_a_mixed_install(self, store, a_card):
+        import mc_llm_runtime
+        import mc_llm_setup
+
+        runtime = store / mc_llm_setup.RUNTIME_DIRNAME
+        runtime.mkdir(parents=True)
+        server = runtime / "llama-server"
+        server.write_bytes(b"")
+
+        mc_llm_studio._apply_runtime(str(server), "mixed:0")
+
+        configuration = mc_llm_runtime.config()
+        assert configuration.mode == "mixed"
+        assert configuration.gpu_layers == "0"
+
+    def test_the_dropdown_comes_back_on_the_option_that_was_chosen(self, store, a_card):
+        import mc_llm_setup
+
+        runtime = store / mc_llm_setup.RUNTIME_DIRNAME
+        runtime.mkdir(parents=True)
+        server = runtime / "llama-server"
+        server.write_bytes(b"")
+        mc_llm_studio._apply_runtime(str(server), "mixed:0")
+
+        assert mc_llm_studio._current_device() == "mixed:0"
+
+    def test_the_detail_line_says_when_the_weights_are_in_system_ram(self, store):
+        state = {"configured": True, "has_runtime": True, "has_model": True,
+                 "running": False, "model": "model.gguf", "quantization": "Q4_K_M",
+                 "device": "NVIDIA GeForce RTX 3090", "mode": "mixed", "sees": False,
+                 "placement": None, "report": None, "resident_bytes": 0}
+
+        assert "mixed" in mc_llm_studio._runtime_detail(state)
 
     def test_the_setup_panel_says_where_the_plain_values_went(self, store):
         """A control that used to be here and is not any more is, from the

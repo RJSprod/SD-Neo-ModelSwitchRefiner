@@ -38,7 +38,7 @@ def placed(host, tmp_path, monkeypatch):
 
 
 def configure(monkeypatch, tmp_path, *, context=8192, mode="fixed", blocks=32,
-              size_mb=4, gpu_layers="all", ceiling=131072):
+              size_mb=4, gpu_layers="all", ceiling=131072, device_mode="gpu"):
     model = build_model(tmp_path, blocks=blocks, size_mb=size_mb, context=ceiling)
     # Written rather than merely named: ``Runtime.client`` refuses to start a
     # server whose executable is not there, which is the check that turns a
@@ -48,7 +48,7 @@ def configure(monkeypatch, tmp_path, *, context=8192, mode="fixed", blocks=32,
     configuration = runtime.Config(
         runtime=server, model=model, mmproj=None, gpu_index=0,
         device="CUDA0", gpu_layers=gpu_layers, context_size=context, context_mode=mode,
-        context_buffer_gb=4.0, kv_type_k="f16", kv_type_v="f16")
+        context_buffer_gb=4.0, kv_type_k="f16", kv_type_v="f16", mode=device_mode)
     monkeypatch.setattr(runtime, "config", lambda: configuration)
     return configuration
 
@@ -586,6 +586,29 @@ class TestTheOffloadArgument:
         managed.client()
 
         assert started[0][1]["gpu_layers"] == "31"
+
+    def test_a_mixed_install_starts_with_none_however_many_were_recorded(
+            self, placed, server, tmp_path, monkeypatch):
+        """Mixed mode trades speed for VRAM that stays free, so a mixed install
+        that filled the card would be the one thing it cannot do. The layer
+        count beside it is a leftover from whatever wrote the state; the mode
+        is the answer."""
+        managed, started = server
+        configure(monkeypatch, tmp_path, gpu_layers="all", blocks=30, device_mode="mixed")
+        set_free(monkeypatch, 20)
+
+        managed.client()
+
+        assert started[0][1]["gpu_layers"] == "0"
+
+    def test_a_mixed_install_makes_no_vram_decision_either(self, placed, tmp_path, monkeypatch):
+        configuration = configure(monkeypatch, tmp_path, gpu_layers="all", device_mode="mixed")
+        set_free(monkeypatch, 1)
+
+        negotiated = runtime.negotiate(configuration)
+
+        assert negotiated.fits
+        assert not negotiated.placement.on_gpu
 
 
 class TestTheLoadReportIsWaitedFor:

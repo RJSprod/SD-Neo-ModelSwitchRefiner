@@ -473,6 +473,48 @@ def describe_device(device) -> str:
         return getattr(device, "name", "unknown device")
 
 
+def device_token(device) -> str:
+    """A device's identity as one string — mode and index, not index alone."""
+    from prompt_master.inference.device_detection import device_token as token
+
+    return token(device)
+
+
+def device_for_token(value, offered=None):
+    """The detected device ``value`` names, or None when nothing matches."""
+    from prompt_master.inference.device_detection import device_for_token as resolve
+
+    return resolve(value, devices() if offered is None else offered)
+
+
+def configured_device():
+    """The device the state file already names, if it is still in the machine.
+
+    What ``record`` falls back to when the caller does not name a device.
+    Recording a runtime is not a device decision -- pressing Detect answers
+    "which llama-server", and answering "and put the weights back on the card"
+    with it is how a mixed-mode install silently became a full offload.
+    """
+    from prompt_master.core.config import read_json
+    from prompt_master.inference.device_detection import device_for_token, recorded_mode
+
+    paths = mc_llm_paths.app_paths()
+    try:
+        state = read_json(paths.state_file)
+    except (OSError, ValueError):
+        return None
+    index = (state or {}).get("gpu_index")
+    if index is None:
+        return None
+
+    mode = recorded_mode(state.get("mode", ""), state.get("gpu_device", ""),
+                         state.get("gpu_layers", ""))
+    try:
+        return device_for_token(f"{mode}:{int(index)}", devices())
+    except (TypeError, ValueError):
+        return None
+
+
 def record(executable: str | Path, device=None) -> dict:
     """Write ``executable`` into the state file as this install's runtime.
 
@@ -507,7 +549,7 @@ def record(executable: str | Path, device=None) -> dict:
     if relative != path:
         raise SetupError(f"{path} could not be recorded relative to {paths.root}")
 
-    chosen = device or preferred_device()
+    chosen = device or configured_device() or preferred_device()
     try:
         state = read_json(paths.state_file)
     except (OSError, ValueError):
