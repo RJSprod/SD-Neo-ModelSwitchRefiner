@@ -1101,13 +1101,14 @@ extensions independently unloading things from the same GPU is how you get a
 checkpoint evicted for an LLM that then evicts itself for the checkpoint. Model
 Chain already owns image residency, so it owns the LLM's too.
 
-### Four modes
+### Five modes
 
 | Mode | What it is |
 | --- | --- |
 | **Prompt Studio** | LTX video-prompt generation. Text-to-video and image-to-video, a positive and a negative prompt as two separate outputs, the smart-negative second pass, and the full control set — style, motion, camera, transition, POV, wardrobe, accent and strength, dialogue budget, extra speech, music, duration, FPS, dimensions, output format, lexicon, extra negative terms and seed. |
 | **Conversation** | Threaded chat with persistent histories, and per-message actions. Characters are files in a `characters/` folder in the layout oobabooga uses, so cards import and export; chats are documents filed per character. |
 | **MiniMax H3** | The prompt enhancer, as its own workflow. FL2VA and REF2VA variants, an optional reference frame that is captioned first and shown to you, and its own history. |
+| **Krea 2** | Krea 2 image prompts, written by the local model from Krea's own prompt expansion instruction. Text alone, or text plus up to four reference images numbered by the slot they sit in — each one described first, in order, so that "the woman from image 2" survives the trip into the finished prompt. Writes prompts; generates no images. Its own history. |
 | **Setup** | The runtime, which GGUF runs, what context fits, and what is currently resident on the card. Everything here needs a file dialog, a download, an estimate or a table — the plain values live on the Settings page instead. |
 
 They share one loaded model and one runtime. They do not share a history, an
@@ -1489,12 +1490,13 @@ mc_llm_files.py       what a pasted path means, and what is in a folder
 mc_llm_browse.py      the Browse button beside every path box
 mc_llm_native.py      the operating system's own file dialog
 mc_llm_setup.py       getting a llama.cpp runtime in place
-mc_llm_state.py       shared preferences + the two mode histories
-mc_llm_sessions.py    the three run orchestrations, as streaming generators
+mc_llm_state.py       shared preferences + the mode histories
+mc_llm_sessions.py    the run orchestrations, as streaming generators
 mc_llm_studio.py      the LLM Studio tab shell, model chooser and Setup mode
 mc_llm_prompt_panel.py     Prompt Studio workspace
 mc_llm_chat_panel.py       Conversation workspace
 mc_llm_minimax_panel.py    MiniMax H3 workspace
+mc_llm_krea_panel.py       Krea 2 workspace
 mc_llm_ui.py          shared UI helpers and the element-id contract
 prompt_master/        vendored LTX business logic (see VENDORED_FROM.txt)
 

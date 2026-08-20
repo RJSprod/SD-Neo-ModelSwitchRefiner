@@ -3,13 +3,19 @@ commit eb80c6099b38a134856ecb6b132f390062c535ee (2026-08-04)
 path in source repository: src/prompt_master/
 
 Everything under this directory is a byte-identical copy of that tree with two
-exclusions and no edits:
+exclusions, one addition and no edits:
 
   * ui/     -- the PySide6 window, chat page, MiniMax page, character editor,
                model chooser and setup wizard. Section 17.B of the design
                intent: the business logic comes across, the Qt presentation
                layer does not. Its Forge replacement is mc_llm_studio.py.
   * app.py  -- the standalone Qt entry point, for the same reason.
+
+The addition is krea/, which is not from that repository at all and never was.
+It is the Krea 2 prompt package written for this extension, around a copy of
+Krea's own docs/expansion.txt vendored from github.com/krea-ai/krea-2. It
+carries its own provenance in krea/UPSTREAM_SOURCE.txt and is the one directory
+here that a `diff -r` against LTX_Video_Prompt_Claude will report as extra.
 
 Nothing else was removed and nothing was rewritten, which is the point. The
 prompt engine, its vendored upstream, the MiniMax enhancer, the chat stores,
