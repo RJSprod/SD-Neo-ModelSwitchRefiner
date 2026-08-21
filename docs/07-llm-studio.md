@@ -2397,3 +2397,117 @@ the first refusal, so a preference was lost and a traceback reached the console.
 It now retries five times over a widening backoff, and removes the temporary
 file when it truly cannot land — the log also showed a leftover
 `preferences.jsonfyz9tar1.tmp` in a directory users open to read their settings.
+
+
+## 26. Twenty seconds before the first character (21 August 2026)
+
+Six runs from one session — three on Mixed, three on the processor — and two
+observations, both correct:
+
+> "Starting llama-server…" appears often. After a first run on a mode, it should
+> never have to start again.
+
+> Look at those numbers for CPU mode, it takes over 20 seconds to get to the
+> first character from LLM even when warm.
+
+### 26.1 Why it kept restarting
+
+§25 stopped the LLM from evicting the image model. It did not stop the image
+model from evicting the LLM, and with VRAM residency set to Exclusive that
+happened on every roll:
+
+```
+llama-server stopped — the image generation that follows a Krea roll, 4.4 GB released
+the image generation that follows a Krea roll: demoted the LLM (Q4_K_M) (4.4 GB)
+```
+
+The request behind that was `hand_back_vram`, asking for `required − held` —
+about 2 GB, with 4.3 GB free. It fitted. Exclusive mode swept anyway, because
+that is what Exclusive mode meant: ownership rather than arithmetic.
+
+That meaning is now empty. The LLM is confined to spare VRAM by construction
+(§25) and a Krea roll reserves the coming pass its full requirement before it
+places itself, so "the image family owns the card" describes a state that is
+already true. What the sweep still did was cost a model load per image — and,
+worse than the load, llama.cpp's prompt cache, which is where the next section
+begins.
+
+So the setting was renamed to the only thing it still decides:
+
+| Setting | Behaviour |
+| --- | --- |
+| **Keep the LLM loaded** (default) | llama-server stays in the spare VRAM. The generation is unaffected and the next prompt starts warm. |
+| **Free the LLM for every image** | llama-server is stopped and the pass gets every last byte, at the cost of a model load per image. |
+
+The constants behind them are still `hybrid` and `exclusive`, so a config
+holding either value resolves. A config holding an old *label* does not, and
+falls back to the default deliberately: "one family owns VRAM at a time" was an
+answer to a question that no longer exists, and carrying it onto "stop
+llama-server for every image" would be carrying a preference about one thing
+onto another.
+
+A pass that genuinely does need the room still gets it. `mc_memory` calls
+`_reclaim_for_image` when its own eviction falls short, and that path demotes
+the LLM on evidence rather than on principle.
+
+### 26.2 Why a warm roll still cost twenty seconds
+
+From the llama-server log, one processor-only server, three consecutive rolls:
+
+```
+task 5   | prompt eval time = 35337 ms / 1065 tokens
+task 199 | prompt eval time = 21335 ms /  601 tokens
+task 405 | prompt eval time = 20258 ms /  596 tokens
+```
+
+Nothing was wrong with generation — 4.8 tokens a second, as expected from system
+RAM. The twenty seconds were *prefill*, and the reason it is 600 tokens rather
+than 60 is two separate things.
+
+**The first is that a checkpoint, not the prefix, decides where a warm turn
+resumes.** llama.cpp's own accounting says so:
+
+```
+slot get_availabl: selected slot by LCP similarity, sim_best = 0.630
+slot update_slots: Checking checkpoint with [0, 1061] against 0...
+slot update_slots: Checking checkpoint with [0, 460] against 0...
+slot update_slots: restored context checkpoint (pos_max = 460, n_past = 460)
+slot update_slots: erased invalidated context checkpoint (n_swa = 1024)
+```
+
+668 tokens matched (`sim_best = 0.630` of 1,060). 460 were resumed. The other
+208 were read again, because Gemma is a sliding-window model, most of its blocks
+keep only a 1,024-token window of the cache, and a prompt can therefore only be
+resumed at one of the checkpoints taken on the way past. `--swa-full` keeps the
+whole cache, which removes both the window and the checkpoints: llama.cpp then
+resumes at the true common prefix. It is added for every placement, processor
+included, because what it buys is reuse rather than throughput — and the memory
+it costs is memory `mc_llm_context.estimate` has always charged for, since that
+function sizes the cache at the full context for every block.
+
+**The second is that the first roll on a server pays for the instruction.** 1,065
+tokens against 601: the difference is Krea's standing instruction, which is the
+same text every time and is known before anybody presses anything. There is no
+reason for a person watching a progress bar to be the one who reads it, so it is
+prefilled when llama-server starts, on a thread nobody is waiting on, with a
+one-token completion whose answer is discarded.
+
+What makes that safe to fire from *any* start — including a re-placement in the
+middle of a roll — is the workload lock. The prime asks for the GPU as
+background work and does not wait, so a start that some job is holding the card
+for finds it taken and does nothing at all. The roll it would have queued in
+front of is precisely the roll it existed to help.
+
+### 26.3 What is left, and what it is not
+
+On the machine those logs came from, a warm processor-only roll should now
+prefill about 390 tokens rather than 597, and a warm Mixed roll about 390 rather
+than 1,050 with no server start in front of it — eighteen seconds to the first
+character becoming roughly three.
+
+The 390 that remain are the creative brief, and they are genuinely new text: a
+different roll of the axes is a different brief. Nothing in the plumbing can
+cache what has not been written yet. Below that number the levers are the
+placement (126 tokens a second on Mixed against 30 on the processor, so the same
+brief is three seconds or thirteen) and the size of the brief itself, which is
+what the Creativity slider and the number of non-Natural axes control.

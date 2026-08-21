@@ -1926,17 +1926,40 @@ idle LLM.** Ordinary txt2img has to keep working, so a background llama-server
 that could starve a generation you are watching would be a bug rather than a
 setting.
 
-What *is* a setting is what happens to the LLM when a generation starts:
+What *is* a setting is what happens to a warm llama-server when a generation
+starts:
 
-| Mode | Behaviour |
+| Setting | Behaviour |
 | --- | --- |
-| **Hybrid** (the default) | llama-server is left where it is. It is holding spare VRAM, so the generation is unaffected and the next prompt it writes starts warm. |
-| **Exclusive** | llama-server is stopped and the generation gets the whole card. More headroom for a single large pass, at the cost of a model load per image. |
+| **Keep the LLM loaded** (the default) | llama-server is left where it is. It is holding spare VRAM, so the generation is unaffected and the next prompt starts warm. |
+| **Free the LLM for every image** | llama-server is stopped and the generation gets every last byte, at the cost of a model load per image. |
 
-Hybrid's rule is stated as a sentence and implemented as one:
+The default's rule is stated as a sentence and implemented as one:
 
 > Never unload merely because another workload started. Demote only because the
 > incoming workload actually needs the memory.
+
+That rule is why the default is the fast one. A stopped server is not only a
+reload: it is llama.cpp's prompt cache thrown away, so the standing instruction
+above your prompt — several hundred tokens that have not changed — is processed
+from scratch again before the first word appears.
+
+### Why the second prompt is faster than the first
+
+llama.cpp keeps the last prompt and resumes the next one at their common prefix.
+Krea's instruction sits above your prompt and the creative brief, and never
+changes, so only the brief has to be read on the second roll and every one after
+it. Two things make sure that actually happens:
+
+- **The instruction is prefilled at startup**, on a background thread, while
+  llama-server has nothing else to do. It never queues in front of your work —
+  it asks for the GPU as background and gives up instantly if anything else
+  wants it — so the roll it would have delayed is exactly the roll it skips.
+- **`--swa-full`** is passed when the build supports it. A sliding-window model
+  (Gemma is one) can otherwise only resume at a checkpoint llama.cpp happened to
+  take, which on a measured run meant 668 matching tokens resumed at 460 and the
+  other 208 read again — seven seconds of watching a progress bar. The memory
+  this costs is memory the estimator has always reserved.
 
 **A server that is up stays up.** Placement is decided when llama-server is
 started, not before every message. Once it is running, a message is answered by

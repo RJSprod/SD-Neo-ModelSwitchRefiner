@@ -75,9 +75,27 @@ MODE_EXCLUSIVE = "exclusive"
 MODE_HYBRID = "hybrid"
 
 MODES = (
-    (MODE_HYBRID, "Hybrid — the LLM keeps the VRAM the image side is not using"),
-    (MODE_EXCLUSIVE, "Exclusive — an image generation takes the whole card"),
+    (MODE_HYBRID, "Keep the LLM loaded — llama-server stays in the spare VRAM, "
+                  "so the next prompt it writes starts warm"),
+    (MODE_EXCLUSIVE, "Free the LLM for every image — stops llama-server when a generation "
+                     "starts; the most headroom for one pass, and a model load per image"),
 )
+"""The two modes, named for the only thing that still differs between them.
+
+They used to be "Hybrid" and "Exclusive" -- a question about who *owns* VRAM.
+That question no longer has two answers: the image model always keeps its VRAM
+and the LLM is placed in what is left over, whichever mode is chosen. What is
+left is a question about what happens to a *warm* llama-server that is already
+confined to the spare room when a generation starts, and that one is a real
+trade: keeping it costs the pass nothing measurable and saves a model load,
+freeing it hands the pass every last byte and costs one load per image.
+
+The stored constants keep their old spellings so a config holding ``hybrid`` or
+``exclusive`` still resolves. A config holding the old *label* does not, and
+falls back to the default -- which is deliberate: "one family owns VRAM at a
+time" was a choice about a question that is gone, and the nearest thing to it
+is not the setting a user with that answer stored would want today.
+"""
 
 OPT_MODE = "model_chain_memory_mode"
 
@@ -846,22 +864,22 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
     sweeping = exclusive_sweep and family == FAMILY_IMAGE and mode() == MODE_EXCLUSIVE
     swept = False
 
-    def say_what_hybrid_would_have_done() -> None:
+    def say_which_setting_did_this() -> None:
         """Name the setting, once, after the sweep has been reported.
 
-        A model load per image is a real cost, and Exclusive mode is frequently
-        chosen to fix a problem it does not cause -- a language model taking
-        image VRAM, which no longer happens in either mode. Said only when a
-        server was really stopped, so a machine that never runs one, or one
-        whose server was already down, hears nothing.
+        A model load per image is a real cost and it is easy to pay without
+        knowing why: the LLM is confined to spare VRAM either way, so the pass
+        gains almost nothing here and the next prompt starts cold. Said only
+        when a server was really stopped, so a machine that never runs one, or
+        one whose server was already down, hears nothing.
         """
         if not swept:
             return
         note(FAMILY_LLM,
-             "Exclusive mode hands the whole card to the image family, so llama-server "
-             "was stopped rather than left in the VRAM the checkpoint is not using. "
-             "Hybrid would have kept it warm — the LLM cannot take image VRAM in "
-             "either mode")
+             "llama-server was stopped because VRAM residency is set to free the LLM for "
+             "every image. It was holding only VRAM the checkpoint is not using, so "
+             "“Keep the LLM loaded” would have left it warm and the next prompt would "
+             "have started without a model load")
 
     # Exclusive mode is checked before the fit, and that ordering is the whole
     # difference between the two modes. Hybrid asks "does this fit"; Exclusive
@@ -882,14 +900,14 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
     if free <= 0:
         # VRAM could not be queried. Guessing at a deficit here would evict on
         # no evidence, which is exactly what this module exists not to do.
-        say_what_hybrid_would_have_done()
+        say_which_setting_did_this()
         return Reclaim(needed, free, freed, 0, tuple(actions))
 
     if free >= target:
         result = Reclaim(needed, free, freed, 0, tuple(actions))
         if actions:
             note(family, f"{reason or _reason_for(family)}: {result.describe()}")
-        say_what_hybrid_would_have_done()
+        say_which_setting_did_this()
         return result
 
     deficit = target - free
@@ -922,7 +940,7 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
              f"evictable was found; expect the driver to spill into system memory"
              f"{_unaccounted_note()}")
 
-    say_what_hybrid_would_have_done()
+    say_which_setting_did_this()
     return result
 
 
