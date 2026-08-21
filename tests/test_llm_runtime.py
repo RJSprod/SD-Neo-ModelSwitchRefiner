@@ -877,6 +877,69 @@ class TestTheCommandThatStartsIt:
         assert "CUDA_VISIBLE_DEVICES" in failure.text
 
 
+class TestWhatThisMachineMeasured:
+    """llama.cpp measures both rates for every request it serves. Until now the
+    extension printed them in a log line and threw them away, while estimating
+    the same quantities from character counts."""
+
+    @pytest.fixture(autouse=True)
+    def clean(self, timing_store):
+        import mc_progress
+
+        mc_progress.forget()
+        return timing_store
+
+    def test_a_measurement_is_kept_against_the_backbone_that_made_it(self):
+        runtime.remember_speed(30.0, 12.8, identity="gemma4-26b-a4b")
+        runtime.remember_speed(24.0, 4.9, identity="gemma4-12b-qat")
+
+        assert runtime.measured_speed("gemma4-26b-a4b")[1] == pytest.approx(12.8)
+        assert runtime.measured_speed("gemma4-12b-qat")[1] == pytest.approx(4.9)
+
+    def test_the_two_backbones_do_not_share_one_number(self):
+        """The reason this is keyed at all. Measured on one machine in system
+        RAM: a dense 12B wrote at 4.9 tokens a second, a 26B mixture-of-experts
+        at 12.8 -- the larger file two and a half times faster, because
+        generation from RAM is bandwidth-bound and an MoE activates a fraction
+        of its weights per token."""
+        runtime.remember_speed(30.0, 12.8, identity="gemma4-26b-a4b")
+
+        assert runtime.measured_speed("gemma4-12b-qat") == (0.0, 0.0)
+
+    def test_an_id_and_a_filename_reach_the_same_key(self):
+        """The running configuration and a catalogue entry come by different
+        routes and have to agree, or the catalogue shows nothing."""
+        assert runtime.speed_key(runtime.WRITE_RATE, "Gemma4 12B/QAT") == \
+            runtime.speed_key(runtime.WRITE_RATE, "gemma4-12b-qat")
+
+    def test_nothing_measured_is_reported_as_nothing(self):
+        assert runtime.measured_speed("never-run-here") == (0.0, 0.0)
+
+    def test_the_specific_key_is_asked_first(self):
+        keys = runtime.speed_keys("krea:write", "gemma4-12b-qat")
+
+        assert keys[0] == "krea:write:gemma4-12b-qat"
+        assert keys[-1] == "krea:write"
+
+    def test_the_catalogue_says_what_this_machine_measured(self, monkeypatch):
+        """Size is a bad proxy for speed and the catalogue was implying
+        otherwise."""
+        import mc_llm_managed_models as managed
+
+        runtime.remember_speed(30.0, 12.8, identity="gemma4-26b-a4b-balanced")
+        entry = managed.catalogue()[-1]
+
+        assert entry.identifier == "gemma4-26b-a4b-balanced"
+        assert "measured here: 12.8 tokens/s" in entry.describe()
+
+    def test_a_backbone_nobody_has_run_claims_nothing(self):
+        import mc_llm_managed_models as managed
+
+        entry = managed.catalogue()[0]
+
+        assert "measured here" not in entry.describe()
+
+
 class TestRetryingASmallerPlacement:
     """A start that ran out of VRAM is tried again with more headroom, because
     nothing this module knows could have predicted the refusal: the card said

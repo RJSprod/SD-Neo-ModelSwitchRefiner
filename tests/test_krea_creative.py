@@ -2121,11 +2121,22 @@ class TestTheCompactPanel:
         mc_creative_krea.remember(**{mc_creative_krea.CREATIVITY: 10,
                                      mc_creative_krea.AXIS_MODES:
                                          {lib.axis_keys[0]: director.VARY}})
-        monkeypatch.setattr(mc_progress, "measured",
-                            lambda key, default=0.0: 1.0 if key == "krea:read" else default)
+        monkeypatch.setattr(mc_progress, "rate_for",
+                            lambda keys: 1.0 if "krea:read" in keys[-1] else 0.0)
         characters, seconds = mc_creative_panel.brief_cost()
 
         assert seconds == pytest.approx(float(characters))
+
+    def test_the_rate_it_reads_is_this_backbone_s_own(self, built, store, lib):
+        """Backbones differ at this by more than anything else the estimate
+        models, and not in the direction their sizes suggest -- so a switch must
+        not leave the panel quoting the previous model's speed."""
+        import mc_llm_progress
+
+        keys = mc_llm_progress.writer_rates("krea:write")
+
+        assert keys[-1] == "krea:write"
+        assert len(keys) in (1, 2)
 
     def test_the_slider_updates_the_cost_line_with_it(self, built):
         """The number beside the directions must not be one action behind the
@@ -2187,9 +2198,10 @@ class TestTheCompactPanel:
         control on this panel changes it."""
         import mc_progress
 
+        monkeypatch.setattr(mc_progress, "rate_for", lambda keys: 0.05)
         monkeypatch.setattr(mc_progress, "measured",
-                            lambda key, default=0.0: {"krea:write": 0.05,
-                                                      "krea:reply": 400.0}.get(key, 0.0028))
+                            lambda key, default=0.0: 400.0 if key == "krea:reply" else default)
+
         assert "20s of writing" in mc_creative_panel.describe_cost()
 
     def test_one_render_answers_for_every_control_it_owns(self, built):

@@ -168,10 +168,12 @@ def brief_cost(stored=None) -> tuple[int, float]:
     try:
         import mc_progress
 
-        per_character = mc_progress.measured("krea:read", 0.0028)
+        import mc_llm_progress
+
+        per_character = mc_progress.rate_for(mc_llm_progress.writer_rates("krea:read"))
     except Exception:
         per_character = 0.0028
-    return characters, characters * float(per_character)
+    return characters, characters * float(per_character or 0.0028)
 
 
 def describe_creativity(value, stored=None) -> str:
@@ -271,7 +273,9 @@ def _writing_seconds() -> float:
     try:
         import mc_progress
 
-        per_character = float(mc_progress.measured("krea:write", 0.0))
+        import mc_llm_progress
+
+        per_character = float(mc_progress.rate_for(mc_llm_progress.writer_rates("krea:write")))
         length = float(mc_progress.measured("krea:reply", 0.0))
     except Exception:
         return 0.0
@@ -279,22 +283,33 @@ def _writing_seconds() -> float:
 
 
 def _placement_note() -> str:
-    """", on the card" or ", from system RAM", when that can be told.
+    """Where the writer runs and how fast it was last measured going, or "".
 
-    Where the language model runs is the largest of the three levers by a wide
-    margin -- the same machine that reads at 36 tokens a second with the weights
-    in RAM reads at 900 with them on the card -- and it is the one this panel
-    cannot change, so it is named rather than acted on.
+    The two facts a user needs to act on and the two the panel was leaving them
+    to infer from a log. Placement, because it is the largest lever by a wide
+    margin -- the same machine reads at 36 tokens a second with the weights in
+    RAM and 900 with them on the card. And the measured rate, because it is the
+    one number that says whether *this* backbone is a good one to be running in
+    that placement: on the machine this was written for, in system RAM, a dense
+    12B wrote at 4.9 tokens a second where a 26B mixture-of-experts wrote at
+    12.8.
+
+    Neither is something this panel can change, which is exactly why it names
+    them: the levers it does have are worth a few seconds each, and this one is
+    worth twenty.
     """
     try:
         import mc_llm_runtime
 
         configuration = mc_llm_runtime.config()
+        if not configuration.configured:
+            return ""
+        where = (" on the card" if configuration.on_gpu
+                 else " with the model in system RAM")
+        _prompt, reply = mc_llm_runtime.measured_speed()
     except Exception:
         return ""
-    if not configuration.configured:
-        return ""
-    return " on the card" if configuration.on_gpu else " with the model in system RAM"
+    return f"{where}, measured at {reply:.1f} tokens/s" if reply > 0 else where
 
 
 # --------------------------------------------------------------------------- #

@@ -240,17 +240,45 @@ class ManagedModel:
         return sum(artifact.approximate_bytes for artifact in self.artifacts)
 
     def describe(self) -> str:
-        """The one line the catalogue shows: role, size, and the family.
+        """The one line the catalogue shows: role, size, family, and speed here.
 
         Everything a choice between six models actually turns on, and nothing
         else. No temperature, no top-k, no cache type -- those are decided in
         ``managed_profiles`` and showing them here would turn a choice of
         backbone back into the settings screen this replaces.
+
+        The measured rate is here because size is a bad proxy for it and the
+        catalogue was implying otherwise. On one machine, both in system RAM,
+        the 12B marked *Recommended* wrote at 4.9 tokens a second and the 26B
+        marked *Current large baseline* wrote at 12.8 -- the larger file being
+        two and a half times faster, because generation from RAM is
+        bandwidth-bound and a mixture-of-experts activates a fraction of its
+        weights per token. No amount of reading the sizes gets you there. One
+        line of measurement does.
         """
         parts = [self.role, self._sizes()]
         if self.family:
             parts.append(self.family)
+        measured = self.measured_speed()
+        if measured:
+            parts.append(measured)
         return " · ".join(part for part in parts if part)
+
+    def measured_speed(self) -> str:
+        """What this machine measured this backbone writing at, or "".
+
+        llama.cpp's own figure for the requests it served, not an estimate from
+        character counts. Absent until this backbone has answered at least once
+        here, which is the honest state: nothing about somebody else's hardware
+        belongs in this line.
+        """
+        try:
+            import mc_llm_runtime
+
+            _prompt, reply = mc_llm_runtime.measured_speed(self.identifier)
+        except Exception:
+            return ""
+        return f"measured here: {reply:.1f} tokens/s" if reply > 0 else ""
 
     def _sizes(self) -> str:
         main = self.model.display_size or _bytes_label(self.model.approximate_bytes)

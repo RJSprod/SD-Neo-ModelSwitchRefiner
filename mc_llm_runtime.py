@@ -717,6 +717,102 @@ class Failure:
 
 
 # --------------------------------------------------------------------------- #
+# What this machine measured, per backbone
+# --------------------------------------------------------------------------- #
+
+WRITE_RATE = "llm:write"
+READ_RATE = "llm:read"
+"""Measured tokens per second, in the progress store, keyed by backbone.
+
+Not a proxy and not an estimate: llama.cpp reports both figures for every
+request it serves, and this is where they are kept so that something other than
+a log line can use them.
+
+Keyed per backbone because that is the axis they differ most on, and the
+difference is not the one the catalogue's sizes suggest. Measured on one
+machine, in system RAM: a dense 12B wrote at 4.9 tokens a second and a 26B
+mixture-of-experts wrote at 12.8, because generation from RAM is bandwidth-bound
+and an MoE activates a fraction of its weights per token. The bigger file was two
+and a half times faster, and nothing on screen said so.
+"""
+
+
+def speed_key(kind: str, identity: str = "") -> str:
+    """The store key for one backbone's measured rate, e.g. ``llm:write:gemma4-12b``.
+
+    The identity is normalised here rather than at each caller, because the two
+    that matter reach it by different routes -- the running configuration and a
+    catalogue entry's id -- and a key written by one and read by the other has
+    to be the same key.
+    """
+    identity = _key_safe(identity) if identity else writer_identity()
+    return f"{kind}:{identity}" if identity else kind
+
+
+def _key_safe(name) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(name or "")).strip("-").casefold()[:64]
+
+
+def speed_keys(kind: str, identity: str = "") -> tuple[str, ...]:
+    """That key, then the general one, for :func:`mc_progress.rate_for`.
+
+    Most specific first, which is the convention the store was built around: a
+    machine that has measured this backbone answers about this backbone, and one
+    that has not falls back to whatever it has learned in general rather than to
+    a built-in guess.
+    """
+    keyed = speed_key(kind, identity)
+    return (keyed, kind) if keyed != kind else (kind,)
+
+
+def writer_identity(configuration: Config | None = None) -> str:
+    """A short, stable name for the configured backbone, for keying rates by.
+
+    The catalogue id when there is one, because that is what a user chose and
+    what the catalogue can look a rate up by; the file's stem otherwise. Both
+    are reduced to characters a settings key can hold.
+    """
+    try:
+        configuration = configuration or config()
+    except Exception:
+        return ""
+    name = str(getattr(configuration, "managed_id", "") or "")
+    if not name:
+        model = getattr(configuration, "model", None)
+        name = model.stem if model is not None else ""
+    return _key_safe(name)
+
+
+def remember_speed(prompt: float, reply: float, identity: str = "") -> None:
+    """Fold one request's measured rates into the store. Never fatal."""
+    try:
+        import mc_progress
+
+        identity = identity or writer_identity()
+        if reply > 0:
+            mc_progress.learn(speed_key(WRITE_RATE, identity), float(reply))
+        if prompt > 0:
+            mc_progress.learn(speed_key(READ_RATE, identity), float(prompt))
+    except Exception:
+        logger.debug("Model Chain: could not record llama.cpp's measured speed",
+                     exc_info=True)
+
+
+def measured_speed(identity: str = "") -> tuple[float, float]:
+    """``(prompt, reply)`` tokens per second measured for one backbone, or zeros."""
+    try:
+        import mc_progress
+
+        identity = identity or writer_identity()
+        if not identity:
+            return 0.0, 0.0
+        return (float(mc_progress.measured(speed_key(READ_RATE, identity), 0.0)),
+                float(mc_progress.measured(speed_key(WRITE_RATE, identity), 0.0)))
+    except Exception:
+        return 0.0, 0.0
+
+
+# --------------------------------------------------------------------------- #
 # One impossible flag pair, taken back out of the vendored command
 # --------------------------------------------------------------------------- #
 
@@ -961,6 +1057,28 @@ again from the first token. A few hundred tokens of extra window is not worth
 that; a quarter more of it is. The asymmetry is deliberate: this is only ever
 consulted about placing *more* on the card, never less.
 """
+
+
+def _warn_about_an_idle_card(configuration: Config, layers: str) -> None:
+    """Say once, per start, when a card is present and doing nothing.
+
+    Mixed placement records ``--n-gpu-layers 0``, and llama.cpp with no
+    offloaded layers runs every matrix multiply on the processor -- so a machine
+    with a 3090 in it can spend twenty seconds a press at four tokens a second
+    while the card sits idle, with nothing on screen or in the log saying that
+    was the arrangement. This is that line.
+    """
+    from prompt_master.inference.device_detection import CPU_DEVICE, NO_OFFLOAD
+
+    if str(layers) != NO_OFFLOAD:
+        return
+    if str(configuration.device).casefold() == CPU_DEVICE:
+        return
+    logger.info("Model Chain: %s is visible to llama-server and will do no work in this "
+                "placement — Mixed offloads no layers, so the processor writes the whole "
+                "prompt. Choose GPU placement in LLM Studio → Setup to use the card, or a "
+                "backbone that is faster in system RAM.",
+                configuration.device_name or configuration.device)
 
 
 def _layers_argument(placement: mc_llm_context.Placement,
@@ -1358,6 +1476,7 @@ class Runtime:
         # nobody can find is a log nobody reads. It is one line per start, and
         # starts are rare.
         logger.info("Model Chain: llama-server log — %s", log_path)
+        _warn_about_an_idle_card(configuration, layers)
         _warn_about_system_ram(configuration, placement)
         self._log = (log_path, written_before)
 
@@ -1676,8 +1795,8 @@ class Runtime:
             return self.report.observed_bytes or (
                 self.report.estimate.resident_bytes if self.report.estimate else 0)
 
-    def speed_note(self) -> str:
-        """What llama.cpp measured for the most recent request, or "".
+    def speed(self) -> tuple[float, float]:
+        """``(prompt, reply)`` tokens per second for the most recent request.
 
         The number every other number in this module is a proxy for. A
         placement is a plan; this is what the plan produced, measured by the
@@ -1687,11 +1806,23 @@ class Runtime:
         """
         with self._lock:
             if self._log is None or not self._running:
-                return ""
+                return 0.0, 0.0
             path, offset = self._log
-        prompt, reply = read_speed(_text_since(path, offset, tail=_TIMING_TAIL))
+        return read_speed(_text_since(path, offset, tail=_TIMING_TAIL))
+
+    def speed_note(self) -> str:
+        """:meth:`speed` as one clause, and kept for whoever asks for it.
+
+        Recording it here rather than only printing it: the same measurement
+        answers "how long will this take" for the progress bar and "which
+        backbone is faster on this machine" for the catalogue, and both of those
+        were being estimated from character counts while llama.cpp was measuring
+        the real thing once per request and writing it to a log.
+        """
+        prompt, reply = self.speed()
         if reply <= 0:
             return ""
+        remember_speed(prompt, reply)
         measured = f"llama.cpp measured {reply:.1f} tokens/s"
         return f"{measured}, prompt at {prompt:.0f} tokens/s" if prompt > 0 else measured
 

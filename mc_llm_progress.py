@@ -117,6 +117,26 @@ rewinding it -- which is what a long answer should look like.
 """
 
 
+def writer_rates(kind: str) -> tuple[str, ...]:
+    """``(this backbone's key, the general key)`` for one phase.
+
+    Backbones differ at this by more than anything else the bar models, and not
+    in the direction their sizes suggest: measured on one machine in system RAM,
+    a dense 12B wrote at 4.9 tokens a second where a 26B mixture-of-experts wrote
+    at 12.8. Sharing one rate across all of them meant every switch spent the
+    next several rolls predicting the previous model's speed, and the panel
+    quoting it.
+
+    The specific key wins where it exists, which is the store's own convention.
+    """
+    try:
+        import mc_llm_runtime
+
+        return mc_llm_runtime.speed_keys(kind)
+    except Exception:
+        return (kind,)
+
+
 class Reporter:
     """One roll's progress, told to the host as it happens.
 
@@ -176,10 +196,11 @@ class Reporter:
 
         job = mc_progress.new_job()
         job.add(mc_progress.PHASE_KREA_WAIT, WAITING, rate_keys=waiting, units=1.0)
-        job.add(mc_progress.PHASE_KREA_READ, READING, rate_keys=("krea:read",),
+        job.add(mc_progress.PHASE_KREA_READ, READING, rate_keys=writer_rates("krea:read"),
                 units=max(int(prompt_characters), 1))
-        job.add(mc_progress.PHASE_KREA_WRITE, WRITING, rate_keys=("krea:write",),
-                units=expected, weights=(expected,))
+        job.add(mc_progress.PHASE_KREA_WRITE, WRITING,
+                rate_keys=writer_rates("krea:write"), units=expected,
+                weights=(expected,))
 
         if claim and not self._claim(task_id):
             return False

@@ -546,10 +546,29 @@ def preferred_device():
     return found[0]
 
 
+MIXED_TRUTH = ("model in system RAM — the processor does the work; the card is "
+               "visible but no layers run on it")
+"""What Mixed placement actually does, in place of what it used to claim.
+
+The vendored describer says "mixed: model in system RAM, card used for
+processing", and that is not what the command line produces: Mixed is recorded
+with ``--n-gpu-layers 0``, and llama.cpp with no offloaded layers runs every
+matrix multiply on the processor. Measured on one machine, same model, same
+prompt: CPU placement 4.2 tokens a second, Mixed 5.3 -- the difference between
+them is noise, because they are the same computation.
+
+Somebody choosing between three options is entitled to have the middle one
+describe itself truthfully; this is the line that does. The vendored file is
+left alone, as ``prompt_master/VENDORED_FROM.txt`` requires.
+"""
+
+
 def describe_device(device) -> str:
     from prompt_master.inference.device_detection import describe
 
     try:
+        if getattr(device, "is_mixed", False):
+            return f"{getattr(device, 'name', 'GPU')} — {MIXED_TRUTH}"
         return describe(device)
     except Exception:
         return getattr(device, "name", "unknown device")

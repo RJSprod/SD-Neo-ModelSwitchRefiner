@@ -1391,8 +1391,34 @@ Three levers, largest first:
 | **How many directions** | Linear. One direction at Creativity 10 is ~170 tokens; ten are ~800. A fresh install directs nothing, so this cost is entirely opt-in. |
 | **The Creativity position** | The expressions themselves get shorter down the scale: the same axis is ~78 tokens at 5 and ~173 at 10. |
 
-None of the three shortens the *writing* half. Only placement does — the same
-12B that writes at 5 tokens/sec from system RAM writes at 40–60 resident.
+None of the three shortens the *writing* half. Two things do, and neither is on
+the Creative panel:
+
+**Which backbone.** In system RAM, generation is bandwidth-bound, so the speed
+follows the *active* parameters per token — not the file size. Measured on one
+machine, same placement, same prompt:
+
+```
+Gemma 4 12B QAT   (dense, ~7.4 GB)    4.9 tokens/sec   ← "Recommended"
+Gemma 4 26B-A4B   (MoE,  ~16.8 GB)   12.8 tokens/sec   ← more than twice as fast
+```
+
+The 16.8 GB file is 2.6× faster than the 7.4 GB one, because a
+mixture-of-experts activates about 4B of its weights per token while a dense 12B
+activates all twelve. **LLM Studio → Setup now shows what each backbone measured
+on your machine**, beside its size, so this is a fact on the screen rather than
+one to be discovered from a log.
+
+**Where it runs.** The same 12B writes at 40–60 tokens/sec resident on a card.
+But it has to fit *beside* the image checkpoint: a Krea 2 stack wanting ~17.6 GB
+of a 24 GB card leaves about 6 GB, which is a 4B writer, not a 12B. Giving the
+writer VRAM the image model needs makes the image slower, not the prompt faster.
+
+> **"Mixed" does no GPU work.** Mixed placement is recorded as
+> `--n-gpu-layers 0`, and llama.cpp with no offloaded layers runs every matrix
+> multiply on the processor. Mixed and CPU are the same computation — measured
+> 4.2 vs 5.3 tokens/sec on one machine, which is noise. Only **GPU** placement
+> offloads layers. The Setup list and the start-up log now say so.
 
 If a Krea 2 checkpoint and your writer will not both fit on the card, the
 catalogue has smaller backbones — **Qwen 3.5 4B** is ~4.5 GB and will sit beside
