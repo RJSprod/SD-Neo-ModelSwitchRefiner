@@ -78,6 +78,7 @@ import mc_creative_panel
 import mc_infotext
 import mc_llm_sessions as sessions
 import mc_memory
+import mc_spatial
 from modules import errors, scripts
 
 logger = mc_memory.logger
@@ -124,20 +125,79 @@ def notice(text: str, kind: str = "info") -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _settings_for(values) -> dict:
-    """This generation's Creative settings, from the panel when it sent them.
+SPATIAL_CONTROLS = 3
+"""How many controls the Spatial block contributes: enabled, mode, layout."""
 
-    ``values`` is what Forge handed ``before_process`` after the enabled flag:
-    the four scalars and then the axis controls, in the order :meth:`ui` returned
-    them. A UI that could not build its axis controls sends fewer, and an API
-    request sends none at all, so the length is checked rather than assumed and
-    the saved preferences answer for anything absent.
+
+def _split(values) -> tuple[tuple, tuple, tuple]:
+    """``before_process``'s tuple, cut into its three parts.
+
+    ``ui()`` returns, after the enabled flag: four scalars, then three controls
+    per axis, then the three Spatial controls. Two of those three lengths are
+    fixed and the middle one is the library's, so the cut is made by *asking the
+    library* rather than by pattern-matching a length -- both a layout with
+    spatial and one without are multiples of three long, and a tuple cannot say
+    which it is.
+
+    Anything shorter than the axis block means there is no panel behind this
+    call: an API request that sent only the flag, or a page built against a
+    library that will not load. The saved settings answer for all of it, which
+    is what those callers already got.
     """
     values = tuple(values or ())
     if len(values) < 4:
+        return (), (), ()
+    scalars, rest = values[:4], values[4:]
+    try:
+        from prompt_master.krea import library as library_module
+
+        expected = len(library_module.library().axis_keys) * 3
+    except Exception:
+        return scalars, (), ()
+    if len(rest) < expected:
+        return scalars, rest, ()
+    return scalars, rest[:expected], rest[expected:expected + SPATIAL_CONTROLS]
+
+
+def _settings_for(values) -> dict:
+    """This generation's Creative settings, from the panel when it sent them.
+
+    ``values`` is what Forge handed ``before_process`` after the enabled flag,
+    in the order :meth:`ui` returned it. A UI that could not build its axis
+    controls sends fewer, and an API request sends none at all, so the length is
+    checked rather than assumed and the saved preferences answer for anything
+    absent.
+    """
+    scalars, axes, _ = _split(values)
+    if not scalars:
         return mc_creative_krea.settings()
-    creativity, seed, anti_repetition, loras = values[:4]
-    return _stored(creativity, seed, anti_repetition, loras, values[4:])
+    creativity, seed, anti_repetition, loras = scalars
+    return _stored(creativity, seed, anti_repetition, loras, axes)
+
+
+def _spatial_for(values) -> dict:
+    """This generation's Spatial settings, from the panel when it sent them.
+
+    Read off the panel for the same reason the Creative settings are: the radio
+    button somebody just moved is what they are looking at, and a generation
+    that used the last *saved* compose mode would silently ignore it. A caller
+    with no panel -- the API -- gets the saved settings, which is also how it
+    gets a layout at all: the serialized canvas is persisted, so a script that
+    sends only the Creative flag still composes the boxes the user last drew.
+    """
+    _, _, spatial = _split(values)
+    stored = mc_spatial.settings()
+    if len(spatial) < SPATIAL_CONTROLS:
+        return stored
+    enabled, mode, layout = spatial
+    from prompt_master.krea import spatial as spatial_module
+
+    mode = str(mode or "").strip().casefold()
+    stored["enabled"] = bool(enabled)
+    stored["compose_mode"] = mode if mode in spatial_module.COMPOSE_MODES \
+        else stored["compose_mode"]
+    stored["layout"] = str(layout or "")
+    return stored
 
 
 def _stored(creativity, seed, anti_repetition, loras, axis_values) -> dict:
@@ -200,7 +260,12 @@ def _recipe_view(recipe) -> str:
 
 
 def _toggled(enabled):
-    """Show or hide the controls, and remember the toggle."""
+    """Show or hide the controls, and remember the toggle.
+
+    Four outputs and three of them are the same update: the slider, the drawer
+    and the Spatial block all appear and disappear with the feature, because
+    none of them does anything while it is off.
+    """
     mc_creative_krea.remember(**{mc_creative_krea.ENABLED: bool(enabled)})
     shown = gr.update(visible=bool(enabled))
     if enabled:
@@ -214,7 +279,7 @@ def _toggled(enabled):
                       "warn" if objection else "info")
     else:
         told = notice("Creative Mode is off.")
-    return shown, shown, gr.update(value=told, visible=bool(enabled))
+    return shown, shown, gr.update(value=told, visible=bool(enabled)), shown
 
 
 def _remember_creativity(value):
@@ -247,6 +312,232 @@ def _last_roll():
 
 
 # --------------------------------------------------------------------------- #
+# The Spatial Layout editor
+# --------------------------------------------------------------------------- #
+
+SPATIAL_PREFIX = "mc-krea-spatial"
+"""Every element the layout editor owns starts here.
+
+Its own prefix rather than Creative Mode's, because the editor is one element
+that JavaScript relocates to ``document.body`` -- a ``position: fixed`` overlay
+inside an accordion is one ``overflow: hidden`` away from being a modal nobody
+can see -- and once it is there it is no longer under any Creative Mode id.
+"""
+
+
+def _spatial_id(*parts: str) -> str:
+    return "-".join((SPATIAL_PREFIX,) + tuple(str(part) for part in parts if part))
+
+
+def _has_vocabulary() -> bool:
+    """Whether the creativity library loaded, asked before the page is laid out.
+
+    :func:`mc_creative_panel.build` asks the same question and answers it with a
+    sentence on the page, but it is called from inside the drawer and the Spatial
+    block is built above the drawer. The library is read once per process and
+    cached, so asking twice costs a lock.
+    """
+    try:
+        from prompt_master.krea import library as library_module
+
+        library_module.library()
+        return True
+    except Exception:
+        logger.debug("Model Chain: the creativity library could not be read; the "
+                     "Spatial Layout controls were not built", exc_info=True)
+        return False
+
+
+def _options(vocabulary, blank: str) -> str:
+    """One ``<select>``'s options, out of the vocabulary that defines them.
+
+    Read from :mod:`prompt_master.krea.spatial` rather than written out here, so
+    that a framing offered on screen is a framing the compositor knows a phrase
+    for. The alternative -- a list in the markup and a dictionary in Python --
+    is two lists that agree until somebody adds to one of them, and the failure
+    is a selection silently dropped at generation time.
+    """
+    import html
+
+    found = []
+    for value in vocabulary:
+        label = value or blank
+        found.append(f'<option value="{html.escape(value)}">{html.escape(label)}</option>')
+    return "".join(found)
+
+
+def spatial_editor() -> str:
+    """The layout editor's markup: every control, none of its behaviour.
+
+    Built in Python and handed to the page as one static block, for two reasons
+    that are both about single sources of truth. The framing and camera-angle
+    lists are the compositor's own vocabularies, so a value that can be chosen
+    is a value that renders a phrase. And the whole editor is one element with
+    stable ids, so the browser file finds what it needs by id and by nothing
+    else -- no Gradio class, no DOM shape, nothing a theme can rearrange.
+
+    The canvas is a ``<div>``, not a ``<canvas>``. Regions are elements, so a
+    region can carry a title, be found by id, be focused, be styled by a theme
+    and be read by a test; a bitmap canvas would put all of that behind a
+    redraw loop in order to draw rectangles.
+    """
+    from prompt_master.krea import spatial
+
+    return f'''
+<div id="{_spatial_id("overlay")}" class="{SPATIAL_PREFIX}-overlay" hidden>
+  <div class="{SPATIAL_PREFIX}-modal" role="dialog" aria-label="Spatial Layout">
+    <div class="{SPATIAL_PREFIX}-head">
+      <span class="{SPATIAL_PREFIX}-title">Spatial Layout</span>
+      <span id="{_spatial_id("warning")}" class="{SPATIAL_PREFIX}-warning" hidden></span>
+      <span class="{SPATIAL_PREFIX}-spacer"></span>
+      <button type="button" id="{_spatial_id("draw")}"
+              class="{SPATIAL_PREFIX}-tool">Draw region</button>
+      <button type="button" id="{_spatial_id("duplicate")}"
+              class="{SPATIAL_PREFIX}-tool">Duplicate</button>
+      <button type="button" id="{_spatial_id("delete")}"
+              class="{SPATIAL_PREFIX}-tool">Delete</button>
+      <button type="button" id="{_spatial_id("raise")}"
+              class="{SPATIAL_PREFIX}-tool" title="Bring forward">Forward</button>
+      <button type="button" id="{_spatial_id("lower")}"
+              class="{SPATIAL_PREFIX}-tool" title="Send backward">Back</button>
+    </div>
+
+    <div class="{SPATIAL_PREFIX}-body">
+      <div class="{SPATIAL_PREFIX}-stage">
+        <div id="{_spatial_id("canvas")}" class="{SPATIAL_PREFIX}-canvas" tabindex="0">
+          <div class="{SPATIAL_PREFIX}-thirds" aria-hidden="true"></div>
+          <div class="{SPATIAL_PREFIX}-cross" aria-hidden="true"></div>
+          <div id="{_spatial_id("regions")}" class="{SPATIAL_PREFIX}-regions"></div>
+        </div>
+      </div>
+
+      <div class="{SPATIAL_PREFIX}-inspector">
+        <label class="{SPATIAL_PREFIX}-field">
+          <span>Regions</span>
+          <select id="{_spatial_id("list")}" size="6"
+                  class="{SPATIAL_PREFIX}-list"></select>
+        </label>
+        <label class="{SPATIAL_PREFIX}-field">
+          <span>Name</span>
+          <input type="text" id="{_spatial_id("name")}" />
+        </label>
+        <label class="{SPATIAL_PREFIX}-field">
+          <span>Type</span>
+          <select id="{_spatial_id("type")}">
+            <option value="{spatial.OBJECT}">Object</option>
+            <option value="{spatial.TEXT}">Text</option>
+          </select>
+        </label>
+        <label class="{SPATIAL_PREFIX}-field" id="{_spatial_id("text-field")}" hidden>
+          <span>Visible text</span>
+          <input type="text" id="{_spatial_id("text")}"
+                 placeholder="the exact words to render" />
+        </label>
+        <label class="{SPATIAL_PREFIX}-field">
+          <span id="{_spatial_id("prompt-label")}">Region prompt</span>
+          <textarea id="{_spatial_id("prompt")}" rows="3"
+                    placeholder="what is in this box, in your own words"></textarea>
+        </label>
+        <label class="{SPATIAL_PREFIX}-field" id="{_spatial_id("framing-field")}">
+          <span>Framing</span>
+          <select id="{_spatial_id("framing")}">{_options(spatial.FRAMINGS, "Automatic")}</select>
+        </label>
+        <label class="{SPATIAL_PREFIX}-field" id="{_spatial_id("angle-field")}">
+          <span>Camera angle</span>
+          <select id="{_spatial_id("angle")}">{_options(spatial.ANGLES, "Automatic")}</select>
+        </label>
+        <label class="{SPATIAL_PREFIX}-check">
+          <input type="checkbox" id="{_spatial_id("auto-hint")}" checked />
+          <span>Add position and size hints automatically</span>
+        </label>
+        <div class="{SPATIAL_PREFIX}-readout">
+          <span>Box (0–{spatial.SCALE})</span>
+          <code id="{_spatial_id("bbox")}">—</code>
+        </div>
+      </div>
+    </div>
+
+    <div class="{SPATIAL_PREFIX}-foot">
+      <span id="{_spatial_id("size")}" class="{SPATIAL_PREFIX}-note"></span>
+      <span class="{SPATIAL_PREFIX}-note">Scene prompt goes through the Creative
+        LLM · region prompts bypass it</span>
+      <span class="{SPATIAL_PREFIX}-spacer"></span>
+      <button type="button" id="{_spatial_id("cancel")}"
+              class="{SPATIAL_PREFIX}-tool">Cancel</button>
+      <button type="button" id="{_spatial_id("save")}"
+              class="{SPATIAL_PREFIX}-tool {SPATIAL_PREFIX}-primary">Save &amp; Close</button>
+    </div>
+  </div>
+</div>'''
+
+
+def spatial_summary(serialized, enabled: bool = True) -> str:
+    """The one line beside the Edit button: what is on the canvas right now.
+
+    Rendered by the server so that a restored workflow and a freshly built page
+    both say something true before any JavaScript has run, and repainted by the
+    browser as the user draws. Two writers for one line is a thing to be careful
+    about; the care is that both compute it from the same serialized layout.
+    """
+    from prompt_master.krea import spatial
+
+    layout = spatial.parse(serialized)
+    if layout.unreadable:
+        return notice(" ".join(layout.notes) or "The saved layout could not be read.",
+                      "warn")
+    if not layout.regions:
+        return notice("No regions yet. Press Edit Layout to draw one — the scene "
+                      "prompt still goes through Creative Mode either way.")
+    said = spatial.summarise(layout)
+    if not enabled:
+        return notice(f"{said} — Spatial Layout is off, so they are not applied.")
+    return notice(f"{said}. Region prompts are used exactly as typed; the scene "
+                  f"around them is written by Creative Mode.")
+
+
+def _spatial_toggled(enabled, serialized):
+    """Remember the Spatial toggle, and say what it now does."""
+    mc_spatial.remember(**{mc_spatial.ENABLED: bool(enabled)})
+    return spatial_summary(serialized, bool(enabled))
+
+
+def _spatial_mode(mode, serialized, enabled):
+    """Remember Smart or Direct, and say what the difference costs."""
+    from prompt_master.krea import spatial
+
+    mode = str(mode or "").strip().casefold()
+    if mode not in spatial.COMPOSE_MODES:
+        mode = spatial.SMART
+    mc_spatial.remember(**{mc_spatial.COMPOSE_MODE: mode})
+    if not enabled:
+        return spatial_summary(serialized, bool(enabled))
+    if mode == spatial.SMART:
+        return notice("Smart Spatial Compose: a second, short language-model pass "
+                      "rewrites the scene so it stops arguing with your boxes. It "
+                      "cannot change a box, a region prompt or a visible text. It "
+                      "costs one extra request per generation.")
+    return notice("Direct BBOX Merge: the scene Creative Mode wrote is used as it "
+                  "stands and no second request is made. Faster, and the control "
+                  "half of an A/B against Smart.")
+
+
+def _spatial_saved(serialized, enabled):
+    """The browser saved a layout. Keep it, and repaint the summary."""
+    mc_spatial.remember(**{mc_spatial.LAYOUT: str(serialized or "")})
+    return spatial_summary(serialized, bool(enabled))
+
+
+def _spatial_scenes(record):
+    mc_spatial.remember(**{mc_spatial.RECORD_SCENES: bool(record)})
+    return notice("The scene before and after the composer pass will be recorded in "
+                  "each spatial image's metadata."
+                  if record else
+                  "The intermediate scenes will not be recorded. Smart and Direct "
+                  "images can still be told apart by Krea Spatial Compose Mode, but "
+                  "what the composer changed will not be recoverable afterwards.")
+
+
+# --------------------------------------------------------------------------- #
 # Continuing from a pasted image
 # --------------------------------------------------------------------------- #
 
@@ -271,6 +562,16 @@ def _pasted_view() -> str:
         lines.append(f"Creativity library: {setup.library_version}")
     if setup.writer:
         lines.append(f"Written by: {setup.writer}")
+    if setup.spatial:
+        from prompt_master.krea import spatial as spatial_module
+
+        drawn = spatial_module.parse(setup.spatial_layout)
+        lines.append(f"{spatial_module.summarise(drawn)}"
+                     f"{f' · {setup.spatial_compose_mode} merge' if setup.spatial_compose_mode else ''}")
+        for region in drawn.ordered:
+            body = region.text if region.kind == spatial_module.TEXT else region.prompt
+            lines.append(f"  [{region.identifier}] {list(region.bbox)} "
+                         f"{region.kind}: {body}")
     for warning in setup.warnings():
         lines.append(f"Warning: {warning}")
     return "\n".join(lines)
@@ -296,7 +597,7 @@ def _restore_setup(replay_exactly):
         return (gr.update(), gr.update(),
                 notice("There is no Creative setup from a pasted image to restore.",
                        "warn"),
-                gr.update())
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
 
     stored = mc_creative_krea.settings()
     remembered = {}
@@ -342,11 +643,44 @@ def _restore_setup(replay_exactly):
                     "from the same idea, not the original.")
     said.extend(setup.warnings())
 
+    # The canvas, restored as one document. The state box is this script's own
+    # component, so writing to it is nothing like writing to the prompt box --
+    # and it is what makes "restore the workflow" mean the whole workflow rather
+    # than the half of it that fits in a settings file.
+    layout_update, spatial_on, mode_update = gr.update(), gr.update(), gr.update()
+    if setup.spatial:
+        from prompt_master.krea import spatial as spatial_module
+
+        readable = (setup.spatial_version is None
+                    or setup.spatial_version == spatial_module.VERSION)
+        if readable:
+            mc_spatial.remember(**{mc_spatial.LAYOUT: setup.spatial_layout,
+                                   mc_spatial.ENABLED: True})
+            layout_update = gr.update(value=setup.spatial_layout)
+            spatial_on = gr.update(value=True)
+            said.append("The spatial canvas is back as it was drawn, and Spatial "
+                        "Layout is on.")
+            mode = str(setup.spatial_compose_mode or "").strip().casefold()
+            if mode in spatial_module.COMPOSE_MODES:
+                mc_spatial.remember(**{mc_spatial.COMPOSE_MODE: mode})
+                mode_update = gr.update(value=mode)
+        else:
+            # Refused, not migrated. §8.4 is explicit that exact replay never
+            # depended on this record -- the picture is reproducible from its own
+            # Prompt line -- so the honest thing to do with a layout from a later
+            # build is leave it alone and say so.
+            said.append("The recorded spatial layout is from a later version and "
+                        "was not restored; the canvas is untouched.")
+
     kind = "warn" if setup.warnings() or (replay_exactly and not setup.replayable) \
         else "info"
+    told = notice(" ".join(said), kind)
     return (gr.update(value=setup.source) if setup.source else gr.update(),
-            gr.update(value=True),
-            notice(" ".join(said), kind), gr.update(value=_pasted_view()))
+            gr.update(value=True), told, gr.update(value=_pasted_view()),
+            layout_update, spatial_on, mode_update,
+            gr.update(value=spatial_summary(
+                setup.spatial_layout if setup.spatial else
+                mc_spatial.settings()["layout"], True)))
 
 
 def _disarm_replay():
@@ -381,6 +715,14 @@ class ScriptKreaCreative(scripts.Script):
         # by the hook that tried and read by postprocess, which is the only
         # place a sentence can reach the person who pressed Generate.
         self._complaint = ""
+        # The same, for the layout half: a Composer that did not run, a layout
+        # that could not be read, a compositor that raised. Separate from the
+        # complaint above because they are separate outcomes -- a spatial
+        # generation can have a perfectly good prompt and no boxes in it, and
+        # saying "Creative Mode did not write this prompt" about that would be
+        # false as well as unhelpful.
+        self._spatial_note = ""
+        self._record_scenes = True
 
     def title(self):
         return "Krea Creative Mode"
@@ -405,9 +747,12 @@ class ScriptKreaCreative(scripts.Script):
     # -- UI ---------------------------------------------------------------- #
 
     def ui(self, is_img2img):
+        from prompt_master.krea import spatial as spatial_module
         from prompt_master.krea import variation
 
         stored = mc_creative_krea.settings()
+        spatial = mc_spatial.settings()
+        vocabulary = _has_vocabulary()
 
         with gr.Group(elem_id=ident("group")):
             with gr.Row(elem_id=ident("bar")):
@@ -423,6 +768,45 @@ class ScriptKreaCreative(scripts.Script):
 
             status = gr.HTML(notice("Creative Mode is off."),
                              visible=bool(stored["enabled"]), elem_id=ident("status"))
+
+            # Spatial Layout sits above the drawer rather than inside it. It is
+            # a decision about *this* picture -- where the subjects go -- and the
+            # drawer holds decisions about how this installation does art
+            # direction. It is hidden with the slider when Creative Mode is off,
+            # because a composition guide with nothing to compose around is a
+            # control that cannot do anything.
+            #
+            # Built only when the creativity library loaded, and that is not a
+            # dependency this feature has -- the compositor needs no vocabulary
+            # at all. It is that a Spatial Layout composes boxes around a scene
+            # Creative Mode wrote, and an installation whose Creative Mode
+            # cannot run has no scene for them to go around. One sentence on the
+            # page beats two dead controls under it.
+            with gr.Group(visible=bool(stored["enabled"]) and vocabulary,
+                          elem_id=ident("spatial")) as spatial_group:
+                with gr.Row(elem_id=ident("spatial", "bar")):
+                    spatial_enabled = gr.Checkbox(
+                        value=bool(spatial["enabled"]), label="Spatial Layout", scale=1,
+                        elem_id=ident("spatial", "toggle"),
+                        info="place subjects with bounding boxes")
+                    spatial_compose = gr.Radio(
+                        choices=[("Smart Spatial Compose", spatial_module.SMART),
+                                 ("Direct BBOX Merge", spatial_module.DIRECT)],
+                        value=spatial["compose_mode"], label="Composition", scale=2,
+                        elem_id=ident("spatial", "compose"))
+                    edit = gr.Button("Edit Layout…", size="sm", scale=1,
+                                     elem_id=_spatial_id("open"))
+                spatial_status = gr.HTML(
+                    spatial_summary(spatial["layout"], bool(spatial["enabled"])),
+                    elem_id=ident("spatial", "status"))
+                # The one component the browser writes to, and the one that
+                # travels with the generation. Hidden rather than absent: the
+                # editor is a page, the compositor is a hook, and a hidden
+                # textbox is the only thing Gradio offers that is both.
+                spatial_state = gr.Textbox(
+                    value=spatial["layout"], visible=False, lines=1,
+                    elem_id=_spatial_id("state"))
+                gr.HTML(spatial_editor(), elem_id=_spatial_id("editor"))
 
             with gr.Accordion("Creative Controls", open=False,
                               visible=bool(stored["enabled"]),
@@ -452,6 +836,13 @@ class ScriptKreaCreative(scripts.Script):
                                             elem_id=ident("restore", "apply"))
                         disarm = gr.Button("Clear armed replay", size="sm",
                                            elem_id=ident("restore", "clear"))
+
+                record_scenes = gr.Checkbox(
+                    value=bool(spatial["record_scenes"]),
+                    label="Record the scene before and after the composer pass",
+                    elem_id=ident("spatial", "scenes"),
+                    info="spatial images only; makes a Smart/Direct comparison "
+                         "readable afterwards")
 
                 # Filled on request rather than streamed. The roll happens
                 # inside the generation now, where there is no open Gradio
@@ -491,27 +882,38 @@ class ScriptKreaCreative(scripts.Script):
         self.components = {
             "enabled": enabled, "creativity": creativity, "status": status,
             "controls": controls, "show": show, "recipe": recipe, "expanded": expanded,
-            "pasted": pasted, "replay": exactly, "restore": restore, "disarm": disarm}
+            "pasted": pasted, "replay": exactly, "restore": restore, "disarm": disarm,
+            "spatial_group": spatial_group, "spatial_enabled": spatial_enabled,
+            "spatial_compose": spatial_compose, "spatial_status": spatial_status,
+            "spatial_state": spatial_state, "spatial_edit": edit,
+            "spatial_scenes": record_scenes}
         if panel is not None:
             self.components.update(panel.components())
 
         self._wire(enabled, creativity, status, controls, show, recipe, expanded,
-                   pasted, exactly, restore, disarm)
+                   pasted, exactly, restore, disarm, spatial_group)
+        self._wire_spatial(spatial_enabled, spatial_compose, spatial_status,
+                           spatial_state, record_scenes)
         self._register_paste_fields()
 
         # Every control travels to before_process, because that is where the
         # roll happens and the panel is what the user is looking at. They are
         # this script's own arguments and reach neither Model Chain's preset
         # list nor its infotext.
+        #
+        # The Spatial controls go last and stay last. _split() cuts this tuple
+        # by asking the library how long the axis block is, so the two fixed
+        # ends are the two that can be read without counting.
+        spatial_controls = [spatial_enabled, spatial_compose, spatial_state]
         if panel is None:
             self.arguments = [enabled, creativity]
         else:
             self.arguments = ([enabled, creativity] + list(panel.settings_controls)
-                              + list(panel.axis_controls))
+                              + list(panel.axis_controls) + spatial_controls)
         return list(self.arguments)
 
     def _wire(self, enabled, creativity, status, controls, show, recipe, expanded,
-              pasted, exactly, restore, disarm):
+              pasted, exactly, restore, disarm, spatial_group):
         """Every handler this file owns, in one place. The panel wires its own.
 
         All of them ``queue=False``: not one of these does any work worth
@@ -520,7 +922,8 @@ class ScriptKreaCreative(scripts.Script):
         :meth:`before_process`, which is not reachable from here.
         """
         enabled.change(fn=_toggled, inputs=[enabled],
-                       outputs=[creativity, controls, status], queue=False)
+                       outputs=[creativity, controls, status, spatial_group],
+                       queue=False)
 
         # The slider moves what the brief costs as well as what it says, and the
         # cost line is the thing somebody looks at straight after moving it. Sent
@@ -543,17 +946,60 @@ class ScriptKreaCreative(scripts.Script):
         # prompt, or a test with no page at all -- the restore still restores the
         # settings and still says so; only the phrase has nowhere to go, and it
         # is in the record above for copying.
+        spatial_outputs = [self.components["spatial_state"],
+                           self.components["spatial_enabled"],
+                           self.components["spatial_compose"],
+                           self.components["spatial_status"]]
         if self.prompt_box is not None:
             restore.click(fn=_restore_setup, inputs=[exactly],
-                          outputs=[self.prompt_box, enabled, status, pasted],
+                          outputs=[self.prompt_box, enabled, status, pasted]
+                                  + spatial_outputs,
                           queue=False)
         else:
             logger.debug("Model Chain: the txt2img prompt box was not offered to "
                          "Creative Mode; Restore Creative setup will not fill it in")
             restore.click(fn=lambda exactly: _restore_setup(exactly)[1:],
-                          inputs=[exactly], outputs=[enabled, status, pasted],
+                          inputs=[exactly],
+                          outputs=[enabled, status, pasted] + spatial_outputs,
                           queue=False)
         disarm.click(fn=_disarm_replay, outputs=[status], queue=False)
+
+    def _wire_spatial(self, spatial_enabled, spatial_compose, spatial_status,
+                      spatial_state, record_scenes):
+        """The Spatial controls' handlers. Four, and none of them generates.
+
+        The state box is the whole of the browser-to-server channel, and it is a
+        channel in one direction only and only between presses: the editor writes
+        the serialized document into it when somebody saves a layout, Gradio's
+        own change event carries that to Python, and Python persists it and
+        repaints the summary line. Nothing polls it, nothing waits for it, and no
+        generation is held up by it -- press Generate and close the tab and the
+        layout that was in the box when the request left is the layout that gets
+        composed.
+
+        That is the difference between this box and the one the old Creative
+        gate had, which looked the same and was not: that one was *polled* by a
+        setInterval that had to see a token appear in it before an image could
+        start, so a throttled tab made a generation late and a closed one made it
+        never happen. Here the box is an input, like the slider.
+
+        ``change`` rather than ``input``: the value arrives from JavaScript, not
+        from a keystroke. The feedback loop the Creative panel avoids by using
+        ``input`` cannot form here because no handler on this box writes back to
+        it -- and the server *does* write to it, on a workflow restore, where
+        having the restored layout persist itself is exactly right.
+        """
+        spatial_enabled.change(fn=_spatial_toggled,
+                               inputs=[spatial_enabled, spatial_state],
+                               outputs=[spatial_status], queue=False)
+        spatial_compose.change(fn=_spatial_mode,
+                               inputs=[spatial_compose, spatial_state, spatial_enabled],
+                               outputs=[spatial_status], queue=False)
+        spatial_state.change(fn=_spatial_saved,
+                             inputs=[spatial_state, spatial_enabled],
+                             outputs=[spatial_status], queue=False)
+        record_scenes.change(fn=_spatial_scenes, inputs=[record_scenes],
+                             outputs=[spatial_status], queue=False)
 
     def _register_paste_fields(self):
         """Make an ordinary paste reproduce the image rather than re-expand it.
@@ -608,6 +1054,8 @@ class ScriptKreaCreative(scripts.Script):
         """
         if not enabled:
             return
+        import mc_broker
+
         self._complaint = ""
         if self._rolling:
             # A process_images() nested inside our own roll. There is nothing to
@@ -616,7 +1064,28 @@ class ScriptKreaCreative(scripts.Script):
                          "generation is left alone")
             return
 
-        written = self._roll(p, args)
+        self._spatial_note = ""
+        settings = _settings_for(args)
+        layout = self._layout(p, args)
+
+        # Both passes, inside one declaration and under one re-entrancy flag.
+        #
+        # ``host_job`` is what tells ``mc_llm_sessions._Gpu.acquire`` that the
+        # image job is blocked waiting for this request rather than competing
+        # with it, and it has to cover the Spatial Composer as much as the
+        # writer: pass 2 runs at the same point in the same hook, with the same
+        # generation waiting on it, and one started outside this block would
+        # wait for the job that is waiting for it. It is re-entrant and
+        # thread-local, so declaring it once here is the whole of it.
+        written = None
+        self._rolling = True
+        try:
+            with mc_broker.host_job():
+                rolled = self._roll(p, settings, layout)
+                if rolled is not None:
+                    written = self._spatially(p, rolled, settings, layout)
+        finally:
+            self._rolling = False
         if written is None:
             return
 
@@ -645,37 +1114,145 @@ class ScriptKreaCreative(scripts.Script):
         extension already puts the sentence when Stage 2 fails. The roll runs in
         ``before_process`` and this is the first hook after it that is handed
         something the user will look at.
+
+        The layout half is reported separately and can appear on its own. A
+        generation whose prompt was written perfectly well and whose Spatial
+        Composer timed out is not a Creative Mode failure, and describing it as
+        one would send somebody to look at the wrong thing.
         """
         complaint = self._complaint
+        spatial_note = self._spatial_note
         self._complaint = ""
-        if not complaint or processed is None:
+        self._spatial_note = ""
+        if processed is None:
             return
         try:
-            processed.comments += (
-                f"\nModel Chain: Creative Mode did not write this prompt — {complaint}. "
-                "The image was generated from the prompt exactly as typed. The console "
-                "and LLM Studio → Setup say more.")
+            if complaint:
+                processed.comments += (
+                    f"\nModel Chain: Creative Mode did not write this prompt — "
+                    f"{complaint}. The image was generated from the prompt exactly as "
+                    "typed. The console and LLM Studio → Setup say more.")
+            if spatial_note:
+                processed.comments += (
+                    f"\nModel Chain: Spatial Layout — {spatial_note}. Your regions "
+                    "have not been changed.")
         except Exception:
             logger.debug("Model Chain: could not put the Creative Mode notice on the "
                          "result", exc_info=True)
 
-    def _roll(self, p, values):
+    def _layout(self, p, values):
+        """This generation's spatial layout, or an empty one.
+
+        Parsed before the roll rather than after it, because pass 1 has to know
+        whether a layout exists: the one sentence it is told about placement is
+        added only when there is a layout to justify it, and adding it after the
+        writer had already written would be adding it to nothing.
+
+        An empty answer -- Spatial Layout switched off, nothing drawn, or a
+        layout this build cannot read -- is the answer that makes the rest of
+        this generation exactly the Creative Mode generation it would have been
+        before this feature existed.
+        """
+        from prompt_master.krea import spatial
+
+        chosen = _spatial_for(values)
+        self._record_scenes = bool(chosen.get("record_scenes", True))
+        if not chosen.get("enabled"):
+            return spatial.Layout()
+        layout = mc_spatial.layout_for(chosen.get("layout"),
+                                       width=getattr(p, "width", 0),
+                                       height=getattr(p, "height", 0),
+                                       compose_mode=chosen.get("compose_mode"))
+        for note in layout.notes:
+            logger.warning("Model Chain: Spatial Layout — %s", note)
+        if layout.unreadable:
+            self._spatial_note = " ".join(layout.notes)
+        return layout
+
+    def _spatially(self, p, rolled, settings, layout):
+        """The scene, the boxes, and the one structured prompt built from both.
+
+        Everything after pass 1 and before ``p.prompt``. The order is the design
+        intent's §3 exactly and each step can only fail *backwards*:
+
+        * no regions -> the writer's paragraph, which is Creative Mode as it was;
+        * Direct, or a Composer that failed -> that paragraph as the scene;
+        * a compositor that raised -> that paragraph, and a sentence saying the
+          layout was not applied.
+
+        None of those refuses a generation, and none of them silently drops a
+        box: every one of them says what happened, in the log and on the result.
+        """
+        from prompt_master.krea import spatial
+
+        loras = settings.get("loras", "")
+        if not layout.regions:
+            return mc_creative_krea.prepare(rolled, loras, settings)
+
+        enhanced = rolled.expanded
+        composed = None
+        scene, background = enhanced, ""
+        if layout.compose_mode == spatial.SMART:
+            composed = mc_spatial.compose(
+                source=rolled.source, scene=enhanced, layout=layout,
+                ratio=spatial.aspect_ratio(getattr(p, "width", 0),
+                                           getattr(p, "height", 0)),
+                seed=mc_spatial.composer_seed(rolled.creative_seed),
+                reserve=mc_creative_krea.image_reserve_bytes())
+            if composed.ran:
+                scene, background = composed.scene, composed.background
+            else:
+                # Direct merge is the answer to every Composer failure. The
+                # boxes are the user's and are unaffected; what is lost is the
+                # de-conflicting of the global scene, and saying so is the
+                # difference between a fallback and a mystery.
+                logger.warning("Model Chain: the Spatial Composer did not run (%s); "
+                               "merging the layout directly instead", composed.failed)
+                self._spatial_note = (f"the scene was merged directly because the "
+                                      f"Spatial Composer did not run — "
+                                      f"{composed.failed}")
+
+        try:
+            prompt = spatial.compose(
+                layout, scene=scene, background=background,
+                ratio=spatial.aspect_ratio(getattr(p, "width", 0),
+                                           getattr(p, "height", 0)))
+        except Exception as exc:
+            errors.report("Model Chain: the spatial compositor failed", exc_info=True)
+            self._spatial_note = (f"the Spatial Layout was not applied because the "
+                                  f"compositor failed ({exc})")
+            return mc_creative_krea.prepare(rolled, loras, settings)
+
+        metadata = mc_spatial.metadata(
+            layout, compose_mode=layout.compose_mode, composed=composed,
+            enhanced=enhanced, record_scenes=self._record_scenes)
+        logger.info("Model Chain: Spatial Layout applied — %s element%s, %s merge, "
+                    "%s characters of structured prompt",
+                    len(layout.regions), "" if len(layout.regions) == 1 else "s",
+                    layout.compose_mode, f"{len(prompt):,}")
+        return mc_creative_krea.prepare(rolled, loras, settings, prompt=prompt,
+                                        spatial=metadata)
+
+    def _roll(self, p, settings, layout):
         """One creative roll for this generation, or ``None`` to leave it alone.
 
-        The whole of the deadlock fix is the two lines that matter here: the roll
-        runs inside :class:`mc_broker.host_job`, which is how
-        ``mc_llm_sessions._Gpu.acquire`` is told that the image job is blocked
-        waiting for this request rather than competing with it, and the bar is
-        borrowed rather than claimed, because the host already started one for
-        the generation this is the first part of.
+        Returns the :class:`mc_creative_krea.Roll` rather than the finished
+        prompt, because what the prompt is made of is settled after this: a
+        layout may still be composed onto the scene it produced. The two steps
+        are separate functions for the same reason they are separate passes --
+        one of them talks to a model and the other one cannot.
+
+        Called inside the :class:`mc_broker.host_job` block ``before_process``
+        opens, which is how ``mc_llm_sessions._Gpu.acquire`` is told that the
+        image job is blocked waiting for this request rather than competing with
+        it. The bar is borrowed rather than claimed, because the host already
+        started one for the generation this is the first part of.
 
         The events are drained rather than forwarded. There is no open Gradio
         event to forward them to -- the press became a native generation, not a
         handler with an output list -- so the progress bar carries the phase and
         the log carries the rest.
         """
-        import mc_broker
-
         source = str(getattr(p, "prompt", "") or "").strip()
         if not source:
             logger.info("Model Chain: Creative Mode has no source prompt to work from")
@@ -683,43 +1260,39 @@ class ScriptKreaCreative(scripts.Script):
             return None
 
         session = mc_creative_krea.creative
-        settings = _settings_for(values)
-        loras = settings.get("loras", "")
 
         # Held by name and closed explicitly, the way the roll itself holds the
         # LLM run: every path out of the loop below leaves the generator
         # suspended, and it is its ``finally`` that gives the progress bar and
         # the workload lock back. Closing it is what runs that now rather than
         # whenever the interpreter next collects the frame.
-        events = session.roll(source, settings, guard_checkpoint=True, own_bar=False)
+        events = session.roll(source, settings, guard_checkpoint=True, own_bar=False,
+                              spatial_layout=layout)
         written = False
-        self._rolling = True
         try:
-            with mc_broker.host_job():
-                for event in events:
-                    if event.kind == sessions.STATUS:
-                        logger.debug("Model Chain: Creative Mode — %s", event.text)
-                    elif event.kind == sessions.CANCELLED:
-                        logger.info("Model Chain: the Creative Mode roll was stopped; "
-                                    "the generation continues with the typed prompt")
-                        self._complaint = "the roll was stopped"
-                        break
-                    elif event.kind == sessions.FAILED:
-                        logger.warning("Model Chain: the Creative Mode roll failed (%s); "
-                                       "generating from the typed prompt instead",
-                                       event.text)
-                        self._complaint = event.text
-                        break
-                    elif event.kind == sessions.DONE:
-                        written = True
-                        break
+            for event in events:
+                if event.kind == sessions.STATUS:
+                    logger.debug("Model Chain: Creative Mode — %s", event.text)
+                elif event.kind == sessions.CANCELLED:
+                    logger.info("Model Chain: the Creative Mode roll was stopped; "
+                                "the generation continues with the typed prompt")
+                    self._complaint = "the roll was stopped"
+                    break
+                elif event.kind == sessions.FAILED:
+                    logger.warning("Model Chain: the Creative Mode roll failed (%s); "
+                                   "generating from the typed prompt instead",
+                                   event.text)
+                    self._complaint = event.text
+                    break
+                elif event.kind == sessions.DONE:
+                    written = True
+                    break
         except Exception as exc:
             errors.report("Model Chain: the Creative Mode roll failed", exc_info=True)
             self._complaint = str(exc) or exc.__class__.__name__
             return None
         finally:
             events.close()
-            self._rolling = False
 
         if not written:
             return None
@@ -730,4 +1303,4 @@ class ScriptKreaCreative(scripts.Script):
                            "generating from the typed prompt instead")
             self._complaint = "the writer returned nothing"
             return None
-        return mc_creative_krea.prepare(last, loras, settings)
+        return last

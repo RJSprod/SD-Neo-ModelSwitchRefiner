@@ -1103,9 +1103,17 @@ class TestStylesheetConstraints:
         assert css.index("background-color: var(--mc-progress-fill)") < css.index("color-mix")
 
     def test_every_effect_derives_from_the_one_colour(self):
-        """Which is what lets a custom colour recolour every theme."""
+        """Which is what lets a custom colour recolour every theme.
+
+        The bar's own rules, not every rule in the file. Other features mix
+        colours too -- the Spatial Layout canvas draws its guides and its region
+        fills as a host property mixed with transparent, which is how they stay
+        legible on a light theme without stating a colour of their own -- and
+        those have nothing to derive from the bar's fill. What this defends is
+        that no *bar* effect appears out of nowhere: change the one colour and
+        every part of the bar follows it."""
         for selector, body in rules():
-            if "color-mix" not in body:
+            if "color-mix" not in body or "mc-progress" not in selector:
                 continue
             assert "--mc-progress-fill" in body, f"{selector} mixes a colour from nowhere"
 

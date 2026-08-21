@@ -1055,3 +1055,257 @@ that does nothing when no layers are on the card. The writer's output length is
 the product — it is a Krea prompt, and a truncated one is not a faster prompt,
 it is a broken one. What is left is the three things above: which backbone,
 where it runs, and how much brief it is asked to read.
+
+
+## 14. Spatial BBOX: composition the writer does not own (21 August 2026)
+
+Companion to the *Krea 2 Creative Mode Spatial BBOX* design intent v0.1
+(21 August 2026). Section numbers in this part are that document's.
+
+The feature in one sentence: the user draws boxes, types a prompt into each one,
+and the boxes reach Krea 2 as a structured prompt whose *scene* Creative Mode
+wrote and whose *elements* nothing wrote — they are what was drawn.
+
+### 14.1 What was built
+
+| File | What it is |
+| --- | --- |
+| `prompt_master/krea/spatial.py` | the pure half: parsing, validation, the deterministic hints, the compositor |
+| `prompt_master/krea/composer.py` | pass 2's instruction, and the strict reader for what comes back |
+| `mc_spatial.py` | the host glue: preferences, the pass-2 run, and what one spatial generation records |
+| `mc_llm_sessions.krea_compose` | one Composer request, beside `krea` and unlike it in three ways |
+| `mc_llm_progress.Pass` | which of the two passes the bar is describing, and what it learns from it |
+| `scripts/model_chain_krea_creative.py` | the panel block, the editor markup, and the four steps after the roll |
+| `javascript/model_chain_spatial_krea.js` | the editor: drawing, dragging, z-order, serialization |
+| `mc_infotext.py` | ten `Krea Spatial *` keys, and the second paste field that switches the feature off |
+| `tests/test_krea_spatial.py` | coordinates, the compositor, isolation, failure, infotext |
+| `tests/test_krea_spatial_js.py` | the editor run under node against a fake page built from the real markup |
+
+### 14.2 The division that the whole thing rests on
+
+**A model may write text fields. Code supplies the structure.** §2.3 states it and
+this implementation takes it literally: `spatial.compose()` builds the elements
+array from validated user state, and the only two strings it will accept from
+anywhere else are `high_level_description` and `background`.
+
+That is not a preference about tidiness. Asking a model for the finished JSON
+fails in five ways and every one of them is silent — a coordinate drifts forty
+units, two regions merge, a user's wording comes back "improved", the reply is
+almost-valid JSON, and the same layout produces different bytes tomorrow so a
+Smart-against-Direct comparison compares two draws. The adversarial test is the
+short version: pass 2 is handed a reply carrying `elements`, `regions`, `bbox`
+*and* a rewritten region prompt, and the finished prompt is unaffected — because
+only two names are ever read out of it.
+
+### 14.3 Why the Composer does not carry Krea's instruction, and what that costs
+
+This is the one place where the fast thing and the right thing point in opposite
+directions, so it is worth the paragraph.
+
+llama.cpp resumes a prompt at its common prefix with the *previous* one (§11.1,
+§26.2 of `07-llm-studio.md`). Krea's expansion instruction is ~460 tokens, it is
+identical on every roll, it is prefilled at startup, and it is the reason a warm
+roll reads only the creative brief. A second pass that reuses that system
+message keeps the prefix; one with its own system message pays for its own
+instruction *and* makes the next roll pay for Krea's again.
+
+On a processor-only placement at ~30 tokens/second that is about fifteen seconds
+each way. So the tempting design is `expansion.txt` plus a composer addendum,
+exactly the way `enhancer.system_prompt` appends the reference rules.
+
+It is the wrong design, and `expansion.txt` says why in its own words:
+
+> 1. **Faithfulness First:** … expand …
+> 6. **Structure:** Write one cohesive paragraph after the thinking block. No
+>    bullets, JSON, or markdown.
+
+The Composer's job is to *shorten* and to return two labelled fields. Putting an
+addendum under those two rules would be this repository telling a model to
+disregard half of a vendored file, inside the context window, on every spatial
+generation — and betting the pass's reliability on a 12B model resolving the
+contradiction the way we meant.
+
+So the Composer has its own short instruction and the thirty seconds are spent.
+Three things make that an acceptable trade rather than a regression:
+
+- **It is opt-in twice.** Smart mode *and* at least one region. Smart with an
+  empty canvas makes no request, so a fresh install pays nothing.
+- **Direct is one radio button away** and makes no second request at all. It is
+  the A/B control §5.5 asks for and it is also the answer for anybody on a
+  processor who wants their thirty seconds back.
+- **On a card it is about half a second each way.** The cost is a property of
+  running the model in system RAM, which is the same lever §13.4 already names.
+
+Nothing about pass 1 changed. With Spatial Layout off, the writer is sent the
+same bytes it was sent before this feature existed — checked as bytes, in
+`test_with_no_layout_the_turn_is_the_turn_it_always_was`, because "the same
+prompt-cache prefix" is not a thing that can be argued from a diff.
+
+### 14.4 The one sentence pass 1 is told
+
+§2.2 says the Creative Writer should not receive individual region prompts, and
+may receive a generic note about placement. `spatial.PLACEMENT_NOTE` is that
+note and it is the whole of what pass 1 learns about the layout.
+
+The reason is worth stating as a mechanism rather than a rule. Handing pass 1 the
+region text would put the user's own words through a rewriter; the compositor
+would then place the *original* words in the elements array beside the rewrite in
+the scene; and the image model would be asked for two of the same subject. The
+duplication §9.8 wants reduced would be introduced by the very pass meant to
+avoid it.
+
+The note is appended only when a region survived validation, which is what keeps
+the Creativity-1 compatibility guarantee (§3) intact: at Creativity 1 with no
+layout the user turn is still byte-identical to the legacy one.
+
+### 14.5 The hints are five decisions, and all five are code's
+
+`desc` is the raw region prompt, verbatim and first, then framing, then angle,
+then position, then size. Every one of the last four comes out of a fixed
+vocabulary in `spatial.py`, and the fixed vocabulary is also what the editor's
+dropdowns are built from — `spatial_editor()` reads `FRAMINGS` and `ANGLES`
+rather than restating them — so a framing that can be chosen is a framing that
+renders a phrase. A selection this build does not know is dropped *with a note*
+rather than passed through, because a silently discarded choice is the failure
+§10 spends a section on.
+
+The position hint uses the same nine cells as the thirds grid the canvas draws.
+That is deliberate: the sentence the model reads and the guides the user drew
+against describe the same division of the frame.
+
+Sizes are five named bands rather than a percentage. "Occupying 8.54% of the
+frame" is a number a text-to-image model has no calibration for.
+
+### 14.6 Coordinates, and the one thing normalization does not solve
+
+0..1000 on both axes, clamped, ordered, and a zero-area box refused outright.
+Clamping and ordering are recoveries — a drag past the edge meant the edge, a
+drag from bottom-right is the same rectangle — and a zero-area box is not a
+recovery, it is a click, so it is skipped with a reason. §10's "never guess
+replacement coordinates" is enforced by there being no code that could.
+
+Because the coordinates are fractions of the frame, a resolution change at the
+same aspect ratio is not a change at all, and the test says so by composing the
+same layout at 1024×1344 and 1536×2016 and asserting the bytes are equal.
+
+An **aspect** change is a different matter and §6.4 asks for reprojection plus a
+non-blocking warning. What is implemented is the warning, and the boxes are left
+exactly where they are. Reprojection would mean this code deciding which of
+somebody's boxes deserved to keep its shape and which deserved to keep its
+position, and there is no answer to that which is right for both a face and a
+horizon. The warning is a line of text in the editor's header — nothing to
+dismiss, nothing that can be dismissed by accident, and no path on which layout
+state is lost.
+
+`aspect_ratio()` reports the exact reduced ratio when it is small enough to
+recognise and snaps to a common one when it is not: 832×1216 reduces to 13:19,
+which is true and useless, and is 2:3 to within two and a half per cent.
+
+### 14.7 Two switches, and why the paste turns both off
+
+A spatial image's recorded `Prompt:` line is the finished structured prompt —
+aspect ratio, scene, background and every element. So an ordinary paste
+reproduces it exactly, the same way §10.5 made an ordinary paste reproduce a
+Creative image, and for the same reason: the prompt was assigned before Forge
+wrote the infotext.
+
+What that requires is that *both* features come back off. Creative Mode off with
+Spatial Layout on would compose boxes around a prompt nobody expanded; Spatial
+on with Creative off would build a BBOX prompt whose `high_level_description` is
+an entire BBOX prompt. Two paste fields, two `False`s, and `None` from both for
+an image that carries neither key — because an ordinary image must not be able
+to switch a feature off any more than on.
+
+The Spatial toggle exists partly for this. §6.1's sketch shows a region count and
+an Edit button with no checkbox, and an explicit toggle is one more control than
+that — but it is what makes "off" a thing a paste can restore and a thing a test
+can assert, and it is the same shape as the Creative toggle above it.
+
+### 14.8 What is recorded, and the one key that is deliberately conditional
+
+Ten keys, all namespaced `Krea Spatial *`. The layout is the whole editable
+state, re-serialized from what parsed rather than passed through — so what an
+image records is what this build actually used, with coordinates clamped,
+ordering canonical and unknown fields gone.
+
+`Krea Enhanced Scene` and `Krea Spatial Scene` are written in **Smart mode only**,
+and that is §5.2's argument applied one layer out rather than a different one. In
+Direct mode the enhanced scene *is* the `high_level_description` in the Prompt
+line, and a second copy would be several hundred bytes repeating what the file
+already says. In Smart mode it is genuinely nowhere else — the Prompt carries the
+reconciled scene — and without it the A/B comparison §11 asks for cannot be done
+after the fact. There is a checkbox for people who would rather have the bytes
+back.
+
+### 14.9 The editor, and the hidden textbox that is not a channel
+
+`javascript/model_chain_spatial_krea.js` owns interaction and serialization; the
+markup is built in Python so the vocabularies have one source; Python owns
+validation, both models, composition, infotext and replay. That is §6.5.
+
+The state box is the part that deserves suspicion, because it is the same shape
+as the thing §9 deleted: a hidden Gradio textbox that JavaScript writes into.
+The difference is entirely in what waits for it. The old one was *polled* — an
+image could not start until a `setInterval` in the page saw a token appear in it,
+which is why a hidden tab made a generation late and a closed tab made it never
+happen. This one is an input, read with the slider and the checkbox when Generate
+is pressed. Nothing polls it, nothing is armed, and no generation is held up by
+it.
+
+That claim is checked rather than asserted. `tests/test_krea_spatial_js.py`
+drives the real file against a synthetic clock and a fake page: it runs an hour
+forward with nobody touching anything and asserts no timer exists, asserts the
+file never names `txt2img_generate`, and asserts it registers no listener on it.
+Two assertions read the file rather than run it — no `setInterval`, no
+`setTimeout` — because a file with no timers today grows one the next time
+somebody wants to know when the server has finished something.
+
+The fake page is built from `spatial_editor()`'s own markup, so a control renamed
+in Python and not in JavaScript fails in a test run rather than as a dead button
+in somebody's browser.
+
+The overlay is moved to `document.body` on first wire. A `position: fixed` modal
+inside a Gradio accordion is one `overflow: hidden` or one `transform` away from
+being invisible, and neither of those is this extension's to promise about a
+theme.
+
+### 14.10 Failure, in the order it is tried
+
+Every one of these was already in §10 and every one of them falls back
+*backwards* — to the thing that was true one step earlier — and says so:
+
+| What failed | What happens | Where it is said |
+| --- | --- | --- |
+| No regions survived validation | an ordinary Creative Mode generation | log, and the panel's summary line |
+| Spatial Composer (timeout, empty, not the schema, interrupted) | Direct merge: pass 1's scene, the same boxes | log, and a line on the result |
+| The layout could not be read | nothing is applied, and nothing is overwritten | log, panel, and a line on the result |
+| The compositor raised | the writer's paragraph, unchanged | log, and a line on the result |
+| The writer failed | the existing Creative Mode fallback: the typed prompt | the existing sentence on the result |
+
+The last row is the one that is arguable, and it is the design intent's answer
+rather than this implementation's preference. §10 says a Creative Writer failure
+uses *the extension's existing Creative Mode fallback behaviour*, which is to
+generate the prompt exactly as typed. Composing boxes around an unexpanded phrase
+would be a third behaviour nobody specified, so the layout is reported as not
+applied and the press that follows tries again.
+
+Interrupt during the Composer pass is worth naming separately: it skips the
+Composer pass and does not cancel the image, because by then the image job is
+already running and pass 1 has already succeeded. The host's own loop reads the
+same flag a moment later and stops the sampling if that is what was meant.
+
+### 14.11 The bar describes two passes now
+
+`mc_llm_progress.Pass` names which one. The writer keeps `krea:read`,
+`krea:write` and `krea:reply`; the Composer measures under
+`krea:compose:*` and says *Reading the layout* and *Reconciling the scene with
+the layout* instead.
+
+Separate keys because the two are unalike in exactly the way the store models:
+the writer reads a creative brief and answers with a Krea paragraph, the Composer
+reads a scene and a layout and answers with two short fields. One shared
+`krea:reply` would learn the average of the two and then predict neither — which
+is the same mistake §13.3 fixed between backbones, one level down.
+
+The Composer borrows the generation's bar exactly as the roll does (§7.3): no
+`start_task`, no `finish_task`, counters handed back on every path out.

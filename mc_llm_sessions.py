@@ -78,6 +78,16 @@ class Event:
 
     kind: str
     text: str = ""
+    data: object = None
+    """A structured result, for the one run whose answer is not a paragraph.
+
+    The Spatial Composer finishes with two strings rather than one, and the
+    alternative to a second field is encoding a pair into ``text`` at one end
+    and decoding it at the other -- a private format between two functions in
+    the same repository, which is a thing to get wrong rather than a thing to
+    read. Every other mode leaves it ``None`` and every existing consumer reads
+    ``text`` exactly as it did.
+    """
 
     @property
     def terminal(self) -> bool:
@@ -661,6 +671,88 @@ def _krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=N
         gpu.release()
 
 
+def _compose(source: str, scene: str, layout, ratio: str, seed: int,
+             cancel: Cancellation, reserve: int = 0):
+    """One Spatial Composer pass: two strings back, and nothing else read.
+
+    The second language-model request Krea Creative Mode can make, and the only
+    one that is optional. It runs when the user chose Smart Spatial Compose *and*
+    drew at least one usable region; Direct BBOX Merge makes no request at all
+    and is one radio button away, which is what keeps this an opt-in cost rather
+    than a tax on Creative Mode.
+
+    Three things about it are deliberately unlike :func:`_krea` and each of them
+    is a decision rather than an omission:
+
+    *No references, ever.* This pass edits two paragraphs. It is asked for a
+    text-only client, so it can run on any backbone that can hold a conversation
+    and never pulls a vision projector onto the card for a job with no picture
+    in it.
+
+    *Its own instruction, not Krea's.* Krea's expansion instruction says expand,
+    and says no JSON. Both are the opposite of what this pass does. See
+    :mod:`prompt_master.krea.composer` for what that costs in llama.cpp's prompt
+    cache and why it is still the right way round.
+
+    *Failure is not fatal.* Every exit that is not a finished, validated pair of
+    strings is a ``FAILED`` event, and the caller's answer to that is Direct
+    merge -- the first pass's scene, the same boxes, no second request. The image
+    is never cancelled because a copy-editor was unavailable.
+
+    ``reserve`` is the same promise :func:`_krea` makes: VRAM this pass will
+    leave alone because an image generation follows it.
+    """
+    from prompt_master.krea import composer
+
+    gpu = _Gpu("the spatial composition", cancel)
+    try:
+        acquired = yield from gpu.acquire()
+        if not acquired:
+            yield Event(CANCELLED, "Cancelled")
+            return
+
+        yield Event(STATUS, _preparing())
+        client = _client(False, reserve)
+        for event in _placement_notes():
+            yield event
+
+        yield Event(STATUS, COMPOSING)
+        written = ""
+        for chunk, result in _streamed(
+                lambda on_text: client.stream_chat(
+                    composer.messages(source, scene, layout, ratio),
+                    composer.MAX_TOKENS, seed, on_text, cancel.event,
+                    temperature=composer.TEMPERATURE, top_p=composer.TOP_P)):
+            if chunk is not None:
+                yield Event(CHUNK, chunk)
+            else:
+                written = result or ""
+
+        if cancel.is_set():
+            yield Event(CANCELLED, "Cancelled")
+            return
+
+        # Counted, not acted on. parse() has already ignored anything that is
+        # not one of the two strings; this is the only place a Composer that
+        # keeps trying to write the elements array becomes visible.
+        reached = composer.overreached(written)
+        if reached:
+            logger.warning("Model Chain: the Spatial Composer returned %s, which was "
+                           "ignored — the layout is the user's",
+                           ", ".join(reached))
+        composed, background = composer.parse(written)
+        yield Event(DONE, composed, data={"scene": composed, "background": background})
+    except Exception as exc:
+        logger.debug("Model Chain: the Spatial Composer failed", exc_info=True)
+        yield Event(FAILED, str(exc))
+    finally:
+        gpu.release()
+
+
+COMPOSING = "Reconciling the scene with the layout"
+"""What the Composer pass is doing, for the status line and the progress bar."""
+
+
 # --------------------------------------------------------------------------- #
 # What the console is told
 # --------------------------------------------------------------------------- #
@@ -779,3 +871,20 @@ def krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=No
     yield from _traced(f"{counted} at creativity {resolve(creativity)}{directed}",
                        _krea(prompt, references, seed, cancel, creativity, direction,
                              reserve))
+
+
+def krea_compose(source: str, scene: str, layout, ratio: str, seed: int,
+                 cancel: Cancellation, reserve: int = 0):
+    """One Spatial Composer pass. See :func:`_compose`.
+
+    The region count reaches the console line because a run that took twice as
+    long as its neighbour is a run somebody will want that number about. The
+    region prompts, the visible text and the coordinates do not: they are the
+    user's own words about their own picture, and the rule this module already
+    follows is that a status line says what kind of run it was and never what
+    was in it.
+    """
+    counted = len(getattr(layout, "regions", ()) or ())
+    yield from _traced(f"a spatial composition over {counted} "
+                       f"region{'' if counted == 1 else 's'}",
+                       _compose(source, scene, layout, ratio, seed, cancel, reserve))
