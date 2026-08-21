@@ -319,22 +319,13 @@ shared.options_templates.update(
                 gr.Radio,
                 {"choices": [label for _, label in mc_broker.MODES]},
             ).info(
-                "Hybrid keeps an image model and an LLM resident together whenever they "
-                "both fit, so alternating between them costs nothing. Exclusive gives one "
-                "family the whole card at a time, which is more predictable and leaves more "
-                "headroom for a single large workload"
-            ),
-            mc_broker.OPT_POLICY: shared.OptionInfo(
-                mc_broker.POLICY_ADAPTIVE,
-                "When the LLM and the image model do not both fit",
-                gr.Radio,
-                {"choices": [label for _, label in mc_broker.POLICIES]},
-            ).info(
-                "Adaptive lowers the LLM's context before moving a checkpoint, because a "
-                "context nobody is using is cheaper to give up than a model somebody is "
-                "about to. Preserve image never moves the checkpoint and shrinks the LLM "
-                "instead. LLM priority does the opposite. An image generation always "
-                "outranks an idle LLM whichever is chosen"
+                "The image model always keeps its VRAM: the LLM is placed in what is left "
+                "over and shrinks itself — shorter context, then experts and blocks in "
+                "system RAM — rather than moving a checkpoint, in either mode. What the "
+                "mode decides is what happens when a generation starts. Hybrid leaves "
+                "llama-server where it is, so the next prompt it writes starts warm. "
+                "Exclusive stops it and hands the whole card to the generation, which is "
+                "more headroom for a single large pass and costs a model load per image"
             ),
             mc_llm_runtime.OPT_RELEASE: shared.OptionInfo(
                 mc_llm_runtime.RELEASE_STOP,

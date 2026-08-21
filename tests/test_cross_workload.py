@@ -277,3 +277,86 @@ class TestWhatCountsAsResident:
         finally:
             mc_broker.unregister_reclaimer(mc_broker.FAMILY_IMAGE)
             mc_broker.register_reclaimer(mc_broker.FAMILY_IMAGE, mc_broker._ImageReclaimer())
+
+
+class TestTheCheckpointStaysOnTheCard:
+    """The cycle a user reported, and the seam that produced it.
+
+    Their console, on a 24 GB card with a 13.9 GB checkpoint loaded, said the
+    same three things on every press of Generate:
+
+        released 13.9 GB of image VRAM for the LLM taking VRAM ownership
+        Moving model(s) has taken 5.92 seconds
+        Moving model(s) has taken 8.07 seconds
+
+    The language model swept the checkpoint off the card, reserved room for it
+    again, placed itself in what was left, and the generation two seconds later
+    paid thirteen seconds to move the very same weights back. Both halves of
+    that are tested here, because either one alone would have hidden it.
+    """
+
+    def test_a_krea_roll_does_not_sweep_a_resident_checkpoint(self, host, monkeypatch):
+        mc_broker.clear()
+        monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
+        set_free(monkeypatch, 8)
+        host.shared.opts.set(mc_broker.OPT_MODE, mc_broker.MODE_EXCLUSIVE)
+
+        image = Recorder(holds=14 * _GB)
+        mc_broker.register_reclaimer(mc_broker.FAMILY_IMAGE, image)
+        try:
+            mc_broker.request_vram(mc_broker.FAMILY_LLM, 12 * _GB,
+                                   reason="a Krea prompt")
+
+            assert image.calls == []
+        finally:
+            mc_broker.unregister_reclaimer(mc_broker.FAMILY_IMAGE)
+            mc_broker.register_reclaimer(mc_broker.FAMILY_IMAGE, mc_broker._ImageReclaimer())
+
+    def test_the_roll_reserves_nothing_for_a_checkpoint_already_on_the_card(
+            self, host, monkeypatch):
+        """The other half. The reserve is sized from what the image family
+        holds, and the register does not know about checkpoints -- so it has to
+        be asked, not read."""
+        import mc_creative_krea
+
+        mc_broker.clear()
+        monkeypatch.setattr(mc_memory, "vram_required_bytes", lambda name, *a, **k: 14 * _GB)
+        monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
+        host.shared.opts.sd_model_checkpoint = "kroma.safetensors"
+
+        image = Recorder(holds=14 * _GB)
+        mc_broker.register_reclaimer(mc_broker.FAMILY_IMAGE, image)
+        try:
+            assert mc_broker.resident_bytes(mc_broker.FAMILY_IMAGE) == 0
+            assert mc_creative_krea.image_reserve_bytes() == 0
+
+            # And the same call still reserves the full amount when the card is
+            # genuinely empty -- otherwise this would pass on a function that
+            # had simply stopped working.
+            image.holds = 0
+            assert mc_creative_krea.image_reserve_bytes() == 14 * _GB
+        finally:
+            mc_broker.unregister_reclaimer(mc_broker.FAMILY_IMAGE)
+            mc_broker.register_reclaimer(mc_broker.FAMILY_IMAGE, mc_broker._ImageReclaimer())
+
+    def test_handing_vram_back_afterwards_is_a_no_op_when_it_never_left(
+            self, host, monkeypatch):
+        """And so llama-server is not stopped and restarted for every image."""
+        import mc_creative_krea
+
+        mc_broker.clear()
+        monkeypatch.setattr(mc_memory, "vram_required_bytes", lambda name, *a, **k: 14 * _GB)
+        host.shared.opts.sd_model_checkpoint = "kroma.safetensors"
+        host.shared.opts.set(mc_broker.OPT_MODE, mc_broker.MODE_EXCLUSIVE)
+
+        image = Recorder(holds=14 * _GB)
+        llm = Recorder(holds=6 * _GB)
+        mc_broker.register_reclaimer(mc_broker.FAMILY_IMAGE, image)
+        mc_broker.register_reclaimer(mc_broker.FAMILY_LLM, llm)
+        try:
+            assert mc_creative_krea.hand_back_vram() == 0
+            assert llm.calls == []
+        finally:
+            mc_broker.unregister_reclaimer(mc_broker.FAMILY_LLM)
+            mc_broker.unregister_reclaimer(mc_broker.FAMILY_IMAGE)
+            mc_broker.register_reclaimer(mc_broker.FAMILY_IMAGE, mc_broker._ImageReclaimer())

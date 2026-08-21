@@ -501,13 +501,44 @@ def _read(filename: str, default):
     return loaded if isinstance(loaded, dict) else default
 
 
+REPLACE_ATTEMPTS = 5
+"""How many times an atomic replace is retried before the write is given up on.
+
+Windows refuses ``os.replace`` with ``[WinError 5] Access is denied`` while
+anything at all holds the destination open -- an anti-virus scanner reading a
+file that was just written, a backup agent, a search indexer -- and every one
+of those holds it for a moment rather than for good. The first attempt is the
+one that fails; the second, a few milliseconds later, succeeds. POSIX renames
+never hit this, which is why the loop was not there to begin with, and why the
+only symptom was a Windows user losing a preference every so often.
+"""
+
+REPLACE_BACKOFF_SECONDS = 0.05
+
+
 def _write(filename: str, document: dict) -> None:
     path = _path(filename)
+    temporary = ""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         handle, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=path.name, suffix=".tmp")
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             json.dump(document, stream, indent=2)
-        os.replace(temporary, path)
+        for attempt in range(REPLACE_ATTEMPTS):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                if attempt == REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(REPLACE_BACKOFF_SECONDS * (attempt + 1))
     except OSError:
         logger.warning("Model Chain: could not write %s", filename, exc_info=True)
+    finally:
+        # A replace that never happened leaves the temporary file behind, and
+        # the directory is one the user opens to read their settings.
+        if temporary and os.path.exists(temporary):
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass

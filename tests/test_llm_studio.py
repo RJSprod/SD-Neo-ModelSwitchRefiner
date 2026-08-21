@@ -8,6 +8,7 @@ reach ordinary image generation.
 
 from __future__ import annotations
 
+import os
 import types
 
 import threading
@@ -1003,3 +1004,57 @@ class TestAServerIsNeverLostOnTheWayToSystemRam:
 
         assert freed == 0
         assert started and started[0].stopped, "the process it started has to be stopped"
+
+
+class TestPreferencesSurviveAWindowsFileLock:
+    """``os.replace`` is atomic on POSIX and merely usually-atomic on Windows.
+
+    A scanner, a backup agent or a search indexer holding the destination open
+    for a moment answers ``[WinError 5] Access is denied``, and the write was
+    given up on the first refusal -- so a user reported a traceback in their
+    console and a preference that did not stick. Every one of those holders
+    lets go within milliseconds, so the fix is to ask again.
+    """
+
+    def test_a_replace_that_is_refused_once_is_retried(self, store, monkeypatch):
+        attempts = []
+        real = os.replace
+
+        def refuse_once(source, target):
+            attempts.append(target)
+            if len(attempts) == 1:
+                raise PermissionError(5, "Access is denied")
+            return real(source, target)
+
+        monkeypatch.setattr(state.os, "replace", refuse_once)
+        monkeypatch.setattr(state.time, "sleep", lambda seconds: None)
+
+        state._write("preferences.json", {"kept": True})
+
+        assert len(attempts) == 2
+        assert state._read("preferences.json", {}) == {"kept": True}
+
+    def test_a_lock_that_never_lets_go_is_reported_rather_than_raised(self, store,
+                                                                     monkeypatch):
+        def always_refuse(source, target):
+            raise PermissionError(5, "Access is denied")
+
+        monkeypatch.setattr(state.os, "replace", always_refuse)
+        monkeypatch.setattr(state.time, "sleep", lambda seconds: None)
+
+        state._write("preferences.json", {"kept": True})
+
+        assert state._read("preferences.json", None) is None
+
+    def test_a_write_that_could_not_land_leaves_no_temporary_file_behind(self, store,
+                                                                        monkeypatch):
+        """The directory is one the user opens to read their own settings, and
+        the log showed a ``preferences.jsonfyz9tar1.tmp`` left in it."""
+        monkeypatch.setattr(state.os, "replace",
+                            lambda source, target: (_ for _ in ()).throw(
+                                PermissionError(5, "Access is denied")))
+        monkeypatch.setattr(state.time, "sleep", lambda seconds: None)
+
+        state._write("preferences.json", {"kept": True})
+
+        assert list(store.glob("*.tmp")) == []

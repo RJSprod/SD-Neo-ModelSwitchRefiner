@@ -1418,7 +1418,7 @@ writer VRAM the image model needs makes the image slower, not the prompt faster.
 
 | Placement | What it does |
 | --- | --- |
-| **GPU** | the whole model on the card, shrinking context and then offload if it will not fit, and asking the image side for room under the configured policy |
+| **GPU** | the whole model on the card, shrinking context and then offload if it will not fit — never asking the image side for room |
 | **Mixed** | as much as fits in VRAM that is **already spare**, never taking room the image model needs, down to nothing when nothing is free |
 | **CPU** | no card involved at all |
 
@@ -1888,7 +1888,7 @@ ceiling (which always wins over what VRAM would allow), and the two answers that
 only matter on a shared card:
 
 > how much context fits **while keeping the image model resident**, and how much
-> becomes available **if it is demoted**.
+> the card would give it **with no image model loaded**.
 
 The runtime reserve starts as a coarse allowance and is then replaced by
 measurement: the first real load of a given model and placement records what the
@@ -1897,35 +1897,46 @@ from then on.
 
 ### Sharing the card
 
-Two modes, chosen in Settings:
+One rule, and it is not a setting:
 
-**Hybrid** (the default) keeps an image model and an LLM resident together
-whenever they both fit. Alternating between them then costs nothing, because
-nothing moves. The rule is stated as a sentence and implemented as one:
+> **The image model keeps its VRAM. The LLM uses what is left over.**
 
-> Never unload merely because another workload started. Demote only because the
-> incoming workload actually needs the memory.
+The image model is the workload; the language model writes a prompt for it. A
+helper that throws a fourteen-gigabyte checkpoint off the card so it can think
+faster has made the thing it was helping *slower* — the checkpoint is wanted
+again seconds later, so every byte borrowed is paid for twice, once moving the
+weights out and once moving them back.
 
-**Exclusive** gives one family the whole card at a time. It is more predictable
-and leaves more headroom for a single large workload, and the handover happens
-when a workload starts rather than when the arithmetic forces it — ownership
-that depended on the size of the last request would not be ownership.
+So the LLM is placed in the VRAM the image side is not using, and when that is
+not enough it makes itself smaller rather than asking:
 
-When something genuinely does not fit, what gives ground is a policy:
-
-| Policy | Behaviour |
+| Rung | What gives ground |
 | --- | --- |
-| **Adaptive** (default) | Lower the LLM's context first, then move a checkpoint. A context nobody is using is cheaper to give up than a model somebody is about to use. |
-| **Preserve image** | Never move the checkpoint. Shrink the LLM's context, then its GPU offload, then run it from system RAM. |
-| **LLM priority** | Give the LLM the placement it asked for and demote image residency to pay for it. |
-
-One thing is not negotiable under any of them: **an image generation always
-outranks an idle LLM.** Ordinary txt2img has to keep working, so a policy that
-let a background llama-server starve a generation you are watching would be a
-bug rather than a setting.
+| 1 | It fits in what is free. Nothing moves. |
+| 2 | The context is lowered. A cache nobody has filled yet is the cheapest thing on the card to give up. |
+| 3 | For a mixture-of-experts model, the experts move to system RAM. They are most of the weights and two are consulted per token, so this buys back the most VRAM for the least speed. |
+| 4 | Blocks move to system RAM, four at a time. |
+| 5 | The whole model runs from system RAM. Slow, and still an answer. |
 
 Whatever gets reduced is reported. If your 128k context became 24k to fit
 alongside a checkpoint, the status line says so.
+
+The other direction is not symmetrical: **an image generation always outranks an
+idle LLM.** Ordinary txt2img has to keep working, so a background llama-server
+that could starve a generation you are watching would be a bug rather than a
+setting.
+
+What *is* a setting is what happens to the LLM when a generation starts:
+
+| Mode | Behaviour |
+| --- | --- |
+| **Hybrid** (the default) | llama-server is left where it is. It is holding spare VRAM, so the generation is unaffected and the next prompt it writes starts warm. |
+| **Exclusive** | llama-server is stopped and the generation gets the whole card. More headroom for a single large pass, at the cost of a model load per image. |
+
+Hybrid's rule is stated as a sentence and implemented as one:
+
+> Never unload merely because another workload started. Demote only because the
+> incoming workload actually needs the memory.
 
 **A server that is up stays up.** Placement is decided when llama-server is
 started, not before every message. Once it is running, a message is answered by
@@ -2102,8 +2113,9 @@ The LLM half adds: the GGUF metadata reader against synthetic headers and every
 way one can be malformed; per-model context arithmetic, including the
 grouped-query case a constant would get wrong; the model's own context ceiling;
 the calibration that replaces the estimated runtime reserve and survives a
-context change; the residency policy in both modes and all three placement
-policies; rank protection for active and pinned residency; workload
+context change; the residency rule that the image model keeps its VRAM in both
+modes and for every placement, and the ladder the LLM shrinks down instead;
+rank protection for active and pinned residency; workload
 serialisation and the bounded waits either side of it; placement negotiation and
 the requirement that every reduction is reported; the estimator preview being
 free of side effects; the two mode histories staying separate files; the three

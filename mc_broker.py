@@ -27,6 +27,19 @@ workload already fits. In Hybrid mode a small checkpoint and a small LLM
 simply coexist, and alternating between them costs nothing at all, because the
 answer to "does it fit" is yes and no code below the first branch runs.
 
+The other invariant, which is newer and narrower
+------------------------------------------------
+    An image residency is never demoted for the LLM.
+
+The image model is the workload. The language model writes a prompt for it, and
+a helper that evicts what it is helping has made the job slower, not faster --
+the checkpoint is wanted again seconds later, so every byte the LLM borrows is
+paid for twice over, moving weights out and then back in. What the LLM gets is
+the VRAM the image side is not using, and when that is not enough it makes
+itself smaller: a shorter context, its experts in system RAM, fewer blocks on
+the card, and finally the whole model in system RAM. It never asks the image
+side for anything. See :func:`_victim_order`.
+
 Serialization
 -------------
 Co-residency is not co-execution (section 8). Everything that actually uses
@@ -62,22 +75,11 @@ MODE_EXCLUSIVE = "exclusive"
 MODE_HYBRID = "hybrid"
 
 MODES = (
-    (MODE_HYBRID, "Hybrid — image and LLM may share VRAM when they fit"),
-    (MODE_EXCLUSIVE, "Exclusive — one family owns VRAM at a time"),
-)
-
-POLICY_ADAPTIVE = "adaptive"
-POLICY_PRESERVE_IMAGE = "preserve_image"
-POLICY_LLM_PRIORITY = "llm_priority"
-
-POLICIES = (
-    (POLICY_ADAPTIVE, "Adaptive — demote whichever costs least"),
-    (POLICY_PRESERVE_IMAGE, "Preserve image — shrink the LLM before the checkpoint moves"),
-    (POLICY_LLM_PRIORITY, "LLM priority — give the LLM what it asked for"),
+    (MODE_HYBRID, "Hybrid — the LLM keeps the VRAM the image side is not using"),
+    (MODE_EXCLUSIVE, "Exclusive — an image generation takes the whole card"),
 )
 
 OPT_MODE = "model_chain_memory_mode"
-OPT_POLICY = "model_chain_hybrid_policy"
 
 # Residency ranks, lowest value evicted first (section 9). Recency breaks ties
 # within a rank; rank itself is never overridden by recency, which is the whole
@@ -156,7 +158,26 @@ def resolve(raw, table, default: str) -> str:
     for value, label in table:
         if folded in (value.casefold(), label.casefold()):
             return value
+    # A label whose explanation has been reworded since it was stored. What a
+    # radio saves is the whole string, so rewriting the half after the dash
+    # would otherwise silently reset everybody's choice to the default -- and a
+    # residency mode that changes itself because the sentence describing it was
+    # improved is a far worse bug than the wording it fixed.
+    name = _label_name(folded)
+    if name:
+        for value, label in table:
+            if name == _label_name(label.casefold()):
+                return value
     return default
+
+
+def _label_name(text: str) -> str:
+    """The naming half of a label -- everything before the explanatory dash."""
+    for dash in ("—", "–", " - "):
+        head, _, tail = text.partition(dash)
+        if tail:
+            return head.strip()
+    return ""
 
 
 def label_for(table, value: str) -> str:
@@ -170,11 +191,6 @@ def label_for(table, value: str) -> str:
 def mode() -> str:
     """The configured residency mode. Hybrid is the default (section 8)."""
     return resolve(option(OPT_MODE, MODE_HYBRID), MODES, MODE_HYBRID)
-
-
-def policy() -> str:
-    """The configured hybrid placement policy (section 13)."""
-    return resolve(option(OPT_POLICY, POLICY_ADAPTIVE), POLICIES, POLICY_ADAPTIVE)
 
 
 # --------------------------------------------------------------------------- #
@@ -793,14 +809,17 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
     The order of the branches below is the policy, so it is worth reading as
     prose:
 
-    1. In Exclusive mode the other family leaves VRAM first, whether or not the
-       arithmetic would have demanded it, because Exclusive mode is a promise
-       about ownership rather than an optimisation (section 10).
+    1. In Exclusive mode an *image* workload takes the whole card first,
+       whether or not the arithmetic would have demanded it, because Exclusive
+       mode is a promise about ownership rather than an optimisation
+       (section 10). The sweep runs in that direction and no other: an LLM
+       never takes VRAM from the image family in either mode, so there is
+       nothing for it to sweep. See :func:`_victim_order`.
     2. Otherwise, if the incoming workload already fits, nothing moves at all.
        This is the co-residency case and it is what Hybrid mode is for
        (section 8).
     3. Only then is the deficit -- and only the deficit -- freed, from the
-       family the configured policy prefers to take it from (sections 9 and 13).
+       family that gives ground for this one (section 9).
     """
     needed = max(int(needed_bytes), 0)
     reserve = safety_margin_bytes() if margin is None else int(margin)
@@ -811,38 +830,66 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
     # a shortfall that is not there -- or, worse, no shortfall when there is.
     reading = device_free_vram_bytes if family == FAMILY_LLM else free_vram_bytes
     free = reading()
+    before = free
     actions: list[str] = []
     freed = 0
     # Read once. A setting that changed between the two branches below would
     # otherwise be able to produce a call that swept a family *and* went on to
     # demote a second one for the same request.
-    sweeping = exclusive_sweep and mode() == MODE_EXCLUSIVE
+    #
+    # Only an image workload sweeps. Exclusive mode used to be symmetrical, and
+    # the symmetry was the bug: a Krea roll swept the checkpoint off the card,
+    # reserved room for it again, placed llama-server in what was left, and
+    # then the generation two seconds later spent thirteen seconds moving the
+    # very same weights back -- every press, on a card that had been holding
+    # both of them comfortably. See :func:`_victim_order`.
+    sweeping = exclusive_sweep and family == FAMILY_IMAGE and mode() == MODE_EXCLUSIVE
+    swept = False
+
+    def say_what_hybrid_would_have_done() -> None:
+        """Name the setting, once, after the sweep has been reported.
+
+        A model load per image is a real cost, and Exclusive mode is frequently
+        chosen to fix a problem it does not cause -- a language model taking
+        image VRAM, which no longer happens in either mode. Said only when a
+        server was really stopped, so a machine that never runs one, or one
+        whose server was already down, hears nothing.
+        """
+        if not swept:
+            return
+        note(FAMILY_LLM,
+             "Exclusive mode hands the whole card to the image family, so llama-server "
+             "was stopped rather than left in the VRAM the checkpoint is not using. "
+             "Hybrid would have kept it warm — the LLM cannot take image VRAM in "
+             "either mode")
 
     # Exclusive mode is checked before the fit, and that ordering is the whole
     # difference between the two modes. Hybrid asks "does this fit"; Exclusive
-    # asks "who owns the card", and the answer has to be the same whether or
-    # not the incoming workload happened to fit alongside the outgoing one --
+    # asks "does the image family own the card", and the answer has to be the
+    # same whether or not the generation happened to fit alongside the LLM --
     # otherwise ownership would depend on the size of the last request, which
     # is precisely the unpredictability Exclusive mode exists to remove
     # (sections 10 and 18).
     if sweeping:
-        other = FAMILY_LLM if family == FAMILY_IMAGE else FAMILY_IMAGE
-        released = _release(other, target,
+        released = _release(FAMILY_LLM, target,
                             reason or f"the {_named(family)} workload taking VRAM ownership",
                             sweep=True)
         freed += released.freed
         actions.extend(released.actions)
         free = reading()
+        swept = released.moved_anything
 
     if free <= 0:
         # VRAM could not be queried. Guessing at a deficit here would evict on
         # no evidence, which is exactly what this module exists not to do.
+        say_what_hybrid_would_have_done()
         return Reclaim(needed, free, freed, 0, tuple(actions))
 
     if free >= target:
         result = Reclaim(needed, free, freed, 0, tuple(actions))
         if actions:
             note(family, f"{reason or _reason_for(family)}: {result.describe()}")
+        say_what_hybrid_would_have_done()
         return result
 
     deficit = target - free
@@ -861,15 +908,21 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
     result = Reclaim(needed, free, freed, remaining, tuple(actions))
 
     if actions:
+        # Reported from the reading taken *before* anything moved. The local
+        # ``free`` has been re-read since the sweep, and quoting it on both
+        # sides of the arrow produced "22.5 GB -> 22.5 GB free" on a call that
+        # had just recovered fourteen gigabytes.
         note(family,
              f"freed {freed / _GB:.1f} GB for {reason or _reason_for(family)} "
-             f"({free / _GB:.1f} GB -> {max(after, free) / _GB:.1f} GB free): {result.describe()}")
+             f"({before / _GB:.1f} GB -> {max(after, free) / _GB:.1f} GB free): "
+             f"{result.describe()}")
     elif remaining > 0:
         note(family,
              f"{reason or _reason_for(family)} is short {remaining / _GB:.1f} GB and nothing "
              f"evictable was found; expect the driver to spill into system memory"
              f"{_unaccounted_note()}")
 
+    say_what_hybrid_would_have_done()
     return result
 
 
@@ -987,20 +1040,26 @@ def _victim_order(family: str) -> tuple[str, ...]:
     it has the cache bookkeeping and the Forge entry points to do it properly,
     and this module would only be guessing at both.
 
-    An image pass always outranks an idle LLM, under every policy. That is not
-    a preference, it is section 18's regression requirement: ordinary txt2img
-    has to keep working, and a policy that let a background llama-server starve
-    a generation the user is watching would break it. What the policy governs
-    is the LLM's ambitions, not whether images can run.
-    """
-    if family == FAMILY_IMAGE:
-        return (FAMILY_LLM,)
+    The asymmetry is the policy, and there is only one of it now: **an image
+    residency is never demoted for the LLM.** The image model is the workload;
+    the language model is a helper that writes a prompt for it, and a helper
+    that throws thirteen gigabytes of checkpoint off the card so it can think
+    faster has made the thing it was helping with slower. It is also not a
+    trade that can be won: the checkpoint is needed again seconds later, so
+    what the LLM borrows it pays back twice, once moving the weights out and
+    once moving them back in.
 
-    if policy() == POLICY_PRESERVE_IMAGE:
-        # Nothing gives ground. The answer for an LLM that does not fit is to
-        # place it smaller, which mc_llm_runtime does before asking at all.
-        return ()
-    return (FAMILY_IMAGE,)
+    What is left for the LLM is the VRAM the image side is not using -- which
+    :func:`mc_llm_runtime.negotiate` sizes itself against, shrinking its
+    context, moving its experts to system RAM, dropping blocks, and running
+    entirely from system RAM when nothing at all is spare.
+
+    An image pass, conversely, always outranks an idle LLM. That is not a
+    preference, it is section 18's regression requirement: ordinary txt2img has
+    to keep working, and a background llama-server that could starve a
+    generation the user is watching would break it.
+    """
+    return (FAMILY_LLM,) if family == FAMILY_IMAGE else ()
 
 
 def _release(family: str, needed: int, reason: str, sweep: bool = False) -> Reclaim:
@@ -1074,7 +1133,6 @@ def _describe(family: str, reclaimer) -> str:
 @dataclass(frozen=True)
 class Status:
     mode: str
-    policy: str
     free_vram: int
     total_vram: int
     reserve: int
@@ -1112,12 +1170,27 @@ def reported_bytes(family: str) -> int:
         return 0
 
 
+def held_bytes(family: str) -> int:
+    """What ``family`` is holding on the card, declared or merely reported.
+
+    The one function to ask when the question is "is it already there". The
+    register alone answers 0 for a loaded checkpoint -- image models are loaded
+    and moved by Forge and are never declared here (see :func:`reported_bytes`)
+    -- and a caller that reserved room on the strength of that 0 reserved it
+    for a model that was already resident. That is not hypothetical: it is why
+    a Krea roll on a 24 GB card holding a 13.9 GB checkpoint sized its language
+    model against 8.7 GB *minus another 13.9 GB*, decided almost nothing fit,
+    and ran sixteen of forty-eight blocks from system RAM.
+    """
+    return max(resident_bytes(family), reported_bytes(family))
+
+
 def status() -> Status:
     entries = list(residencies())
     families = {}
     for family in (FAMILY_IMAGE, FAMILY_LLM):
         declared = resident_bytes(family)
-        families[family] = max(declared, reported_bytes(family))
+        families[family] = held_bytes(family)
         if declared <= 0 and families[family] > 0:
             # Nothing declared, but the family says it is holding VRAM. Shown
             # as a synthetic row rather than left out: a residency panel that
@@ -1129,7 +1202,6 @@ def status() -> Status:
 
     return Status(
         mode=mode(),
-        policy=policy(),
         free_vram=free_vram_bytes(),
         total_vram=total_vram_bytes(),
         reserve=safety_margin_bytes(),
