@@ -174,6 +174,64 @@ def brief_cost(stored=None) -> tuple[int, float]:
     return characters, characters * float(per_character)
 
 
+def describe_creativity(value, stored=None) -> str:
+    """What moving the Creativity slider will actually do, given the directions.
+
+    Reported as "the creativity slider is not working": at Creativity 10 with
+    every axis Natural the panel said *extreme direction on every eligible axis*
+    and produced a brief of zero characters. The slider was not broken. It was
+    describing a scale it had nothing to apply -- Creativity governs how a
+    *direction* is expressed, and an axis nobody has directed has no expression
+    to scale.
+
+    Both of the ways that happens are named here rather than left to be
+    inferred, because they look identical from outside: no directions at all,
+    and directions that exist but sit below the position where the Director
+    starts emitting any (0 and 1 add nothing, by design and by promise).
+    """
+    from prompt_master.krea import director, variation
+
+    creativity = variation.clamp(value)
+    stored = stored or mc_creative_krea.settings()
+    modes = stored.get("axis_modes") or {}
+    active = [key for key, mode in modes.items()
+              if mode in (director.VARY, director.FIXED)]
+
+    if not active:
+        return (f"Creativity {creativity} has nothing to scale: every axis is Natural, "
+                "so the prompt is expanded with no art direction at all. Add a "
+                "direction to give the slider something to act on.")
+
+    counted = f"{len(active)} direction{'' if len(active) == 1 else 's'}"
+    varying = [key for key in active if modes.get(key) == director.VARY]
+    if creativity <= variation.LEGACY and varying:
+        return (f"Creativity {creativity} adds no direction by design, so your "
+                f"{counted} will not be expressed. Fixed values still apply; varying "
+                "axes start at 2.")
+    return f"{variation.describe(creativity)} · {counted}"
+
+
+def active_note(stored=None) -> str:
+    """One clause naming what Creative Mode is currently directing.
+
+    For the status line the toggle writes, which is the only Creative text on
+    screen while the drawer is shut. "Creative Mode is on" is true and, on a
+    fresh configuration, deeply misleading on its own: on and directing nothing
+    looks exactly like on and directing everything until the image arrives.
+    """
+    from prompt_master.krea import director
+
+    stored = stored or mc_creative_krea.settings()
+    modes = stored.get("axis_modes") or {}
+    active = [key for key, mode in modes.items()
+              if mode in (director.VARY, director.FIXED)]
+    if not active:
+        return ("No directions are set, so nothing is being art-directed — open "
+                "Creative Controls to add one.")
+    counted = f"{len(active)} direction{'' if len(active) == 1 else 's'}"
+    return f"{counted} set."
+
+
 def describe_cost(stored=None) -> str:
     """The line under the directions: what they cost, in this machine's seconds.
 
@@ -184,15 +242,40 @@ def describe_cost(stored=None) -> str:
     of the three are on this panel.
     """
     characters, seconds = brief_cost(stored)
-    if not characters:
-        return ("*Nothing extra to read: with no directions the writer is handed the "
-                "prompt as you typed it.*")
-
+    writing = _writing_seconds()
     where = _placement_note()
+    after = (f", then about {writing:.0f}s of writing" if writing else "")
+
+    if not characters:
+        return (f"*No directions: nothing extra for the model to read{after}"
+                f"{where}. A press is the plain Krea expansion of what you typed.*")
+
     return (f"*About {characters:,} characters of brief — roughly {seconds:.0f}s of "
-            f"reading before the writing starts{where}. The brief is different every "
-            "roll, so it is the one part of the request that can never come out of the "
-            "model's cache.*")
+            f"reading{after}{where}. The brief is different every roll, so it is the "
+            "one part of the request that can never come out of the model's cache.*")
+
+
+def _writing_seconds() -> float:
+    """How long the expansion itself takes on this machine, or 0 if unknown.
+
+    The other half of a press, and on a model running from system RAM it is
+    usually the larger one: a hundred tokens at five tokens a second is twenty
+    seconds, and no configuration on this panel changes it. It is quoted so that
+    a user reading "4s of reading" is not left to conclude that the other twenty
+    seconds are unaccounted for.
+
+    Both numbers come out of the progress store, which learns them from this
+    installation's own rolls: seconds per character of reply, and how long a
+    reply usually is.
+    """
+    try:
+        import mc_progress
+
+        per_character = float(mc_progress.measured("krea:write", 0.0))
+        length = float(mc_progress.measured("krea:reply", 0.0))
+    except Exception:
+        return 0.0
+    return per_character * length if per_character > 0 and length > 0 else 0.0
 
 
 def _placement_note() -> str:

@@ -62,6 +62,23 @@ change that costs nobody their saved work.
 FACTORY = "Factory"
 """The built-in neutral profile. Always present, never stored, never deletable."""
 
+SPREAD = "Everything varies"
+"""The built-in opposite: every axis on Vary, nothing pinned, nothing excluded.
+
+Here because the neutral default took something away that people had, and one
+click is the honest way to give it back. The creativity package shipped nine of
+its ten axes on Vary, so anybody who used Creative Mode before the panel was
+rebuilt had been running something close to this without choosing it -- and
+after the rebuild the same installation directs nothing until a direction is
+added, which is correct and is also a surprise.
+
+It is not the default and should not be: this is a configuration to *choose*,
+and choosing it is exactly what makes it different from the old behaviour.
+"""
+
+BUILT_IN = (FACTORY, SPREAD)
+"""The profiles that are computed rather than stored. Never deletable."""
+
 FIELDS = ("creativity", "seed", "anti_repetition", "axis_modes", "fixed_values",
           "excluded_values", "loras")
 """Every field a profile carries, by the name :func:`mc_creative_krea.settings`
@@ -196,6 +213,25 @@ def factory() -> dict:
     }
 
 
+def spread() -> dict:
+    """Every axis varying, at the package's own Creativity position."""
+    from prompt_master.krea import director
+
+    values = factory()
+    values["axis_modes"] = {key: director.VARY for key in values["axis_modes"]}
+    return values
+
+
+def built_in(name: str) -> dict | None:
+    """One built-in profile by name, or ``None`` when the name is not one."""
+    name = str(name or "")
+    if name == FACTORY:
+        return factory()
+    if name == SPREAD:
+        return spread()
+    return None
+
+
 def normalise(values) -> dict:
     """One profile's fields, cleaned against the current library.
 
@@ -241,19 +277,20 @@ def names() -> list[str]:
 
 
 def choices() -> list[str]:
-    """Dropdown choices: the built-in Factory first, then the user's own."""
-    return [FACTORY] + names()
+    """Dropdown choices: the built-ins first, then the user's own."""
+    return list(BUILT_IN) + names()
 
 
 def exists(name: str) -> bool:
-    return str(name or "") == FACTORY or str(name or "") in _read()["profiles"]
+    return str(name or "") in BUILT_IN or str(name or "") in _read()["profiles"]
 
 
 def get(name: str) -> dict | None:
     """One profile's values, or ``None`` when there is no such profile."""
     name = str(name or "")
-    if name == FACTORY:
-        return factory()
+    fixed = built_in(name)
+    if fixed is not None:
+        return fixed
     stored = _read()["profiles"].get(name)
     return None if stored is None else normalise(stored)
 
@@ -263,9 +300,9 @@ def save(name: str, values: dict) -> list[str]:
     name = (name or "").strip()
     if not name:
         raise ProfileError("Give the profile a name before saving.")
-    if name == FACTORY:
-        raise ProfileError(f'"{FACTORY}" is the built-in neutral profile and cannot '
-                           "be overwritten. Save under another name.")
+    if name in BUILT_IN:
+        raise ProfileError(f'"{name}" is built in and cannot be overwritten. Save '
+                           "under another name.")
 
     document = _read()
     existed = name in document["profiles"]
@@ -287,9 +324,8 @@ def delete(name: str) -> list[str]:
     and leaving one behind on purpose would be careless.
     """
     name = str(name or "")
-    if not name or name == FACTORY:
-        raise ProfileError(f'"{FACTORY}" is the built-in neutral profile and cannot '
-                           "be deleted.")
+    if not name or name in BUILT_IN:
+        raise ProfileError(f'"{name or FACTORY}" is built in and cannot be deleted.')
 
     document = _read()
     if name not in document["profiles"]:
@@ -312,7 +348,7 @@ def default_name() -> str:
 def set_default(name: str) -> str:
     """Nominate the profile to open with. Returns the name that was stored."""
     name = str(name or "").strip() or FACTORY
-    if name != FACTORY and name not in _read()["profiles"]:
+    if not exists(name):
         raise ProfileError(f'No Creative profile named "{name}".')
 
     document = _read()

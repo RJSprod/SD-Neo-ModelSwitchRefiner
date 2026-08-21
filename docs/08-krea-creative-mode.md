@@ -890,3 +890,69 @@ possibility rather than the typical one). The seconds are `mc_progress.measured
 predicts from, so the panel and the bar cannot disagree. The placement clause is
 read from the runtime configuration, because the lever it names is the one this
 panel cannot pull.
+
+
+## 12. A slider describing a scale it had nothing to apply (21 August 2026)
+
+Reported as *"the creativity mode slider is not working — even at 0 creativity, a
+one word input prompt leads to a nearly 400 character output"*, alongside a copy
+of the repository from before the rebuild.
+
+Both halves of that are working exactly as designed, and both looked broken for
+the same reason: the panel was describing what the *scale* means without saying
+whether there was anything to apply it to.
+
+### 12.1 The slider was telling the truth about the wrong thing
+
+```
+Creativity 10, every axis Natural
+  → 0 axes directed, brief 0 characters
+  → panel said: "Creativity 10 — extreme direction on every eligible axis"
+```
+
+`variation.describe()` names the position on the scale, which is half an answer.
+The other half is the axis configuration, and after §10 the shipped one is every
+axis Natural — so a fresh installation's slider genuinely does nothing to the
+brief at any position, and said the opposite at every position.
+
+`mc_creative_panel.describe_creativity()` now answers with both halves, and names
+the *two* ways a direction produces nothing, because they are indistinguishable
+from outside: no directions at all, and directions that exist but sit below
+Creativity 2, where the Director emits nothing by design and by promise. The
+status line the toggle writes carries the same information, because while the
+drawer is shut it is the only Creative text on screen and "Creative Mode is on"
+is deeply misleading on a configuration that directs nothing.
+
+### 12.2 The 400 characters are the writer, not the direction
+
+Expanding a short idea into a full Krea prompt is what the writer is *for*; art
+direction changes what it expands into, not whether it expands. A one-word
+prompt at Creativity 0 with no directions is the plain Krea expansion, which is
+also exactly what Creativity 1 is defined as (§5) — and the pre-rebuild copy the
+user attached confirms it: `variation.py`, `enhancer.py`, `expansion.txt` and
+`mc_llm_sessions.py` are byte-identical across the rebuild. Nothing about how
+the prompt is written changed.
+
+What changed is the default configuration, and with it the *feel*: nine axes on
+Vary produced a richer expansion than none. That is the trade §10.2 made
+deliberately, and the honest way to give it back is one click rather than a
+different default — hence the second built-in profile, **Everything varies**.
+
+### 12.3 The other twenty seconds
+
+The same log:
+
+```
+read    4.2s for 116 tokens   (28 tok/s)   ← the brief, after §11
+write  21.3s for 103 tokens   (4.8 tok/s)  ← the expansion itself
+```
+
+§11 moved the reading half from ten seconds to four by pricing only what is
+actually evaluated, and the neutral defaults cut the brief that feeds it. The
+remaining twenty seconds is the model writing four hundred characters at five
+tokens a second, which is a 12B in system RAM and is not something any control
+on this panel changes.
+
+So the cost line names both halves — *"roughly 4s of reading, then about 20s of
+writing"* — from the same measured store, because a user told about four seconds
+who then waits twenty-five is owed the other twenty-one.

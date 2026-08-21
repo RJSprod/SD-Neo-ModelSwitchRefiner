@@ -1792,6 +1792,38 @@ class TestProfiles:
         with pytest.raises(profiles.ProfileError):
             profiles.save(profiles.FACTORY, profiles.factory())
 
+    def test_there_is_a_built_in_that_varies_everything(self, data, store, lib):
+        """The neutral default took something away that people had, and one
+        click is the honest way to give it back: the package shipped nine of its
+        ten axes on Vary, so anybody using Creative Mode before the rebuild had
+        been running something close to this without choosing it."""
+        values = profiles.get(profiles.SPREAD)
+
+        assert profiles.SPREAD in profiles.choices()
+        assert set(values["axis_modes"]) == set(lib.axis_keys)
+        assert set(values["axis_modes"].values()) == {director.VARY}
+        assert values["fixed_values"] == {} and values["excluded_values"] == {}
+
+    def test_neither_built_in_can_be_deleted_or_overwritten(self, data, store):
+        for name in profiles.BUILT_IN:
+            with pytest.raises(profiles.ProfileError):
+                profiles.delete(name)
+            with pytest.raises(profiles.ProfileError):
+                profiles.save(name, profiles.factory())
+
+    def test_a_built_in_can_be_the_chosen_default(self, data, store):
+        profiles.set_default(profiles.SPREAD)
+
+        assert profiles.default_profile()[0] == profiles.SPREAD
+        assert profiles.default_profile()[2] == ""
+
+    def test_applying_it_directs_every_axis(self, data, store, lib):
+        stored, complaint = profiles.apply(profiles.SPREAD)
+
+        assert complaint == ""
+        assert set(stored["axis_modes"].values()) == {director.VARY}
+        assert len(mc_creative_krea.active_axes(stored)) == len(lib.axis_keys)
+
     def test_deleting_one_profile_keeps_the_others(self, data, store):
         profiles.save("One", profiles.factory())
         profiles.save("Two", profiles.factory())
@@ -2047,10 +2079,10 @@ class TestTheCompactPanel:
         said = updates[id(panel.cost)]["value"]
 
         assert "characters of brief" in said
-        assert "reading before the writing starts" in said
+        assert "of reading" in said
 
     def test_a_configuration_that_directs_nothing_costs_nothing(self, built):
-        assert "Nothing extra to read" in built.components["cost"].value
+        assert "No directions" in built.components["cost"].value
         assert mc_creative_panel.brief_cost()[0] == 0
 
     def test_more_directions_cost_more(self, built, store, lib):
@@ -2094,6 +2126,71 @@ class TestTheCompactPanel:
         characters, seconds = mc_creative_panel.brief_cost()
 
         assert seconds == pytest.approx(float(characters))
+
+    def test_the_slider_updates_the_cost_line_with_it(self, built):
+        """The number beside the directions must not be one action behind the
+        control that changes it -- moving the slider is exactly when somebody
+        looks at what it costs."""
+        panel = self.panel(built)
+        moved = [kwargs for _kind, kwargs
+                 in built.components["creativity"]._callbacks]
+
+        assert moved, "the slider registers no handler"
+        assert panel.cost in (moved[0].get("outputs") or [])
+
+    def test_the_slider_says_when_it_has_nothing_to_scale(self, built, store):
+        """Reported as "the creativity slider is not working". It was not: at
+        Creativity 10 with every axis Natural the panel promised "extreme
+        direction on every eligible axis" over a brief of zero characters."""
+        said = mc_creative_panel.describe_creativity(10)
+
+        assert "nothing to scale" in said
+        assert "Add a direction" in said
+
+    def test_it_says_what_the_scale_means_once_there_is_something_to_scale(
+            self, built, store, lib):
+        mc_creative_krea.remember(**{mc_creative_krea.AXIS_MODES:
+                                     {lib.axis_keys[0]: director.VARY}})
+        said = mc_creative_panel.describe_creativity(10)
+
+        assert "nothing to scale" not in said
+        assert "1 direction" in said
+
+    def test_it_names_the_other_way_a_direction_produces_nothing(self, built, store,
+                                                                 lib):
+        """0 and 1 add no direction by design, so a user who has just added one
+        and set the slider to 0 sees exactly what "nothing to scale" looks
+        like, for a completely different reason."""
+        mc_creative_krea.remember(**{mc_creative_krea.AXIS_MODES:
+                                     {lib.axis_keys[0]: director.VARY}})
+        said = mc_creative_panel.describe_creativity(1)
+
+        assert "no direction by design" in said
+        assert "start at 2" in said
+
+    def test_the_status_line_says_whether_anything_is_directed(self, built, store,
+                                                               lib):
+        """The only Creative text on screen while the drawer is shut. "Creative
+        Mode is on" is true and, on a fresh configuration, deeply misleading on
+        its own."""
+        assert "No directions are set" in mc_creative_panel.active_note()
+
+        mc_creative_krea.remember(**{mc_creative_krea.AXIS_MODES:
+                                     {lib.axis_keys[0]: director.VARY}})
+        assert mc_creative_panel.active_note() == "1 direction set."
+
+    def test_the_cost_line_names_the_writing_as_well_as_the_reading(self, built,
+                                                                    store, lib,
+                                                                    monkeypatch):
+        """A user told "4s of reading" who waits twenty seconds is owed the
+        other sixteen: the expansion itself is usually the larger half, and no
+        control on this panel changes it."""
+        import mc_progress
+
+        monkeypatch.setattr(mc_progress, "measured",
+                            lambda key, default=0.0: {"krea:write": 0.05,
+                                                      "krea:reply": 400.0}.get(key, 0.0028))
+        assert "20s of writing" in mc_creative_panel.describe_cost()
 
     def test_one_render_answers_for_every_control_it_owns(self, built):
         """The contract every handler relies on: a render is positional, so an

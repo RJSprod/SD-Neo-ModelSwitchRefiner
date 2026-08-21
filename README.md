@@ -1201,8 +1201,12 @@ under a name.
 | **Set as default** | nominates the profile *Reset to default* restores, and the one the panel opens on before you have loaded any other |
 | **Reset to default** | reapplies that profile |
 
-**Factory** is built in, cannot be deleted or overwritten, and is the neutral
-configuration: every axis Natural, nothing pinned, nothing excluded. If the
+Two profiles are built in and cannot be deleted or overwritten. **Factory** is
+the neutral configuration: every axis Natural, nothing pinned, nothing excluded.
+**Everything varies** is its opposite — all ten axes on Vary — and it is there
+because the creativity package shipped nine of its ten axes that way, so anybody
+who used Creative Mode before the panel was rebuilt had been running something
+close to it without choosing it. One click puts that back. If the
 default you chose has been deleted or the store is damaged, the panel opens on
 Factory and says so rather than refusing to build.
 
@@ -1224,7 +1228,17 @@ an atomic replace.
 ### Creativity
 
 One integer, 0 to 10, and it is a *semantic* control rather than a temperature
-slider. It decides four separate things at once:
+slider. **It scales directions; it does not create them.** With every axis
+Natural there is nothing for it to scale, and the panel says so rather than
+promising "extreme direction on every eligible axis" over an empty brief:
+
+```
+Creativity 10 has nothing to scale: every axis is Natural, so the prompt is
+expanded with no art direction at all. Add a direction to give the slider
+something to act on.
+```
+
+Given at least one direction, it decides four separate things at once:
 
 - **whether an axis activates at all** — none at 0–1, one at 2, all of them at 10;
 - **which variants are eligible** — some treatments only unlock higher up;
@@ -1356,6 +1370,19 @@ overhead that can be optimised away; it is the art direction, priced per press.
 The **Creative Controls** drawer says what your configuration costs, in this
 machine's own measured seconds, next to the directions that set it.
 
+**And reading is only half of it.** Once the brief is read the model still has
+to write the expansion, and that half does not depend on the brief at all — a
+one-word prompt with no directions at all still produces a full Krea prompt,
+because expanding prompts is what the writer is for. From the same machine's log:
+
+```
+write  21.4s for ~110 tokens   (5.2 tokens/sec, ~440 characters)
+```
+
+Twenty-one seconds of that press is the model writing, at five tokens a second,
+because the weights are in system RAM. The Creative Controls drawer names both
+halves so the arithmetic is visible before the bar starts.
+
 Three levers, largest first:
 
 | Lever | Effect |
@@ -1363,6 +1390,9 @@ Three levers, largest first:
 | **Where the language model runs** (LLM Studio → Setup → Device) | The biggest by a wide margin. The same machine that reads at ~36 tokens/sec with the weights in system RAM reads at **~900 tokens/sec** with them on the card — 10.5s becomes under half a second. Mixed and CPU placement both do prefill on the processor. |
 | **How many directions** | Linear. One direction at Creativity 10 is ~170 tokens; ten are ~800. A fresh install directs nothing, so this cost is entirely opt-in. |
 | **The Creativity position** | The expressions themselves get shorter down the scale: the same axis is ~78 tokens at 5 and ~173 at 10. |
+
+None of the three shortens the *writing* half. Only placement does — the same
+12B that writes at 5 tokens/sec from system RAM writes at 40–60 resident.
 
 If a Krea 2 checkpoint and your writer will not both fit on the card, the
 catalogue has smaller backbones — **Qwen 3.5 4B** is ~4.5 GB and will sit beside
