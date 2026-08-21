@@ -10,6 +10,7 @@ without reporting what it changed."
 from __future__ import annotations
 
 import dataclasses
+import threading
 import types
 from pathlib import Path
 
@@ -33,6 +34,11 @@ def placed(host, tmp_path, monkeypatch):
     for family in (mc_broker.FAMILY_IMAGE, mc_broker.FAMILY_LLM):
         mc_broker.unregister_reclaimer(family)
     monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
+    # Starting a server schedules a prompt-cache prime on a background thread,
+    # which in a test would take the workload lock and then sit in httpx
+    # waiting for a port nothing is listening on. Its own tests call the body
+    # directly; everything else here is about placement.
+    monkeypatch.setattr(runtime, "_prime_prompt_cache", lambda client: None)
     yield
     mc_broker.clear()
     ctx.forget()
@@ -1109,12 +1115,41 @@ class TestAskingTheBuildWhatItSupports:
         assert runtime.FLASH_ATTENTION_FLAG not in runtime.accelerator_flags(
             configuration, placement)
 
-    def test_none_of_it_reaches_a_cpu_placement(self, build):
+    def test_no_gpu_flag_reaches_a_cpu_placement(self, build):
         configuration = build("      --flash-attn\n      --cpu-moe\n")
         placement = ctx.Placement(gpu_layers=20, on_gpu=False,
                                              cpu_experts=True)
 
         assert runtime.accelerator_flags(configuration, placement) == []
+
+    def test_the_full_attention_window_reaches_every_placement(self, build):
+        """The one flag that is not about the card. What it buys is prompt
+        *reuse*: a sliding-window model can only resume a cached prompt at a
+        context checkpoint, so a warm turn that shared 668 tokens with the last
+        one resumed at 460 and processed the other 208 again -- seven seconds,
+        on the processor-only placement in the log this came from."""
+        configuration = build("      --swa-full\n")
+
+        for placement in (ctx.Placement(gpu_layers=20),
+                          ctx.Placement(gpu_layers=ctx.NO_LAYERS),
+                          ctx.Placement(gpu_layers=20, on_gpu=False)):
+            assert runtime.accelerator_flags(configuration, placement) == [
+                runtime.FULL_ATTENTION_WINDOW_FLAG], placement
+
+    def test_a_build_without_the_full_window_is_not_given_it(self, build):
+        configuration = build("  -m, --model FNAME\n")
+
+        assert runtime.accelerator_flags(configuration, ctx.Placement(gpu_layers=20)) == []
+
+    def test_it_comes_before_the_card_flags(self, build):
+        configuration = build("      --swa-full\n      --flash-attn\n      --cpu-moe\n")
+        placement = ctx.Placement(gpu_layers=20, cpu_experts=True)
+
+        assert runtime.accelerator_flags(configuration, placement) == [
+            runtime.FULL_ATTENTION_WINDOW_FLAG,
+            runtime.CPU_MOE_FLAG,
+            runtime.FLASH_ATTENTION_FLAG,
+        ]
 
     def test_the_three_state_spelling_is_given_its_value(self, build):
         """llama.cpp changed --flash-attn from a switch to on/off/auto and both
@@ -1472,3 +1507,110 @@ class TestTheProjectorIsNotFree:
 
         assert len(started) == 2
         assert started[1][0][2] == configuration.mmproj
+
+
+class TestPrimingThePromptCache:
+    """The instruction above a Krea brief is the same every roll.
+
+    llama.cpp resumes a cached prompt at its common prefix, so the second roll
+    on a server is far cheaper than the first -- from the log this came from,
+    on a processor-only placement at 30 tokens a second:
+
+        task 5   | prompt eval time = 35337 ms / 1065 tokens
+        task 199 | prompt eval time = 21335 ms /  601 tokens
+
+    Thirty-five seconds against twenty, and the difference is text that was
+    known before anybody pressed anything.
+    """
+
+    @pytest.fixture(autouse=True)
+    def idle(self):
+        mc_broker.clear()
+        runtime._priming = None
+        yield
+        runtime._priming = None
+        mc_broker.clear()
+
+    class Client:
+        def __init__(self):
+            self.sent = []
+
+        def stream_chat(self, messages, max_tokens, seed, on_text, *args, **kwargs):
+            self.sent.append((messages, max_tokens))
+            return "."
+
+    def prime(self, client):
+        runtime._prime(client)
+
+    def test_it_sends_the_writer_instruction_and_asks_for_nothing_back(self, host):
+        client = self.Client()
+
+        self.prime(client)
+
+        assert len(client.sent) == 1
+        messages, tokens = client.sent[0]
+        assert tokens == runtime.PRIME_TOKENS
+        assert messages[0]["role"] == "system" and messages[0]["content"]
+        assert messages[-1]["content"] == ""
+
+    def test_it_does_nothing_while_a_job_holds_the_gpu(self, host):
+        """The case that makes this safe to fire from any start. A server
+        restarted in the middle of a roll must not be handed a prefill the roll
+        would then queue behind -- and the roll holds the workload lock, so
+        asking for it as background work is the whole guard."""
+        client = self.Client()
+
+        with mc_broker.workload(mc_broker.FAMILY_LLM, "a Krea prompt"):
+            self.prime(client)
+
+        assert client.sent == []
+
+    def test_it_does_nothing_while_the_host_is_generating(self, host, monkeypatch):
+        client = self.Client()
+        monkeypatch.setattr(mc_broker, "host_busy", lambda: True)
+
+        self.prime(client)
+
+        assert client.sent == []
+
+    def test_a_client_that_raises_is_not_a_failed_start(self, host):
+        class Broken:
+            def stream_chat(self, *args, **kwargs):
+                raise RuntimeError("llama-server went away")
+
+        self.prime(Broken())  # must not raise
+
+    def test_it_releases_the_gpu_afterwards(self, host):
+        self.prime(self.Client())
+
+        assert mc_broker.active() is None
+
+    def test_only_one_runs_at_a_time(self, host, monkeypatch):
+        """A prime holds the workload lock while llama.cpp prefills. Two of
+        them queued behind each other would hold it twice as long, for a cache
+        the first one already filled."""
+        started = threading.Event()
+        finish = threading.Event()
+        monkeypatch.setattr(runtime, "_prime",
+                            lambda client: (started.set(), finish.wait(5)))
+
+        runtime._prime_prompt_cache(object())
+        assert started.wait(5)
+        first = runtime._priming
+
+        runtime._prime_prompt_cache(object())
+        assert runtime._priming is first
+
+        finish.set()
+        first.join(timeout=5)
+
+    def test_a_start_schedules_it(self, placed, tmp_path, monkeypatch, server):
+        """The scheduling itself, since every other test here stubs it out."""
+        managed, _started = server
+        scheduled: list = []
+        monkeypatch.setattr(runtime, "_prime_prompt_cache", scheduled.append)
+        configure(monkeypatch, tmp_path)
+
+        managed.client()
+
+        assert len(scheduled) == 1

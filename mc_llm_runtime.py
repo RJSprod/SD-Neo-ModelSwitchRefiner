@@ -731,6 +731,33 @@ CPU_MOE_FLAG = "--cpu-moe"
 FLASH_ATTENTION_FLAG = "--flash-attn"
 """Fused attention kernels. A CUDA thing: worth nothing with no layers offloaded."""
 
+FULL_ATTENTION_WINDOW_FLAG = "--swa-full"
+"""Keep the whole key/value cache, rather than a sliding window of it.
+
+A sliding-window model -- Gemma is one, at ``n_swa = 1024`` -- keeps only a
+window of the cache for most of its blocks, and llama.cpp can therefore only
+*resume* a cached prompt at one of the context checkpoints it took on the way
+past. That turns a nearly-free warm turn into a mostly-cold one. From a user's
+log, on three consecutive Krea rolls that shared a 668-token instruction:
+
+    slot get_availabl: selected slot by LCP similarity, sim_best = 0.630
+    slot update_slots: restored context checkpoint (pos_max = 460, n_past = 460)
+    slot update_slots: erased invalidated context checkpoint (n_swa = 1024)
+    slot print_timing: prompt eval time = 21335 ms / 601 tokens
+
+668 tokens matched; 460 were resumed; the other 208 were processed again
+because the only checkpoint below the divergence was at 460. At the 28 tokens
+a second that placement was managing, those 208 tokens are seven seconds of a
+user watching a progress bar before the first character appears.
+
+With the full cache there are no checkpoints to land on and no window to fall
+out of: llama.cpp resumes at the exact length of the common prefix. What it
+costs is the memory the window was saving -- which this extension has always
+budgeted for anyway, because :func:`mc_llm_context.estimate` sizes the cache at
+the full context for every block. So the reserve does not move; reality merely
+stops being cheaper than the arithmetic that placed it.
+"""
+
 _HELP_TIMEOUT = 20
 _capabilities: dict[tuple, frozenset] = {}
 _capabilities_lock = threading.Lock()
@@ -794,9 +821,13 @@ def runtime_supports(flag: str, configuration: Config | None = None) -> bool:
 
 
 def accelerator_flags(configuration: Config, placement) -> list[str]:
-    """Extra command-line flags for a placement that puts work on the card.
+    """Extra command-line flags for this placement, gated on the build having them.
 
-    Two, both gated on the build advertising them:
+    ``--swa-full`` is the only one that is not about the card, and it is added
+    for every placement including a processor-only one, because what it buys is
+    prompt *reuse* rather than throughput -- see
+    :data:`FULL_ATTENTION_WINDOW_FLAG`. It is also the only one that costs
+    memory, and the estimator has always charged for it.
 
     ``--flash-attn`` is fused attention. It is a CUDA kernel, so it is added
     only when something is actually offloaded -- on a placement with no resident
@@ -807,12 +838,14 @@ def accelerator_flags(configuration: Config, placement) -> list[str]:
     reaches the command line here rather than through the vendored launcher's
     fixed argument list, which has no room for it.
 
-    There is no third. Sage attention is a quantised attention kernel for
+    There is no fourth. Sage attention is a quantised attention kernel for
     diffusion models in PyTorch and has no llama.cpp counterpart, and the
     remaining llama.cpp knobs -- thread counts, batch sizes -- are hardware
     guesses this module has no way to verify from here.
     """
     flags: list[str] = []
+    if runtime_supports(FULL_ATTENTION_WINDOW_FLAG, configuration):
+        flags.append(FULL_ATTENTION_WINDOW_FLAG)
     if not getattr(placement, "on_gpu", False):
         return flags
     if getattr(placement, "cpu_experts", False) and runtime_supports(CPU_MOE_FLAG,
@@ -1232,6 +1265,79 @@ consulted about placing *more* on the card, never less.
 """
 
 
+PRIME_LABEL = "priming the prompt cache"
+
+_priming: threading.Thread | None = None
+
+
+def _prime_prompt_cache(client) -> None:
+    """Prefill the writer's standing instruction, on a thread nobody is waiting on.
+
+    llama.cpp caches a prompt and resumes the next one at their common prefix,
+    so the *second* Krea roll on a given server is much cheaper than the first:
+    only the creative brief has changed, and the instruction above it is
+    already in the cache. The first roll pays for the whole thing. From a
+    user's log, on a processor-only placement at 30 tokens a second:
+
+        task 5   | prompt eval time = 35337 ms / 1065 tokens   <- first roll
+        task 199 | prompt eval time = 21335 ms /  601 tokens   <- second
+        task 405 | prompt eval time = 20258 ms /  596 tokens   <- third
+
+    Thirty-five seconds against twenty. The difference is the instruction, and
+    there is no reason for a person watching a progress bar to be the one who
+    pays for it: it is the same 460-odd tokens every time, it is known before
+    anybody presses anything, and llama-server is started at WebUI boot with
+    nothing else to do.
+
+    So it is prefilled then, with a one-token completion whose answer is thrown
+    away. What makes this safe to fire from a start that happened *inside* a
+    run -- a re-placement mid-roll -- is the workload lock: this asks for it as
+    background work and does not wait, so a start that some job is holding the
+    GPU for finds it taken and does nothing at all. The roll it would have
+    queued in front of is exactly the roll it was meant to help.
+    """
+    global _priming
+
+    if _priming is not None and _priming.is_alive():
+        return
+    thread = threading.Thread(target=_prime, args=(client,), name="mc-llm-prime",
+                              daemon=True)
+    _priming = thread
+    thread.start()
+
+
+def _prime(client) -> None:
+    try:
+        from prompt_master.krea import enhancer
+
+        if mc_broker.host_busy():
+            return
+        with mc_broker.workload(mc_broker.FAMILY_LLM, PRIME_LABEL, timeout=0,
+                                background=True, required=False) as held:
+            if not held:
+                return
+            started = time.monotonic()
+            client.stream_chat(
+                [{"role": "system", "content": enhancer.system_prompt(False)},
+                 {"role": "user", "content": ""}],
+                PRIME_TOKENS, PRIME_SEED, lambda _chunk: None,
+            )
+            logger.info("Model Chain: the writer's instruction is in llama.cpp's prompt "
+                        "cache (%.1fs) — the first Krea roll now costs only what the "
+                        "creative brief adds", time.monotonic() - started)
+    except Exception:
+        # Never a failure. Nothing depends on this having run; the only thing
+        # that changes when it does not is that somebody waits for the tokens
+        # this would have paid for.
+        logger.debug("Model Chain: could not prime the prompt cache", exc_info=True)
+
+
+PRIME_TOKENS = 1
+"""Enough to make llama-server prefill and keep the prompt; no more."""
+
+PRIME_SEED = 1
+
+
 def _warn_about_an_idle_card(configuration: Config, layers: str) -> None:
     """Say once, per start, when a card is present and doing nothing.
 
@@ -1614,7 +1720,9 @@ class Runtime:
             self._process, self._signature, self._placement = process, signature, placement
             self._identity = _identity(configuration, projector)
             self._record(configuration, negotiated, observed, offload)
-            return self._client(configuration)
+            prepared = self._client(configuration)
+            _prime_prompt_cache(prepared)
+            return prepared
 
     def _launch(self, configuration: Config, placement: mc_llm_context.Placement,
                 projector=None):

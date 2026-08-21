@@ -158,10 +158,10 @@ class TestWhatTheNoteSays:
         said = [entry.text for entry in broker.decisions()]
         assert any("4.0 GB -> 14.0 GB free" in text for text in said), said
 
-    def test_an_exclusive_sweep_says_what_hybrid_would_have_done_instead(
+    def test_a_sweep_says_which_setting_stopped_the_server(
             self, broker, host, monkeypatch):
-        """The stop is the mode's promise, not a fault -- but it is a model load
-        per image, and the setting that avoids it is worth naming once."""
+        """The stop is the setting's promise, not a fault -- but it is a model
+        load per image, and the setting that avoids it is worth naming once."""
         host.shared.opts.set(broker.OPT_MODE, broker.MODE_EXCLUSIVE)
         set_free(monkeypatch, 4)
         broker.register_reclaimer(broker.FAMILY_LLM, Recorder(holds=6 * _GB))
@@ -169,9 +169,9 @@ class TestWhatTheNoteSays:
         broker.request_vram(broker.FAMILY_IMAGE, 2 * _GB)
 
         said = " ".join(entry.text for entry in broker.decisions())
-        assert "Hybrid would have kept it warm" in said
+        assert "Keep the LLM loaded" in said
 
-    def test_a_request_that_moved_nothing_says_nothing_about_modes(
+    def test_a_request_that_moved_nothing_says_nothing_about_settings(
             self, broker, host, monkeypatch):
         host.shared.opts.set(broker.OPT_MODE, broker.MODE_EXCLUSIVE)
         set_free(monkeypatch, 20)
@@ -179,7 +179,7 @@ class TestWhatTheNoteSays:
         broker.request_vram(broker.FAMILY_IMAGE, 2 * _GB)
 
         said = " ".join(entry.text for entry in broker.decisions())
-        assert "Hybrid" not in said
+        assert "Keep the LLM loaded" not in said
 
 
 class TestExclusiveMode:
@@ -550,10 +550,21 @@ class TestSettings:
         """What a radio stores is the whole string. Rewriting the half after the
         dash must not silently reset everybody's residency mode to the default.
         """
-        host.shared.opts.set(broker.OPT_MODE,
-                             "Exclusive — one family owns VRAM at a time")
+        naming_half = broker.label_for(broker.MODES, broker.MODE_EXCLUSIVE).split("—")[0]
+        host.shared.opts.set(broker.OPT_MODE, f"{naming_half}— something else entirely")
 
         assert broker.mode() == broker.MODE_EXCLUSIVE
+
+    def test_the_pre_rename_labels_fall_back_to_the_default(self, broker, host):
+        """Deliberate, and the one case where falling back is right. "Exclusive
+        -- one family owns VRAM at a time" answered a question that no longer
+        exists: the image model keeps its VRAM whatever is chosen. Carrying that
+        answer over to "stop llama-server for every image" would be carrying a
+        preference about one thing onto another.
+        """
+        host.shared.opts.set(broker.OPT_MODE, "Exclusive — one family owns VRAM at a time")
+
+        assert broker.mode() == broker.MODE_HYBRID
 
     def test_an_unrecognised_setting_falls_back_to_the_default(self, broker, host):
         host.shared.opts.set(broker.OPT_MODE, "something else entirely")

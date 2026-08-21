@@ -321,11 +321,12 @@ shared.options_templates.update(
             ).info(
                 "The image model always keeps its VRAM: the LLM is placed in what is left "
                 "over and shrinks itself — shorter context, then experts and blocks in "
-                "system RAM — rather than moving a checkpoint, in either mode. What the "
-                "mode decides is what happens when a generation starts. Hybrid leaves "
-                "llama-server where it is, so the next prompt it writes starts warm. "
-                "Exclusive stops it and hands the whole card to the generation, which is "
-                "more headroom for a single large pass and costs a model load per image"
+                "system RAM — rather than moving a checkpoint. That is not a setting. "
+                "This is: whether a warm llama-server sitting in that spare room is left "
+                "alone when a generation starts, or stopped so the pass has every last "
+                "byte. Keeping it costs the generation nothing measurable and saves a "
+                "model load — which on a slow placement is twenty seconds before the "
+                "first word of the next prompt"
             ),
             mc_llm_runtime.OPT_RELEASE: shared.OptionInfo(
                 mc_llm_runtime.RELEASE_STOP,
