@@ -166,17 +166,32 @@ class Prepared:
     roll: Roll
     generation: str
     loras: str
+    settings: dict = field(default_factory=dict)
+    """The configuration this roll ran with, for the metadata to record.
+
+    Read off the panel at press time rather than out of the preferences file,
+    because they can differ: the file holds what was last saved and the panel
+    holds what the user is looking at. What made the picture is the second one.
+    """
 
     @property
     def metadata(self) -> dict:
         """What this generation records about how its prompt was written.
 
-        The source phrase, the position, both seeds and the recipe as compact
-        ids: everything needed to roll it again, and nothing that is already in
-        the file. The expanded prompt is absent because it *is* the image's own
-        ``Prompt:`` line -- writing the paragraph a second time under a key of
-        ours would add a few hundred bytes to every PNG to repeat what the file
-        already says, and create a copy a later paste could disagree with.
+        Two questions, and the fields answer them separately. *How do I make this
+        picture again* is answered by the image's own ``Prompt:`` line, which is
+        the expanded prompt Creative Mode substituted -- so an ordinary paste
+        reproduces the image by restoring that prompt and turning Creative Mode
+        off, and needs nothing from here at all. *How do I get back to the
+        workflow that produced it* is what these fields are for: the source
+        phrase, the position, both seeds, the recipe as compact ids, the axis
+        configuration that allowed it, and the writer that wrote it.
+
+        The expanded prompt is still absent, and for the reason it always was: it
+        *is* the ``Prompt:`` line. Writing the paragraph a second time under a key
+        of ours would add a few hundred bytes to every PNG to repeat what the file
+        already says, and create a second copy that a later paste could disagree
+        with.
         """
         import mc_infotext
 
@@ -196,14 +211,59 @@ class Prepared:
             recorded[mc_infotext.CREATIVE_LIBRARY] = version
         if self.loras:
             recorded[mc_infotext.CREATIVE_LORAS] = self.loras
+
+        axes = mc_infotext.creative_axes(self.settings.get("axis_modes"),
+                                         self.settings.get("fixed_values"))
+        if axes:
+            recorded[mc_infotext.CREATIVE_AXES] = axes
+        excluded = mc_infotext.creative_exclusions(self.settings.get("excluded_values"))
+        if excluded:
+            recorded[mc_infotext.CREATIVE_EXCLUDED] = excluded
+        if "anti_repetition" in self.settings:
+            recorded[mc_infotext.CREATIVE_ANTI] = str(
+                bool(self.settings.get("anti_repetition")))
+        writer = writer_identity()
+        if writer:
+            recorded[mc_infotext.CREATIVE_WRITER] = writer
         return recorded
 
 
-def prepare(roll: Roll, loras) -> Prepared:
+def prepare(roll: Roll, loras, stored=None) -> Prepared:
     """One finished roll, packaged for the processing hook."""
     return Prepared(roll=roll,
                     generation=generation_prompt(roll.expanded, loras),
-                    loras=lora_suffix(loras))
+                    loras=lora_suffix(loras),
+                    settings=dict(stored or {}))
+
+
+def writer_identity() -> str:
+    """Which language model wrote the prompt, as far as this installation knows.
+
+    The file's own name, plus the catalogue id when the backbone came from the
+    catalogue -- because two people running "gemma-3-12b-it" may not be running
+    the same weights, and the managed id is the one string that says which
+    curated build it was. Not a hash: hashing a twelve-gigabyte file to label a
+    PNG is a cost paid on every generation to answer a question almost nobody
+    asks, and the answer would still be absent for a manual install of a file
+    that has since been replaced in place.
+
+    Empty when nothing can be determined, which keeps the key out of the
+    infotext entirely rather than recording a guess.
+    """
+    try:
+        import mc_llm_runtime
+
+        config = mc_llm_runtime.config()
+    except Exception:
+        logger.debug("Model Chain: could not identify the Krea writer", exc_info=True)
+        return ""
+
+    model = getattr(config, "model", None)
+    name = model.stem if model is not None else ""
+    managed = str(getattr(config, "managed_id", "") or "")
+    if managed and managed != name:
+        return f"{name} ({managed})".strip() if name else managed
+    return name
 
 
 # --------------------------------------------------------------------------- #
@@ -258,8 +318,28 @@ SEED = "krea_creative_seed"
 ANTI_REPETITION = "krea_creative_anti_repetition"
 AXIS_MODES = "krea_creative_axis_modes"
 FIXED_VALUES = "krea_creative_fixed"
+EXCLUDED_VALUES = "krea_creative_excluded"
 LORAS = "krea_creative_loras"
 HISTORY = "krea_creative_history"
+PROFILE = "krea_creative_profile"
+"""Which named profile the settings above were last loaded from, or "".
+
+Remembered so the panel can open showing where the configuration came from. It
+is a *label on the settings*, not a source of them: nothing applies a profile
+because this says so, which is what keeps opening a tab from silently discarding
+whatever was adjusted in the last one.
+"""
+
+CONFIGURATION = (CREATIVITY, SEED, ANTI_REPETITION, AXIS_MODES, FIXED_VALUES,
+                 EXCLUDED_VALUES, LORAS)
+"""The keys a Creative profile describes, and the ones it deliberately does not.
+
+:data:`ENABLED` is absent and stays absent. A profile says *how* Creative Mode
+behaves; whether the feature is on is a decision somebody makes at the moment
+they press Generate, and a preset that could switch it on would be a preset that
+changes what the button does. :data:`HISTORY` is absent too -- it is a record of
+what recently happened on this machine, not a setting.
+"""
 
 
 def settings() -> dict:
@@ -296,6 +376,9 @@ def settings() -> dict:
     fixed = dict(defaults.get("fixed_values") or {})
     fixed.update({key: str(value) for key, value in (stored.get(FIXED_VALUES) or {}).items()
                   if value})
+    excluded = dict(defaults.get("excluded_values") or {})
+    excluded.update({key: value for key, value in (stored.get(EXCLUDED_VALUES) or {}).items()
+                     if value})
 
     return {
         "enabled": bool(stored.get(ENABLED, defaults.get("creative_mode_enabled", False))),
@@ -304,10 +387,89 @@ def settings() -> dict:
         "seed": _seed(stored.get(SEED, defaults.get("creative_seed", director.RANDOM_SEED))),
         "anti_repetition": bool(stored.get(ANTI_REPETITION,
                                            defaults.get("anti_repetition", True))),
-        "axis_modes": {key: modes.get(key, director.VARY) for key in axis_keys},
-        "fixed_values": {key: value for key, value in fixed.items() if key in axis_keys},
+        # Natural for anything nobody has set. A fresh install has no art
+        # direction in it at all, and an axis a later package adds arrives
+        # silent rather than quietly varying.
+        "axis_modes": {key: modes.get(key, director.NATURAL) for key in axis_keys},
+        "fixed_values": known_fixed(fixed),
+        "excluded_values": known_excluded(excluded),
         "loras": lora_suffix(stored.get(LORAS, "")),
     }
+
+
+def known_fixed(fixed) -> dict:
+    """Pinned ids the current library still has, by axis.
+
+    A saved configuration outlives the package version it was written against.
+    An id that has gone is dropped here, once, with a line in the log naming it
+    -- rather than reaching the Director, which would fall silent on that axis
+    every roll without anybody being told why.
+    """
+    axes = _axes()
+    if axes is None:
+        return {key: str(value) for key, value in (fixed or {}).items() if value}
+
+    kept, lost = {}, []
+    for key, value in (fixed or {}).items():
+        axis = axes.get(key)
+        if axis is None or not value:
+            continue
+        if axis.variant(str(value)) is None:
+            lost.append(f"{key}={value}")
+            continue
+        kept[key] = str(value)
+    if lost:
+        logger.warning("Model Chain: pinned Creative treatments are not in this "
+                       "creativity library and were dropped: %s", ", ".join(lost))
+    return kept
+
+
+def known_excluded(excluded) -> dict:
+    """Excluded ids the current library still has, by axis.
+
+    Same rule as the pinned ones and for a sharper reason: an exclusion naming a
+    treatment that no longer exists excludes nothing, and keeping it would leave
+    a user reading a list of protections they no longer have.
+    """
+    axes = _axes()
+    kept, lost = {}, []
+    for key, values in (excluded or {}).items():
+        if isinstance(values, str):
+            values = [values]
+        chosen = []
+        for value in values or ():
+            identifier = str(value).strip()
+            if not identifier:
+                continue
+            axis = axes.get(key) if axes is not None else None
+            if axes is not None and (axis is None or axis.variant(identifier) is None):
+                lost.append(f"{key}={identifier}")
+                continue
+            if identifier not in chosen:
+                chosen.append(identifier)
+        if chosen:
+            kept[key] = chosen
+    if lost:
+        logger.warning("Model Chain: excluded Creative treatments are not in this "
+                       "creativity library and were dropped: %s", ", ".join(lost))
+    return kept
+
+
+def _axes():
+    """``{axis key: Axis}`` for the loaded library, or ``None`` if it will not load.
+
+    ``None`` rather than an empty mapping, because the two mean opposite things
+    here: no library is a reason to keep every stored id untouched, and an empty
+    library would be a reason to throw them all away.
+    """
+    try:
+        from prompt_master.krea import library as library_module
+
+        lib = library_module.library()
+    except Exception:
+        logger.debug("Model Chain: the creativity library could not be read", exc_info=True)
+        return None
+    return {key: lib.axis(key) for key in lib.axis_keys}
 
 
 def _seed(value) -> int:
@@ -329,13 +491,210 @@ def remember(**values) -> None:
 
 
 def axis_settings(stored=None) -> dict:
-    """The stored modes and pins as the Director's own type."""
+    """The stored modes, pins and exclusions as the Director's own type."""
     from prompt_master.krea import director
 
     stored = stored or settings()
     fixed = stored.get("fixed_values") or {}
-    return {key: director.AxisSetting(mode=mode, fixed_id=fixed.get(key))
+    excluded = stored.get("excluded_values") or {}
+    return {key: director.AxisSetting(mode=mode, fixed_id=fixed.get(key),
+                                      excluded_ids=frozenset(excluded.get(key) or ()))
             for key, mode in (stored.get("axis_modes") or {}).items()}
+
+
+def active_axes(stored=None) -> list[str]:
+    """The axes this configuration actually directs, in the library's own order.
+
+    The list the panel draws, and the shortest true description of what Creative
+    Mode is doing: everything else is Natural, and Natural is absence. An axis
+    whose mode is Fixed with nothing pinned is still active -- the user asked for
+    a pin and has not chosen one yet, and hiding the row would hide the half-made
+    decision rather than the decision.
+    """
+    from prompt_master.krea import director
+
+    stored = stored or settings()
+    modes = stored.get("axis_modes") or {}
+    keys = list(modes)
+    axes = _axes()
+    if axes is not None:
+        keys = [key for key in axes if key in modes]
+    return [key for key in keys if modes.get(key) in (director.VARY, director.FIXED)]
+
+
+# --------------------------------------------------------------------------- #
+# What an image says about how it was made
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class Setup:
+    """One image's Creative configuration, read back out of its infotext.
+
+    Not applied by reading it. This is what the *ordinary* paste deliberately
+    does not do: a paste restores the picture, which means restoring the final
+    expanded prompt and switching Creative Mode off so nothing expands it twice.
+    Everything here is for the second, explicit action -- "restore the creative
+    setup" -- which puts the short source phrase back in the prompt box and the
+    configuration back on the panel, and says so.
+    """
+
+    source: str = ""
+    creativity: int | None = None
+    seed: int | None = None
+    llm_seed: int | None = None
+    recipe: str = ""
+    library_version: str = ""
+    axis_modes: dict = field(default_factory=dict)
+    fixed_values: dict = field(default_factory=dict)
+    excluded_values: dict = field(default_factory=dict)
+    anti_repetition: bool | None = None
+    loras: str = ""
+    writer: str = ""
+
+    @property
+    def present(self) -> bool:
+        """Whether this describes a Creative generation at all."""
+        return bool(self.source or self.recipe or self.creativity is not None)
+
+    @property
+    def replayable(self) -> bool:
+        """Whether the recorded recipe is enough to reproduce the art direction."""
+        return bool(self.recipe)
+
+    def warnings(self) -> list[str]:
+        """What about this record the current installation cannot honour.
+
+        Said before anything is restored rather than discovered afterwards. A
+        different library version does not stop a replay -- ids are stable by the
+        package's own contract -- but it does mean the *expressions* those ids
+        render into may have been rewritten, and somebody comparing two pictures
+        deserves to know that before they conclude the feature is broken.
+        """
+        found = []
+        version = installed_library_version()
+        if self.library_version and version and self.library_version != version:
+            found.append(f"This image was made with creativity library "
+                         f"{self.library_version}; {version} is installed. The recorded "
+                         "treatments still resolve, but their wording may have changed.")
+        writer = writer_identity()
+        if self.writer and writer and self.writer != writer:
+            found.append(f"The prompt was written by {self.writer}; {writer} is "
+                         "configured now. The same brief will not produce the same "
+                         "paragraph.")
+        return found
+
+
+def installed_library_version() -> str:
+    try:
+        from prompt_master.krea import library as library_module
+
+        return library_module.library().version
+    except Exception:
+        return ""
+
+
+class Pasted:
+    """The Creative setup from the most recent infotext paste, if there was one.
+
+    One slot, overwritten by each paste, read by the button that restores it.
+    Deliberately not a queue and deliberately not consumed on read: somebody who
+    pastes an image, looks at what it says, and then decides to continue from it
+    should find it still there, and somebody who pastes a second image should
+    find the second one rather than a backlog.
+
+    It holds a parsed record and never a prompt to be generated from. Nothing
+    here can reach a generation on its own -- the only way anything in it is
+    applied is a button press.
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._setup: Setup | None = None
+
+    def remember(self, setup: Setup | None) -> None:
+        with self._lock:
+            self._setup = setup if setup is not None and setup.present else None
+
+    @property
+    def setup(self) -> Setup | None:
+        with self._lock:
+            return self._setup
+
+    def clear(self) -> None:
+        with self._lock:
+            self._setup = None
+
+
+@dataclass(frozen=True)
+class ReplayPlan:
+    """Art direction to reuse verbatim on the next roll, instead of drawing one."""
+
+    creativity: int
+    creative_seed: int
+    llm_seed: int
+    recipe: str
+    library_version: str = ""
+    source: str = ""
+
+    @property
+    def description(self) -> str:
+        counted = len(self.recipe.split(",")) if self.recipe else 0
+        return (f"{counted} recorded {'line' if counted == 1 else 'lines'} of art "
+                f"direction at Creativity {self.creativity}, creative seed "
+                f"{self.creative_seed}")
+
+
+class Replay:
+    """One armed replay, or none. Explicit to arm, spent by the next roll.
+
+    This is not the arming token that used to sit between a Gradio handler and a
+    native Generate, and the difference is the whole reason it is allowed to
+    exist. That token held a *finished prompt* -- a model's output, made before
+    the click, waiting for a generation to spend it -- which is how a closed tab
+    used to strand work and how the wrong image could have picked it up.
+
+    What is held here is a list of variant ids the user asked to reuse: data they
+    chose, that they can read on the panel before pressing anything, that no
+    model produced and that reaches nothing on its own. The roll still happens
+    inside the generation and the writer is still called exactly once. All this
+    changes is where that roll's art direction comes from, and it says so on the
+    panel for as long as it is armed.
+
+    One generation, then gone: :meth:`take` clears it. A replay that survived its
+    generation would be a setting nobody set, quietly reproducing an old picture's
+    direction over every new idea typed after it.
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._plan: ReplayPlan | None = None
+
+    def arm(self, plan: ReplayPlan | None) -> ReplayPlan | None:
+        with self._lock:
+            self._plan = plan
+            return self._plan
+
+    def take(self) -> ReplayPlan | None:
+        """The armed plan, and disarm. Called by the roll, once."""
+        with self._lock:
+            plan, self._plan = self._plan, None
+            return plan
+
+    @property
+    def pending(self) -> ReplayPlan | None:
+        with self._lock:
+            return self._plan
+
+    def clear(self) -> None:
+        self.arm(None)
+
+
+pasted = Pasted()
+"""What the last paste said about Creative Mode. Read by the restore button."""
+
+replay = Replay()
+"""The armed replay, if the user asked for one. Spent by the next roll."""
 
 
 # --------------------------------------------------------------------------- #
@@ -471,13 +830,23 @@ class Creative:
 
         stored = stored or settings()
         self.say(DIRECTING)
+        # Taken before the try, and taken whatever happens next: an armed replay
+        # is permission for *this* roll, and one that survived a failed roll
+        # would silently direct the next unrelated press.
+        plan = replay.take()
         try:
-            recipe = director.roll(
-                source=source,
-                creativity=stored["creativity"],
-                creative_seed=stored["seed"],
-                settings=axis_settings(stored),
-                history=recent_ids() if stored.get("anti_repetition") else ())
+            if plan is not None:
+                recipe = director.replay(
+                    source=source, creativity=plan.creativity,
+                    creative_seed=plan.creative_seed, llm_seed=plan.llm_seed,
+                    recipe_ids=plan.recipe)
+            else:
+                recipe = director.roll(
+                    source=source,
+                    creativity=stored["creativity"],
+                    creative_seed=stored["seed"],
+                    settings=axis_settings(stored),
+                    history=recent_ids() if stored.get("anti_repetition") else ())
         except Exception as exc:
             # A library that will not load is a Creative Mode that cannot
             # direct. It is emphatically not a reason to send the request
@@ -488,6 +857,13 @@ class Creative:
             yield sessions.Event(sessions.FAILED, f"The creativity library could not be "
                                                   f"used: {exc}")
             return
+
+        for note in getattr(recipe, "notes", ()):
+            # Warned rather than logged quietly: every note here is a line of art
+            # direction the user configured and did not get, and the whole reason
+            # exclusions are absolute is that guessing past them would be worse.
+            logger.warning("Model Chain: Creative Mode — %s", note)
+            yield sessions.Event(sessions.STATUS, note)
 
         yield sessions.Event(sessions.STATUS, _directed(recipe))
         self.say(WRITING)
@@ -553,7 +929,11 @@ class Creative:
 
         with self._lock:
             self._last = Roll(recipe=recipe, source=source, expanded=written.strip())
-        if stored.get("anti_repetition"):
+        # A replay is not a new choice and does not go in the recent memory. The
+        # ids it used were already recorded when they were first drawn, and
+        # writing them again would push a user's own reproduction away from the
+        # treatments they had just asked to reproduce.
+        if stored.get("anti_repetition") and not getattr(recipe, "replayed", False):
             note_roll(recipe)
 
         # The last thing before the prompt is handed over, and only on the path
@@ -702,9 +1082,10 @@ def _directed(recipe) -> str:
     panel every time somebody pressed Generate.
     """
     count = len(getattr(recipe, "items", ()))
+    verb = "Replayed" if getattr(recipe, "replayed", False) else "Directed"
     if not count:
         return f"No creative direction at Creativity {recipe.creativity}."
-    return (f"Directed {count} {'axis' if count == 1 else 'axes'} · "
+    return (f"{verb} {count} {'axis' if count == 1 else 'axes'} · "
             f"Creative seed {recipe.creative_seed}")
 
 
@@ -712,7 +1093,7 @@ creative = Creative()
 """The one Creative Mode session.
 
 A module singleton for the reason ``mc_llm_runtime.runtime`` and the broker are:
-one browser, one GPU, one llama-server, one Forge. The arming token is what
-keeps that honest across the gap between the Gradio handler that writes it and
-the Forge thread that reads it.
+one browser, one GPU, one llama-server, one Forge. It holds the last roll so the
+diagnostics drawer has something to show, and nothing else -- there is no gap
+between a roll and the generation that uses it for anything else to live in.
 """

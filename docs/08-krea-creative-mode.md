@@ -40,14 +40,17 @@ answered rather than routed around.
 
 | File | What it is |
 | --- | --- |
-| `prompt_master/krea/creativity/` | the vendored data package, byte-identical |
-| `prompt_master/krea/CREATIVITY_LIBRARY_SOURCE.txt` | its provenance and digests |
+| `prompt_master/krea/creativity/` | the vendored data package; every file byte-identical but `defaults.json` (§10.2) |
+| `prompt_master/krea/CREATIVITY_LIBRARY_SOURCE.txt` | its provenance, digests and the one edit |
 | `prompt_master/krea/library.py` | loads and validates it; no UI, no inference |
 | `prompt_master/krea/director.py` | the local Creative Director |
 | `prompt_master/krea/variation.py` | reduced to the writer's sampling profile |
 | `prompt_master/krea/enhancer.py` | accepts a finished brief for the user turn |
 | `mc_llm_sessions.py` | one writer request, carrying the brief |
-| `mc_creative_krea.py` | settings, roll history, one roll |
+| `mc_creative_krea.py` | settings, roll history, one roll, and what a paste left behind (§10) |
+| `mc_creative_panel.py` | the control surface, built once for both surfaces (§10.3) |
+| `mc_creative_profiles.py` | named configurations and the chosen default (§10.4) |
+| `mc_infotext.py` | the Creative paste fields and the configuration keys (§10.5) |
 | `scripts/model_chain_krea_creative.py` | the txt2img panel, and the hook that rolls and applies |
 | `javascript/model_chain_creative_krea.js` | the armed indicator, and nothing else (§9) |
 | `mc_llm_krea_panel.py` | the same controls in LLM Studio |
@@ -155,6 +158,12 @@ every PNG in order to repeat what the file already says, and would create a copy
 that a later paste could disagree with. `Krea Pinned LoRAs` is recorded instead,
 which is the only difference between the writer's paragraph and the prompt that
 was generated from.
+
+That reasoning still holds and the fields it produced are still the fields. What
+did **not** hold was the conclusion originally drawn beside it — that the Creative
+keys should therefore be diagnostic and never pasteable. §10.5 is where that was
+undone, and why leaving it as it was made an ordinary paste fail to reproduce the
+image it came from.
 
 ### 5.3 One settings file for both surfaces
 
@@ -614,3 +623,199 @@ a short prompt is exactly what an SD 1.5 checkpoint wanted.
   arguments and reach neither Model Chain's preset list nor its infotext, which
   is what §2's "a separate always-on script" was for. A caller with no panel
   behind it — the API — sends only the flag, and the saved settings answer.
+
+
+## 10. The control surface stopped describing the implementation (21 August 2026)
+
+Reported as four things, which turned out to be one thing and a bug.
+
+The four: the panel renders every axis as a permanent row whether or not it is
+doing anything; the factory defaults put nine of the ten axes on Vary; there is
+no way to say "vary this, but never that"; and there are no named profiles. The
+bug: pasting a Creative image back does not reproduce it.
+
+The one thing the first four have in common is that the interface was a picture
+of the data model. Ten axes exist, so ten rows were drawn; three modes exist, so
+three radio buttons and a value dropdown were drawn per row, giving twenty
+controls before the user had made a single decision — nine of which already said
+Vary, which is nine art-direction decisions arriving from nowhere.
+
+The rule the rebuild follows is the design intent's own sentence: **show the
+decisions the user has made, not every decision the software knows how to make.**
+
+### 10.1 Natural is absence, so it takes no space
+
+Natural was always defined as *no line in the brief*. The panel now says the same
+thing about itself: a Natural axis has no row, no dropdown and no space. Adding a
+direction adds a line; returning it to Natural removes the line. The Active
+directions list is therefore the shortest true description of what Creative Mode
+is doing, and it is short precisely when the configuration is simple.
+
+`AxisSetting.mode` defaults to `NATURAL` for the same reason at a different
+level: an axis nobody has configured — one a later package adds, one an older
+profile does not mention — has to fail neutral. Silence is a thing a user can see
+the absence of; a silently varied axis is not.
+
+### 10.2 The one file edited in the vendored package
+
+`creativity/defaults.json` shipped with nine axes on Vary. That is a statement
+about how the feature should *open*, which is what a defaults file is for, and it
+is the one file in the package that describes this installation rather than the
+vocabulary — so it is the one file edited, and
+`CREATIVITY_LIBRARY_SOURCE.txt` records the edit, the reason, the new digest and
+the digest as delivered. Everything else in the package is still byte-for-byte
+what arrived.
+
+`excluded_values` is added to the same file, and an absent key still reads as "no
+exclusions", so a package update that does not know about the key costs nothing.
+
+### 10.3 Exclusion is a modifier of Vary, never a fourth mode
+
+The gap was real: a user could allow everything on an axis or pin exactly one
+thing, with nothing in between. The tempting fix is a fourth mode, and it is
+wrong — "never harsh noon" is a statement about *how* to vary, and making it a
+mode would force somebody who wants two treatments gone to stop varying
+altogether.
+
+So `AxisSetting` grew `excluded_ids`, and `_choose_variant` removes them from the
+pool *before* it weighs anything. Two consequences worth stating:
+
+- **Exclusion is absolute, anti-repetition is a weight.** Anti-repetition falls
+  back to the unpenalised weights rather than refuse to direct an axis (§5.6);
+  exclusion never does. A user who said "never this" said it about every roll.
+- **An axis whose whole pool is excluded is dropped before the draw, not during
+  it.** Left in, it would consume one of the activation slots the Creativity
+  position allows and then produce nothing — so excluding one small axis would
+  quietly leave every *other* axis directed less often. It is skipped instead,
+  with a note on the recipe, a line in the status area and a warning in the log.
+  `CreativeRecipe.notes` exists for that: the two wrong answers here are both
+  silent, and one of them is choosing the value the user forbade.
+
+The panel shows exclusions as `gr.Dropdown(multiselect=True)` over the axis's own
+variants, storing ids and displaying labels — ids are stable by the package's
+contract, labels are display text a package update may rewrite.
+
+### 10.4 One panel, two surfaces; one profile store, its own file
+
+`mc_creative_panel.py` is built by txt2img and by LLM Studio's Krea tab. Two
+implementations of a ten-axis editor would disagree within a release, and the
+first thing they would disagree about is what a fresh install does.
+
+Gradio 4 cannot create a component after the page is built, so every row and
+every editor is built up front and hidden. That is not a compromise: `visible=
+False` removes the element from the layout rather than making it transparent, so
+"build them all, show one" is the same thing on screen as "create one on demand"
+and much simpler than a component pool.
+
+Every handler ends in `Panel.render()`, which returns an update for every
+component the panel owns, computed from the stored settings. The alternative —
+each handler updating what it believes it touched — is how a panel ends up
+showing an exclusion list for an axis that is no longer varying. It costs one
+wide outputs list per handler, which is a thing to read once rather than a class
+of bug to find repeatedly. A test asserts `len(render()) == len(outputs())`,
+because a positional list that disagrees by one puts every update after the
+mismatch on the wrong control.
+
+Every one of those handlers is wired to `input` rather than `change`. `change`
+fires when the *server* sets a value, and each handler rewrites the very control
+that fired it — so `change` would be a feedback loop that only terminates
+because the value written back equals the value just read.
+
+Profiles are their own file, `krea_creative_profiles.json`, in the WebUI data
+directory, following `mc_presets` exactly (temp file, atomic replace, damaged
+store reads as empty). Not `mc_llm_state.preferences()`, which holds *current*
+settings and is rewritten every time a slider moves — a list of complete named
+configurations living in that file would put everybody's saved work in the path
+of every preference write.
+
+The **Factory** profile is built rather than stored: it is read out of the
+package's own `defaults.json`, so a package that ships different defaults ships a
+different Factory with no code change, and it cannot be deleted or overwritten.
+It is what makes "put it back" always answerable, including when the chosen
+default has been deleted behind the panel's back — that falls back to Factory
+with a sentence rather than refusing to build, because a Creative panel that will
+not build is a Creative Mode nobody can turn on to fix.
+
+Opening the panel shows a profile and never applies one: the dropdown names the
+profile the live settings were last loaded from (`krea_creative_profile` in the
+preferences file), falling back to the nominated default and then to Factory. The
+alternative — reapplying the default on every page build — would silently discard
+whatever the last tab adjusted, every time a tab was opened. *Reset to default*
+is how somebody asks for that deliberately.
+
+A profile does not carry the enabled toggle. A profile says how the feature
+behaves; whether it runs is a decision made at the moment somebody presses
+Generate, and a preset that could flip it would be a preset that changes what the
+button does.
+
+### 10.5 The paste bug, and the two questions it conflated
+
+`mc_infotext` used to say, in a docstring, that the Creative keys were diagnostic
+and deliberately not pasteable: a pasted source prompt would either overwrite
+what somebody was iterating on or silently re-run a language model. Both halves
+of that are true. The conclusion was still wrong, because it answered a question
+nobody was asking and left the real one unanswered.
+
+Creative Mode assigns the expanded prompt to `p.prompt` *before* Forge records
+infotext. The recorded `Prompt:` line is therefore the paragraph the image model
+actually saw — which means a paste already restores everything needed to
+reproduce the image, and the only thing standing in the way is that Creative Mode
+is still on and will expand that paragraph a second time. The result is a picture
+of the prompt of the picture.
+
+So there are two questions and they now have two answers:
+
+- **Reproduce the image.** One paste field, on the enabled checkbox, answering
+  `False` for any infotext carrying `Krea Creative Mode`. Nothing else changes:
+  the prompt, seed, checkpoint, sampler and size are the host's and always were.
+  The status line says what happened. An infotext with no Creative keys returns
+  `None`, which is how the host is told to leave a control alone — an ordinary
+  image must not be able to switch a feature off any more than on.
+- **Restore the workflow.** A separate button, under *Continue from a pasted
+  image*. It is the only handler in this extension that writes to a native
+  control, and it writes to exactly one: the txt2img prompt box, grabbed by its
+  own `elem_id` in `after_component`, because a recorded *source phrase* has
+  nowhere else to go. A test asserts that no other handler on the panel names a
+  component outside it.
+
+  It is also the only thing in the extension that switches Creative Mode *on*,
+  and that is deliberate rather than convenient: the paste switched it off so the
+  picture would reproduce, and this button is the request to do the opposite. A
+  short idea generated with the writer switched off is not a smaller version of
+  the feature — it is a bare phrase handed to Krea 2. A test counts the
+  occurrences and fails at two.
+
+The capture happens on every paste (piggy-backed on a paste field, because a
+paste field is the only callback the host offers) and is stashed in
+`mc_creative_krea.pasted`. It holds a parsed record and nothing that could reach
+a generation on its own.
+
+**Exact replay.** Re-rolling at the recorded Creative seed is *not* a
+reproduction: the draw is weighted by recent history, and a machine six months
+later has different recent history. `director.replay()` rebuilds the recipe from
+the recorded ids instead — nothing drawn, no history consulted, ids the current
+package no longer has dropped with a note rather than substituted. It is armed
+explicitly, for one generation, and says so on the panel while it is armed.
+
+That is an arming mechanism, and §1 records that the last one was removed on
+purpose, so the difference is worth stating. The old token held a **finished
+prompt** — a model's output, made before the click, waiting for a generation to
+spend it, which is how a closed tab used to strand work. `ReplayPlan` holds a
+short list of variant ids the user chose, that they can read before pressing
+anything, that no model produced, and that reaches nothing on its own. The roll
+still happens inside the generation and the writer is still called exactly once;
+all that changes is where that roll's art direction comes from. It lives beside
+the session rather than on it, it is taken before the roll is attempted so a
+failed roll cannot leave it armed, and a replay is not written into the recent
+memory — its ids were recorded when they were first drawn, and writing them again
+would push a user's own reproduction away from what they asked to reproduce.
+
+### 10.6 What the panel argument list looks like now
+
+Three controls per axis rather than two — mode, pinned value, exclusions — in the
+library's own axis order, parsed in exactly one place per surface
+(`mc_creative_panel.axes_from`). A tuple of the wrong length is refused outright
+rather than unpacked as far as it goes: reading three controls per axis out of
+two produces a *valid* configuration nobody chose, which the caller would then
+save over the one they did. Refusing means the saved settings answer, which is
+the same thing an API request with no panel behind it gets.

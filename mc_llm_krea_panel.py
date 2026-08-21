@@ -48,6 +48,7 @@ import time
 import gradio as gr
 
 import mc_creative_krea
+import mc_creative_panel
 import mc_llm_runtime
 import mc_llm_sessions as sessions
 import mc_llm_state
@@ -74,10 +75,11 @@ agreement one side has never been told about is not one.
 
 CREATIVE_NOTE = (
     "**Natural** leaves the axis out of the brief entirely — the model decides as it "
-    "would without Creative Mode. **Vary** lets the local director choose, and the "
-    "Creativity slider decides whether the axis activates at all, how strongly it is "
-    "expressed, and how hard recent choices are pushed away. **Fixed** repeats your "
-    "chosen value every roll.\n\n"
+    "would without Creative Mode, and a Natural axis has no row below. **Vary** lets "
+    "the local director choose, and the Creativity slider decides whether the axis "
+    "activates at all, how strongly it is expressed, and how hard recent choices are "
+    "pushed away; exclude any treatments you never want it to pick. **Fixed** repeats "
+    "one chosen value every roll.\n\n"
     "Your own words always win: type *oil painting of a car* and Medium stays oil "
     "painting however Medium is set. The direction is chosen here, in Python, from a "
     "vendored vocabulary — no model is asked what to vary, and each press is still "
@@ -171,22 +173,30 @@ def build() -> dict:
             with gr.Accordion("Creative Controls", open=False,
                                visible=bool(stored["enabled"]),
                                elem_id=ui.ident("krea", "controls")) as controls:
-                gr.Markdown(CREATIVE_NOTE, elem_classes=ui.classes("hint"))
-                axis_controls = _axis_table(stored)
+                # The same panel txt2img draws, from the same module: one layout,
+                # one set of handlers, one settings file. Two implementations of
+                # a ten-axis editor would disagree within a release, and the
+                # first thing they would disagree about is what a fresh install
+                # does.
+                panel = mc_creative_panel.build(
+                    lambda *parts: ui.ident("krea", *parts), ui.notice, status,
+                    creativity, loras=False, stored=stored)
+                axis_controls = list(panel.axis_controls) if panel is not None else []
+                if panel is not None:
+                    creative_seed, anti = panel.seed, panel.anti
+                else:
+                    # The library would not load, so there is no panel and no
+                    # vocabulary to direct with -- but the generate handler's
+                    # input list is fixed at build time and cannot have holes in
+                    # it. These stand in, hold the stored values, and let the
+                    # mode go on writing undirected prompts.
+                    creative_seed = gr.Number(value=stored["seed"], precision=0,
+                                              visible=False,
+                                              elem_id=ui.ident("krea", "creative-seed"))
+                    anti = gr.Checkbox(value=bool(stored["anti_repetition"]),
+                                       visible=False, elem_id=ui.ident("krea", "anti"))
 
-                with gr.Row():
-                    creative_seed = gr.Number(
-                        label="Creative seed", value=stored["seed"], precision=0, scale=2,
-                        info="-1 rolls new art direction each time; a fixed value "
-                             "repeats it. Not the writer's own seed.",
-                        elem_id=ui.ident("krea", "creative-seed"))
-                    anti = gr.Checkbox(
-                        value=bool(stored["anti_repetition"]), scale=1,
-                        label="Avoid recent treatments",
-                        info="pushes the last few rolls' choices away at high Creativity",
-                        elem_id=ui.ident("krea", "anti"))
-                    forget = gr.Button("Clear recent memory", size="sm", scale=1,
-                                       elem_id=ui.ident("krea", "forget"))
+                gr.Markdown(CREATIVE_NOTE, elem_classes=ui.classes("hint"))
 
                 recipe = gr.Textbox(
                     label="Last creative recipe", lines=10, max_lines=10,
@@ -221,23 +231,20 @@ def build() -> dict:
     # travels from 1 to 10 is forty writes for one decision.
     creativity.release(fn=_remember_creativity, inputs=[creativity], outputs=[status],
                        queue=False)
-    creative_seed.input(fn=_remember_creative_seed, inputs=[creative_seed],
-                        outputs=[creative_seed], queue=False)
-    anti.change(fn=_remember_anti, inputs=[anti], outputs=[anti], queue=False)
-    forget.click(fn=_forget_history, outputs=[status], queue=False)
-    for control in axis_controls:
-        control.change(fn=_remember_axes, inputs=list(axis_controls), outputs=[status],
-                       queue=False)
-
     refresh.click(fn=lambda: gr.update(choices=_history_choices()), outputs=[history],
                   queue=False)
     load.click(fn=_load_session, inputs=[history],
                outputs=[prompt, written, captions, status], queue=False)
     drop.click(fn=_delete_session, inputs=[history], outputs=[history, status], queue=False)
 
-    return {"status": status, "output": written, "stop": stop, "creativity": creativity,
-            "creative": creative, "controls": controls, "recipe": recipe,
-            "axes": axis_controls}
+    found = {"status": status, "output": written, "stop": stop, "creativity": creativity,
+             "creative": creative, "controls": controls, "recipe": recipe,
+             "axes": axis_controls}
+    if panel is not None:
+        found["panel"] = panel
+        found.update({f"creative_{name}": component
+                      for name, component in panel.components().items()})
+    return found
 
 
 # --------------------------------------------------------------------------- #
@@ -307,85 +314,23 @@ def _described(captions) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _axis_table(stored) -> list:
-    """One row per axis: what it is called, how it behaves, and its pinned value.
-
-    Built from the library rather than from a list here, so a package that adds
-    an axis grows a row without this file being edited -- and so that the two
-    surfaces cannot end up offering different axes, which they would within a
-    release if each kept its own list.
-    """
-    try:
-        from prompt_master.krea import library as library_module
-
-        lib = library_module.library()
-    except Exception as exc:
-        gr.Markdown(f"The creativity library could not be read, so Creative Mode has "
-                    f"no vocabulary to direct with: {exc}",
-                    elem_classes=ui.classes("hint"))
-        return []
-
-    from prompt_master.krea import director
-
-    modes = stored.get("axis_modes") or {}
-    fixed = stored.get("fixed_values") or {}
-    rows = []
-    for key in lib.axis_keys:
-        axis = lib.axis(key)
-        with gr.Row(elem_id=ui.ident("krea", "axis", key)):
-            mode = gr.Radio(
-                label=axis.label, choices=[("Natural", director.NATURAL),
-                                           ("Vary", director.VARY),
-                                           ("Fixed", director.FIXED)],
-                value=modes.get(key, director.VARY), scale=2,
-                elem_id=ui.ident("krea", "axis", key, "mode"))
-            value = gr.Dropdown(
-                label="Fixed value", scale=3, value=fixed.get(key),
-                choices=[(variant.label, variant.identifier) for variant in axis.variants],
-                elem_id=ui.ident("krea", "axis", key, "value"))
-        rows.extend([mode, value])
-    return rows
-
-
-def _axes_from(axis_values) -> tuple[dict, dict]:
-    """The axis controls, as ``(modes, fixed ids)``.
-
-    The values arrive as one flat tuple -- Gradio has no other shape for a
-    variable number of inputs -- laid out mode, fixed, mode, fixed in the
-    library's own axis order. That pairing is the one thing that could go
-    quietly wrong, so it is done in one place.
-    """
-    from prompt_master.krea import director
-
-    try:
-        from prompt_master.krea import library as library_module
-
-        keys = library_module.library().axis_keys
-    except Exception:
-        return {}, {}
-
-    modes, fixed = {}, {}
-    for position, key in enumerate(keys):
-        mode = str(axis_values[position * 2] if position * 2 < len(axis_values)
-                   else director.VARY).casefold()
-        chosen = axis_values[position * 2 + 1] if position * 2 + 1 < len(axis_values) else None
-        modes[key] = mode if mode in director.MODES else director.VARY
-        if chosen:
-            fixed[key] = str(chosen)
-    return modes, fixed
-
-
 def _recipe_view(recipe) -> str:
     """The last recipe as something a person can read and argue with."""
     items = getattr(recipe, "items", ())
+    notes = getattr(recipe, "notes", ())
     if not items:
-        return (f"No creative direction at Creativity {getattr(recipe, 'creativity', 0)}.\n"
-                "Creativity 0 and 1 direct nothing by design; above that, set at least "
-                "one axis to Vary.")
+        head = (f"No creative direction at Creativity {getattr(recipe, 'creativity', 0)}.\n"
+                "Creativity 0 and 1 direct nothing by design; above that, add at least "
+                "one direction.")
+        return "\n".join([head, *notes]) if notes else head
     lines = [f"Creative seed: {recipe.creative_seed}   ·   writer seed: {recipe.llm_seed}"
              f"   ·   library {recipe.library_version}"]
+    if getattr(recipe, "replayed", False):
+        lines.append("Replayed from a recorded recipe: nothing was drawn.")
     if recipe.locked:
         lines.append("Locked by your prompt: " + ", ".join(recipe.locked))
+    for note in notes:
+        lines.append(f"Note: {note}")
     lines.append("")
     for item in items:
         lines.append(f"{item.label} [{item.source}] {item.variant_id} — {item.variant_label}")
@@ -415,28 +360,6 @@ def _remember_creativity(value):
 
     mc_creative_krea.remember(**{mc_creative_krea.CREATIVITY: clamp(value)})
     return ui.notice(describe(value))
-
-
-def _remember_creative_seed(value):
-    mc_creative_krea.remember(**{mc_creative_krea.SEED: mc_creative_krea._seed(value)})
-    return gr.update()
-
-
-def _remember_anti(value):
-    mc_creative_krea.remember(**{mc_creative_krea.ANTI_REPETITION: bool(value)})
-    return gr.update()
-
-
-def _remember_axes(*axis_values):
-    modes, fixed = _axes_from(axis_values)
-    mc_creative_krea.remember(**{mc_creative_krea.AXIS_MODES: modes,
-                                 mc_creative_krea.FIXED_VALUES: fixed})
-    return gr.update()
-
-
-def _forget_history():
-    mc_creative_krea.forget_history()
-    return ui.notice("Recent-roll memory cleared; every treatment is available again.")
 
 
 def _generate(prompt, seed, creative, creativity, creative_seed, anti, *rest):
@@ -542,14 +465,15 @@ def _split_tail(rest) -> tuple[tuple, tuple]:
     """The variable argument tail, as ``(axis controls, reference slots)``.
 
     Two variable-length groups arrive as one flat tuple because Gradio has no
-    other shape for them. The split is by the library's axis count -- two
-    controls per axis -- with the references taking whatever is left, so a
-    library that grows an axis moves the boundary without this being edited.
+    other shape for them. The split is by the library's axis count -- three
+    controls per axis, mode, fixed value and exclusions -- with the references
+    taking whatever is left, so a library that grows an axis moves the boundary
+    without this being edited.
     """
     try:
         from prompt_master.krea import library as library_module
 
-        width = len(library_module.library().axis_keys) * 2
+        width = len(library_module.library().axis_keys) * 3
     except Exception:
         width = 0
     return tuple(rest[:width]), tuple(rest[width:])
@@ -567,8 +491,9 @@ def _direct(prompt, creative, position, creative_seed, anti, axis_values):
         return None, ""
     from prompt_master.krea import director
 
-    modes, fixed = _axes_from(axis_values)
-    settings = {key: director.AxisSetting(mode=mode, fixed_id=fixed.get(key))
+    modes, fixed, excluded = mc_creative_panel.axes_from(axis_values)
+    settings = {key: director.AxisSetting(mode=mode, fixed_id=fixed.get(key),
+                                          excluded_ids=frozenset(excluded.get(key) or ()))
                 for key, mode in modes.items()}
     try:
         return director.roll(

@@ -162,3 +162,73 @@ class TestPasteFieldNames:
         written = set(build(seed_mode="Fixed", fixed_seed=1, sampler="Euler", scheduler="Karras"))
         declared = set(mc_infotext.paste_field_names())
         assert written <= declared, f"keys written but never pasted: {written - declared}"
+
+
+class TestTheCreativeConfiguration:
+    """The axis configuration written into a PNG, and read back out of one.
+
+    Short by design: Natural axes are absent, because absence is what Natural
+    means, and ids rather than labels, because a label is display text a package
+    update may rewrite while an id is stable by the package's own contract.
+    """
+
+    def test_only_the_axes_that_direct_anything_are_written(self):
+        line = mc_infotext.creative_axes(
+            {"medium": "vary", "texture": "natural", "mood": "fixed"},
+            {"mood": "monumental"})
+
+        assert "texture" not in line
+        assert line == "medium=vary, mood=fixed:monumental"
+
+    def test_it_round_trips(self):
+        modes = {"medium": "vary", "mood": "fixed"}
+        fixed = {"mood": "monumental"}
+        back_modes, back_fixed = mc_infotext.parse_creative_axes(
+            mc_infotext.creative_axes(modes, fixed))
+
+        assert (back_modes, back_fixed) == (modes, fixed)
+
+    def test_exclusions_round_trip(self):
+        excluded = {"lighting": ["harsh_noon", "golden_hour"], "texture": ["gloss"]}
+        line = mc_infotext.creative_exclusions(excluded)
+
+        assert mc_infotext.parse_creative_exclusions(line) == excluded
+
+    def test_an_axis_with_nothing_excluded_is_not_written(self):
+        assert mc_infotext.creative_exclusions({"lighting": []}) == ""
+
+    def test_the_lines_survive_the_hosts_own_quoting(self):
+        """Both carry commas and one carries a colon, which is exactly what the
+        host's quote/unquote pair exists for."""
+        axes = mc_infotext.creative_axes({"medium": "fixed", "mood": "vary"},
+                                         {"medium": "oil_impasto"})
+        excluded = mc_infotext.creative_exclusions(
+            {"lighting": ["harsh_noon", "golden_hour"]})
+        line = ", ".join([f"{mc_infotext.CREATIVE_AXES}: {quote(axes)}",
+                          f"{mc_infotext.CREATIVE_EXCLUDED}: {quote(excluded)}"])
+        parsed = parse_generation_parameters(f"a prompt\nSteps: 20, Seed: 1, {line}")
+
+        assert parsed[mc_infotext.CREATIVE_AXES] == axes
+        assert parsed[mc_infotext.CREATIVE_EXCLUDED] == excluded
+
+    def test_a_mode_that_is_not_a_mode_is_ignored_rather_than_restored(self):
+        modes, _fixed = mc_infotext.parse_creative_axes("medium=enthusiastic, mood=vary")
+
+        assert modes == {"mood": "vary"}
+
+    def test_nothing_recorded_reads_back_as_nothing(self):
+        assert mc_infotext.parse_creative_axes("") == ({}, {})
+        assert mc_infotext.parse_creative_exclusions(None) == {}
+
+    def test_every_creative_key_is_forwarded(self):
+        """The "send to txt2img" buttons forward by exact name, so a key not
+        declared here simply does not arrive."""
+        assert set(mc_infotext.CREATIVE_KEYS) <= set(
+            mc_infotext.creative_paste_field_names())
+
+    def test_the_creative_keys_are_namespaced_like_everything_else(self):
+        for key in mc_infotext.CREATIVE_KEYS:
+            assert key.startswith("Krea ")
+
+    def test_they_do_not_collide_with_the_chain_s_own_keys(self):
+        assert not set(mc_infotext.CREATIVE_KEYS) & set(mc_infotext.paste_field_names())

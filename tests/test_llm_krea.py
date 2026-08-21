@@ -116,14 +116,15 @@ def undirected(prompt, seed=7, *paths):
     reference slots -- flattened into one argument list, because Gradio has no
     other shape for them. A test that spelled the axis half out would be a test
     that has to be edited whenever the creativity package grows an axis, so it
-    is built from the library here instead.
+    is built from the library here instead. Three controls per axis: the mode,
+    the pinned value and the excluded ids.
     """
     from prompt_master.krea import director
     from prompt_master.krea import library as library_module
 
     axes = []
     for _ in library_module.library().axis_keys:
-        axes.extend([director.VARY, None])
+        axes.extend([director.VARY, None, []])
     return list(panel._generate(prompt, seed, False, 1, -1, False, *axes, *paths))
 
 

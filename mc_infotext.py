@@ -89,29 +89,44 @@ CREATIVE_RECIPE = "Krea Creative Recipe"
 CREATIVE_SOURCE = "Krea Source Prompt"
 CREATIVE_LIBRARY = "Krea Creativity Library"
 CREATIVE_LORAS = "Krea Pinned LoRAs"
+CREATIVE_AXES = "Krea Creative Axes"
+CREATIVE_EXCLUDED = "Krea Creative Excluded"
+CREATIVE_ANTI = "Krea Anti Repetition"
+CREATIVE_WRITER = "Krea Writer Model"
 """What a Creative Mode generation records, and what it deliberately does not.
 
-Between them these answer one question: how would somebody make this picture
-again. The Creative seed reproduces the local recipe exactly, the recipe ids say
-what that recipe was without needing the seed re-rolled, the library version
-says which vocabulary those ids were drawn from, and the LLM seed and Creativity
-say how the one writer request was made. The source prompt is the short phrase
-the user actually typed, which nothing else in the file preserves.
+There are two different questions here and conflating them is what made the old
+behaviour wrong.
 
-The expanded Krea prompt is absent from this list because it is not missing: it
-is the generation's own ``Prompt:`` line, which is what Creative Mode
-substituted before sampling began. Recording it a second time under a key of
-ours would add a few hundred bytes to every PNG in order to repeat what the file
-already says, and would create a second copy that a later paste could disagree
-with.
+**How do I make this picture again?** Answered by the image's own ``Prompt:``
+line and nothing else. Creative Mode assigns the expanded prompt to ``p.prompt``
+before Forge records infotext, so the recorded Prompt *is* the paragraph the
+image model was given -- which means an ordinary paste reproduces the image by
+restoring it and switching Creative Mode **off**. Leaving Creative Mode on would
+hand that paragraph back to the writer as a fresh idea and expand it a second
+time, and the result would be a picture of the prompt of the picture. That is
+what :func:`build_creative_paste_fields` exists to prevent.
 
-These are diagnostic rather than pasteable, and are not registered as paste
-fields. A pasted Krea source prompt would have to either overwrite the positive
-prompt box -- destroying whatever the user was iterating on -- or silently re-run
-the language model on a paste, and neither is a thing a paste button should do.
-The Creative seed is the field somebody copies by hand, into the seed box, on
-purpose.
+**How do I get back to the workflow that made it?** Answered by the keys above.
+The source phrase is the short thing the user typed, which nothing else in the
+file preserves. The Creative seed reproduces the local roll, the recipe ids say
+what that roll chose without needing it re-rolled, the library version says which
+vocabulary those ids came from, the axes and exclusions say what configuration
+allowed them, and the writer model says which language model turned the brief
+into English. Restoring all of that is a separate, explicit action on the panel,
+because it overwrites the prompt box -- and a paste button that silently replaced
+what somebody was iterating on would be the more destructive of the two failures.
+
+The expanded Krea prompt is still absent from this list, and still for the reason
+it always was: it is the ``Prompt:`` line. Recording it a second time under a key
+of ours would add a few hundred bytes to every PNG to repeat what the file
+already says, and would create a second copy a later paste could disagree with.
 """
+
+CREATIVE_KEYS = (CREATIVE_MODE, CREATIVE_CREATIVITY, CREATIVE_SEED, CREATIVE_LLM_SEED,
+                 CREATIVE_RECIPE, CREATIVE_SOURCE, CREATIVE_LIBRARY, CREATIVE_LORAS,
+                 CREATIVE_AXES, CREATIVE_EXCLUDED, CREATIVE_ANTI, CREATIVE_WRITER)
+"""Every key a Creative generation may write, for forwarding and for tests."""
 
 MODULE_PREFIX = "Model Chain Module "
 """Numbered VAE / text encoder keys: "Model Chain Module 1", "... 2", and so on.
@@ -423,6 +438,218 @@ def build_paste_fields(components: dict) -> list:
     ]
 
     return fields
+
+
+# --------------------------------------------------------------------------- #
+# Krea Creative Mode: writing the configuration down, and reading it back
+# --------------------------------------------------------------------------- #
+
+
+def creative_axes(modes, fixed) -> str:
+    """The axis configuration as one line: ``medium=fixed:oil_impasto, mood=vary``.
+
+    Natural axes are left out, which is what keeps this short on the ordinary
+    configuration: a fresh install directs nothing and writes nothing, and a user
+    who has configured two axes gets two entries rather than ten. Absence is not
+    ambiguous here -- everything unlisted is Natural, which is what Natural means.
+
+    Ids, never labels. A label is display text that a package update may rewrite;
+    an id is stable by the package's own contract, which is the only reason a
+    recorded configuration is worth restoring at all.
+    """
+    from prompt_master.krea import director
+
+    modes = modes or {}
+    fixed = fixed or {}
+    entries = []
+    for key, mode in modes.items():
+        mode = str(mode).casefold()
+        if mode == director.FIXED:
+            pinned = str(fixed.get(key) or "")
+            entries.append(f"{key}=fixed:{pinned}" if pinned else f"{key}=fixed")
+        elif mode == director.VARY:
+            entries.append(f"{key}=vary")
+    return ", ".join(entries)
+
+
+def parse_creative_axes(value) -> tuple[dict, dict]:
+    """``"medium=fixed:oil_impasto, mood=vary"`` back into ``(modes, fixed ids)``.
+
+    Only the axes the line names. The caller fills the rest with Natural, because
+    that is what their absence meant when the line was written -- and because an
+    image made before an axis existed must not be able to say anything about it.
+    """
+    from prompt_master.krea import director
+
+    modes, fixed = {}, {}
+    for entry in _entries(value):
+        key, _, described = entry.partition("=")
+        key, described = key.strip(), described.strip()
+        if not key or not described:
+            continue
+        mode, _, pinned = described.partition(":")
+        mode = mode.strip().casefold()
+        if mode not in director.MODES:
+            continue
+        modes[key] = mode
+        if mode == director.FIXED and pinned.strip():
+            fixed[key] = pinned.strip()
+    return modes, fixed
+
+
+def creative_exclusions(excluded) -> str:
+    """Excluded ids as one line: ``lighting=harsh_noon|golden_hour, texture=gloss``.
+
+    Pipes inside an axis, commas between them, because the host's own quoting
+    already understands a comma and this way one axis's exclusions stay one
+    token even when a value is read by eye.
+    """
+    entries = []
+    for key, values in (excluded or {}).items():
+        chosen = [str(value) for value in (values or ()) if str(value)]
+        if chosen:
+            entries.append(f"{key}={'|'.join(chosen)}")
+    return ", ".join(entries)
+
+
+def parse_creative_exclusions(value) -> dict:
+    """One recorded exclusions line back into ``{axis: [id, ...]}``."""
+    excluded = {}
+    for entry in _entries(value):
+        key, _, listed = entry.partition("=")
+        key = key.strip()
+        chosen = [part.strip() for part in listed.split("|") if part.strip()]
+        if key and chosen:
+            excluded[key] = chosen
+    return excluded
+
+
+def _entries(value) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(entry).strip() for entry in value if str(entry).strip()]
+    return [part.strip() for part in str(value).split(",") if part.strip()]
+
+
+def creative_setup(params: dict):
+    """One infotext's Creative fields as a :class:`mc_creative_krea.Setup`.
+
+    Reading, and only reading. Nothing here applies anything: the panel's restore
+    button does that, when somebody presses it, and this is what it reads.
+    """
+    import mc_creative_krea
+
+    modes, fixed = parse_creative_axes(params.get(CREATIVE_AXES))
+    excluded = parse_creative_exclusions(params.get(CREATIVE_EXCLUDED))
+    return mc_creative_krea.Setup(
+        source=str(params.get(CREATIVE_SOURCE) or ""),
+        creativity=_number(params.get(CREATIVE_CREATIVITY)),
+        seed=_number(params.get(CREATIVE_SEED)),
+        llm_seed=_number(params.get(CREATIVE_LLM_SEED)),
+        recipe=str(params.get(CREATIVE_RECIPE) or ""),
+        library_version=str(params.get(CREATIVE_LIBRARY) or ""),
+        axis_modes=modes,
+        fixed_values=fixed,
+        excluded_values=excluded,
+        anti_repetition=_flag(params.get(CREATIVE_ANTI)),
+        loras=str(params.get(CREATIVE_LORAS) or ""),
+        writer=str(params.get(CREATIVE_WRITER) or ""),
+    )
+
+
+def _number(value):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _flag(value):
+    if value is None or str(value).strip() == "":
+        return None
+    return str(value).strip().casefold() in ("true", "1", "yes", "on")
+
+
+def build_creative_paste_fields(components: dict, notice=None, view=None) -> list:
+    """Map a pasted Creative infotext onto the txt2img Creative controls.
+
+    Exactly one control is *changed* by an ordinary paste, and it is switched
+    off. That is the whole of the reproduction fix:
+
+    * the recorded ``Prompt:`` line is the expanded prompt the image model was
+      given, and the host restores it as it restores any prompt;
+    * Creative Mode is switched off, so nothing expands it a second time;
+    * the seed, checkpoint, sampler, size and everything else are the host's and
+      are untouched by this.
+
+    The rest of the Creative record is *captured* rather than applied -- stashed
+    on :data:`mc_creative_krea.pasted` for the panel's explicit "Restore Creative
+    setup" button, which is the action that is allowed to overwrite the prompt
+    box, because somebody pressed it.
+
+    A paste with no Creative keys in it changes nothing here. Returning ``None``
+    from a paste field is how the host is told to leave a control alone, and an
+    ordinary image should not be able to switch a feature off any more than on.
+    """
+    from modules.infotext_utils import PasteField
+
+    import mc_creative_krea
+
+    def creative_off(params):
+        if CREATIVE_MODE not in params:
+            return None
+        logger.info("Model Chain: this image was made with Krea Creative Mode. Its "
+                    "final expanded prompt has been restored and Creative Mode was "
+                    "switched off, so the prompt is not expanded a second time.")
+        return False
+
+    def captured(params):
+        """Stash the Creative record, and say on the panel what just happened.
+
+        Piggy-backed on a paste field because a paste field is the only callback
+        the host offers on a paste, and the capture has to happen on every paste
+        rather than on the ones somebody remembers to press a button after.
+        """
+        setup = creative_setup(params)
+        mc_creative_krea.pasted.remember(setup)
+        # A paste is a new starting point; an armed replay from an earlier one
+        # is not part of it and would silently direct the next generation.
+        mc_creative_krea.replay.clear()
+        if not setup.present:
+            return None
+        said = ("Creative image restored using its final expanded prompt. Creative Mode "
+                "was disabled to prevent re-expansion. Its source prompt and settings "
+                "are under Creative Controls → Continue from a pasted image.")
+        return notice(said) if notice else said
+
+    def pasted_view(params):
+        # The surface hands its own view function in rather than being imported
+        # by name: this module is imported by the host under a name it chooses,
+        # and a helper module reaching back into a script by string would be a
+        # dependency nothing declares.
+        if CREATIVE_MODE not in params or view is None:
+            return None
+        return view()
+
+    fields = [PasteField(components["enabled"], creative_off, api="krea_creative_enabled")]
+    if "status" in components:
+        fields.append(PasteField(components["status"], captured,
+                                 api="krea_creative_status"))
+    if "pasted" in components and view is not None:
+        fields.append(PasteField(components["pasted"], pasted_view,
+                                 api="krea_creative_pasted"))
+    return fields
+
+
+def creative_paste_field_names() -> list[str]:
+    """Keys the "Send to txt2img" buttons must forward for the above to work.
+
+    All of them, including the ones only the restore button reads: the buttons
+    forward by exact name, so a key that is not listed here simply does not
+    arrive, and "restore the setup" would find half a record.
+    """
+    return list(CREATIVE_KEYS)
 
 
 def paste_field_names() -> list[str]:

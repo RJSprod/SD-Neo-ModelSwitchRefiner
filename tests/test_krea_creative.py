@@ -32,6 +32,7 @@ import pytest
 
 import mc_broker
 import mc_creative_krea
+import mc_creative_profiles as profiles
 import mc_infotext
 import mc_llm_krea_panel as panel
 import mc_llm_paths
@@ -101,6 +102,22 @@ def axes(**overrides) -> dict:
 
 def roll(source="car", creativity=10, seed=director.RANDOM_SEED, settings=None, history=()):
     return director.roll(source, creativity, seed, settings or axes(), history)
+
+
+def varying(creativity=10, **overrides) -> dict:
+    """The stored settings, with every axis varying.
+
+    The factory configuration is now every axis Natural -- a fresh install
+    directs nothing until somebody asks it to -- so a test about *how a directed
+    roll is made* has to say that it wants direction. Saying it here once is what
+    keeps that from being restated in every such test.
+    """
+    stored = mc_creative_krea.settings()
+    stored["creativity"] = creativity
+    stored["axis_modes"] = {key: director.VARY
+                            for key in library_module.library().axis_keys}
+    stored.update(overrides)
+    return stored
 
 
 # --------------------------------------------------------------------------- #
@@ -609,9 +626,7 @@ class TestTheOneCallRule:
         assert len(client.calls) == 10
 
     def test_the_brief_travels_in_the_user_turn_and_not_the_instruction(self, client):
-        stored = mc_creative_krea.settings()
-        stored["creativity"] = 10
-        list(mc_creative_krea.creative.roll("car", stored))
+        list(mc_creative_krea.creative.roll("car", varying()))
 
         system, user = client.calls[0]["messages"]
         assert director.BRIEF_HEADING not in system["content"]
@@ -879,16 +894,20 @@ def rolled(client, source="car", loras="", creativity=10):
     return mc_creative_krea.prepare(mc_creative_krea.creative.last, loras)
 
 
-def panel_values(creativity=10, seed=director.RANDOM_SEED, anti=True, loras=""):
+def panel_values(creativity=10, seed=director.RANDOM_SEED, anti=True, loras="",
+                 mode=director.VARY, modes=None, fixed=None, excluded=None):
     """What Forge hands ``before_process`` after the enabled flag.
 
     The panel's own controls, in the order ``ui()`` returns them: the four
-    scalars and then the axis table, mode and fixed value per axis. Built from
-    the library rather than written out, for the same reason the table is.
+    scalars and then the axis controls, three per axis -- mode, pinned value,
+    excluded ids. Built from the library rather than written out, for the same
+    reason the panel is.
     """
     values = [creativity, seed, anti, loras]
-    for _key in library_module.library().axis_keys:
-        values.extend([director.VARY, None])
+    for key in library_module.library().axis_keys:
+        values.extend([(modes or {}).get(key, mode),
+                       (fixed or {}).get(key),
+                       list((excluded or {}).get(key) or ())])
     return values
 
 
@@ -1180,12 +1199,23 @@ class TestTheTxt2imgSurface:
 
         assert (slider.minimum, slider.maximum, slider.step) == (0, 10, 1)
 
-    def test_there_is_a_row_for_every_axis_in_the_library(self, built, lib):
-        assert len(built.components["axes"]) == len(lib.axis_keys) * 2
+    def test_there_are_three_controls_for_every_axis_in_the_library(self, built, lib):
+        """Mode, pinned value, exclusions -- in that order, per axis. The order is
+        the contract ``before_process`` unpacks by."""
+        assert len(built.components["axes"]) == len(lib.axis_keys) * 3
 
     def test_every_axis_offers_the_three_modes(self, built):
-        for control in built.components["axes"][::2]:
+        for control in built.components["axes"][::3]:
             assert [value for _label, value in control.choices] == list(director.MODES)
+
+    def test_an_axis_can_exclude_its_own_treatments(self, built, lib):
+        """Exclusion is a modifier of Vary, so it is a multiselect over the same
+        vocabulary the axis varies within -- not a fourth mode."""
+        excluded = built.components["axes"][2]
+        expected = [variant.identifier for variant in lib.axis(lib.axis_keys[0]).variants]
+
+        assert excluded.multiselect is True
+        assert [value for _label, value in excluded.choices] == expected
 
     def test_a_fixed_dropdown_lists_that_axis_own_variants(self, built, lib):
         values = built.components["axes"][1]
@@ -1221,14 +1251,27 @@ class TestTheTxt2imgSurface:
         """The gate's half is gone: no hidden button for JavaScript to press and
         no hidden box for it to poll. Both existed only to sequence a roll and a
         click from the page, and both are how a closed tab used to strand a
-        generation."""
+        generation.
+
+        What is hidden now is progressive disclosure, which is the opposite kind
+        of thing: a row for a decision nobody has made yet, revealed by a press on
+        a control that is right there. Those are allowed by identity -- they are
+        the panel's own rows, editors and axis controls -- so a *new* hidden
+        component with no visible way to reach it still fails here.
+        """
+        disclosure = {id(entry)
+                      for name in ("rows", "editors", "axes")
+                      for entry in built.components.get(name) or []}
+
         for name, component in built.components.items():
             if isinstance(component, list):
                 continue
             if getattr(component, "visible", True) is False:
                 # The controls that hide with the toggle are a different thing:
-                # they are visible the moment Creative Mode is on.
-                assert name in ("creativity", "status", "controls")
+                # they are visible the moment Creative Mode is on. "name_row" is
+                # the Save As name box, revealed by the Save As button.
+                assert (name in ("creativity", "status", "controls", "name_row")
+                        or id(component) in disclosure), name
 
     def test_what_ui_returns_is_what_before_process_reads(self, store, host, client):
         """The contract that is easiest to break and hardest to notice.
@@ -1290,8 +1333,8 @@ class TestTheLlmStudioSurface:
         assert built["controls"].visible is False
         assert (built["creativity"].minimum, built["creativity"].maximum) == (0, 10)
 
-    def test_it_has_a_row_for_every_axis_too(self, built, lib):
-        assert len(built["axes"]) == len(lib.axis_keys) * 2
+    def test_it_has_the_same_three_controls_per_axis(self, built, lib):
+        assert len(built["axes"]) == len(lib.axis_keys) * 3
 
     def test_it_adds_no_image_backend(self, built):
         """This mode writes prompts. It settles nothing about how they would be
@@ -1402,6 +1445,922 @@ class TestTheCheckpointGuard:
         list(mc_creative_krea.creative.roll("car"))
 
         assert len(client.calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Exclusions: a modifier of Vary, and an absolute one
+# --------------------------------------------------------------------------- #
+
+
+class TestExclusions:
+    """"Vary this axis, but never that treatment."
+
+    The gap the old panel left: a user could allow everything or pin one thing,
+    and had no way to say which two of a hundred treatments they never want. It
+    is a modifier of Vary rather than a fourth mode, because "never harsh noon"
+    is a statement about *how* to vary and making it a mode would force somebody
+    who wants two treatments gone to stop varying altogether.
+    """
+
+    def test_an_excluded_variant_is_never_chosen(self, lib):
+        """Over three hundred rolls at the position that activates everything."""
+        banned = {variant.identifier for variant in lib.axis("medium").variants[:4]}
+        settings = axes(medium=director.AxisSetting(mode=director.VARY,
+                                                    excluded_ids=frozenset(banned)))
+        for seed in range(300):
+            recipe = roll(creativity=10, seed=seed, settings=settings)
+            for item in recipe.items:
+                assert item.variant_id not in banned
+
+    def test_the_rest_of_the_axis_is_still_reachable(self, lib):
+        """Excluding four treatments is not excluding the axis."""
+        banned = {variant.identifier for variant in lib.axis("medium").variants[:4]}
+        settings = axes(medium=director.AxisSetting(mode=director.VARY,
+                                                    excluded_ids=frozenset(banned)))
+        chosen = {item.variant_id for seed in range(200)
+                  for item in roll(creativity=10, seed=seed, settings=settings).items
+                  if item.axis == "medium"}
+
+        assert len(chosen) > 3
+
+    def test_excluding_everything_skips_the_axis_and_says_so(self, lib):
+        """Never the excluded value anyway, and never silence about it.
+
+        The two wrong answers are both quiet: choosing an excluded treatment
+        because nothing else was left, or dropping the axis with nothing said and
+        letting somebody conclude that exclusions break Vary."""
+        everything = {variant.identifier for variant in lib.axis("texture").variants}
+        settings = axes(texture=director.AxisSetting(mode=director.VARY,
+                                                     excluded_ids=frozenset(everything)))
+        recipe = roll(creativity=10, settings=settings)
+
+        assert all(item.axis != "texture" for item in recipe.items)
+        assert any("Texture" in note for note in recipe.notes)
+
+    def test_a_skipped_axis_does_not_cost_another_axis_its_line(self, lib):
+        """An axis that cannot be directed must not consume an activation slot.
+
+        Left in the pool it would be drawn, produce nothing, and leave the roll
+        one line shorter -- so a user who excluded one small axis would find the
+        others directed less often with nothing to explain it."""
+        everything = {variant.identifier for variant in lib.axis("texture").variants}
+        settings = axes(texture=director.AxisSetting(mode=director.VARY,
+                                                     excluded_ids=frozenset(everything)))
+        for seed in range(40):
+            with_exclusion = roll(creativity=6, seed=seed, settings=settings)
+            assert with_exclusion.items, "the roll directed nothing at all"
+
+    def test_exclusion_does_not_apply_to_a_fixed_pin(self, lib):
+        """A pin is the decision. An exclusion that could cancel one would leave
+        the axis meaning two things at once."""
+        pinned = lib.axis("texture").variants[0].identifier
+        settings = axes(texture=director.AxisSetting(
+            mode=director.FIXED, fixed_id=pinned, excluded_ids=frozenset({pinned})))
+        recipe = roll(creativity=5, settings=settings)
+
+        assert any(item.variant_id == pinned for item in recipe.items)
+
+    def test_the_setting_takes_a_list_as_readily_as_a_set(self):
+        """It arrives from a JSON file, a Gradio multiselect and an infotext
+        line, and one of the three hands over a list every time."""
+        setting = director.AxisSetting(mode=director.VARY, excluded_ids=["a", "b", "a"])
+
+        assert setting.excluded_ids == frozenset({"a", "b"})
+        assert setting.excludes("a") and not setting.excludes("c")
+
+    def test_they_survive_the_settings_file(self, store, lib):
+        banned = [lib.axis("lighting").variants[0].identifier]
+        mc_creative_krea.remember(**{
+            mc_creative_krea.AXIS_MODES: {"lighting": director.VARY},
+            mc_creative_krea.EXCLUDED_VALUES: {"lighting": banned}})
+
+        assert mc_creative_krea.settings()["excluded_values"] == {"lighting": banned}
+        assert mc_creative_krea.axis_settings()["lighting"].excluded_ids == frozenset(banned)
+
+    def test_an_id_the_library_no_longer_has_is_dropped(self, store):
+        """A saved configuration outlives the package version it was written
+        against, and an exclusion naming a treatment that has gone excludes
+        nothing -- so keeping it would leave somebody reading a list of
+        protections they no longer have."""
+        mc_creative_krea.remember(**{
+            mc_creative_krea.EXCLUDED_VALUES: {"lighting": ["no_such_treatment"]},
+            mc_creative_krea.FIXED_VALUES: {"medium": "no_such_medium"}})
+        stored = mc_creative_krea.settings()
+
+        assert stored["excluded_values"] == {}
+        assert stored["fixed_values"] == {}
+
+
+# --------------------------------------------------------------------------- #
+# The fresh install directs nothing
+# --------------------------------------------------------------------------- #
+
+
+class TestTheFactoryConfiguration:
+    """A new configuration contains no art direction the user did not ask for.
+
+    The package as delivered set nine of the ten axes to Vary, which meant a
+    fresh install arrived with nine decisions already taken -- none of them made
+    by the user, and none of them visible until they opened the drawer and read
+    ten rows of controls.
+    """
+
+    def test_every_axis_is_natural(self, lib, store):
+        stored = mc_creative_krea.settings()
+
+        assert set(stored["axis_modes"]) == set(lib.axis_keys)
+        assert set(stored["axis_modes"].values()) == {director.NATURAL}
+
+    def test_nothing_is_pinned_and_nothing_is_excluded(self, store):
+        stored = mc_creative_krea.settings()
+
+        assert stored["fixed_values"] == {}
+        assert stored["excluded_values"] == {}
+
+    def test_a_fresh_configuration_directs_nothing_at_any_position(self, store):
+        settings = mc_creative_krea.axis_settings()
+        for creativity in range(0, 11):
+            recipe = director.roll("car", creativity, 7, settings)
+            assert recipe.items == ()
+            assert recipe.brief == ""
+
+    def test_an_axis_setting_defaults_to_natural(self):
+        """A missing axis -- one a later package adds, one an older profile does
+        not mention -- fails neutral rather than silently varying."""
+        assert director.AxisSetting().mode == director.NATURAL
+
+    def test_the_packages_defaults_agree(self, lib):
+        assert set((lib.defaults.get("axis_modes") or {}).values()) == {director.NATURAL}
+        assert not lib.defaults.get("fixed_values")
+        assert not lib.defaults.get("excluded_values")
+
+    def test_the_creativity_position_is_still_five(self, store):
+        """Neutral means no *decisions*, not a feature turned down: somebody who
+        adds one direction should get it at the middle of the scale."""
+        assert mc_creative_krea.settings()["creativity"] == 5
+
+
+# --------------------------------------------------------------------------- #
+# Named profiles
+# --------------------------------------------------------------------------- #
+
+
+class TestProfiles:
+    @pytest.fixture
+    def data(self, tmp_path, monkeypatch, host):
+        """Point the profile store at a throwaway WebUI data directory."""
+        from modules import paths
+
+        monkeypatch.setattr(paths, "data_path", str(tmp_path), raising=False)
+        return tmp_path
+
+    def test_the_factory_profile_is_always_there_and_is_neutral(self, data, lib):
+        assert profiles.FACTORY in profiles.choices()
+        values = profiles.get(profiles.FACTORY)
+
+        assert set(values["axis_modes"].values()) == {director.NATURAL}
+        assert values["fixed_values"] == {} and values["excluded_values"] == {}
+
+    def test_a_saved_profile_round_trips_through_the_file(self, data, store, lib):
+        banned = [lib.axis("lighting").variants[0].identifier]
+        mc_creative_krea.remember(**{
+            mc_creative_krea.CREATIVITY: 8,
+            mc_creative_krea.AXIS_MODES: {"lighting": director.VARY},
+            mc_creative_krea.EXCLUDED_VALUES: {"lighting": banned}})
+        profiles.save("Editorial", profiles.from_settings())
+
+        # A fresh read of the file, as a restarted WebUI would do.
+        loaded = profiles.get("Editorial")
+        assert loaded["creativity"] == 8
+        assert loaded["axis_modes"]["lighting"] == director.VARY
+        assert loaded["excluded_values"]["lighting"] == banned
+
+    def test_a_profile_does_not_carry_whether_creative_mode_is_on(self, data, store):
+        """A profile says how the feature behaves. Whether it runs at all is a
+        decision made at the moment somebody presses Generate."""
+        mc_creative_krea.remember(**{mc_creative_krea.ENABLED: True})
+        saved = profiles.from_settings()
+
+        assert "enabled" not in saved
+        assert "enabled" not in profiles.FIELDS
+        assert set(profiles.FIELDS) & set(profiles.EXCLUDED_FIELDS) == set()
+
+    def test_applying_a_profile_leaves_the_toggle_alone(self, data, store):
+        mc_creative_krea.remember(**{mc_creative_krea.ENABLED: True})
+        profiles.save("Quiet", profiles.factory())
+        stored, complaint = profiles.apply("Quiet")
+
+        assert complaint == ""
+        assert stored["enabled"] is True
+
+    def test_the_panel_opens_on_the_profile_the_settings_came_from(self, data, store):
+        profiles.save("Editorial", profiles.factory())
+        profiles.apply("Editorial")
+
+        assert profiles.selected() == "Editorial"
+
+    def test_a_selection_naming_a_deleted_profile_falls_back(self, data, store):
+        profiles.save("Editorial", profiles.factory())
+        profiles.apply("Editorial")
+        profiles.delete("Editorial")
+
+        assert profiles.selected() == profiles.FACTORY
+
+    def test_nothing_is_applied_merely_by_opening_the_panel(self, data, store):
+        """A panel that reapplied its default every time a tab opened would
+        silently discard whatever the last tab adjusted."""
+        profiles.save("Editorial", profiles.factory())
+        profiles.set_default("Editorial")
+        mc_creative_krea.remember(**{mc_creative_krea.CREATIVITY: 9,
+                                     mc_creative_krea.AXIS_MODES:
+                                         {"medium": director.VARY}})
+
+        assert profiles.selected() == "Editorial"
+        assert mc_creative_krea.settings()["creativity"] == 9
+        assert mc_creative_krea.settings()["axis_modes"]["medium"] == director.VARY
+
+    def test_the_chosen_default_survives_a_restart(self, data, store):
+        profiles.save("Editorial", profiles.factory())
+        profiles.set_default("Editorial")
+
+        # Nothing cached: every reader opens the file.
+        assert profiles.default_name() == "Editorial"
+        name, _values, complaint = profiles.default_profile()
+        assert (name, complaint) == ("Editorial", "")
+
+    def test_a_default_that_has_gone_falls_back_to_factory_and_says_so(self, data,
+                                                                      store):
+        """A panel that refused to build over a missing preset would be a
+        Creative Mode nobody can turn on to fix it.
+
+        The profile is removed from the file rather than through :func:`delete`,
+        because delete tidies the default up after itself. What is being tested
+        is the case nothing tidied: a hand-edited store, or one written by a
+        version that is no longer installed."""
+        import json
+
+        profiles.save("Editorial", profiles.factory())
+        profiles.set_default("Editorial")
+        with open(profiles.path(), "w", encoding="utf-8") as handle:
+            json.dump({"version": 1, "profiles": {}, "default": "Editorial"}, handle)
+
+        name, values, complaint = profiles.default_profile()
+        assert name == profiles.FACTORY
+        assert set(values["axis_modes"].values()) == {director.NATURAL}
+        assert "Editorial" in complaint
+
+    def test_deleting_the_default_leaves_no_dangling_nomination(self, data, store):
+        profiles.save("Editorial", profiles.factory())
+        profiles.set_default("Editorial")
+        profiles.delete("Editorial")
+
+        assert profiles.default_name() == profiles.FACTORY
+        assert profiles.default_profile()[2] == ""
+
+    def test_the_factory_profile_cannot_be_deleted_or_overwritten(self, data, store):
+        with pytest.raises(profiles.ProfileError):
+            profiles.delete(profiles.FACTORY)
+        with pytest.raises(profiles.ProfileError):
+            profiles.save(profiles.FACTORY, profiles.factory())
+
+    def test_deleting_one_profile_keeps_the_others(self, data, store):
+        profiles.save("One", profiles.factory())
+        profiles.save("Two", profiles.factory())
+        profiles.delete("One")
+
+        assert profiles.names() == ["Two"]
+
+    def test_an_unnamed_save_is_refused_rather_than_written(self, data, store):
+        with pytest.raises(profiles.ProfileError):
+            profiles.save("   ", profiles.factory())
+
+        assert profiles.names() == []
+
+    def test_the_store_is_outside_the_extension_directory(self, data):
+        """Reinstalling or updating the extension must not throw profiles away,
+        which is why this file lives beside Model Chain's presets in the WebUI's
+        data directory rather than in the extension folder."""
+        import os
+
+        location = profiles.path()
+        assert os.path.basename(location) == "krea_creative_profiles.json"
+        assert str(Path(__file__).resolve().parent.parent) not in location
+
+    def test_a_damaged_store_reads_as_empty_rather_than_raising(self, data, store):
+        with open(profiles.path(), "w", encoding="utf-8") as handle:
+            handle.write("{not json at all")
+
+        assert profiles.names() == []
+        assert profiles.default_profile()[0] == profiles.FACTORY
+
+    def test_a_profile_written_by_an_older_version_still_loads(self, data, store):
+        """Fields added since are filled from the current defaults rather than
+        blanking the control -- which is what makes adding exclusions to a schema
+        that had none cost nobody their saved work."""
+        profiles.save("Old", {"creativity": 7, "axis_modes": {"medium": director.VARY}})
+        loaded = profiles.get("Old")
+
+        assert loaded["creativity"] == 7
+        assert loaded["excluded_values"] == {}
+        assert loaded["anti_repetition"] is True
+
+    def test_a_mode_that_is_not_a_mode_reads_as_natural(self, data, store):
+        profiles.save("Odd", {"axis_modes": {"medium": "enthusiastic"}})
+
+        assert profiles.get("Odd")["axis_modes"]["medium"] == director.NATURAL
+
+
+# --------------------------------------------------------------------------- #
+# The compact panel
+# --------------------------------------------------------------------------- #
+
+
+class TestTheCompactPanel:
+    """What the drawer shows is what the user has decided, and nothing else."""
+
+    @pytest.fixture
+    def data(self, tmp_path, monkeypatch, host):
+        from modules import paths
+
+        monkeypatch.setattr(paths, "data_path", str(tmp_path), raising=False)
+        return tmp_path
+
+    @pytest.fixture
+    def built(self, store, data, host):
+        import model_chain_krea_creative as creative_script
+
+        instance = creative_script.ScriptKreaCreative()
+        instance.ui(False)
+        return instance
+
+    def panel(self, built):
+        return built.panel
+
+    def rendered(self, built, updates) -> dict:
+        """One render's updates, keyed by the component they are for."""
+        return {id(component): update
+                for component, update in zip(built.panel.outputs(), updates)}
+
+    def test_a_fresh_drawer_has_no_axis_rows_at_all(self, built):
+        assert all(row.visible is False for row in built.components["rows"])
+        assert all(editor.visible is False for editor in built.components["editors"])
+
+    def test_it_says_so_in_words_rather_than_showing_an_empty_table(self, built):
+        assert "None" in built.components["summary"].value
+
+    def test_every_natural_axis_is_offered_as_something_to_add(self, built, lib):
+        offered = [value for _label, value in built.components["add"].choices]
+
+        assert offered == list(lib.axis_keys)
+
+    def test_adding_a_direction_shows_that_row_and_opens_its_editor(self, built, lib):
+        panel = self.panel(built)
+        updates = self.rendered(built, _fire(built, panel.add, "medium"))
+
+        assert updates[id(panel.rows["medium"])]["visible"] is True
+        assert updates[id(panel.editors["medium"])]["visible"] is True
+        assert updates[id(panel.rows["lighting"])]["visible"] is False
+        assert updates[id(panel.editors["lighting"])]["visible"] is False
+
+    def test_an_added_axis_is_no_longer_offered_to_be_added(self, built):
+        panel = self.panel(built)
+        updates = self.rendered(built, _fire(built, panel.add, "medium"))
+        offered = [value for _label, value in updates[id(panel.add)]["choices"]]
+
+        assert "medium" not in offered
+
+    def test_adding_a_direction_varies_it_rather_than_pinning_it(self, built):
+        _fire(built, self.panel(built).add, "medium")
+
+        assert mc_creative_krea.settings()["axis_modes"]["medium"] == director.VARY
+
+    def test_vary_offers_exclusions_and_no_pinned_value(self, built):
+        panel = self.panel(built)
+        _fire(built, panel.add, "medium")
+        updates = self.rendered(built, _fire(built, panel.modes["medium"],
+                                             director.VARY))
+
+        assert updates[id(panel.excluded["medium"])]["visible"] is True
+        assert updates[id(panel.fixed["medium"])]["visible"] is False
+
+    def test_fixed_offers_a_pinned_value_and_no_exclusions(self, built):
+        panel = self.panel(built)
+        _fire(built, panel.add, "medium")
+        updates = self.rendered(built, _fire(built, panel.modes["medium"],
+                                             director.FIXED))
+
+        assert updates[id(panel.fixed["medium"])]["visible"] is True
+        assert updates[id(panel.excluded["medium"])]["visible"] is False
+
+    def test_neither_is_shown_for_an_axis_whose_editor_is_closed(self, built):
+        panel = self.panel(built)
+        _fire(built, panel.add, "medium")
+        _fire(built, panel.modes["medium"], director.VARY)
+        updates = self.rendered(built, _click(built, "editor", "medium", "done"))
+
+        assert updates[id(panel.editors["medium"])]["visible"] is False
+        assert updates[id(panel.excluded["medium"])]["visible"] is False
+        assert updates[id(panel.rows["medium"])]["visible"] is True
+
+    def test_returning_to_natural_removes_the_row(self, built):
+        panel = self.panel(built)
+        _fire(built, panel.add, "medium")
+        updates = self.rendered(built, _click(built, "editor", "medium", "natural"))
+
+        assert updates[id(panel.rows["medium"])]["visible"] is False
+        assert mc_creative_krea.settings()["axis_modes"]["medium"] == director.NATURAL
+
+    def test_the_row_summarises_the_decision_in_one_line(self, built, lib):
+        panel = self.panel(built)
+        pinned = lib.axis("medium").variants[0]
+        _fire(built, panel.add, "medium")
+        _fire(built, panel.modes["medium"], director.FIXED)
+        updates = self.rendered(built, _fire(built, panel.fixed["medium"],
+                                             pinned.identifier))
+
+        assert updates[id(panel.labels["medium"])]["value"] == (
+            f"**{lib.axis('medium').label}** · Fixed: {pinned.label}")
+
+    def test_a_vary_row_says_how_many_it_excludes(self, built, lib):
+        panel = self.panel(built)
+        banned = lib.axis("lighting").variants[0]
+        _fire(built, panel.add, "lighting")
+        updates = self.rendered(built, _fire(built, panel.excluded["lighting"],
+                                             [banned.identifier]))
+        line = updates[id(panel.labels["lighting"])]["value"]
+
+        assert "Vary" in line and banned.label in line
+
+    def test_the_exclusions_reach_the_settings_file(self, built, lib):
+        panel = self.panel(built)
+        banned = lib.axis("lighting").variants[0].identifier
+        _fire(built, panel.add, "lighting")
+        _fire(built, panel.excluded["lighting"], [banned])
+
+        assert mc_creative_krea.settings()["excluded_values"] == {"lighting": [banned]}
+
+    def test_every_axis_control_answers_on_input_rather_than_on_change(self, built):
+        """Every handler here rewrites the whole panel, including the control
+        that fired it. ``change`` fires when the server sets a value, so wiring
+        these to it would be a feedback loop."""
+        panel = self.panel(built)
+        for key in panel.keys:
+            for control in (panel.modes[key], panel.fixed[key], panel.excluded[key]):
+                kinds = {kind for kind, _kwargs in control._callbacks}
+                assert kinds == {"input"}
+
+    def test_saving_a_profile_from_the_panel_stores_what_is_on_screen(self, built,
+                                                                      data):
+        panel = self.panel(built)
+        _fire(built, panel.add, "medium")
+        panel.profile_name.value = "Editorial"
+        _click(built, "profile", "create")
+
+        assert profiles.get("Editorial")["axis_modes"]["medium"] == director.VARY
+
+    def test_loading_a_profile_redraws_every_control(self, built, data):
+        panel = self.panel(built)
+        _fire(built, panel.add, "medium")
+        panel.profile_name.value = "Editorial"
+        _click(built, "profile", "create")
+        _click(built, "editor", "medium", "natural")
+
+        updates = self.rendered(built, _fire(built, panel.profile, "Editorial"))
+        assert updates[id(panel.rows["medium"])]["visible"] is True
+        assert updates[id(panel.modes["medium"])]["value"] == director.VARY
+
+    def test_one_render_answers_for_every_control_it_owns(self, built):
+        """The contract every handler relies on: a render is positional, so an
+        outputs list and a render that disagree by one put every update after
+        the mismatch on the wrong control."""
+        panel = self.panel(built)
+
+        assert len(panel.render()) == len(panel.outputs())
+        assert len(panel.render(editing="medium", told="hello")) == len(panel.outputs())
+
+    def test_a_library_that_will_not_load_leaves_a_sentence_and_no_panel(self, store,
+                                                                        monkeypatch):
+        """Creative Mode then has no vocabulary to direct with, and a drawer of
+        empty dropdowns would invite somebody to configure a feature that cannot
+        run."""
+        import model_chain_krea_creative as creative_script
+        from prompt_master.krea import library as library_module
+
+        def broken():
+            raise library_module.LibraryError("the package is not there")
+
+        monkeypatch.setattr(library_module, "library", broken)
+        instance = creative_script.ScriptKreaCreative()
+        returned = instance.ui(False)
+
+        assert instance.panel is None
+        assert len(returned) == 2  # the toggle and the slider, and nothing else
+
+    def test_both_surfaces_build_the_same_panel(self, built):
+        """One implementation. Two would disagree within a release, and the
+        first thing they would disagree about is what a fresh install does."""
+        root = Path(__file__).resolve().parent.parent
+        for name in ("mc_llm_krea_panel.py", "scripts/model_chain_krea_creative.py"):
+            source = (root / name).read_text(encoding="utf-8")
+            assert "mc_creative_panel" in source
+            assert "_axis_table" not in source
+
+    def test_the_panel_never_offers_a_fourth_mode(self, built):
+        """Exclusion is a modifier of Vary. A mode for it would make "vary this
+        but not that" impossible to say."""
+        for control in built.components["axes"][::3]:
+            assert [value for _label, value in control.choices] == list(director.MODES)
+
+
+def _fire(script, component, value):
+    """Drive one component's ``input`` handler the way the browser would."""
+    for kind, kwargs in component._callbacks:
+        if kind != "input":
+            continue
+        component.value = value
+        inputs = list(kwargs.get("inputs") or [])
+        return kwargs["fn"](*[value if entry is component
+                              else getattr(entry, "value", None) for entry in inputs])
+    raise AssertionError("that component has no input handler")
+
+
+def _click(script, *parts):
+    """Press the button with this extension-owned id."""
+    import model_chain_krea_creative as creative_script
+
+    wanted = creative_script.ident(*parts)
+    for button in script.components.get("buttons") or []:
+        if getattr(button, "elem_id", "") != wanted:
+            continue
+        for kind, kwargs in button._callbacks:
+            if kind != "click":
+                continue
+            inputs = list(kwargs.get("inputs") or [])
+            return kwargs["fn"](*[getattr(entry, "value", None) for entry in inputs])
+    raise AssertionError(f"no button {wanted} with a click handler")
+
+
+# --------------------------------------------------------------------------- #
+# Pasting an image back
+# --------------------------------------------------------------------------- #
+
+
+class TestOrdinaryPasteReproducesTheImage:
+    """The bug this half of the work exists for.
+
+    A Creative generation's recorded ``Prompt:`` line is the *expanded* prompt,
+    because Creative Mode assigns it before Forge writes infotext. So a paste
+    that left Creative Mode on would hand a finished Krea paragraph back to the
+    writer as though it were a short idea and expand it again, and what came out
+    would be a picture of the prompt of the picture.
+    """
+
+    @pytest.fixture
+    def built(self, store, host):
+        import model_chain_krea_creative as creative_script
+
+        instance = creative_script.ScriptKreaCreative()
+        instance.ui(False)
+        return instance
+
+    @pytest.fixture
+    def made(self, built, client):
+        """One Creative image, and its infotext as a paste would parse it."""
+        client.answers = ["A tall white lighthouse under storm light, "
+                          "photographed on large-format film."]
+        p = generate(built, "a lighthouse")
+        return p, _parsed(p)
+
+    def test_the_prompt_line_is_the_prompt_the_image_model_saw(self, made):
+        p, params = made
+
+        assert params["Prompt"] == p.prompt
+
+    def test_pasting_switches_creative_mode_off(self, built, made):
+        _p, params = made
+
+        assert _pasted_value(built, "enabled", params) is False
+
+    def test_the_writer_is_not_called_when_the_paste_is_regenerated(self, built, made,
+                                                                    client):
+        """The acceptance test, end to end: paste, press Generate, and the
+        prompt handed to the image model is byte-for-byte the recorded one with
+        no writer call at all."""
+        p, params = made
+        before = len(client.calls)
+        enabled = _pasted_value(built, "enabled", params)
+
+        again = generate(built, params["Prompt"], enabled=bool(enabled))
+
+        assert again.prompt == p.prompt
+        assert len(client.calls) == before
+        assert again.extra_generation_params == {}
+
+    def test_an_ordinary_image_leaves_the_toggle_where_it_is(self, built):
+        """An image made without Creative Mode should not be able to switch a
+        feature off any more than on."""
+        assert _pasted_value(built, "enabled", {"Steps": "20"}) is None
+
+    def test_the_paste_says_what_it_did(self, built, made):
+        _p, params = made
+        said = _pasted_value(built, "status", params)
+
+        assert "Creative Mode was disabled" in said
+
+    def test_every_recorded_key_is_forwarded_by_the_send_to_buttons(self, built, made):
+        """The buttons forward by exact name, so a key that is not declared
+        simply does not arrive -- and "restore the setup" would find half a
+        record."""
+        _p, params = made
+        declared = set(mc_infotext.creative_paste_field_names())
+        written = {key for key in params if key.startswith("Krea ")}
+
+        assert written <= declared
+
+
+class TestRestoringTheCreativeSetup:
+    """The other half: the workflow, restored on purpose and never by surprise."""
+
+    @pytest.fixture
+    def built(self, store, host):
+        import model_chain_krea_creative as creative_script
+
+        instance = creative_script.ScriptKreaCreative()
+        instance.ui(False)
+        return instance
+
+    @pytest.fixture
+    def made(self, built, client, lib):
+        """One image made with a real configuration: one axis varying, one
+        treatment excluded, and the other nine axes Natural."""
+        client.answers = ["A painted lighthouse."]
+        p = generate(built, "a lighthouse", mode=director.NATURAL,
+                     modes={"medium": director.VARY},
+                     excluded={"medium": [lib.axis("medium").variants[0].identifier]})
+        params = _parsed(p)
+        _pasted_value(built, "status", params)  # the capture a real paste performs
+        return p, params
+
+    def test_the_record_carries_the_configuration_the_image_was_made_under(self, made):
+        _p, params = made
+
+        assert params[mc_infotext.CREATIVE_AXES]
+        assert params[mc_infotext.CREATIVE_EXCLUDED]
+        assert mc_infotext.CREATIVE_ANTI in params
+
+    def test_the_axes_round_trip_through_the_infotext(self, made, lib):
+        _p, params = made
+        modes, fixed = mc_infotext.parse_creative_axes(params[mc_infotext.CREATIVE_AXES])
+        excluded = mc_infotext.parse_creative_exclusions(
+            params[mc_infotext.CREATIVE_EXCLUDED])
+
+        assert modes["medium"] == director.VARY
+        assert excluded["medium"] == [lib.axis("medium").variants[0].identifier]
+        assert fixed == {}
+
+    def test_natural_axes_are_not_written_down_at_all(self, made):
+        """Absence is what Natural means, so a configuration that directs two
+        axes records two axes rather than ten."""
+        _p, params = made
+        recorded = params[mc_infotext.CREATIVE_AXES]
+
+        assert "natural" not in recorded
+
+    def test_restoring_puts_the_source_phrase_back_in_the_prompt_box(self, built, made):
+        import model_chain_krea_creative as creative_script
+
+        prompt_update, _enabled, _status, _view = creative_script._restore_setup(False)
+
+        assert prompt_update["value"] == "a lighthouse"
+
+    def test_restoring_is_the_only_thing_that_writes_to_the_prompt_box(self, built,
+                                                                       made):
+        """Every other handler on this panel stays inside it."""
+        ours = {id(entry) for component in built.components.values()
+                for entry in (component if isinstance(component, list) else [component])}
+        outside = []
+        for kwargs in _handlers(built):
+            for component in list(kwargs.get("outputs") or []):
+                if id(component) not in ours:
+                    outside.append(kwargs["fn"].__name__)
+
+        assert outside in ([], ["_restore_setup"])
+
+    def test_restoring_turns_creative_mode_back_on(self, built, made, store):
+        """The paste turned it off so the picture would reproduce. Continuing
+        from the *source* is the opposite request, and a short idea generated
+        with the writer switched off is a bare phrase handed to Krea 2."""
+        import model_chain_krea_creative as creative_script
+
+        mc_creative_krea.remember(**{mc_creative_krea.ENABLED: False})
+        _prompt, enabled, status, _view = creative_script._restore_setup(False)
+
+        assert mc_creative_krea.settings()["enabled"] is True
+        assert enabled["value"] is True
+        assert "Creative Mode is on again" in status
+
+    def test_only_that_button_ever_turns_it_on(self, built):
+        """Loading a profile, adding a direction, excluding a treatment: none of
+        them may switch the feature on. A profile says how Creative Mode
+        behaves; whether it runs is a decision made at the Generate button."""
+        import model_chain_krea_creative as creative_script
+
+        source = Path(creative_script.__file__).read_text(encoding="utf-8")
+        turning_on = [line for line in source.splitlines()
+                      if "ENABLED: True" in line]
+
+        assert len(turning_on) == 1
+
+    def test_it_says_which_of_the_two_things_it_did(self, built, made):
+        import model_chain_krea_creative as creative_script
+
+        _prompt, _enabled, armed, _view = creative_script._restore_setup(True)
+        _prompt, _enabled, fresh, _view = creative_script._restore_setup(False)
+
+        assert "replays it exactly" in armed
+        assert "new roll from the same idea" in fresh
+
+
+class TestReplayingARecordedRecipe:
+    """A replay reproduces the art direction. It never pretends to be a roll."""
+
+    def test_the_recorded_ids_come_back_verbatim(self, client, lib):
+        recipe = roll(creativity=10, seed=11)
+        replayed = director.replay("car", recipe.creativity, recipe.creative_seed,
+                                   recipe.llm_seed, recipe.compact)
+
+        assert replayed.compact == recipe.compact
+        assert replayed.llm_seed == recipe.llm_seed
+        assert replayed.replayed is True
+
+    def test_nothing_in_it_is_drawn(self, lib):
+        """Same answer at any history, which a re-roll cannot promise: the draw
+        is weighted by recent choices, and a machine six months later has other
+        recent choices."""
+        recipe = roll(creativity=10, seed=11)
+        crowded = director.replay("car", 10, recipe.creative_seed, recipe.llm_seed,
+                                  recipe.compact)
+
+        assert crowded.compact == recipe.compact
+
+    def test_a_line_the_library_no_longer_has_is_dropped_and_named(self):
+        replayed = director.replay("car", 6, 3, 4, "medium=no_such_thing")
+
+        assert replayed.items == ()
+        assert any("no_such_thing" in note for note in replayed.notes)
+
+    def test_an_armed_replay_directs_the_next_roll_and_only_that_one(self, client):
+        recipe = roll(creativity=10, seed=11)
+        mc_creative_krea.replay.arm(mc_creative_krea.ReplayPlan(
+            creativity=10, creative_seed=recipe.creative_seed,
+            llm_seed=recipe.llm_seed, recipe=recipe.compact))
+
+        list(mc_creative_krea.creative.roll("car", varying()))
+        first = mc_creative_krea.creative.last.recipe
+        list(mc_creative_krea.creative.roll("car", varying()))
+        second = mc_creative_krea.creative.last.recipe
+
+        assert first.compact == recipe.compact and first.replayed is True
+        assert second.replayed is False
+
+    def test_it_is_still_exactly_one_writer_call(self, client):
+        recipe = roll(creativity=10, seed=11)
+        mc_creative_krea.replay.arm(mc_creative_krea.ReplayPlan(
+            creativity=10, creative_seed=recipe.creative_seed,
+            llm_seed=recipe.llm_seed, recipe=recipe.compact))
+        list(mc_creative_krea.creative.roll("car", varying()))
+
+        assert len(client.calls) == 1
+
+    def test_it_holds_no_prompt_and_no_model_output(self, client):
+        """The arming token that used to sit between a handler and a generation
+        held a *finished prompt* -- made before the click, waiting to be spent.
+        This holds variant ids the user chose, which is why it is allowed to
+        exist at all."""
+        plan = mc_creative_krea.ReplayPlan(creativity=5, creative_seed=1, llm_seed=2,
+                                           recipe="medium=oil_impasto")
+        values = " ".join(str(value) for value in vars(plan).values())
+
+        assert "expanded" not in vars(plan)
+        assert len(values) < 200
+
+    def test_a_failed_roll_does_not_leave_it_armed(self, client, monkeypatch):
+        def explode(*args, **kwargs):
+            raise RuntimeError("llama-server is not running")
+            yield  # pragma: no cover - generator shape only
+
+        monkeypatch.setattr(sessions, "krea", explode)
+        mc_creative_krea.replay.arm(mc_creative_krea.ReplayPlan(
+            creativity=5, creative_seed=1, llm_seed=2, recipe="medium=oil_impasto"))
+        list(mc_creative_krea.creative.roll("car"))
+
+        assert mc_creative_krea.replay.pending is None
+
+    def test_a_replay_is_not_written_into_the_recent_memory(self, client, store):
+        """Its ids were recorded when they were first drawn. Writing them again
+        would push a user's own reproduction away from what they asked to
+        reproduce."""
+        recipe = roll(creativity=10, seed=11)
+        mc_creative_krea.forget_history()
+        mc_creative_krea.replay.arm(mc_creative_krea.ReplayPlan(
+            creativity=10, creative_seed=recipe.creative_seed,
+            llm_seed=recipe.llm_seed, recipe=recipe.compact))
+        list(mc_creative_krea.creative.roll("car", varying()))
+
+        assert mc_creative_krea.history() == []
+
+
+def _parsed(p) -> dict:
+    """One generation's infotext, as the host would write and re-parse it."""
+    from conftest import parse_generation_parameters, quote
+
+    line = ", ".join(f"{key}: {quote(value)}"
+                     for key, value in p.extra_generation_params.items())
+    parsed = parse_generation_parameters(f"{p.prompt}\n{line}" if line else p.prompt)
+    parsed["Prompt"] = p.prompt
+    return parsed
+
+
+def _pasted_value(script, name, params):
+    """What the paste field for ``name`` answers for this infotext."""
+    component = script.components[name]
+    for field in script.infotext_fields:
+        if field.component is not component:
+            continue
+        if field.function is not None:
+            return field.function(params)
+        return params.get(field.label)
+    raise AssertionError(f"no paste field for {name}")
+
+
+# --------------------------------------------------------------------------- #
+# The panel on a narrow screen, and under somebody else's theme
+# --------------------------------------------------------------------------- #
+
+
+class TestTheStylesheet:
+    @pytest.fixture
+    def css(self):
+        return (Path(__file__).resolve().parent.parent
+                / "style.css").read_text(encoding="utf-8")
+
+    @pytest.fixture
+    def section(self, css):
+        return css.split("Krea Creative Mode", 1)[1]
+
+    def test_it_selects_nothing_gradio_generated(self, section):
+        """A ``.svelte-`` hash is regenerated on every Gradio build, and a
+        layout that depends on one is a layout that breaks on an upgrade."""
+        assert ".svelte" not in section
+
+    def test_it_states_no_colour_of_its_own(self, section):
+        """Every colour is one of the host's custom properties, which is what
+        lets a theme -- Lobe included -- decide what all of this looks like."""
+        import re
+
+        for line in section.splitlines():
+            stripped = line.strip()
+            if ":" not in stripped or stripped.startswith(("*", "/", "#", "@", ".")):
+                continue
+            assert not re.search(r":\s*#[0-9a-fA-F]{3,8}\b", stripped), stripped
+            assert not re.search(r":\s*rgba?\(", stripped), stripped
+
+    def test_a_long_summary_wraps_rather_than_scrolling(self, section):
+        """A flex child's minimum is its content width by default, which is how
+        "excludes a, b and c" becomes a horizontal scroll bar on a phone."""
+        rule = section.split(".mc-creative-direction-summary {", 1)[1].split("}", 1)[0]
+
+        assert "min-width: 0" in rule
+        assert "flex-wrap: wrap" in section.split(".mc-creative-direction {", 1)[1] \
+                                            .split("}", 1)[0]
+
+    def test_everything_stacks_into_one_column_on_a_phone(self, section):
+        """320-375px: the rows become columns, and nothing states a width a
+        narrow viewport cannot honour."""
+        assert "@media (max-width: 480px)" in section
+        narrow = _braced(section, "@media (max-width: 480px) {")
+
+        assert "flex-direction: column" in narrow
+        for line in narrow.splitlines():
+            # A width in pixels is a width a 320px viewport may not have.
+            assert "px" not in line.split(":", 1)[-1], line
+
+    def test_the_panel_classes_are_this_extensions_own(self):
+        """One prefix, shared by both surfaces, because it is one layout."""
+        import mc_creative_panel
+
+        assert mc_creative_panel.classes("editor") == ["mc-creative-editor"]
+
+
+def _braced(text: str, opening: str) -> str:
+    """The block ``opening`` starts, up to its own closing brace."""
+    body = text.split(opening, 1)[1]
+    depth = 1
+    for position, character in enumerate(body):
+        depth += (character == "{") - (character == "}")
+        if depth == 0:
+            return body[:position]
+    raise AssertionError(f"{opening!r} is never closed")
 
 
 # --------------------------------------------------------------------------- #

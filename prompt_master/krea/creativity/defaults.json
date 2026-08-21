@@ -4,16 +4,17 @@
   "creative_seed": -1,
   "anti_repetition": true,
   "axis_modes": {
-    "medium": "vary",
-    "style": "vary",
-    "lighting": "vary",
-    "composition": "vary",
-    "viewpoint": "vary",
-    "lens_zoom": "vary",
-    "palette": "vary",
+    "medium": "natural",
+    "style": "natural",
+    "lighting": "natural",
+    "composition": "natural",
+    "viewpoint": "natural",
+    "lens_zoom": "natural",
+    "palette": "natural",
     "texture": "natural",
-    "mood": "vary",
-    "detail_emphasis": "vary"
+    "mood": "natural",
+    "detail_emphasis": "natural"
   },
-  "fixed_values": {}
+  "fixed_values": {},
+  "excluded_values": {}
 }

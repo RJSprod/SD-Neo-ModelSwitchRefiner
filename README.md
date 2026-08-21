@@ -1129,8 +1129,97 @@ entirely — the checkpoint, the sampler and scheduler, the size, Steps, the CFG
 the image seed, the extra networks, every other extension's hooks, the saving,
 the PNG metadata and the gallery.
 
-The same controls are in **LLM Studio → Krea 2**, sharing one settings file and
-one Director, where they write a prompt and generate no image.
+The same controls are in **LLM Studio → Krea 2**, sharing one settings file, one
+Director and one panel, where they write a prompt and generate no image.
+
+### The drawer shows what you decided
+
+Open **Creative Controls** on a fresh install and there is nothing in it:
+
+```
+Profile: Factory     [Save] [Save As] [Delete] [Set as default] [Reset to default]
+Active direction: None. Creative Mode is not influencing any axis.
+[ + Add direction ▾ ]
+```
+
+Add one and it becomes a line. Add two and it becomes two lines:
+
+```
+Medium     · Fixed: Fashion editorial                              [Edit]
+Lighting   · Vary · excludes harsh noon, golden hour               [Edit]
+[ + Add direction ▾ ]
+```
+
+An axis you have not touched is **Natural**, and Natural is the absence of a
+decision — so it has no row, no dropdown and no space. Returning an axis to
+Natural removes its row. The editor for an axis exists only while you are
+editing that axis, and opening it is the only time you see a mode radio, a
+"Always use" dropdown or an exclusions list.
+
+That is the whole design rule: *show the decisions the user has made, not every
+decision the software knows how to make.* The panel this replaced drew ten axes
+as twenty permanent controls, nine of them saying Vary because the shipped
+defaults said Vary — nine art-direction decisions nobody had made, invisible
+until you opened the drawer and read the table.
+
+**The Creative seed, anti-repetition, Clear recent memory and Pinned LoRAs** are
+in a **Settings** accordion below. They are configuration, not everyday art
+direction, and they used to sit in the middle of the axis rows.
+
+### Excluding treatments you never want
+
+Vary takes one modifier: a multiselect of ids the Director must never choose.
+
+```
+Lighting
+( Natural ) ( ● Vary ) ( Fixed )
+Exclude choices: [ harsh noon ×  golden hour × ]
+```
+
+It is **not** a fourth mode, and that is deliberate. "Vary the lighting, but
+never harsh noon" is a statement about *how* to vary; a mode would force somebody
+who wants two treatments gone to stop varying altogether.
+
+Excluded ids come out of the pool before anything is weighted, so an excluded
+treatment is never chosen — not at Creativity 10, not when the alternatives run
+short, not ever. If you exclude every treatment an axis has, the axis is left out
+of the brief and says so, in the status line, in the console and in the Last
+creative roll view. It is never quietly given the value you told it not to use,
+and it never eats one of the activation slots the Creativity position allows.
+
+### Profiles
+
+A profile is every Creative setting — the Creativity position, the seed,
+anti-repetition, each axis's mode, pin and exclusions, and the pinned LoRAs —
+under a name.
+
+| Button | What it does |
+| --- | --- |
+| **Save** | overwrites the selected profile with what is on screen |
+| **Save As** | asks for a name and creates a new one |
+| **Delete** | removes a saved profile; the settings on screen are left alone |
+| **Set as default** | nominates the profile *Reset to default* restores, and the one the panel opens on before you have loaded any other |
+| **Reset to default** | reapplies that profile |
+
+**Factory** is built in, cannot be deleted or overwritten, and is the neutral
+configuration: every axis Natural, nothing pinned, nothing excluded. If the
+default you chose has been deleted or the store is damaged, the panel opens on
+Factory and says so rather than refusing to build.
+
+Opening the panel *shows* a profile; it never applies one. The dropdown names
+the profile your current settings were last loaded from, and the settings
+themselves are whatever you left them as — a panel that reapplied its default
+every time you opened a tab would silently discard the last tab's adjustments.
+**Reset to default** is how you ask for that on purpose.
+
+Profiles do **not** carry whether Creative Mode is on. A profile describes how
+the feature behaves; switching it on is a decision you make when you press
+Generate.
+
+They live in `krea_creative_profiles.json` in the WebUI's data directory —
+beside Model Chain's presets, and for the same reason: updating or reinstalling
+the extension must not throw them away. Writes go through a temporary file and
+an atomic replace.
 
 ### Creativity
 
@@ -1168,23 +1257,26 @@ lighting, framing, palette, texture, mood and detail direction each time.
 
 ### The ten axes
 
-Open **Creative Controls** and each axis has three modes:
+Each axis has three modes, and Vary takes exclusions:
 
 | Mode | What it does |
 | --- | --- |
-| **Natural** | leaves the axis out of the brief entirely — the model decides as it would without Creative Mode. Not a hedged line: *no* line. |
-| **Vary** | lets the Director choose, scaled by Creativity. |
+| **Natural** | leaves the axis out of the brief entirely — the model decides as it would without Creative Mode. Not a hedged line: *no* line. No row in the panel either. |
+| **Vary** | lets the Director choose, scaled by Creativity, from everything you have not excluded. |
 | **Fixed** | repeats your chosen value every roll. |
 
 Medium, Style, Lighting, Composition, Viewpoint, Lens / Zoom, Palette, Texture,
-Mood and Detail emphasis. Fresh-install defaults are Vary everywhere except
-Texture, which is Natural.
+Mood and Detail emphasis. **Every one of them is Natural on a fresh install**, so
+a new configuration contains no art direction you did not ask for. (The library
+package ships nine of them on Vary; `defaults.json` is the one file in the
+vendored package this extension edits, and
+`prompt_master/krea/CREATIVITY_LIBRARY_SOURCE.txt` records that and why.)
 
 **Your own words always win.** Type *oil painting of a car* and Medium stays oil
 painting however Medium is configured — the Director detects the constraint from
 the library's aliases and skips the axis, and every brief also carries the rule
 in words for the phrases no alias list will ever catch. Precedence is: your
-prompt, then Fixed, then Vary, then Natural.
+prompt, then Fixed, then Vary (minus its exclusions), then Natural.
 
 ### Seeds
 
@@ -1197,8 +1289,47 @@ vary the picture, or the other way round.
 
 Every generated image records `Krea Creative Seed`, `Krea Creativity`,
 `Krea Creative Recipe` (compact `axis=variant_id` ids), `Krea LLM Seed`,
-`Krea Source Prompt` and the library version. The expanded prompt is not
-recorded separately — it is already the image's own `Prompt:` line.
+`Krea Source Prompt`, `Krea Creative Axes`, `Krea Creative Excluded`,
+`Krea Anti Repetition`, `Krea Writer Model` and the library version. The
+expanded prompt is not recorded separately — it is already the image's own
+`Prompt:` line.
+
+### Pasting a Creative image back
+
+There are two different things somebody means by "get this image back", and
+Creative Mode answers them separately.
+
+**Reproduce the picture.** Paste the image — PNG Info, the arrow under the
+gallery, a dropped file — and press Generate. Creative Mode assigned the expanded
+prompt to `p.prompt` before Forge wrote the infotext, so the recorded `Prompt:`
+line *is* the paragraph the image model was given: restoring it reproduces the
+image. So a paste also switches **Creative Mode off**, and says so:
+
+> Creative image restored using its final expanded prompt. Creative Mode was
+> disabled to prevent re-expansion.
+
+That is the fix for the failure this behaviour used to have. With Creative Mode
+left on, the pasted expansion was treated as a fresh short idea and expanded a
+second time, and what came out was a picture of the prompt of the picture. A
+regression test presses Generate on a pasted infotext and asserts the prompt
+handed to the image model is byte-for-byte the recorded one, with zero writer
+calls.
+
+**Continue from the idea.** That is a separate, explicit action, under
+**Creative Controls → Continue from a pasted image**. It shows what the pasted
+image recorded, and **Restore Creative setup** puts the short source phrase back
+in the prompt box, the axis configuration back on the panel, and Creative Mode
+back on — the paste turned it off so the picture would reproduce, and continuing
+from the source is the opposite request. With *Replay the
+recorded recipe exactly* ticked, it also arms the recorded recipe for **one**
+generation, which is the only way to get the recorded art direction back
+verbatim — re-rolling at the recorded seed re-derives the same draw, and the draw
+is weighted by a recent history that is not the history the original roll saw.
+It warns, before anything is restored, if the image was made with a different
+creativity library version or a different writer model.
+
+Nothing is ever re-rolled and called a reproduction, and nothing writes to your
+prompt box unless you press that button.
 
 ### What it costs, and what the bar shows
 
@@ -1224,8 +1355,8 @@ Creativity 10                 ~370 prompt tokens    10.3s read  + 12.4s write
 If that is slower than you want, the levers in order of effect are: put the LLM
 on the GPU (**Setup → placement**) — every prompt token costs ~27 ms in Mixed
 and a fraction of that resident; drop Creativity a notch or two, which shortens
-the brief directly; or set axes you do not care about to **Natural**, since each
-one removes its whole line from the brief.
+the brief directly; or add fewer directions, since each active axis is a whole
+line of brief and a fresh configuration has none.
 
 **VRAM.** Creative Mode loads the language model immediately *before* the image
 model, which on a fresh restart means it meets an empty card. It is told how
@@ -1251,7 +1382,10 @@ visual clichés — *35mm cinematic still*, *ultra detailed*, *masterpiece* — 
 it writes, rather than stripping words afterwards. Anything you asked for
 yourself is never suppressed: type "ultra detailed" and it stays.
 
-**Clear recent memory** in the drawer resets it. Ids are stored, never prompts.
+**Clear recent memory**, under Settings in the drawer, resets it. Ids are
+stored, never prompts. A replayed recipe is not written into it: its ids were
+recorded when they were first drawn, and writing them again would push your own
+reproduction away from what you asked to reproduce.
 
 ### What it will not do
 
@@ -1761,6 +1895,8 @@ mc_llm_minimax_panel.py    MiniMax H3 workspace
 mc_llm_krea_panel.py       Krea 2 workspace
 mc_llm_ui.py          shared UI helpers and the element-id contract
 mc_creative_krea.py   Creative Mode: settings, roll history, one roll
+mc_creative_panel.py  the Creative control surface, built once for both surfaces
+mc_creative_profiles.py    named Creative configurations and the chosen default
 mc_llm_progress.py    the Krea roll, reported on the host's progress bar
 prompt_master/        vendored LTX business logic (see VENDORED_FROM.txt)
 prompt_master/krea/creativity/    the versioned creative vocabulary (data only)
@@ -1894,7 +2030,7 @@ checks both halves of a hidden profile: that it really reaches the command line
 and the request payload for a managed backbone, that it reaches neither for a
 hand-picked GGUF, and that nothing it contains is nameable anywhere in Setup.
 
-Creative Mode adds two kinds of test. `tests/test_krea_creative.py` measures the
+Creative Mode adds three kinds of test. `tests/test_krea_creative.py` measures the
 Director over hundreds of rolls, because its promises are properties of a
 distribution rather than of a function: that a bare "car" at Creativity 10
 reaches a dozen different mediums, that a stated medium is never replaced, that
@@ -1904,6 +2040,20 @@ seed, and that recent variants are avoided at 10 without the pool ever emptying.
 It also counts model calls — always exactly one per roll, at every position —
 checks Creativity 1 as a payload *and* as a message, and reads the package's own
 `acceptance_cases.json`, failing if the data grows a promise no test claims.
+
+The same file covers the control surface and the round trip. An excluded
+treatment is asserted never chosen over three hundred rolls; excluding an entire
+axis is asserted to skip it, say so, and not cost another axis its line; a fresh
+install is asserted to direct nothing at any position. The compact panel is
+driven the way a browser drives it — add a direction, change its mode, exclude
+something, return it to Natural — and what is checked each time is which rows and
+editors the render makes visible. Profiles are saved, reloaded from the file,
+deleted and nominated as the default, including a store that will not parse and a
+default that has been removed behind the panel's back. And the reproduction fix
+has its own end-to-end case: one Creative image, its infotext parsed as a paste
+would parse it, Creative Mode found switched off, Generate pressed, and the
+prompt handed to the image model asserted byte-for-byte identical with the writer
+never called.
 
 `tests/test_krea_creative_js.py` runs the browser file under node against a
 synthetic clock and a fake page. What it defends is an absence: a click
