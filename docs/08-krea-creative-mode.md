@@ -819,3 +819,74 @@ rather than unpacked as far as it goes: reading three controls per axis out of
 two produces a *valid* configuration nobody chose, which the caller would then
 save over the one they did. Refusing means the saved settings answer, which is
 the same thing an API request with no panel behind it gets.
+
+
+## 11. What the reading step actually costs (21 August 2026)
+
+Reported as *"why does the reading input prompt step take over ten seconds, on
+both CPU and mixed mode? I want it to start creating output fast."* The
+`llama-server.log` answers it precisely, and the answer changed two things in
+the code.
+
+### 11.1 The cache is working; the brief is the cost
+
+A run mid-log, on a warm server:
+
+```
+prompt eval time = 10737.63 ms / 382 tokens (28.11 ms per token)
+stop processing: n_tokens = 1028
+```
+
+1,028 prompt tokens, 382 evaluated, **646 reused**. The 646 are Krea's
+instruction, which is the same bytes on every roll and which llama.cpp's prompt
+cache therefore answers for. The 382 are the user's line and the creative brief.
+
+So the reading step is not the request being slow. It is the brief being read,
+and the brief cannot be cached *by construction*: Vary means a different one
+every roll. Across the same log the relationship is exactly linear — 92 tokens
+at Creativity 5 with one direction, 520 at Creativity 10 with six, at a flat
+26–36 ms per token.
+
+Two rows of that log are the whole answer to "how do I make it fast", though:
+
+```
+prefill  0.6s for 482 tokens (843.6 tok/s)     ← weights on the card
+prefill 10.9s for 479 tokens ( 43.7 tok/s)     ← weights in system RAM
+```
+
+Same machine, same model, twenty times the speed. Mixed placement is defined as
+*no resident layers* (§5, `Config.__post_init__`), so its prefill runs on the
+processor exactly as CPU placement's does. Nothing in the prompt is worth
+optimising next to that.
+
+### 11.2 The bar was pricing bytes that cost nothing
+
+`_prompt_size()` counted Krea's instruction, the user's line and the brief —
+everything the request *carries*. What llama.cpp *evaluates* on a warm server is
+the last two. Counting the instruction anyway made the read phase over-predict a
+short brief, and worse, made the learned `krea:read` rate drift with the mix:
+the same seconds were being divided by a character count that included a
+constant, so the seconds-per-character it learned depended on how big that
+roll's brief happened to be next to the two kilobytes of instruction.
+
+It now counts the instruction only when the server is cold, where it really is
+read. `krea:read` means one thing again, and both the bar and §11.3 use it.
+
+### 11.3 The panel says what a direction costs
+
+The progress bar is the first place a user sees the cost and the last place they
+can do anything about it. Two of the three levers — how many directions, and the
+Creativity position — are decisions made in the Creative Controls drawer, so the
+drawer now carries the number:
+
+> *About 1,299 characters of brief — roughly 4s of reading before the writing
+> starts with the model in system RAM. The brief is different every roll, so it
+> is the one part of the request that can never come out of the model's cache.*
+
+The characters are a three-seed average of the brief this configuration produces
+(at mid Creativity the activation count is itself a draw, so one sample is one
+possibility rather than the typical one). The seconds are `mc_progress.measured
+("krea:read")` — this machine's own measurement, out of the same store the bar
+predicts from, so the panel and the bar cannot disagree. The placement clause is
+read from the runtime configuration, because the lever it names is the one this
+panel cannot pull.

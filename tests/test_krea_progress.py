@@ -399,6 +399,44 @@ class TestTheEstimate:
 
         assert long > short + 2900
 
+    def test_a_warm_server_is_not_charged_for_the_instruction_again(self):
+        """llama.cpp keeps a prompt cache and Krea's instruction is the same
+        bytes on every roll, so a server that has answered one already has it.
+        Pricing those two kilobytes anyway made the bar over-predict a short
+        brief and made the learned seconds-per-character drift with the mix."""
+        cold = mc_creative_krea._prompt_size("car", (), "brief", cached=False)
+        warm = mc_creative_krea._prompt_size("car", (), "brief", cached=True)
+
+        assert cold > warm * 3
+        assert warm < 100
+
+    def test_the_brief_is_charged_either_way(self):
+        """It is different every roll by construction, so no cache can hold it
+        -- which is exactly why it is the whole cost of a press."""
+        for cached in (True, False):
+            small = mc_creative_krea._prompt_size("car", (), "", cached=cached)
+            large = mc_creative_krea._prompt_size("car", (), "x" * 2000, cached=cached)
+            # Plus the blank line that separates it from the request above it.
+            assert 2000 <= large - small <= 2004
+
+    def test_a_roll_on_a_warm_server_sizes_the_read_by_the_brief(self, client,
+                                                                 monkeypatch):
+        """End to end: what the bar counts is what llama.cpp will evaluate."""
+        sizes: list = []
+        real = mc_llm_progress.reporter.begin
+
+        def begin(task_id, prompt_characters, warm=None, claim=True):
+            sizes.append(prompt_characters)
+            return real(task_id, prompt_characters, warm, claim=claim)
+
+        monkeypatch.setattr(mc_llm_progress.reporter, "begin", begin)
+        monkeypatch.setattr(mc_creative_krea, "_warm", lambda: True)
+        roll()
+
+        from prompt_master.krea import enhancer
+
+        assert sizes and sizes[0] < len(enhancer.system_prompt(False))
+
     def test_the_reply_length_is_learned_from_what_came_back(self, client):
         client.pieces = ("y" * 900,)
         roll()

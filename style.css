@@ -1477,6 +1477,20 @@
     opacity: 0.85;
 }
 
+/* What the directions cost before the image starts. Quiet, because it is a
+   consequence rather than a control -- but present, because the decision that
+   sets it is two lines above. */
+.mc-creative-cost {
+    margin: 0.15em 0 0.35em;
+    font-size: var(--text-sm, 0.85em);
+    line-height: 1.4;
+    opacity: 0.75;
+}
+
+.mc-creative-cost p {
+    margin: 0;
+}
+
 .mc-creative-direction {
     align-items: center;
     gap: 0.5em;

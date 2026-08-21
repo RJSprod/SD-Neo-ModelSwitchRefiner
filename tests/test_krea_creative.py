@@ -32,6 +32,7 @@ import pytest
 
 import mc_broker
 import mc_creative_krea
+import mc_creative_panel
 import mc_creative_profiles as profiles
 import mc_infotext
 import mc_llm_krea_panel as panel
@@ -2031,6 +2032,68 @@ class TestTheCompactPanel:
                                        built.components["creativity"]]
         assert built.arguments[2:5] == list(panel.settings_controls)
         assert built.arguments[5:] == list(panel.axis_controls)
+
+    def test_it_says_what_the_directions_cost_before_the_image_starts(self, built,
+                                                                       lib):
+        """Reported as "why does the reading step take ten seconds". The brief
+        is different every roll, so no cache can hold it, and it is the whole of
+        what a press pays before the writer says anything. That is a decision
+        somebody makes on this panel, so the panel is where the number belongs
+        -- the progress bar is the first place they see it and the last place
+        they can act on it."""
+        panel = self.panel(built)
+        _fire(built, panel.add, "medium")
+        updates = self.rendered(built, _fire(built, panel.add, "lighting"))
+        said = updates[id(panel.cost)]["value"]
+
+        assert "characters of brief" in said
+        assert "reading before the writing starts" in said
+
+    def test_a_configuration_that_directs_nothing_costs_nothing(self, built):
+        assert "Nothing extra to read" in built.components["cost"].value
+        assert mc_creative_panel.brief_cost()[0] == 0
+
+    def test_more_directions_cost_more(self, built, store, lib):
+        """Linear, and it is what makes the trade-off real: the brief is the one
+        part of the request that cannot come out of the model's cache."""
+        keys = list(lib.axis_keys)
+        costs = []
+        for count in (1, 3, 6):
+            mc_creative_krea.remember(**{
+                mc_creative_krea.CREATIVITY: 10,
+                mc_creative_krea.AXIS_MODES: {
+                    key: (director.VARY if position < count else director.NATURAL)
+                    for position, key in enumerate(keys)}})
+            costs.append(mc_creative_panel.brief_cost()[0])
+
+        assert costs[0] < costs[1] < costs[2]
+
+    def test_a_lower_creativity_is_a_shorter_brief(self, built, store, lib):
+        """The expressions themselves get shorter down the scale, so the same
+        directions cost less to read."""
+        modes = {lib.axis_keys[0]: director.VARY}
+        sizes = []
+        for creativity in (3, 10):
+            mc_creative_krea.remember(**{mc_creative_krea.CREATIVITY: creativity,
+                                         mc_creative_krea.AXIS_MODES: modes})
+            sizes.append(mc_creative_panel.brief_cost()[0])
+
+        assert sizes[0] < sizes[1]
+
+    def test_the_seconds_come_from_this_machine_s_own_measurement(self, built, store,
+                                                                  lib, monkeypatch):
+        """The same store the progress bar predicts from, so the panel and the
+        bar cannot disagree about what a press costs."""
+        import mc_progress
+
+        mc_creative_krea.remember(**{mc_creative_krea.CREATIVITY: 10,
+                                     mc_creative_krea.AXIS_MODES:
+                                         {lib.axis_keys[0]: director.VARY}})
+        monkeypatch.setattr(mc_progress, "measured",
+                            lambda key, default=0.0: 1.0 if key == "krea:read" else default)
+        characters, seconds = mc_creative_panel.brief_cost()
+
+        assert seconds == pytest.approx(float(characters))
 
     def test_one_render_answers_for_every_control_it_owns(self, built):
         """The contract every handler relies on: a render is positional, so an
