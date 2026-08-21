@@ -882,8 +882,10 @@ class Creative:
         run = sessions.krea(source, list(references or []), recipe.llm_seed, cancel,
                             recipe.creativity, recipe.brief, reserve)
         progress = mc_llm_progress.reporter
-        progress.begin(task_id, _prompt_size(source, references, recipe.brief), _warm(),
-                       claim=own_bar)
+        warm = _warm()
+        progress.begin(task_id,
+                       _prompt_size(source, references, recipe.brief, cached=warm),
+                       warm, claim=own_bar)
         written = ""
         finished = False
         try:
@@ -952,21 +954,38 @@ class Creative:
         yield sessions.Event(sessions.DONE, written.strip())
 
 
-def _prompt_size(source: str, references, brief: str) -> int:
-    """How much text the model is about to read, in characters.
+def _prompt_size(source: str, references, brief: str, cached: bool = False) -> int:
+    """How much text the model is about to *evaluate*, in characters.
 
-    Krea's instruction, the user's line and the creative brief. This is what
-    prompt evaluation is proportional to, and it is the single number that
-    explains why a Creativity-10 roll takes several times as long to start
-    generating as a Creativity-2 one: the brief is hundreds of tokens, and it is
-    different every roll, so nothing past the instruction can be reused from the
-    server's prompt cache.
+    Not how much it is about to be sent. Those are different numbers and the
+    difference is most of the request: llama.cpp keeps a prompt cache, Krea's
+    instruction is the same bytes on every roll, and a server that has already
+    answered one has it. What is left to evaluate is the user's line and the
+    creative brief -- and the brief is different every roll by construction, so
+    it can never be cached, which is what makes it the whole cost.
+
+    Measured on one user's ``llama-server.log``, mid-run: 1,028 prompt tokens, of
+    which 646 came out of the cache and 382 were evaluated, at 27 ms each. Ten
+    and a half seconds, all of it the brief.
+
+    Counting the instruction anyway -- which this did -- made two things wrong at
+    once. The bar over-predicted the reading phase for a short brief, because it
+    was pricing two kilobytes that cost nothing; and the rate it learned per
+    character drifted with the mix, since the same seconds were being divided by
+    a character count that included a constant. Sizing by what is actually read
+    fixes both, and makes ``krea:read`` mean one thing.
+
+    ``cached`` is "a server is already up and has answered a Krea request the
+    same way". It guesses false when nothing can be told, which prices the
+    instruction in -- the pessimistic direction, and the correct one for a cold
+    start, where it really is read.
     """
     from prompt_master.krea import enhancer
 
     try:
-        size = len(enhancer.system_prompt(bool(references)))
-        size += len(enhancer.user_content(source, None, brief))
+        size = len(enhancer.user_content(source, None, brief))
+        if not cached:
+            size += len(enhancer.system_prompt(bool(references)))
     except Exception:
         logger.debug("Model Chain: could not size the Krea prompt", exc_info=True)
         return max(len(source or "") + len(brief or ""), 1)

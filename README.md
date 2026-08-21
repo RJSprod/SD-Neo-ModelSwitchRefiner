@@ -1342,21 +1342,32 @@ Creativity:
 | **Reading the prompt** | prompt evaluation | The brief is different every roll, so llama.cpp can reuse its cached prefix only as far as Krea's instruction. Everything after that is evaluated fresh, every time. |
 | **Writing the Krea prompt** | token generation | A richer brief produces a longer expansion. |
 
-The brief grows roughly twelvefold from Creativity 2 to Creativity 10 — one
-short line to ten fully-expressed axes — so the reading half grows with it.
-Measured on a 26B mixture-of-experts model in **Mixed** placement (weights in
-system RAM, compute on the card, ~36 tokens/sec reading and ~14 writing):
+**Only the brief is read.** llama.cpp keeps a prompt cache, and Krea's
+instruction is the same ~650 tokens on every roll, so a server that has already
+answered one has it. From a user's own `llama-server.log`, mid-run:
 
 ```
-Creative Mode off, cached      ~19 prompt tokens     0.7s read  +  7.5s write
-Creativity 10                 ~370 prompt tokens    10.3s read  + 12.4s write
+1,028 prompt tokens   →   646 out of the cache, 382 evaluated at 27 ms each = 10.5s
 ```
 
-If that is slower than you want, the levers in order of effect are: put the LLM
-on the GPU (**Setup → placement**) — every prompt token costs ~27 ms in Mixed
-and a fraction of that resident; drop Creativity a notch or two, which shortens
-the brief directly; or add fewer directions, since each active axis is a whole
-line of brief and a fresh configuration has none.
+All ten and a half seconds of that is the brief — which is different every roll
+*by construction*, because that is what Vary means. So the reading step is not
+overhead that can be optimised away; it is the art direction, priced per press.
+The **Creative Controls** drawer says what your configuration costs, in this
+machine's own measured seconds, next to the directions that set it.
+
+Three levers, largest first:
+
+| Lever | Effect |
+| --- | --- |
+| **Where the language model runs** (LLM Studio → Setup → Device) | The biggest by a wide margin. The same machine that reads at ~36 tokens/sec with the weights in system RAM reads at **~900 tokens/sec** with them on the card — 10.5s becomes under half a second. Mixed and CPU placement both do prefill on the processor. |
+| **How many directions** | Linear. One direction at Creativity 10 is ~170 tokens; ten are ~800. A fresh install directs nothing, so this cost is entirely opt-in. |
+| **The Creativity position** | The expressions themselves get shorter down the scale: the same axis is ~78 tokens at 5 and ~173 at 10. |
+
+If a Krea 2 checkpoint and your writer will not both fit on the card, the
+catalogue has smaller backbones — **Qwen 3.5 4B** is ~4.5 GB and will sit beside
+a Krea 2 checkpoint on a 24 GB card, which is a far better trade for this
+feature than a larger model reading from system RAM.
 
 **VRAM.** Creative Mode loads the language model immediately *before* the image
 model, which on a fresh restart means it meets an empty card. It is told how

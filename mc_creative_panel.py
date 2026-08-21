@@ -121,6 +121,100 @@ def _axis_setting(stored, key) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# What a direction costs before the image starts
+# --------------------------------------------------------------------------- #
+
+COST_SAMPLES = 3
+"""Rolls to average the brief's length over.
+
+One would do at Creativity 10, where every eligible axis activates and the
+length is settled. Lower down the activation count is itself a draw, so one
+sample is one of the possibilities rather than the typical one.
+"""
+
+COST_SOURCE = "a lighthouse in a storm"
+"""A stand-in prompt for the estimate. Its own length is subtracted back out."""
+
+
+def brief_cost(stored=None) -> tuple[int, float]:
+    """``(characters, seconds)`` this configuration adds to every press.
+
+    The Krea instruction is the same bytes on every roll, so llama.cpp's prompt
+    cache answers for it and it costs nothing after the first request to a given
+    server. The brief is different every roll by construction -- that is what
+    Vary *means* -- so it can never be cached, and it is therefore the whole of
+    what a press pays before the writing starts.
+
+    The seconds are this machine's own measurement, out of the same store the
+    progress bar predicts from, falling back to the built-in guess until a roll
+    has been timed. Both numbers are honest about being estimates: which axes
+    activate is a draw, so the length varies roll to roll around this.
+    """
+    from prompt_master.krea import director
+
+    stored = stored or mc_creative_krea.settings()
+    try:
+        settings = mc_creative_krea.axis_settings(stored)
+        creativity = int(stored.get("creativity", 5))
+        lengths = [len(director.roll(COST_SOURCE, creativity, seed, settings).brief)
+                   for seed in range(1, COST_SAMPLES + 1)]
+    except Exception:
+        logger.debug("Model Chain: could not size the creative brief", exc_info=True)
+        return 0, 0.0
+
+    characters = int(sum(lengths) / len(lengths)) if lengths else 0
+    if not characters:
+        return 0, 0.0
+    try:
+        import mc_progress
+
+        per_character = mc_progress.measured("krea:read", 0.0028)
+    except Exception:
+        per_character = 0.0028
+    return characters, characters * float(per_character)
+
+
+def describe_cost(stored=None) -> str:
+    """The line under the directions: what they cost, in this machine's seconds.
+
+    Said where the decision is made rather than only on the progress bar, which
+    is the first place anybody looks and the last place they can act on it. A
+    user who wants the image to start sooner has three levers -- fewer
+    directions, a lower Creativity, and where the language model runs -- and two
+    of the three are on this panel.
+    """
+    characters, seconds = brief_cost(stored)
+    if not characters:
+        return ("*Nothing extra to read: with no directions the writer is handed the "
+                "prompt as you typed it.*")
+
+    where = _placement_note()
+    return (f"*About {characters:,} characters of brief — roughly {seconds:.0f}s of "
+            f"reading before the writing starts{where}. The brief is different every "
+            "roll, so it is the one part of the request that can never come out of the "
+            "model's cache.*")
+
+
+def _placement_note() -> str:
+    """", on the card" or ", from system RAM", when that can be told.
+
+    Where the language model runs is the largest of the three levers by a wide
+    margin -- the same machine that reads at 36 tokens a second with the weights
+    in RAM reads at 900 with them on the card -- and it is the one this panel
+    cannot change, so it is named rather than acted on.
+    """
+    try:
+        import mc_llm_runtime
+
+        configuration = mc_llm_runtime.config()
+    except Exception:
+        return ""
+    if not configuration.configured:
+        return ""
+    return " on the card" if configuration.on_gpu else " with the model in system RAM"
+
+
+# --------------------------------------------------------------------------- #
 # Writing one change back
 # --------------------------------------------------------------------------- #
 
@@ -187,6 +281,7 @@ class Panel:
         self.name_row = None
         self.profile_name = None
         self.summary = None
+        self.cost = None
         self.add = None
         self.seed = None
         self.anti = None
@@ -224,7 +319,8 @@ class Panel:
     def outputs(self) -> list:
         """Every component :meth:`render` returns an update for, in order."""
         found = [self.status, self.creativity, self.profile, self.name_row,
-                 self.profile_name, self.summary, self.add, self.seed, self.anti]
+                 self.profile_name, self.summary, self.cost, self.add, self.seed,
+                 self.anti]
         if self.loras is not None:
             found.append(self.loras)
         for key in self.keys:
@@ -235,7 +331,8 @@ class Panel:
     def components(self) -> dict:
         """Everything this panel owns, for a surface to expose and a test to read."""
         found = {"profile": self.profile, "profile_name": self.profile_name,
-                 "name_row": self.name_row, "summary": self.summary, "add": self.add,
+                 "name_row": self.name_row, "summary": self.summary, "cost": self.cost,
+                 "add": self.add,
                  "seed": self.seed, "anti": self.anti,
                  "axes": self.axis_controls,
                  "rows": [self.rows[key] for key in self.keys],
@@ -271,6 +368,7 @@ class Panel:
             gr.update(visible=bool(naming)),
             gr.update(value="") if not naming else gr.update(),
             gr.update(value=DIRECTIONS_HEADING if active else NO_DIRECTIONS),
+            gr.update(value=describe_cost(stored)),
             gr.update(choices=[(self.axes[key].label, key) for key in natural],
                       value=None, visible=bool(natural)),
             gr.update(value=stored.get("seed")),
@@ -405,6 +503,9 @@ def build(ident, notice, status, creativity, *, loras=True, stored=None) -> Pane
         # Wired at the end, not here: every handler answers with an update for
         # every component the panel owns, and half of them do not exist yet.
         editor_buttons.append((key, edit, done, natural))
+
+    panel.cost = gr.Markdown(describe_cost(stored), elem_id=ident("cost"),
+                             elem_classes=classes("cost"))
 
     natural_now = [key for key in keys
                    if _axis_setting(stored, key)["mode"] not in (director.VARY,
