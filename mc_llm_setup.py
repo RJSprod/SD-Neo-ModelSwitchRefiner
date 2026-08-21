@@ -546,20 +546,22 @@ def preferred_device():
     return found[0]
 
 
-MIXED_TRUTH = ("model in system RAM — the processor does the work; the card is "
-               "visible but no layers run on it")
-"""What Mixed placement actually does, in place of what it used to claim.
+MIXED_TRUTH = ("mixed: as much of the model as fits in spare VRAM, the rest in "
+               "system RAM — never takes room the image model needs")
+"""What Mixed placement does, in place of what the vendored describer claims.
 
-The vendored describer says "mixed: model in system RAM, card used for
-processing", and that is not what the command line produces: Mixed is recorded
-with ``--n-gpu-layers 0``, and llama.cpp with no offloaded layers runs every
-matrix multiply on the processor. Measured on one machine, same model, same
-prompt: CPU placement 4.2 tokens a second, Mixed 5.3 -- the difference between
-them is noise, because they are the same computation.
+The vendored line is "mixed: model in system RAM, card used for processing",
+and for most of this extension's life that was false in the direction that
+mattered: Mixed was recorded as ``--n-gpu-layers 0``, llama.cpp with no
+offloaded layers runs every matrix multiply on the processor, and a machine with
+a 3090 in it wrote prompts at four tokens a second with the card idle. Measured
+there: CPU 4.2 tokens a second, Mixed 5.3 -- the same computation, twice.
 
-Somebody choosing between three options is entitled to have the middle one
-describe itself truthfully; this is the line that does. The vendored file is
-left alone, as ``prompt_master/VENDORED_FROM.txt`` requires.
+It is true now, which is why this line says what it says. Mixed fills whatever
+is genuinely free after the image model's needs are set aside, moves a
+mixture-of-experts model's experts out before it drops any blocks, and lands on
+system RAM only when nothing at all is spare. The vendored file is left alone,
+as ``prompt_master/VENDORED_FROM.txt`` requires.
 """
 
 

@@ -66,6 +66,11 @@ def _whole(value, default: int = 0) -> int:
         return default
 
 
+DEFAULT_EXPERT_SHARE = 0.85
+"""What fraction of a mixture-of-experts model's weights are experts, when its
+header does not say enough to work it out. Every published MoE is above this."""
+
+
 @dataclass(frozen=True)
 class Gguf:
     """A model's shape, as its own header describes it."""
@@ -91,6 +96,73 @@ class Gguf:
     @property
     def embedding_length(self) -> int:
         return _whole(self._arch("embedding_length", 0))
+
+    # -- mixture of experts, which changes what "offload less" should mean -- #
+
+    @property
+    def expert_count(self) -> int:
+        """Experts per block, or 0 for a dense model."""
+        return _whole(self._arch("expert_count", 0))
+
+    @property
+    def expert_used_count(self) -> int:
+        """Experts actually consulted per token. The number speed follows.
+
+        A 26B model that uses two experts of 4B does roughly 4B of arithmetic
+        per token, which is why it can be three times faster than a dense 12B
+        on the same machine while being twice the file. Nothing else in this
+        header explains that, and without it a chooser sorted by size is sorted
+        by the wrong thing.
+        """
+        return _whole(self._arch("expert_used_count", 0))
+
+    @property
+    def expert_feed_forward_length(self) -> int:
+        return _whole(self._arch("expert_feed_forward_length", 0))
+
+    @property
+    def feed_forward_length(self) -> int:
+        return _whole(self._arch("feed_forward_length", 0))
+
+    @property
+    def mixture_of_experts(self) -> bool:
+        """Whether this model has experts at all."""
+        return self.expert_count > 1
+
+    @property
+    def expert_share(self) -> float:
+        """Roughly what fraction of the weights are expert tensors.
+
+        Estimated from the header rather than measured from the tensors,
+        because the tensor list is past the metadata block this module has
+        promised not to read past -- and because the number is only ever used
+        to *choose between two placements*, where being right to a few per cent
+        is as good as being exact.
+
+        Three matrices per expert (gate, up, down), each ``embedding_length ×
+        expert_feed_forward_length``, against everything else in a block:
+        attention projections and the shared feed-forward, if any. A model whose
+        header does not answer gets the conservative default -- experts dominate
+        every published mixture-of-experts, so under-estimating their share is
+        the direction that keeps a placement fitting.
+        """
+        if not self.mixture_of_experts:
+            return 0.0
+        width = self.embedding_length
+        expert_ff = self.expert_feed_forward_length or self.feed_forward_length
+        if width <= 0 or expert_ff <= 0:
+            return DEFAULT_EXPERT_SHARE
+
+        experts = 3 * self.expert_count * width * expert_ff
+        heads = max(self.head_counts[0] if self.head_counts else 0, 1)
+        kv_heads = max(self.head_counts_kv[0] if self.head_counts_kv else heads, 1)
+        head_width = width // heads if heads else width
+        attention = 2 * width * width + 2 * width * (kv_heads * head_width)
+        shared = 3 * width * self.feed_forward_length if self.expert_feed_forward_length else 0
+        rest = attention + shared
+        if experts + rest <= 0:
+            return DEFAULT_EXPERT_SHARE
+        return min(max(experts / (experts + rest), 0.0), 0.98)
 
     # -- per block, because the attention shape is not always one shape ---- #
     #

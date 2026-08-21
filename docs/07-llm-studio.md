@@ -2177,3 +2177,93 @@ is an image made from their four words with nothing indicating that anything was
 meant to happen. `ScriptKreaCreative.postprocess` now puts the reason on the
 result, beside the image, where this extension already puts the sentence when
 Stage 2 fails.
+
+
+## 24. Mixed placement was a mode that did nothing (21 August 2026)
+
+Asked for directly: *"can you make it so mixed mode keeps some parts on GPU such
+that only what is necessary to make the GPU run the LLM is loaded"* and *"can we
+apply sage or other speed ups for GPU only and mixed mode?"*
+
+### 24.1 What Mixed was
+
+`Config.__post_init__` forced `gpu_layers = NO_OFFLOAD` for `MIXED_MODE`,
+`Config.on_gpu` was therefore False, and `negotiate()` returned at its first
+branch — *"System RAM or CPU execution: there is no VRAM decision to make"*. The
+command line got `--n-gpu-layers 0`, llama.cpp put nothing on the card, and the
+mode's own description said "card used for processing".
+
+The whole partial-offload ladder already existed and Mixed was the one mode
+forbidden from reaching it.
+
+### 24.2 What Mixed is
+
+`_requested_placement` now asks for every layer with `on_gpu=True` when the mode
+is Mixed and a card is configured, and `negotiate` forces the **preserve-image**
+policy for that call whatever the installation's own policy says. The existing
+ladder then does the work: shrink the context, move the experts, drop blocks,
+and land on zero — today's behaviour, unchanged — when nothing is free.
+
+Two properties are worth stating because they are what make this safe to do by
+default:
+
+- **It never asks anything to move.** Preserve-image never calls the broker, so
+  no checkpoint is evicted and no image generation is slowed to make a prompt
+  faster.
+- **It sizes against the image model's needs.** A Creative roll already passes
+  `image_reserve_bytes()` as `extra_reserve`, so what Mixed fills is what is
+  spare *after* the picture that is about to be generated has been accounted
+  for.
+
+### 24.3 Moving the experts instead of the blocks
+
+`_shrink_offload` stepped down in fours: 40 layers, 36, 32… Each step moves a
+whole block, which is that block's attention *and* its feed-forward. For a
+mixture-of-experts model that is the wrong thing to give up first: the experts
+are the great majority of the weights and are consulted a couple at a time,
+while attention is small and every token touches it.
+
+So for an MoE model the first degradation step is now `--cpu-moe` — all layers
+resident, experts in system RAM — and only if that still does not fit do blocks
+start leaving. Simulated against a 26B-A4B's real shape:
+
+```
+6.4 GB free →  all 40 blocks on the GPU, experts in system RAM   (3.7 GB)
+3.0 GB free →  28 of 40 blocks, experts in system RAM            (3.0 GB)
+0.5 GB free →  system RAM                                        (as before)
+```
+
+`Placement.cpu_experts` carries it, `weights_bytes` prices it from
+`Gguf.expert_share` (estimated from the header's expert count and widths, since
+the tensor list is past the metadata block `mc_gguf` promises not to read), and
+`Placement.key` includes it so calibration does not file two different
+footprints under one identity.
+
+### 24.4 Asking the build rather than assuming
+
+`--cpu-moe` and `--flash-attn` were both added to llama.cpp at different times,
+and `--flash-attn` changed from a switch to `on|off|auto` along the way. The
+runtime is whatever build the user copied in, and a flag it has never heard of
+is not a slower server but a server that exits at startup — the failure this
+extension already spent a week on (§23).
+
+So `runtime_capabilities()` runs `llama-server --help` once per binary, caches
+the answer against the executable's modification time, and reduces it to the set
+of long options it advertises. `accelerator_flags()` adds only what is in that
+set, only for a placement that puts work on the card, and passes `--flash-attn`
+its value only when the help text shows the three-state spelling.
+
+They reach the command through `_Launcher`, the same stand-in that removes the
+impossible flag pair, because the vendored `LlamaProcess.start` has a fixed
+keyword list with no room for arbitrary arguments and
+`prompt_master/VENDORED_FROM.txt` forbids editing it.
+
+### 24.5 What was not added, and why
+
+Sage attention is a quantised attention kernel for diffusion models in PyTorch.
+There is no llama.cpp counterpart and nothing to enable. The remaining llama.cpp
+knobs are thread counts and batch sizes, which are hardware guesses — on a
+hybrid Intel part the right thread count is often *fewer* than the default, and
+which is right cannot be determined from here. Now that every request's measured
+tokens per second is kept per backbone (§23.3), that is the shape a future
+answer should take: measure, then choose — not guess in a docstring.

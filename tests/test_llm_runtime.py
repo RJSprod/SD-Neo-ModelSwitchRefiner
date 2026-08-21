@@ -10,6 +10,7 @@ without reporting what it changed."
 from __future__ import annotations
 
 import dataclasses
+import types
 from pathlib import Path
 
 import pytest
@@ -587,28 +588,59 @@ class TestTheOffloadArgument:
 
         assert started[0][1]["gpu_layers"] == "31"
 
-    def test_a_mixed_install_starts_with_none_however_many_were_recorded(
+    def test_a_mixed_install_fills_the_room_that_is_spare(
             self, placed, server, tmp_path, monkeypatch):
-        """Mixed mode trades speed for VRAM that stays free, so a mixed install
-        that filled the card would be the one thing it cannot do. The layer
-        count beside it is a leftover from whatever wrote the state; the mode
-        is the answer."""
+        """Mixed used to be pinned at zero layers, so a machine with a 3090 in
+        it ran every matrix multiply on the processor while the card sat idle --
+        which is the one thing the mode's own description promised it would not
+        do. It now takes what is genuinely free."""
         managed, started = server
         configure(monkeypatch, tmp_path, gpu_layers="all", blocks=30, device_mode="mixed")
         set_free(monkeypatch, 20)
 
         managed.client()
 
+        assert started[0][1]["gpu_layers"] != "0"
+
+    def test_a_mixed_install_takes_nothing_when_nothing_is_free(
+            self, placed, server, tmp_path, monkeypatch):
+        """The old behaviour, kept as the floor: a full card means system RAM,
+        which is slow and is still an answer."""
+        managed, started = server
+        configure(monkeypatch, tmp_path, gpu_layers="all", blocks=30, device_mode="mixed")
+        set_free(monkeypatch, 0.2)
+
+        managed.client()
+
         assert started[0][1]["gpu_layers"] == "0"
 
-    def test_a_mixed_install_makes_no_vram_decision_either(self, placed, tmp_path, monkeypatch):
-        configuration = configure(monkeypatch, tmp_path, gpu_layers="all", device_mode="mixed")
+    def test_a_mixed_install_never_asks_the_image_side_to_move(
+            self, placed, tmp_path, monkeypatch):
+        """Somebody who picked the middle option did not ask for their
+        checkpoint to be evicted so a prompt could be written faster -- whatever
+        the installation's policy says."""
+        asked: list = []
+        monkeypatch.setattr(runtime.mc_broker, "policy",
+                            lambda: runtime.mc_broker.POLICY_LLM_PRIORITY)
+        monkeypatch.setattr(runtime.mc_broker, "request_vram",
+                            lambda *args, **kwargs: asked.append(args) or _NoRoom())
+
+        configuration = configure(monkeypatch, tmp_path, gpu_layers="all",
+                                  device_mode="mixed")
         set_free(monkeypatch, 1)
+        runtime.negotiate(configuration)
 
-        negotiated = runtime.negotiate(configuration)
+        assert asked == []
 
-        assert negotiated.fits
-        assert not negotiated.placement.on_gpu
+
+class _NoRoom:
+    """What ``request_vram`` answers with when nothing could be freed."""
+
+    freed = 0
+    note = ""
+
+    def __bool__(self):
+        return False
 
 
 class TestTheLoadReportIsWaitedFor:
@@ -875,6 +907,247 @@ class TestTheCommandThatStartsIt:
         assert failure and not failure.out_of_memory
         assert "no GPU visible" in failure.text
         assert "CUDA_VISIBLE_DEVICES" in failure.text
+
+
+class TestMovingTheExpertsRatherThanTheBlocks:
+    """For a mixture-of-experts model, "offload less" should not mean "fewer
+    layers". Experts are the great majority of the weights and are consulted a
+    couple at a time; attention is small and every token touches it."""
+
+    @pytest.fixture
+    def moe(self):
+        class Header:
+            file_bytes = int(16.8 * 1024 ** 3)
+            block_count = 40
+            usable = True
+            context_length = 262144
+            embedding_length = 3584
+            expert_count = 8
+            expert_used_count = 2
+            mixture_of_experts = True
+            expert_share = 0.85
+
+        return Header()
+
+    @pytest.fixture
+    def dense(self, moe):
+        class Header(type(moe)):
+            file_bytes = int(7.4 * 1024 ** 3)
+            expert_count = 0
+            expert_used_count = 0
+            mixture_of_experts = False
+            expert_share = 0.0
+
+        return Header()
+
+    @pytest.fixture
+    def shrink(self, monkeypatch, tmp_path, host):
+        monkeypatch.setattr(runtime, "runtime_supports", lambda flag, config=None: True)
+        monkeypatch.setattr(ctx, "estimate", lambda model, placement, header: ctx.Estimate(
+            model=model, context=placement.context, ceiling=0,
+            weights_bytes=ctx.weights_bytes(header, placement),
+            kv_bytes=int(0.8 * 1024 ** 3), compute_bytes=int(0.4 * 1024 ** 3),
+            kv_bytes_per_token=96.0, calibrated=False, placement=placement))
+        configuration = runtime.Config(
+            runtime=tmp_path / "llama-server", model=tmp_path / "m.gguf", mmproj=None,
+            gpu_index=0, device="CUDA0", gpu_layers="all", context_size=8192,
+            context_mode="fixed", context_buffer_gb=4.0, kv_type_k="f16", kv_type_v="f16")
+
+        def run(header, free_gb):
+            monkeypatch.setattr(runtime, "_free_vram",
+                                lambda ours=0, gigabytes=free_gb: int(gigabytes * 1024 ** 3))
+            placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, context=8192)
+            return runtime._shrink_offload(configuration, placement, header, 0)
+
+        return run
+
+    def test_a_moe_keeps_every_block_on_the_card(self, shrink, moe):
+        """6.4 GB free against a 16.8 GB model, and all forty blocks stay
+        resident because only the experts left."""
+        placement, _estimate, note = shrink(moe, 6.4)
+
+        assert placement.cpu_experts is True
+        assert placement.gpu_layers == ctx.ALL_LAYERS
+        assert "experts stay in system RAM" in note
+
+    def test_a_dense_model_still_drops_blocks(self, shrink, dense):
+        placement, _estimate, note = shrink(dense, 6.4)
+
+        assert placement.cpu_experts is False
+        assert 0 < placement.gpu_layers < 40
+        assert "of 40 layers" in note
+
+    def test_the_experts_come_out_before_any_block_does(self, shrink, moe):
+        """Order matters: moving experts costs far less speed than moving
+        attention, so it is tried first and blocks only if it is not enough."""
+        placement, _estimate, _note = shrink(moe, 3)
+
+        assert placement.cpu_experts is True
+        assert 0 < placement.gpu_layers < 40
+
+    def test_nothing_free_is_still_system_RAM(self, shrink, moe):
+        placement, _estimate, note = shrink(moe, 0.5)
+
+        assert placement.gpu_layers == ctx.NO_LAYERS
+        assert "system RAM" in note
+
+    def test_a_build_without_the_flag_is_not_given_the_placement(self, shrink, moe,
+                                                                 monkeypatch):
+        """The placement means ``--cpu-moe``, so a runtime that has never heard
+        of it must not be handed one."""
+        monkeypatch.setattr(runtime, "runtime_supports", lambda flag, config=None: False)
+        placement, _estimate, _note = shrink(moe, 6.4)
+
+        assert placement.cpu_experts is False
+
+    def test_the_estimate_knows_the_experts_are_elsewhere(self, moe):
+        whole = ctx.weights_bytes(moe, ctx.Placement(gpu_layers=ctx.ALL_LAYERS))
+        without = ctx.weights_bytes(
+            moe, ctx.Placement(gpu_layers=ctx.ALL_LAYERS, cpu_experts=True))
+
+        assert without < whole / 4
+
+    def test_the_placement_says_so_out_loud(self):
+        said = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, cpu_experts=True).describe(40)
+
+        assert "experts in system RAM" in said
+
+    def test_calibration_tells_the_two_apart(self):
+        """They are different footprints for the same layer count, so a measured
+        one must not be filed under the other."""
+        assert ctx.Placement(gpu_layers=-1).key != ctx.Placement(gpu_layers=-1,
+                                                                 cpu_experts=True).key
+
+
+class TestAskingTheBuildWhatItSupports:
+    """Two flags are worth adding and neither may be guessed at.
+
+    The runtime is whatever build the user copied in; a flag it does not know
+    is not a slower server but a server that exits at startup, which is a
+    failure this extension has already spent a week on.
+    """
+
+    @pytest.fixture(autouse=True)
+    def forget(self):
+        runtime._capabilities.clear()
+        runtime._arm_flags([])
+        yield
+        runtime._capabilities.clear()
+        runtime._arm_flags([])
+
+    @pytest.fixture
+    def build(self, tmp_path, monkeypatch):
+        """A fake llama-server whose --help says what we tell it to."""
+        executable = tmp_path / "llama-server"
+        executable.write_text("")
+
+        def announce(text):
+            monkeypatch.setattr(
+                runtime.subprocess, "run",
+                lambda *args, **kwargs: types.SimpleNamespace(stdout=text, stderr=""))
+            return runtime.Config(
+                runtime=executable, model=tmp_path / "model.gguf", mmproj=None,
+                gpu_index=0, device="CUDA0", gpu_layers="all", context_size=8192,
+                context_mode="fixed", context_buffer_gb=4.0, kv_type_k="f16",
+                kv_type_v="f16")
+
+        return announce
+
+    def test_a_build_that_lists_a_flag_may_be_given_it(self, build):
+        configuration = build("  -fa, --flash-attn        enable Flash Attention\n"
+                              "      --cpu-moe            keep all MoE weights in RAM\n")
+
+        assert runtime.runtime_supports(runtime.CPU_MOE_FLAG, configuration)
+        assert runtime.runtime_supports(runtime.FLASH_ATTENTION_FLAG, configuration)
+
+    def test_a_build_that_does_not_is_given_neither(self, build):
+        configuration = build("  -m, --model FNAME\n  -c, --ctx-size N\n")
+        placement = ctx.Placement(gpu_layers=20, cpu_experts=True)
+
+        assert runtime.accelerator_flags(configuration, placement) == []
+
+    def test_flash_attention_is_not_added_when_nothing_is_offloaded(self, build):
+        """It is a CUDA kernel. On a placement with no resident layers it would
+        be a flag that changes nothing, and a flag that changes nothing is one
+        somebody will later believe changed something."""
+        configuration = build("      --flash-attn\n      --cpu-moe\n")
+        placement = ctx.Placement(gpu_layers=ctx.NO_LAYERS)
+
+        assert runtime.FLASH_ATTENTION_FLAG not in runtime.accelerator_flags(
+            configuration, placement)
+
+    def test_none_of_it_reaches_a_cpu_placement(self, build):
+        configuration = build("      --flash-attn\n      --cpu-moe\n")
+        placement = ctx.Placement(gpu_layers=20, on_gpu=False,
+                                             cpu_experts=True)
+
+        assert runtime.accelerator_flags(configuration, placement) == []
+
+    def test_the_three_state_spelling_is_given_its_value(self, build):
+        """llama.cpp changed --flash-attn from a switch to on/off/auto and both
+        spellings are in the wild. The wrong one is a server that will not
+        start, so the help text decides."""
+        configuration = build("  -fa, --flash-attn {on,off,auto}   (default: auto)\n")
+        placement = ctx.Placement(gpu_layers=20)
+
+        assert runtime.accelerator_flags(configuration, placement) == [
+            runtime.FLASH_ATTENTION_FLAG, "on"]
+
+    def test_the_answer_is_cached_per_binary(self, build, monkeypatch):
+        configuration = build("      --cpu-moe\n")
+        runtime.runtime_capabilities(configuration)
+
+        calls: list = []
+        monkeypatch.setattr(runtime.subprocess, "run",
+                            lambda *a, **k: calls.append(a) or types.SimpleNamespace(
+                                stdout="", stderr=""))
+        runtime.runtime_capabilities(configuration)
+
+        assert calls == []
+
+    def test_a_build_that_will_not_answer_is_given_nothing(self, tmp_path, monkeypatch):
+        executable = tmp_path / "llama-server"
+        executable.write_text("")
+
+        def explode(*args, **kwargs):
+            raise OSError("not executable here")
+
+        monkeypatch.setattr(runtime.subprocess, "run", explode)
+        configuration = runtime.Config(
+            runtime=executable, model=tmp_path / "model.gguf", mmproj=None, gpu_index=0,
+            device="CUDA0", gpu_layers="all", context_size=8192, context_mode="fixed",
+            context_buffer_gb=4.0, kv_type_k="f16", kv_type_v="f16")
+
+        assert runtime.runtime_capabilities(configuration) == frozenset()
+
+
+class TestFlagsReachTheCommand:
+    @pytest.fixture(autouse=True)
+    def clean(self):
+        runtime._arm_flags([])
+        yield
+        runtime._arm_flags([])
+
+    def _command(self):
+        return ["llama-server", "--model", "m.gguf", "--ctx-size", "8192",
+                "--device", "CUDA0"]
+
+    def test_an_armed_flag_is_appended_once(self):
+        runtime._arm_flags(["--cpu-moe"])
+
+        assert runtime.with_extra_flags(self._command())[-1] == "--cpu-moe"
+        assert "--cpu-moe" not in runtime.with_extra_flags(self._command())
+
+    def test_nothing_armed_changes_nothing(self):
+        assert runtime.with_extra_flags(self._command()) == self._command()
+
+    def test_a_command_that_is_not_llama_server_is_left_alone(self):
+        """A device probe spawned while a start is in flight must not collect
+        the flags meant for the server."""
+        runtime._arm_flags(["--cpu-moe"])
+        probe = ["nvidia-smi", "--query-gpu=index", "--format=csv"]
+
+        assert runtime.with_extra_flags(probe) == probe
 
 
 class TestWhatThisMachineMeasured:

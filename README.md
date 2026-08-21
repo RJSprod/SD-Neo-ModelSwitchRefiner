@@ -1414,11 +1414,39 @@ But it has to fit *beside* the image checkpoint: a Krea 2 stack wanting ~17.6 GB
 of a 24 GB card leaves about 6 GB, which is a 4B writer, not a 12B. Giving the
 writer VRAM the image model needs makes the image slower, not the prompt faster.
 
-> **"Mixed" does no GPU work.** Mixed placement is recorded as
-> `--n-gpu-layers 0`, and llama.cpp with no offloaded layers runs every matrix
-> multiply on the processor. Mixed and CPU are the same computation — measured
-> 4.2 vs 5.3 tokens/sec on one machine, which is noise. Only **GPU** placement
-> offloads layers. The Setup list and the start-up log now say so.
+### The three placements
+
+| Placement | What it does |
+| --- | --- |
+| **GPU** | the whole model on the card, shrinking context and then offload if it will not fit, and asking the image side for room under the configured policy |
+| **Mixed** | as much as fits in VRAM that is **already spare**, never taking room the image model needs, down to nothing when nothing is free |
+| **CPU** | no card involved at all |
+
+Mixed used to mean `--n-gpu-layers 0` — every matrix multiply on the processor
+while the card sat idle, which is the one thing its own description promised it
+would not do. It now fills whatever is genuinely free after the image model's
+needs are set aside, and it never asks the image side to move: somebody who
+picked the middle option did not ask for their checkpoint to be evicted so a
+prompt could be written faster.
+
+**For a mixture-of-experts model, "offload less" moves the experts, not the
+blocks.** Experts are the great majority of the weights and are consulted a
+couple at a time; attention is small and every token touches it. So when the
+whole model will not fit, `--cpu-moe` keeps every block's attention on the card
+and puts the experts in system RAM — which for a 26B-A4B is 16.8 GB of weights
+reduced to about 3.7 GB resident, with all forty blocks still on the GPU. Only
+if that is still too much do whole blocks start leaving.
+
+**Flash attention** is added when the build advertises it and something is
+actually offloaded. Both it and `--cpu-moe` are gated on asking the runtime
+binary what it supports (`llama-server --help`, cached per build), because a
+flag an older build has never heard of is not a slower server — it is a server
+that exits at startup.
+
+There is no sage-attention equivalent: that is a quantised attention kernel for
+diffusion models in PyTorch, and llama.cpp has no counterpart. The remaining
+knobs — thread counts, batch sizes — are hardware guesses this extension has no
+way to verify, so it does not make them.
 
 If a Krea 2 checkpoint and your writer will not both fit on the card, the
 catalogue has smaller backbones — **Qwen 3.5 4B** is ~4.5 GB and will sit beside

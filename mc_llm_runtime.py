@@ -389,7 +389,12 @@ def negotiate(configuration: Config | None = None,
     if _fits(estimate, reserve, already_ours):
         return Negotiation(wanted, estimate, (), True)
 
-    chosen = mc_broker.policy()
+    # Mixed is "spare room only", whatever the installation's policy says: it
+    # fills what is already free and never asks the image side to give anything
+    # up. Somebody who picked the middle option did not ask for their checkpoint
+    # to be evicted so a prompt could be written faster.
+    chosen = (mc_broker.POLICY_PRESERVE_IMAGE if is_mixed(configuration)
+              else mc_broker.policy())
     placement = wanted
 
     if chosen == mc_broker.POLICY_LLM_PRIORITY:
@@ -425,7 +430,18 @@ def negotiate(configuration: Config | None = None,
 
 def _requested_placement(configuration: Config, gguf: mc_gguf.Gguf | None,
                          already_ours: int = 0) -> mc_llm_context.Placement:
-    """The placement the user's settings ask for, before any negotiation."""
+    """The placement the user's settings ask for, before any negotiation.
+
+    Mixed asks for the whole model on the card and lets the ladder below take
+    it apart. That is a change: Mixed used to be recorded as zero layers and
+    pinned there, so a machine with a 3090 in it ran every matrix multiply on
+    the processor while the card sat idle -- which is what the mode's own
+    description promised it would not do. What it now means is "use the room
+    that is genuinely spare, and never ask for any that is not": the
+    negotiation is forced down the preserve-image ladder (see :func:`negotiate`),
+    so it shrinks the context, then moves the experts out, then drops blocks,
+    and lands on zero -- exactly today's behaviour -- when nothing is free.
+    """
     from prompt_master.inference.device_detection import NO_OFFLOAD
 
     layers = mc_llm_context.ALL_LAYERS
@@ -438,12 +454,16 @@ def _requested_placement(configuration: Config, gguf: mc_gguf.Gguf | None,
         except ValueError:
             layers = mc_llm_context.ALL_LAYERS
 
+    on_gpu = configuration.on_gpu
+    if is_mixed(configuration):
+        layers, on_gpu = mc_llm_context.ALL_LAYERS, True
+
     placement = mc_llm_context.Placement(
         gpu_layers=layers,
         context=max(int(configuration.context_size), MINIMUM_CONTEXT),
         kv_type_k=configuration.kv_type_k,
         kv_type_v=configuration.kv_type_v,
-        on_gpu=configuration.on_gpu,
+        on_gpu=on_gpu,
     )
 
     if configuration.context_mode == "auto" and placement.on_gpu:
@@ -457,6 +477,19 @@ def _requested_placement(configuration: Config, gguf: mc_gguf.Gguf | None,
             placement = placement.with_context(sized)
 
     return _capped(placement, gguf)
+
+
+def is_mixed(configuration: Config | None = None) -> bool:
+    """Whether this installation is on Mixed placement with a card to use."""
+    from prompt_master.core.models import MIXED_MODE
+    from prompt_master.inference.device_detection import CPU_DEVICE
+
+    try:
+        configuration = configuration or config()
+    except Exception:
+        return False
+    return (str(configuration.mode).strip().casefold() == MIXED_MODE
+            and str(configuration.device).strip().casefold() != CPU_DEVICE)
 
 
 def _capped(placement: mc_llm_context.Placement,
@@ -552,6 +585,23 @@ def _shrink_offload(configuration: Config, placement, gguf, reserve: int,
 
     total = gguf.block_count
     free = _free_vram(already_ours)
+
+    # For a mixture-of-experts model, the first thing to move is the experts --
+    # not whole blocks. They are the great majority of the weights and are
+    # consulted a couple at a time, while attention is small and every token
+    # touches it. Dropping blocks gives up both; this gives up only the idle
+    # half, and usually saves enough that no block has to leave the card at all.
+    if (not placement.cpu_experts and gguf.mixture_of_experts
+            and runtime_supports(CPU_MOE_FLAG, configuration)):
+        candidate = placement.with_cpu_experts()
+        estimate = mc_llm_context.estimate(configuration.model, candidate, gguf)
+        if free >= estimate.total_bytes + reserve:
+            return candidate, estimate, (
+                f"the experts stay in system RAM and the rest of the model is on the "
+                f"GPU — {gguf.expert_count} experts a block, {gguf.expert_used_count} "
+                "consulted per token, so this costs far less speed than moving blocks")
+        placement = candidate
+
     for layers in range(total - 4, -1, -4):
         candidate = placement.with_layers(max(layers, 0))
         estimate = mc_llm_context.estimate(configuration.model, candidate, gguf)
@@ -714,6 +764,135 @@ class Failure:
 
     def __bool__(self) -> bool:
         return bool(self.text)
+
+
+# --------------------------------------------------------------------------- #
+# What this build of llama-server can be asked for
+# --------------------------------------------------------------------------- #
+
+CPU_MOE_FLAG = "--cpu-moe"
+"""Keep every expert tensor in system RAM, everything else on the card."""
+
+FLASH_ATTENTION_FLAG = "--flash-attn"
+"""Fused attention kernels. A CUDA thing: worth nothing with no layers offloaded."""
+
+_HELP_TIMEOUT = 20
+_capabilities: dict[tuple, frozenset] = {}
+_capabilities_lock = threading.Lock()
+
+
+def runtime_capabilities(configuration: Config | None = None) -> frozenset:
+    """Every long option this llama-server build advertises, or an empty set.
+
+    Asked of the binary rather than assumed from a version string, because
+    there is no version string: the runtime is whatever build the user copied
+    in, and the two flags this module wants to add were added to llama.cpp at
+    different times and spelled differently before that. A flag that is passed
+    to a build which does not know it is not a slower server, it is a server
+    that exits at startup -- which is exactly the failure this extension spent a
+    week on already.
+
+    Cached per executable and modification time, so adopting a new build asks
+    again and an ordinary start asks nothing.
+    """
+    try:
+        configuration = configuration or config()
+        executable = configuration.runtime
+        if executable is None or not Path(executable).is_file():
+            return frozenset()
+        stamp = (str(executable), Path(executable).stat().st_mtime)
+    except Exception:
+        return frozenset()
+
+    with _capabilities_lock:
+        found = _capabilities.get(stamp)
+    if found is not None:
+        return found
+
+    found = _read_capabilities(executable)
+    with _capabilities_lock:
+        _capabilities[stamp] = found
+    return found
+
+
+def _read_capabilities(executable) -> frozenset:
+    """``llama-server --help``, reduced to the set of long options it lists."""
+    try:
+        finished = subprocess.run(
+            [str(executable), "--help"], capture_output=True, text=True,
+            timeout=_HELP_TIMEOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:
+        logger.debug("Model Chain: could not ask llama-server what it supports",
+                     exc_info=True)
+        return frozenset()
+    text = f"{finished.stdout or ''}\n{finished.stderr or ''}"
+    flags = frozenset(re.findall(r"(--[a-z0-9][a-z0-9-]+)", text))
+    if flags:
+        logger.debug("Model Chain: llama-server advertises %d options", len(flags))
+    return flags
+
+
+def runtime_supports(flag: str, configuration: Config | None = None) -> bool:
+    """Whether this build advertises ``flag``. False when it cannot be asked."""
+    return flag in runtime_capabilities(configuration)
+
+
+def accelerator_flags(configuration: Config, placement) -> list[str]:
+    """Extra command-line flags for a placement that puts work on the card.
+
+    Two, both gated on the build advertising them:
+
+    ``--flash-attn`` is fused attention. It is a CUDA kernel, so it is added
+    only when something is actually offloaded -- on a placement with no resident
+    layers it would be a flag that changes nothing, and a flag that changes
+    nothing is a flag somebody will later believe changed something.
+
+    ``--cpu-moe`` is how the placement above says "experts in system RAM". It
+    reaches the command line here rather than through the vendored launcher's
+    fixed argument list, which has no room for it.
+
+    There is no third. Sage attention is a quantised attention kernel for
+    diffusion models in PyTorch and has no llama.cpp counterpart, and the
+    remaining llama.cpp knobs -- thread counts, batch sizes -- are hardware
+    guesses this module has no way to verify from here.
+    """
+    flags: list[str] = []
+    if not getattr(placement, "on_gpu", False):
+        return flags
+    if getattr(placement, "cpu_experts", False) and runtime_supports(CPU_MOE_FLAG,
+                                                                    configuration):
+        flags.append(CPU_MOE_FLAG)
+    if placement.gpu_layers == mc_llm_context.NO_LAYERS:
+        return flags
+    if runtime_supports(FLASH_ATTENTION_FLAG, configuration):
+        flags.append(FLASH_ATTENTION_FLAG)
+        if _flash_attention_takes_a_value(configuration):
+            flags.append("on")
+    return flags
+
+
+def _flash_attention_takes_a_value(configuration: Config | None = None) -> bool:
+    """Whether this build spells it ``--flash-attn on`` rather than as a switch.
+
+    llama.cpp changed it from a boolean switch to a three-state option
+    (``on``/``off``/``auto``) and both spellings are in the wild. Passing the
+    wrong one is a server that will not start, so the help text decides.
+    """
+    try:
+        configuration = configuration or config()
+        executable = configuration.runtime
+        if executable is None:
+            return False
+        finished = subprocess.run(
+            [str(executable), "--help"], capture_output=True, text=True,
+            timeout=_HELP_TIMEOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:
+        return False
+    text = f"{finished.stdout or ''}\n{finished.stderr or ''}"
+    match = re.search(r"--flash-attn[^\n]*", text)
+    return bool(match and re.search(r"\bon\b.*\boff\b|\{on", match.group(0)))
 
 
 # --------------------------------------------------------------------------- #
@@ -883,6 +1062,44 @@ def without_gpu_selection(command):
     return kept
 
 
+_pending_flags: list[str] = []
+"""Flags to append to the very next llama-server command. See :class:`_Launcher`.
+
+Module state, and deliberately the smallest kind: it is written and read inside
+the runtime's own lock, microseconds apart, by the one method that starts a
+server. The alternative is a vendored launcher that takes arbitrary extra
+arguments, and it does not -- ``LlamaProcess.start`` has a fixed keyword list,
+which is the whole reason the command is corrected at the boundary instead.
+"""
+
+
+def _arm_flags(flags) -> None:
+    del _pending_flags[:]
+    _pending_flags.extend(str(flag) for flag in flags or ())
+
+
+def with_extra_flags(command) -> list[str]:
+    """``command`` plus whatever the start that is happening now armed.
+
+    Appended at the end, where llama.cpp takes its options in any order, and
+    consumed exactly once: a flag left armed would attach itself to the next
+    server started for any reason, which on this path is a server started for a
+    different placement.
+    """
+    argv = [str(part) for part in command or ()]
+    if not _pending_flags:
+        return argv
+    extra, wanted = list(_pending_flags), False
+    del _pending_flags[:]
+    # Only a llama-server command gets them. Anything else spawned while a start
+    # is in flight -- a device probe, a help query -- passes through untouched.
+    wanted = "--model" in argv and "--ctx-size" in argv
+    if not wanted:
+        return argv
+    logger.info("Model Chain: llama-server is starting with %s", " ".join(extra))
+    return argv + extra
+
+
 class _Launcher:
     """The vendored launcher's ``subprocess``, with one command rewritten.
 
@@ -902,7 +1119,8 @@ class _Launcher:
 
     @staticmethod
     def Popen(command, *args, **kwargs):  # noqa: N802 - subprocess's own spelling
-        return subprocess.Popen(without_gpu_selection(command), *args, **kwargs)
+        return subprocess.Popen(
+            with_extra_flags(without_gpu_selection(command)), *args, **kwargs)
 
 
 def _repair_launcher() -> None:
@@ -1074,10 +1292,11 @@ def _warn_about_an_idle_card(configuration: Config, layers: str) -> None:
         return
     if str(configuration.device).casefold() == CPU_DEVICE:
         return
-    logger.info("Model Chain: %s is visible to llama-server and will do no work in this "
-                "placement — Mixed offloads no layers, so the processor writes the whole "
-                "prompt. Choose GPU placement in LLM Studio → Setup to use the card, or a "
-                "backbone that is faster in system RAM.",
+    logger.info("Model Chain: %s will do no work in this placement — nothing was free "
+                "to offload into, so the processor writes the whole prompt. Free VRAM "
+                "before pressing Generate, choose GPU placement in LLM Studio → Setup, "
+                "or pick a backbone that is faster in system RAM (a mixture-of-experts "
+                "one is several times faster there than a dense one of the same size).",
                 configuration.device_name or configuration.device)
 
 
@@ -1483,6 +1702,7 @@ class Runtime:
         process = self._new_process()
         from_system_ram = (configuration.device.casefold() == CPU_DEVICE
                            or layers == NO_OFFLOAD)
+        _arm_flags(accelerator_flags(configuration, placement))
         try:
             process.start(configuration.runtime, configuration.model, projector,
                           configuration.gpu_index, configuration.device, placement.context,
