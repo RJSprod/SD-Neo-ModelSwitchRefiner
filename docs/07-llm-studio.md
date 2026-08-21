@@ -1923,3 +1923,176 @@ skips every `except`.**
 
 The test for it closes the generator after one chunk and reads the thread back
 off disk. Neutering the `finally` fails that test and only that test.
+
+## 22. Managed backbones (20 August 2026)
+
+LLM Studio has always run any GGUF on the machine. That is the right floor and
+it is a poor first experience: a new installation has no weights, no way to know
+which of several thousand models this application was written against, and no
+way to find out except by downloading a few and comparing. The catalogue is the
+other half — six backbones chosen in advance, each with the settings it should
+run at already decided.
+
+The design intent for it is `llm_studio_managed_backbones_design_intent.txt`.
+What follows is where the implementation matches it, and the three places it
+does not.
+
+### 22.1 The registry is the trust root, and it is the only reachable thing
+
+`prompt_master/models/managed-models.json` is checked in, reviewed like source,
+and carries a SHA-256 for every byte it names. `mc_llm_managed_models.entry()`
+is the only route to a download and it accepts an id from that file or nothing,
+so there is no code path from the UI to an arbitrary URL — not because the UI
+declines to offer one, but because no function underneath it takes one.
+
+Every row is validated at load: the id against a regex with no separators in it
+(the id becomes a directory name, so that regex *is* the traversal defence), the
+filename as a plain `.gguf`, the source as HTTPS, the hash as 64 hex characters.
+These are checks against a file inside the extension, which is exactly why they
+are cheap enough to be worth having.
+
+The publisher's filename never becomes a path. A bundle on disk is always
+`model.gguf`, `mmproj.gguf` and `installed.json`; the real name is *recorded* in
+the manifest so a bundle can say what it is, and is used only to build the URL.
+
+### 22.2 Shipped on a branch, and why that is not the hole it looks like
+
+The design intent says to pin an immutable revision. The six entries ship with
+`"revision": "main"` and `"bytes": null`, because the machine this was written
+on cannot reach huggingface.co and neither commit shas nor exact byte counts can
+be invented.
+
+That is a real gap and it is not a security one. The trust anchor is the
+SHA-256 committed here, and it is checked after every transfer, so a publisher
+who re-uploads gets a **refusal**, never a substitution — which is the property
+§7.3 actually asks for. What a branch costs is the *quality* of that refusal: a
+moved `main` fails as a hash mismatch and a sentence asking for an extension
+update, where a pinned commit would simply have kept working. The panel says
+which of the two an entry is.
+
+`tools/pin_managed_models.py` closes it in one run on a machine with network
+access. It resolves the commit and the LFS object sizes, and it **never writes
+the hub's hash over the one checked in** — a disagreement fails the whole run
+with a sentence, because a publisher whose files have really changed is a review
+decision and not something a script does at three in the morning. `bytes` stays
+optional either way, which is the precedent `release-manifest.json` already set:
+the size is used for the disk-space check and the progress fraction, and the
+hash is what decides whether a file is the right file.
+
+### 22.3 The transaction, and the reason it reuses the vendored downloader
+
+Stage under `managed/.downloads/<id>/`, verify, write the manifest, and rename
+the directory into place. Until that rename the installed tree does not know the
+download exists, which is what makes every interesting failure boring: a
+cancelled download is a `.part` file, a corrupted one is a deleted `.part`, a
+crash is a staging directory nothing reads, and in all three the model selected
+a minute ago is still selected, still on disk and still startable.
+
+The transfer itself is `prompt_master.provisioning.downloader`, unchanged. It
+already has HTTP Range resumption, a retry budget that only counts attempts
+which moved no bytes, the 416-means-start-again rule, and a verify-then-rename
+that keeps a failed hash from ever becoming a file with a real name. Writing a
+second downloader to gain a catalogue would have been two of them to keep
+correct. What this module adds around it is the sidecar: a `.part` file is a
+pile of bytes with no memory of what it was going to be, so the expectations are
+written down first and a staging directory whose sidecar does not match the
+entry being downloaded *now* is discarded rather than continued. Appending the
+current quantisation to the previous one's prefix produces a file of exactly the
+right length that is not any model at all.
+
+Two checks the hash cannot make are made anyway. Free space is checked against
+the *remaining* bytes plus `max(512 MB, 5%)`, before anything is created, so a
+refusal is a sentence at the start rather than an `OSError` at 94%. And every
+verified artifact has its GGUF header read: a file can match its SHA-256
+perfectly and still be the wrong kind of thing, which without this would surface
+as a llama-server startup failure several minutes and one discarded model later.
+
+Promotion moves a previous bundle aside and puts it back if the rename fails —
+the pattern §3 of `mc_llm_setup` established for the runtime, for the same
+reason. `rmtree` walks a directory file by file, so deleting first would leave
+an installation that had a working model with half of one.
+
+### 22.4 Applying is a different transaction with a stricter rule
+
+Downloading eight gigabytes while a model is loaded is fine and deliberately
+does not disturb it. Swapping which model is *resident* is the operation with
+the hard invariant: at no point may two llama-server processes intentionally
+hold weights.
+
+So a switch refuses first (an LLM generation in flight, or the GPU held by an
+image job, are both a sentence rather than a queue), snapshots the state, stops
+the server and then **waits until it is observed gone** — `stop()` returning is
+a statement about a handle, and on Windows the server can still be unmapping a
+17 GB file for several seconds — writes the new selection atomically, starts the
+new backbone through the existing placement negotiation, and runs one eight-token
+completion. A server that reaches `/health` has loaded a file; it has not
+necessarily loaded a chat model or applied a template, and without the smoke
+test the first thing to discover that would be somebody's real generation, with
+the previous model long since discarded. Any failure after the snapshot restores
+it and restarts what was there, keeping the downloaded files.
+
+### 22.5 A profile is not a settings object
+
+`prompt_master/models/managed_profiles.py` holds them as constants. `config()`
+reads three layers as it always did — state file, preferences, Settings page —
+and then, for a managed backbone only, a fourth that wins. That precedence *is*
+the feature: somebody who chose "Gemma 4 12B QAT Balanced" chose an 8192
+context, a q8_0 cache and a chat-template flag along with it, whether or not
+they know that, and leaving the Settings page authoritative would run a curated
+model at whatever the previous one happened to need.
+
+It reaches exactly as far as the profile's own fields. No profile names a GPU
+index, forces an offload or asks for mixed mode, and the dataclass has no field
+in which one could: **profiles control model behaviour, the broker controls
+where the model fits.** `context_mode` is forced to `fixed` rather than left on
+`auto`, because automatic sizing spends whatever VRAM is free on context and
+8192 is a decision about this workload rather than a floor to grow from —
+negotiation may still shrink it to fit, which is a report and not a setting.
+
+Temperature and top_p are deliberately absent from `SAMPLER_FIELDS`. They arrive
+per request from Creative Mode's 0–10 curve, and a checked-in file that set them
+would be overriding the user's own Creativity slider. The remaining fields go
+out in the request body, filtered against the same whitelist at both ends —
+"whatever the profile dict contained" is not a thing to put in a JSON payload.
+
+The profile id is part of `_identity()`, so switching backbones restarts the
+server even when the two agree about context and cache: `--jinja` and the cache
+types are start-time arguments, and a running server cannot be told about
+either. Without it, a switch between two similar models would have reused the
+process that was still holding the previous weights.
+
+### 22.6 What a manual install gets, which is nothing
+
+`_profile_arguments` returns `{}` without a profile and the llama-server command
+line is byte-for-byte the one this extension has always built. That is a
+decision rather than an omission, and it leaves one thing visibly odd: the
+Settings page's KV cache types have never been passed to llama-server at all —
+they feed the VRAM estimate and nothing else. Quietly starting to honour them
+here would have changed both the quality and the footprint of every existing
+install as a side effect of adding a catalogue. It is worth fixing on its own
+terms; it was not worth fixing inside this one.
+
+### 22.7 The two routes had to know about each other
+
+A managed bundle lives under the LLM data root, which is also where the ordinary
+model chooser scans, so a downloaded backbone appears in that list like any other
+GGUF the moment it arrives. Picking it there used to be indistinguishable from
+picking a stranger's file — which would have silently dropped the hidden profile
+that is the entire reason to have downloaded it.
+
+`follow_path()` is called by both manual routes and settles it in both
+directions: a path inside a bundle restores the managed selection, anything else
+clears it. Without the second half, a profile written for one model would be
+applied to another — an 8192 context and a q8_0 cache imposed on a file nobody
+measured for them.
+
+### 22.8 What is on screen
+
+One dropdown, one line, one button, and a link to the model card. The button
+reads **Download & Use** or **Use**, so what pressing it costs is on the button
+rather than in a dialog afterwards. The line is role, size, family and state
+(*Not downloaded*, *Download interrupted*, *Installed*, *Installed — older
+revision*, *Active*), and nothing else: no temperature, no top-k, no cache type,
+no template flag, for managed models. The test for that reads the labels off the
+panel Setup actually builds, so a control added later fails there rather than
+being noticed by a user.

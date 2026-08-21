@@ -307,8 +307,18 @@ def _build():
         opened = block.load(fn=_on_load,
                             outputs=[runtime_status, settings["residency"], chooser],
                             queue=False)
-        for dependency in (chosen, loading, unloading, opened, rescanning):
+        # Applying a managed backbone is in this list for the same reason Load
+        # is: it starts a server, so the state chip in the bar and the one in
+        # Conversation's header are both stale until they are told.
+        for dependency in (chosen, loading, unloading, opened, rescanning,
+                           settings["managed_applied"]):
             dependency.then(fn=_chips, outputs=chips, queue=False)
+        # The model sheet's chooser is refilled too: a managed backbone that has
+        # just been downloaded is a new .gguf under the models folder, and a
+        # chooser still listing what was there before would not have it.
+        settings["managed_applied"].then(
+            fn=lambda: gr.update(choices=_model_choices(), value=_current_model()),
+            outputs=[chooser], queue=False)
 
     return block
 
@@ -547,6 +557,7 @@ def _choose_model(path):
     try:
         chosen = mc_llm_files.resolve_model(path)
         model_choice.choose(mc_llm_paths.app_paths(), chosen.path, None)
+        _follow_managed(chosen.path)
     except mc_llm_files.PathError as exc:
         return (ui.state("Not set up", "warn", str(exc)), gr.update(), gr.update(),
                 ui.notice(str(exc), "warn"))
@@ -896,6 +907,32 @@ def _setup_panel() -> dict:
                 fetch_runtime = gr.Button("Download the pinned build", size="sm",
                                           interactive=found.downloadable)
 
+            # The catalogue sits between the runtime and the path boxes because
+            # that is the order somebody new goes through them in: get a
+            # llama.cpp, get a model, and only then -- if ever -- go looking for
+            # one of their own. Putting it after the boxes would have made the
+            # curated route the fallback for people who had already read the
+            # harder one.
+            gr.Markdown("#### Managed backbones")
+            gr.Markdown(
+                "A short list of models this extension was tested against. Each one downloads "
+                "its exact weights and its matching vision projector into "
+                f"{_managed_folder()}, verifies every byte against a checksum stored in the "
+                "extension, and runs at settings chosen for it — so choosing one is the whole "
+                "of the decision. Anything already downloaded is used from disk rather than "
+                "fetched again. Your own GGUFs are never moved or deleted, and the boxes "
+                "below still take one.",
+                elem_classes=ui.classes("hint"))
+            catalogue = gr.Dropdown(
+                label="Backbone", choices=_managed_choices(), value=_managed_current(),
+                elem_id=ui.ident("settings", "managed"))
+            managed_notice = gr.HTML(_managed_line(_managed_current()),
+                                     elem_id=ui.ident("settings", "managed", "state"))
+            with gr.Row():
+                managed_use = gr.Button(_managed_action(_managed_current()), variant="primary",
+                                        size="sm", elem_id=ui.ident("settings", "managed", "use"))
+                managed_refresh = gr.Button("↻ Refresh", size="sm")
+
             gr.Markdown("#### Which model runs")
             gr.Markdown(
                 "A model can live anywhere on the machine — it is read, not started, so it "
@@ -948,11 +985,27 @@ def _setup_panel() -> dict:
     suggest.click(fn=_suggest_projector, inputs=[model_path],
                   outputs=[mmproj_path, model_notice], queue=False)
 
+    # ``input`` rather than ``change``, for the reason the model chooser uses
+    # it: this code refills the dropdown after a download, and ``change`` fires
+    # on the refill -- which would redraw the state line for whatever the
+    # refill happened to select.
+    _picked(catalogue)(fn=_managed_line_and_action, inputs=[catalogue],
+                       outputs=[managed_notice, managed_use], queue=False)
+    managed_refresh.click(fn=_refresh_managed, inputs=[catalogue],
+                          outputs=[catalogue, managed_notice, managed_use], queue=False)
+    # Queued, and the only handler here that is: this one downloads eight
+    # gigabytes and then restarts llama-server, and it yields as it goes.
+    applied = managed_use.click(
+        fn=_use_managed, inputs=[catalogue],
+        outputs=[managed_notice, managed_use, model_path, mmproj_path, model_notice,
+                 estimator, residency])
+
     estimate_now.click(fn=lambda: _estimator_html(), outputs=[estimator], queue=False)
     refresh_residency.click(fn=_residency_html, outputs=[residency], queue=False)
 
     return {"residency": residency, "estimator": estimator, "model": model_path,
-            "mmproj": mmproj_path, "notice": model_notice, "runtime": runtime_path}
+            "mmproj": mmproj_path, "notice": model_notice, "runtime": runtime_path,
+            "managed": catalogue, "managed_applied": applied}
 
 
 def _models_folder() -> str:
@@ -961,6 +1014,245 @@ def _models_folder() -> str:
     except Exception:
         logger.debug("Model Chain: could not read the models folder", exc_info=True)
         return "the models folder"
+
+
+# --------------------------------------------------------------------------- #
+# Managed backbones
+# --------------------------------------------------------------------------- #
+
+
+DOWNLOAD_AND_USE = "Download & Use"
+USE = "Use"
+
+
+def _managed_folder() -> str:
+    try:
+        return str(mc_llm_paths.managed_models_root())
+    except Exception:
+        logger.debug("Model Chain: could not read the managed models folder", exc_info=True)
+        return "the managed models folder"
+
+
+def _managed_choices() -> list[tuple[str, str]]:
+    """The catalogue as Gradio choices, grouped in the label.
+
+    Gradio 4's Dropdown has no optgroup, so the catalogue's grouping survives
+    as a prefix -- the convention :func:`mc_llm_ui.grouped_choices` already
+    established for the style lists. The rest of each entry (the size, the
+    family, whether it is downloaded) is on the line under the box rather than
+    in it: six entries whose labels all run to eighty characters is a list
+    nobody can scan.
+    """
+    try:
+        import mc_llm_managed_models as managed
+
+        return [(f"{model.group} · {model.label}" if model.group else model.label,
+                 model.identifier)
+                for model in managed.catalogue()]
+    except Exception:
+        # Section 18: a failure in the LLM half must not cost the tab. An empty
+        # catalogue draws an explanation and the path boxes below it still work.
+        logger.warning("Model Chain: the managed backbone catalogue is unavailable",
+                       exc_info=True)
+        return []
+
+
+def _managed_current() -> str | None:
+    """The entry to open the dropdown on: the active backbone, or the first.
+
+    Never nothing, when there is a catalogue. A dropdown that opens empty
+    reads as a list that failed to load, and the first entry is the
+    recommended one by construction.
+    """
+    try:
+        import mc_llm_managed_models as managed
+
+        chosen = managed.selection()
+        entries = managed.catalogue()
+        if chosen.managed and any(model.identifier == chosen.identifier for model in entries):
+            return chosen.identifier
+        return entries[0].identifier if entries else None
+    except Exception:
+        logger.debug("Model Chain: could not read the managed backbone selection",
+                     exc_info=True)
+        return None
+
+
+def _managed_status(identifier):
+    """One catalogue entry's status, or ``None`` when there is no such entry."""
+    import mc_llm_managed_models as managed
+
+    if not identifier:
+        return None
+    try:
+        return managed.status(managed.entry(str(identifier)))
+    except managed.ManagedError:
+        return None
+    except Exception:
+        logger.debug("Model Chain: could not read the managed backbone status", exc_info=True)
+        return None
+
+
+def _managed_line(identifier) -> str:
+    """The line under the dropdown: what this backbone is, and where it stands.
+
+    Deliberately the four things a choice turns on -- role, size, family, and
+    whether it is already on disk -- plus a link to the model card. Nothing
+    about temperature, top-k, min-p, cache types or templates appears here or
+    anywhere else in Setup: those are the profile's, they were decided when the
+    entry was written, and putting them on screen would turn a choice of
+    backbone back into the settings page this replaces.
+    """
+    if not _managed_available():
+        return ui.notice(
+            "The managed model catalogue could not be read, so only the boxes below are "
+            "available. This extension's files may be incomplete — the console has the "
+            "detail.", "warn")
+    import mc_llm_managed_models as managed
+
+    found = _managed_status(identifier)
+    if found is None:
+        return ui.notice("Choose a backbone to see what it is and whether it is downloaded.")
+
+    kind = "info"
+    if found.state in (managed.SUPERSEDED, managed.PARTIAL):
+        kind = "warn"
+    line = f"{found.model.describe()} · {found.state}"
+    if found.detail:
+        line = f"{line} — {found.detail}"
+    return ui.notice(line, kind) + _managed_source(found.model)
+
+
+def _managed_source(model) -> str:
+    """The model card, as a link.
+
+    Required rather than decorative: these are somebody else's weights under
+    somebody else's licence, and a catalogue that downloads eight gigabytes
+    without saying whose they are is not one to ship.
+    """
+    if not model.source_url:
+        return ""
+    return (f'<div class="{ui.PREFIX}-hint">Source: '
+            f'<a href="{ui.escape(model.source_url)}" target="_blank" rel="noopener">'
+            f'{ui.escape(model.source_url)}</a></div>')
+
+
+def _managed_available() -> bool:
+    return bool(_managed_choices())
+
+
+def _managed_action(identifier) -> str:
+    """What the button says: one press, and the label tells you what it costs."""
+    found = _managed_status(identifier)
+    return USE if found is not None and found.ready else DOWNLOAD_AND_USE
+
+
+def _managed_line_and_action(identifier):
+    return _managed_line(identifier), gr.update(value=_managed_action(identifier))
+
+
+def _refresh_managed(identifier):
+    """Re-read the registry and the folder, without downloading anything.
+
+    For the case the catalogue cannot cover on its own: files deleted by hand,
+    a bundle moved in from another install, an extension updated while the tab
+    was open.
+    """
+    import mc_llm_managed_models as managed
+
+    try:
+        managed.registry(refresh=True)
+    except managed.ManagedError:
+        logger.warning("Model Chain: the managed model registry could not be re-read",
+                       exc_info=True)
+    choices = _managed_choices()
+    value = identifier if any(value == identifier for _, value in choices) else _managed_current()
+    return (gr.update(choices=choices, value=value),) + _managed_line_and_action(value)
+
+
+def _use_managed(identifier, progress=gr.Progress()):
+    """Download the chosen backbone if it is not here, then make it the one in use.
+
+    A generator, because this is the longest press in the extension: it can be
+    twenty minutes of transfer, a minute of hashing and a restart of
+    llama-server, and a button that looks inert for any of that gets pressed
+    again. Every yield is a real state -- Downloading, Verifying, Installing,
+    Starting -- rather than a spinner.
+
+    The two halves are separate transactions on purpose. A download that fails
+    changes nothing at all: the model that was running is still running, still
+    selected, and the bytes that did arrive are kept so pressing again carries
+    on from there. Only a fully verified bundle is ever applied, and only then
+    is the resident model touched.
+    """
+    import mc_llm_managed_models as managed
+
+    unchanged = (gr.update(),) * 5
+    if not identifier:
+        yield (ui.notice("Choose a backbone first.", "warn"), gr.update()) + unchanged
+        return
+
+    try:
+        model = managed.entry(str(identifier))
+    except managed.ManagedError as exc:
+        yield (ui.notice(ui.failure(exc), "error"), gr.update()) + unchanged
+        return
+
+    found = managed.status(model)
+    if not found.ready:
+        yield (ui.working(f"Downloading {model.label} — {model.describe()}"),
+               gr.update(interactive=False)) + unchanged
+        try:
+            managed.download(
+                model.identifier,
+                on_status=lambda text: progress(0, desc=text),
+                on_progress=lambda fraction: progress(fraction))
+        except managed.ManagedError as exc:
+            logger.warning("Model Chain: %s could not be downloaded: %s", model.label,
+                           ui.failure(exc))
+            yield (ui.notice(ui.failure(exc), "error"),
+                   gr.update(value=_managed_action(identifier), interactive=True)) + unchanged
+            return
+        except Exception as exc:
+            logger.warning("Model Chain: the managed download failed", exc_info=True)
+            yield (ui.notice(f"{model.label} could not be downloaded ({ui.failure(exc)}). "
+                             f"Your current model is unchanged.", "error"),
+                   gr.update(value=_managed_action(identifier), interactive=True)) + unchanged
+            return
+
+    yield (ui.working(f"Starting {model.label}…"), gr.update(interactive=False)) + unchanged
+    try:
+        managed.use(model.identifier, on_status=lambda text: progress(0, desc=text))
+    except managed.Busy as exc:
+        yield (ui.notice(ui.failure(exc), "warn"),
+               gr.update(value=_managed_action(identifier), interactive=True)) + unchanged
+        return
+    except Exception as exc:
+        logger.warning("Model Chain: %s could not be applied", model.label, exc_info=True)
+        yield ((ui.notice(ui.failure(exc), "error"),
+                gr.update(value=_managed_action(identifier), interactive=True))
+               + _managed_boxes())
+        return
+
+    logger.info("Model Chain: LLM Studio — managed backbone %s is now in use", model.identifier)
+    yield ((_managed_line(identifier), gr.update(value=USE, interactive=True))
+           + _managed_boxes())
+
+
+def _managed_boxes():
+    """The manual half of the panel, refreshed after a switch.
+
+    The path boxes are not decoration here: a user who has just applied a
+    managed backbone and then looks at "GGUF model" should see the file that is
+    actually running, not the one that was there before they pressed the
+    button. Two controls disagreeing about which model is loaded is how a
+    working switch reads as a broken one.
+    """
+    import mc_llm_runtime
+
+    configuration = mc_llm_runtime.config()
+    return (str(configuration.model or ""), str(configuration.mmproj or ""),
+            _model_line(configuration), _estimator_html(), _residency_html())
 
 
 def _settings_pointer() -> str:
@@ -994,9 +1286,30 @@ def _model_line(configuration, notes=()) -> str:
     if configuration.model is None:
         return ui.notice("No model chosen yet. Enter the path to a .gguf file, or press "
                          "Browse.", "warn")
-    line = (f"{configuration.model.name} · "
+    line = (f"{_model_name(configuration)} · "
             f"{'vision projector loaded' if configuration.sees else 'text only'}")
     return ui.notice(" ".join([line] + [str(note) for note in notes]))
+
+
+def _model_name(configuration) -> str:
+    """What to call the model that is set up, in one phrase.
+
+    A managed bundle's file on disk is called ``model.gguf`` -- fixed, because
+    a publisher's filename is not a thing to join onto a path -- so the
+    filename alone would tell a reader nothing at all here. The catalogue's own
+    label is what they chose and what they should see; a hand-picked file keeps
+    its filename, which is what they chose in that case.
+    """
+    name = configuration.model.name
+    if not getattr(configuration, "managed_id", ""):
+        return name
+    try:
+        import mc_llm_managed_models
+
+        return f"{mc_llm_managed_models.entry(configuration.managed_id).label} (managed)"
+    except Exception:
+        logger.debug("Model Chain: could not name the managed backbone", exc_info=True)
+        return name
 
 
 # --------------------------------------------------------------------------- #
@@ -1221,6 +1534,7 @@ def _apply_model(model, mmproj):
     try:
         model_choice.choose(mc_llm_paths.app_paths(), chosen.path,
                             projector.path if projector is not None else None)
+        _follow_managed(chosen.path)
     except Exception as exc:
         return (ui.notice(ui.failure(exc), "error"),) + unchanged
 
@@ -1232,6 +1546,28 @@ def _apply_model(model, mmproj):
         notes.extend(_projector_hint(chosen.path))
     return (_model_line(mc_llm_runtime.config(), notes), _estimator_html(),
             str(chosen.path), str(projector.path) if projector is not None else "")
+
+
+def _follow_managed(path) -> None:
+    """Make the recorded source agree with the path just recorded. Never raises.
+
+    Called by both manual routes -- the chooser in the model sheet and the boxes
+    in Setup -- because both of them can land on either kind of file. A managed
+    bundle sits under the folder the chooser scans, so picking one there is
+    ordinary rather than exotic, and it has to keep its profile; anything else
+    has to lose it. See :func:`mc_llm_managed_models.follow_path`.
+
+    Best-effort: a catalogue that will not load must not stop somebody choosing
+    a model. The cost of failing quietly here is the previous source staying
+    recorded, which the panel then reports.
+    """
+    try:
+        import mc_llm_managed_models
+
+        mc_llm_managed_models.follow_path(path)
+    except Exception:
+        logger.debug("Model Chain: could not update the managed backbone selection",
+                     exc_info=True)
 
 
 def _projector_hint(model) -> list[str]:

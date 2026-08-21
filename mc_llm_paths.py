@@ -53,6 +53,29 @@ DIRNAME = "model_chain_llm"
 MODELS_DIRNAME = "models"
 """Where the provisioner puts a downloaded model, and so the default to scan."""
 
+MANAGED_DIRNAME = "managed"
+"""Where the managed catalogue's downloads live, under :data:`MODELS_DIRNAME`.
+
+Under the LLM data root and never under :func:`models_root`, which is a
+different question with a different answer. The models folder is somewhere a
+user already keeps twenty gigabytes of weights -- very often another drive,
+very often shared with another front end -- and writing eight gigabytes of
+*our* download into it would be putting managed files in a directory this
+extension does not own and cannot tidy up. The managed root is ours: nothing
+outside the catalogue writes there, and nothing in it is ever a file somebody
+put there by hand.
+"""
+
+STAGING_DIRNAME = ".downloads"
+"""Where a managed bundle is assembled before it is anything.
+
+A sibling of the installed bundles rather than a temporary directory
+elsewhere, so the rename that promotes a verified download is a rename within
+one filesystem -- which is what makes it atomic. The leading dot is not
+decoration either: it keeps a half-downloaded model out of the folder listings
+a user browses, and out of the scan that fills the model chooser.
+"""
+
 ROOT_ENV = "PROMPT_MASTER_ROOT"
 """Upstream's own name for this, from ``prompt_master.core.paths``.
 
@@ -86,6 +109,25 @@ def models_root() -> Path:
     if configured:
         return Path(str(configured)).expanduser().resolve()
     return data_root() / MODELS_DIRNAME
+
+
+def managed_models_root() -> Path:
+    """Where downloaded managed backbones live: ``<LLM data root>/models/managed``.
+
+    Deliberately not derived from :func:`models_root`. See
+    :data:`MANAGED_DIRNAME` -- the models folder is a place a user keeps their
+    own weights, and this is a place the extension keeps its own.
+
+    Creates nothing, like everything else here. The download transaction makes
+    the directories it needs at the point it needs them, so an installation
+    that never opens the catalogue never grows a folder for it.
+    """
+    return data_root() / MODELS_DIRNAME / MANAGED_DIRNAME
+
+
+def managed_staging_root() -> Path:
+    """Where a managed bundle is downloaded to before it is promoted."""
+    return managed_models_root() / STAGING_DIRNAME
 
 
 def app_paths():

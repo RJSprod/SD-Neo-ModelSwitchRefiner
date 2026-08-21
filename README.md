@@ -1304,7 +1304,7 @@ Chain already owns image residency, so it owns the LLM's too.
 | **Conversation** | Threaded chat with persistent histories, and per-message actions. Characters are files in a `characters/` folder in the layout oobabooga uses, so cards import and export; chats are documents filed per character. |
 | **MiniMax H3** | The prompt enhancer, as its own workflow. FL2VA and REF2VA variants, an optional reference frame that is captioned first and shown to you, and its own history. |
 | **Krea 2** | Krea 2 image prompts, written by the local model from Krea's own prompt expansion instruction. Text alone, or text plus up to four reference images numbered by the slot they sit in — each one described first, in order, so that "the woman from image 2" survives the trip into the finished prompt. [Creative Mode](#krea-creative-mode) and its ten art-direction axes, shared with txt2img. Writes prompts; generates no images. Its own history. |
-| **Setup** | The runtime, which GGUF runs, what context fits, and what is currently resident on the card. Everything here needs a file dialog, a download, an estimate or a table — the plain values live on the Settings page instead. |
+| **Setup** | The runtime, the [managed backbone catalogue](#managed-backbones), which GGUF runs, what context fits, and what is currently resident on the card. Everything here needs a file dialog, a download, an estimate or a table — the plain values live on the Settings page instead. |
 
 They share one loaded model and one runtime. They do not share a history, an
 output format, or a screen. Switching modes hides a workspace rather than
@@ -1324,6 +1324,72 @@ Conversation hides that bar and draws the same three affordances into its own
 header, beside the character and the thread. **Model / Runtime**, **Setup** and
 **Switch mode** are also in its menu, which is where you leave Conversation from
 without going back to a row of pills above the transcript.
+
+### Managed backbones
+
+**Setup → Managed backbones** is a short list of models this extension was
+tested against. Pick one, press the button, and that is the whole decision:
+the exact weights and the matching vision projector are downloaded, every byte
+is checked against a checksum stored in the extension, and the model is started
+at settings chosen for it.
+
+| Backbone | |
+| --- | --- |
+| **Gemma 4 12B QAT Balanced** | Recommended · ~7.4 GB + 175 MB vision · Gemma 4 |
+| **Gemma 4 E4B Aggressive** | Small Gemma · ~6.3 GB + 990 MB vision |
+| **Qwen 3.5 9B Aggressive** | Modern alternative · ~7.4 GB + 922 MB vision |
+| **Qwen 3.5 9B Defiant Fable** | Creative alternative · ~7.7 GB + 918 MB vision |
+| **Qwen 3.5 4B Aggressive** | Smallest · ~4.5 GB + 676 MB vision |
+| **Gemma 4 26B-A4B Balanced** | Current large baseline · ~16.8 GB + 1.19 GB vision |
+
+The button says **Download & Use** when the files are not here and **Use** when
+they are, so what pressing it costs is on the button rather than in a dialog
+afterwards. Anything already on disk is used from disk — a backbone you have
+downloaded once is never downloaded again, including one you downloaded, moved
+away from, and came back to. An interrupted download says so and carries on
+from where it stopped when you press again.
+
+Downloads go to `models/managed/<backbone>/` inside the LLM data directory,
+which is the extension's own folder and deliberately *not* your **LLM models
+folder** — that one is very often another drive shared with another front end,
+and eight gigabytes of our download does not belong in it. Your own GGUFs are
+never moved, renamed or deleted by any of this.
+
+Whichever backbone you are using is the backbone **every** mode uses: Prompt
+Studio, Conversation, MiniMax, Krea 2 and Creative Mode all resolve the same
+model, and switching takes effect without restarting Forge.
+
+**Your own model still works exactly as it did.** The path boxes under the
+catalogue take any GGUF on the machine, and a model chosen that way runs on the
+installation's own settings — the context size, buffer and cache types on the
+**Settings** page — precisely as before this list existed. The two routes know
+about each other in one direction only: pick a stranger's file and the
+catalogue's settings stop applying; pick a downloaded backbone's own weights
+out of the ordinary model chooser and they start again, because the alternative
+is a curated model quietly running as an anonymous one.
+
+What you will not find anywhere in Setup is a temperature, a top-k, a min-p, a
+repetition penalty, a KV cache type or a template flag for a managed backbone.
+Those were decided when the entry was written and are not settings; the reason
+to have a curated list is that choosing the model is the whole of the choice.
+**Creativity 0–10 is unchanged and still means what it always meant**, on every
+backbone.
+
+#### When something goes wrong
+
+Nothing about a failure costs you the model you were using.
+
+| | |
+| --- | --- |
+| Download interrupted, or cancelled | What arrived is kept. Press again to carry on. Your current model never stopped. |
+| Checksum does not match | Nothing is installed. The published file has changed since this release, so the extension needs updating — it will not quietly install something else instead. |
+| Disk too full | Refused before anything is downloaded, with the numbers. |
+| The new backbone will not start | The previous one is put back and restarted, and the download you paid for stays on disk. |
+| Something is generating | The switch is refused with a sentence. Weights are never taken out from under a running request. |
+
+Exactly one model is ever intentionally in VRAM: the old llama-server is
+stopped and *observed to be gone* before the new one starts, and the new one
+has to answer a one-line test before it is called active.
 
 ### Switching models
 
@@ -1685,6 +1751,7 @@ mc_llm_files.py       what a pasted path means, and what is in a folder
 mc_llm_browse.py      the Browse button beside every path box
 mc_llm_native.py      the operating system's own file dialog
 mc_llm_setup.py       getting a llama.cpp runtime in place
+mc_llm_managed_models.py   the managed backbone catalogue: verify, install, switch
 mc_llm_state.py       shared preferences + the mode histories
 mc_llm_sessions.py    the run orchestrations, as streaming generators
 mc_llm_studio.py      the LLM Studio tab shell, model chooser and Setup mode
@@ -1700,12 +1767,15 @@ prompt_master/krea/creativity/    the versioned creative vocabulary (data only)
 prompt_master/krea/library.py     loads and validates that package
 prompt_master/krea/director.py    the local Creative Director; no inference
 prompt_master/krea/variation.py   Creativity 0-10, as sampling settings
+prompt_master/models/managed-models.json  the curated backbone registry (data only)
+prompt_master/models/managed_profiles.py  the hidden per-backbone quality profiles
 
 scripts/model_chain.py                Script class, UI, orchestration
 scripts/model_chain_krea_creative.py  the txt2img Creative Mode panel and its hook
 style.css             optional progress-bar appearance + LLM Studio styling
 javascript/           the settings-to-CSS layer, LLM Studio polish, Creative Mode
 tests/                pytest suite (runs without a WebUI)
+tools/                maintainer scripts; never imported by the extension
 docs/                 revised specifications for the progress and LLM work
 ```
 
@@ -1717,7 +1787,16 @@ mc_llm_*_panel  ->  mc_llm_sessions  ->  mc_llm_runtime  ->  mc_broker
 mc_llm_browse  ->  mc_llm_native        mc_llm_context      mc_memory
        |                                      |
 mc_llm_files  <-  mc_llm_setup            mc_gguf
+
+mc_llm_studio  ->  mc_llm_managed_models  ->  mc_llm_paths
+                            |
+                   mc_llm_runtime (stop / start / one switch at a time)
 ```
+
+`mc_llm_managed_models` is below the panels and beside the runtime rather than
+inside it, for the reason the catalogue exists at all: downloading a model and
+starting one are separate lifecycles with separate failure modes, and the
+runtime should not grow a network stack to gain a list.
 
 `mc_memory.py` does not import `mc_broker`, and that is deliberate rather than
 incidental: the image half stays importable, testable and correct on an
@@ -1744,6 +1823,11 @@ Neo loads extensions:
 - **`mc_arch.py`, `mc_presets.py` and `mc_references.py` are additional
   modules**, for architecture detection (needed by both the UI and the
   orchestration code), preset storage, and Stage 2 reference routing.
+- **`tools/` is not `scripts/`.** `tools/pin_managed_models.py` is a
+  maintainer's command-line tool that resolves the catalogue's Hugging Face
+  revisions to immutable commits and fills in exact byte counts. It reaches the
+  network, so it must never be one of the files Forge imports when somebody
+  opens a WebUI.
 
 `mc_references.py` is the only module that knows ImageStitch exists, and it
 reaches for exactly one thing: the contents of the user's input gallery, read
@@ -1789,6 +1873,26 @@ free of side effects; the two mode histories staying separate files; the three
 run orchestrations and their event sequences; the panels assembling with their
 control lists in agreement; and the theme contract — extension-owned element
 ids, no hard-coded colours, no Gradio-generated selectors.
+
+The managed backbone catalogue adds four files, and what they mostly assert is
+that a failure costs nothing. `test_llm_managed_registry.py` holds the trust
+root to its shape — a full SHA-256 on every artifact, an HTTPS source, and a
+refusal for every id or filename that could be read as a path — and covers the
+maintainer tool that pins revisions, including its refusal to write a hash the
+hub reports over the one checked in. `test_llm_managed_download.py` runs the
+real vendored downloader against a fake Hugging Face, so the resume, the
+rejected-range restart, the SHA-256 check and the verify-then-rename are the
+ones that ship: a hash mismatch, a 404, a missing projector, a full disk, a
+file that is not a GGUF and a promotion that cannot happen each leave the
+previous selection running and nothing half-installed, a bundle already on disk
+is never fetched twice, and a resume only continues from a sidecar that matches.
+`test_llm_managed_switch.py` drives the switch through a runtime fake that
+refuses to start a second model while one is up, and checks the order (refuse
+if busy, stop, observe the stop, start, prove it answers) and the rollback that
+restores and restarts the previous backbone. `test_llm_managed_profiles.py`
+checks both halves of a hidden profile: that it really reaches the command line
+and the request payload for a managed backbone, that it reaches neither for a
+hand-picked GGUF, and that nothing it contains is nameable anywhere in Setup.
 
 Creative Mode adds two kinds of test. `tests/test_krea_creative.py` measures the
 Director over hundreds of rolls, because its promises are properties of a
