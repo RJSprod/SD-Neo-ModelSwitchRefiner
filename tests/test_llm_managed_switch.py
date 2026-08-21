@@ -24,6 +24,7 @@ import mc_broker
 import mc_llm_managed_models as managed
 import mc_llm_paths
 import mc_llm_runtime
+from prompt_master.models import managed_profiles
 
 
 MODEL_SHA = "a" * 64
@@ -188,7 +189,7 @@ class TestASuccessfulSwitch:
         assert state["source"] == "managed"
         assert state["managed_model_id"] == "first-model"
         assert state["managed_profile"] == "gemma4-12b-qat-balanced"
-        assert state["managed_profile_version"] == "1"
+        assert state["managed_profile_version"] == managed_profiles.VERSION
         assert state["model"] == "models/managed/first-model/model.gguf"
         assert state["mmproj"] == "models/managed/first-model/mmproj.gguf"
 

@@ -2511,3 +2511,130 @@ cache what has not been written yet. Below that number the levers are the
 placement (126 tokens a second on Mixed against 30 on the processor, so the same
 brief is three seconds or thirteen) and the size of the brief itself, which is
 what the Creativity slider and the number of non-Natural axes control.
+
+## 27. Three more weights of one backbone, and a ladder with rungs (21 August 2026)
+
+Design intent: `gemma26b_quant_tiers_speed_design_intent.txt`.
+
+The managed catalogue shipped one 26B-A4B entry, at Q4_K_M, which is 16.8 GB of
+weights plus a 1.19 GB projector. That is a backbone for a 24 GB card with
+nothing else on it, and the machines this extension runs on have a Krea 2 stack
+on the same card. The answer is not a different model — the whole reason the 26B
+is in the catalogue is that it writes prompts the way this application wants and
+generates fast for its size, because a mixture-of-experts activates about 4B of
+its weights per token. The answer is the *same* model at fewer bits.
+
+### 27.1 Three entries, one backbone
+
+`prompt_master/models/managed-models.json` gains Q4_K_P (~16.9 GB), Q3_K_P
+(~13.4 GB) and Q2_K_P (~10.7 GB) from the publisher this catalogue already
+names, pinned to commit `96c11c22`. Q3_K_P is the one marked as the recommended
+26B; Q2_K_P is labelled *Low memory* and nothing in the catalogue calls it
+equivalent, because it is not.
+
+The existing Q4_K_M entry keeps its id, its hashes and its revision. That is not
+tidiness: the id is what an installed state file names and the hashes are what
+`Installed.matches` compares, so anything else would have shown every existing
+26B install as *Installed — older revision* and invited a re-download of files
+that had not changed. The three new entries are pinned; the shipped one is left
+exactly as the installations that have it expect to find it, and
+`tools/pin_managed_models.py` remains the way to close that on a machine with
+network access, which is also where the `bytes` fields get filled in.
+
+Each tier gets its own hidden profile in `managed_profiles.py`. The only thing
+that differs between them is the KV cache: f16 for the quality tier, because
+that tier exists to be as close to the known Q4 baseline as a checked-in file
+can make it, and q8_0 for the other two, because the cache is the term that
+scales with context rather than with the file and is therefore the cheapest
+gigabyte on the card to buy back. No tier sets a sampler. A different number of
+bits per weight is not a reason to move a temperature, and stacking two lossy
+decisions on the low-memory tier would leave nobody able to say which of them a
+bad caption came from.
+
+**One projector, four names.** All four tiers name the same
+`mmproj-…-f16.gguf`, byte for byte and hash for hash. Installing all four used
+to mean fetching 1.19 GB four times and keeping four copies of it. The
+downloader now looks for an installed bundle whose manifest records exactly the
+hash it wants, re-reads that file's digest — the manifest describes the past and
+this is somebody's disk — and hard-links it into the new bundle, copying where
+the filesystem will not link. Every failure in that path returns "no" and the
+file is downloaded exactly as it always was, because a disk optimisation that
+can fail an install is not one worth having.
+
+### 27.2 `--cpu-moe` was a cliff
+
+The residency ladder already preferred moving an MoE model's experts over
+dropping whole blocks, and for the right reason: experts are the great majority
+of the weights and are consulted a couple at a time, while attention is small
+and every token touches it. What it had was one flag to say it with.
+`--cpu-moe` moves *every* expert. So a model two gigabytes too large for a card
+answered that by reading thirty-four blocks' worth of experts across the bus for
+the rest of the session, when six blocks' worth would have closed the gap.
+
+llama.cpp has `--n-cpu-moe N`, which keeps the experts of the first N blocks in
+system RAM and leaves the rest where they are. `Placement.cpu_experts` was a
+boolean and is now `cpu_expert_layers`, an integer with three meanings: nothing
+moved, N blocks moved, or the `ALL_EXPERTS` sentinel that still means
+`--cpu-moe`. `cpu_experts` survives as a property, because "are any of them
+elsewhere" is the only question most callers were asking.
+
+The count is **solved rather than searched**. The saving is linear in the number
+of blocks moved — `expert_share × N / block_count` of the file — so
+`_minimum_expert_layers` measures what moving all of them would save, divides the
+shortfall by the per-block share of it, and returns one number. The caller
+verifies that number against the real arithmetic anyway, and steps it up if the
+estimate was optimistic. The ladder in `_shrink_offload` is then:
+
+1. `--n-cpu-moe N`, for the smallest N that fits;
+2. `--cpu-moe`, once N has reached every block anyway;
+3. whole blocks, four at a time;
+4. system RAM.
+
+with `--n-cpu-moe <block_count>` standing in for step 2 on a build that has the
+new flag and not the old one.
+
+**A driver that refuses is evidence.** Everything above is planning, and
+planning cannot see fragmentation, another process, or a Windows allocator that
+will not hand out 17.8 GB in one piece from 22.8 GB free. So a start that ran
+out of memory does not merely re-derive the same number: `_next_expert_floor`
+raises the floor by two blocks and the retry negotiates against it, alongside
+the headroom penalty that has always been applied. The server signature gained
+the expert split for the same reason — it is a start-time argument, and a
+signature that could not tell 6 from 8 would have handed back the server that
+had just failed.
+
+Both flags are capability-gated, separately, because they were added to
+llama.cpp at different times and a build may have either. A partial split is
+never promoted to `--cpu-moe` on a build that lacks `--n-cpu-moe`: the placement
+was negotiated against an estimate of N layers, and moving every expert instead
+is a different footprint and a different speed than the one that was planned.
+`--flash-attn` and `--swa-full` are unchanged, and MTP is deliberately not
+attached to any of these three — the publisher's MTP head is built for a
+separate QAT release, and mixing artifacts across releases on the strength of a
+shared family name is how a bundle verifies and then fails at load.
+
+### 27.3 A speed is a fact about a placement
+
+`llm:write:<backbone>` was already an improvement on one global number: measured
+on one machine in system RAM, a dense 12B wrote at 4.9 tokens a second and the
+26B at 12.8, and the catalogue had been implying the opposite from the file
+sizes. But the backbone is not the axis that moves it furthest. The same 26B
+writes at forty tokens a second resident on a card and at five from system RAM,
+and the new rungs in between are real speeds rather than an interpolation of
+those two.
+
+So the key gained the placement: `llm:write:<backbone>:gpu`,
+`:ncmoe-8`, `:cpu-moe`, `:cpu`, with a `-l20` suffix for the case the design
+intent does not list and the ladder can still reach — every expert gone *and*
+blocks leaving, which covers placements an order of magnitude apart. Nothing
+writes the backbone-wide key any more, so nothing can average two placements
+into one number; it is still *read*, last, because a store written before this
+change holds it and a stale approximation is a better first guess than none.
+
+The catalogue asks a different question from the progress bar — it is drawn for
+entries that are not loaded and mostly never have been at the placement they
+would get next — so it goes through `best_measured`, which prefers the running
+placement when the entry is the running backbone and otherwise reports the
+fastest on record. Either way the line names it: *measured here: 31.4 tokens/s
+(8 expert layers in RAM)*, rather than a number that reads as a property of the
+model.

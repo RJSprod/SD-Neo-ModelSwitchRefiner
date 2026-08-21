@@ -260,6 +260,46 @@ class TestTheProfilesThemselves:
         assert (baseline.kv_type_k, baseline.kv_type_v) == ("f16", "f16")
         assert baseline.sampling == {}
 
+    def test_the_quant_tiers_each_get_a_profile_of_their_own(self):
+        """Three quantisations of one backbone, three profile ids. Sharing one
+        would make the cache choice below impossible to express."""
+        for name in ("gemma4-26b-a4b-q4kp", "gemma4-26b-a4b-q3kp",
+                     "gemma4-26b-a4b-q2kp"):
+            found = managed_profiles.profile(name)
+            assert found is not None
+            assert found.profile_id == name
+
+    def test_the_quality_tier_keeps_the_baselines_full_precision_cache(self):
+        """Section 5: the quality tier exists to be as close to the known Q4
+        behaviour as this file can make it, and the cache is half of that."""
+        found = managed_profiles.profile("gemma4-26b-a4b-q4kp")
+        baseline = managed_profiles.profile("gemma4-26b-a4b-balanced")
+
+        assert (found.kv_type_k, found.kv_type_v) == (baseline.kv_type_k,
+                                                      baseline.kv_type_v) == ("f16", "f16")
+
+    def test_the_smaller_tiers_buy_their_cache_back_with_q8_0(self):
+        for name in ("gemma4-26b-a4b-q3kp", "gemma4-26b-a4b-q2kp"):
+            found = managed_profiles.profile(name)
+            assert (found.kv_type_k, found.kv_type_v) == ("q8_0", "q8_0")
+
+    def test_a_different_quant_does_not_move_the_samplers(self):
+        """Section 5: "Do not change temperature/top_p because a different quant
+        was selected." Nothing this file can set would only move those two, so
+        the rule is kept by setting nothing at all."""
+        for name in ("gemma4-26b-a4b-q4kp", "gemma4-26b-a4b-q3kp",
+                     "gemma4-26b-a4b-q2kp"):
+            assert managed_profiles.profile(name).sampling == {}
+            assert managed_profiles.sampler_arguments(managed_profiles.profile(name)) == {}
+
+    def test_the_quant_tiers_keep_the_family_template(self):
+        for name in ("gemma4-26b-a4b-q4kp", "gemma4-26b-a4b-q3kp",
+                     "gemma4-26b-a4b-q2kp"):
+            found = managed_profiles.profile(name)
+            assert found.jinja is True
+            assert found.thinking is False
+            assert found.context == 8192
+
     def test_an_unknown_profile_id_is_none_rather_than_a_default(self):
         assert managed_profiles.profile("nothing-like-this") is None
         assert managed_profiles.profile("") is None

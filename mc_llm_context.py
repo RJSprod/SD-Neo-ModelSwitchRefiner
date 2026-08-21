@@ -118,6 +118,19 @@ ALL_LAYERS = -1
 NO_LAYERS = 0
 """Weights stay in system RAM: mixed mode, and CPU mode with it."""
 
+ALL_EXPERTS = -1
+"""``cpu_expert_layers`` meaning "every expert tensor in system RAM".
+
+llama.cpp's ``--cpu-moe``, and the last rung of the expert ladder rather than
+its only one -- see :attr:`Placement.cpu_expert_layers`. Spelled as a negative
+sentinel for the same reason :data:`ALL_LAYERS` is: "all" is not a count, and a
+count large enough to mean all is a count that goes wrong the first time a
+model with more blocks than the number arrives.
+"""
+
+NO_EXPERTS = 0
+"""Every expert on the card, which is where they belong when there is room."""
+
 
 @dataclass(frozen=True)
 class Placement:
@@ -130,19 +143,33 @@ class Placement:
     on_gpu: bool = True
     """False for CPU mode -- no VRAM is involved at all, and every figure
     below is then zero rather than small."""
-    cpu_experts: bool = False
-    """Keep a mixture-of-experts model's expert tensors in system RAM.
+    cpu_expert_layers: int = NO_EXPERTS
+    """How many blocks keep their expert tensors in system RAM.
 
-    The right way to make an MoE model smaller on the card, and it is not
-    "fewer layers". Experts are the great majority of the weights and are
-    consulted a couple at a time; attention is small and is touched by every
-    token. Dropping whole blocks moves both, so it gives up attention -- the
-    part that most wants to be resident -- to save weights that are mostly idle.
-    Moving only the experts saves nearly the same VRAM and keeps every block's
-    attention on the card.
+    Moving experts is the right way to make a mixture-of-experts model smaller
+    on the card, and it is not "fewer layers". Experts are the great majority of
+    the weights and are consulted a couple at a time; attention is small and is
+    touched by every token. Dropping whole blocks moves both, so it gives up
+    attention -- the part that most wants to be resident -- to save weights that
+    are mostly idle. Moving only the experts saves nearly the same VRAM and
+    keeps every block's attention on the card.
+
+    This used to be a boolean, and a boolean made it an all-or-nothing choice: a
+    model two gigabytes too large for a card moved *every* expert into system
+    RAM, when the first six blocks' worth would have been enough. So it is a
+    count now, and the three states it can be in are worth naming:
+
+    ``NO_EXPERTS``
+        Nothing moved. No expert flag reaches the command line.
+    ``N > 0``
+        ``--n-cpu-moe N``: the first ``N`` blocks keep their experts in system
+        RAM and every other tensor, in every block, stays on the card.
+    ``ALL_EXPERTS``
+        ``--cpu-moe``: every expert in system RAM, which is where the ladder
+        ends before whole blocks start to leave.
 
     Only meaningful for a model with experts, and only when the runtime
-    understands ``--cpu-moe``; both are checked before this is set.
+    understands the corresponding flag; both are checked before this is set.
     """
 
     def with_context(self, context: int) -> "Placement":
@@ -155,20 +182,80 @@ class Placement:
 
         return replace(self, gpu_layers=int(layers))
 
-    def with_cpu_experts(self, cpu_experts: bool = True) -> "Placement":
+    def with_cpu_expert_layers(self, layers: int) -> "Placement":
+        """The same placement with ``layers`` blocks' experts in system RAM."""
         from dataclasses import replace
 
-        return replace(self, cpu_experts=bool(cpu_experts))
+        layers = int(layers)
+        return replace(self, cpu_expert_layers=layers if layers >= 0 else ALL_EXPERTS)
+
+    def with_cpu_experts(self, cpu_experts: bool = True) -> "Placement":
+        """All experts in system RAM, or none. The boolean this field used to be.
+
+        Kept because "move every expert" is still a real rung of the ladder --
+        it is the one taken when the build has ``--cpu-moe`` and not
+        ``--n-cpu-moe``, and the one the progressive search lands on when every
+        block has to give its experts up anyway.
+        """
+        return self.with_cpu_expert_layers(ALL_EXPERTS if cpu_experts else NO_EXPERTS)
+
+    @property
+    def cpu_experts(self) -> bool:
+        """Whether any expert tensor is in system RAM at all.
+
+        The compatibility shim for the boolean this replaced, and the only
+        question most callers are actually asking.
+        """
+        return self.cpu_expert_layers != NO_EXPERTS
+
+    @property
+    def all_cpu_experts(self) -> bool:
+        """Whether *every* expert is in system RAM -- llama.cpp's ``--cpu-moe``."""
+        return self.cpu_expert_layers == ALL_EXPERTS
+
+    @property
+    def experts_key(self) -> str:
+        """The expert split as one token, in llama.cpp's own vocabulary."""
+        if self.all_cpu_experts:
+            return "cpu-moe"
+        return f"ncmoe-{max(int(self.cpu_expert_layers), 0)}"
 
     @property
     def key(self) -> str:
         """Identity for calibration: everything that changes the footprint
-        except the context, which the calibration arithmetic divides out."""
+        except the context, which the calibration arithmetic divides out.
+
+        The expert split is part of it because it is part of the footprint: two
+        placements that differ only in how many blocks left their experts behind
+        are two different amounts of VRAM, and a measurement of one filed under
+        the other is worse than no measurement at all.
+        """
         return (f"{self.gpu_layers}/{self.kv_type_k}/{self.kv_type_v}/"
-                f"{int(self.on_gpu)}/{int(self.cpu_experts)}")
+                f"{int(self.on_gpu)}/{self.experts_key}")
+
+    @property
+    def speed_token(self) -> str:
+        """This placement as one key-safe word, for keying measured speed by.
+
+        Tokens a second is a property of *where the model ran*, not of which
+        model ran: the same backbone writes at forty tokens a second resident
+        and at five from system RAM, and a store that averages the two answers
+        neither question. So the measurement is keyed by this.
+
+        ``gpu``, ``ncmoe-8``, ``cpu-moe`` and ``cpu`` are the four the design
+        intent names. The layer suffix is the fifth case it does not, because
+        the ladder can reach it: once every expert has moved and blocks start
+        leaving too, "on the GPU" covers placements an order of magnitude apart.
+        """
+        if not self.on_gpu or self.gpu_layers == NO_LAYERS:
+            return "cpu"
+        token = "gpu" if self.cpu_expert_layers == NO_EXPERTS else self.experts_key
+        if self.gpu_layers != ALL_LAYERS and self.gpu_layers > 0:
+            token = f"{token}-l{self.gpu_layers}"
+        return token
 
     def describe(self, total_layers: int = 0) -> str:
-        experts = ", experts in system RAM" if self.cpu_experts else ""
+        experts = self._describe_experts(total_layers)
         if not self.on_gpu:
             return "system RAM (no GPU offload)"
         if self.gpu_layers == ALL_LAYERS:
@@ -178,6 +265,15 @@ class Placement:
         if total_layers:
             return f"{self.gpu_layers} of {total_layers} layers on the GPU{experts}"
         return f"{self.gpu_layers} layers on the GPU{experts}"
+
+    def _describe_experts(self, total_layers: int = 0) -> str:
+        if self.cpu_expert_layers == NO_EXPERTS:
+            return ""
+        if self.all_cpu_experts:
+            return ", experts in system RAM"
+        of_total = f" of {total_layers}" if total_layers else ""
+        return (f", the experts of {self.cpu_expert_layers}{of_total} "
+                f"layers in system RAM")
 
 
 # --------------------------------------------------------------------------- #
@@ -271,6 +367,41 @@ def kv_bytes_per_token(gguf: mc_gguf.Gguf, placement: Placement) -> float:
     return float(sum(per_block))
 
 
+def expert_fraction_moved(gguf: mc_gguf.Gguf, placement: Placement) -> float:
+    """What share of the whole file's bytes this expert split leaves off the card.
+
+    The arithmetic the design intent asks for, and it is deliberately the
+    coarsest thing that is still right in the two cases that matter::
+
+        expert_fraction_moved = expert_share * clamp(N / block_count, 0, 1)
+
+    Experts are assumed to be spread evenly across the blocks, which is true of
+    every published mixture-of-experts this catalogue names and is why ``N``
+    blocks' experts are ``N / block_count`` of them. ``ALL_EXPERTS`` skips the
+    proration entirely rather than relying on ``N == block_count``, because
+    ``--cpu-moe`` moves every expert whatever this file thinks the block count
+    is.
+
+    Pre-load planning only. The observed footprint recorded after a real start
+    remains the authoritative number for any configuration actually run.
+    """
+    share = float(getattr(gguf, "expert_share", 0.0) or 0.0)
+    layers = int(getattr(placement, "cpu_expert_layers", NO_EXPERTS))
+    if share <= 0 or layers == NO_EXPERTS:
+        return 0.0
+    if layers == ALL_EXPERTS:
+        return share
+
+    blocks = int(getattr(gguf, "block_count", 0) or 0)
+    if blocks <= 0:
+        # No block count to prorate against. Charging for the whole expert share
+        # would under-state the footprint of a partial split, and under-stating
+        # it is the direction that ends in an out-of-memory error rather than in
+        # an avoidable eviction -- so nothing is discounted at all.
+        return 0.0
+    return share * min(max(layers / blocks, 0.0), 1.0)
+
+
 def weights_bytes(gguf: mc_gguf.Gguf, placement: Placement) -> int:
     """VRAM the weights themselves take under this placement.
 
@@ -283,13 +414,11 @@ def weights_bytes(gguf: mc_gguf.Gguf, placement: Placement) -> int:
     """
     if not placement.on_gpu:
         return 0
-    resident = 1.0
-    if placement.cpu_experts:
-        # The experts stay in system RAM, so what the card holds is everything
-        # else. Estimated from the header rather than measured -- see
-        # ``mc_gguf.Gguf.expert_share`` -- and superseded by the load report
-        # llama.cpp writes once the server is actually up.
-        resident = max(1.0 - float(getattr(gguf, "expert_share", 0.0)), 0.0)
+    # Whatever share of the experts stayed behind is VRAM the card does not
+    # spend. Estimated from the header rather than measured -- see
+    # ``mc_gguf.Gguf.expert_share`` and :func:`expert_fraction_moved` -- and
+    # superseded by the load report llama.cpp writes once the server is up.
+    resident = max(1.0 - expert_fraction_moved(gguf, placement), 0.0)
     if placement.gpu_layers == ALL_LAYERS:
         return int(gguf.file_bytes * resident)
     blocks = gguf.block_count

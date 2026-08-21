@@ -315,6 +315,118 @@ class TestItIsSmartAboutWhatIsAlreadyHere:
         assert managed.installed("test-model").model.read_bytes() == artifacts["weights.gguf"]
 
 
+class TestOneProjectorSharedBySeveralBackbones:
+    """Four Gemma 26B tiers name one vision projector: same file, same hash.
+
+    Downloading it once per tier is 1.19 GB of somebody's connection and 1.19 GB
+    of their disk, four times over, for four names of one file. So a bundle that
+    already holds exactly those bytes is linked rather than fetched -- and the
+    thing being tested is as much the fallback as the optimisation, because a
+    disk optimisation that can fail a download is not worth having.
+    """
+
+    @pytest.fixture
+    def tiers(self, tmp_path, monkeypatch, artifacts, hub):
+        """Two entries of one family, sharing a projector byte for byte."""
+        second = build_model(tmp_path / "source", "weights-2.gguf", size_mb=1,
+                             blocks=8).read_bytes()
+        artifacts["weights-2.gguf"] = second
+        hub.files["weights-2.gguf"] = second
+
+        def entry(name):
+            return {"filename": name,
+                    "sha256": hashlib.sha256(artifacts[name]).hexdigest(),
+                    "bytes": len(artifacts[name]),
+                    "display_size": f"{len(artifacts[name])} B"}
+
+        def row(identifier, weights):
+            return {"id": identifier, "label": identifier, "role": "Quality",
+                    "group": "Family", "family": "Test",
+                    "profile": "gemma4-12b-qat-balanced", "multimodal": True,
+                    "source_url": "https://huggingface.co/example/test",
+                    "repo_id": "example/test", "revision": "main",
+                    "model": entry(weights), "projector": entry("mmproj-test.gguf")}
+
+        document = {"version": 1, "registry_version": "test-1",
+                    "models": [row("first-tier", "weights.gguf"),
+                               row("second-tier", "weights-2.gguf")]}
+        path = tmp_path / "tiers.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        monkeypatch.setattr(managed, "REGISTRY_PATH", path)
+        managed._registry_cache = None
+        return document
+
+    def test_the_second_tier_does_not_download_the_projector_again(self, hub, tiers):
+        managed.download("first-tier")
+        hub.requests.clear()
+
+        managed.download("second-tier")
+
+        asked = [url.rsplit("/", 1)[-1] for url, _headers in hub.requests]
+        assert asked == ["weights-2.gguf"]
+
+    def test_the_second_tier_still_has_a_projector(self, root, hub, tiers):
+        managed.download("first-tier")
+        bundle = managed.download("second-tier")
+
+        assert bundle.mmproj is not None
+        assert bundle.mmproj.is_file()
+        assert bundle.mmproj.read_bytes() == (
+            root / "models" / "managed" / "first-tier" / "mmproj.gguf").read_bytes()
+
+    def test_it_is_one_file_on_disk_and_not_two(self, root, hub, tiers):
+        """A hard link, where the filesystem allows one: the same inode under
+        two names, so the second tier costs nothing at all."""
+        managed.download("first-tier")
+        managed.download("second-tier")
+
+        first = (root / "models" / "managed" / "first-tier" / "mmproj.gguf").stat()
+        second = (root / "models" / "managed" / "second-tier" / "mmproj.gguf").stat()
+
+        assert (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
+
+    def test_a_filesystem_that_will_not_link_still_installs(self, root, hub, tiers,
+                                                            monkeypatch):
+        """Cross-device, or Windows without the privilege. The copy costs the
+        disk space the link would have saved and saves the download either way."""
+        def refuse(*_args, **_kwargs):
+            raise OSError("cross-device link")
+
+        managed.download("first-tier")
+        monkeypatch.setattr(managed.os, "link", refuse)
+        hub.requests.clear()
+
+        bundle = managed.download("second-tier")
+
+        assert bundle.mmproj.is_file()
+        assert [url.rsplit("/", 1)[-1] for url, _h in hub.requests] == ["weights-2.gguf"]
+        first = (root / "models" / "managed" / "first-tier" / "mmproj.gguf").stat()
+        assert first.st_ino != bundle.mmproj.stat().st_ino
+
+    def test_a_local_copy_that_no_longer_hashes_is_downloaded_instead(self, root, hub,
+                                                                     tiers):
+        """The hash in the manifest describes what was promoted, which is a
+        statement about the past. This is somebody's disk."""
+        managed.download("first-tier")
+        (root / "models" / "managed" / "first-tier" / "mmproj.gguf").write_bytes(b"tampered")
+        hub.requests.clear()
+
+        bundle = managed.download("second-tier")
+
+        asked = [url.rsplit("/", 1)[-1] for url, _headers in hub.requests]
+        assert "mmproj-test.gguf" in asked
+        assert bundle.mmproj.is_file()
+
+    def test_nothing_is_reused_across_a_different_hash(self, hub, tiers):
+        """The model files differ, so only the projector may be shared."""
+        managed.download("first-tier")
+        hub.requests.clear()
+
+        managed.download("second-tier")
+
+        assert "weights.gguf" not in [url.rsplit("/", 1)[-1] for url, _h in hub.requests]
+
+
 class TestFailuresCostNothing:
     def test_a_hash_mismatch_installs_nothing_and_says_the_extension_is_stale(
             self, root, hub, registry, tmp_path):

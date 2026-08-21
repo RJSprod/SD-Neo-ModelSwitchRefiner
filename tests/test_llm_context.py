@@ -232,6 +232,140 @@ class TestCalibration:
         assert not ctx.estimate(model, placement).calibrated
 
 
+class TestPartialExpertResidency:
+    """A mixture-of-experts model's experts, moved a few blocks at a time.
+
+    The boolean this replaced made one choice available -- every expert in
+    system RAM -- for a model that was two gigabytes too large, which is
+    thirty-four blocks read over the PCIe bus to save a shortfall six would have
+    covered. What is tested here is that the arithmetic in the middle is
+    linear, that the two ends still mean what they meant, and that a calibration
+    recorded at one split is never read back at another.
+    """
+
+    @pytest.fixture
+    def moe(self):
+        class Header:
+            file_bytes = 40 * _GB
+            block_count = 40
+            usable = True
+            context_length = 8192
+            embedding_length = 3584
+            expert_count = 8
+            expert_used_count = 2
+            mixture_of_experts = True
+            expert_share = 0.80
+
+        return Header()
+
+    def test_nothing_moved_costs_the_whole_file(self, moe):
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS)
+
+        assert ctx.expert_fraction_moved(moe, placement) == 0.0
+        assert ctx.weights_bytes(moe, placement) == moe.file_bytes
+
+    def test_every_expert_moved_leaves_only_what_is_not_an_expert(self, moe):
+        placement = ctx.Placement(cpu_expert_layers=ctx.ALL_EXPERTS)
+
+        assert ctx.expert_fraction_moved(moe, placement) == pytest.approx(0.80)
+        assert ctx.weights_bytes(moe, placement) == pytest.approx(8 * _GB, rel=1e-6)
+
+    def test_the_share_moved_is_prorated_across_the_blocks(self, moe):
+        """Design intent section 7: ``expert_share * clamp(N / block_count)``."""
+        placement = ctx.Placement(cpu_expert_layers=10)
+
+        assert ctx.expert_fraction_moved(moe, placement) == pytest.approx(0.20)
+        assert ctx.weights_bytes(moe, placement) == pytest.approx(32 * _GB, rel=1e-6)
+
+    def test_each_further_block_costs_the_same_again(self, moe):
+        """Linear, which is what lets the runtime solve for N rather than
+        search for it."""
+        sizes = [ctx.weights_bytes(moe, ctx.Placement(cpu_expert_layers=n))
+                 for n in (0, 4, 8, 12)]
+        steps = [before - after for before, after in zip(sizes, sizes[1:])]
+
+        assert steps[0] == pytest.approx(steps[1], rel=1e-6)
+        assert steps[1] == pytest.approx(steps[2], rel=1e-6)
+
+    def test_more_blocks_than_the_model_has_moves_no_more_than_all_of_them(self, moe):
+        assert ctx.expert_fraction_moved(moe, ctx.Placement(cpu_expert_layers=400)) == (
+            pytest.approx(0.80))
+
+    def test_a_dense_model_never_saves_anything_by_this(self, moe):
+        class Dense(type(moe)):
+            mixture_of_experts = False
+            expert_share = 0.0
+
+        assert ctx.expert_fraction_moved(Dense(), ctx.Placement(cpu_expert_layers=10)) == 0.0
+
+    def test_a_header_with_no_block_count_discounts_nothing(self, moe):
+        """An under-estimate ends in an out-of-memory error and an over-estimate
+        ends in one avoidable eviction, so the unknown is charged for."""
+        class Headerless(type(moe)):
+            block_count = 0
+
+        assert ctx.expert_fraction_moved(Headerless(),
+                                         ctx.Placement(cpu_expert_layers=10)) == 0.0
+
+    def test_the_boolean_helper_still_means_all_of_them(self, moe):
+        placement = ctx.Placement().with_cpu_experts()
+
+        assert placement.cpu_expert_layers == ctx.ALL_EXPERTS
+        assert placement.cpu_experts is True
+        assert placement.all_cpu_experts is True
+        assert placement.with_cpu_experts(False).cpu_experts is False
+
+    def test_a_partial_split_reads_as_experts_moved_but_not_all_of_them(self):
+        placement = ctx.Placement(cpu_expert_layers=6)
+
+        assert placement.cpu_experts is True
+        assert placement.all_cpu_experts is False
+
+    def test_the_calibration_key_carries_the_split(self):
+        """Section 7: two placements that differ only in how many blocks left
+        their experts behind are two different footprints."""
+        keys = {ctx.Placement(cpu_expert_layers=n).key
+                for n in (ctx.NO_EXPERTS, 8, 16, ctx.ALL_EXPERTS)}
+
+        assert len(keys) == 4
+        assert ctx.Placement(cpu_expert_layers=8).key.endswith("ncmoe-8")
+        assert ctx.Placement(cpu_expert_layers=ctx.ALL_EXPERTS).key.endswith("cpu-moe")
+        assert ctx.Placement().key.endswith("ncmoe-0")
+
+    def test_a_measurement_at_one_split_is_not_read_back_at_another(self, tmp_path, moe,
+                                                                    monkeypatch):
+        model = build_model(tmp_path, blocks=40, size_mb=8)
+        eight = ctx.Placement(cpu_expert_layers=8, context=4096)
+        ten = ctx.Placement(cpu_expert_layers=10, context=4096)
+
+        ctx.record_observation(model, eight, ctx.estimate(model, eight).total_bytes + 900 * _MB)
+
+        assert ctx.estimate(model, eight).calibrated is True
+        assert ctx.estimate(model, ten).calibrated is False
+
+    def test_the_speed_token_names_the_placement(self):
+        assert ctx.Placement().speed_token == "gpu"
+        assert ctx.Placement(cpu_expert_layers=8).speed_token == "ncmoe-8"
+        assert ctx.Placement(cpu_expert_layers=ctx.ALL_EXPERTS).speed_token == "cpu-moe"
+        assert ctx.Placement(on_gpu=False).speed_token == "cpu"
+        assert ctx.Placement(gpu_layers=ctx.NO_LAYERS).speed_token == "cpu"
+
+    def test_a_partial_block_offload_is_its_own_speed(self):
+        """Not one of the four the design intent lists, and reachable: once the
+        experts have all gone and blocks start leaving, "on the GPU" covers
+        placements an order of magnitude apart."""
+        token = ctx.Placement(gpu_layers=20, cpu_expert_layers=ctx.ALL_EXPERTS).speed_token
+
+        assert token == "cpu-moe-l20"
+        assert token != ctx.Placement(cpu_expert_layers=ctx.ALL_EXPERTS).speed_token
+
+    def test_the_placement_says_how_many_blocks_gave_their_experts_up(self):
+        said = ctx.Placement(cpu_expert_layers=6).describe(40)
+
+        assert "experts of 6 of 40 layers in system RAM" in said
+        assert "all layers on the GPU" in said
+
+
 class TestHybridModels:
     """A model whose blocks are not all the same shape.
 
