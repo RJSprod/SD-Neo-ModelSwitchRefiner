@@ -130,6 +130,20 @@ class Placement:
     on_gpu: bool = True
     """False for CPU mode -- no VRAM is involved at all, and every figure
     below is then zero rather than small."""
+    cpu_experts: bool = False
+    """Keep a mixture-of-experts model's expert tensors in system RAM.
+
+    The right way to make an MoE model smaller on the card, and it is not
+    "fewer layers". Experts are the great majority of the weights and are
+    consulted a couple at a time; attention is small and is touched by every
+    token. Dropping whole blocks moves both, so it gives up attention -- the
+    part that most wants to be resident -- to save weights that are mostly idle.
+    Moving only the experts saves nearly the same VRAM and keeps every block's
+    attention on the card.
+
+    Only meaningful for a model with experts, and only when the runtime
+    understands ``--cpu-moe``; both are checked before this is set.
+    """
 
     def with_context(self, context: int) -> "Placement":
         from dataclasses import replace
@@ -141,22 +155,29 @@ class Placement:
 
         return replace(self, gpu_layers=int(layers))
 
+    def with_cpu_experts(self, cpu_experts: bool = True) -> "Placement":
+        from dataclasses import replace
+
+        return replace(self, cpu_experts=bool(cpu_experts))
+
     @property
     def key(self) -> str:
         """Identity for calibration: everything that changes the footprint
         except the context, which the calibration arithmetic divides out."""
-        return f"{self.gpu_layers}/{self.kv_type_k}/{self.kv_type_v}/{int(self.on_gpu)}"
+        return (f"{self.gpu_layers}/{self.kv_type_k}/{self.kv_type_v}/"
+                f"{int(self.on_gpu)}/{int(self.cpu_experts)}")
 
     def describe(self, total_layers: int = 0) -> str:
+        experts = ", experts in system RAM" if self.cpu_experts else ""
         if not self.on_gpu:
             return "system RAM (no GPU offload)"
         if self.gpu_layers == ALL_LAYERS:
-            return "all layers on the GPU"
+            return f"all layers on the GPU{experts}"
         if self.gpu_layers <= 0:
             return "no layers on the GPU (weights in system RAM)"
         if total_layers:
-            return f"{self.gpu_layers} of {total_layers} layers on the GPU"
-        return f"{self.gpu_layers} layers on the GPU"
+            return f"{self.gpu_layers} of {total_layers} layers on the GPU{experts}"
+        return f"{self.gpu_layers} layers on the GPU{experts}"
 
 
 # --------------------------------------------------------------------------- #
@@ -262,13 +283,20 @@ def weights_bytes(gguf: mc_gguf.Gguf, placement: Placement) -> int:
     """
     if not placement.on_gpu:
         return 0
+    resident = 1.0
+    if placement.cpu_experts:
+        # The experts stay in system RAM, so what the card holds is everything
+        # else. Estimated from the header rather than measured -- see
+        # ``mc_gguf.Gguf.expert_share`` -- and superseded by the load report
+        # llama.cpp writes once the server is actually up.
+        resident = max(1.0 - float(getattr(gguf, "expert_share", 0.0)), 0.0)
     if placement.gpu_layers == ALL_LAYERS:
-        return int(gguf.file_bytes)
+        return int(gguf.file_bytes * resident)
     blocks = gguf.block_count
     if blocks <= 0 or placement.gpu_layers <= 0:
         return 0
     share = min(max(int(placement.gpu_layers), 0), blocks) / blocks
-    return int(gguf.file_bytes * share)
+    return int(gguf.file_bytes * share * resident)
 
 
 def compute_bytes(gguf: mc_gguf.Gguf, placement: Placement) -> int:

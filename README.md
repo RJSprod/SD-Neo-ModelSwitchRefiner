@@ -1391,8 +1391,62 @@ Three levers, largest first:
 | **How many directions** | Linear. One direction at Creativity 10 is ~170 tokens; ten are ~800. A fresh install directs nothing, so this cost is entirely opt-in. |
 | **The Creativity position** | The expressions themselves get shorter down the scale: the same axis is ~78 tokens at 5 and ~173 at 10. |
 
-None of the three shortens the *writing* half. Only placement does — the same
-12B that writes at 5 tokens/sec from system RAM writes at 40–60 resident.
+None of the three shortens the *writing* half. Two things do, and neither is on
+the Creative panel:
+
+**Which backbone.** In system RAM, generation is bandwidth-bound, so the speed
+follows the *active* parameters per token — not the file size. Measured on one
+machine, same placement, same prompt:
+
+```
+Gemma 4 12B QAT   (dense, ~7.4 GB)    4.9 tokens/sec   ← "Recommended"
+Gemma 4 26B-A4B   (MoE,  ~16.8 GB)   12.8 tokens/sec   ← more than twice as fast
+```
+
+The 16.8 GB file is 2.6× faster than the 7.4 GB one, because a
+mixture-of-experts activates about 4B of its weights per token while a dense 12B
+activates all twelve. **LLM Studio → Setup now shows what each backbone measured
+on your machine**, beside its size, so this is a fact on the screen rather than
+one to be discovered from a log.
+
+**Where it runs.** The same 12B writes at 40–60 tokens/sec resident on a card.
+But it has to fit *beside* the image checkpoint: a Krea 2 stack wanting ~17.6 GB
+of a 24 GB card leaves about 6 GB, which is a 4B writer, not a 12B. Giving the
+writer VRAM the image model needs makes the image slower, not the prompt faster.
+
+### The three placements
+
+| Placement | What it does |
+| --- | --- |
+| **GPU** | the whole model on the card, shrinking context and then offload if it will not fit, and asking the image side for room under the configured policy |
+| **Mixed** | as much as fits in VRAM that is **already spare**, never taking room the image model needs, down to nothing when nothing is free |
+| **CPU** | no card involved at all |
+
+Mixed used to mean `--n-gpu-layers 0` — every matrix multiply on the processor
+while the card sat idle, which is the one thing its own description promised it
+would not do. It now fills whatever is genuinely free after the image model's
+needs are set aside, and it never asks the image side to move: somebody who
+picked the middle option did not ask for their checkpoint to be evicted so a
+prompt could be written faster.
+
+**For a mixture-of-experts model, "offload less" moves the experts, not the
+blocks.** Experts are the great majority of the weights and are consulted a
+couple at a time; attention is small and every token touches it. So when the
+whole model will not fit, `--cpu-moe` keeps every block's attention on the card
+and puts the experts in system RAM — which for a 26B-A4B is 16.8 GB of weights
+reduced to about 3.7 GB resident, with all forty blocks still on the GPU. Only
+if that is still too much do whole blocks start leaving.
+
+**Flash attention** is added when the build advertises it and something is
+actually offloaded. Both it and `--cpu-moe` are gated on asking the runtime
+binary what it supports (`llama-server --help`, cached per build), because a
+flag an older build has never heard of is not a slower server — it is a server
+that exits at startup.
+
+There is no sage-attention equivalent: that is a quantised attention kernel for
+diffusion models in PyTorch, and llama.cpp has no counterpart. The remaining
+knobs — thread counts, batch sizes — are hardware guesses this extension has no
+way to verify, so it does not make them.
 
 If a Krea 2 checkpoint and your writer will not both fit on the card, the
 catalogue has smaller backbones — **Qwen 3.5 4B** is ~4.5 GB and will sit beside

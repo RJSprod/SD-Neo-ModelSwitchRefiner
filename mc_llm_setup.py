@@ -546,10 +546,31 @@ def preferred_device():
     return found[0]
 
 
+MIXED_TRUTH = ("mixed: as much of the model as fits in spare VRAM, the rest in "
+               "system RAM — never takes room the image model needs")
+"""What Mixed placement does, in place of what the vendored describer claims.
+
+The vendored line is "mixed: model in system RAM, card used for processing",
+and for most of this extension's life that was false in the direction that
+mattered: Mixed was recorded as ``--n-gpu-layers 0``, llama.cpp with no
+offloaded layers runs every matrix multiply on the processor, and a machine with
+a 3090 in it wrote prompts at four tokens a second with the card idle. Measured
+there: CPU 4.2 tokens a second, Mixed 5.3 -- the same computation, twice.
+
+It is true now, which is why this line says what it says. Mixed fills whatever
+is genuinely free after the image model's needs are set aside, moves a
+mixture-of-experts model's experts out before it drops any blocks, and lands on
+system RAM only when nothing at all is spare. The vendored file is left alone,
+as ``prompt_master/VENDORED_FROM.txt`` requires.
+"""
+
+
 def describe_device(device) -> str:
     from prompt_master.inference.device_detection import describe
 
     try:
+        if getattr(device, "is_mixed", False):
+            return f"{getattr(device, 'name', 'GPU')} — {MIXED_TRUTH}"
         return describe(device)
     except Exception:
         return getattr(device, "name", "unknown device")

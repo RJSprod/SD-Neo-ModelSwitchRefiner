@@ -956,3 +956,102 @@ on this panel changes.
 So the cost line names both halves — *"roughly 4s of reading, then about 20s of
 writing"* — from the same measured store, because a user told about four seconds
 who then waits twenty-five is owed the other twenty-one.
+
+
+## 13. Why the card was idle and the writer was slow (21 August 2026)
+
+Reported as *"you still didn't explain what went wrong"*, with four runs — cold
+CPU, warm CPU, cold Mixed, warm Mixed — and two observations: five seconds
+before the first character on a warm server, and Mixed no faster than CPU.
+
+Both are explained by the same two lines of the user's own console log, and
+neither had anything on screen saying so.
+
+### 13.1 "Mixed" was doing no GPU work, and said the opposite
+
+```
+Model Chain: starting llama-server — Q4_K_M on NVIDIA GeForce RTX 3090,
+             system RAM (no GPU offload), 8,192 token context
+```
+
+Mixed placement is recorded with `gpu_layers = "0"`, `Config.__post_init__`
+enforces it, and `_layers_argument` emits `--n-gpu-layers 0`. llama.cpp with no
+offloaded layers runs every matrix multiply on the processor. So Mixed and CPU
+are the same computation — 4.2 against 5.3 tokens a second in the user's four
+runs, which is noise — and the card is named on `--device` purely so it is
+visible.
+
+The vendored device describer said, in the Setup list the user chose from:
+
+> mixed: model in system RAM, **card used for processing**
+
+which is how somebody ends up asking why the card is not being used. The
+vendored file stays byte-identical (`prompt_master/VENDORED_FROM.txt`);
+`mc_llm_setup.describe_device` overrides the wording for the mixed case, and
+`_warn_about_an_idle_card` says the same thing in the log at every start where a
+card is present and no layers are offloaded.
+
+**What it is not**, and this is the part worth keeping: a bug to be fixed by
+offloading anyway. The same log says
+
+```
+Model Chain: the image generation that follows a Krea roll is short 9.6 GB
+             and nothing evictable was found; expect the driver to spill
+```
+
+The Krea 2 stack alone wants roughly 17.6 GB of a 24 GB card and is already
+spilling. There is no room to give the writer, and taking some would slow the
+image down to speed the prompt up. Mixed is doing the right thing here. It was
+only describing itself wrongly.
+
+### 13.2 The five seconds are prefill, and llama.cpp says how much
+
+From the same run's `llama-server.log`:
+
+```
+restored context checkpoint (pos_max = 460, n_tokens = 461, size = 76.539 MiB)
+prompt eval time = 5565.34 ms / 114 tokens (48.82 ms per token, 20.48 tok/s)
+```
+
+The prompt cache restores to a *checkpoint*, at token 460, and everything after
+it is evaluated again: the tail of Krea's instruction plus the whole user turn.
+That is 66–118 tokens per warm roll, and on a processor a small batch is much
+worse per token than a large one — 55 ms/token on 19 tokens against 21 ms/token
+on 574. Five seconds of arithmetic, not five seconds of overhead. There is
+nothing between the press and llama.cpp to remove.
+
+### 13.3 The measurement nobody was keeping
+
+`Runtime.speed_note()` has always read llama.cpp's own tokens-per-second out of
+its log after each request — and printed it into a log line and thrown it away,
+while `mc_progress` estimated the same quantities from character counts.
+
+Those numbers are now kept, per backbone (`llm:write:<id>`), because that is the
+axis they differ on most and the difference is the opposite of what the
+catalogue's sizes suggest:
+
+```
+Gemma 4 12B QAT   dense, ~7.4 GB     4.9 tokens/s     ← "Recommended"
+Gemma 4 26B-A4B   MoE,  ~16.8 GB    12.8 tokens/s     ← 2.6× faster
+```
+
+Generation from system RAM is bandwidth-bound, so it follows the *active*
+parameters per token: a mixture-of-experts touches about 4B of its weights,
+a dense 12B touches all twelve. The user had switched from the second to the
+first — from the entry labelled *Current large baseline* to the one labelled
+*Recommended* — and got two and a half times slower, with nothing on screen
+saying that was the trade.
+
+`ManagedModel.describe()` now carries `measured here: 12.8 tokens/s` beside the
+size, and the progress bar predicts from the running backbone's own key rather
+than a rate shared across all of them (which meant every switch spent its next
+several rolls predicting the previous model's speed, and the Creative panel
+quoting it).
+
+### 13.4 What there is no lever for
+
+No CPU equivalent of sage attention exists, and flash attention is a CUDA kernel
+that does nothing when no layers are on the card. The writer's output length is
+the product — it is a Krea prompt, and a truncated one is not a faster prompt,
+it is a broken one. What is left is the three things above: which backbone,
+where it runs, and how much brief it is asked to read.
