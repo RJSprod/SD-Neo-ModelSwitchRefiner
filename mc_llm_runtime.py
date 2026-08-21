@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -598,6 +599,9 @@ _DEVICE = re.compile(r"-\s*(CUDA\d+|GPU\d+)\s*:.*?\(\s*(\d+)\s*MiB,\s*(\d+)\s*Mi
 _ALLOC_FAILED = re.compile(
     r"allocating\s+([0-9.]+)\s*MiB on device\s*(\d+):\s*(?:cudaMalloc|.*?)\s*failed:?\s*(.*)")
 _LOAD_FAILED = re.compile(r"(?:error loading model|failed to load model|exiting due to)[^\n]*")
+_NO_DEVICE = re.compile(
+    r"invalid value for main_gpu:\s*(-?\d+)\s*\(available devices:\s*0\s*\)")
+"""A start told to use a GPU by a process that can see none. See :func:`without_gpu_selection`."""
 _SPEED = re.compile(
     r"(prompt eval|eval) time\s*=.*?\(\s*[0-9.]+ ms per token,\s*([0-9.]+) tokens per second\)")
 
@@ -712,6 +716,116 @@ class Failure:
         return bool(self.text)
 
 
+# --------------------------------------------------------------------------- #
+# One impossible flag pair, taken back out of the vendored command
+# --------------------------------------------------------------------------- #
+
+CPU_DEVICE_TOKEN = "none"
+"""llama.cpp's own word for "offload to nothing"; ``device_detection.CPU_DEVICE``.
+
+Restated here rather than imported at module scope for the reason every other
+``prompt_master`` import in this file is done inside a function: this module is
+imported while the WebUI is still building its UI, and the vendored tree is not
+required to be importable for that to work.
+"""
+
+
+def without_gpu_selection(command):
+    """``command``, minus the single-GPU selection, when there is no GPU to select.
+
+    The vendored launcher writes the same line every time, and two halves of it
+    contradict each other in CPU placement::
+
+        --device none --split-mode none --main-gpu 0
+
+    ``--device none`` says "no devices"; ``--split-mode none --main-gpu 0`` says
+    "use device number 0". llama.cpp used to ignore the second half when the
+    first had emptied the device list. Builds since validate it, and what a user
+    gets is every start of the language model dying at load::
+
+        llama_prepare_model_devices: invalid value for main_gpu: 0 (available devices: 0)
+        llama_model_load_from_file_impl: failed to load model
+        srv  llama_server: exiting due to model loading error
+
+    -- which is not a degraded LLM, it is no LLM: LLM Studio cannot answer and
+    Creative Mode falls back to the prompt as typed, on every generation, for as
+    long as the installation stays on CPU placement.
+
+    So the selection comes off when the device is ``none``, which is the only
+    case it can be wrong in. A GPU or Mixed placement names a card and keeps the
+    line it has always had.
+
+    ``prompt_master/`` is a byte-identical vendored tree whose own
+    ``VENDORED_FROM.txt`` says "do not hand-edit these files -- changes belong in
+    the mc_llm_* modules that sit on top of them". This is that change, and
+    :class:`_Launcher` is how it reaches the command without one being edited.
+    """
+    argv = [str(part) for part in command or ()]
+    try:
+        device = argv[argv.index("--device") + 1].strip().casefold()
+    except (ValueError, IndexError):
+        return list(argv)
+    if device != CPU_DEVICE_TOKEN:
+        return list(argv)
+
+    kept, dropped, skip = [], [], False
+    for position, part in enumerate(argv):
+        if skip:
+            skip = False
+            dropped.append(part)
+            continue
+        if part in ("--split-mode", "--main-gpu"):
+            skip = position + 1 < len(argv)
+            dropped.append(part)
+            continue
+        kept.append(part)
+
+    if dropped:
+        logger.info("Model Chain: this llama-server is starting with no GPU visible, so "
+                    "%s was left off its command line — llama.cpp refuses to select a "
+                    "device it does not have", " ".join(dropped))
+    return kept
+
+
+class _Launcher:
+    """The vendored launcher's ``subprocess``, with one command rewritten.
+
+    It forwards every attribute untouched and intercepts exactly one call, on
+    exactly one command shape, on its way to the operating system. Installed in
+    place of the module-level ``subprocess`` name inside one vendored file, which
+    leaves that file byte-identical to its upstream and ``diff -r`` clean.
+
+    A subclass overriding ``start()`` was the obvious alternative and is worse:
+    the command is assembled inside that method, so overriding it means copying
+    the whole assembly into this repository, where it would silently stop
+    matching the next version of the vendored tree.
+    """
+
+    def __getattr__(self, name):
+        return getattr(subprocess, name)
+
+    @staticmethod
+    def Popen(command, *args, **kwargs):  # noqa: N802 - subprocess's own spelling
+        return subprocess.Popen(without_gpu_selection(command), *args, **kwargs)
+
+
+def _repair_launcher() -> None:
+    """Put :class:`_Launcher` in front of the vendored launcher's ``subprocess``.
+
+    Idempotent, and done at the moment a process is about to be started rather
+    than at import: nothing here should run on an installation that never starts
+    a language model.
+    """
+    try:
+        from prompt_master.inference import llama_process
+    except Exception:
+        logger.debug("Model Chain: the vendored launcher could not be imported",
+                     exc_info=True)
+        return
+    if not isinstance(getattr(llama_process, "subprocess", None), _Launcher):
+        llama_process.subprocess = _Launcher()
+
+
 def read_failure(text: str) -> Failure:
     """Why a start failed, in llama.cpp's own words.
 
@@ -734,6 +848,17 @@ def read_failure(text: str) -> Failure:
             f"llama-server could not fit on the card: it asked the driver for "
             f"{asked / _GB:.1f} GB in one piece and was refused ({why}){seen}",
             out_of_memory=True)
+    no_device = _NO_DEVICE.search(text)
+    if no_device:
+        # Said in full because the log's own sentence -- "invalid value for
+        # main_gpu: 0 (available devices: 0)" -- names the symptom and none of
+        # the cause, and the two causes have completely different remedies.
+        return Failure(
+            "llama-server started with no GPU visible and was still told to use GPU "
+            f"{no_device.group(1)}. If this installation is on CPU placement, update "
+            "the extension: the flag pair is removed there now. Otherwise the card is "
+            "not reaching llama.cpp — CUDA_VISIBLE_DEVICES set in the environment, or a "
+            "runtime build without the CUDA backend beside it.")
     failure = _LOAD_FAILED.search(text)
     if failure:
         return Failure(failure.group(0).strip())
@@ -1324,6 +1449,7 @@ class Runtime:
     def _new_process(self):
         from prompt_master.inference.llama_process import LlamaProcess
 
+        _repair_launcher()
         return LlamaProcess()
 
     @property

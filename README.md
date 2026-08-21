@@ -1366,6 +1366,12 @@ Generate. Switching to a much larger checkpoint while a language model is
 already resident is the case that still costs a restart of `llama-server`, and
 the console says so when it happens.
 
+**If the writer cannot run at all** — no model configured, a llama-server that
+will not start, a checkpoint that is not Krea 2 — Creative Mode generates the
+prompt exactly as you typed it and says why under the image. That is deliberate:
+a language model that will not answer is not a reason to refuse a generation you
+asked for. The console and **LLM Studio → Setup** have the detail.
+
 All of it is reported on Forge's own progress bar — the generation's own bar,
 since the roll is the first part of that generation — with the phase name, a
 moving bar and an ETA. Interrupt during the roll stops the generation. The

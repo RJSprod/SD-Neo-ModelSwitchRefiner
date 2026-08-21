@@ -2096,3 +2096,84 @@ revision*, *Active*), and nothing else: no temperature, no top-k, no cache type,
 no template flag, for managed models. The test for that reads the labels off the
 panel Setup actually builds, so a control added later fails there rather than
 being noticed by a user.
+
+
+## 23. CPU placement could not start at all (21 August 2026)
+
+Reported as *"Creative Mode is on and my prompt is not changing"*, with a
+`llama-server.log`. The log answered it in three lines, repeated twenty-three
+times:
+
+```
+E llama_prepare_model_devices: invalid value for main_gpu: 0 (available devices: 0)
+E llama_model_load_from_file_impl: failed to load model
+E srv  llama_server: exiting due to model loading error
+```
+
+Every one of those starts enumerated one device — the CPU. The last start that
+worked had listed `CUDA0` and a 3090, loaded, answered one request and stopped;
+everything after it was this. In between, the installation's placement had been
+changed to **CPU (system RAM)** in Setup.
+
+### 23.1 Two halves of one command line disagreeing
+
+`prompt_master/inference/llama_process.py` writes the same flags every time:
+
+```
+--device none --split-mode none --main-gpu 0
+```
+
+`--device none` is llama.cpp's own token for *no devices* — CPU placement also
+empties `CUDA_VISIBLE_DEVICES`, so the process genuinely has none.
+`--split-mode none --main-gpu 0` is *use device number 0*. Both have been in
+that line since the tree was vendored, and llama.cpp used to ignore the second
+when the first had emptied the device list. It validates it now:
+
+```cpp
+if (params.split_mode == LLAMA_SPLIT_MODE_NONE) {
+    if (params.main_gpu >= (int)model->devices.size()) { ...error... }
+```
+
+So the failure is not a degraded language model, it is no language model, and
+every surface that needs one is affected at once. LLM Studio says llama-server
+exited before becoming ready. Creative Mode does what it is designed to do when
+the writer will not answer — generate the prompt as typed — which is why the
+symptom that got reported was "my prompt is not changing" rather than "the LLM
+is down".
+
+### 23.2 The fix is not in the vendored file
+
+`prompt_master/VENDORED_FROM.txt` is explicit: *"Do not hand-edit these files —
+changes belong in the mc_llm_* modules that sit on top of them."*
+
+The command is assembled inside `LlamaProcess.start`, so a subclass overriding
+that method means copying the whole assembly into this repository, where it
+would silently stop matching the next version of the vendored tree. Instead
+`mc_llm_runtime._Launcher` stands in for the `subprocess` name inside that one
+vendored module: it forwards every attribute untouched and rewrites exactly one
+command shape on its way to the operating system, via
+`without_gpu_selection()`. The vendored file stays byte-identical and `diff -r`
+stays clean.
+
+`without_gpu_selection` only ever removes `--split-mode` and `--main-gpu`, only
+when `--device none` is in the same line, and says so in the log when it does.
+A GPU or Mixed placement is untouched, and a command that is not llama-server's
+— a device probe spawned while a server is starting — passes straight through.
+
+### 23.3 Two things that made it hard to see
+
+**The log said the symptom, not the cause.** `read_failure()` reports
+llama.cpp's own last words, and its `failed to load model '...'` pattern matched
+first — true, and useless. It now recognises the device-selection failure
+specifically and says what produces it: a CPU placement on an extension that
+predates this fix, or a card that is not reaching llama.cpp at all
+(`CUDA_VISIBLE_DEVICES` set in the environment, a runtime build with no CUDA
+backend beside it).
+
+**Creative Mode fell back in silence.** Falling back to the typed prompt is
+right — a writer that will not answer is not a reason to refuse a generation
+somebody asked for — but it was said only in the console, and what a user sees
+is an image made from their four words with nothing indicating that anything was
+meant to happen. `ScriptKreaCreative.postprocess` now puts the reason on the
+result, beside the image, where this extension already puts the sentence when
+Stage 2 fails.
