@@ -1007,7 +1007,7 @@ class TestMovingTheExpertsRatherThanTheBlocks:
 
         assert placement.cpu_experts is True
         assert placement.gpu_layers == ctx.ALL_LAYERS
-        assert "experts stay in system RAM" in note
+        assert "stay in system RAM" in note
 
     def test_a_dense_model_still_drops_blocks(self, shrink, dense):
         placement, _estimate, note = shrink(dense, 6.4)
@@ -1042,20 +1042,194 @@ class TestMovingTheExpertsRatherThanTheBlocks:
     def test_the_estimate_knows_the_experts_are_elsewhere(self, moe):
         whole = ctx.weights_bytes(moe, ctx.Placement(gpu_layers=ctx.ALL_LAYERS))
         without = ctx.weights_bytes(
-            moe, ctx.Placement(gpu_layers=ctx.ALL_LAYERS, cpu_experts=True))
+            moe, ctx.Placement(gpu_layers=ctx.ALL_LAYERS, cpu_expert_layers=ctx.ALL_EXPERTS))
 
         assert without < whole / 4
 
     def test_the_placement_says_so_out_loud(self):
-        said = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, cpu_experts=True).describe(40)
+        said = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, cpu_expert_layers=ctx.ALL_EXPERTS).describe(40)
 
         assert "experts in system RAM" in said
 
     def test_calibration_tells_the_two_apart(self):
         """They are different footprints for the same layer count, so a measured
         one must not be filed under the other."""
-        assert ctx.Placement(gpu_layers=-1).key != ctx.Placement(gpu_layers=-1,
-                                                                 cpu_experts=True).key
+        assert ctx.Placement(gpu_layers=-1).key != ctx.Placement(
+            gpu_layers=-1, cpu_expert_layers=ctx.ALL_EXPERTS).key
+        assert ctx.Placement(gpu_layers=-1, cpu_expert_layers=8).key != ctx.Placement(
+            gpu_layers=-1, cpu_expert_layers=10).key
+
+
+class TestProgressiveExpertOffload:
+    """Move the experts of as few blocks as the shortfall needs, not all of them.
+
+    ``--cpu-moe`` is a cliff. A 16.8 GB model two gigabytes too large for a card
+    used to answer that by reading thirty-four blocks of experts over the bus
+    for the rest of the session, when six blocks' worth covered the gap. The
+    ladder now has rungs: ``--n-cpu-moe N``, stepped up if the arithmetic was
+    optimistic, then ``--cpu-moe``, and only then whole blocks.
+    """
+
+    @pytest.fixture
+    def moe(self):
+        class Header:
+            file_bytes = int(16.8 * 1024 ** 3)
+            block_count = 40
+            usable = True
+            context_length = 262144
+            embedding_length = 3584
+            expert_count = 8
+            expert_used_count = 2
+            mixture_of_experts = True
+            expert_share = 0.85
+
+        return Header()
+
+    @pytest.fixture
+    def shrink(self, monkeypatch, tmp_path, host):
+        """``_shrink_offload`` against a card of a given size and a given build.
+
+        ``flags`` is what this llama-server advertises, which is the whole of
+        what decides which rung is reachable -- a flag an older build has never
+        heard of is not a slower server, it is one that exits at startup.
+        """
+        monkeypatch.setattr(ctx, "estimate", lambda model, placement, header: ctx.Estimate(
+            model=model, context=placement.context, ceiling=0,
+            weights_bytes=ctx.weights_bytes(header, placement),
+            kv_bytes=int(0.8 * 1024 ** 3), compute_bytes=int(0.4 * 1024 ** 3),
+            kv_bytes_per_token=96.0, calibrated=False, placement=placement))
+        configuration = runtime.Config(
+            runtime=tmp_path / "llama-server", model=tmp_path / "m.gguf", mmproj=None,
+            gpu_index=0, device="CUDA0", gpu_layers="all", context_size=8192,
+            context_mode="fixed", context_buffer_gb=4.0, kv_type_k="f16", kv_type_v="f16")
+
+        def run(header, free_gb, flags=(runtime.N_CPU_MOE_FLAG, runtime.CPU_MOE_FLAG),
+                floor=ctx.NO_EXPERTS):
+            monkeypatch.setattr(runtime, "runtime_supports",
+                                lambda flag, config=None, offered=flags: flag in offered)
+            monkeypatch.setattr(runtime, "_free_vram",
+                                lambda ours=0, gigabytes=free_gb: int(gigabytes * 1024 ** 3))
+            placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, context=8192)
+            return runtime._shrink_offload(configuration, placement, header, 0, 0, floor)
+
+        return run
+
+    def test_it_moves_the_fewest_blocks_that_cover_the_shortfall(self, shrink, moe):
+        """18.0 GB wanted against 16.0 GB free. Each block's experts are worth
+        about 0.36 GB, so six of forty is the answer and thirty-four blocks keep
+        theirs on the card."""
+        placement, _estimate, note = shrink(moe, 16.0)
+
+        assert placement.cpu_expert_layers == 6
+        assert placement.gpu_layers == ctx.ALL_LAYERS
+        assert "6 of 40 layers" in note
+
+    def test_a_bigger_shortfall_moves_more_of_them(self, shrink, moe):
+        smaller, _e, _n = shrink(moe, 16.0)
+        bigger, _e, _n = shrink(moe, 12.0)
+
+        assert bigger.cpu_expert_layers > smaller.cpu_expert_layers
+        assert bigger.gpu_layers == ctx.ALL_LAYERS
+
+    def test_a_placement_that_already_fits_moves_nothing(self, shrink, moe):
+        placement, _estimate, note = shrink(moe, 24.0)
+
+        assert placement.cpu_expert_layers == ctx.NO_EXPERTS
+        assert note == ""
+
+    def test_when_every_block_must_give_them_up_it_says_cpu_moe(self, shrink, moe):
+        """Design intent section 6.6. ``--cpu-moe`` is the spelling every build
+        that has either flag understands, so the end of the ladder uses it."""
+        placement, _estimate, _note = shrink(moe, 4.0)
+
+        assert placement.cpu_expert_layers == ctx.ALL_EXPERTS
+
+    def test_a_build_with_only_the_old_flag_keeps_the_old_behaviour(self, shrink, moe):
+        placement, _estimate, _note = shrink(moe, 16.0, flags=(runtime.CPU_MOE_FLAG,))
+
+        assert placement.cpu_expert_layers == ctx.ALL_EXPERTS
+        assert placement.gpu_layers == ctx.ALL_LAYERS
+
+    def test_a_build_with_only_the_new_flag_can_still_move_them_all(self, shrink, moe):
+        """``--n-cpu-moe 40`` says what ``--cpu-moe`` says, and is the only
+        thing such a build would accept."""
+        placement, _estimate, _note = shrink(moe, 4.0, flags=(runtime.N_CPU_MOE_FLAG,))
+
+        assert placement.cpu_expert_layers == 40
+
+    def test_a_build_with_neither_flag_is_given_neither(self, shrink, moe):
+        placement, _estimate, note = shrink(moe, 16.0, flags=())
+
+        assert placement.cpu_expert_layers == ctx.NO_EXPERTS
+        assert "experts" not in note
+
+    def test_blocks_leave_only_after_the_experts_have(self, shrink, moe):
+        """Section 6.7. Attention is small and every token touches it, so it is
+        the last thing to go."""
+        placement, _estimate, note = shrink(moe, 2.0)
+
+        assert placement.cpu_expert_layers == ctx.ALL_EXPERTS
+        assert placement.gpu_layers != ctx.ALL_LAYERS
+        assert "stay in system RAM" in note
+        assert "layers on the GPU" in note
+
+    def test_a_floor_carried_in_from_a_failed_start_wins(self, shrink, moe):
+        """The arithmetic says six and a real load that ran out of memory says
+        the arithmetic was short. Evidence beats planning."""
+        placement, _estimate, _note = shrink(moe, 16.0, floor=12)
+
+        assert placement.cpu_expert_layers == 12
+
+    def test_a_floor_below_what_is_needed_changes_nothing(self, shrink, moe):
+        placement, _estimate, _note = shrink(moe, 16.0, floor=2)
+
+        assert placement.cpu_expert_layers == 6
+
+    def test_a_start_that_failed_with_every_expert_out_does_not_get_fewer_back(
+            self, shrink, moe):
+        """Arithmetic that has just been shown to be optimistic does not get to
+        place the next server somewhere worse than the one that failed."""
+        placement, _estimate, _note = shrink(moe, 16.0, floor=ctx.ALL_EXPERTS)
+
+        assert placement.cpu_expert_layers == ctx.ALL_EXPERTS
+
+    def test_the_next_floor_is_two_more_blocks(self):
+        assert runtime._next_expert_floor(ctx.Placement(cpu_expert_layers=6)) == 8
+        assert runtime._next_expert_floor(ctx.Placement(cpu_expert_layers=8)) == 10
+
+    def test_a_placement_with_no_experts_moved_yet_gets_no_floor(self):
+        """The added headroom will have the ladder compute a real number for
+        itself, and a floor invented here would only get in its way."""
+        assert runtime._next_expert_floor(ctx.Placement()) == ctx.NO_EXPERTS
+
+    def test_a_placement_that_moved_them_all_has_nothing_left_at_this_rung(self):
+        assert runtime._next_expert_floor(
+            ctx.Placement(cpu_expert_layers=ctx.ALL_EXPERTS)) == ctx.ALL_EXPERTS
+
+    def test_a_changed_split_is_a_different_server(self, tmp_path):
+        """Start-time arguments, both of them: a signature that could not tell
+        the two apart would hand back the server that had just run out of
+        memory."""
+        configuration = runtime.Config(
+            runtime=tmp_path / "llama-server", model=tmp_path / "m.gguf", mmproj=None,
+            gpu_index=0, device="CUDA0", gpu_layers="all", context_size=8192,
+            context_mode="fixed", context_buffer_gb=4.0, kv_type_k="f16", kv_type_v="f16")
+
+        six = runtime._signature_of(configuration, None, ctx.Placement(cpu_expert_layers=6))
+        eight = runtime._signature_of(configuration, None, ctx.Placement(cpu_expert_layers=8))
+
+        assert six != eight
+
+    def test_getting_the_experts_back_is_worth_a_restart(self):
+        """The finer steps are only useful if the ladder can also be climbed:
+        the same blocks on the card with fewer of their experts elsewhere is
+        more of the model resident."""
+        assert runtime._worth_restarting(ctx.Placement(cpu_expert_layers=12),
+                                         ctx.Placement(cpu_expert_layers=4), 40)
+        assert not runtime._worth_restarting(ctx.Placement(cpu_expert_layers=4),
+                                             ctx.Placement(cpu_expert_layers=12), 40)
+        assert runtime._worth_restarting(ctx.Placement(cpu_expert_layers=ctx.ALL_EXPERTS),
+                                         ctx.Placement(cpu_expert_layers=8), 40)
 
 
 class TestAskingTheBuildWhatItSupports:
@@ -1101,7 +1275,7 @@ class TestAskingTheBuildWhatItSupports:
 
     def test_a_build_that_does_not_is_given_neither(self, build):
         configuration = build("  -m, --model FNAME\n  -c, --ctx-size N\n")
-        placement = ctx.Placement(gpu_layers=20, cpu_experts=True)
+        placement = ctx.Placement(gpu_layers=20, cpu_expert_layers=ctx.ALL_EXPERTS)
 
         assert runtime.accelerator_flags(configuration, placement) == []
 
@@ -1118,7 +1292,7 @@ class TestAskingTheBuildWhatItSupports:
     def test_no_gpu_flag_reaches_a_cpu_placement(self, build):
         configuration = build("      --flash-attn\n      --cpu-moe\n")
         placement = ctx.Placement(gpu_layers=20, on_gpu=False,
-                                             cpu_experts=True)
+                                  cpu_expert_layers=ctx.ALL_EXPERTS)
 
         assert runtime.accelerator_flags(configuration, placement) == []
 
@@ -1143,7 +1317,7 @@ class TestAskingTheBuildWhatItSupports:
 
     def test_it_comes_before_the_card_flags(self, build):
         configuration = build("      --swa-full\n      --flash-attn\n      --cpu-moe\n")
-        placement = ctx.Placement(gpu_layers=20, cpu_experts=True)
+        placement = ctx.Placement(gpu_layers=20, cpu_expert_layers=ctx.ALL_EXPERTS)
 
         assert runtime.accelerator_flags(configuration, placement) == [
             runtime.FULL_ATTENTION_WINDOW_FLAG,
@@ -1279,6 +1453,150 @@ class TestWhatThisMachineMeasured:
         entry = managed.catalogue()[0]
 
         assert "measured here" not in entry.describe()
+
+    def test_a_rate_is_kept_against_the_placement_that_produced_it(self):
+        """Section 9. The same backbone writes at forty tokens a second resident
+        and at five from system RAM, and one number covering both is a number
+        that is wrong for each of them."""
+        resident = ctx.Placement()
+        spilled = ctx.Placement(cpu_expert_layers=8)
+
+        runtime.remember_speed(300.0, 41.0, identity="gemma-26b", placement=resident)
+        runtime.remember_speed(90.0, 12.0, identity="gemma-26b", placement=spilled)
+
+        assert runtime.measured_speed("gemma-26b", resident)[1] == pytest.approx(41.0)
+        assert runtime.measured_speed("gemma-26b", spilled)[1] == pytest.approx(12.0)
+
+    def test_the_placement_is_in_the_key_the_design_intent_names(self):
+        assert runtime.speed_key(runtime.WRITE_RATE, "gemma-26b", ctx.Placement()) == \
+            "llm:write:gemma-26b:gpu"
+        assert runtime.speed_key(runtime.WRITE_RATE, "gemma-26b",
+                                 ctx.Placement(cpu_expert_layers=8)) == \
+            "llm:write:gemma-26b:ncmoe-8"
+        assert runtime.speed_key(runtime.WRITE_RATE, "gemma-26b",
+                                 ctx.Placement(cpu_expert_layers=ctx.ALL_EXPERTS)) == \
+            "llm:write:gemma-26b:cpu-moe"
+        assert runtime.speed_key(runtime.WRITE_RATE, "gemma-26b",
+                                 ctx.Placement(on_gpu=False)) == "llm:write:gemma-26b:cpu"
+
+    def test_placements_are_never_averaged_into_one_number(self):
+        """"Do not merge different placement speeds into one number." Nothing
+        writes the backbone-wide key any more, so nothing can."""
+        runtime.remember_speed(300.0, 41.0, identity="gemma-26b", placement=ctx.Placement())
+
+        import mc_progress
+
+        assert "llm:write:gemma-26b" not in mc_progress.rates()
+
+    def test_the_specific_placement_is_asked_for_first_and_the_backbone_after(self):
+        keys = runtime.speed_keys("krea:write", "gemma-26b",
+                                  ctx.Placement(cpu_expert_layers=8))
+
+        assert keys == ("krea:write:gemma-26b:ncmoe-8", "krea:write:gemma-26b", "krea:write")
+
+    def test_a_pre_placement_measurement_is_still_read_back(self):
+        """A store written before placements were keyed holds the backbone-wide
+        key. It is a stale approximation and a better first guess than none."""
+        import mc_progress
+
+        mc_progress.learn("llm:write:gemma-26b", 9.5)
+
+        assert runtime.best_measured("gemma-26b")[1] == pytest.approx(9.5)
+        assert runtime.best_measured("gemma-26b")[2] == ""
+
+    def test_the_catalogue_is_told_where_the_number_came_from(self):
+        """"measured here: 5.0 tokens/s" with no placement beside it reads as a
+        fact about the model."""
+        runtime.remember_speed(90.0, 12.0, identity="gemma-26b",
+                               placement=ctx.Placement(cpu_expert_layers=8))
+        prompt, reply, where = runtime.best_measured("gemma-26b")
+
+        assert (prompt, reply) == (pytest.approx(90.0), pytest.approx(12.0))
+        assert where == "ncmoe-8"
+        assert runtime.describe_placement_token(where) == "8 expert layers in RAM"
+
+    def test_the_best_placement_on_record_is_the_one_reported(self):
+        runtime.remember_speed(90.0, 12.0, identity="gemma-26b",
+                               placement=ctx.Placement(cpu_expert_layers=8))
+        runtime.remember_speed(300.0, 41.0, identity="gemma-26b", placement=ctx.Placement())
+
+        assert runtime.best_measured("gemma-26b")[1] == pytest.approx(41.0)
+        assert runtime.best_measured("gemma-26b")[2] == "gpu"
+
+    def test_a_placement_token_reads_as_a_clause_a_person_can_read(self):
+        assert runtime.describe_placement_token("gpu") == "all layers on the GPU"
+        assert runtime.describe_placement_token("cpu") == "in system RAM"
+        assert runtime.describe_placement_token("cpu-moe") == "experts in system RAM"
+        assert runtime.describe_placement_token("ncmoe-1") == "1 expert layer in RAM"
+        assert runtime.describe_placement_token("cpu-moe-l20") == (
+            "experts in system RAM, 20 layers on the GPU")
+        assert runtime.describe_placement_token("") == ""
+
+
+class TestTheExpertFlagOnTheCommandLine:
+    """Which of the two spellings reaches llama-server, and when neither does."""
+
+    @pytest.fixture(autouse=True)
+    def forget(self):
+        runtime._capabilities.clear()
+        yield
+        runtime._capabilities.clear()
+
+    @pytest.fixture
+    def build(self, tmp_path, monkeypatch, host):
+        def announce(*flags):
+            configuration = runtime.Config(
+                runtime=tmp_path / "llama-server", model=tmp_path / "m.gguf", mmproj=None,
+                gpu_index=0, device="CUDA0", gpu_layers="all", context_size=8192,
+                context_mode="fixed", context_buffer_gb=4.0, kv_type_k="f16",
+                kv_type_v="f16")
+            monkeypatch.setattr(runtime, "runtime_supports",
+                                lambda flag, config=None, offered=flags: flag in offered)
+            return configuration
+
+        return announce
+
+    def test_a_partial_split_is_passed_as_a_count(self, build):
+        configuration = build(runtime.N_CPU_MOE_FLAG)
+
+        assert runtime.expert_flags(configuration, ctx.Placement(cpu_expert_layers=8)) == [
+            "--n-cpu-moe", "8"]
+
+    def test_every_expert_is_passed_as_the_switch(self, build):
+        configuration = build(runtime.N_CPU_MOE_FLAG, runtime.CPU_MOE_FLAG)
+
+        assert runtime.expert_flags(
+            configuration, ctx.Placement(cpu_expert_layers=ctx.ALL_EXPERTS)) == ["--cpu-moe"]
+
+    def test_nothing_is_passed_when_nothing_moved(self, build):
+        configuration = build(runtime.N_CPU_MOE_FLAG, runtime.CPU_MOE_FLAG)
+
+        assert runtime.expert_flags(configuration, ctx.Placement()) == []
+
+    def test_a_partial_split_is_never_promoted_to_the_older_flag(self, build):
+        """The placement was negotiated against an estimate of N layers. Moving
+        every expert instead is a different footprint and a different speed than
+        the one that was planned, so a build with only the old flag gets
+        nothing -- and the ladder never hands it such a placement anyway."""
+        configuration = build(runtime.CPU_MOE_FLAG)
+
+        assert runtime.expert_flags(configuration, ctx.Placement(cpu_expert_layers=8)) == []
+
+    def test_an_older_build_is_given_no_expert_flag_at_all(self, build):
+        configuration = build()
+
+        for placement in (ctx.Placement(cpu_expert_layers=8),
+                          ctx.Placement(cpu_expert_layers=ctx.ALL_EXPERTS)):
+            assert runtime.expert_flags(configuration, placement) == []
+
+    def test_it_reaches_the_accelerator_flags_in_front_of_the_card_flags(self, build):
+        configuration = build(runtime.N_CPU_MOE_FLAG, runtime.FLASH_ATTENTION_FLAG,
+                              runtime.FULL_ATTENTION_WINDOW_FLAG)
+        monkeyed = runtime.accelerator_flags(
+            configuration, ctx.Placement(gpu_layers=20, cpu_expert_layers=8))
+
+        assert monkeyed.index("--n-cpu-moe") < monkeyed.index("--flash-attn")
+        assert monkeyed[monkeyed.index("--n-cpu-moe") + 1] == "8"
 
 
 class TestRetryingASmallerPlacement:

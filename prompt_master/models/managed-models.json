@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "registry_version": "2026.08.20-1",
+  "registry_version": "2026.08.21-1",
   "models": [
     {
       "id": "gemma4-12b-qat-balanced",
@@ -125,6 +125,81 @@
         "sha256": "a1e32e86ea99aa7a56f3dcfe7e63c1d0be9439d31fd07087099f15bc0fda0f22",
         "bytes": null,
         "display_size": "676 MB"
+      }
+    },
+    {
+      "id": "gemma4-26b-a4b-balanced-q4kp",
+      "label": "Gemma 4 26B-A4B — Quality",
+      "role": "Quality",
+      "group": "Gemma 4 26B",
+      "family": "Gemma 4",
+      "profile": "gemma4-26b-a4b-q4kp",
+      "multimodal": true,
+      "source_url": "https://huggingface.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced",
+      "license_url": "https://huggingface.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced",
+      "repo_id": "HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced",
+      "revision": "96c11c22b1128c3c8c655b21557b409f307c557f",
+      "model": {
+        "filename": "Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q4_K_P.gguf",
+        "sha256": "295121f61edeedaa8604bcaf3171831981c546c3a10a210cea87dc992eb429ae",
+        "bytes": null,
+        "display_size": "~16.9 GB"
+      },
+      "projector": {
+        "filename": "mmproj-Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-f16.gguf",
+        "sha256": "9422eeb070cc7f6e412d34d03e2fb4693bb90dcdba4a0294150de28a04f4e12c",
+        "bytes": null,
+        "display_size": "1.19 GB"
+      }
+    },
+    {
+      "id": "gemma4-26b-a4b-balanced-q3kp",
+      "label": "Gemma 4 26B-A4B — Balanced",
+      "role": "Recommended 26B",
+      "group": "Gemma 4 26B",
+      "family": "Gemma 4",
+      "profile": "gemma4-26b-a4b-q3kp",
+      "multimodal": true,
+      "source_url": "https://huggingface.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced",
+      "license_url": "https://huggingface.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced",
+      "repo_id": "HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced",
+      "revision": "96c11c22b1128c3c8c655b21557b409f307c557f",
+      "model": {
+        "filename": "Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q3_K_P.gguf",
+        "sha256": "52f21bf68bf4e1ddbd98be81f88ebc005c7c8b9c0aa22ef43479e59a97374ef2",
+        "bytes": null,
+        "display_size": "~13.4 GB"
+      },
+      "projector": {
+        "filename": "mmproj-Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-f16.gguf",
+        "sha256": "9422eeb070cc7f6e412d34d03e2fb4693bb90dcdba4a0294150de28a04f4e12c",
+        "bytes": null,
+        "display_size": "1.19 GB"
+      }
+    },
+    {
+      "id": "gemma4-26b-a4b-balanced-q2kp",
+      "label": "Gemma 4 26B-A4B — Low Memory",
+      "role": "Low memory",
+      "group": "Gemma 4 26B",
+      "family": "Gemma 4",
+      "profile": "gemma4-26b-a4b-q2kp",
+      "multimodal": true,
+      "source_url": "https://huggingface.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced",
+      "license_url": "https://huggingface.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced",
+      "repo_id": "HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced",
+      "revision": "96c11c22b1128c3c8c655b21557b409f307c557f",
+      "model": {
+        "filename": "Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q2_K_P.gguf",
+        "sha256": "5726f6649f90e7c6af7609760a65bec0895cfa375ec3d3d63de8f76ec1b1a4ed",
+        "bytes": null,
+        "display_size": "~10.7 GB"
+      },
+      "projector": {
+        "filename": "mmproj-Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-f16.gguf",
+        "sha256": "9422eeb070cc7f6e412d34d03e2fb4693bb90dcdba4a0294150de28a04f4e12c",
+        "bytes": null,
+        "display_size": "1.19 GB"
       }
     },
     {

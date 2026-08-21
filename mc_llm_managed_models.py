@@ -45,8 +45,10 @@ puts the old state back if the new one will not answer.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
 import re
 import shutil
 import threading
@@ -265,20 +267,31 @@ class ManagedModel:
         return " · ".join(part for part in parts if part)
 
     def measured_speed(self) -> str:
-        """What this machine measured this backbone writing at, or "".
+        """What this machine measured this backbone writing at, and where.
 
         llama.cpp's own figure for the requests it served, not an estimate from
         character counts. Absent until this backbone has answered at least once
         here, which is the honest state: nothing about somebody else's hardware
         belongs in this line.
+
+        The placement is named beside it because the rate is not a property of
+        the backbone alone -- the same model writes at forty tokens a second
+        resident and at five from system RAM, and "measured here: 5.0 tokens/s"
+        with no placement beside it reads as a fact about the model. What is
+        reported is the best placement on record for this entry; see
+        ``mc_llm_runtime.best_measured``.
         """
         try:
             import mc_llm_runtime
 
-            _prompt, reply = mc_llm_runtime.measured_speed(self.identifier)
+            _prompt, reply, where = mc_llm_runtime.best_measured(self.identifier)
+            said = mc_llm_runtime.describe_placement_token(where)
         except Exception:
             return ""
-        return f"measured here: {reply:.1f} tokens/s" if reply > 0 else ""
+        if reply <= 0:
+            return ""
+        return (f"measured here: {reply:.1f} tokens/s ({said})" if said
+                else f"measured here: {reply:.1f} tokens/s")
 
     def _sizes(self) -> str:
         main = self.model.display_size or _bytes_label(self.model.approximate_bytes)
@@ -846,6 +859,10 @@ def download(identifier: str, on_status=None, on_progress=None,
     done_before = 0
     for artifact in model.artifacts:                                   # STEP 3
         _check_cancelled(cancel)
+        if _adopt_local_copy(model, artifact, staging / artifact.local_name, say):
+            done_before += artifact.approximate_bytes or 0
+            tick(min(done_before / total, 1.0))
+            continue
         say(f"Downloading {artifact.filename}…")
         share = artifact.approximate_bytes or total
         base = done_before
@@ -955,6 +972,96 @@ def _prepare_staging(model: ManagedModel, staging: Path) -> None:
     except OSError as exc:
         raise ManagedError(f"The managed models folder cannot be created ({exc}).") from exc
     _write_json(sidecar, {"expected": wanted, "started_at": time.time()})
+
+
+def _adopt_local_copy(model: ManagedModel, artifact: Artifact, destination: Path,
+                      say) -> bool:
+    """Take an identical, already-installed file instead of downloading it again.
+
+    Every Gemma 4 26B-A4B tier in the catalogue names the same vision projector:
+    the same publisher, the same filename, the same 1.19 GB and the same
+    SHA-256. Installing all four downloads it four times and keeps four copies,
+    which is nearly five gigabytes of somebody's connection and disk spent on
+    one file.
+
+    So a bundle that already holds a file with exactly the hash this one wants
+    is linked into staging. A hard link is the same inode: no copy, no second
+    allocation, and the two names are as interchangeable as the bytes are, which
+    is what an identical hash means. Where a link cannot be made -- a different
+    filesystem, a Windows volume without the privilege -- the file is copied,
+    which still saves the download.
+
+    Optional, and written so that it is: every failure here returns ``False``
+    and the caller downloads the file exactly as it always did. The hash is
+    re-read from the source before it is trusted, because "verified when it was
+    promoted" is a statement about the past and this is somebody's disk.
+    """
+    if destination.exists():
+        return False
+    source = _identical_installed_file(model, artifact)
+    if source is None:
+        return False
+
+    say(f"{artifact.filename}: already on disk from another backbone; verifying…")
+    try:
+        from prompt_master.provisioning.verifier import digest_of
+
+        if digest_of(source).casefold() != artifact.sha256:
+            logger.info("Model Chain: %s in %s no longer matches its recorded hash, so it is "
+                        "being downloaded rather than reused", artifact.filename, source.parent)
+            return False
+    except Exception:
+        logger.debug("Model Chain: could not verify a reusable copy of %s",
+                     artifact.filename, exc_info=True)
+        return False
+
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(source, destination)
+            how = "linked"
+        except (OSError, AttributeError, NotImplementedError):
+            shutil.copy2(source, destination)
+            how = "copied"
+    except OSError:
+        logger.debug("Model Chain: could not reuse the local copy of %s", artifact.filename,
+                     exc_info=True)
+        with contextlib.suppress(OSError):
+            destination.unlink()
+        return False
+
+    say(f"{artifact.filename}: reused the verified copy already on disk.")
+    logger.info("Model Chain: %s %s from %s into %s — identical hash, nothing downloaded",
+                how, artifact.filename, source.parent.name, model.identifier)
+    return True
+
+
+def _identical_installed_file(model: ManagedModel, artifact: Artifact) -> Path | None:
+    """An installed bundle's file with exactly ``artifact``'s hash, or ``None``.
+
+    Matched on the SHA-256 alone. The filename and the revision are how the
+    catalogue talks about a file; the hash is what the file *is*, and two
+    entries whose hashes agree cannot disagree about a byte.
+    """
+    try:
+        entries = registry().values()
+    except ManagedError:
+        return None
+    for other in entries:
+        if other.identifier == model.identifier:
+            continue
+        try:
+            bundle = installed(other.identifier)
+        except Exception:
+            continue
+        if bundle is None:
+            continue
+        if str(bundle.hashes.get(artifact.local_name, "")).casefold() != artifact.sha256:
+            continue
+        candidate = bundle.root / artifact.local_name
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _fetch(model: ManagedModel, artifact: Artifact, destination: Path, report, say) -> None:

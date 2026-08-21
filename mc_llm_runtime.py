@@ -38,6 +38,7 @@ reloading it somewhere else.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import subprocess
@@ -319,7 +320,8 @@ def projector_bytes(configuration: Config, vision: bool) -> int:
 def negotiate(configuration: Config | None = None,
               gguf: mc_gguf.Gguf | None = None, *, reclaim: bool = True,
               already_ours: int = 0, extra_reserve: int = 0,
-              vision: bool = False) -> Negotiation:
+              vision: bool = False,
+              expert_floor: int = mc_llm_context.NO_EXPERTS) -> Negotiation:
     """Decide where the LLM goes, given what is on the card right now.
 
     ``reclaim=False`` is what the estimator panel passes, and it now makes no
@@ -356,13 +358,20 @@ def negotiate(configuration: Config | None = None,
        once the checkpoint and the model are both small enough.
     2. Shrink the context. A cache nobody has filled yet is the cheapest thing
        on the card to give up.
-    3. For a mixture-of-experts model, move the experts to system RAM. They are
-       most of the weights and are consulted two at a time, so this buys back
-       the most VRAM for the least speed.
-    4. Drop blocks, four at a time, until what is left fits.
-    5. Land on zero, which is the whole model in system RAM. Slow, and still an
+    3. For a mixture-of-experts model, move the experts of as few blocks as
+       will cover the shortfall into system RAM. They are most of the weights
+       and are consulted two at a time, so this buys back the most VRAM for the
+       least speed -- and moving six blocks' worth costs a sixth of what moving
+       every block's worth costs.
+    4. When that reaches every block anyway, move every expert.
+    5. Drop blocks, four at a time, until what is left fits.
+    6. Land on zero, which is the whole model in system RAM. Slow, and still an
        answer rather than a failure -- and still faster than the alternative it
        replaced, which was evicting a checkpoint and paying to move it back.
+
+    ``expert_floor`` is a lower bound on rung 3, carried in by a caller whose
+    last real start ran out of memory at a smaller one. See
+    :data:`EXPERT_RETRY_STEP`.
     """
     configuration = configuration or config()
     if not configuration.configured:
@@ -396,7 +405,7 @@ def negotiate(configuration: Config | None = None,
         return Negotiation(placement, estimate, tuple(notes), True)
 
     placement, estimate, offloaded = _shrink_offload(configuration, placement, described, reserve,
-                                                     already_ours)
+                                                     already_ours, expert_floor)
     if offloaded:
         notes.append(offloaded)
 
@@ -525,37 +534,54 @@ def _shrink_context(configuration: Config, placement, gguf, reserve: int,
             f"context reduced from {was:,} to {affordable:,} tokens to fit the free VRAM")
 
 
+EXPERT_RETRY_STEP = 2
+"""How many more blocks' experts move after a load that ran out of memory anyway.
+
+The arithmetic in :func:`_minimum_expert_layers` is planning, and planning can
+be wrong in one direction that matters: llama.cpp allocates its own buffers on
+top of what this module predicts, and a driver refuses an allocation for reasons
+-- fragmentation, another process, a Windows limit -- that no header can see. A
+start that failed is evidence that the plan was short, so the next attempt moves
+two more blocks' experts rather than re-deriving the same number.
+
+Two rather than one because a retry is not free (a failed start costs the load
+time twice over), and rather than "all of them" because that is the cliff this
+whole ladder exists to avoid.
+"""
+
+
 def _shrink_offload(configuration: Config, placement, gguf, reserve: int,
-                    already_ours: int = 0):
-    """Move blocks off the card, which is section 13's graceful degradation.
+                    already_ours: int = 0,
+                    expert_floor: int = mc_llm_context.NO_EXPERTS):
+    """Move the model off the card in the order that costs the least speed.
 
     Reached only when a full-precision placement will not fit even at the
-    minimum context. Every block left in system RAM costs speed and gives back
-    both its weights and its share of the cache, so this converges quickly --
-    and if it converges all the way to zero the model runs from system RAM,
-    which is slow but is still an answer rather than a failure.
+    minimum context, and the order is the whole of it:
+
+    1. the experts of as few blocks as will cover the shortfall
+       (``--n-cpu-moe N``);
+    2. every expert (``--cpu-moe``), once N has reached every block anyway;
+    3. whole blocks, four at a time;
+    4. system RAM.
+
+    Every block left in system RAM costs speed and gives back both its weights
+    and its share of the cache, so the last two converge quickly -- and if they
+    converge all the way to zero the model runs from system RAM, which is slow
+    but is still an answer rather than a failure.
     """
     if gguf is None or not gguf.usable or gguf.block_count <= 0:
         return placement, mc_llm_context.estimate(configuration.model, placement, gguf), ""
 
     total = gguf.block_count
     free = _free_vram(already_ours)
+    notes: list[str] = []
 
-    # For a mixture-of-experts model, the first thing to move is the experts --
-    # not whole blocks. They are the great majority of the weights and are
-    # consulted a couple at a time, while attention is small and every token
-    # touches it. Dropping blocks gives up both; this gives up only the idle
-    # half, and usually saves enough that no block has to leave the card at all.
-    if (not placement.cpu_experts and gguf.mixture_of_experts
-            and runtime_supports(CPU_MOE_FLAG, configuration)):
-        candidate = placement.with_cpu_experts()
-        estimate = mc_llm_context.estimate(configuration.model, candidate, gguf)
-        if free >= estimate.total_bytes + reserve:
-            return candidate, estimate, (
-                f"the experts stay in system RAM and the rest of the model is on the "
-                f"GPU — {gguf.expert_count} experts a block, {gguf.expert_used_count} "
-                "consulted per token, so this costs far less speed than moving blocks")
-        placement = candidate
+    placement, estimate, spilled = _spill_experts(configuration, placement, gguf, reserve,
+                                                  free, expert_floor)
+    if spilled:
+        notes.append(spilled)
+    if free >= estimate.total_bytes + reserve:
+        return placement, estimate, "; ".join(notes)
 
     for layers in range(total - 4, -1, -4):
         candidate = placement.with_layers(max(layers, 0))
@@ -566,11 +592,134 @@ def _shrink_offload(configuration: Config, placement, gguf, reserve: int,
             if layers <= 0:
                 note = ("the whole model was placed in system RAM -- there is not enough free "
                         "VRAM for any of it alongside what is resident; generation will be slow")
-            return candidate, estimate, note
+            notes.append(note)
+            return candidate, estimate, "; ".join(notes)
 
     candidate = placement.with_layers(mc_llm_context.NO_LAYERS)
+    notes.append("the whole model was placed in system RAM; generation will be slow")
     return (candidate, mc_llm_context.estimate(configuration.model, candidate, gguf),
-            "the whole model was placed in system RAM; generation will be slow")
+            "; ".join(notes))
+
+
+def _spill_experts(configuration: Config, placement, gguf, reserve: int, free: int,
+                   floor: int = mc_llm_context.NO_EXPERTS):
+    """As few blocks' experts in system RAM as will make the model fit.
+
+    The first rung of the ladder, and the one that used to be all-or-nothing.
+    For a mixture-of-experts model the first thing to move is the experts, not
+    whole blocks: they are the great majority of the weights and are consulted a
+    couple at a time, while attention is small and every token touches it.
+    Dropping blocks gives up both; this gives up only the idle half.
+
+    What is new is *how much* of the idle half. ``--cpu-moe`` moves all of it,
+    which for a model two gigabytes over is thirty-four blocks of experts read
+    from system RAM to save a shortfall six would have covered. So the count is
+    computed, tried, and stepped up only if the arithmetic was optimistic --
+    and it becomes ``--cpu-moe`` exactly when it reaches every block, because at
+    that point the older flag says the same thing in a spelling every build
+    understands.
+
+    Returns ``(placement, estimate, note)`` whether or not the result fits: a
+    placement that still does not fit has given the caller the largest saving
+    this rung has, and the caller goes on to drop blocks from it.
+    """
+    estimate = mc_llm_context.estimate(configuration.model, placement, gguf)
+    if not gguf.mixture_of_experts or placement.all_cpu_experts:
+        return placement, estimate, ""
+
+    progressive = runtime_supports(N_CPU_MOE_FLAG, configuration)
+    everything = runtime_supports(CPU_MOE_FLAG, configuration)
+    if not progressive and not everything:
+        # An older build that has never heard of either flag. Passing one is not
+        # a slower server, it is a server that exits at startup, so this rung is
+        # skipped entirely and the blocks below it do the work.
+        return placement, estimate, ""
+
+    total = gguf.block_count
+    wanted = max(int(floor), int(placement.cpu_expert_layers), mc_llm_context.NO_EXPERTS)
+
+    # A floor of ``ALL_EXPERTS`` is a start that ran out of memory with every
+    # expert already elsewhere. Recomputing a smaller N from arithmetic that has
+    # just been shown to be optimistic would place the next server somewhere
+    # worse than the one that failed.
+    if progressive and floor != mc_llm_context.ALL_EXPERTS:
+        needed = _minimum_expert_layers(configuration, placement, gguf,
+                                        estimate, free - reserve)
+        if needed == mc_llm_context.NO_EXPERTS and wanted == mc_llm_context.NO_EXPERTS:
+            # There is no shortfall to close. Only a caller asking about a
+            # placement that already fits gets here, and the honest answer is
+            # the placement it asked about.
+            return placement, estimate, ""
+        wanted = max(wanted, needed)
+        while 0 < wanted < total:
+            candidate = placement.with_cpu_expert_layers(wanted)
+            trial = mc_llm_context.estimate(configuration.model, candidate, gguf)
+            if free >= trial.total_bytes + reserve:
+                return candidate, trial, _expert_note(gguf, wanted, total)
+            wanted += EXPERT_RETRY_STEP
+
+    if everything:
+        candidate = placement.with_cpu_experts()
+    elif total > 0:
+        # ``--n-cpu-moe`` alone, asked for every block: the same placement in
+        # the only spelling this build has.
+        candidate = placement.with_cpu_expert_layers(total)
+    else:
+        return placement, estimate, ""
+    trial = mc_llm_context.estimate(configuration.model, candidate, gguf)
+    return candidate, trial, _expert_note(gguf, mc_llm_context.ALL_EXPERTS, total)
+
+
+def _expert_note(gguf: mc_gguf.Gguf, layers: int, total: int) -> str:
+    """One clause saying which experts moved and why it is the cheap thing to do."""
+    why = (f"{gguf.expert_count} experts a block, {gguf.expert_used_count} consulted per "
+           "token, so this costs far less speed than moving blocks")
+    if layers == mc_llm_context.ALL_EXPERTS or layers >= total > 0:
+        return (f"the experts stay in system RAM and the rest of the model is on the GPU — {why}")
+    return (f"the experts of {layers} of {total} layers stay in system RAM and everything "
+            f"else is on the GPU — {why}")
+
+
+def _minimum_expert_layers(configuration: Config, placement, gguf,
+                           estimate: mc_llm_context.Estimate, budget: int) -> int:
+    """The fewest blocks whose experts have to leave for ``placement`` to fit.
+
+    Solved rather than searched. The saving is linear in the number of blocks
+    moved -- that is what :func:`mc_llm_context.expert_fraction_moved` says --
+    so the whole-model saving is measured once and the shortfall divided by the
+    per-block share of it. One estimate, one division, and the caller verifies
+    the answer against the real arithmetic anyway before it uses it.
+
+    Measured from the estimator rather than computed from ``file_bytes`` here so
+    that a partial block offload is accounted for: with half the blocks already
+    off the card, moving a block's experts saves half as much, and a formula in
+    this function would have to know that twice.
+    """
+    deficit = int(estimate.total_bytes) - int(budget)
+    if deficit <= 0:
+        return mc_llm_context.NO_EXPERTS
+
+    total = gguf.block_count
+    if total <= 0:
+        return mc_llm_context.ALL_EXPERTS
+    moved = max(int(placement.cpu_expert_layers), mc_llm_context.NO_EXPERTS)
+    movable = total - moved
+    if movable <= 0:
+        return total
+    whole = mc_llm_context.estimate(configuration.model,
+                                    placement.with_cpu_expert_layers(total), gguf)
+    saving = int(estimate.total_bytes) - int(whole.total_bytes)
+    if saving <= 0:
+        # No expert weights to speak of, or a header that will not say. Moving
+        # them buys nothing, and claiming a number here would spend a restart
+        # finding that out.
+        return mc_llm_context.ALL_EXPERTS
+
+    # ``saving`` is what the blocks that have *not* moved yet are worth, so it
+    # is divided by those and the answer is an absolute count again. The two are
+    # the same number on the common path, where nothing has moved yet, and this
+    # is not the place to depend on that.
+    return min(moved + int(math.ceil(deficit / (saving / movable))), total)
 
 
 # --------------------------------------------------------------------------- #
@@ -728,6 +877,20 @@ class Failure:
 CPU_MOE_FLAG = "--cpu-moe"
 """Keep every expert tensor in system RAM, everything else on the card."""
 
+N_CPU_MOE_FLAG = "--n-cpu-moe"
+"""Keep the expert tensors of the first N blocks in system RAM, and no more.
+
+The finer-grained half of :data:`CPU_MOE_FLAG`, and the one worth reaching for
+first. ``--cpu-moe`` is a cliff: a model two gigabytes too large for a card
+moves *all* of its experts into system RAM and generates at the speed of the
+slowest thing in the path, when the first six blocks' worth would have covered
+the shortfall and left the other thirty-four on the GPU.
+
+Newer than ``--cpu-moe`` in llama.cpp, so the two are asked about separately and
+neither is assumed from the other -- see :func:`runtime_capabilities`. A build
+that has one, the other, or neither is a build this module still places.
+"""
+
 FLASH_ATTENTION_FLAG = "--flash-attn"
 """Fused attention kernels. A CUDA thing: worth nothing with no layers offloaded."""
 
@@ -834,9 +997,15 @@ def accelerator_flags(configuration: Config, placement) -> list[str]:
     layers it would be a flag that changes nothing, and a flag that changes
     nothing is a flag somebody will later believe changed something.
 
-    ``--cpu-moe`` is how the placement above says "experts in system RAM". It
-    reaches the command line here rather than through the vendored launcher's
-    fixed argument list, which has no room for it.
+    ``--n-cpu-moe N`` and ``--cpu-moe`` are how the placement above says
+    "experts in system RAM", partly and entirely. They reach the command line
+    here rather than through the vendored launcher's fixed argument list, which
+    has no room for either. Only one of the two is ever passed, and a partial
+    split on a build that has only the all-or-nothing flag is not silently
+    promoted to it: the placement was chosen against an estimate of *N* layers,
+    and moving every expert instead would be a different footprint and a
+    different speed than the one negotiated. :func:`_shrink_offload` does not
+    produce such a placement, and this is the second place that is true.
 
     There is no fourth. Sage attention is a quantised attention kernel for
     diffusion models in PyTorch and has no llama.cpp counterpart, and the
@@ -848,9 +1017,7 @@ def accelerator_flags(configuration: Config, placement) -> list[str]:
         flags.append(FULL_ATTENTION_WINDOW_FLAG)
     if not getattr(placement, "on_gpu", False):
         return flags
-    if getattr(placement, "cpu_experts", False) and runtime_supports(CPU_MOE_FLAG,
-                                                                    configuration):
-        flags.append(CPU_MOE_FLAG)
+    flags.extend(expert_flags(configuration, placement))
     if placement.gpu_layers == mc_llm_context.NO_LAYERS:
         return flags
     if runtime_supports(FLASH_ATTENTION_FLAG, configuration):
@@ -858,6 +1025,24 @@ def accelerator_flags(configuration: Config, placement) -> list[str]:
         if _flash_attention_takes_a_value(configuration):
             flags.append("on")
     return flags
+
+
+def expert_flags(configuration: Config, placement) -> list[str]:
+    """The expert-offload part of a command line, in the spelling this build has.
+
+    Empty for a placement with every expert on the card, for a build that
+    advertises neither flag, and for a dense model -- which never reaches a
+    placement with experts moved, because :func:`_shrink_offload` reads the
+    header before it makes one.
+    """
+    layers = int(getattr(placement, "cpu_expert_layers", mc_llm_context.NO_EXPERTS))
+    if layers == mc_llm_context.NO_EXPERTS:
+        return []
+    if layers == mc_llm_context.ALL_EXPERTS:
+        return [CPU_MOE_FLAG] if runtime_supports(CPU_MOE_FLAG, configuration) else []
+    if runtime_supports(N_CPU_MOE_FLAG, configuration):
+        return [N_CPU_MOE_FLAG, str(layers)]
+    return []
 
 
 def _flash_attention_takes_a_value(configuration: Config | None = None) -> bool:
@@ -901,35 +1086,111 @@ machine, in system RAM: a dense 12B wrote at 4.9 tokens a second and a 26B
 mixture-of-experts wrote at 12.8, because generation from RAM is bandwidth-bound
 and an MoE activates a fraction of its weights per token. The bigger file was two
 and a half times faster, and nothing on screen said so.
+
+Keyed per *placement* as well, because that is the axis they differ most on
+after the backbone, and by more: the same 26B writes at forty tokens a second
+resident on a card and at five from system RAM. One number covering both is a
+number that is wrong for each of them, and the ladder now has rungs between
+those two -- eight blocks' experts in system RAM is a real speed and not an
+interpolation of the other two. So the store learns
+``llm:write:<backbone>:ncmoe-8`` and never averages it into
+``llm:write:<backbone>``.
 """
 
 
-def speed_key(kind: str, identity: str = "") -> str:
-    """The store key for one backbone's measured rate, e.g. ``llm:write:gemma4-12b``.
+def speed_key(kind: str, identity: str = "", placement=None) -> str:
+    """The store key for one rate, e.g. ``llm:write:gemma4-12b:ncmoe-8``.
 
     The identity is normalised here rather than at each caller, because the two
     that matter reach it by different routes -- the running configuration and a
     catalogue entry's id -- and a key written by one and read by the other has
     to be the same key.
+
+    ``placement`` may be a :class:`mc_llm_context.Placement`, a token from
+    :attr:`~mc_llm_context.Placement.speed_token`, or ``None`` for the placement
+    running right now. Pass ``""`` for the backbone-wide key with no placement
+    in it at all, which is what the fallback chain below ends on.
     """
     identity = _key_safe(identity) if identity else writer_identity()
-    return f"{kind}:{identity}" if identity else kind
+    token = placement if isinstance(placement, str) else placement_token(placement)
+    return ":".join(part for part in (kind, identity, _key_safe(token)) if part)
+
+
+def placement_token(placement=None) -> str:
+    """``placement``'s speed token, defaulting to the placement running now.
+
+    Empty when nothing is running and nothing was passed, which is the honest
+    answer: a rate recorded then is a rate about a placement nobody can name,
+    and it goes under the backbone-wide key rather than under a guess.
+    """
+    if placement is None:
+        try:
+            placement = runtime.placement()
+        except Exception:
+            return ""
+    if placement is None:
+        return ""
+    try:
+        return str(placement.speed_token)
+    except Exception:
+        return ""
+
+
+PLACEMENT_WORDS = {
+    "gpu": "all layers on the GPU",
+    "cpu": "in system RAM",
+    "cpu-moe": "experts in system RAM",
+}
+
+
+def describe_placement_token(token: str) -> str:
+    """One short clause for a placement token, for a line a person reads.
+
+    ``ncmoe-8`` is "8 expert layers in RAM", which is the sentence the design
+    intent asks the catalogue to be able to print beside a measured rate. A
+    token this does not recognise is returned as it is rather than dropped: an
+    unfamiliar word beside a number is a smaller failure than a number whose
+    placement is not stated at all.
+    """
+    token = str(token or "").strip()
+    if not token:
+        return ""
+    head, _, layers = token.partition("-l")
+    said = PLACEMENT_WORDS.get(head)
+    if said is None and head.startswith("ncmoe-"):
+        count = head[len("ncmoe-"):]
+        said = f"{count} expert layer{'' if count == '1' else 's'} in RAM"
+    if said is None:
+        said = head
+    if layers:
+        said = f"{said}, {layers} layers on the GPU"
+    return said
 
 
 def _key_safe(name) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", str(name or "")).strip("-").casefold()[:64]
 
 
-def speed_keys(kind: str, identity: str = "") -> tuple[str, ...]:
-    """That key, then the general one, for :func:`mc_progress.rate_for`.
+def speed_keys(kind: str, identity: str = "", placement=None) -> tuple[str, ...]:
+    """That key, then the broader ones, for :func:`mc_progress.rate_for`.
 
     Most specific first, which is the convention the store was built around: a
-    machine that has measured this backbone answers about this backbone, and one
-    that has not falls back to whatever it has learned in general rather than to
-    a built-in guess.
+    machine that has measured this backbone *at this placement* answers about
+    that; one that has measured the backbone somewhere else answers about the
+    backbone; one that has measured neither falls back to whatever it has
+    learned in general rather than to a built-in guess.
+
+    Reading through the backbone-wide key is not the same as writing to it.
+    Nothing writes there any more -- see :data:`WRITE_RATE` -- so what it can
+    still hold is a measurement recorded before placements were keyed, which is
+    a stale approximation and a better first guess than none.
     """
-    keyed = speed_key(kind, identity)
-    return (keyed, kind) if keyed != kind else (kind,)
+    keys = (speed_key(kind, identity, placement), speed_key(kind, identity, ""), kind)
+    ordered: list[str] = []
+    for key in keys:
+        if key not in ordered:
+            ordered.append(key)
+    return tuple(ordered)
 
 
 def writer_identity(configuration: Config | None = None) -> str:
@@ -950,33 +1211,89 @@ def writer_identity(configuration: Config | None = None) -> str:
     return _key_safe(name)
 
 
-def remember_speed(prompt: float, reply: float, identity: str = "") -> None:
-    """Fold one request's measured rates into the store. Never fatal."""
+def remember_speed(prompt: float, reply: float, identity: str = "", placement=None) -> None:
+    """Fold one request's measured rates into the store. Never fatal.
+
+    Written to the placement-specific key alone. Recording it in the
+    backbone-wide key as well would put the average of a resident placement and
+    a system-RAM one somewhere a caller can read it, and the whole reason this
+    is keyed by placement is that such an average describes neither.
+    """
     try:
         import mc_progress
 
         identity = identity or writer_identity()
+        token = placement if isinstance(placement, str) else placement_token(placement)
         if reply > 0:
-            mc_progress.learn(speed_key(WRITE_RATE, identity), float(reply))
+            mc_progress.learn(speed_key(WRITE_RATE, identity, token), float(reply))
         if prompt > 0:
-            mc_progress.learn(speed_key(READ_RATE, identity), float(prompt))
+            mc_progress.learn(speed_key(READ_RATE, identity, token), float(prompt))
     except Exception:
         logger.debug("Model Chain: could not record llama.cpp's measured speed",
                      exc_info=True)
 
 
-def measured_speed(identity: str = "") -> tuple[float, float]:
-    """``(prompt, reply)`` tokens per second measured for one backbone, or zeros."""
+def measured_speed(identity: str = "", placement=None) -> tuple[float, float]:
+    """``(prompt, reply)`` tokens per second for one backbone at one placement.
+
+    ``placement`` defaults to the one running now, and zeros come back when
+    nothing has been measured there. For "whatever this machine knows about this
+    backbone", which is the catalogue's question rather than the status line's,
+    see :func:`best_measured`.
+    """
     try:
         import mc_progress
 
         identity = identity or writer_identity()
         if not identity:
             return 0.0, 0.0
-        return (float(mc_progress.measured(speed_key(READ_RATE, identity), 0.0)),
-                float(mc_progress.measured(speed_key(WRITE_RATE, identity), 0.0)))
+        token = placement if isinstance(placement, str) else placement_token(placement)
+        return (float(mc_progress.measured(speed_key(READ_RATE, identity, token), 0.0)),
+                float(mc_progress.measured(speed_key(WRITE_RATE, identity, token), 0.0)))
     except Exception:
         return 0.0, 0.0
+
+
+def best_measured(identity: str = "") -> tuple[float, float, str]:
+    """``(prompt, reply, placement token)``: the best this backbone has done here.
+
+    The catalogue's question. It is asked about backbones that are not loaded
+    and mostly never have been at the placement they would get next, so keying
+    the answer to the running placement would blank the line for every entry but
+    one. What it reports instead is the placement running now when that is this
+    backbone, and otherwise the fastest placement on record -- with the token, so
+    the line can say *where* rather than implying the number is unconditional.
+    """
+    identity = _key_safe(identity) if identity else writer_identity()
+    if not identity:
+        return 0.0, 0.0, ""
+    try:
+        import mc_progress
+
+        store = mc_progress.rates()
+    except Exception:
+        return 0.0, 0.0, ""
+
+    prefix = f"{WRITE_RATE}:{identity}:"
+    running = placement_token() if writer_identity() == identity else ""
+    found, rate = "", 0.0
+    for key, value in store.items():
+        if not key.startswith(prefix) or not value:
+            continue
+        token = key[len(prefix):]
+        if token == running:
+            found, rate = token, float(value)
+            break
+        if float(value) > rate:
+            found, rate = token, float(value)
+    if rate <= 0:
+        # Nothing keyed by placement. A measurement recorded before placements
+        # were keyed still answers the question, and says nothing about where.
+        rate = float(store.get(f"{WRITE_RATE}:{identity}") or 0.0)
+        if rate <= 0:
+            return 0.0, 0.0, ""
+        return float(store.get(f"{READ_RATE}:{identity}") or 0.0), rate, ""
+    return float(store.get(f"{READ_RATE}:{identity}:{found}") or 0.0), rate, found
 
 
 # --------------------------------------------------------------------------- #
@@ -1469,6 +1786,14 @@ def _offloaded_layers(placement: mc_llm_context.Placement, total: int) -> int:
     return max(int(placement.gpu_layers), 0)
 
 
+def _spilled_experts(placement: mc_llm_context.Placement, total: int) -> int:
+    """``placement``'s expert split as a number two placements can be compared by."""
+    layers = int(placement.cpu_expert_layers)
+    if layers == mc_llm_context.ALL_EXPERTS:
+        return total if total > 0 else 1 << 30
+    return max(layers, 0)
+
+
 def _worth_restarting(current: mc_llm_context.Placement, wanted: mc_llm_context.Placement,
                       total_layers: int = 0) -> bool:
     """Whether ``wanted`` is enough of an improvement to stop a server for.
@@ -1488,6 +1813,14 @@ def _worth_restarting(current: mc_llm_context.Placement, wanted: mc_llm_context.
     there = _offloaded_layers(wanted, total_layers)
     if there != here:
         return there > here
+
+    # Same blocks on the card, fewer of their experts in system RAM: the same
+    # placement with more of the weights resident, which is the improvement this
+    # ladder's finer steps exist to be able to offer back.
+    spilled_here = _spilled_experts(current, total_layers)
+    spilled_there = _spilled_experts(wanted, total_layers)
+    if spilled_there != spilled_here:
+        return spilled_there < spilled_here
     return wanted.context >= current.context * (1.0 + CONTEXT_UPGRADE_FRACTION)
 
 
@@ -1568,6 +1901,36 @@ RETRY_HEADROOM = 3 * _GB
 """How much more room each retry leaves. Large enough to change the placement:
 a step that only trimmed the context would ask the driver for the same
 allocation that had just been refused."""
+
+
+def _signature_of(configuration: Config, projector, placement) -> tuple:
+    """What a running server would have to be restarted to change.
+
+    The expert split is in it because it is a start-time argument like the
+    other two: a placement that moved two more blocks' experts is a different
+    command line, and a signature that could not tell the two apart would hand
+    back the server that had just run out of memory.
+    """
+    return (configuration.runtime, configuration.model, projector,
+            configuration.gpu_index, configuration.device,
+            placement.context, placement.gpu_layers, placement.cpu_expert_layers)
+
+
+def _next_expert_floor(placement) -> int:
+    """The expert split to insist on after ``placement`` ran out of memory.
+
+    Two more blocks than the attempt that failed -- see
+    :data:`EXPERT_RETRY_STEP` -- and nothing at all when there were no experts
+    moved yet, because the added headroom will have the ladder compute a real
+    number for itself. A placement that had already moved every expert has
+    nothing left to give at this rung and says so by keeping the sentinel.
+    """
+    layers = int(getattr(placement, "cpu_expert_layers", mc_llm_context.NO_EXPERTS))
+    if layers == mc_llm_context.ALL_EXPERTS:
+        return mc_llm_context.ALL_EXPERTS
+    if layers <= mc_llm_context.NO_EXPERTS:
+        return mc_llm_context.NO_EXPERTS
+    return layers + EXPERT_RETRY_STEP
 
 
 class Runtime:
@@ -1677,9 +2040,7 @@ class Runtime:
             negotiated = negotiate(configuration, already_ours=ours, vision=needs_vision,
                                    extra_reserve=reserve)
             placement = negotiated.placement
-            signature = (configuration.runtime, configuration.model, projector,
-                         configuration.gpu_index, configuration.device,
-                         placement.context, placement.gpu_layers)
+            signature = _signature_of(configuration, projector, placement)
 
             if self._running and signature == self._signature:
                 self._identity = _identity(configuration, projector)
@@ -1697,15 +2058,14 @@ class Runtime:
             # asking for less and trying again. Two extra attempts, each with
             # more headroom than the last, and every one of them says so.
             penalty = 0
+            expert_floor = mc_llm_context.NO_EXPERTS
             for attempt in range(START_ATTEMPTS):
-                if penalty:
+                if penalty or expert_floor:
                     negotiated = negotiate(configuration, already_ours=ours,
                                            extra_reserve=reserve + penalty,
-                                           vision=needs_vision)
+                                           vision=needs_vision, expert_floor=expert_floor)
                     placement = negotiated.placement
-                    signature = (configuration.runtime, configuration.model, projector,
-                                 configuration.gpu_index, configuration.device,
-                                 placement.context, placement.gpu_layers)
+                    signature = _signature_of(configuration, projector, placement)
                 try:
                     process, observed, offload = self._launch(configuration, placement,
                                                               projector)
@@ -1714,8 +2074,11 @@ class Runtime:
                     if not failure.out_of_memory or attempt == START_ATTEMPTS - 1:
                         raise RuntimeError(str(failure)) from None
                     penalty += RETRY_HEADROOM
-                    logger.warning("Model Chain: %s. Trying again with %.1f GB more headroom",
-                                   failure, penalty / _GB)
+                    expert_floor = _next_expert_floor(placement)
+                    logger.warning("Model Chain: %s. Trying again with %.1f GB more headroom%s",
+                                   failure, penalty / _GB,
+                                   f" and the experts of at least {expert_floor} layers in "
+                                   "system RAM" if expert_floor > 0 else "")
 
             self._process, self._signature, self._placement = process, signature, placement
             self._identity = _identity(configuration, projector)
@@ -1861,6 +2224,15 @@ class Runtime:
     def running(self) -> bool:
         with self._lock:
             return self._running
+
+    def placement(self) -> mc_llm_context.Placement | None:
+        """Where the running server was actually placed, or ``None``.
+
+        The plan that was carried out, which is what a measurement taken from
+        that server has to be filed under -- see :func:`speed_key`.
+        """
+        with self._lock:
+            return self._placement if self._running else None
 
     def _record(self, configuration: Config, negotiated: Negotiation, observed: int,
                 offload: Offload | None = None) -> None:
@@ -2105,7 +2477,7 @@ class Runtime:
         prompt, reply = self.speed()
         if reply <= 0:
             return ""
-        remember_speed(prompt, reply)
+        remember_speed(prompt, reply, placement=self._placement)
         measured = f"llama.cpp measured {reply:.1f} tokens/s"
         return f"{measured}, prompt at {prompt:.0f} tokens/s" if prompt > 0 else measured
 

@@ -1409,6 +1409,14 @@ activates all twelve. **LLM Studio → Setup now shows what each backbone measur
 on your machine**, beside its size, so this is a fact on the screen rather than
 one to be discovered from a log.
 
+The measurement is kept **per placement as well as per backbone**, because the
+placement moves it further than the model does: the same 26B writes at forty
+tokens a second resident on a card and at five from system RAM, and the rungs
+in between are real speeds rather than an interpolation of those two. So the
+line names where the number came from — *measured here: 31.4 tokens/s (8 expert
+layers in RAM)* — and a rate learned at one placement is never quoted for
+another.
+
 **Where it runs.** The same 12B writes at 40–60 tokens/sec resident on a card.
 But it has to fit *beside* the image checkpoint: a Krea 2 stack wanting ~17.6 GB
 of a 24 GB card leaves about 6 GB, which is a 4B writer, not a 12B. Giving the
@@ -1432,16 +1440,26 @@ prompt could be written faster.
 **For a mixture-of-experts model, "offload less" moves the experts, not the
 blocks.** Experts are the great majority of the weights and are consulted a
 couple at a time; attention is small and every token touches it. So when the
-whole model will not fit, `--cpu-moe` keeps every block's attention on the card
-and puts the experts in system RAM — which for a 26B-A4B is 16.8 GB of weights
-reduced to about 3.7 GB resident, with all forty blocks still on the GPU. Only
-if that is still too much do whole blocks start leaving.
+whole model will not fit, the experts go to system RAM and every block's
+attention stays on the card — which for a 26B-A4B is 16.8 GB of weights reduced
+to about 3.7 GB resident, with all forty blocks still on the GPU.
+
+**And it moves as few of them as the shortfall needs.** `--cpu-moe` is
+all-or-nothing, and a model two gigabytes too large for a card used to answer
+that by reading *thirty-four* blocks of experts across the bus for the rest of
+the session. The ladder now computes how many blocks have to give theirs up —
+six, in that example — and asks for `--n-cpu-moe 6`, keeping the other
+thirty-four blocks' experts resident. If the real load runs out of memory
+anyway, it retries with two more, and only when every block has to give them up
+does it fall back to `--cpu-moe`. Whole blocks leave the card after that and
+not before.
 
 **Flash attention** is added when the build advertises it and something is
-actually offloaded. Both it and `--cpu-moe` are gated on asking the runtime
+actually offloaded. It and both expert flags are gated on asking the runtime
 binary what it supports (`llama-server --help`, cached per build), because a
 flag an older build has never heard of is not a slower server — it is a server
-that exits at startup.
+that exits at startup. A build with only `--cpu-moe` gets the behaviour it has
+always had; one with neither drops blocks as it always did.
 
 There is no sage-attention equivalent: that is a quantised attention kernel for
 diffusion models in PyTorch, and llama.cpp has no counterpart. The remaining
@@ -1575,7 +1593,24 @@ at settings chosen for it.
 | **Qwen 3.5 9B Aggressive** | Modern alternative · ~7.4 GB + 922 MB vision |
 | **Qwen 3.5 9B Defiant Fable** | Creative alternative · ~7.7 GB + 918 MB vision |
 | **Qwen 3.5 4B Aggressive** | Smallest · ~4.5 GB + 676 MB vision |
-| **Gemma 4 26B-A4B Balanced** | Current large baseline · ~16.8 GB + 1.19 GB vision |
+| **Gemma 4 26B-A4B — Quality** | Quality · ~16.9 GB + 1.19 GB vision · Q4_K_P |
+| **Gemma 4 26B-A4B — Balanced** | Recommended 26B · ~13.4 GB + 1.19 GB vision · Q3_K_P |
+| **Gemma 4 26B-A4B — Low Memory** | Low memory · ~10.7 GB + 1.19 GB vision · Q2_K_P |
+| **Gemma 4 26B-A4B Balanced** | Current large baseline · ~16.8 GB + 1.19 GB vision · Q4_K_M |
+
+The last four are **one backbone at four weights** — the same uncensored
+26B-A4B, the same vision projector, the same instructions — so the choice
+between them is a choice about how much of your card the writer may have, not
+about which model writes. **Balanced (Q3_K_P)** is the one to start from;
+**Quality (Q4_K_P)** is the closest to the Q4_K_M entry this extension has
+always shipped, and **Low Memory (Q2_K_P)** is the lowest-memory option and is
+not claimed to be the same quality. The Q4_K_M entry keeps its identity and its
+files, so an installation already on it stays on it and never migrates to
+another quantisation on its own.
+
+Because those four name the same 1.19 GB projector, byte for byte, installing a
+second one does not download it again: the verified copy already on disk is
+linked into the new bundle, and copied where the filesystem will not link.
 
 The button says **Download & Use** when the files are not here and **Use** when
 they are, so what pressing it costs is on the button rather than in a dialog
@@ -2158,13 +2193,33 @@ ones that ship: a hash mismatch, a 404, a missing projector, a full disk, a
 file that is not a GGUF and a promotion that cannot happen each leave the
 previous selection running and nothing half-installed, a bundle already on disk
 is never fetched twice, and a resume only continues from a sidecar that matches.
+It also covers the shared vision projector the four Gemma 26B tiers name: the
+second tier links the verified copy instead of downloading it, copies it where
+the filesystem will not link, and downloads it after all if the file on disk no
+longer hashes to what its manifest claims.
 `test_llm_managed_switch.py` drives the switch through a runtime fake that
 refuses to start a second model while one is up, and checks the order (refuse
 if busy, stop, observe the stop, start, prove it answers) and the rollback that
 restores and restarts the previous backbone. `test_llm_managed_profiles.py`
 checks both halves of a hidden profile: that it really reaches the command line
 and the request payload for a managed backbone, that it reaches neither for a
-hand-picked GGUF, and that nothing it contains is nameable anywhere in Setup.
+hand-picked GGUF, and that nothing it contains is nameable anywhere in Setup —
+including that the three 26B quant tiers each get their own profile, that only
+the two smaller ones buy their cache back with q8_0, and that choosing a
+different quantisation moves no sampler.
+
+Progressive expert offload is covered on both sides of the estimate.
+`test_llm_context.py` holds the arithmetic to the design intent's formula —
+linear in the number of blocks moved, clamped at both ends, discounting nothing
+when the header will not say how many blocks there are — and checks that a
+calibration recorded at one split is never read back at another.
+`test_llm_runtime.py` drives the ladder itself: the fewest blocks that cover the
+shortfall, more for a bigger shortfall, `--cpu-moe` only once every block has to
+give them up, whole blocks only after that, the two-block step a failed start
+forces, and the three builds it has to survive — one with both flags, one with
+only the older one, and one with neither. The measured-speed store is checked
+for the property the placement key exists to give it: two placements of one
+backbone never average into one number.
 
 Creative Mode adds three kinds of test. `tests/test_krea_creative.py` measures the
 Director over hundreds of rolls, because its promises are properties of a

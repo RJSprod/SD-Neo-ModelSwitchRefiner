@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-VERSION = "1"
+VERSION = "2"
 """Bumped when any value below changes.
 
 Recorded in the setup state beside the model id, so an installation can say
@@ -166,6 +166,40 @@ PROFILES: dict[str, ManagedProfile] = {
     "gemma4-26b-a4b-balanced": ManagedProfile(
         profile_id="gemma4-26b-a4b-balanced",
         kv_type_k="f16", kv_type_v="f16",
+    ),
+
+    # -- The baseline, at three other weights ------------------------------- #
+    #
+    # The same 26B-A4B backbone, the same vision projector and the same
+    # instructions, quantised three further ways so that a card which cannot
+    # hold the Q4_K_M baseline can still run the model this application was
+    # tuned against rather than a different one. Nothing below is a *behaviour*
+    # decision: every one of them keeps the empty sampler dict the baseline has,
+    # because the thing being varied is how many bits a weight has and adding a
+    # second variable to that would make the comparison unreadable.
+    #
+    # What does differ is the cache, and only where the reason is memory.
+    "gemma4-26b-a4b-q4kp": ManagedProfile(
+        profile_id="gemma4-26b-a4b-q4kp",
+        kv_type_k="f16", kv_type_v="f16",
+    ),
+    # q8_0 halves the cache for a quality cost that does not show up in a
+    # written image prompt, and it is the term that scales with context rather
+    # than with the file -- so it is the cheapest gigabyte on the card to buy
+    # back, and it is bought here rather than by dropping blocks later. The
+    # quality tier above keeps f16 for the opposite reason: it exists to be as
+    # close to the known Q4 baseline as this file can make it.
+    "gemma4-26b-a4b-q3kp": ManagedProfile(
+        profile_id="gemma4-26b-a4b-q3kp",
+        kv_type_k="q8_0", kv_type_v="q8_0",
+    ),
+    # The same cache as the balanced tier, deliberately. Q2_K_P has already
+    # given up a great deal at the weights, and answering that by quantising
+    # the cache further would stack two lossy decisions on one model and leave
+    # nobody able to say which of them a bad caption came from.
+    "gemma4-26b-a4b-q2kp": ManagedProfile(
+        profile_id="gemma4-26b-a4b-q2kp",
+        kv_type_k="q8_0", kv_type_v="q8_0",
     ),
 }
 

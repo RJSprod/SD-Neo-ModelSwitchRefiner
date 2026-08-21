@@ -62,10 +62,16 @@ def entry_document(**overrides) -> dict:
 
 
 class TestTheShippedCatalogue:
-    def test_all_six_backbones_are_present(self):
-        """Section 4 of the design intent names six, including the baseline the
-        extension is known to behave a certain way on. Losing that one would
-        remove the automated route back to a comparison."""
+    def test_every_shipped_backbone_is_present_and_in_order(self):
+        """Six from the original design intent plus the three 26B quant tiers.
+
+        The order is asserted because it is the order Setup draws, and the quant
+        tiers' own design intent asks for one: quality, then the recommended
+        balance, then the low-memory tier, then the Q4_K_M entry this extension
+        is known to behave a certain way on. Losing the last one would remove
+        the automated route back to a comparison, which is the whole reason the
+        new tiers can be trusted at all.
+        """
         found = managed.catalogue()
 
         assert [model.identifier for model in found] == [
@@ -74,6 +80,9 @@ class TestTheShippedCatalogue:
             "qwen35-9b-aggressive",
             "qwen35-9b-defiant-fable",
             "qwen35-4b-aggressive",
+            "gemma4-26b-a4b-balanced-q4kp",
+            "gemma4-26b-a4b-balanced-q3kp",
+            "gemma4-26b-a4b-balanced-q2kp",
             "gemma4-26b-a4b-balanced",
         ]
 
@@ -129,6 +138,100 @@ class TestTheShippedCatalogue:
         assert not any(word in described.casefold()
                        for word in ("temperature", "top_k", "top-k", "min_p", "q8_0",
                                     "jinja", "penalty"))
+
+
+class TestTheGemma26BQuantTiers:
+    """Three weights of one backbone, and the one already-shipped entry beside them.
+
+    What makes this worth its own class is that the four are *the same model*.
+    Everything that differs between them is a number in a filename, and every
+    place the catalogue treats them as four unrelated downloads -- four
+    projectors, four profiles that drifted apart, a fifth revision -- is a place
+    a user pays for the difference without getting one.
+    """
+
+    TIERS = ("gemma4-26b-a4b-balanced-q4kp", "gemma4-26b-a4b-balanced-q3kp",
+             "gemma4-26b-a4b-balanced-q2kp")
+
+    REVISION = "96c11c22b1128c3c8c655b21557b409f307c557f"
+
+    def test_each_tier_names_its_own_quantisation(self):
+        wanted = {"gemma4-26b-a4b-balanced-q4kp": "Q4_K_P",
+                  "gemma4-26b-a4b-balanced-q3kp": "Q3_K_P",
+                  "gemma4-26b-a4b-balanced-q2kp": "Q2_K_P"}
+
+        for identifier, quant in wanted.items():
+            model = managed.entry(identifier)
+            assert model.model.filename.endswith(f"-{quant}.gguf")
+            assert "QAT" not in model.model.filename
+
+    def test_they_are_pinned_to_an_immutable_revision(self):
+        """Section 3 of the design intent. A branch would still refuse the wrong
+        bytes -- the hash does that -- but it would refuse them as a hash
+        mismatch, where a pin simply keeps working."""
+        for identifier in self.TIERS:
+            model = managed.entry(identifier)
+            assert model.revision == self.REVISION
+            assert model.pinned
+            assert model.model.url(model.repo_id, model.revision).endswith(
+                f"/resolve/{self.REVISION}/{model.model.filename}")
+
+    def test_they_share_one_vision_projector(self):
+        """The same file, byte for byte, in all four. That is what lets the
+        downloader link the second and later copies instead of fetching them."""
+        entries = [managed.entry(name) for name in
+                   self.TIERS + ("gemma4-26b-a4b-balanced",)]
+        projectors = {(model.projector.filename, model.projector.sha256)
+                      for model in entries}
+
+        assert len(projectors) == 1
+
+    def test_the_shipped_q4_k_m_entry_is_untouched(self):
+        """Backward compatibility, and it is a real installation on somebody's
+        disk rather than a principle: the id is what their state file names, and
+        the hashes are what says the bundle they have is still the right one."""
+        model = managed.entry("gemma4-26b-a4b-balanced")
+
+        assert model.model.filename.endswith("-Q4_K_M.gguf")
+        assert model.model.sha256 == (
+            "f8b1da6dc139e6928159e536bc85602adbc1412018871732a878dedcad7ccafd")
+        assert model.profile_id == "gemma4-26b-a4b-balanced"
+
+    def test_each_tier_gets_its_own_hidden_profile(self):
+        """Not one profile shared across three quantisations. The balanced and
+        low-memory tiers buy their cache back with q8_0 and the quality tier
+        does not, which is the difference between them and the reason each has
+        its own id in the state file."""
+        profiles = {managed.entry(name).profile_id for name in self.TIERS}
+
+        assert profiles == {"gemma4-26b-a4b-q4kp", "gemma4-26b-a4b-q3kp",
+                            "gemma4-26b-a4b-q2kp"}
+
+    def test_the_low_memory_tier_is_not_sold_as_an_equal(self):
+        """Section 4's last line. Q2 is the lowest-memory option and the
+        catalogue may not imply it is the same model at a smaller size."""
+        described = managed.entry("gemma4-26b-a4b-balanced-q2kp").describe()
+
+        assert "Low memory" in described
+        assert "Recommended" not in described
+
+    def test_the_recommended_tier_is_the_middle_one(self):
+        assert "Recommended" in managed.entry("gemma4-26b-a4b-balanced-q3kp").role
+        assert "Recommended" not in managed.entry("gemma4-26b-a4b-balanced-q4kp").role
+
+    def test_the_registry_version_moved_with_them(self):
+        """A catalogue that gained three entries and kept its version number is
+        a catalogue no staged download can tell it has to restart against."""
+        assert managed.entry("gemma4-26b-a4b-balanced-q3kp").registry_version != "2026.08.20-1"
+
+    def test_no_mtp_artifact_reaches_these_entries(self):
+        """Section 10: the MTP head is published for a different, QAT target and
+        must not be attached to these files on the strength of the family name."""
+        for identifier in self.TIERS:
+            model = managed.entry(identifier)
+            assert "MTP" not in model.model.filename.upper()
+            assert "MTP" not in model.repo_id.upper()
+            assert "QAT" not in model.repo_id.upper()
 
 
 class TestRefusals:
