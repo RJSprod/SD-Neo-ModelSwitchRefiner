@@ -1458,19 +1458,98 @@
     border-left-color: var(--error-text-color, var(--color-accent, currentColor));
 }
 
-/* Ten axis rows is a lot of vertical space at Gradio's default block sizing,
-   and the drawer they live in is one somebody opens to make a quick change
-   rather than to read. Tightening the rows is what keeps the whole table on
-   screen at once, which is the difference between a table you can scan and ten
-   controls you scroll past. */
-#mc-krea-creative-controls [id^="mc-krea-creative-axis-"] {
-    align-items: center;
-    gap: 0.5em;
-    margin-bottom: 0.1em;
+/* The compact panel: active directions, and the editor for whichever one is
+   being edited.
+
+   These are class selectors rather than id selectors because the same panel is
+   built twice -- once in txt2img and once in LLM Studio -- and an id is unique
+   to a page while the layout is one layout. Every class is this extension's
+   own, every colour and radius is one of the host's custom properties, and no
+   selector below names anything Gradio generated.
+
+   Nothing here hides or shows anything. Visibility is Python's: a Natural axis
+   has no row because the row's component is visible=False, which takes it out
+   of the layout entirely rather than leaving a gap where it used to be. */
+
+.mc-creative-summary {
+    margin: 0.35em 0 0.15em;
+    font-size: var(--text-sm, 0.85em);
+    opacity: 0.85;
 }
 
-#mc-krea-creative-controls [id^="mc-krea-creative-axis-"] label {
+.mc-creative-direction {
+    align-items: center;
+    gap: 0.5em;
+    margin-bottom: 0.15em;
+    /* A flex child's default minimum is its content width, which is what turns
+       a long "excludes a, b, c" line into a horizontal scroll bar on a phone
+       instead of a wrap. */
+    flex-wrap: wrap;
+}
+
+.mc-creative-direction-summary {
+    flex: 1 1 12em;
+    min-width: 0;
     font-size: var(--text-sm, 0.85em);
+    line-height: 1.4;
+}
+
+.mc-creative-direction-summary p {
+    margin: 0;
+}
+
+.mc-creative-editor {
+    border-left: 3px solid var(--color-accent, var(--border-color-primary));
+    padding: 0.5em 0.6em;
+    margin: 0.15em 0 0.5em;
+    border-radius: var(--block-radius, 8px);
+    background: var(--background-fill-secondary);
+}
+
+.mc-creative-editor-title p,
+.mc-creative-editor-title h3 {
+    margin: 0 0 0.35em;
+    font-size: var(--text-md, 1em);
+}
+
+.mc-creative-editor-actions,
+.mc-creative-profile-actions,
+.mc-creative-profile-bar,
+.mc-creative-profile-name {
+    flex-wrap: wrap;
+    gap: 0.4em;
+}
+
+.mc-creative-profiles {
+    margin-bottom: 0.4em;
+}
+
+.mc-creative-add {
+    margin-top: 0.2em;
+}
+
+/* Phones, and the narrow right-hand column a wide Forge layout leaves for a
+   script accordion. Everything becomes one column: a row that cannot fit its
+   children side by side wraps instead of scrolling, and nothing here sets a
+   width that a 320px viewport cannot honour. */
+@media (max-width: 480px) {
+    .mc-creative-direction,
+    .mc-creative-editor-actions,
+    .mc-creative-profile-actions,
+    .mc-creative-profile-bar,
+    .mc-creative-profile-name {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .mc-creative-direction-summary {
+        flex: 1 1 auto;
+    }
+
+    .mc-creative-profile-actions button,
+    .mc-creative-editor-actions button {
+        width: 100%;
+    }
 }
 
 /* The recipe view is a record, not prose: the ids in it line up with what the

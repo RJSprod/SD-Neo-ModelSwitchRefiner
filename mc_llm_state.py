@@ -123,6 +123,13 @@ DEFAULTS: dict = {
     # does art direction, and somebody who has spent five minutes configuring
     # ten axes in LLM Studio should not have to do it again in txt2img.
     #
+    # These are the *current* settings, not the saved ones. Named configurations
+    # live in mc_creative_profiles, in their own file under the WebUI data
+    # directory, because a list of complete configurations is a different shape
+    # from one flat mapping of what the panel is set to right now -- and because
+    # every save of a slider position would otherwise rewrite somebody's saved
+    # work.
+    #
     # Every default here is a fallback for a headless read; the authoritative
     # ones are the creativity package's own defaults.json, which
     # mc_creative_krea.settings() layers over these.
@@ -132,7 +139,15 @@ DEFAULTS: dict = {
     "krea_creative_anti_repetition": True,
     "krea_creative_axis_modes": {},
     "krea_creative_fixed": {},
+    # Treatments a Vary axis must never choose, by axis. A modifier of Vary and
+    # not a fourth mode: "vary the lighting, but never harsh noon" is a statement
+    # about how to vary, and making it a mode would force somebody who wants two
+    # treatments gone to stop varying altogether.
+    "krea_creative_excluded": {},
     "krea_creative_loras": "",
+    # The named profile the settings above were last loaded from, for the panel
+    # to open showing. A label on the settings rather than a source of them.
+    "krea_creative_profile": "",
     # The variant ids of the last few rolls, newest last. Ids, never prompts:
     # what anti-repetition needs to know is "did we just use the impasto
     # medium", and storing the prompts to answer that would be keeping a

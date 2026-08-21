@@ -752,7 +752,7 @@ class TestTheRollRunsInsideTheGeneration:
         script = creative_script.ScriptKreaCreative()
         values = [10, director.RANDOM_SEED, True, ""]
         for _key in library_module.library().axis_keys:
-            values.extend([director.VARY, None])
+            values.extend([director.VARY, None, []])
 
         class Processing:
             def __init__(self):

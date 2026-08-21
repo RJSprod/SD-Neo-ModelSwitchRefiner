@@ -11,8 +11,10 @@ delivered:    2026-08-20, with krea2_creative_mode_design_intent.txt
 library:      Krea 2 Creative Mode Starter Library
 version:      1.0.0 (library_manifest.json), schema_version 1
 contents:     10 axis files, 164 variant families
-unchanged:    yes. Not one byte of the package is edited. The directory layout
-              inside creativity/ is the layout inside the ZIP.
+unchanged:    every file but one. The directory layout inside creativity/ is
+              the layout inside the ZIP, and the vocabulary, policy, rules,
+              examples and acceptance cases are byte-for-byte as delivered.
+              defaults.json is edited locally — see "the one edited file" below.
 
 # zip digest (sha256, as received)
 0eb5c7133a6c4560b432d5e2eaa96fd319d97f604e142c637755d18d17c2305d  krea2_creativity_library.zip
@@ -32,7 +34,7 @@ baaa36878d545cdc70d893b68657d31aca1381634871fc778101cb21e3f78fb9  axes/style.jso
 38a6748da11a20003721d2d3af68695dbff8ec31615844db6da02915e5ddf07f  axes/viewpoint.json
 6ef052c945b667404ea50fa2c65fddb80aa33b3dd106c04f1a786db0b840e5e6  compatibility.json
 e10fcd4f7120042c2cb2e5ba3d2863353a55e1ffaaa2ddc5f67b5d2a3bccb2b1  creativity_policy.json
-f4d95add5800461133f3460e83c5ab4c475b2f91a30fbf2f6da8605eab0b73b0  defaults.json
+1eea9429f4b070ae85341372d06292651a9d7105feabce6638a34bea33c32fee  defaults.json  (edited; as delivered: f4d95add5800461133f3460e83c5ab4c475b2f91a30fbf2f6da8605eab0b73b0)
 b1a1c6eba6ee53da8d98aba7b64faa25ee87a02691b1f03b55ceef2f2492c68a  developer_pseudocode.txt
 fdd4d4069a7c3831f9920fd0703c05e62d16c887bac5ca4dbbe5ab3ea3ac93f0  examples/car_creativity_10.json
 abbbb2b4cfd0aec4c4fd4813aec92e4fb5255c370d8d34ccc789b9f8be7a346b  examples/car_creativity_2.json
@@ -42,6 +44,22 @@ abbbb2b4cfd0aec4c4fd4813aec92e4fb5255c370d8d34ccc789b9f8be7a346b  examples/car_c
 288aeb86f2226f43b671c38dedb349694d10e0c69cea7afedece09cb80c474da  library_manifest.json
 421cd2336478964d2082dd67e44b29ad2a931da47d5ea5cb882a93ec3fdfc975  schema.json
 75a559562454622a9b5b5459f78a8413dbdad3893187b62bdbdd2466d9995b61  tests/acceptance_cases.json
+
+# the one edited file
+
+defaults.json as delivered sets nine of the ten axes to Vary. That makes a fresh
+install arrive with nine art-direction decisions already taken, none of which the
+user made and none of which is visible until they open the drawer and read ten
+rows. The fresh state is now every axis Natural, no Fixed values and no
+exclusions: Creative Mode influences nothing until somebody adds a direction, and
+what it influences is exactly the list of directions they added.
+
+Nothing else in the package moved. The Vary-by-default choice is a *preference*
+about how the feature should open, which is what a defaults file is for, and it
+is the one file in here that describes this installation rather than the
+vocabulary. `excluded_values` is added to it for the same reason the panel has
+exclusions at all — see §3 of the Creative Mode rebuild spec — and an absent key
+still reads as "no exclusions".
 
 # why it is vendored rather than fetched
 

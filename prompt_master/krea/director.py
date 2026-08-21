@@ -29,6 +29,13 @@ eligible, how strongly the chosen one is expressed, and how hard recent choices
 are pushed away. All four scale, which is why Creativity 2 with one Vary axis
 still differs from Creativity 10 with the same one axis.
 
+Vary takes one modifier and it is not a fourth mode: **excluded ids**. "Vary the
+lighting, but never harsh noon" is a statement about *how* to vary, and making it
+a mode would force a user who wants two treatments gone to give up varying
+altogether. The excluded ids come out of the pool before anything is weighed, and
+if that empties the pool the axis is skipped with a note rather than being handed
+back the value it was told not to use.
+
 **Fixed** repeats a chosen variant every roll. It sits *below* the source prompt
 and *above* Vary: a user who pinned a texture gets it until they say otherwise,
 unless their own words that roll say something else.
@@ -67,6 +74,15 @@ NATURAL = "natural"
 VARY = "vary"
 FIXED = "fixed"
 MODES = (NATURAL, VARY, FIXED)
+
+REPLAY = "replay"
+"""Where a replayed line came from. Not a mode -- no axis can be set to it.
+
+:attr:`CreativeRecipeItem.source` says which of the user's decisions produced a
+line, and a replayed recipe's lines were produced by none of them: they came out
+of a record. Labelling them ``vary`` would make the diagnostics view claim the
+Director chose something it did not choose.
+"""
 
 AxisMode = Literal["natural", "vary", "fixed"]
 
@@ -140,23 +156,51 @@ def derive(creative_seed: int) -> tuple[int, int]:
 
 @dataclass(frozen=True)
 class AxisSetting:
-    """What the user asked for on one axis."""
+    """What the user asked for on one axis.
 
-    mode: AxisMode = VARY
+    Natural by default, and that default is load-bearing. A missing axis -- one
+    the package added after a user's settings were written, one a profile from
+    an older schema does not mention -- has to fail *neutral*: contributing
+    nothing to the brief is a thing the user can see the absence of, whereas
+    silently varying an axis nobody configured is art direction arriving from
+    nowhere.
+
+    ``excluded_ids`` modifies Vary and only Vary. It is the answer to "vary this,
+    but never that": the Director removes those ids from the eligible pool before
+    it weighs anything. Fixed ignores it, because a pin *is* the decision and an
+    exclusion that could cancel one would leave the axis meaning two things at
+    once.
+    """
+
+    mode: AxisMode = NATURAL
     fixed_id: str | None = None
+    excluded_ids: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        # Coerced rather than trusted: these arrive from a JSON file, a Gradio
+        # multiselect and an infotext line, and one of the three hands over a
+        # list every time. A frozenset of str is what selection wants to ask
+        # ``in`` of, and building it here is what stops each caller doing it.
+        object.__setattr__(self, "excluded_ids", frozenset(
+            str(identifier) for identifier in self.excluded_ids or () if str(identifier)))
 
     @property
     def valid(self) -> bool:
         return self.mode in MODES
+
+    def excludes(self, identifier: str) -> bool:
+        """Whether Vary on this axis is forbidden from choosing ``identifier``."""
+        return str(identifier) in self.excluded_ids
 
 
 @dataclass(frozen=True)
 class CreativeRecipeItem:
     """One line of art direction, and where it came from.
 
-    ``source`` is ``"vary"`` or ``"fixed"`` and is not decoration: it is what
-    lets the diagnostic view show a user which of their pins held and which
-    lines the Director chose, without them having to remember their own settings.
+    ``source`` is ``"vary"``, ``"fixed"`` or ``"replay"`` and is not decoration:
+    it is what lets the diagnostic view show a user which of their pins held,
+    which lines the Director chose, and which came back out of a recorded recipe
+    rather than being chosen at all.
     """
 
     axis: str
@@ -185,6 +229,23 @@ class CreativeRecipe:
     locked: tuple[str, ...] = ()
     library_version: str = ""
     brief: str = ""
+    notes: tuple[str, ...] = ()
+    """Anything the roll decided *not* to do, in words, for a person to read.
+
+    Exclusions are the reason this exists. An axis whose whole eligible pool has
+    been excluded cannot be directed, and the two wrong answers are both silent:
+    choosing an excluded treatment anyway, or dropping the axis with nothing said
+    and letting somebody conclude that exclusions break Vary. The axis is skipped
+    and the skip is written down, here, where the diagnostics view and the log
+    both read it.
+    """
+    replayed: bool = False
+    """Whether these items were replayed from a record rather than chosen.
+
+    A replayed recipe is not a roll and must never be described as one: the
+    Director drew nothing, the history weighted nothing, and the seed on it is
+    the seed the original roll resolved. See :func:`replay`.
+    """
 
     def __bool__(self) -> bool:
         """Whether this roll has anything to say.
@@ -327,18 +388,38 @@ def _preference_boost(lib, variant, chosen) -> float:
     return boost
 
 
-def _choose_variant(lib, axis, creativity, rng, chosen, recent, penalty):
-    """One variant for ``axis``, or ``None`` if nothing eligible fits.
+def _choose_variant(lib, axis, creativity, rng, chosen, recent, penalty, excluded=()):
+    """One variant for ``axis`` as ``(variant, note)``; ``variant`` may be ``None``.
 
-    The three filters are applied in order of how badly they should be allowed
-    to fail. ``min_creativity`` is absolute -- an extreme-only variant at
-    Creativity 2 would break the scale. Compatibility is absolute too; an
-    incoherent pair is worse than a missing line. Anti-repetition is a weight,
-    because "avoid what you used last time" must never become "produce nothing".
+    The four filters are applied in order of how badly they should be allowed to
+    fail. Exclusions are absolute and come first, because a user who said "never
+    this" has said something about every roll rather than about this one.
+    ``min_creativity`` is absolute too -- an extreme-only variant at Creativity 2
+    would break the scale -- and so is compatibility; an incoherent pair is worse
+    than a missing line. Anti-repetition is only a weight, because "avoid what you
+    used last time" must never become "produce nothing".
+
+    The note is the difference between the two ways this returns ``None``. An
+    axis with nothing eligible at this position is ordinary and says nothing; an
+    axis whose every eligible treatment the user excluded is a configuration that
+    cannot do what it looks like it does, and saying so is the whole point of
+    letting exclusions be absolute.
     """
+    excluded = frozenset(excluded or ())
     eligible = [v for v in axis.eligible(creativity) if _compatible(lib, v, chosen)]
     if not eligible:
-        return None
+        return None, ""
+
+    if excluded:
+        kept = [v for v in eligible if v.identifier not in excluded]
+        if not kept:
+            # Reached only when compatibility has already narrowed the pool --
+            # a wholly excluded axis is dropped before the draw, in roll(). So
+            # the sentence names the combination rather than the exclusions
+            # alone, which would send somebody looking in the wrong place.
+            return None, (f"{axis.label}: everything that fits the rest of this roll is "
+                          "excluded, so the axis was left out of the brief.")
+        eligible = kept
 
     weights = [v.weight * _preference_boost(lib, v, chosen) for v in eligible]
     if penalty > 0 and recent:
@@ -351,7 +432,7 @@ def _choose_variant(lib, axis, creativity, rng, chosen, recent, penalty):
         if sum(damped) > 0:
             weights = damped
 
-    return _weighted_choice(rng, eligible, weights)
+    return _weighted_choice(rng, eligible, weights), ""
 
 
 def _active_axes(lib, eligible, creativity, rng) -> list[str]:
@@ -436,12 +517,20 @@ def assemble(items, avoid=()) -> str:
 
 
 def default_settings(lib=None) -> dict:
-    """The package's own fresh-install axis modes."""
+    """The package's own fresh-install axis settings.
+
+    Natural for anything the package does not name, which on a fresh install is
+    every axis: a new configuration should contain no art direction the user did
+    not ask for. An axis missing from ``defaults.json`` is therefore silent
+    rather than varied.
+    """
     lib = lib or library_module.library()
     modes = lib.defaults.get("axis_modes") or {}
     fixed = lib.defaults.get("fixed_values") or {}
-    return {key: AxisSetting(mode=str(modes.get(key, VARY)).casefold(),
-                             fixed_id=fixed.get(key))
+    excluded = lib.defaults.get("excluded_values") or {}
+    return {key: AxisSetting(mode=str(modes.get(key, NATURAL)).casefold(),
+                             fixed_id=fixed.get(key),
+                             excluded_ids=frozenset(excluded.get(key) or ()))
             for key in lib.axis_keys}
 
 
@@ -473,6 +562,7 @@ def roll(source: str, creativity: int, creative_seed=RANDOM_SEED, settings=None,
 
     chosen: dict = {}
     items: list[CreativeRecipeItem] = []
+    notes: list[str] = []
 
     def record(axis, variant, strength, origin):
         chosen[axis.key] = variant
@@ -501,17 +591,36 @@ def roll(source: str, creativity: int, creative_seed=RANDOM_SEED, settings=None,
         record(axis, variant, fixed_strength, FIXED)
 
     if tier in library_module.TIERS:
-        eligible = [key for key in lib.axis_keys
-                    if (settings.get(key) or AxisSetting()).mode == VARY
-                    and key not in locked
-                    and key not in chosen
-                    and lib.axis(key) is not None
-                    and lib.axis(key).eligible(creativity)]
+        # An axis every one of whose eligible treatments has been excluded is
+        # dropped here rather than in the draw. Left in, it would consume one of
+        # the activation slots the Creativity position allows and then produce
+        # nothing -- so a user who excluded a whole small axis would find their
+        # other axes quietly directed less often, with no visible cause.
+        eligible = []
+        for key in lib.axis_keys:
+            setting = settings.get(key) or AxisSetting()
+            axis = lib.axis(key)
+            if setting.mode != VARY or key in locked or key in chosen or axis is None:
+                continue
+            available = axis.eligible(creativity)
+            if not available:
+                continue
+            if setting.excluded_ids and all(variant.identifier in setting.excluded_ids
+                                            for variant in available):
+                notes.append(f"{axis.label}: every treatment available at Creativity "
+                             f"{creativity} is excluded, so the axis was left out of "
+                             "the brief.")
+                continue
+            eligible.append(key)
         for key in _active_axes(lib, eligible, creativity, rng):
             axis = lib.axis(key)
-            variant = _choose_variant(lib, axis, creativity, rng, chosen, recent, penalty)
+            setting = settings.get(key) or AxisSetting()
+            variant, note = _choose_variant(lib, axis, creativity, rng, chosen, recent,
+                                            penalty, setting.excluded_ids)
             if variant is not None:
                 record(axis, variant, tier, VARY)
+            elif note:
+                notes.append(note)
 
     order = {key: position for position, key in enumerate(lib.axis_keys)}
     items.sort(key=lambda item: order.get(item.axis, len(order)))
@@ -520,4 +629,92 @@ def roll(source: str, creativity: int, creative_seed=RANDOM_SEED, settings=None,
     return CreativeRecipe(
         creative_seed=resolved, llm_seed=llm_seed, creativity=creativity,
         items=tuple(items), avoid=avoid, locked=tuple(sorted(locked)),
-        library_version=lib.version, brief=assemble(items, avoid))
+        library_version=lib.version, brief=assemble(items, avoid),
+        notes=tuple(notes))
+
+
+def replay(source: str, creativity: int, creative_seed, llm_seed, recipe_ids,
+           lib=None) -> CreativeRecipe:
+    """The recipe a record describes, rebuilt exactly, with nothing drawn.
+
+    This is the second of the two honest ways to reproduce a creative image, and
+    it is the one for continuing from an old idea rather than re-making an old
+    picture. The first -- take the final expanded prompt out of the file and skip
+    the writer entirely -- is what an ordinary infotext paste does.
+
+    Nothing here is random and nothing here consults history. That is the whole
+    point: a fresh roll at the recorded seed would re-derive the same *draw*, but
+    the draw is weighted by recent choices, and the recent choices of a machine
+    six months later are not the recent choices the original roll saw. So the
+    recorded ids are used as ids, in the library's own axis order, at the tier
+    the recorded position calls for.
+
+    ``recipe_ids`` is the ``axis=variant_id`` form :attr:`CreativeRecipe.compact`
+    writes. Ids the current package no longer has are dropped with a note rather
+    than substituted: a replay that quietly swapped a treatment would be a
+    reproduction that is not one, which is exactly the failure this exists to
+    avoid.
+    """
+    lib = lib or library_module.library()
+    creativity = max(0, min(10, int(creativity)))
+    resolved = resolve_seed(creative_seed)
+    try:
+        writer_seed = int(llm_seed)
+    except (TypeError, ValueError):
+        writer_seed = derive(resolved)[1]
+
+    strength = library_module.tier_at_or_below(lib.policy.tier(creativity))
+    order = {key: position for position, key in enumerate(lib.axis_keys)}
+
+    items: list[CreativeRecipeItem] = []
+    notes: list[str] = []
+    for axis_key, variant_id in parse_recipe(recipe_ids):
+        axis = lib.axis(axis_key)
+        variant = axis.variant(variant_id) if axis is not None else None
+        if variant is None:
+            notes.append(f"{axis_key}={variant_id} is not in creativity library "
+                         f"{lib.version}, so that line could not be replayed.")
+            continue
+        items.append(CreativeRecipeItem(
+            axis=axis.key, label=axis.label, variant_id=variant.identifier,
+            variant_label=variant.label, expression=variant.expression(strength),
+            strength=strength, source=REPLAY))
+
+    items.sort(key=lambda item: order.get(item.axis, len(order)))
+    avoid = _discouraged(lib, source, creativity) if items else ()
+    return CreativeRecipe(
+        creative_seed=resolved, llm_seed=writer_seed, creativity=creativity,
+        items=tuple(items), avoid=avoid,
+        locked=tuple(sorted(explicit_locks(source, lib))),
+        library_version=lib.version, brief=assemble(items, avoid),
+        notes=tuple(notes), replayed=True)
+
+
+def parse_recipe(recipe_ids) -> tuple[tuple[str, str], ...]:
+    """``"medium=oil_impasto, mood=monumental"`` as ordered ``(axis, id)`` pairs.
+
+    Accepts the compact string a metadata field holds and the pairs a caller
+    already has, because both spellings turn up: one comes out of a PNG, the
+    other out of a recipe still in memory. Anything that is not a pair is
+    dropped -- this parses somebody's file, and a malformed line is a line to
+    ignore rather than an exception to raise into a paste.
+    """
+    if not recipe_ids:
+        return ()
+    if isinstance(recipe_ids, str):
+        entries = [part.strip() for part in recipe_ids.split(",")]
+    else:
+        entries = list(recipe_ids)
+
+    parsed: list[tuple[str, str]] = []
+    for entry in entries:
+        if isinstance(entry, (list, tuple)) and len(entry) == 2:
+            axis_key, variant_id = entry
+        elif isinstance(entry, str) and "=" in entry:
+            axis_key, variant_id = entry.split("=", 1)
+        else:
+            continue
+        axis_key, variant_id = str(axis_key).strip(), str(variant_id).strip()
+        if axis_key and variant_id:
+            parsed.append((axis_key, variant_id))
+    return tuple(parsed)
