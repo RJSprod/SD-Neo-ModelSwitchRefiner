@@ -878,6 +878,13 @@ class Processing:
         self.extra_generation_params = {}
 
 
+class _Result:
+    """The half of a Processed the notice is written on."""
+
+    def __init__(self):
+        self.comments = ""
+
+
 @pytest.fixture
 def script():
     import model_chain_krea_creative as creative_script
@@ -1077,6 +1084,67 @@ class TestTheProcessingHook:
 
         assert p.prompt == "car"
         assert p.extra_generation_params == {}
+
+    def test_a_roll_that_fails_says_so_on_the_result(self, script, client,
+                                                     monkeypatch):
+        """Reported from a user's log: llama-server would not start, so every
+        Creative generation quietly used the prompt as typed. Falling back is
+        right; falling back in silence is what makes it read as "Creative Mode
+        does nothing" rather than "the writer is down"."""
+        def explode(*args, **kwargs):
+            raise RuntimeError("llama-server is not running")
+            yield  # pragma: no cover - generator shape only
+
+        monkeypatch.setattr(sessions, "krea", explode)
+        p = generate(script, "car")
+        processed = _Result()
+        script.postprocess(p, processed)
+
+        assert "Creative Mode did not write this prompt" in processed.comments
+        assert "llama-server is not running" in processed.comments
+
+    def test_a_roll_that_worked_says_nothing_at_all(self, script, client):
+        p = generate(script, "car")
+        processed = _Result()
+        script.postprocess(p, processed)
+
+        assert processed.comments == ""
+
+    def test_the_reason_is_not_carried_into_the_next_generation(self, script, client,
+                                                                monkeypatch):
+        """One generation's failure explains that generation and no other."""
+        real = sessions.krea
+        attempts: list = []
+
+        def first_one_fails(*args, **kwargs):
+            attempts.append(1)
+            if len(attempts) > 1:
+                return real(*args, **kwargs)
+
+            def failing():
+                raise RuntimeError("llama-server is not running")
+                yield  # pragma: no cover - generator shape only
+
+            return failing()
+
+        monkeypatch.setattr(sessions, "krea", first_one_fails)
+        generate(script, "car")
+        script.postprocess(Processing("car"), _Result())
+
+        second = generate(script, "car")
+        processed = _Result()
+        script.postprocess(second, processed)
+
+        assert second.prompt != "car"
+        assert processed.comments == ""
+
+    def test_creative_mode_off_says_nothing(self, script, client):
+        """The hook is not reached, so there is nothing to explain."""
+        p = generate(script, "car", enabled=False)
+        processed = _Result()
+        script.postprocess(p, processed)
+
+        assert processed.comments == ""
 
     def test_a_checkpoint_that_is_not_krea_generates_the_typed_prompt(
             self, script, client, monkeypatch):
@@ -1928,6 +1996,41 @@ class TestTheCompactPanel:
         updates = self.rendered(built, _fire(built, panel.profile, "Editorial"))
         assert updates[id(panel.rows["medium"])]["visible"] is True
         assert updates[id(panel.modes["medium"])]["value"] == director.VARY
+
+    def test_a_choice_made_in_the_panel_reaches_the_writer(self, built, client, lib):
+        """The whole point of the panel, end to end, driven the way a browser
+        drives it: add a direction, pin a treatment, press Generate, and the
+        pinned treatment is in the brief the writer was handed.
+
+        Reported as "I fixed Style to anime and the result did not work" — which
+        it did not, because llama-server would not start (see
+        ``TestTheProcessingHook``). This is what proves the other half."""
+        panel = self.panel(built)
+        pinned = lib.axis("style").variants[0]
+        _fire(built, panel.add, "style")
+        _fire(built, panel.modes["style"], director.FIXED)
+        _fire(built, panel.fixed["style"], pinned.identifier)
+
+        # The values Forge sends: whatever the panel's own controls hold.
+        values = [getattr(control, "value", None) for control in built.arguments]
+        values[0] = True
+        p = Processing("a car")
+        built.before_process(p, *values)
+
+        recipe = mc_creative_krea.creative.last.recipe
+        assert [item.variant_id for item in recipe.items] == [pinned.identifier]
+        assert pinned.label.casefold() in client.turn.casefold()
+        assert p.prompt != "a car"
+
+    def test_what_the_panel_holds_is_what_the_generation_reads(self, built):
+        """The contract that is easiest to break and hardest to notice: the
+        argument list is positional both ways."""
+        panel = self.panel(built)
+
+        assert built.arguments[:2] == [built.components["enabled"],
+                                       built.components["creativity"]]
+        assert built.arguments[2:5] == list(panel.settings_controls)
+        assert built.arguments[5:] == list(panel.axis_controls)
 
     def test_one_render_answers_for_every_control_it_owns(self, built):
         """The contract every handler relies on: a render is positional, so an

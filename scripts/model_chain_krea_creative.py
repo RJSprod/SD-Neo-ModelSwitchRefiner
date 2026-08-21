@@ -352,9 +352,10 @@ class ScriptKreaCreative(scripts.Script):
 
     def __init__(self):
         super().__init__()
-        # Filled in by ui(); the shell never reads it, and a test asking what
-        # the panel is made of has something to ask.
+        # Filled in by ui(); the shell never reads either, and a test asking
+        # what the panel is made of and what it sends has something to ask.
         self.components: dict = {}
+        self.arguments: list = []
         self.panel: mc_creative_panel.Panel | None = None
         # The native prompt box, handed over by after_component. Only the
         # restore action writes to it. See PROMPT_ELEM_ID.
@@ -364,6 +365,10 @@ class ScriptKreaCreative(scripts.Script):
         # the cost of getting that wrong is not a duplicate image but an LLM
         # request that begins while the first is still streaming.
         self._rolling = False
+        # Why this generation's prompt was not expanded, if it was not. Written
+        # by the hook that tried and read by postprocess, which is the only
+        # place a sentence can reach the person who pressed Generate.
+        self._complaint = ""
 
     def title(self):
         return "Krea Creative Mode"
@@ -487,9 +492,11 @@ class ScriptKreaCreative(scripts.Script):
         # this script's own arguments and reach neither Model Chain's preset
         # list nor its infotext.
         if panel is None:
-            return [enabled, creativity]
-        return ([enabled, creativity] + list(panel.settings_controls)
-                + list(panel.axis_controls))
+            self.arguments = [enabled, creativity]
+        else:
+            self.arguments = ([enabled, creativity] + list(panel.settings_controls)
+                              + list(panel.axis_controls))
+        return list(self.arguments)
 
     def _wire(self, enabled, creativity, status, controls, show, recipe, expanded,
               pasted, exactly, restore, disarm):
@@ -579,6 +586,7 @@ class ScriptKreaCreative(scripts.Script):
         """
         if not enabled:
             return
+        self._complaint = ""
         if self._rolling:
             # A process_images() nested inside our own roll. There is nothing to
             # do for it and a great deal to get wrong.
@@ -601,6 +609,34 @@ class ScriptKreaCreative(scripts.Script):
                     f"{len(written.generation):,}", f"{len(written.roll.source):,}",
                     written.roll.creativity, written.roll.creative_seed)
 
+    def postprocess(self, p, processed, *args):
+        """Say on the result when Creative Mode did not write the prompt.
+
+        Failure is always "generate what the user typed", and that is right: a
+        language model that will not answer is not a reason to refuse a
+        generation somebody asked for. But it was said only in the console, and
+        what a user sees is an image made from their four words with no
+        indication that anything was meant to happen -- which reads as "Creative
+        Mode does nothing", not as "the writer is down".
+
+        So the reason goes on the result, beside the image, in the place this
+        extension already puts the sentence when Stage 2 fails. The roll runs in
+        ``before_process`` and this is the first hook after it that is handed
+        something the user will look at.
+        """
+        complaint = self._complaint
+        self._complaint = ""
+        if not complaint or processed is None:
+            return
+        try:
+            processed.comments += (
+                f"\nModel Chain: Creative Mode did not write this prompt — {complaint}. "
+                "The image was generated from the prompt exactly as typed. The console "
+                "and LLM Studio → Setup say more.")
+        except Exception:
+            logger.debug("Model Chain: could not put the Creative Mode notice on the "
+                         "result", exc_info=True)
+
     def _roll(self, p, values):
         """One creative roll for this generation, or ``None`` to leave it alone.
 
@@ -621,6 +657,7 @@ class ScriptKreaCreative(scripts.Script):
         source = str(getattr(p, "prompt", "") or "").strip()
         if not source:
             logger.info("Model Chain: Creative Mode has no source prompt to work from")
+            self._complaint = "there was no prompt to work from"
             return None
 
         session = mc_creative_krea.creative
@@ -643,17 +680,20 @@ class ScriptKreaCreative(scripts.Script):
                     elif event.kind == sessions.CANCELLED:
                         logger.info("Model Chain: the Creative Mode roll was stopped; "
                                     "the generation continues with the typed prompt")
+                        self._complaint = "the roll was stopped"
                         break
                     elif event.kind == sessions.FAILED:
                         logger.warning("Model Chain: the Creative Mode roll failed (%s); "
                                        "generating from the typed prompt instead",
                                        event.text)
+                        self._complaint = event.text
                         break
                     elif event.kind == sessions.DONE:
                         written = True
                         break
-        except Exception:
+        except Exception as exc:
             errors.report("Model Chain: the Creative Mode roll failed", exc_info=True)
+            self._complaint = str(exc) or exc.__class__.__name__
             return None
         finally:
             events.close()
@@ -666,5 +706,6 @@ class ScriptKreaCreative(scripts.Script):
         if last is None or not last.expanded.strip():
             logger.warning("Model Chain: the Creative Mode roll produced nothing; "
                            "generating from the typed prompt instead")
+            self._complaint = "the writer returned nothing"
             return None
         return mc_creative_krea.prepare(last, loras, settings)

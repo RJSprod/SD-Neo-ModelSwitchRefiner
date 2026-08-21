@@ -742,6 +742,141 @@ class TestAStartThatDidNotComeUp:
         assert not runtime.read_failure("srv update_slots: all slots are idle")
 
 
+class TestTheCommandThatStartsIt:
+    """The command line, as the vendored launcher actually assembles it.
+
+    Reported from a user's ``llama-server.log``: every start of the language
+    model died at load with ``invalid value for main_gpu: 0 (available devices:
+    0)``, so LLM Studio could not answer and Creative Mode generated the prompt
+    as typed on every press. The installation was on CPU placement, where the
+    vendored launcher writes ``--device none`` -- no devices -- and
+    ``--split-mode none --main-gpu 0`` -- use device 0 -- in the same line.
+    """
+
+    @pytest.fixture
+    def launched(self, monkeypatch, tmp_path):
+        """One real ``LlamaProcess.start``, with the OS boundary faked."""
+        from prompt_master.inference import llama_process
+
+        runtime.runtime._new_process()  # installs the repair, as a start does
+        seen: list[list[str]] = []
+
+        class FakePopen:
+            def __init__(self, command, *args, **kwargs):
+                seen.append([str(part) for part in command])
+                self.args = command
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        # Patched on the real module rather than on the stand-in, so the
+        # stand-in's own Popen -- the thing under test -- still runs.
+        import subprocess
+
+        monkeypatch.setattr(subprocess, "Popen", FakePopen)
+
+        def start(device, gpu_layers="all"):
+            process = llama_process.LlamaProcess()
+            process.start(tmp_path / "llama-server", tmp_path / "model.gguf", None,
+                          0, device, 8192, tmp_path / "log.txt",
+                          gpu_layers=gpu_layers)
+            process.process = None
+            return seen[-1]
+
+        return start
+
+    def test_a_gpu_placement_keeps_the_command_it_has_always_had(self, launched):
+        command = launched("CUDA0")
+
+        assert "--device" in command and command[command.index("--device") + 1] == "CUDA0"
+        assert "--main-gpu" in command
+        assert "--split-mode" in command
+
+    def test_a_cpu_placement_does_not_select_a_gpu(self, launched):
+        """The fix. ``--device none`` and ``--main-gpu 0`` cannot both be true,
+        and llama.cpp refuses the pair rather than picking one."""
+        command = launched("none", gpu_layers="0")
+
+        assert command[command.index("--device") + 1] == "none"
+        assert "--main-gpu" not in command
+        assert "--split-mode" not in command
+
+    def test_nothing_else_about_the_command_moves(self, launched):
+        """Only the two flags come off. The model, the context, the offload and
+        every other flag are the vendored launcher's and stay its.
+
+        Compared as flags rather than as whole lines: the port and the API key
+        are drawn fresh for every start, so two identical launches differ there
+        by design."""
+        def flags(command):
+            return {part for part in command if part.startswith("--")}
+
+        with_gpu = launched("CUDA0", gpu_layers="0")
+        without = launched("none", gpu_layers="0")
+
+        assert flags(with_gpu) - flags(without) == {"--split-mode", "--main-gpu"}
+        assert flags(without) - flags(with_gpu) == set()
+        for flag, value in (("--ctx-size", "8192"), ("--n-gpu-layers", "0")):
+            assert without[without.index(flag) + 1] == value
+
+    def test_the_repair_leaves_the_vendored_file_alone(self):
+        """``prompt_master/`` is a byte-identical vendored tree, and its own
+        VENDORED_FROM.txt says changes belong in the modules on top of it."""
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parent.parent / "prompt_master" /
+                  "inference" / "llama_process.py").read_text(encoding="utf-8")
+
+        assert '"--split-mode","none","--main-gpu","0"' in source
+
+    def test_it_is_installed_once_however_many_servers_are_started(self):
+        from prompt_master.inference import llama_process
+
+        runtime.runtime._new_process()
+        first = llama_process.subprocess
+        runtime.runtime._new_process()
+
+        assert llama_process.subprocess is first
+
+    def test_everything_else_reaches_the_real_subprocess(self):
+        """It stands in for a module, so it has to answer like one."""
+        import subprocess
+
+        from prompt_master.inference import llama_process
+
+        runtime.runtime._new_process()
+
+        assert llama_process.subprocess.TimeoutExpired is subprocess.TimeoutExpired
+        assert llama_process.subprocess.PIPE == subprocess.PIPE
+
+    def test_a_command_that_is_not_llama_server_is_not_touched(self):
+        """The rewrite is keyed on the contradiction, not on the program: a
+        device probe spawned while a server is starting passes through."""
+        probe = ["nvidia-smi", "--query-gpu=index,name", "--format=csv"]
+
+        assert runtime.without_gpu_selection(probe) == probe
+
+    def test_the_failure_it_prevented_is_explained_if_it_happens_anyway(self):
+        """An old state file, a CUDA_VISIBLE_DEVICES in the environment, or a
+        runtime build with no CUDA backend beside it can still produce this, and
+        llama.cpp's own sentence names the symptom and none of the cause."""
+        failure = runtime.read_failure(
+            "E llama_prepare_model_devices: invalid value for main_gpu: 0 "
+            "(available devices: 0)\n"
+            "E llama_model_load_from_file_impl: failed to load model\n"
+            "E srv  llama_server: exiting due to model loading error")
+
+        assert failure and not failure.out_of_memory
+        assert "no GPU visible" in failure.text
+        assert "CUDA_VISIBLE_DEVICES" in failure.text
+
+
 class TestRetryingASmallerPlacement:
     """A start that ran out of VRAM is tried again with more headroom, because
     nothing this module knows could have predicted the refusal: the card said
