@@ -8,7 +8,7 @@ import httpx
 class LlamaProcess:
     def __init__(self): self.process: subprocess.Popen | None = None; self.port = 0; self.api_key = ""; self._log = None
 
-    def start(self, executable: Path, model: Path, mmproj: Path | None, gpu_index: int, device: str, context_size: int, log_path: Path, gpu_layers: str = "all") -> None:
+    def start(self, executable: Path, model: Path, mmproj: Path | None, gpu_index: int, device: str, context_size: int, log_path: Path, gpu_layers: str = "all", cache_type_k: str | None = None, cache_type_v: str | None = None, jinja: bool = False) -> None:
         # gpu_layers is llama.cpp's --n-gpu-layers. It stays "all" for every card
         # that fits its quantization, which is what the 3090 and 5090 pinned
         # builds always used; a smaller card can record a layer count at setup
@@ -25,10 +25,21 @@ class LlamaProcess:
         # which llama-server would refuse to start on. What it costs is images:
         # InferenceService is what turns that into a sentence, before anything
         # here is reached.
+        #
+        # cache_type_k/v and jinja are None/False unless a managed backbone
+        # profile supplied them, and the flags are then left off the command
+        # entirely rather than passed a default. That is the difference between
+        # "this model wants a q8_0 KV cache" and "nobody has said", and only the
+        # first is something to tell llama.cpp: a manual GGUF whose install has
+        # never been asked about cache types keeps the exact command line it has
+        # always been started with.
         self.stop(); self.port = self._free_port(); self.api_key = secrets.token_urlsafe(32)
         command = [str(executable),"--model",str(model)]
         if mmproj is not None: command += ["--mmproj",str(mmproj)]
         command += ["--alias","prompt-master","--host","127.0.0.1","--port",str(self.port),"--api-key",self.api_key,"--no-webui","--device",device,"--split-mode","none","--main-gpu","0","--n-gpu-layers",str(gpu_layers),"--ctx-size",str(context_size),"--parallel","1","--reasoning","off","--reasoning-budget","0","--timeout","600"]
+        if cache_type_k: command += ["--cache-type-k",str(cache_type_k)]
+        if cache_type_v: command += ["--cache-type-v",str(cache_type_v)]
+        if jinja: command += ["--jinja"]
         env = os.environ.copy(); env["CUDA_VISIBLE_DEVICES"] = "" if device.casefold() == "none" else str(gpu_index)
         log_path.parent.mkdir(parents=True, exist_ok=True); self._log = log_path.open("a", encoding="utf-8")
         self.process = subprocess.Popen(command, env=env, stdout=self._log, stderr=subprocess.STDOUT, creationflags=getattr(subprocess,"CREATE_NEW_PROCESS_GROUP",0)|getattr(subprocess,"CREATE_NO_WINDOW",0))

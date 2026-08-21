@@ -1,0 +1,156 @@
+{
+  "version": 1,
+  "registry_version": "2026.08.20-1",
+  "models": [
+    {
+      "id": "gemma4-12b-qat-balanced",
+      "label": "Gemma 4 12B QAT Balanced",
+      "role": "Recommended",
+      "group": "Recommended",
+      "family": "Gemma 4",
+      "profile": "gemma4-12b-qat-balanced",
+      "multimodal": true,
+      "source_url": "https://huggingface.co/HauhauCS/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced",
+      "license_url": "https://huggingface.co/HauhauCS/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced",
+      "repo_id": "HauhauCS/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced",
+      "revision": "main",
+      "model": {
+        "filename": "Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf",
+        "sha256": "59656d7494d6376ca97e9e20b64ea2e16cd97f12ec6d47bfccba91cb785b5134",
+        "bytes": null,
+        "display_size": "~7.4 GB"
+      },
+      "projector": {
+        "filename": "mmproj-Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced-BF16.gguf",
+        "sha256": "b59e815479b7e5f0665bd29e6784c104a368092bcbc63120148c606f9276ab8e",
+        "bytes": null,
+        "display_size": "175 MB"
+      }
+    },
+    {
+      "id": "gemma4-e4b-aggressive",
+      "label": "Gemma 4 E4B Aggressive",
+      "role": "Small Gemma",
+      "group": "Small",
+      "family": "Gemma 4",
+      "profile": "gemma4-e4b-aggressive",
+      "multimodal": true,
+      "source_url": "https://huggingface.co/HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive",
+      "license_url": "https://huggingface.co/HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive",
+      "repo_id": "HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive",
+      "revision": "main",
+      "model": {
+        "filename": "Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q6_K_P.gguf",
+        "sha256": "f28b0ae262158af10d847c3f01bfdb943161dd31320f3aed20775ee2ad6c67a6",
+        "bytes": null,
+        "display_size": "~6.3 GB"
+      },
+      "projector": {
+        "filename": "mmproj-Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-f16.gguf",
+        "sha256": "debad39ab9c1152ab67695a674fb35e8375b2320c57bfd5075835d3ccb16c7db",
+        "bytes": null,
+        "display_size": "990 MB"
+      }
+    },
+    {
+      "id": "qwen35-9b-aggressive",
+      "label": "Qwen 3.5 9B Aggressive",
+      "role": "Modern alternative",
+      "group": "Alternatives",
+      "family": "Qwen 3.5",
+      "profile": "qwen35-9b-aggressive",
+      "multimodal": true,
+      "source_url": "https://huggingface.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive",
+      "license_url": "https://huggingface.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive",
+      "repo_id": "HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive",
+      "revision": "main",
+      "model": {
+        "filename": "Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q6_K.gguf",
+        "sha256": "c0ba7beb68fd3fe47891bd549486d38dcf62d00817296ea314ad37017f5a4986",
+        "bytes": null,
+        "display_size": "~7.4 GB"
+      },
+      "projector": {
+        "filename": "mmproj-Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-BF16.gguf",
+        "sha256": "05f662501f8bd45607b079723a3e238a4e888fd085a10a53f4057a0e250f6934",
+        "bytes": null,
+        "display_size": "922 MB"
+      }
+    },
+    {
+      "id": "qwen35-9b-defiant-fable",
+      "label": "Qwen 3.5 9B Defiant Fable",
+      "role": "Creative alternative",
+      "group": "Alternatives",
+      "family": "Qwen 3.5",
+      "profile": "qwen35-9b-defiant-fable",
+      "multimodal": true,
+      "source_url": "https://huggingface.co/DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF",
+      "license_url": "https://huggingface.co/DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF",
+      "repo_id": "DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF",
+      "revision": "main",
+      "model": {
+        "filename": "Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-Q5_K_M.gguf",
+        "sha256": "3138b1069d7a798460eba9cedf7b865f4dbf285b43117d9db549d124797cebbf",
+        "bytes": null,
+        "display_size": "~7.7 GB"
+      },
+      "projector": {
+        "filename": "mmproj-F16.gguf",
+        "sha256": "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f",
+        "bytes": null,
+        "display_size": "918 MB"
+      }
+    },
+    {
+      "id": "qwen35-4b-aggressive",
+      "label": "Qwen 3.5 4B Aggressive",
+      "role": "Smallest",
+      "group": "Small",
+      "family": "Qwen 3.5",
+      "profile": "qwen35-4b-aggressive",
+      "multimodal": true,
+      "source_url": "https://huggingface.co/HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive",
+      "license_url": "https://huggingface.co/HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive",
+      "repo_id": "HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive",
+      "revision": "main",
+      "model": {
+        "filename": "Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-Q8_0.gguf",
+        "sha256": "3aa21dfc185595bb9f3f8f98f08325fcecfdf446c510ce2b03fe19104e700c16",
+        "bytes": null,
+        "display_size": "~4.5 GB"
+      },
+      "projector": {
+        "filename": "mmproj-Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-BF16.gguf",
+        "sha256": "a1e32e86ea99aa7a56f3dcfe7e63c1d0be9439d31fd07087099f15bc0fda0f22",
+        "bytes": null,
+        "display_size": "676 MB"
+      }
+    },
+    {
+      "id": "gemma4-26b-a4b-balanced",
+      "label": "Gemma 4 26B-A4B Balanced",
+      "role": "Current large baseline",
+      "group": "Current large baseline",
+      "family": "Gemma 4",
+      "profile": "gemma4-26b-a4b-balanced",
+      "multimodal": true,
+      "source_url": "https://huggingface.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced",
+      "license_url": "https://huggingface.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced",
+      "repo_id": "HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced",
+      "revision": "main",
+      "model": {
+        "filename": "Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf",
+        "sha256": "f8b1da6dc139e6928159e536bc85602adbc1412018871732a878dedcad7ccafd",
+        "bytes": null,
+        "display_size": "~16.8 GB"
+      },
+      "projector": {
+        "filename": "mmproj-Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced-f16.gguf",
+        "sha256": "9422eeb070cc7f6e412d34d03e2fb4693bb90dcdba4a0294150de28a04f4e12c",
+        "bytes": null,
+        "display_size": "1.19 GB"
+      }
+    }
+  ]
+}

@@ -44,12 +44,16 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import mc_broker
 import mc_gguf
 import mc_llm_context
 import mc_llm_paths
 import mc_llm_state
+
+if TYPE_CHECKING:
+    from prompt_master.models.managed_profiles import ManagedProfile
 
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
@@ -110,6 +114,23 @@ class Config:
     quantization: str = ""
     device_name: str = ""
     mode: str = "gpu"
+    source: str = "manual"
+    """``"managed"`` when the model came from the catalogue, ``"manual"`` when
+    the user pointed at a GGUF themselves. See :mod:`mc_llm_managed_models`."""
+    managed_id: str = ""
+    profile: "ManagedProfile | None" = None
+    """The hidden quality profile in force, or ``None`` on a manual install.
+
+    Not a settings object: everything in it was decided when the catalogue
+    entry was written, and it is here rather than in the preferences file
+    because it belongs to *the model* rather than to the installation. A
+    manual install has none, which is what leaves the Settings page in charge
+    of context and cache types exactly as it was before the catalogue existed.
+    """
+
+    @property
+    def profile_id(self) -> str:
+        return getattr(self.profile, "profile_id", "") if self.profile is not None else ""
 
     def __post_init__(self) -> None:
         """The mode has the last word on where the weights go.
@@ -148,7 +169,22 @@ class Config:
 
 def config() -> Config:
     """Current runtime configuration. Never raises -- an unconfigured install
-    is a state the panel renders, not an exception it handles."""
+    is a state the panel renders, not an exception it handles.
+
+    Read in the usual three layers -- the state file, the preferences file, the
+    Settings page -- and then, for a managed backbone only, a fourth that wins:
+    the hidden profile that came with the catalogue entry. That precedence is
+    the feature. Somebody who chose "Gemma 4 12B QAT Balanced" chose a context
+    size, two cache types and a chat-template flag along with it, whether or
+    not they know that; leaving the Settings page authoritative over those
+    would mean a curated backbone ran at whatever the *previous* model happened
+    to need, which is the failure this catalogue exists to prevent.
+
+    It reaches exactly as far as the profile's own fields. The device, the
+    offload, the residency policy and everything else about this machine are
+    untouched -- a profile that pinned a GPU index would be a checked-in file
+    making a claim about somebody else's hardware.
+    """
     from prompt_master.core.config import read_json
 
     paths = mc_llm_paths.app_paths()
@@ -157,6 +193,7 @@ def config() -> Config:
     except (OSError, ValueError):
         state = {}
     prefs = mc_llm_state.preferences()
+    source, managed_id, profile = _managed(state)
 
     def located(key):
         recorded = str(state.get(key) or "")
@@ -175,6 +212,18 @@ def config() -> Config:
         except ValueError:
             runtime = None
 
+    context_size = int(prefs.get("context_size") or state.get("context_size", 8192) or 8192)
+    context_mode = str(prefs.get("context_mode", "auto"))
+    kv_type_k = str(prefs.get("kv_type_k", "f16"))
+    kv_type_v = str(prefs.get("kv_type_v", "f16"))
+    if profile is not None:
+        # "fixed" and not "auto": automatic sizing spends whatever VRAM is free
+        # on context, and a managed profile's context size is a decision about
+        # the workload rather than a number to grow into. Negotiation can still
+        # shrink it to make the model fit -- that is a report, not a setting.
+        context_size, context_mode = int(profile.context), "fixed"
+        kv_type_k, kv_type_v = str(profile.kv_type_k), str(profile.kv_type_v)
+
     return Config(
         runtime=runtime,
         model=located("model"),
@@ -182,15 +231,38 @@ def config() -> Config:
         gpu_index=int(state.get("gpu_index", 0) or 0),
         device=str(state.get("gpu_device", "CUDA0")),
         gpu_layers=str(state.get("gpu_layers", "all")),
-        context_size=int(prefs.get("context_size") or state.get("context_size", 8192) or 8192),
-        context_mode=str(prefs.get("context_mode", "auto")),
+        context_size=context_size,
+        context_mode=context_mode,
         context_buffer_gb=float(prefs.get("context_buffer_gb", 4.0) or 0.0),
-        kv_type_k=str(prefs.get("kv_type_k", "f16")),
-        kv_type_v=str(prefs.get("kv_type_v", "f16")),
+        kv_type_k=kv_type_k,
+        kv_type_v=kv_type_v,
         quantization=str(state.get("quantization", "")),
         device_name=str(state.get("gpu_device_name", state.get("gpu_name", ""))),
         mode=str(state.get("mode", "gpu")),
+        source=source,
+        managed_id=managed_id,
+        profile=profile,
     )
+
+
+def _managed(state: dict) -> tuple:
+    """``(source, id, profile)`` for ``state``, and manual defaults on any failure.
+
+    Total, like everything else :func:`config` calls. A registry that will not
+    load, a profile this build has never heard of, or a catalogue module that
+    cannot be imported at all are every one of them a reason to run the
+    recorded GGUF with the installation's own settings and say so in the log --
+    never a reason for the panel to fail to draw.
+    """
+    try:
+        import mc_llm_managed_models
+
+        chosen = mc_llm_managed_models.selection(state)
+        return chosen.source, chosen.identifier, mc_llm_managed_models.active_profile(chosen)
+    except Exception:
+        logger.debug("Model Chain: could not read the managed backbone selection",
+                     exc_info=True)
+        return "manual", "", None
 
 
 def _release_mode() -> str:
@@ -795,6 +867,34 @@ EVERY_LAYER = 999
 """What to ask for when the model's own layer count could not be read."""
 
 
+def _profile_arguments(configuration: Config,
+                       placement: mc_llm_context.Placement) -> dict:
+    """The llama-server flags a managed profile adds, and none at all without one.
+
+    Two things arrive here that a running server cannot be told about later:
+    the key/value cache types, and whether to use the chat template baked into
+    the GGUF. Both are start-time arguments, which is why a profile change
+    restarts the server (see :func:`_identity`).
+
+    The cache types come off the *placement* rather than off the profile
+    directly, so that whatever negotiation settled on is what llama.cpp is
+    actually told -- the estimate and the command line cannot then describe two
+    different caches.
+
+    A manual install returns ``{}`` and its command line is byte-for-byte the
+    one it has always had. That is deliberate rather than tidy: the Settings
+    page's cache types have never been passed to llama-server, they feed the
+    VRAM estimate alone, and quietly starting to honour them here would change
+    both the quality and the footprint of every existing install as a side
+    effect of adding a catalogue. It is worth fixing; it is not worth fixing
+    without the user asking.
+    """
+    if configuration.profile is None:
+        return {}
+    return {"cache_type_k": placement.kv_type_k, "cache_type_v": placement.kv_type_v,
+            "jinja": bool(configuration.profile.jinja)}
+
+
 def _device_label(configuration: Config) -> str:
     """The card's name, without the numbers recorded beside it during setup.
 
@@ -827,7 +927,14 @@ def _identity(configuration: Config, projector=None) -> tuple:
             int(configuration.gpu_index), str(configuration.device),
             str(configuration.gpu_layers), int(configuration.context_size),
             str(configuration.context_mode), str(configuration.kv_type_k),
-            str(configuration.kv_type_v))
+            str(configuration.kv_type_v),
+            # The profile is a *choice* even though nobody typed it: switching
+            # backbones changes the template flag and the samplers, and two of
+            # those are command-line arguments a running server cannot be told
+            # about. Without this, a switch between two models that happened to
+            # want the same context and cache types would have reused the
+            # server that was already up -- still holding the previous weights.
+            str(configuration.profile_id))
 
 
 def _offloaded_layers(placement: mc_llm_context.Placement, total: int) -> int:
@@ -999,7 +1106,6 @@ class Runtime:
         way and giving it a smaller share of the card helps nobody.
         """
         from prompt_master.inference.device_detection import CPU_DEVICE, NO_OFFLOAD
-        from prompt_master.inference.llama_client import LlamaClient
         from prompt_master.inference.service import CPU_READY_TIMEOUT, GPU_READY_TIMEOUT
 
         with self._lock:
@@ -1032,8 +1138,7 @@ class Runtime:
             if (self._running and self._identity == _identity(configuration, projector)
                     and not self._outgrown(configuration, ours)):
                 self._touch(configuration, ours)
-                return LlamaClient(f"http://127.0.0.1:{self._process.port}",
-                                   self._process.api_key)
+                return self._client(configuration)
 
             # Before anything is measured, and only on a path that is really
             # going to start a server. The image allocator keeps the blocks it
@@ -1056,7 +1161,7 @@ class Runtime:
             if self._running and signature == self._signature:
                 self._identity = _identity(configuration, projector)
                 self._touch(configuration, ours)
-                return LlamaClient(f"http://127.0.0.1:{self._process.port}", self._process.api_key)
+                return self._client(configuration)
 
             self._stop_locked("making way for a new placement")
 
@@ -1092,7 +1197,7 @@ class Runtime:
             self._process, self._signature, self._placement = process, signature, placement
             self._identity = _identity(configuration, projector)
             self._record(configuration, negotiated, observed, offload)
-            return LlamaClient(f"http://127.0.0.1:{process.port}", process.api_key)
+            return self._client(configuration)
 
     def _launch(self, configuration: Config, placement: mc_llm_context.Placement,
                 projector=None):
@@ -1137,7 +1242,8 @@ class Runtime:
         try:
             process.start(configuration.runtime, configuration.model, projector,
                           configuration.gpu_index, configuration.device, placement.context,
-                          log_path, gpu_layers=layers)
+                          log_path, gpu_layers=layers,
+                          **_profile_arguments(configuration, placement))
             process.wait_ready(CPU_READY_TIMEOUT if from_system_ram else GPU_READY_TIMEOUT)
         except Exception as exc:
             process.stop()
@@ -1146,6 +1252,24 @@ class Runtime:
 
         observed = max(before - mc_broker.device_free_vram_bytes(), 0) if before > 0 else 0
         return process, observed, _await_offload(log_path, written_before)
+
+    def _client(self, configuration: Config):
+        """A client for the server that is up, carrying the profile's samplers.
+
+        One helper rather than three constructions, because the three places
+        this is reached from -- a warm server, a server whose placement did not
+        change, and one that has just been started -- must not be able to
+        disagree about which sampler fields a request goes out with. They did
+        not disagree before because there were none.
+
+        The fields are the managed profile's fixed ones and nothing else; a
+        manual install builds exactly the client it always built.
+        """
+        from prompt_master.inference.llama_client import LlamaClient
+        from prompt_master.models import managed_profiles
+
+        return LlamaClient(f"http://127.0.0.1:{self._process.port}", self._process.api_key,
+                           managed_profiles.sampler_arguments(configuration.profile))
 
     def _outgrown(self, configuration: Config, ours: int) -> bool:
         """Whether the card could now hold more of the model than this server does.
