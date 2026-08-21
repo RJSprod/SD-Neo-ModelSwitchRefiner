@@ -205,9 +205,12 @@ def _toggled(enabled):
     shown = gr.update(visible=bool(enabled))
     if enabled:
         objection = mc_creative_krea.checkpoint_objection()
+        stored = mc_creative_krea.settings()
+        directions = mc_creative_panel.active_note(stored)
         told = notice(objection or
-                      "Creative Mode is on. Press Generate: the prompt is directed "
-                      "locally and expanded once, then Forge makes the image.",
+                      ("Creative Mode is on. Press Generate: the prompt is directed "
+                       f"locally and expanded once, then Forge makes the image. "
+                       f"{directions}"),
                       "warn" if objection else "info")
     else:
         told = notice("Creative Mode is off.")
@@ -215,10 +218,19 @@ def _toggled(enabled):
 
 
 def _remember_creativity(value):
-    from prompt_master.krea.variation import clamp, describe
+    """Keep the slider's position, and say what it will actually do.
+
+    ``variation.describe`` alone describes the *scale*, which is only half the
+    answer and reads as a lie when the other half is "nothing is directed": at
+    Creativity 10 with every axis Natural it said "extreme direction on every
+    eligible axis" over a brief of zero characters.
+    """
+    from prompt_master.krea.variation import clamp
 
     mc_creative_krea.remember(**{mc_creative_krea.CREATIVITY: clamp(value)})
-    return notice(describe(value))
+    stored = mc_creative_krea.settings()
+    told = mc_creative_panel.describe_creativity(value, stored)
+    return notice(told, "warn" if "nothing to scale" in told else "info")
 
 
 def _last_roll():
@@ -509,8 +521,18 @@ class ScriptKreaCreative(scripts.Script):
         """
         enabled.change(fn=_toggled, inputs=[enabled],
                        outputs=[creativity, controls, status], queue=False)
-        creativity.release(fn=_remember_creativity, inputs=[creativity],
-                           outputs=[status], queue=False)
+
+        # The slider moves what the brief costs as well as what it says, and the
+        # cost line is the thing somebody looks at straight after moving it. Sent
+        # together so the two cannot disagree by one action.
+        if self.panel is not None:
+            creativity.release(
+                fn=lambda value: (_remember_creativity(value),
+                                  gr.update(value=mc_creative_panel.describe_cost())),
+                inputs=[creativity], outputs=[status, self.panel.cost], queue=False)
+        else:
+            creativity.release(fn=_remember_creativity, inputs=[creativity],
+                               outputs=[status], queue=False)
         show.click(fn=_last_roll, outputs=[recipe, expanded], queue=False)
 
         # The one handler in this extension that writes to a native control, and

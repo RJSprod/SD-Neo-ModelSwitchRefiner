@@ -229,8 +229,16 @@ def build() -> dict:
     # Remembered on release rather than on every pixel of the drag: the value
     # is a preference, and a preferences file rewritten forty times as a slider
     # travels from 1 to 10 is forty writes for one decision.
-    creativity.release(fn=_remember_creativity, inputs=[creativity], outputs=[status],
-                       queue=False)
+    if panel is not None:
+        # With the cost line, so the number beside the directions cannot be one
+        # action behind the slider that changes it.
+        creativity.release(
+            fn=lambda value: (_remember_creativity(value),
+                              gr.update(value=mc_creative_panel.describe_cost())),
+            inputs=[creativity], outputs=[status, panel.cost], queue=False)
+    else:
+        creativity.release(fn=_remember_creativity, inputs=[creativity],
+                           outputs=[status], queue=False)
     refresh.click(fn=lambda: gr.update(choices=_history_choices()), outputs=[history],
                   queue=False)
     load.click(fn=_load_session, inputs=[history],
@@ -343,8 +351,11 @@ def _toggled(enabled):
     """Show or hide the Creative controls, and remember the toggle."""
     mc_creative_krea.remember(**{mc_creative_krea.ENABLED: bool(enabled)})
     shown = gr.update(visible=bool(enabled))
-    told = ("Creative Mode is on. Each press directs the prompt locally, then asks the "
-            "writer once." if enabled else "Creative Mode is off.")
+    if enabled:
+        told = ("Creative Mode is on. Each press directs the prompt locally, then asks "
+                f"the writer once. {mc_creative_panel.active_note()}")
+    else:
+        told = "Creative Mode is off."
     return shown, shown, ui.notice(told)
 
 
@@ -356,10 +367,12 @@ def _remember_creativity(value):
     spent five minutes configuring ten axes here should not have to do it again
     in txt2img.
     """
-    from prompt_master.krea.variation import clamp, describe
+    from prompt_master.krea.variation import clamp
 
     mc_creative_krea.remember(**{mc_creative_krea.CREATIVITY: clamp(value)})
-    return ui.notice(describe(value))
+    stored = mc_creative_krea.settings()
+    told = mc_creative_panel.describe_creativity(value, stored)
+    return ui.notice(told, "warn" if "nothing to scale" in told else "info")
 
 
 def _generate(prompt, seed, creative, creativity, creative_seed, anti, *rest):
