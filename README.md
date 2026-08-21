@@ -1308,6 +1308,113 @@ Every generated image records `Krea Creative Seed`, `Krea Creativity`,
 expanded prompt is not recorded separately — it is already the image's own
 `Prompt:` line.
 
+### Spatial Layout: saying where things go
+
+Creative Mode decides how a picture looks. **Spatial Layout** is where you say
+what goes where — you draw boxes on a canvas the shape of your image, type a
+prompt into each one, and those boxes reach Krea 2 as part of a structured
+prompt. It is off until you turn it on, and it changes nothing at all while it
+is off.
+
+```
+[x] Creative Mode      Creativity [------7----]
+
+    [x] Spatial Layout    Composition: (o) Smart Spatial Compose
+                                       ( ) Direct BBOX Merge      [Edit Layout…]
+    2 regions. Region prompts are used exactly as typed; the scene around
+    them is written by Creative Mode.
+
+    ▸ Creative Controls
+```
+
+**Your words in a box are yours.** A region prompt never goes near the Creative
+writer. Nothing rewrites it, shortens it or "improves" it: it arrives in the
+final prompt verbatim, with a framing hint, a camera-angle hint and a plain
+position hint appended after it. The same is true of the box itself, the
+Object/Text choice, the visible text of a text region and the stacking order —
+no model is ever the source of truth for any of them.
+
+```
+you typed:   elderly Japanese woman, silver hair, gentle expression
+Krea gets:   elderly Japanese woman, silver hair, gentle expression,
+             shown in a close-up view, in a three-quarter view from the left,
+             positioned in the upper-left area, occupying a medium-sized area
+```
+
+#### The editor
+
+**Edit Layout…** opens a full-window canvas in the shape of the image you are
+about to make, with a thirds grid and a centre cross on it.
+
+| | |
+| --- | --- |
+| **Draw region** then drag | a new region, selected, with the cursor already in its prompt box |
+| drag a box / drag a corner | move it / resize it |
+| **Duplicate**, **Delete**, **Forward**, **Back** | the obvious things; Delete and Backspace work on the canvas too |
+| **Escape** | abandons a drag in progress; press it again to close without saving |
+| **Object** / **Text** | a subject, or words you want rendered — a text region carries the exact string separately from its description, so only the words get drawn |
+| **Save & Close** / **Cancel** | Cancel changes nothing |
+
+Boxes are stored as fractions of the frame (0–1000), not pixels, so **changing
+the resolution does not move anything**. Change the *aspect ratio* and the boxes
+stay exactly where they are and a line appears at the top of the editor saying
+the frame is now a different shape — your layout is never silently reprojected
+and never silently deleted.
+
+#### Smart or Direct
+
+| Mode | What happens | Cost |
+| --- | --- | --- |
+| **Smart Spatial Compose** | a second, short language-model pass rewrites the *scene* so it stops arguing with your boxes — it removes "centred in the frame" when your subject is upper-left, and stops repeating a subject the layout already places | one extra request per generation |
+| **Direct BBOX Merge** | the scene Creative Mode wrote is used exactly as it stands | nothing extra |
+
+The second pass **cannot** change a box, a region prompt, a visible text, a
+type, a framing or an angle. It is asked for two strings — the scene and the
+background — and two strings are the only thing read out of its reply, so a
+model that tries to send back its own coordinates is simply ignored. If it
+fails, times out, is interrupted or returns something that is not the expected
+shape, the generation falls back to Direct merge and finishes; a copy-editor
+being unavailable is not a reason to refuse you a picture.
+
+Direct is also the control half of an A/B: same source, same image seed, same
+Creative recipe, same boxes, one radio button apart.
+
+**On a processor-only placement Smart mode is not cheap.** The second pass reads
+its own instruction rather than Krea's — Krea's says "expand this" and "no JSON",
+which is the opposite of what this pass does — so it does not come out of
+llama.cpp's prompt cache, and neither does the following roll's copy of Krea's
+instruction. Reckon on roughly thirty seconds a generation with the weights in
+system RAM, and well under a second with them on the card. Direct mode costs
+nothing at all, which is the lever if you want it back.
+
+#### What a spatial image records
+
+The image's own `Prompt:` line is the finished structured prompt — aspect ratio,
+scene, background and every element — because that is exactly what Krea was
+given. So pasting the PNG back reproduces the picture with **no model request of
+any kind**, and the paste switches *both* Creative Mode and Spatial Layout off so
+nothing rebuilds a prompt that is already built.
+
+Separately, `Krea Spatial Layout` records the canvas itself — every box, every
+word, every framing and angle, the stacking order and the compose mode. **Restore
+Creative setup** (under *Continue from a pasted image*) puts all of it back: the
+short source phrase in the prompt box, the axes on the panel, and the canvas in
+the editor, ready to carry on from.
+
+In Smart mode the scene before and after the composer pass are recorded too, so
+a Smart and a Direct image can be compared after the fact. There is a checkbox
+in **Creative Controls** if you would rather have the bytes back.
+
+#### What this is not
+
+Spatial Layout is **strong composition guidance, not a mask.** There is no
+regional diffusion, no latent masking, no per-box LoRA or ControlNet, and no
+guarantee that a subject stays inside its rectangle. What it does is say the
+same thing to the model in six independent ways at once — a separate element
+entry, numeric coordinates, your own words, a framing hint, an angle hint and a
+plain-English position — and stop the global scene from contradicting any of
+them.
+
 ### Pasting a Creative image back
 
 There are two different things somebody means by "get this image back", and

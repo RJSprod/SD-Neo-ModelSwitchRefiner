@@ -69,6 +69,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import dataclass
 
 import mc_progress
 
@@ -79,14 +80,49 @@ WAITING = "Waiting for the language model"
 READING = "Reading the prompt"
 WRITING = "Writing the Krea prompt"
 
-# What one roll's phases are called on the bar. Deliberately plain: the bar is
-# read at a glance by somebody wondering whether anything is happening, and
-# "Reading the prompt" answers that where "Krea expansion phase 2" does not.
-_LABELS = {
-    mc_progress.PHASE_KREA_WAIT: WAITING,
-    mc_progress.PHASE_KREA_READ: READING,
-    mc_progress.PHASE_KREA_WRITE: WRITING,
-}
+COMPOSING_READ = "Reading the layout"
+COMPOSING_WRITE = "Reconciling the scene with the layout"
+
+
+@dataclass(frozen=True)
+class Pass:
+    """One language-model pass: what its phases are called, and what it learns.
+
+    Krea Creative Mode can make two requests for one generation, and they are
+    unalike in both respects. The writer reads a creative brief and answers with
+    a Krea paragraph; the Spatial Composer reads a scene and a layout and answers
+    with two short fields. Sharing one set of measurement keys between them would
+    teach the bar that a reply is the average of a four-hundred-character prompt
+    and a hundred-and-twenty-character edit, and then predict neither -- which is
+    the same mistake §13.3 fixed between backbones, one level down.
+
+    So each pass carries its own keys and its own words, and the bar tells the
+    user which of the two it is describing.
+    """
+
+    read_key: str
+    write_key: str
+    reply_key: str
+    waiting: str = WAITING
+    reading: str = READING
+    writing: str = WRITING
+
+    def labels(self) -> dict:
+        return {mc_progress.PHASE_KREA_WAIT: self.waiting,
+                mc_progress.PHASE_KREA_READ: self.reading,
+                mc_progress.PHASE_KREA_WRITE: self.writing}
+
+
+WRITER = Pass("krea:read", "krea:write", "krea:reply")
+"""Pass 1: the Krea writer. The keys it has always measured under."""
+
+COMPOSER = Pass("krea:compose:read", "krea:compose:write", "krea:compose:reply",
+                reading=COMPOSING_READ, writing=COMPOSING_WRITE)
+"""Pass 2: the Spatial Composer, measured separately and named differently."""
+
+# Kept for anything that read the labels directly; the writer's are the ones
+# every existing caller meant.
+_LABELS = WRITER.labels()
 
 ADOPTED = "(the host's own bar)"
 """Stands in for a task id when the roll is borrowing a bar rather than owning one.
@@ -152,6 +188,7 @@ class Reporter:
         self._claimed = False
         self._written = 0
         self._expected = 0.0
+        self._kind = WRITER
         self._phase = ""
 
     # -- lifecycle --------------------------------------------------------- #
@@ -162,7 +199,7 @@ class Reporter:
             return self._task
 
     def begin(self, task_id, prompt_characters: int, warm: bool = None,
-              claim: bool = True) -> bool:
+              claim: bool = True, kind: Pass = WRITER) -> bool:
         """Plan the roll and put it on a bar. Returns whether the bar will show.
 
         ``prompt_characters`` is everything the model is about to read -- Krea's
@@ -177,6 +214,10 @@ class Reporter:
         weights off a disk. The caller knows; this module would have to import
         the runtime to find out.
 
+        ``kind`` is which of the two passes this is, and it decides both what
+        the bar says and which keys the measurement lands under. It defaults to
+        the writer, so every existing caller measures exactly where it did.
+
         ``claim`` says whether this roll owns the host task or is borrowing one.
         A roll that runs *inside* an image generation -- which is where Creative
         Mode's roll runs -- is described by the bar the host already started for
@@ -190,16 +231,17 @@ class Reporter:
         if not task_id:
             return False
 
-        expected = max(mc_progress.measured("krea:reply", 700.0), MINIMUM_REPLY)
+        expected = max(mc_progress.measured(kind.reply_key, 700.0), MINIMUM_REPLY)
         waiting = ("krea:wait",) if warm is None else (
             ("krea:wait:warm",) if warm else ("krea:wait:cold",)) + ("krea:wait",)
 
         job = mc_progress.new_job()
-        job.add(mc_progress.PHASE_KREA_WAIT, WAITING, rate_keys=waiting, units=1.0)
-        job.add(mc_progress.PHASE_KREA_READ, READING, rate_keys=writer_rates("krea:read"),
+        job.add(mc_progress.PHASE_KREA_WAIT, kind.waiting, rate_keys=waiting, units=1.0)
+        job.add(mc_progress.PHASE_KREA_READ, kind.reading,
+                rate_keys=writer_rates(kind.read_key),
                 units=max(int(prompt_characters), 1))
-        job.add(mc_progress.PHASE_KREA_WRITE, WRITING,
-                rate_keys=writer_rates("krea:write"), units=expected,
+        job.add(mc_progress.PHASE_KREA_WRITE, kind.writing,
+                rate_keys=writer_rates(kind.write_key), units=expected,
                 weights=(expected,))
 
         if claim and not self._claim(task_id):
@@ -211,12 +253,13 @@ class Reporter:
             self._written = 0
             self._expected = expected
             self._phase = ""
+            self._kind = kind
 
         mc_progress.begin(job)
         self.enter(mc_progress.PHASE_KREA_WAIT)
-        logger.info("Model Chain: Krea roll — %s characters to read, expecting about "
-                    "%.0f back, predicted %.1fs", f"{int(prompt_characters):,}",
-                    expected, job.estimate)
+        logger.info("Model Chain: %s — %s characters to read, expecting about "
+                    "%.0f back, predicted %.1fs", kind.writing,
+                    f"{int(prompt_characters):,}", expected, job.estimate)
         return True
 
     def enter(self, phase: str) -> None:
@@ -226,7 +269,7 @@ class Reporter:
                 return
             self._phase = phase
         mc_progress.enter(phase)
-        self._say(_LABELS.get(phase, ""))
+        self._say(self._kind.labels().get(phase, ""))
         if phase == mc_progress.PHASE_KREA_WRITE:
             # The writing phase is the one that can report itself, so this is
             # where the counters start meaning something. Set before the first
@@ -260,13 +303,14 @@ class Reporter:
         with self._lock:
             task, self._task = self._task, None
             claimed, self._claimed = self._claimed, False
+            kind, self._kind = self._kind, WRITER
             self._phase = ""
         if task is None:
             return
 
         length = len(reply or "")
         if length > 0:
-            mc_progress.learn("krea:reply", float(length))
+            mc_progress.learn(kind.reply_key, float(length))
         mc_progress.end()
         self._release(task, claimed)
 
@@ -280,6 +324,7 @@ class Reporter:
         with self._lock:
             task, self._task = self._task, None
             claimed, self._claimed = self._claimed, False
+            self._kind = WRITER
             self._phase = ""
         if task is None:
             return

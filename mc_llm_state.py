@@ -153,6 +153,19 @@ DEFAULTS: dict = {
     # medium", and storing the prompts to answer that would be keeping a
     # transcript of everything anybody asked for in a preferences file.
     "krea_creative_history": [],
+    # Krea Creative Mode's Spatial Layout. Four keys, and the third of them is
+    # the only place in this file that holds a *document* rather than a setting.
+    #
+    # The canvas is persisted deliberately. Boxes are minutes of work with a
+    # mouse, and a WebUI restart that quietly emptied them would be exactly the
+    # silent loss of layout state the design intent forbids -- so the last saved
+    # layout is what the editor opens onto and what an API request with no page
+    # behind it composes. It is not part of a Creative profile: a profile says
+    # how art direction behaves, and a composition is about one picture.
+    "krea_spatial_enabled": False,
+    "krea_spatial_compose_mode": "smart",
+    "krea_spatial_layout": "",
+    "krea_spatial_record_scenes": True,
 }
 
 

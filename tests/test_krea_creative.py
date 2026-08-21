@@ -1366,7 +1366,18 @@ class TestTheTxt2imgSurface:
                 # The controls that hide with the toggle are a different thing:
                 # they are visible the moment Creative Mode is on. "name_row" is
                 # the Save As name box, revealed by the Save As button.
-                assert (name in ("creativity", "status", "controls", "name_row")
+                #
+                # "spatial_state" is the one component here that is hidden and
+                # stays hidden, and it is allowed by name because it is an
+                # *input* rather than a channel: the layout editor writes the
+                # serialized canvas into it when somebody saves, and Forge reads
+                # it with every other control when Generate is pressed. Nothing
+                # polls it and no generation waits for it, which is the whole of
+                # the difference between it and the token box the old gate had.
+                # tests/test_krea_spatial_js.py is where that is checked rather
+                # than asserted.
+                assert (name in ("creativity", "status", "controls", "name_row",
+                                 "spatial_group", "spatial_state")
                         or id(component) in disclosure), name
 
     def test_what_ui_returns_is_what_before_process_reads(self, store, host, client):
@@ -2087,10 +2098,18 @@ class TestTheCompactPanel:
         argument list is positional both ways."""
         panel = self.panel(built)
 
+        spatial = [built.components["spatial_enabled"],
+                   built.components["spatial_compose"],
+                   built.components["spatial_state"]]
+
         assert built.arguments[:2] == [built.components["enabled"],
                                        built.components["creativity"]]
         assert built.arguments[2:5] == list(panel.settings_controls)
-        assert built.arguments[5:] == list(panel.axis_controls)
+        assert built.arguments[5:-3] == list(panel.axis_controls)
+        # The Spatial block goes last and stays last. The axis block is the only
+        # variable-length part of this tuple, so the two fixed ends are the two
+        # that can be found without counting -- which is what _split does.
+        assert built.arguments[-3:] == spatial
 
     def test_it_says_what_the_directions_cost_before_the_image_starts(self, built,
                                                                        lib):
@@ -2431,7 +2450,8 @@ class TestRestoringTheCreativeSetup:
     def test_restoring_puts_the_source_phrase_back_in_the_prompt_box(self, built, made):
         import model_chain_krea_creative as creative_script
 
-        prompt_update, _enabled, _status, _view = creative_script._restore_setup(False)
+        prompt_update, _enabled, _status, _view, *_spatial = \
+            creative_script._restore_setup(False)
 
         assert prompt_update["value"] == "a lighthouse"
 
@@ -2455,29 +2475,41 @@ class TestRestoringTheCreativeSetup:
         import model_chain_krea_creative as creative_script
 
         mc_creative_krea.remember(**{mc_creative_krea.ENABLED: False})
-        _prompt, enabled, status, _view = creative_script._restore_setup(False)
+        _prompt, enabled, status, _view, *_spatial = \
+            creative_script._restore_setup(False)
 
         assert mc_creative_krea.settings()["enabled"] is True
         assert enabled["value"] is True
         assert "Creative Mode is on again" in status
 
     def test_only_that_button_ever_turns_it_on(self, built):
-        """Loading a profile, adding a direction, excluding a treatment: none of
-        them may switch the feature on. A profile says how Creative Mode
-        behaves; whether it runs is a decision made at the Generate button."""
+        """Loading a profile, adding a direction, excluding a treatment, drawing
+        a box: none of them may switch a feature on. A profile says how Creative
+        Mode behaves; whether it runs is a decision made at the Generate button.
+
+        Two features can be switched on now -- Creative Mode and Spatial Layout
+        -- and the rule is the same for both and for the same reason. The paste
+        turned them off so the picture would reproduce; this button is the
+        request to do the opposite, and it is the only one.
+        """
+        import inspect
+
         import model_chain_krea_creative as creative_script
 
         source = Path(creative_script.__file__).read_text(encoding="utf-8")
-        turning_on = [line for line in source.splitlines()
+        restore = inspect.getsource(creative_script._restore_setup)
+        turning_on = [line.strip() for line in source.splitlines()
                       if "ENABLED: True" in line]
 
-        assert len(turning_on) == 1
+        assert len(turning_on) == 2
+        for line in turning_on:
+            assert line in restore, line
 
     def test_it_says_which_of_the_two_things_it_did(self, built, made):
         import model_chain_krea_creative as creative_script
 
-        _prompt, _enabled, armed, _view = creative_script._restore_setup(True)
-        _prompt, _enabled, fresh, _view = creative_script._restore_setup(False)
+        _prompt, _enabled, armed, _view, *_spatial = creative_script._restore_setup(True)
+        _prompt, _enabled, fresh, _view, *_spatial = creative_script._restore_setup(False)
 
         assert "replays it exactly" in armed
         assert "new roll from the same idea" in fresh

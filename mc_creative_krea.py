@@ -167,6 +167,13 @@ class Prepared:
     generation: str
     loras: str
     settings: dict = field(default_factory=dict)
+    spatial: dict = field(default_factory=dict)
+    """The Spatial keys for this generation, or nothing at all.
+
+    Merged into :attr:`metadata` rather than written by a second hook, so that
+    one generation writes its infotext in one place and a spatial image cannot
+    end up carrying half a record.
+    """
     """The configuration this roll ran with, for the metadata to record.
 
     Read off the panel at press time rather than out of the preferences file,
@@ -225,15 +232,25 @@ class Prepared:
         writer = writer_identity()
         if writer:
             recorded[mc_infotext.CREATIVE_WRITER] = writer
+        recorded.update(self.spatial or {})
         return recorded
 
 
-def prepare(roll: Roll, loras, stored=None) -> Prepared:
-    """One finished roll, packaged for the processing hook."""
+def prepare(roll: Roll, loras, stored=None, prompt=None, spatial=None) -> Prepared:
+    """One finished roll, packaged for the processing hook.
+
+    ``prompt`` overrides what the pinned networks are appended to. It is the
+    structured Spatial BBOX prompt when there was a layout, and the writer's own
+    paragraph when there was not -- and the LoRA tags go on the end either way,
+    because that is the order a hand-written Forge prompt uses and because Forge
+    parses them off the end before conditioning whatever precedes them.
+    """
     return Prepared(roll=roll,
-                    generation=generation_prompt(roll.expanded, loras),
+                    generation=generation_prompt(
+                        roll.expanded if prompt is None else prompt, loras),
                     loras=lora_suffix(loras),
-                    settings=dict(stored or {}))
+                    settings=dict(stored or {}),
+                    spatial=dict(spatial or {}))
 
 
 def writer_identity() -> str:
@@ -552,10 +569,28 @@ class Setup:
     loras: str = ""
     writer: str = ""
 
+    spatial_layout: str = ""
+    spatial_compose_mode: str = ""
+    spatial_version: int | None = None
+    """What the image recorded about its Spatial Layout, if it had one.
+
+    Carried on the Creative record rather than in a second one, because there is
+    one restore button and one thing it restores: the workflow that made this
+    picture. A spatial image is a Creative image with a canvas, and splitting the
+    record would mean two buttons whose only difference is which half of the same
+    workflow they put back.
+    """
+
     @property
     def present(self) -> bool:
         """Whether this describes a Creative generation at all."""
-        return bool(self.source or self.recipe or self.creativity is not None)
+        return bool(self.source or self.recipe or self.creativity is not None
+                    or self.spatial_layout)
+
+    @property
+    def spatial(self) -> bool:
+        """Whether this image recorded a spatial layout worth restoring."""
+        return bool(self.spatial_layout)
 
     @property
     def replayable(self) -> bool:
@@ -582,6 +617,17 @@ class Setup:
             found.append(f"The prompt was written by {self.writer}; {writer} is "
                          "configured now. The same brief will not produce the same "
                          "paragraph.")
+        if self.spatial_layout:
+            from prompt_master.krea import spatial as spatial_module
+
+            if self.spatial_version is not None \
+                    and self.spatial_version != spatial_module.VERSION:
+                found.append(f"This image records spatial layout version "
+                             f"{self.spatial_version}; this build reads version "
+                             f"{spatial_module.VERSION}. The canvas was not restored.")
+            else:
+                parsed = spatial_module.parse(self.spatial_layout)
+                found.extend(parsed.notes)
         return found
 
 
@@ -791,7 +837,7 @@ class Creative:
     # -- one roll ---------------------------------------------------------- #
 
     def roll(self, source: str, stored=None, references=(), guard_checkpoint=False,
-             task_id="", own_bar: bool = True):
+             task_id="", own_bar: bool = True, spatial_layout=None):
         """One creative roll: direct locally, then ask the model once.
 
         Yields :class:`mc_llm_sessions.Event` throughout so a caller can put the
@@ -812,6 +858,19 @@ class Creative:
         after the roll ends; there ``task_id`` may be empty as well, because the
         bar being borrowed already exists whatever it is called. See
         :mod:`mc_llm_progress`.
+
+        ``spatial_layout`` is a parsed :class:`prompt_master.krea.spatial.Layout`
+        when the user has drawn one, and it reaches the writer as **one
+        sentence** and nothing else: placement is handled separately, so do not
+        state rigid screen positions. Not the regions, not their prompts, not a
+        coordinate. Handing pass 1 the region text would put the user's own
+        words through a rewriter and then let the compositor place the original
+        beside the rewrite, which is a request for two of the same subject.
+
+        With no layout -- which is every generation until somebody draws one --
+        the user turn is assembled from ``recipe.brief`` exactly as it always
+        was, down to the byte, so llama.cpp resumes at the same prefix and
+        Creativity 1 stays the compatibility guarantee it is documented as.
         """
         from prompt_master.core.models import draw_seed
         from prompt_master.krea import director
@@ -879,12 +938,17 @@ class Creative:
         # reserve on. LLM Studio writes a prompt and stops; reserving image VRAM
         # there would shrink the writer for a picture nobody asked for.
         reserve = image_reserve_bytes() if guard_checkpoint else 0
+        direction = recipe.brief
+        if spatial_layout is not None and getattr(spatial_layout, "regions", ()):
+            from prompt_master.krea import spatial as spatial_module
+
+            direction = spatial_module.directed(direction)
         run = sessions.krea(source, list(references or []), recipe.llm_seed, cancel,
-                            recipe.creativity, recipe.brief, reserve)
+                            recipe.creativity, direction, reserve)
         progress = mc_llm_progress.reporter
         warm = _warm()
         progress.begin(task_id,
-                       _prompt_size(source, references, recipe.brief, cached=warm),
+                       _prompt_size(source, references, direction, cached=warm),
                        warm, claim=own_bar)
         written = ""
         finished = False

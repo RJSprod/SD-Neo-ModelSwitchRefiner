@@ -775,11 +775,15 @@ class TestTheRollRunsInsideTheGeneration:
         mc_creative_krea.creative = mc_creative_krea.Creative()
         mc_broker.clear()
 
-    def press(self, timeout=20.0, prompt="car"):
+    def press(self, timeout=20.0, prompt="car", spatial=None):
         """One press of Generate, on a thread with a deadline.
 
         A deadlocked hook does not fail a test, it hangs the run -- so the
         deadline is the assertion.
+
+        ``spatial`` is the three Spatial controls when a test wants them, and is
+        left off otherwise -- which is also what an API request sends, and what
+        every test above this one means.
         """
         import threading
 
@@ -791,6 +795,8 @@ class TestTheRollRunsInsideTheGeneration:
         values = [10, director.RANDOM_SEED, True, ""]
         for _key in library_module.library().axis_keys:
             values.extend([director.VARY, None, []])
+        if spatial is not None:
+            values.extend(spatial)
 
         class Processing:
             def __init__(self):
@@ -872,3 +878,29 @@ class TestTheRollRunsInsideTheGeneration:
         self.press()
 
         assert mc_broker.active() is None
+
+    def test_the_spatial_composer_runs_inside_the_same_declaration(self, running):
+        """The second pass is the first one's deadlock all over again.
+
+        It runs at the same point in the same hook, with the same generation
+        blocked waiting on it, so it needs the same permission -- and a version
+        of this that declared ``host_job`` around the roll alone would pass every
+        other test in the repository and hang the first Smart-mode generation on
+        a real machine. Nothing here stubs ``host_busy``; the deadline is the
+        assertion, exactly as it is above.
+        """
+        import json
+
+        from prompt_master.krea import spatial
+
+        running.answers = ["A woman in the centre of a rainy street.",
+                           '{"scene": "A rainy street.", "background": "neon"}']
+        layout = json.dumps({
+            "version": 1, "canvas": {"width": 1024, "height": 1024},
+            "compose_mode": spatial.SMART,
+            "regions": [{"id": "r1", "type": "obj", "bbox": [35, 55, 315, 360],
+                         "prompt": "an elderly woman", "z": 0}]})
+        p = self.press(spatial=(True, spatial.SMART, layout))
+
+        assert len(running.calls) == 2
+        assert json.loads(p.prompt)["compositional_deconstruction"]["elements"]

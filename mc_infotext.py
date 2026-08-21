@@ -128,6 +128,49 @@ CREATIVE_KEYS = (CREATIVE_MODE, CREATIVE_CREATIVITY, CREATIVE_SEED, CREATIVE_LLM
                  CREATIVE_AXES, CREATIVE_EXCLUDED, CREATIVE_ANTI, CREATIVE_WRITER)
 """Every key a Creative generation may write, for forwarding and for tests."""
 
+SPATIAL_MODE = "Krea Spatial Mode"
+SPATIAL_VERSION = "Krea Spatial Version"
+SPATIAL_LAYOUT = "Krea Spatial Layout"
+SPATIAL_COMPOSE_MODE = "Krea Spatial Compose Mode"
+SPATIAL_COMPOSER_MODEL = "Krea Spatial Composer Model"
+SPATIAL_COMPOSER_SEED = "Krea Spatial Composer Seed"
+SPATIAL_COMPOSER_VERSION = "Krea Spatial Composer Instruction"
+SPATIAL_PROMPT_VERSION = "Krea Spatial Prompt Version"
+SPATIAL_ENHANCED_SCENE = "Krea Enhanced Scene"
+SPATIAL_SCENE = "Krea Spatial Scene"
+"""What a Spatial BBOX generation records, in its own namespace.
+
+The same two questions the Creative keys answer, asked about the composition.
+
+**How do I make this picture again?** Still the image's own ``Prompt:`` line and
+still nothing else -- it is the finished structured prompt, aspect ratio, scene,
+background, elements and all, assigned to ``p.prompt`` before Forge wrote the
+infotext. An ordinary paste therefore reproduces a spatial image exactly, and
+does it by restoring that prompt and switching *both* Creative Mode and Spatial
+Layout off. Leaving either on would rebuild the prompt from the layout around a
+scene that is already a finished structured prompt, and the result would be a
+BBOX prompt with a BBOX prompt inside it.
+
+**How do I get back to the canvas?** These keys. The layout is the whole
+editable state, normalised: version, canvas, compose mode, and every region with
+its box, its words, its type, its framing, its angle and its z-order. That is
+several hundred bytes on a spatial image and nothing at all on any other, which
+is the trade §8.2 asks for -- and the layout is the one thing in the file that
+cannot be reconstructed from the prompt, because the prompt carries the derived
+hints rather than the selections they came from.
+
+The two scene keys are diagnostic and are written only in Smart mode, where the
+pass-1 output really is unrecoverable. In Direct mode the enhanced scene *is*
+the ``high_level_description``, and recording it twice would repeat the file to
+itself.
+"""
+
+SPATIAL_KEYS = (SPATIAL_MODE, SPATIAL_VERSION, SPATIAL_LAYOUT, SPATIAL_COMPOSE_MODE,
+                SPATIAL_COMPOSER_MODEL, SPATIAL_COMPOSER_SEED,
+                SPATIAL_COMPOSER_VERSION, SPATIAL_PROMPT_VERSION,
+                SPATIAL_ENHANCED_SCENE, SPATIAL_SCENE)
+"""Every key a Spatial generation may write, for forwarding and for tests."""
+
 MODULE_PREFIX = "Model Chain Module "
 """Numbered VAE / text encoder keys: "Model Chain Module 1", "... 2", and so on.
 
@@ -555,6 +598,9 @@ def creative_setup(params: dict):
         anti_repetition=_flag(params.get(CREATIVE_ANTI)),
         loras=str(params.get(CREATIVE_LORAS) or ""),
         writer=str(params.get(CREATIVE_WRITER) or ""),
+        spatial_layout=str(params.get(SPATIAL_LAYOUT) or ""),
+        spatial_compose_mode=str(params.get(SPATIAL_COMPOSE_MODE) or ""),
+        spatial_version=_number(params.get(SPATIAL_VERSION)),
     )
 
 
@@ -604,6 +650,28 @@ def build_creative_paste_fields(components: dict, notice=None, view=None) -> lis
                     "switched off, so the prompt is not expanded a second time.")
         return False
 
+    def spatial_off(params):
+        """The same answer, for the same reason, one layer out.
+
+        A spatial image's recorded Prompt is the finished structured prompt --
+        aspect ratio, scene, background and every element. Restoring it with
+        Spatial Layout still on would put that whole document into
+        ``high_level_description`` and build a second BBOX prompt around it,
+        which reproduces nothing and is not even obviously wrong to look at.
+
+        Two switches rather than one because they are two features. Creative
+        Mode off with Spatial on would compose boxes around a prompt nobody
+        expanded; a spatial image has to switch off both, and an image carrying
+        neither key must be able to switch off neither.
+        """
+        if SPATIAL_MODE not in params:
+            return None
+        logger.info("Model Chain: this image was made with Krea Spatial Layout. Its "
+                    "final structured prompt has been restored and Spatial Layout was "
+                    "switched off, so the layout is not composed onto it a second "
+                    "time.")
+        return False
+
     def captured(params):
         """Stash the Creative record, and say on the panel what just happened.
 
@@ -633,6 +701,9 @@ def build_creative_paste_fields(components: dict, notice=None, view=None) -> lis
         return view()
 
     fields = [PasteField(components["enabled"], creative_off, api="krea_creative_enabled")]
+    if "spatial_enabled" in components:
+        fields.append(PasteField(components["spatial_enabled"], spatial_off,
+                                 api="krea_spatial_enabled"))
     if "status" in components:
         fields.append(PasteField(components["status"], captured,
                                  api="krea_creative_status"))
@@ -649,7 +720,7 @@ def creative_paste_field_names() -> list[str]:
     forward by exact name, so a key that is not listed here simply does not
     arrive, and "restore the setup" would find half a record.
     """
-    return list(CREATIVE_KEYS)
+    return list(CREATIVE_KEYS) + list(SPATIAL_KEYS)
 
 
 def paste_field_names() -> list[str]:
