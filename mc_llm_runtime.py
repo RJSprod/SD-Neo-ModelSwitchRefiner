@@ -322,11 +322,13 @@ def negotiate(configuration: Config | None = None,
               vision: bool = False) -> Negotiation:
     """Decide where the LLM goes, given what is on the card right now.
 
-    ``reclaim=False`` answers the same question without moving anything, which
-    is what the estimator panel asks. That distinction is not a nicety: the
-    panel is rendered when the tab is built and every time somebody opens the
-    accordion, and a preview that evicted a checkpoint to show a table would be
-    a far worse bug than any it was drawing attention to.
+    ``reclaim=False`` is what the estimator panel passes, and it now makes no
+    difference to the answer, because no path through this function moves
+    anything: a negotiation that cannot fit shrinks the language model rather
+    than evicting a checkpoint. The parameter is kept because callers pass it
+    and because "this preview will not touch the card" is worth being able to
+    say at the call site -- and it is now true of every call, which is a
+    stronger guarantee than the one it used to name.
 
     ``extra_reserve`` is headroom on top of the global safety margin, and the
     only thing that ever passes it is a start that has already failed: the card
@@ -343,21 +345,24 @@ def negotiate(configuration: Config | None = None,
     on a card that was holding all of it a second earlier. See
     :func:`_free_vram`.
 
-    The ladder, in order, and it is the order that encodes the policy:
+    The ladder, in order, and every rung of it is the LLM giving something up.
+    Nothing here asks the image side for anything, in either residency mode or
+    for any placement -- see :func:`mc_broker._victim_order`. The VRAM this
+    function is spending is the VRAM the image family is not using, and when
+    there is none of it the answer is system RAM, not an eviction:
 
     1. Ask for what the user configured. If it fits in what is already free,
-       stop -- nothing moves, which is section 8's rule and the common case in
-       Hybrid mode once both models are small enough.
-    2. Under **Preserve image**, never ask the image side for anything: shrink
-       the context, then the offload, until it fits or it cannot.
-    3. Under **Adaptive**, shrink the context to its floor first and only then
-       ask the broker for room. Reducing a context buffer nobody is using is
-       less disruptive than evicting a checkpoint somebody is about to use,
-       which is what "least disruption" has to mean if it means anything.
-    4. Under **LLM priority**, ask the broker first and shrink only if the
-       broker could not find enough.
-    5. In **Exclusive** mode the broker sweeps the image family out entirely
-       before any of this, so step 1 usually succeeds on its own.
+       stop -- nothing moves, which is section 8's rule and the common case
+       once the checkpoint and the model are both small enough.
+    2. Shrink the context. A cache nobody has filled yet is the cheapest thing
+       on the card to give up.
+    3. For a mixture-of-experts model, move the experts to system RAM. They are
+       most of the weights and are consulted two at a time, so this buys back
+       the most VRAM for the least speed.
+    4. Drop blocks, four at a time, until what is left fits.
+    5. Land on zero, which is the whole model in system RAM. Slow, and still an
+       answer rather than a failure -- and still faster than the alternative it
+       replaced, which was evicting a checkpoint and paying to move it back.
     """
     configuration = configuration or config()
     if not configuration.configured:
@@ -379,46 +384,16 @@ def negotiate(configuration: Config | None = None,
                + projector_bytes(configuration, vision))
     estimate = mc_llm_context.estimate(configuration.model, wanted, described)
 
-    if reclaim and mc_broker.mode() == mc_broker.MODE_EXCLUSIVE:
-        mc_broker.request_vram(mc_broker.FAMILY_LLM,
-                               max(estimate.total_bytes - already_ours, 0),
-                               reason="the LLM taking VRAM ownership in Exclusive mode",
-                               margin=reserve)
-        estimate = mc_llm_context.estimate(configuration.model, wanted, described)
-
     if _fits(estimate, reserve, already_ours):
         return Negotiation(wanted, estimate, (), True)
 
-    # Mixed is "spare room only", whatever the installation's policy says: it
-    # fills what is already free and never asks the image side to give anything
-    # up. Somebody who picked the middle option did not ask for their checkpoint
-    # to be evicted so a prompt could be written faster.
-    chosen = (mc_broker.POLICY_PRESERVE_IMAGE if is_mixed(configuration)
-              else mc_broker.policy())
     placement = wanted
-
-    if chosen == mc_broker.POLICY_LLM_PRIORITY:
-        placement, estimate, freed = _ask_broker(configuration, placement, described, reserve,
-                                                 reclaim, already_ours)
-        if freed:
-            notes.append(freed)
-        if _fits(estimate, reserve, already_ours):
-            return Negotiation(placement, estimate, tuple(notes), True)
-
     placement, estimate, shrunk = _shrink_context(configuration, placement, described, reserve,
                                                   already_ours)
     if shrunk:
         notes.append(shrunk)
     if _fits(estimate, reserve, already_ours):
         return Negotiation(placement, estimate, tuple(notes), True)
-
-    if chosen == mc_broker.POLICY_ADAPTIVE:
-        placement, estimate, freed = _ask_broker(configuration, placement, described, reserve,
-                                                 reclaim, already_ours)
-        if freed:
-            notes.append(freed)
-        if _fits(estimate, reserve, already_ours):
-            return Negotiation(placement, estimate, tuple(notes), True)
 
     placement, estimate, offloaded = _shrink_offload(configuration, placement, described, reserve,
                                                      already_ours)
@@ -437,10 +412,10 @@ def _requested_placement(configuration: Config, gguf: mc_gguf.Gguf | None,
     pinned there, so a machine with a 3090 in it ran every matrix multiply on
     the processor while the card sat idle -- which is what the mode's own
     description promised it would not do. What it now means is "use the room
-    that is genuinely spare, and never ask for any that is not": the
-    negotiation is forced down the preserve-image ladder (see :func:`negotiate`),
-    so it shrinks the context, then moves the experts out, then drops blocks,
-    and lands on zero -- exactly today's behaviour -- when nothing is free.
+    that is genuinely spare, and never ask for any that is not" -- which is
+    what *every* placement means now: :func:`negotiate` shrinks the context,
+    then moves the experts out, then drops blocks, and lands on zero -- exactly
+    Mixed's old behaviour -- when nothing is free.
     """
     from prompt_master.inference.device_detection import NO_OFFLOAD
 
@@ -524,26 +499,6 @@ def _free_vram(already_ours: int = 0) -> int:
 
 def _fits(estimate: mc_llm_context.Estimate, reserve: int, already_ours: int = 0) -> bool:
     return _free_vram(already_ours) >= estimate.total_bytes + reserve
-
-
-def _ask_broker(configuration: Config, placement, gguf, reserve: int, reclaim: bool = True,
-                already_ours: int = 0):
-    """Ask the image side for room, or -- when previewing -- do not ask at all.
-
-    A preview that declined to demote reports a placement that fits less well
-    than the real one would, which is the right way round: the panel may
-    understate what is possible, and must never take VRAM from a workload to
-    populate a table.
-    """
-    estimate = mc_llm_context.estimate(configuration.model, placement, gguf)
-    if not reclaim:
-        return placement, estimate, ""
-    released = mc_broker.request_vram(mc_broker.FAMILY_LLM,
-                                      max(estimate.total_bytes - already_ours, 0),
-                                      reason="an LLM request", margin=reserve,
-                                      exclusive_sweep=False)
-    estimate = mc_llm_context.estimate(configuration.model, placement, gguf)
-    return placement, estimate, (released.describe() if released.moved_anything else "")
 
 
 def _shrink_context(configuration: Config, placement, gguf, reserve: int,

@@ -119,11 +119,11 @@ class TestItFits:
 
 
 class TestDegradation:
-    def test_adaptive_lowers_the_context_before_moving_a_checkpoint(self, placed, tmp_path,
-                                                                    host, monkeypatch):
+    def test_it_lowers_the_context_before_moving_a_checkpoint(self, placed, tmp_path,
+                                                              host, monkeypatch):
         """Section 13's "least disruption": a context nobody is using is
-        cheaper to give up than a model somebody is about to use."""
-        host.shared.opts.set(mc_broker.OPT_POLICY, mc_broker.POLICY_ADAPTIVE)
+        cheaper to give up than a model somebody is about to use -- and the
+        checkpoint is not on the table at all."""
         configuration = configure(monkeypatch, tmp_path, context=131072)
         set_free(monkeypatch, 3)
         image = Recorder(holds=8 * _GB)
@@ -145,9 +145,8 @@ class TestDegradation:
         assert negotiated.notes
         assert all(isinstance(note, str) and note for note in negotiated.notes)
 
-    def test_preserve_image_shrinks_the_llm_instead_of_the_checkpoint(self, placed, tmp_path,
-                                                                      host, monkeypatch):
-        host.shared.opts.set(mc_broker.OPT_POLICY, mc_broker.POLICY_PRESERVE_IMAGE)
+    def test_it_shrinks_the_llm_instead_of_the_checkpoint(self, placed, tmp_path,
+                                                          host, monkeypatch):
         configuration = configure(monkeypatch, tmp_path, context=131072)
         set_free(monkeypatch, 3)
         image = Recorder(holds=10 * _GB)
@@ -158,17 +157,20 @@ class TestDegradation:
         assert image.calls == []
         assert negotiated.placement.context < 131072
 
-    def test_llm_priority_asks_for_the_checkpoint_first(self, placed, tmp_path, host,
-                                                        monkeypatch):
-        host.shared.opts.set(mc_broker.OPT_POLICY, mc_broker.POLICY_LLM_PRIORITY)
-        configuration = configure(monkeypatch, tmp_path, context=131072, size_mb=4)
-        set_free(monkeypatch, 3)
-        image = Recorder(holds=10 * _GB)
+    def test_a_model_that_cannot_fit_at_all_runs_from_system_ram(self, placed, tmp_path,
+                                                                 host, monkeypatch):
+        """The floor of the ladder, and the last thing the user asked for: when
+        nothing is spare, the answer is system RAM, never the checkpoint."""
+        configuration = configure(monkeypatch, tmp_path, context=131072, size_mb=64)
+        set_free(monkeypatch, 0.03)
+        image = Recorder(holds=20 * _GB)
         mc_broker.register_reclaimer(mc_broker.FAMILY_IMAGE, image)
+        mc_broker.declare(mc_broker.FAMILY_IMAGE, "ckpt", "a checkpoint", 20 * _GB)
 
-        runtime.negotiate(configuration)
+        negotiated = runtime.negotiate(configuration)
 
-        assert image.calls
+        assert image.calls == []
+        assert negotiated.placement.gpu_layers == 0
 
     def test_offload_is_reduced_when_context_alone_cannot_save_it(self, placed, tmp_path,
                                                                   monkeypatch):
@@ -197,8 +199,14 @@ class TestDegradation:
 
 
 class TestExclusiveMode:
-    def test_the_image_family_is_swept_before_anything_is_measured(self, placed, tmp_path,
-                                                                   host, monkeypatch):
+    def test_the_image_family_is_not_swept_for_the_llm(self, placed, tmp_path,
+                                                       host, monkeypatch):
+        """Exclusive mode is the image family's ownership, not the LLM's. The
+        sweep used to run both ways, and the reverse direction is what evicted
+        a user's checkpoint on every Krea roll -- twice in one log -- so that
+        the generation that followed spent thirteen seconds moving the same
+        13.9 GB back onto the card.
+        """
         host.shared.opts.set(mc_broker.OPT_MODE, mc_broker.MODE_EXCLUSIVE)
         configuration = configure(monkeypatch, tmp_path, context=8192)
         set_free(monkeypatch, 2)
@@ -208,7 +216,22 @@ class TestExclusiveMode:
 
         runtime.negotiate(configuration)
 
-        assert image.calls
+        assert image.calls == []
+
+    def test_the_llm_is_placed_in_what_the_checkpoint_left(self, placed, tmp_path,
+                                                           host, monkeypatch):
+        """What replaces the sweep: the spare VRAM, and no more than that."""
+        host.shared.opts.set(mc_broker.OPT_MODE, mc_broker.MODE_EXCLUSIVE)
+        configuration = configure(monkeypatch, tmp_path, context=4096, size_mb=64,
+                                  blocks=30)
+        set_free(monkeypatch, 0.03)
+        image = Recorder(holds=14 * _GB)
+        mc_broker.register_reclaimer(mc_broker.FAMILY_IMAGE, image)
+
+        negotiated = runtime.negotiate(configuration)
+
+        assert image.calls == []
+        assert 0 <= negotiated.placement.gpu_layers < 30
 
 
 class TestAutomaticSizing:
@@ -269,7 +292,6 @@ class TestPreview:
     def test_a_preview_never_moves_anything(self, placed, tmp_path, host, monkeypatch):
         """The estimator panel is drawn on tab build and on every accordion
         open. Drawing a table must not cost somebody their checkpoint."""
-        host.shared.opts.set(mc_broker.OPT_POLICY, mc_broker.POLICY_LLM_PRIORITY)
         configuration = configure(monkeypatch, tmp_path, context=131072)
         set_free(monkeypatch, 2)
         image = Recorder(holds=12 * _GB)
@@ -617,16 +639,27 @@ class TestTheOffloadArgument:
     def test_a_mixed_install_never_asks_the_image_side_to_move(
             self, placed, tmp_path, monkeypatch):
         """Somebody who picked the middle option did not ask for their
-        checkpoint to be evicted so a prompt could be written faster -- whatever
-        the installation's policy says."""
+        checkpoint to be evicted so a prompt could be written faster -- and
+        neither did anybody else. No placement asks; the negotiation spends
+        spare VRAM and shrinks when there is none."""
         asked: list = []
-        monkeypatch.setattr(runtime.mc_broker, "policy",
-                            lambda: runtime.mc_broker.POLICY_LLM_PRIORITY)
         monkeypatch.setattr(runtime.mc_broker, "request_vram",
                             lambda *args, **kwargs: asked.append(args) or _NoRoom())
 
         configuration = configure(monkeypatch, tmp_path, gpu_layers="all",
                                   device_mode="mixed")
+        set_free(monkeypatch, 1)
+        runtime.negotiate(configuration)
+
+        assert asked == []
+
+    def test_a_gpu_install_never_asks_the_image_side_to_move_either(
+            self, placed, tmp_path, monkeypatch):
+        asked: list = []
+        monkeypatch.setattr(runtime.mc_broker, "request_vram",
+                            lambda *args, **kwargs: asked.append(args) or _NoRoom())
+
+        configuration = configure(monkeypatch, tmp_path, gpu_layers="all", context=131072)
         set_free(monkeypatch, 1)
         runtime.negotiate(configuration)
 

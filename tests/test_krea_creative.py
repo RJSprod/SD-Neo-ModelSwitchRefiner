@@ -696,12 +696,13 @@ class TestTheImageModelKeepsItsRoom:
 
     @pytest.fixture
     def card(self, monkeypatch, host):
-        """A 24 GB card, an 8 GB checkpoint, and nothing resident."""
+        """A 24 GB card, an 8 GB checkpoint, no margin, and nothing resident."""
         import mc_memory
 
         monkeypatch.setattr(mc_memory, "vram_required_bytes",
                             lambda name, *a, **k: 8 * 1024 ** 3)
         monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None: 0)
+        monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
         from modules import shared
 
         shared.opts.sd_model_checkpoint = "krea2.safetensors"
@@ -718,8 +719,34 @@ class TestTheImageModelKeepsItsRoom:
 
         assert mc_creative_krea.image_reserve_bytes() == 2 * 1024 ** 3
 
+    def test_the_safety_margin_is_not_reserved_twice_either(self, card, monkeypatch):
+        """``negotiate`` adds the global margin on top of whatever this returns,
+        and it is the same number -- both are ``vram_headroom_bytes()``, which
+        ``vram_required_bytes`` already includes. Counted twice it is one
+        activation peak's worth of card held back for nothing, which on a 24 GB
+        machine is several blocks of the language model."""
+        monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 1024 ** 3)
+
+        assert mc_creative_krea.image_reserve_bytes() == 7 * 1024 ** 3
+
     def test_a_fully_resident_checkpoint_needs_nothing_reserved(self, card, monkeypatch):
         monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None: 20 * 1024 ** 3)
+
+        assert mc_creative_krea.image_reserve_bytes() == 0
+
+    def test_a_checkpoint_nobody_declared_still_counts(self, card, monkeypatch):
+        """The register only holds what was declared to it, and image
+        checkpoints never are -- Forge loads and moves them. Sizing the reserve
+        from the register therefore answered 0 for a checkpoint sitting in
+        fourteen gigabytes of VRAM, and the roll reserved room for it all over
+        again: on a 24 GB card that put the language model in 8.7 GB *minus*
+        another 13.9 GB, which is sixteen of forty-eight blocks on the card and
+        the rest crawling from system RAM.
+        """
+        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None: 0)
+        monkeypatch.setattr(mc_broker, "reported_bytes",
+                            lambda family: 8 * 1024 ** 3 if family == mc_broker.FAMILY_IMAGE
+                            else 0)
 
         assert mc_creative_krea.image_reserve_bytes() == 0
 

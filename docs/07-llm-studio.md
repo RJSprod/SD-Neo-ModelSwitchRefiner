@@ -118,10 +118,22 @@ both. `_victim_order` therefore never returns the asking family.
 
 ### 3.3 An image generation always outranks an idle LLM
 
-§13's three policies govern the LLM's ambitions, not whether images can run.
-Under every policy — including **LLM priority** — a foreground image pass can
-reclaim an idle llama-server's VRAM, because §18's regression requirement
-("ordinary txt2img/img2img remains functional") outranks a placement preference.
+The deciding is one-directional, and this is the direction §18 forces. A
+foreground image pass can reclaim an idle llama-server's VRAM, because
+"ordinary txt2img/img2img remains functional" outranks any placement the LLM
+would have preferred.
+
+The reverse never happens. §13 used to make it a setting — three policies, one
+of which ("LLM priority") demoted image residency to pay for a placement — and
+the setting is gone, because in practice there is no case for it. The image
+model is the workload the user is waiting on; the language model writes a
+prompt for it and then has nothing to do. A checkpoint evicted for a prompt is
+wanted again seconds later, so the borrowed VRAM is paid for twice, and on a
+24 GB card that arrived in a user's console as `Moving model(s) has taken 5.92
+seconds` followed by `Moving model(s) has taken 8.07 seconds` — thirteen
+seconds added to every press of Generate to undo an eviction that had bought
+the writer a few seconds. `_victim_order` now answers `()` for the LLM in both
+residency modes, and `negotiate` shrinks instead of asking.
 
 ### 3.4 The warm tier for the LLM is the OS page cache
 
@@ -137,13 +149,19 @@ why the default release mode stops the server rather than reloading it
 elsewhere. The alternative — restarting with `--n-gpu-layers 0` — is offered as
 a setting for people who would rather spend the RAM than the reload.
 
-### 3.5 Reduction before displacement, under Adaptive
+### 3.5 Reduction instead of displacement
 
-§13 asks Adaptive to "demote whichever residency creates the least disruption".
-The order chosen is: lower the LLM's context to its floor first, *then* ask the
-image side for room. A context nobody is using is cheaper to give up than a
-model somebody is about to use, and a 128k context sized automatically to fill
-free VRAM is frequently exactly that.
+§13 asks for "whichever residency creates the least disruption" to be demoted.
+With displacement of the image side off the table (§3.3), what is left is an
+order in which the LLM gives up its *own* resources, and it is the order of
+increasing cost: the context first, because a cache nobody has filled is the
+cheapest thing on the card to give up and a 128k context sized automatically to
+fill free VRAM is frequently exactly that; then, for a mixture-of-experts
+model, the experts, which are most of the weights and are consulted two at a
+time; then blocks, four at a time; then the whole model in system RAM.
+
+Every rung is reported, which is §13's other requirement and the reason the
+ladder is legible from a console log rather than only from a debugger.
 
 ### 3.6 Gradio 4.40, not newer
 
@@ -895,12 +913,16 @@ They are now two:
   stops the process outright.
 
 A warm turn therefore costs a tuple comparison and one read of the model's
-header, and asks the image side for nothing at all. That last part is a real
+header, and asks the image side for nothing at all. That last part was a real
 change in Exclusive mode, which used to sweep the image family before every
-message: the sweep happens when the LLM is *placed*, which is when ownership of
-the card actually changes hands. Re-sweeping before a message that is about to
-be answered out of VRAM the LLM is already holding evicts a checkpoint to buy
-nothing.
+message: the sweep was narrowed to the moment the LLM is *placed*, which is
+when ownership of the card would actually have changed hands. Re-sweeping
+before a message about to be answered out of VRAM the LLM is already holding
+evicts a checkpoint to buy nothing.
+
+§25 finished the job: the LLM does not sweep the image family when it is placed
+either, or ask for its VRAM in any other way. What is described below as "the
+image side has its own way of asking" is now the only direction that asks.
 
 The recovery path is the same rule read the other way. A placement made while
 the card was full is not permanent: `_outgrown` re-checks it before each
@@ -2199,10 +2221,12 @@ forbidden from reaching it.
 ### 24.2 What Mixed is
 
 `_requested_placement` now asks for every layer with `on_gpu=True` when the mode
-is Mixed and a card is configured, and `negotiate` forces the **preserve-image**
-policy for that call whatever the installation's own policy says. The existing
-ladder then does the work: shrink the context, move the experts, drop blocks,
-and land on zero — today's behaviour, unchanged — when nothing is free.
+is Mixed and a card is configured, and the ladder does the rest: shrink the
+context, move the experts, drop blocks, and land on zero — today's behaviour,
+unchanged — when nothing is free. Mixed originally forced a preserve-image
+policy for its own call, to be sure the middle option could never cost somebody
+their checkpoint; §25 made that the rule for every placement, so the special
+case is gone and the guarantee is wider than it was.
 
 Two properties are worth stating because they are what make this safe to do by
 default:
@@ -2267,3 +2291,109 @@ hybrid Intel part the right thread count is often *fewer* than the default, and
 which is right cannot be determined from here. Now that every request's measured
 tokens per second is kept per backbone (§23.3), that is the shape a future
 answer should take: measure, then choose — not guess in a docstring.
+
+
+## 25. The language model was evicting the image model (21 August 2026)
+
+Asked for directly, and twice in one message: *"i see the image model is being
+moved in and out of vram. it should always stay!"* and *"The goal is to always
+prioritize image model in vram over LLM."*
+
+### 25.1 What the log said
+
+A 24 GB card, a 13.9 GB checkpoint, a 12B model in Q4_K_M, Exclusive mode. Every
+press of Generate produced this:
+
+```
+released 13.9 GB of image VRAM for the LLM taking VRAM ownership in Exclusive
+mode (8.7 GB -> 22.6 GB free)
+demoted the image checkpoint (kromaV02TurboINT8_v02) (13.9 GB)
+starting llama-server — 16 layers on the GPU, 22.5 GB free
+...
+llama-server stopped — the image generation that follows a Krea roll
+Moving model(s) has taken 5.92 seconds
+Moving model(s) has taken 8.07 seconds
+```
+
+Three separate faults, each of which made the next one worse.
+
+### 25.2 Fault one: Exclusive mode swept in both directions
+
+`request_vram` read the mode and swept "the other family", whichever family was
+asking. For an image pass that is the mode's promise. For an LLM it was a
+13.9 GB eviction to make room for a model that had asked for about ten — and the
+checkpoint was needed again a second and a half later, so the generation paid
+`5.92s + 8.07s` to move the same weights back. Every press.
+
+The sweep is now the image family's alone: `sweeping = exclusive_sweep and
+family == FAMILY_IMAGE and mode() == MODE_EXCLUSIVE`. Backing it up,
+`_victim_order` answers `()` for the LLM under both modes, so nothing anywhere
+can demote an image residency for a language model.
+
+### 25.3 Fault two: the reserve did not know the checkpoint was there
+
+`image_reserve_bytes` is how a Krea roll tells `negotiate` to leave room for the
+generation that follows. It subtracts what the image family already holds,
+because reserving that a second time would shrink the writer to make room for a
+model already on the card — and it read that figure from
+`mc_broker.resident_bytes`, the residency *register*.
+
+Image checkpoints are never in the register. They are loaded and moved by Forge,
+and `mc_memory` cooperates with that rather than announcing every load to the
+broker; the honest answer comes from asking the reclaimer, which is what
+`reported_bytes` does and what `status()` had always used. So the register said
+0 for a checkpoint sitting in fourteen gigabytes of VRAM, the roll reserved
+13.9 GB for it all over again, and the writer was sized against 8.7 GB *minus*
+13.9 GB. That is why a 3090 with room to spare ran sixteen of forty-eight blocks
+on the card.
+
+`mc_broker.held_bytes(family)` is now the one function to ask when the question
+is "is it already there", and it is `max(declared, reported)`.
+
+### 25.4 Fault three: the two faults fed each other
+
+`hand_back_vram` runs after a roll and asks for `required - held`. With the
+checkpoint swept off the card by fault one and `held` misread by fault two, it
+asked for the full 13.9 GB — which in Exclusive mode swept llama-server out, so
+the next roll started a cold server. Time to the first character in that log was
+28 seconds. With the checkpoint resident and counted, the call is a no-op, the
+server stays up, and the next roll is warm.
+
+### 25.5 What the policy setting became
+
+`OPT_POLICY` had three values and all three answered the same question: what may
+the LLM take from the image side. The answer is now "nothing", so the setting
+was removed rather than left on the Settings page describing a choice it no
+longer makes. `Status.policy` is gone with it, and LLM Studio's residency panel
+states the rule instead of reporting a setting.
+
+What remains configurable is the direction that still has two honest answers —
+what happens to llama-server when a generation starts:
+
+| Mode | Behaviour |
+| --- | --- |
+| **Hybrid** (default) | It is left alone. It is holding spare VRAM, the generation is unaffected, and the next prompt starts warm. |
+| **Exclusive** | It is stopped and the generation gets the whole card. More headroom for one large pass, at the cost of a model load per image. |
+
+An Exclusive sweep that actually stops a server now says which setting would not
+have, once, in the console — because "a model load per image" is a real cost and
+the mode was chosen, in this user's case, to fix the very problem §25.2 was
+causing.
+
+### 25.6 Rewording a radio label must not reset it
+
+`MODES`' labels changed in this work, and what a Gradio radio stores is the
+whole displayed string. `resolve` therefore falls back to matching the *naming*
+half of a label — everything before the em dash — so an installation holding
+`Exclusive — one family owns VRAM at a time` still resolves to `exclusive`
+rather than silently reverting to the default.
+
+### 25.7 `preferences.json` and `[WinError 5]`
+
+Visible in the same log, unrelated to VRAM: `os.replace` is atomic on POSIX and
+merely usually-atomic on Windows, where a scanner or indexer holding the
+destination open for a moment answers `Access is denied`. The write gave up on
+the first refusal, so a preference was lost and a traceback reached the console.
+It now retries five times over a widening backoff, and removes the temporary
+file when it truly cannot land — the log also showed a leftover
+`preferences.jsonfyz9tar1.tmp` in a directory users open to read their settings.

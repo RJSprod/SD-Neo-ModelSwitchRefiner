@@ -1010,10 +1010,17 @@ def image_reserve_bytes() -> int:
     it afterwards, because a running llama-server can only give VRAM back by
     stopping.
 
-    What is already the image family's is subtracted. Those bytes are not free
-    -- they are the loaded checkpoint -- and reserving them a second time would
-    have the language model shrink to make room for a model that is already
-    there.
+    What is already the image family's is subtracted, and it is subtracted from
+    :func:`mc_broker.held_bytes` rather than the residency register. The
+    register only holds what was *declared* to it, and image checkpoints never
+    are -- Forge loads and moves them, and ``mc_memory`` cooperates with that
+    rather than announcing every load to the broker. Asking the register
+    therefore answered 0 for a checkpoint sitting in fourteen gigabytes of
+    VRAM, and this function reserved room all over again for a model that was
+    already there. What that cost, on a 24 GB card holding a 13.9 GB
+    checkpoint, was a language model sized against 8.7 GB *minus* another
+    13.9 GB: sixteen of forty-eight blocks on the card and the rest crawling
+    from system RAM, on a machine with room for far more than that.
 
     Zero on any failure, and zero is the old behaviour: an unknown checkpoint
     is not a reason to refuse to write a prompt.
@@ -1027,8 +1034,15 @@ def image_reserve_bytes() -> int:
         if not name:
             return 0
         required = int(mc_memory.vram_required_bytes(name))
-        held = int(mc_broker.resident_bytes(mc_broker.FAMILY_IMAGE))
-        return max(required - max(held, 0), 0)
+        held = int(mc_broker.held_bytes(mc_broker.FAMILY_IMAGE))
+        # The global safety margin comes off too, because ``negotiate`` adds it
+        # on top of whatever this returns and it is the *same* number: both are
+        # ``mc_memory.vram_headroom_bytes()``, which is inside
+        # ``vram_required_bytes`` already. Counted twice it is a gigabyte and a
+        # half of a card reserved for one activation peak, which on a 24 GB
+        # machine is several blocks of the language model for nothing.
+        margin = int(mc_broker.safety_margin_bytes())
+        return max(required - max(held, 0) - max(margin, 0), 0)
     except Exception:
         logger.debug("Model Chain: could not size the image reserve for a Creative roll",
                      exc_info=True)

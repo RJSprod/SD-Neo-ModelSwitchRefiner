@@ -20,7 +20,7 @@ Where setup went, and why
 The model, the placement and the context budget used to be a "Models, hardware
 and memory" accordion sitting under whichever workspace was open. Two things
 were wrong with that. Everything in it that is a plain value -- the context
-sizing, the cache types, the residency policy, the folders -- describes the
+sizing, the cache types, the residency mode, the folders -- describes the
 installation rather than anything a mode is doing, which is precisely the test
 this extension already applies to decide that a control belongs on the WebUI's
 Settings page; and everything in it that is *not* a plain value -- the file
@@ -813,7 +813,10 @@ def _residency_table() -> str:
         # same sentence, but a tooltip is not somewhere anybody reads carefully.
         f"<li>LLM runtime: {ui.escape(_runtime_detail(state))}</li>",
         f"<li>Mode: <b>{ui.escape(mc_broker.label_for(mc_broker.MODES, status.mode))}</b></li>",
-        f"<li>Policy: <b>{ui.escape(mc_broker.label_for(mc_broker.POLICIES, status.policy))}</b></li>",
+        # Stated rather than configured, because it is no longer a choice: the
+        # LLM is never the reason a checkpoint leaves the card.
+        "<li>Placement rule: <b>the image model keeps its VRAM; the LLM uses what is "
+        "spare</b></li>",
         f"<li>VRAM: {ui.gigabytes(status.free_vram)} free of "
         f"{ui.gigabytes(status.total_vram)}, {ui.gigabytes(status.reserve)} reserved</li>",
         f"<li>VRAM owners: {ui.escape(owners)}</li>",
@@ -866,7 +869,7 @@ def _setup_panel() -> dict:
     """Setup mode: the runtime, the model, what fits, and what is resident.
 
     Only the things that are not plain values. Context sizing, the cache types,
-    the residency mode, the policy and the release behaviour were all controls
+    the residency mode and the release behaviour were all controls
     here once and are now Forge settings, because every one of them describes
     the installation rather than the click being made -- the same test that put
     the VRAM reserve and the progress theme on the Settings page. What is left
@@ -1711,7 +1714,10 @@ def _estimate_html() -> str:
         f"<b>{'calibrated from a real load' if estimate.calibrated else 'estimated'}</b></li>",
         f"<li>Keeping the current image model resident: "
         f"<b>{ui.tokens(with_image.usable)}</b> tokens</li>",
-        f"<li>If the image model is demoted to system RAM: "
+        # Not "if it were demoted": nothing here will ever demote it for the
+        # LLM. It is what the card would give a language model on a day when no
+        # checkpoint is loaded, which is a real state and a fair comparison.
+        f"<li>With no image model on the card: "
         f"<b>{ui.tokens(without_image.usable)}</b> tokens</li>",
     ]
     if estimate.capped:

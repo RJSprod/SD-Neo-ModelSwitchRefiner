@@ -134,6 +134,54 @@ class TestFitFirst:
         assert not result.moved_anything
 
 
+class TestWhatTheNoteSays:
+    def test_a_sweep_reports_the_card_as_it_was_before_it_moved_anything(
+            self, broker, host, monkeypatch):
+        """The reading is re-taken after the sweep, and quoting it on both sides
+        of the arrow printed "22.5 GB -> 22.5 GB free" on a call that had just
+        recovered fourteen gigabytes."""
+        host.shared.opts.set(broker.OPT_MODE, broker.MODE_EXCLUSIVE)
+        card = [4 * _GB]
+        monkeypatch.setattr(broker, "free_vram_bytes", lambda: card[0])
+        monkeypatch.setattr(broker, "device_free_vram_bytes", lambda: card[0])
+
+        class Mover(Recorder):
+            def release(self, needed_bytes, reason=""):
+                freed = super().release(needed_bytes, reason)
+                card[0] += freed
+                return freed
+
+        broker.register_reclaimer(broker.FAMILY_LLM, Mover(holds=10 * _GB))
+
+        broker.request_vram(broker.FAMILY_IMAGE, 20 * _GB)
+
+        said = [entry.text for entry in broker.decisions()]
+        assert any("4.0 GB -> 14.0 GB free" in text for text in said), said
+
+    def test_an_exclusive_sweep_says_what_hybrid_would_have_done_instead(
+            self, broker, host, monkeypatch):
+        """The stop is the mode's promise, not a fault -- but it is a model load
+        per image, and the setting that avoids it is worth naming once."""
+        host.shared.opts.set(broker.OPT_MODE, broker.MODE_EXCLUSIVE)
+        set_free(monkeypatch, 4)
+        broker.register_reclaimer(broker.FAMILY_LLM, Recorder(holds=6 * _GB))
+
+        broker.request_vram(broker.FAMILY_IMAGE, 2 * _GB)
+
+        said = " ".join(entry.text for entry in broker.decisions())
+        assert "Hybrid would have kept it warm" in said
+
+    def test_a_request_that_moved_nothing_says_nothing_about_modes(
+            self, broker, host, monkeypatch):
+        host.shared.opts.set(broker.OPT_MODE, broker.MODE_EXCLUSIVE)
+        set_free(monkeypatch, 20)
+
+        broker.request_vram(broker.FAMILY_IMAGE, 2 * _GB)
+
+        said = " ".join(entry.text for entry in broker.decisions())
+        assert "Hybrid" not in said
+
+
 class TestExclusiveMode:
     def test_the_other_family_leaves_entirely(self, broker, host, monkeypatch):
         """Section 10: Exclusive mode is a promise about ownership, so the
@@ -162,25 +210,27 @@ class TestExclusiveMode:
         assert llm.calls
 
 
-class TestPolicy:
-    def test_an_image_pass_outranks_an_idle_llm_under_every_policy(self, broker, host,
-                                                                   monkeypatch):
-        """Section 18's regression requirement: ordinary txt2img keeps working,
-        whatever the LLM was promised."""
-        for chosen in (broker.POLICY_ADAPTIVE, broker.POLICY_PRESERVE_IMAGE,
-                       broker.POLICY_LLM_PRIORITY):
-            host.shared.opts.set(broker.OPT_POLICY, chosen)
-            set_free(monkeypatch, 1)
-            llm = Recorder(holds=8 * _GB)
-            broker.register_reclaimer(broker.FAMILY_LLM, llm)
+class TestTheImageModelKeepsItsVram:
+    """The one asymmetry: an image residency is never demoted for the LLM.
 
-            broker.request_vram(broker.FAMILY_IMAGE, 5 * _GB)
+    The LLM is a helper that writes a prompt for the image model. A helper that
+    throws the checkpoint off the card has made the job slower, because the
+    checkpoint is wanted again seconds later and every byte borrowed is paid
+    for twice -- once moving the weights out, once moving them back.
+    """
 
-            assert llm.calls, f"{chosen} refused to yield to an image pass"
+    def test_an_image_pass_outranks_an_idle_llm(self, broker, host, monkeypatch):
+        """Section 18's regression requirement: ordinary txt2img keeps working."""
+        set_free(monkeypatch, 1)
+        llm = Recorder(holds=8 * _GB)
+        broker.register_reclaimer(broker.FAMILY_LLM, llm)
 
-    def test_preserve_image_never_asks_the_image_side_for_anything(self, broker, host,
-                                                                   monkeypatch):
-        host.shared.opts.set(broker.OPT_POLICY, broker.POLICY_PRESERVE_IMAGE)
+        broker.request_vram(broker.FAMILY_IMAGE, 5 * _GB)
+
+        assert llm.calls
+
+    def test_the_llm_never_asks_the_image_side_for_anything(self, broker, host,
+                                                            monkeypatch):
         set_free(monkeypatch, 1)
         image = Recorder(holds=12 * _GB)
         broker.register_reclaimer(broker.FAMILY_IMAGE, image)
@@ -190,15 +240,20 @@ class TestPolicy:
         assert image.calls == []
         assert not result.satisfied
 
-    def test_llm_priority_demotes_the_image_model(self, broker, host, monkeypatch):
-        host.shared.opts.set(broker.OPT_POLICY, broker.POLICY_LLM_PRIORITY)
+    def test_not_even_in_exclusive_mode(self, broker, host, monkeypatch):
+        """The sweep is directional. Exclusive mode used to run it both ways,
+        and a Krea roll on a 24 GB card evicted a 13.9 GB checkpoint it then
+        reserved room for, so the generation two seconds later spent thirteen
+        seconds moving the same weights back -- every press.
+        """
+        host.shared.opts.set(broker.OPT_MODE, broker.MODE_EXCLUSIVE)
         set_free(monkeypatch, 1)
-        image = Recorder(holds=12 * _GB)
+        image = Recorder(holds=14 * _GB)
         broker.register_reclaimer(broker.FAMILY_IMAGE, image)
 
         broker.request_vram(broker.FAMILY_LLM, 8 * _GB)
 
-        assert image.calls[0][0] == 7 * _GB
+        assert image.calls == []
 
     def test_a_family_is_never_asked_to_make_room_for_itself(self, broker, monkeypatch):
         set_free(monkeypatch, 1)
@@ -487,9 +542,18 @@ class TestSettings:
         assert broker.mode() == broker.MODE_EXCLUSIVE
 
     def test_a_bare_value_resolves_too(self, broker, host):
-        host.shared.opts.set(broker.OPT_POLICY, broker.POLICY_LLM_PRIORITY)
+        host.shared.opts.set(broker.OPT_MODE, broker.MODE_EXCLUSIVE)
 
-        assert broker.policy() == broker.POLICY_LLM_PRIORITY
+        assert broker.mode() == broker.MODE_EXCLUSIVE
+
+    def test_a_label_whose_explanation_was_reworded_still_resolves(self, broker, host):
+        """What a radio stores is the whole string. Rewriting the half after the
+        dash must not silently reset everybody's residency mode to the default.
+        """
+        host.shared.opts.set(broker.OPT_MODE,
+                             "Exclusive — one family owns VRAM at a time")
+
+        assert broker.mode() == broker.MODE_EXCLUSIVE
 
     def test_an_unrecognised_setting_falls_back_to_the_default(self, broker, host):
         host.shared.opts.set(broker.OPT_MODE, "something else entirely")
@@ -535,6 +599,40 @@ class TestStatusSeesTheImageSide:
         broker.register_reclaimer(broker.FAMILY_IMAGE, Broken())
 
         assert broker.status().image_bytes == 0
+
+
+class TestHeldBytes:
+    """The one function to ask when the question is "is it already there".
+
+    Callers that asked the register instead reserved room for a checkpoint that
+    was already resident -- see ``mc_creative_krea.image_reserve_bytes``.
+    """
+
+    def test_it_reads_the_register_when_something_declared_itself(self, broker,
+                                                                  monkeypatch):
+        set_free(monkeypatch, 4)
+        broker.declare(broker.FAMILY_LLM, "llm", "the LLM", 8 * _GB)
+
+        assert broker.held_bytes(broker.FAMILY_LLM) == 8 * _GB
+
+    def test_it_asks_the_family_when_nothing_declared_itself(self, broker, monkeypatch):
+        set_free(monkeypatch, 4)
+        broker.register_reclaimer(broker.FAMILY_IMAGE, Recorder(holds=13 * _GB))
+
+        assert broker.resident_bytes(broker.FAMILY_IMAGE) == 0
+        assert broker.held_bytes(broker.FAMILY_IMAGE) == 13 * _GB
+
+    def test_it_never_double_counts(self, broker, monkeypatch):
+        set_free(monkeypatch, 4)
+        broker.register_reclaimer(broker.FAMILY_LLM, Recorder(holds=8 * _GB))
+        broker.declare(broker.FAMILY_LLM, "llm", "the LLM", 8 * _GB)
+
+        assert broker.held_bytes(broker.FAMILY_LLM) == 8 * _GB
+
+    def test_it_answers_zero_for_a_family_holding_nothing(self, broker, monkeypatch):
+        set_free(monkeypatch, 4)
+
+        assert broker.held_bytes(broker.FAMILY_IMAGE) == 0
 
 
 class TestVramNobodyAdmitsTo:
@@ -645,9 +743,9 @@ class TestTheReasonReadsAsASentence:
         monkeypatch.setattr(mc_broker, "mode", lambda: mc_broker.MODE_EXCLUSIVE)
         monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24 * _GB)
         set_free(monkeypatch, 4)
-        image = Recorder(holds=6 * _GB, label="the image checkpoint")
-        broker.register_reclaimer(broker.FAMILY_IMAGE, image)
+        llm = Recorder(holds=6 * _GB, label="the LLM")
+        broker.register_reclaimer(broker.FAMILY_LLM, llm)
 
-        mc_broker.request_vram(mc_broker.FAMILY_LLM, 8 * _GB)
+        mc_broker.request_vram(mc_broker.FAMILY_IMAGE, 8 * _GB)
 
-        assert image.calls[0][1] == "the LLM workload taking VRAM ownership"
+        assert llm.calls[0][1] == "the image workload taking VRAM ownership"
