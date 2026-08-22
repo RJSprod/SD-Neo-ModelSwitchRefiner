@@ -593,7 +593,24 @@ residency of that pair realistically wants a 24 GB card. Quantised Flux builds
 (GGUF, nf4, fp4, fp8) are substantially smaller and make dual residency workable
 on less. The extension handles both cases and never assumes dual residency.
 
-#### Generation Memory & Persistent LLM
+##### Reading the console
+
+Every line this extension writes carries the time of day to the millisecond:
+
+```
+Model Chain [10:14:07.912]: active plan — Creative Writer -> Stage 1 (krea2);
+                            image working peak 19.3 GB, set by Stage 1 (measured)
+Model Chain [10:14:07.913]: memory budget — 22.7 GB obtainable of 24.0 GB on the card,
+                            19.3 GB protected for the image plan, 2.8 GB for the LLM (auto)
+```
+
+The clock is inside the name rather than in front of it, so a log somebody
+greps for `Model Chain` still finds every line it used to. Half of what is
+logged here is a number that only means something against a clock — how long a
+switch took, how long a prompt took to read, how long the card sat idle between
+two phases — and the host's own handler prints no time at all.
+
+### Generation Memory & Persistent LLM
 
 Everything above is about one workload. A generation is often several — a
 Creative Writer call, a Spatial Composer call, Stage 1, the handoff into
