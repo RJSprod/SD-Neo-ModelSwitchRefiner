@@ -685,7 +685,42 @@ def publish(plan: Plan | None) -> Plan | None:
                 plan.image_working_peak() / _GB,
                 f", set by {limiting.label}" if limiting else "",
             )
+            _log_derivation()
         return plan
+
+
+def _log_derivation() -> None:
+    """Show the whole sum, once per plan, so a restart never needs a log round-trip.
+
+    Every figure that decides whether llama-server survives the generation is on
+    one line: what the card can really give, what the plan is protected for, and
+    what is therefore left. A budget that looks wrong is then wrong *visibly*,
+    against a named phase, rather than being inferred three days later from the
+    fact that the model keeps reloading.
+
+    The obtainable figure is the one worth reading twice. It is deliberately not
+    the card's nameplate -- see :func:`usable_vram_bytes` -- and on a machine
+    where the two differ by more than a token amount, that difference is the
+    single most likely explanation for a language model that will not stay up.
+    """
+    try:
+        import mc_broker
+
+        ours = int(mc_broker.reported_bytes(mc_broker.FAMILY_LLM))
+        total = int(mc_broker.total_vram_bytes())
+    except Exception:
+        return
+    obtainable = usable_vram_bytes(ours)
+    protected = image_protected_bytes()
+    allowance = persistent_llm_budget(ours)
+    logger.info(
+        "Model Chain: memory budget — %.1f GB obtainable of %.1f GB on the card, "
+        "%.1f GB protected for the image plan, %.1f GB for the LLM (%s)%s",
+        obtainable / _GB, total / _GB, protected / _GB,
+        max(allowance, 0) / _GB, cap_mode(),
+        f"; a learned ceiling of {learned_cap_bytes() / _GB:.1f} GB is in force"
+        if learned_cap_bytes() > 0 else "",
+    )
 
 
 def current() -> Plan | None:
@@ -777,16 +812,73 @@ def image_protected_bytes() -> int:
     return plan.image_working_peak() + user_safety_bytes()
 
 
-def usable_vram_bytes() -> int:
+def usable_vram_bytes(already_ours: int = 0) -> int:
+    """VRAM that can actually be obtained on this card, which is not its size.
+
+    A card's nameplate total is not available to anything. From a user's log, an
+    RTX 3090 reporting ``24575 MiB`` total never had more than ``23304 MiB``
+    free, even with nothing whatever loaded: the display, the driver's own
+    working set and whatever else the desktop is doing account for the rest.
+    That is **1.24 GB** on this machine, and it is not a rounding error -- it is
+    the whole difference between a language model that survives a generation and
+    one that is evicted at the start of every single one.
+
+    The mechanism is worth spelling out, because the symptom looks nothing like
+    the cause. ``PersistentLLMBudget`` is ``usable - protected``. Computed from
+    the nameplate it is 1.24 GB too generous, so the model is *placed* 1.24 GB
+    larger than the card can actually carry alongside the image plan. Nothing
+    fails at that point -- llama.cpp starts happily, because the VRAM really is
+    free while the checkpoint is not loaded. What fails is the next question
+    anybody asks: "does the image plan fit right now?" The answer is no, by
+    almost exactly the overshoot, and the only thing the broker can do about it
+    is stop llama-server. Every generation, with an identical placement every
+    time, because the overshoot is identical every time.
+
+    So it is measured rather than declared:
+
+        obtainable = free to the driver, right now
+                   + what our own language model is holding
+                   + what our own image models are holding
+
+    Each of those three is VRAM this extension can have; nothing else on the
+    card is. The sum is invariant as models come and go -- a checkpoint loading
+    moves bytes from the first term to the third and leaves the total alone --
+    which is exactly the stability the plan exists to provide, and it also means
+    a *third-party* process taking VRAM correctly shrinks the budget rather than
+    being quietly counted as ours.
+
+    ``already_ours`` is passed by :func:`mc_llm_runtime._spendable`, which knows
+    the figure and is holding the runtime lock when it asks. Reading it from the
+    register instead would mean re-entering that lock from whatever thread the
+    panel happens to be on, and a status display that can block for the length
+    of a model load is not a status display.
+
+    Capped at the nameplate, and falling back to it, so a host that cannot
+    answer either question gets the old behaviour rather than a budget of zero.
+    """
     try:
         import mc_broker
 
-        return int(mc_broker.total_vram_bytes())
+        total = int(mc_broker.total_vram_bytes())
     except Exception:
         return 0
 
+    try:
+        import mc_broker
 
-def persistent_llm_budget() -> int:
+        obtainable = int(mc_broker.device_free_vram_bytes())
+        if obtainable <= 0:
+            return total
+        obtainable += max(int(already_ours), 0)
+        obtainable += max(int(mc_broker.held_bytes(mc_broker.FAMILY_IMAGE)), 0)
+    except Exception:
+        logger.debug("Model Chain: could not measure the obtainable VRAM", exc_info=True)
+        return total
+
+    return min(obtainable, total) if total > 0 else obtainable
+
+
+def persistent_llm_budget(already_ours: int = 0) -> int:
     """What the language model may hold persistently, given the active plan.
 
     The remainder, and only ever the remainder: rule 6. On Off it is zero, on
@@ -797,12 +889,16 @@ def persistent_llm_budget() -> int:
     control is documented as a way to be more conservative than the arithmetic,
     and a control that could also be less conservative than it would be a way
     to break image generation from a text box.
+
+    ``already_ours`` is what a running server of ours is holding at this moment.
+    It is *added back* before the division, because those bytes are ours to
+    spend on the next placement -- see :func:`usable_vram_bytes`.
     """
     mode = cap_mode()
     if mode == CAP_OFF:
         return 0
 
-    total = usable_vram_bytes()
+    total = usable_vram_bytes(already_ours)
     if total <= 0:
         # No card, or no way to ask about it. The negotiator's existing
         # behaviour -- size against what is free -- is the honest fallback, and
@@ -907,7 +1003,7 @@ def record_miss(phase: str, shortfall_bytes: int, *, llm_bytes: int = 0,
     # whole card -- which is what the budget arithmetic returns when nothing is
     # protected -- would print "Active LLM cap: 24.0 GB" at a user whose
     # language model was holding four.
-    cap = max(persistent_llm_budget(), 0) if current() is not None else 0
+    cap = max(persistent_llm_budget(llm_bytes), 0) if current() is not None else 0
     held = max(int(llm_bytes), 0)
     shortfall = max(int(shortfall_bytes), 0)
     # What the language model should have been holding for the image to have
@@ -991,17 +1087,21 @@ def budget() -> Budget:
         import mc_broker
 
         margin = int(mc_broker.safety_margin_bytes())
+        # What a running server of ours holds is ours to spend, so the panel
+        # reads the same obtainable figure the placement was made from rather
+        # than one that shrinks by the size of the model it is describing.
+        ours = int(mc_broker.reported_bytes(mc_broker.FAMILY_LLM))
     except Exception:
-        margin = 0
+        margin, ours = 0, 0
     return Budget(
         plan=plan,
-        total_bytes=usable_vram_bytes(),
+        total_bytes=usable_vram_bytes(ours),
         working_peak_bytes=plan.image_working_peak() if plan is not None else 0,
         limiting=plan.limiting() if plan is not None else None,
         safety_bytes=margin,
         user_safety_bytes=user_safety_bytes(),
         protected_bytes=image_protected_bytes(),
-        llm_allowance_bytes=max(persistent_llm_budget(), 0),
+        llm_allowance_bytes=max(persistent_llm_budget(ours), 0),
         llm_cap_mode=cap_mode(),
         llm_custom_cap_bytes=custom_cap_bytes(),
         llm_learned_cap_bytes=learned_cap_bytes(),

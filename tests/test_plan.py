@@ -60,7 +60,7 @@ def card(host, monkeypatch):
                         if stage.present else 0)
     monkeypatch.setattr(mc_plan, "_module_bytes",
                         lambda stage: int(modules.get(str(stage.name), 0.0) * GB))
-    monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda: 24 * GB)
+    monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda ours=0: 24 * GB)
     monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
     monkeypatch.setattr(mc_broker, "held_bytes", lambda family: 0)
     return types.SimpleNamespace(sizes=sizes, modules=modules)
@@ -467,7 +467,7 @@ class TestTheBudget:
         """-1 is "there is no card to divide up", not "there is no room". A
         zero here would force the model into system RAM on every machine whose
         VRAM cannot be queried."""
-        monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda: 0)
+        monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda ours=0: 0)
         card.sizes["krea2"] = 14.0
         mc_plan.publish(plan_for(card, stage_1=stage("krea2")))
 
@@ -677,3 +677,172 @@ class TestHowACheckpointIsNamed:
     def test_a_square_bracket_that_is_not_a_hash_suffix_is_kept(self):
         assert mc_plan.Stage(name="krea2").shown() == "krea2"
         assert mc_plan.Stage(name="[experimental]krea2").shown() == "[experimental]krea2"
+
+
+class TestTheBudgetIsMeasuredNotDeclared:
+    """A card's nameplate is not available to anything, and the gap is fatal.
+
+    Numbers throughout are one user's RTX 3090, from the ``device_info`` line
+    llama-server prints at every start: ``24575 MiB`` total, and never more than
+    ``23304 MiB`` free with nothing whatever loaded. The missing 1.24 GB is the
+    display, the driver's working set and the desktop.
+
+    Sized from the nameplate, ``PersistentLLMBudget`` is 1.24 GB too generous,
+    so the model is placed 1.24 GB larger than the card can carry beside the
+    image plan. Nothing fails then -- the VRAM really is free while the
+    checkpoint is not loaded. What fails is the next question anybody asks:
+    "does the image plan fit right now?" No, by almost exactly the overshoot,
+    and the only answer the broker has is to stop llama-server. Every
+    generation, with an identical placement every time.
+    """
+
+    MiB = 1024**2
+
+    @pytest.fixture
+    def card_3090(self, host, monkeypatch):
+        state = {"free": 23304 * self.MiB, "image": 0, "llm": 0}
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24575 * self.MiB)
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes", lambda: state["free"])
+        monkeypatch.setattr(mc_broker, "held_bytes",
+                            lambda family: state["image"] if family == mc_broker.FAMILY_IMAGE
+                            else state["llm"])
+        monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
+        return state
+
+    def test_the_nameplate_is_not_what_the_card_can_give(self, card_3090):
+        assert mc_plan.usable_vram_bytes() == 23304 * self.MiB
+
+    def test_the_overshoot_it_removes_is_the_one_that_was_evicting(self, card_3090):
+        nameplate = 24575 * self.MiB
+        assert nameplate - mc_plan.usable_vram_bytes() == 1271 * self.MiB
+
+    def test_it_is_invariant_as_models_come_and_go(self, card_3090):
+        """The property that makes the budget stable. A checkpoint loading moves
+        bytes from the free term into the image term and leaves the sum alone,
+        so the allowance does not move when the card fills up."""
+        empty = mc_plan.usable_vram_bytes()
+
+        card_3090["free"] = 2824 * self.MiB
+        card_3090["image"] = 14336 * self.MiB
+        loaded = mc_plan.usable_vram_bytes(already_ours=6144 * self.MiB)
+
+        assert loaded == empty
+
+    def test_a_running_server_of_ours_counts_as_ours_to_spend(self, card_3090):
+        card_3090["free"] = 17160 * self.MiB
+        held = 6144 * self.MiB
+
+        assert mc_plan.usable_vram_bytes(already_ours=held) == 23304 * self.MiB
+
+    def test_another_process_taking_vram_shrinks_the_budget(self, card_3090):
+        """Correctly, and this is the case the nameplate could never see."""
+        card_3090["free"] = 13304 * self.MiB
+
+        assert mc_plan.usable_vram_bytes() == 13304 * self.MiB
+
+    def test_the_allowance_no_longer_exceeds_what_the_card_can_carry(self, card_3090):
+        """The whole bug in one assertion. Stage 1 at 14 GB on this card leaves
+        8.76 GB, not the 10.00 GB the nameplate claimed."""
+        mc_plan.publish(mc_plan.Plan((
+            mc_plan.Phase(mc_plan.STAGE_1, mc_plan.KIND_IMAGE, "Stage 1", 14 * GB),
+        ), 1024, 1024))
+
+        allowance = mc_plan.persistent_llm_budget()
+
+        assert allowance == 23304 * self.MiB - 14 * GB
+        assert allowance < 10 * GB
+
+    def test_a_model_placed_in_the_allowance_leaves_the_plan_room(self, card_3090):
+        """The invariant that stops the eviction: with the language model
+        holding its whole allowance, what is left is still the protected peak,
+        so nothing has to be handed back."""
+        peak = 14 * GB
+        mc_plan.publish(mc_plan.Plan((
+            mc_plan.Phase(mc_plan.STAGE_1, mc_plan.KIND_IMAGE, "Stage 1", peak),
+        ), 1024, 1024))
+        allowance = mc_plan.persistent_llm_budget()
+
+        card_3090["free"] = 23304 * self.MiB - allowance
+
+        assert card_3090["free"] >= peak
+
+    def test_the_nameplate_allowance_did_not_leave_that_room(self, card_3090):
+        """The same arithmetic with the old figure, kept so the test above is
+        known to be measuring the fix rather than restating a tautology."""
+        peak = 14 * GB
+        nameplate_allowance = 24575 * self.MiB - peak
+
+        assert 23304 * self.MiB - nameplate_allowance < peak
+
+    def test_a_host_that_cannot_answer_falls_back_to_the_nameplate(
+            self, card_3090, monkeypatch):
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes", lambda: 0)
+
+        assert mc_plan.usable_vram_bytes() == 24575 * self.MiB
+
+    def test_it_never_reports_more_than_the_card_holds(self, card_3090):
+        """Belt and braces: the three terms are read at slightly different
+        moments and a model unloading between two of them must not produce a
+        budget larger than the card."""
+        card_3090["free"] = 23304 * self.MiB
+        card_3090["image"] = 8 * GB
+
+        assert mc_plan.usable_vram_bytes() == 24575 * self.MiB
+
+
+class TestTheDerivationIsWrittenDown:
+    """A restart should never need a log round-trip to explain.
+
+    Every figure that decides whether llama-server survives the generation goes
+    on one line at the moment the plan is published, so a budget that looks
+    wrong is wrong visibly, against a named phase.
+    """
+
+    def test_the_whole_sum_is_logged_when_the_plan_changes(self, card, caplog):
+        card.sizes["krea2"] = 14.0
+        with caplog.at_level("INFO", logger="model_chain"):
+            mc_plan.publish(plan_for(card, stage_1=stage("krea2")))
+
+        assert any("memory budget" in record.message for record in caplog.records)
+
+    def test_it_names_obtainable_and_nameplate_separately(self, card, caplog):
+        """The two differing is the single likeliest explanation for a language
+        model that will not stay up, so a line showing only one of them would
+        hide the thing it exists to reveal."""
+        card.sizes["krea2"] = 14.0
+        with caplog.at_level("INFO", logger="model_chain"):
+            mc_plan.publish(plan_for(card, stage_1=stage("krea2")))
+
+        line = next(r.getMessage() for r in caplog.records if "memory budget" in r.message)
+        assert "obtainable of" in line and "on the card" in line
+
+    def test_an_unchanged_plan_says_nothing(self, card, caplog):
+        """Ten presses with the same settings is one line, not ten."""
+        card.sizes["krea2"] = 14.0
+        mc_plan.publish(plan_for(card, stage_1=stage("krea2")))
+        caplog.clear()
+        with caplog.at_level("INFO", logger="model_chain"):
+            mc_plan.publish(plan_for(card, stage_1=stage("krea2")))
+
+        assert not any("memory budget" in r.message for r in caplog.records)
+
+    def test_a_learned_ceiling_is_named_when_one_is_in_force(self, card, caplog):
+        card.sizes["krea2"] = 14.0
+        mc_plan.publish(plan_for(card, stage_1=stage("krea2")))
+        mc_plan.record_miss("Stage 2", 2 * GB, llm_bytes=8 * GB, evicted=True)
+        caplog.clear()
+        with caplog.at_level("INFO", logger="model_chain"):
+            mc_plan.publish(plan_for(card, stage_1=stage("krea2"), width=2048, height=2048))
+
+        line = next(r.getMessage() for r in caplog.records if "memory budget" in r.message)
+        assert "learned ceiling" in line
+
+    def test_logging_that_fails_does_not_stop_the_plan_being_published(
+            self, card, monkeypatch):
+        def explode(*args, **kwargs):
+            raise RuntimeError("no")
+
+        monkeypatch.setattr(mc_broker, "reported_bytes", explode)
+        card.sizes["krea2"] = 14.0
+
+        assert mc_plan.publish(plan_for(card, stage_1=stage("krea2"))) is not None

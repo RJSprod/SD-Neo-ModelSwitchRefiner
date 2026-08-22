@@ -1961,7 +1961,7 @@ def publish_plan(*, stage_1_gb=14.0, stage_2_gb=0.0, total_gb=24.0, monkeypatch=
         phases.append(mc_plan.Phase(mc_plan.STAGE_2, mc_plan.KIND_IMAGE, "Stage 2",
                                     int(stage_2_gb * _GB), detail="klein9b"))
     if monkeypatch is not None:
-        monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda: int(total_gb * _GB))
+        monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda ours=0: int(total_gb * _GB))
     return mc_plan.publish(mc_plan.Plan(tuple(phases), 1024, 1024))
 
 
@@ -2024,7 +2024,7 @@ class TestThePlanCapsWhatAPlacementMaySpend:
     def test_a_card_that_cannot_be_measured_does_not_starve_the_model(
             self, placed, monkeypatch):
         set_free(monkeypatch, 20)
-        monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda: 0)
+        monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda ours=0: 0)
         publish_plan(stage_1_gb=14.0)
 
         assert runtime._spendable() == 20 * _GB

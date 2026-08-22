@@ -384,7 +384,7 @@ class TestAReserveMissIsRecordedNotJustSurvived:
         monkeypatch.setattr(mc_memory, "_pass_requirement", lambda *a, **k: 6 * _GB)
         monkeypatch.setattr(mc_memory, "_loaded_target_patchers", lambda name: [])
         monkeypatch.setattr(mc_memory, "_resident_bytes", lambda patchers: 0)
-        monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda: 24 * _GB)
+        monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda ours=0: 24 * _GB)
         mc_plan.publish(mc_plan.Plan((
             mc_plan.Phase(mc_plan.STAGE_1, mc_plan.KIND_IMAGE, "Stage 1", 14 * _GB),
         ), 1024, 1024))
