@@ -214,6 +214,13 @@ class Plan:
     phases: tuple[Phase, ...] = ()
     width: int = 0
     height: int = 0
+    batch: int = 1
+    """Images sampled at once. It multiplies the activations and nothing else.
+
+    ``n_iter`` deliberately does not appear anywhere here: batches run one after
+    another, so a run of four batches of two costs what one batch of two costs.
+    ``batch_size`` is the one that is live all at the same moment.
+    """
     built_at: float = field(default_factory=time.time)
 
     # -- the peak-of-plan rule -------------------------------------------- #
@@ -281,7 +288,7 @@ class Plan:
         this is that class.
         """
         step = _GB // 4
-        return tuple(
+        return (max(int(self.batch), 1),) + tuple(
             (phase.name, phase.peak_bytes // step if step else phase.peak_bytes)
             for phase in self.phases
         )
@@ -412,7 +419,7 @@ def forget_weights() -> None:
         _measured_weights.clear()
 
 
-def _measured_pass_bytes(stage: Stage, width: int, height: int) -> int:
+def _measured_pass_bytes(stage: Stage, width: int, height: int, batch: int = 1) -> int:
     """What this stage costs according to a measurement, or 0 if there is none.
 
     The loaded model is asked first, because that answer is true right now.
@@ -430,14 +437,15 @@ def _measured_pass_bytes(stage: Stage, width: int, height: int) -> int:
             weights = measured_weights(stage.name, stage.modules)
         if weights <= 0:
             return 0
-        return int(mc_memory.pass_bytes_from_weights(weights, width, height))
+        return int(mc_memory.pass_bytes_from_weights(weights, width, height, batch))
     except Exception:
         logger.debug("Model Chain: could not measure the %s pass", stage.shown(),
                      exc_info=True)
         return 0
 
 
-def _phase_cost(stage: Stage, width: int, height: int) -> tuple[int, bool]:
+def _phase_cost(stage: Stage, width: int, height: int,
+                batch: int = 1) -> tuple[int, bool]:
     """``(bytes, measured)`` for one image stage.
 
     Measurement wins whenever there is one. The estimate behind it -- the file
@@ -450,13 +458,13 @@ def _phase_cost(stage: Stage, width: int, height: int) -> tuple[int, bool]:
     figure somebody measured from a figure nobody has, and a user watching Task
     Manager disagree with the panel deserves to know which they are looking at.
     """
-    measured = _measured_pass_bytes(stage, width, height)
+    measured = _measured_pass_bytes(stage, width, height, batch)
     if measured > 0:
         return measured, True
-    return _pass_bytes(stage, width, height), False
+    return _pass_bytes(stage, width, height, batch), False
 
 
-def _pass_bytes(stage: Stage, width: int, height: int) -> int:
+def _pass_bytes(stage: Stage, width: int, height: int, batch: int = 1) -> int:
     """VRAM one sampling pass on ``stage`` needs: weights resident, plus activations.
 
     Delegated to ``mc_memory`` rather than reimplemented, so that a plan and the
@@ -470,7 +478,8 @@ def _pass_bytes(stage: Stage, width: int, height: int) -> int:
     try:
         import mc_memory
 
-        return int(mc_memory.vram_required_bytes(stage.name, stage.modules, width, height))
+        return int(mc_memory.vram_required_bytes(stage.name, stage.modules, width, height,
+                                                 batch))
     except Exception:
         logger.debug("Model Chain: could not size the %s pass", stage.shown(), exc_info=True)
         return 0
@@ -525,7 +534,7 @@ def _stage_2_size(width: int, height: int, multiplier: float) -> tuple[int, int]
     return int(max(width, 0) * scale), int(max(height, 0) * scale)
 
 
-def build(*, width: int = 0, height: int = 0,
+def build(*, width: int = 0, height: int = 0, batch: int = 1,
           stage_1: Stage | None = None, stage_2: Stage | None = None,
           creative: bool = False, spatial_compose: str = "",
           warm_up: bool = True) -> Plan:
@@ -554,13 +563,14 @@ def build(*, width: int = 0, height: int = 0,
     elif mode:
         phases.append(Phase(DIRECT_MERGE, KIND_PREPARATION, "Direct BBOX Merge"))
 
-    stage_1_peak, stage_1_measured = _phase_cost(stage_1, width, height)
+    batch = max(int(batch or 1), 1)
+    stage_1_peak, stage_1_measured = _phase_cost(stage_1, width, height, batch)
     phases.append(Phase(STAGE_1, KIND_IMAGE, "Stage 1", stage_1_peak,
                         measured=stage_1_measured, detail=stage_1.shown()))
 
     if stage_2 is not None and stage_2.present:
         wide, tall = _stage_2_size(width, height, stage_2.multiplier)
-        stage_2_peak, stage_2_measured = _phase_cost(stage_2, wide, tall)
+        stage_2_peak, stage_2_measured = _phase_cost(stage_2, wide, tall, batch)
         # The overlap the switch actually creates, and only that. The whole of
         # Stage 1 is not assumed to survive into Stage 2 -- it does not, the
         # UNet is evicted -- but its encoders are deliberately spared, and
@@ -581,7 +591,7 @@ def build(*, width: int = 0, height: int = 0,
                                 stage_1_peak, measured=stage_1_measured,
                                 detail="restored for the next press"))
 
-    return Plan(tuple(phases), int(max(width, 0)), int(max(height, 0)))
+    return Plan(tuple(phases), int(max(width, 0)), int(max(height, 0)), batch)
 
 
 # --------------------------------------------------------------------------- #
@@ -768,7 +778,14 @@ def build_for(p, *, creative: bool | None = None,
         logger.debug("Model Chain: could not read the Stage 1 checkpoint for the plan",
                      exc_info=True)
 
-    return build(width=width, height=height, stage_1=stage_1,
+    # ``batch_size``, never ``n_iter``: a run of four batches of two is four
+    # passes of two images, not one pass of eight.
+    try:
+        batch = max(int(getattr(p, "batch_size", 1) or 1), 1)
+    except (TypeError, ValueError):
+        batch = 1
+
+    return build(width=width, height=height, batch=batch, stage_1=stage_1,
                  stage_2=stage_2_from(p), creative=creative,
                  spatial_compose=spatial_compose)
 
@@ -1145,6 +1162,44 @@ def record_miss(phase: str, shortfall_bytes: int, *, llm_bytes: int = 0,
 
     logger.warning("Model Chain: reserve miss — %s", miss.describe())
     return miss
+
+
+def check_observed(phase: str, observed_bytes: int) -> Miss | None:
+    """Compare what a pass really cost with what the plan protected for it.
+
+    The gap this closes is the one a user found by watching a third-party VRAM
+    guard abort a generation the extension believed was comfortably inside
+    budget. Nothing here noticed, because nothing here was in the path: when an
+    estimate is short, what happens next is the host's allocator spilling or
+    somebody else's guard stopping the job, and neither reports back.
+
+    So the estimate is checked against the measurement at the one moment both
+    exist. A pass that peaked above the protected budget is a reserve miss --
+    the plan was wrong, whether or not anything had to be evicted for it --
+    and it is recorded as one so the panel says so and Auto learns from it.
+
+    ``evicted=False`` on purpose: nothing was taken here. This is the miss
+    being *noticed*, which is a different event from the recovery, and telling
+    a user their language model was evicted when it was not would be worse than
+    saying nothing.
+
+    Returns the miss, or ``None`` when the pass fitted -- which is the common
+    case and the silent one.
+    """
+    protected = image_protected_bytes()
+    observed = max(int(observed_bytes), 0)
+    if protected <= 0 or observed <= 0 or observed <= protected:
+        return None
+
+    held = 0
+    try:
+        import mc_broker
+
+        held = max(int(mc_broker.reported_bytes(mc_broker.FAMILY_LLM)), 0)
+    except Exception:
+        logger.debug("Model Chain: could not read the LLM residency", exc_info=True)
+
+    return record_miss(phase, observed - protected, llm_bytes=held, evicted=False)
 
 
 def misses(limit: int = MISS_HISTORY) -> list[Miss]:

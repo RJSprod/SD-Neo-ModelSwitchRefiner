@@ -229,6 +229,93 @@ every image row. A table that presented an estimate with the same authority as
 a reading would be inviting the user to trust the wrong one.
 
 
+## 4c. A batch multiplies the activations
+
+Every image in a batch carries its own latents, its own attention buffers and
+its own residual stream, and they are all live at the same moment. The weights
+are shared; nothing else is. So the plan takes `p.batch_size` and multiplies the
+pixel count by it.
+
+Deliberately **not** `n_iter`: four batches of two run one after another and
+cost what one batch of two costs. Reserving for eight images would leave the
+language model nothing, for nothing.
+
+The bug this fixes killed a generation before its first step. A batch of five on
+a 24 GB card holding a 17.8 GB checkpoint:
+
+```
+Reclaimed: 21640 MB    Residual: 1312 MB
+Driver-free: 255 MB    Torch reserved: 21056 MB
+Estimated next operation: 1352 MB
+Trigger: driver-free memory below the hard floor (checked at unet-forward)
+```
+
+The plan had protected **19.3 GB** — weights plus *one* image's activations. The
+pass reserved **21.06 GB**. The 1.76 GB difference is four extra images' worth of
+activations, and a llama-server was sitting in 1.4 GB of it under a promise this
+plan had made it. With Creative Mode off the same batch completed, because
+nothing was holding that 1.4 GB.
+
+The observation side is corrected too. `observe_activation_peak` now divides by
+the batch, so what it learns is the cost of *one* image at that resolution.
+Without that, one batch of five would teach the estimator a per-megapixel figure
+five times too large and every single-image generation afterwards would reserve
+for a batch nobody asked for.
+
+### The allowance can now fall, and the server must follow it
+
+`_worth_restarting` only ever asks for an improvement, and its reasoning was
+sound: a running server holds its VRAM either way, and moving it somewhere
+smaller frees nothing anybody asked for. A plan is exactly that request. When a
+boundary lowers the allowance below what the server is holding,
+`Runtime._overspending` returns true and the placement is redone downwards —
+with a 256 MB tolerance, because both sides of that comparison are measurements
+and re-placing for a rounding error is the flapping this work removed.
+
+
+## 4d. Noticing an overrun at all
+
+When an estimate is short, nothing in this extension is in the path. The host's
+allocator spills, or a VRAM guard in another extension stops the generation at
+`unet-forward` and reports it in its own words. Neither reports back, so the
+panel went on quoting a budget that had just been exceeded.
+
+`mc_plan.check_observed` closes that. `observe_activation_peak` already measures
+the pass peak; it is now compared with what the plan protected, and a pass that
+peaked above it is recorded as a reserve miss — `evicted=False`, because nothing
+was taken. This is the miss being *noticed*, which is a different event from the
+recovery.
+
+
+## 4e. Where the card's memory actually is
+
+The panel now shows a residency map that adds up to the whole card:
+
+| | |
+| --- | --- |
+| Image models | weights as loaded, not as stored on disk |
+| Language model | 0 when it is running from system RAM |
+| Free | |
+| Everything else | CUDA context, desktop, other programs |
+| **Card total** | |
+
+The last row is the one worth having. A user reported 20.1 GB in Task Manager on
+an idle machine whose three model files come to 17.3 GB. All of it was ordinary:
+
+| | |
+| --- | --- |
+| text encoder (4.88 GiB file) | 5.61 GiB loaded — fp8 file into bf16 compute |
+| transformer (11.95 GiB file) | 11.95 GiB loaded |
+| VAE (0.47 GiB file) | 0.24 GiB loaded — decoder only |
+| **resident weights** | **17.79 GiB** |
+| CUDA context | ~1.33 GiB, never returned until the process exits |
+| llama-server, 6 layers | ~1.4 GiB |
+
+Loaded size is not file size in either direction, and a CUDA context is over a
+gigabyte before a single weight arrives. None of that was visible anywhere,
+which is the part that was actually wrong.
+
+
 ## 5. Stability
 
 `Runtime._outgrown` is where re-placement was decided, and it now declines to

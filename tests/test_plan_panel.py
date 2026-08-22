@@ -313,3 +313,72 @@ class TestMeasuredAndEstimatedAreNotTheSameThing:
         self.measured_chain(True)
 
         assert "becomes a measurement" not in panel.plan_view()
+
+
+class TestTheCardAddsUp:
+    """A user watched Task Manager report 20.1 GB on an idle machine whose three
+    model files come to 17.3 GB, and had nowhere to look for the rest.
+
+    The rest was real and entirely ordinary — a text encoder that loads larger
+    than its file, a CUDA context that never comes back before the process
+    exits, and a language model holding what the plan had given it. None of it
+    was visible anywhere, which is the part worth fixing.
+    """
+
+    @pytest.fixture
+    def card(self, host, monkeypatch):
+        state = {"total": 24 * GB, "free": 4 * GB, "image": 17 * GB, "llm": 1 * GB}
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: state["total"])
+        monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: state["free"])
+        monkeypatch.setattr(mc_broker, "held_bytes",
+                            lambda family: state["image"]
+                            if family == mc_broker.FAMILY_IMAGE else state["llm"])
+        return state
+
+    def test_every_row_is_shown(self, card):
+        view = panel.residency_view()
+
+        assert "Image models" in view and "Language model" in view
+        assert "Free" in view and "Everything else" in view
+
+    def test_the_rows_add_up_to_the_card(self, card):
+        view = panel.residency_view()
+
+        assert "| Image models | 17.0 GB" in view
+        assert "| Language model | 1.0 GB" in view
+        assert "| Free | 4.0 GB" in view
+        assert "| Everything else | 2.0 GB" in view
+        assert "24.0 GB" in view
+
+    def test_the_unexplained_share_names_what_it_usually_is(self, card):
+        """A number nobody can explain is exactly the number somebody needs to
+        see, and the CUDA context is where most of it goes."""
+        assert "CUDA context" in panel.residency_view()
+
+    def test_a_card_that_cannot_be_read_says_nothing_rather_than_zero(
+            self, card, monkeypatch):
+        monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 0)
+
+        assert panel.residency_view() == ""
+
+    def test_it_is_part_of_the_report(self, card):
+        assert "On the card right now" in panel.report()
+
+    def test_the_batch_is_named_when_there_is_one(self, budget):
+        mc_plan.publish(mc_plan.Plan((
+            mc_plan.Phase(mc_plan.STAGE_1, mc_plan.KIND_IMAGE, "Stage 1", 18 * GB,
+                          measured=True, detail="krea2"),
+        ), 1024, 1024, 5))
+
+        view = panel.plan_view()
+
+        assert "1024x1024, batch of 5" in view
+        assert "multiplies the activations, not the weights" in view
+
+    def test_a_single_image_does_not_labour_the_point(self, budget):
+        mc_plan.publish(mc_plan.Plan((
+            mc_plan.Phase(mc_plan.STAGE_1, mc_plan.KIND_IMAGE, "Stage 1", 18 * GB,
+                          measured=True, detail="krea2"),
+        ), 1024, 1024, 1))
+
+        assert "batch of" not in panel.plan_view()

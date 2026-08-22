@@ -146,7 +146,7 @@ class TestTheRequirementStaysAttainable:
 
     def test_the_requirement_never_exceeds_the_card(self, warming, monkeypatch):
         monkeypatch.setattr(mc_memory, "total_vram_bytes", lambda: 24 * GB)
-        monkeypatch.setattr(mc_memory, "vram_headroom_bytes", lambda w=0, h=0: 20 * GB)
+        monkeypatch.setattr(mc_memory, "vram_headroom_bytes", lambda w=0, h=0, batch=1: 20 * GB)
 
         required = mc_memory._pass_requirement("A", None, 1024, 1024, [])
 
@@ -156,7 +156,7 @@ class TestTheRequirementStaysAttainable:
         """The model has to be resident to sample at all; the reserve is a
         margin, and one that cannot be honoured is better spent than pretended."""
         monkeypatch.setattr(mc_memory, "total_vram_bytes", lambda: 16 * GB)
-        monkeypatch.setattr(mc_memory, "vram_headroom_bytes", lambda w=0, h=0: 20 * GB)
+        monkeypatch.setattr(mc_memory, "vram_headroom_bytes", lambda w=0, h=0, batch=1: 20 * GB)
         monkeypatch.setattr(mc_memory, "file_size_bytes", lambda name, mods=None: 12 * GB)
 
         model = 12 * GB * (1 + mc_memory.VRAM_MODEL_OVERHEAD_FRACTION)
@@ -164,13 +164,13 @@ class TestTheRequirementStaysAttainable:
 
     def test_an_unknowable_card_size_changes_nothing(self, warming, monkeypatch):
         monkeypatch.setattr(mc_memory, "total_vram_bytes", lambda: 0)
-        monkeypatch.setattr(mc_memory, "vram_headroom_bytes", lambda w=0, h=0: 20 * GB)
+        monkeypatch.setattr(mc_memory, "vram_headroom_bytes", lambda w=0, h=0, batch=1: 20 * GB)
 
         assert mc_memory._pass_requirement("A", None, 1024, 1024, []) > 20 * GB
 
     def test_a_pass_that_fits_is_left_alone(self, warming, monkeypatch):
         monkeypatch.setattr(mc_memory, "total_vram_bytes", lambda: 24 * GB)
-        monkeypatch.setattr(mc_memory, "vram_headroom_bytes", lambda w=0, h=0: 2 * GB)
+        monkeypatch.setattr(mc_memory, "vram_headroom_bytes", lambda w=0, h=0, batch=1: 2 * GB)
 
         patchers = [warming.stage_1.patchers.unet]  # 8 GB
         assert mc_memory._pass_requirement("A", None, 1024, 1024, patchers) == 10 * GB

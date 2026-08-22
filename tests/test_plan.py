@@ -46,18 +46,24 @@ def card(host, monkeypatch):
     sizes: dict[str, float] = {}
     modules: dict[str, float] = {}
 
-    def required(name, mods=None, width=0, height=0):
+    def required(name, mods=None, width=0, height=0, batch=1):
+        """Weights that do not scale, plus activations that do.
+
+        Half a gigabyte per extra 1024x1024's worth of pixels and half a
+        gigabyte per extra image in the batch, which is the shape of the real
+        arithmetic: a batch shares the weights and nothing else. Units are one
+        1024x1024 pass at batch one, so a test that does not care about either
+        gets round numbers and one that does can still show a peak move.
+        """
         base = sizes.get(str(name), 0.0)
-        # Activations scale with pixels, as the real estimator's do, so a test
-        # can show a multiplier changing a peak rather than asserting it does.
-        # Units of one 1024x1024 pass, so a test that does not care about size
-        # gets round numbers and one that does can still show a peak moving.
         units = max((width * height) / (1024 * 1024), 1.0) if width and height else 1.0
-        return int((base + 0.5 * (units - 1.0)) * GB)
+        images = max(int(batch or 1), 1)
+        return int((base + 0.5 * (units - 1.0) + 0.5 * (images - 1)) * GB)
 
     monkeypatch.setattr(mc_plan, "_pass_bytes",
-                        lambda stage, w, h: required(stage.name, stage.modules, w, h)
-                        if stage.present else 0)
+                        lambda stage, w, h, batch=1: (
+                            required(stage.name, stage.modules, w, h, batch)
+                            if stage.present else 0))
     monkeypatch.setattr(mc_plan, "_module_bytes",
                         lambda stage: int(modules.get(str(stage.name), 0.0) * GB))
     monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda ours=0: 24 * GB)
@@ -873,7 +879,8 @@ class TestPeaksAreMeasuredWhereTheyCanBe:
         monkeypatch.setattr(mc_memory, "measured_weight_bytes",
                             lambda name, modules=None: self.REAL if name == "krea2" else 0)
         monkeypatch.setattr(mc_memory, "pass_bytes_from_weights",
-                            lambda weights, width=0, height=0: int(weights) + GB // 2)
+                            lambda weights, width=0, height=0, batch=1:
+                            int(weights) + (GB // 2) * max(int(batch), 1))
         return card
 
     def test_the_measurement_wins_over_the_file_estimate(self, loaded):
@@ -929,7 +936,7 @@ class TestAMeasurementOutlivesTheLoad:
         monkeypatch.setattr(mc_memory, "measured_weight_bytes",
                             lambda name, modules=None: 0)
         monkeypatch.setattr(mc_memory, "pass_bytes_from_weights",
-                            lambda weights, width=0, height=0: int(weights))
+                            lambda weights, width=0, height=0, batch=1: int(weights))
         card.sizes.update({"krea2": 10.0, "klein9b": 18.0})
         mc_plan.remember_weights("klein9b", None, 11 * GB)
 
@@ -992,3 +999,154 @@ class TestAMeasurementOutlivesTheLoad:
                 return 12 * GB
 
         assert mc_memory._pass_requirement("klein9b", None, 1024, 1024, [Patcher()]) > 0
+
+
+class TestABatchMultipliesTheActivations:
+    """The generation that died before its first step.
+
+    A batch of five, on a 24 GB card holding a 17.8 GB checkpoint. The plan
+    protected 19.3 GB — weights plus one image's activations — and the pass
+    reserved 21.06 GB. A third-party VRAM guard stopped it at ``unet-forward``
+    with 255 MB free on the card, and the 1.4 GB a llama-server was holding,
+    under a promise this plan had made it, was very nearly exactly the gap.
+
+    Every image in a batch carries its own latents, its own attention buffers
+    and its own residual stream, and they are all live at the same moment. The
+    weights are shared; nothing else is.
+    """
+
+    def test_a_batch_raises_the_peak(self, card):
+        card.sizes["krea2"] = 14.0
+        one = plan_for(card, stage_1=stage("krea2"), batch=1)
+        five = plan_for(card, stage_1=stage("krea2"), batch=5)
+
+        assert five.image_working_peak() > one.image_working_peak()
+
+    def test_it_multiplies_the_activations_and_not_the_weights(self, card):
+        """Five copies of a 14 GB checkpoint would be 70 GB. The card holds 24."""
+        card.sizes["krea2"] = 14.0
+        five = plan_for(card, stage_1=stage("krea2"), batch=5)
+
+        assert five.image_working_peak() < 5 * 14 * GB
+
+    def test_the_llm_allowance_falls_as_the_batch_rises(self, card):
+        """The whole point. What the image plan needs, the language model does
+        not get -- and a batch of five needs a great deal more."""
+        card.sizes["krea2"] = 14.0
+        mc_plan.publish(plan_for(card, stage_1=stage("krea2"), batch=1))
+        one = mc_plan.persistent_llm_budget()
+        mc_plan.publish(plan_for(card, stage_1=stage("krea2"), batch=5))
+        five = mc_plan.persistent_llm_budget()
+
+        assert five < one
+
+    def test_a_batch_change_is_a_plan_boundary(self, card):
+        """So the placement made for a batch of one is reconsidered before a
+        batch of five runs, rather than being discovered in the wreckage."""
+        card.sizes["krea2"] = 14.0
+        mc_plan.publish(plan_for(card, stage_1=stage("krea2"), batch=1))
+        mc_plan.note_placement(mc_plan.current())
+        mc_plan.publish(plan_for(card, stage_1=stage("krea2"), batch=5))
+
+        assert mc_plan.boundary_moved()
+
+    def test_a_batch_of_one_plans_exactly_as_before(self, card):
+        card.sizes["krea2"] = 14.0
+
+        assert (plan_for(card, stage_1=stage("krea2"), batch=1).image_working_peak()
+                == plan_for(card, stage_1=stage("krea2")).image_working_peak())
+
+    def test_a_nonsense_batch_is_treated_as_one(self, card):
+        card.sizes["krea2"] = 14.0
+
+        assert plan_for(card, stage_1=stage("krea2"), batch=0).batch == 1
+
+    def test_the_batch_is_read_off_the_generation(self, card, host):
+        host.shared.opts.sd_model_checkpoint = "krea2"
+        card.sizes["krea2"] = 10.0
+        p = processing(creative_args=[True])
+        p.batch_size = 4
+
+        assert mc_plan.build_for(p).batch == 4
+
+    def test_n_iter_is_not_a_batch(self, card, host):
+        """Four batches of two run one after another. They cost what one batch
+        of two costs, and reserving for eight images would leave the language
+        model nothing for no reason at all."""
+        host.shared.opts.sd_model_checkpoint = "krea2"
+        card.sizes["krea2"] = 10.0
+        p = processing(creative_args=[True])
+        p.batch_size = 2
+        p.n_iter = 4
+
+        assert mc_plan.build_for(p).batch == 2
+
+
+class TestAnOverrunIsNoticedRatherThanSurvived:
+    """When an estimate is short, nothing in this extension is in the path.
+
+    The host's allocator spills, or a guard in another extension stops the
+    generation and reports it in its own words. Neither reports back here, so
+    the panel went on quoting a budget that had just been exceeded. Comparing
+    the measurement with the estimate at the one moment both exist is how that
+    becomes a recorded miss.
+    """
+
+    @pytest.fixture
+    def planned(self, card):
+        card.sizes["krea2"] = 14.0
+        mc_plan.publish(plan_for(card, stage_1=stage("krea2")))
+        return card
+
+    def test_a_pass_that_fitted_records_nothing(self, planned):
+        assert mc_plan.check_observed("Stage 1", 13 * GB) is None
+        assert mc_plan.last_miss() is None
+
+    def test_a_pass_that_overran_is_recorded(self, planned):
+        miss = mc_plan.check_observed("Stage 1", 17 * GB)
+
+        assert miss is not None
+        assert miss.shortfall_bytes == 3 * GB
+        assert miss.phase == "Stage 1"
+
+    def test_it_does_not_claim_an_eviction_that_did_not_happen(self, planned):
+        """Nothing was taken here. This is the miss being noticed, which is a
+        different event from the recovery."""
+        miss = mc_plan.check_observed("Stage 1", 17 * GB)
+
+        assert not miss.evicted
+        assert "evicted" not in miss.describe()
+
+    def test_it_teaches_a_safer_cap(self, planned):
+        mc_plan.check_observed("Stage 1", 17 * GB)
+
+        assert mc_plan.learned_cap_bytes() >= 0
+
+    def test_nothing_is_recorded_without_a_plan(self, card):
+        mc_plan.clear()
+
+        assert mc_plan.check_observed("Stage 1", 17 * GB) is None
+
+    def test_an_unmeasurable_pass_records_nothing(self, planned):
+        assert mc_plan.check_observed("Stage 1", 0) is None
+
+    def test_mc_memory_reports_the_peak_it_measures(self, planned, monkeypatch):
+        import mc_memory
+
+        seen = []
+        monkeypatch.setattr(mc_plan, "check_observed",
+                            lambda phase, observed: seen.append((phase, observed)))
+
+        mc_memory._report_pass_peak("Stage 1", 17 * GB)
+
+        assert seen == [("Stage 1", 17 * GB)]
+
+    def test_a_reporting_failure_does_not_break_the_pass(self, planned, monkeypatch):
+        import mc_memory
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("no")
+
+        monkeypatch.setattr(mc_plan, "check_observed", explode)
+
+        mc_memory._report_pass_peak("Stage 1", 17 * GB)

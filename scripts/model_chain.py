@@ -2098,7 +2098,8 @@ class ScriptModelChain(scripts.Script):
         # Stage 1 has finished sampling and Stage 2's model is not loaded yet,
         # so this is the one moment the peak reading describes Stage 1's pass
         # alone. It feeds the automatic VRAM reserve.
-        mc_memory.observe_activation_peak(stage1_width, stage1_height, stage=mc_memory.STAGE_1)
+        mc_memory.observe_activation_peak(stage1_width, stage1_height, stage=mc_memory.STAGE_1,
+                                          batch=getattr(p, "batch_size", 1))
 
         if prompt_mode == "Inherit":
             styles = []
@@ -2342,7 +2343,8 @@ class ScriptModelChain(scripts.Script):
             # it is next used.
             self._clear_references(p)
             mc_memory.observe_activation_peak(
-                stage_2_width, stage_2_height, stage=mc_memory.STAGE_2
+                stage_2_width, stage_2_height, stage=mc_memory.STAGE_2,
+                batch=getattr(p, "batch_size", 1),
             )
             # Put the selection back so the next generation starts on Model A
             # with Model A's own VAE and text encoder. Only the selection:

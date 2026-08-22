@@ -2178,3 +2178,73 @@ class TestABoundaryStillWinsInsideAHostJob:
         monkeypatch.setattr(mc_broker, "host_busy", lambda: True)
 
         assert not server._outgrown(configuration, 0)
+
+
+class TestAServerGivesBackWhatThePlanNoLongerAllows:
+    """The one direction ``_worth_restarting`` will never ask for.
+
+    Its rule -- only ever an improvement -- was written when a running server
+    sat in VRAM nobody else had a claim on, and moving it somewhere smaller
+    really did free nothing anybody had asked for. A plan is exactly that
+    claim.
+
+    A user found the gap the hard way. A batch of five was planned for while a
+    llama-server placed under a batch-of-one plan held 1.4 GB, and the
+    generation died before its first step with 255 MB free on the card. The
+    placement that had been right five seconds earlier was the thing in the way.
+    """
+
+    def server(self, layers=20):
+        held = runtime.Runtime()
+        held._placement = ctx.Placement(gpu_layers=layers, context=8192,
+                                        kv_type_k="f16", kv_type_v="f16", on_gpu=True)
+        return held
+
+    def test_a_server_inside_its_allowance_is_left_alone(self, placed, monkeypatch):
+        publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
+
+        assert not self.server()._overspending(2 * _GB)
+
+    def test_a_server_over_its_allowance_is_re_placed(self, placed, monkeypatch):
+        """A 20 GB plan on a 24 GB card leaves 4 GB. Holding 5 is over."""
+        publish_plan(stage_1_gb=20.0, monkeypatch=monkeypatch)
+
+        assert self.server()._overspending(5 * _GB)
+
+    def test_a_rounding_error_is_not_an_overspend(self, placed, monkeypatch):
+        """Both sides are measurements. Restarting to recover a rounding error
+        would be the flapping this whole change set removed."""
+        publish_plan(stage_1_gb=20.0, monkeypatch=monkeypatch)
+        allowance = 4 * _GB
+
+        assert not self.server()._overspending(allowance + 64 * 1024 * 1024)
+
+    def test_with_no_plan_nothing_is_overspending(self, placed, monkeypatch):
+        mc_plan.clear()
+
+        assert not self.server()._overspending(20 * _GB)
+
+    def test_the_batch_that_broke_it(self, placed, tmp_path, monkeypatch):
+        """The user's numbers. A plan for a batch of one leaves 2.8 GB and the
+        server takes 1.4; a plan for a batch of five leaves 1.0, and the server
+        must give the difference back before the pass starts."""
+        configuration = configure(monkeypatch, tmp_path)
+        publish_plan(stage_1_gb=19.3, total_gb=22.1, monkeypatch=monkeypatch)
+        mc_plan.note_placement(mc_plan.current())
+        held = self.server(layers=6)
+        set_free(monkeypatch, 3)
+
+        assert not held._outgrown(configuration, int(1.4 * _GB))
+
+        publish_plan(stage_1_gb=21.1, total_gb=22.1, monkeypatch=monkeypatch)
+
+        assert held._outgrown(configuration, int(1.4 * _GB))
+
+    def test_an_unchanged_plan_still_does_not_re_place(self, placed, tmp_path,
+                                                      monkeypatch):
+        configuration = configure(monkeypatch, tmp_path)
+        publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
+        mc_plan.note_placement(mc_plan.current())
+        set_free(monkeypatch, 8)
+
+        assert not self.server(layers=6)._outgrown(configuration, 2 * _GB)
