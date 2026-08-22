@@ -81,12 +81,12 @@ def client(monkeypatch, host):
     fake = FakeClient()
     asked: list[bool] = []
 
-    def obtain(needs_vision=False, reserve=0):
+    def obtain(needs_vision=False, reserve=0, role=''):
         asked.append(bool(needs_vision))
         return fake
 
     monkeypatch.setattr(sessions, "_client", obtain)
-    monkeypatch.setattr(sessions, "_placement_notes", list)
+    monkeypatch.setattr(sessions, "_placement_notes", lambda role="": [])
     fake.vision_asked = asked
     yield fake
     mc_broker.clear()
@@ -346,7 +346,7 @@ class TestTextOnlyRuns:
         assert texts(events, sessions.DONE) == ["Hello there"]
 
     def test_done_carries_the_cleaned_prompt(self, client, monkeypatch):
-        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0: FakeClient(
+        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0, role='': FakeClient(
             pieces=("<think>weighing it up</think>", "A quiet street.")))
 
         events = drain(sessions.krea("a shot", [], 7, sessions.Cancellation()))
@@ -355,7 +355,7 @@ class TestTextOnlyRuns:
 
     def test_an_empty_answer_is_an_error_not_an_empty_prompt(self, client, monkeypatch):
         monkeypatch.setattr(sessions, "_client",
-                            lambda needs_vision=False, reserve=0: FakeClient(pieces=("",)))
+                            lambda needs_vision=False, reserve=0, role='': FakeClient(pieces=("",)))
 
         events = drain(sessions.krea("a shot", [], 7, sessions.Cancellation()))
 
@@ -371,7 +371,7 @@ class TestReferenceRuns:
     def test_one_caption_event_per_reference_in_slot_order(self, client, monkeypatch):
         fake = FakeClient(answers=["a woman on a balcony", "a woman in a red coat",
                                    "a snowy forest", "warm side light", "the final prompt"])
-        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0: fake)
+        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0, role='': fake)
 
         events = drain(sessions.krea("use them", refs(4), 7, sessions.Cancellation()))
 
@@ -394,7 +394,7 @@ class TestReferenceRuns:
                                                                       monkeypatch):
         fake = FakeClient(answers=["a woman on a balcony", "a woman in a red coat",
                                    "the final prompt"])
-        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0: fake)
+        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0, role='': fake)
 
         drain(sessions.krea("replace the face in image 1 with the woman from image 2",
                             refs(2), 7, sessions.Cancellation()))
@@ -413,7 +413,7 @@ class TestReferenceRuns:
     def test_the_captions_are_kept_on_the_references_they_describe(self, client,
                                                                    monkeypatch):
         fake = FakeClient(answers=["first picture", "second picture", "the prompt"])
-        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0: fake)
+        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0, role='': fake)
         references = refs(2)
 
         drain(sessions.krea("use them", references, 7, sessions.Cancellation()))
@@ -434,7 +434,7 @@ class TestWhenSomethingGoesWrong:
         """§8: do not synthesize a prompt from only the remaining images, and do
         not silently renumber the survivors."""
         fake = FakeClient(answers=["a woman on a balcony", "", "the final prompt"])
-        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0: fake)
+        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0, role='': fake)
 
         events = drain(sessions.krea("use them", refs(3), 7, sessions.Cancellation()))
 
@@ -444,7 +444,7 @@ class TestWhenSomethingGoesWrong:
 
     def test_the_failure_says_which_reference_it_was(self, client, monkeypatch):
         fake = FakeClient(answers=["first", "", "third", "the prompt"])
-        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0: fake)
+        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0, role='': fake)
 
         events = drain(sessions.krea("use them", refs(3), 7, sessions.Cancellation()))
 
@@ -454,7 +454,7 @@ class TestWhenSomethingGoesWrong:
             self, client, monkeypatch):
         """The panel refuses first; this is the same requirement stated where
         the client is actually obtained, for anything that got past it."""
-        def refuse(needs_vision=False, reserve=0):
+        def refuse(needs_vision=False, reserve=0, role=''):
             if needs_vision:
                 raise RuntimeError("this request carries an image and the model running "
                                    "has no vision projector")
@@ -471,7 +471,7 @@ class TestWhenSomethingGoesWrong:
         cancel = sessions.Cancellation()
         fake = FakeClient(answers=[lambda: (cancel.cancel(), "first")[1],
                                    "second", "the prompt"])
-        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0: fake)
+        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0, role='': fake)
 
         events = drain(sessions.krea("use them", refs(2), 7, cancel))
 
@@ -508,7 +508,7 @@ class TestTheWorkloadIsAlwaysGivenBack:
 
     def test_after_a_failed_run(self, client, monkeypatch):
         monkeypatch.setattr(sessions, "_client",
-                            lambda needs_vision=False, reserve=0: FakeClient(fail=RuntimeError("boom")))
+                            lambda needs_vision=False, reserve=0, role='': FakeClient(fail=RuntimeError("boom")))
 
         events = drain(sessions.krea("a shot", [], 7, sessions.Cancellation()))
 
@@ -518,7 +518,7 @@ class TestTheWorkloadIsAlwaysGivenBack:
     def test_after_a_cancelled_run(self, client, monkeypatch):
         cancel = sessions.Cancellation()
         fake = FakeClient(answers=[lambda: (cancel.cancel(), "first")[1], "the prompt"])
-        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0: fake)
+        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0, role='': fake)
 
         drain(sessions.krea("use it", refs(1), 7, cancel))
 

@@ -57,6 +57,80 @@ SERVER_NAMES = ("llama-server.exe", "llama-server")
 """What llama.cpp calls its server, in the two spellings a release uses."""
 
 RUNTIME_DIRNAME = "runtime"
+
+RUNTIME_MARKER = ".runtime-id"
+"""File inside a runtime directory naming which llama.cpp family it holds.
+
+Written on install and read to decide where the *next* install goes. Without it
+there is no way to ask a directory what is in it, and the only alternatives are
+to trust the state file -- which describes one role and there may now be two --
+or to overwrite, which is the failure this exists to prevent.
+"""
+
+
+def family_dirname(component_id: str) -> str:
+    """Where a runtime family lives when it is not the installation's first.
+
+    Section 14: a machine may legitimately need two llama.cpp builds installed
+    at once -- a Creative role on a 5090 wants the CUDA 13 build and a Spatial
+    role on a 3090 wants CUDA 12, and a role on the processor wants neither.
+    They cannot share a directory, so the second one onwards gets its own.
+    """
+    cleaned = "".join(part for part in str(component_id or "") if part.isalnum() or part in "-_")
+    return f"{RUNTIME_DIRNAME}-{cleaned}" if cleaned else RUNTIME_DIRNAME
+
+
+def family_in(directory) -> str:
+    """Which llama.cpp family ``directory`` holds, or ``""`` when it cannot say.
+
+    An empty answer is not "none": it is an installation made before the marker
+    existed, and it is treated as "whatever is being installed now" so that
+    upgrading in place keeps working exactly as it did.
+    """
+    try:
+        return (Path(directory) / RUNTIME_MARKER).read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return ""
+
+
+def runtime_directory(component_id: str, root=None):
+    """Where to install ``component_id``, and where to find it afterwards.
+
+    The plain ``runtime/`` for the first family installed, which is every
+    installation that existed before roles did and every installation that only
+    ever uses one card. A second family gets :func:`family_dirname` rather than
+    replacing the first -- ``install_runtime`` swaps its destination directory
+    wholesale, so without this, provisioning a Spatial role on the other card
+    would take the Creative role's llama.cpp away with it.
+    """
+    base = Path(root) if root is not None else mc_llm_paths.data_root()
+    default = base / RUNTIME_DIRNAME
+    if not default.exists():
+        return default
+    holds = family_in(default)
+    if not holds or holds == str(component_id or ""):
+        return default
+    return base / family_dirname(component_id)
+
+
+def runtime_families(root=None) -> dict:
+    """Every installed llama.cpp family, by component id.
+
+    What the Setup panel offers a role when its device needs a build the
+    installation's default directory does not hold.
+    """
+    base = Path(root) if root is not None else mc_llm_paths.data_root()
+    found: dict = {}
+    if not base.is_dir():
+        return found
+    for directory in sorted(base.glob(f"{RUNTIME_DIRNAME}*")):
+        if not directory.is_dir() or directory.name.endswith((".previous", ".incoming")):
+            continue
+        server = _server_in(directory)
+        if server is None:
+            continue
+        found.setdefault(family_in(directory) or directory.name, server)
+    return found
 """Where a runtime lives under the install root. The vendored installer's own
 choice, matched so a build placed by either route is found by both."""
 
@@ -144,15 +218,22 @@ def recorded_runtime() -> Path | None:
 
 
 def detect() -> Path | None:
-    """A llama-server under ``<root>/runtime/``, whether or not it is recorded."""
-    directory = mc_llm_paths.data_root() / RUNTIME_DIRNAME
-    if not directory.is_dir():
-        return None
-    for name in SERVER_NAMES:
-        matches = sorted(directory.rglob(name))
-        if matches:
-            return matches[0]
-    return None
+    """A llama-server under ``<root>/runtime*/``, whether or not it is recorded.
+
+    The default directory first and always, so an installation with one family
+    finds exactly what it has always found. A second family is only reached when
+    there is no first one -- this answers "is anything installed", and which of
+    two builds a *role* should use is :func:`runtime_families`' question.
+    """
+    root = mc_llm_paths.data_root()
+    directory = root / RUNTIME_DIRNAME
+    if directory.is_dir():
+        for name in SERVER_NAMES:
+            matches = sorted(directory.rglob(name))
+            if matches:
+                return matches[0]
+    families = runtime_families(root)
+    return next(iter(families.values()), None)
 
 
 def downloadable() -> bool:
@@ -426,6 +507,7 @@ def download(device=None, on_status=None, on_progress=None) -> Path:
     """
     from prompt_master.provisioning.downloader import download as fetch
     from prompt_master.provisioning.extractor import extract_zips_atomic
+    from prompt_master.inference.device_detection import runtime_component_id
     from prompt_master.provisioning.installer import load_components, runtime_component_ids
 
     if not downloadable():
@@ -453,7 +535,7 @@ def download(device=None, on_status=None, on_progress=None) -> Path:
 
     say("Extracting the runtime…")
     tick(share * len(ids))
-    destination = paths.root / RUNTIME_DIRNAME
+    destination = runtime_directory(runtime_component_id(gpu), paths.root)
     # Extracted beside the runtime and swapped in, rather than over it. The
     # vendored extractor clears its destination with ``rmtree`` before moving
     # the new build into place, and a runtime with a file held open is then
@@ -466,6 +548,14 @@ def download(device=None, on_status=None, on_progress=None) -> Path:
         extract_zips_atomic(archives, incoming)
         if _server_in(incoming) is None:
             raise SetupError("The downloaded archives contain no llama-server executable")
+        # Stamped before the swap, so a directory is never in place without the
+        # marker that says which family it holds -- the next install reads that
+        # to decide whether it may reuse this directory or needs its own.
+        try:
+            (incoming / RUNTIME_MARKER).write_text(runtime_component_id(gpu), encoding="utf-8")
+        except OSError:
+            logger.warning("Model Chain: could not record which llama.cpp family was installed",
+                           exc_info=True)
         _replace_directory(incoming, destination)
     finally:
         shutil.rmtree(incoming, ignore_errors=True)
@@ -618,8 +708,13 @@ def configured_device():
         return None
 
 
-def record(executable: str | Path, device=None) -> dict:
+def record(executable: str | Path, device=None, role: str = "") -> dict:
     """Write ``executable`` into the state file as this install's runtime.
+
+    ``role`` writes the same choices as that role's overrides instead of as the
+    installation's, so Creative and Spatial can be pointed at different builds
+    on different cards. An empty role -- every caller that existed before roles
+    did -- writes exactly where it always wrote.
 
     Merges rather than replaces. A state file that already names a model and a
     projector keeps them: fixing a missing runtime must not cost somebody the
@@ -669,7 +764,7 @@ def record(executable: str | Path, device=None) -> dict:
                            "assuming CUDA0", exc_info=True)
         layers = NO_OFFLOAD if chosen.is_mixed else FULL_OFFLOAD
 
-    state.update({
+    chosen_values = {
         "runtime": paths.record(path),
         "runtime_id": runtime_component_id(chosen),
         "mode": chosen.mode,
@@ -679,11 +774,82 @@ def record(executable: str | Path, device=None) -> dict:
         "gpu_device": token,
         "gpu_device_name": token_name,
         "gpu_layers": str(layers),
-    })
-    state.setdefault("model", "")
-    state.setdefault("mmproj", "")
-    state.setdefault("context_size", DEFAULT_CONTEXT_SIZE)
+    }
 
+    import mc_llm_roles
+
+    if mc_llm_roles.named(role):
+        # The role's own hardware, left alongside the installation's rather than
+        # replacing it: the shared configuration is still what every other mode
+        # runs on, and is still what the *other* role inherits.
+        mc_llm_roles.apply(state, role, chosen_values, keys=mc_llm_roles.STATE_FIELDS)
+    else:
+        state.update(chosen_values)
+        state.setdefault("model", "")
+        state.setdefault("mmproj", "")
+        state.setdefault("context_size", DEFAULT_CONTEXT_SIZE)
+
+    paths.data.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(paths.state_file, state)
+    return state
+
+
+def record_model(model, projector=None, role: str = "") -> dict:
+    """Point ``role`` at its own GGUF, leaving the installation's alone.
+
+    The other half of a split, and the half the design intent's own example is
+    about: a large backbone for the writer and a small instruction-follower for
+    the Composer. Without it a role can be given its own card and its own
+    placement and is still reading the installation's weights.
+
+    ``source`` is written manual alongside the path, and that is not a detail.
+    The managed selection lives in the same state file and a role that
+    overrode only the path would still resolve the installation's managed
+    profile -- so a hand-picked 4B GGUF would run with a 26B backbone's context
+    and cache types, which is precisely the mismatch this feature exists to let
+    somebody avoid.
+    """
+    import mc_llm_roles
+    from prompt_master.core.config import atomic_write_json, read_json
+
+    chosen = mc_llm_roles.named(role)
+    if not chosen:
+        raise SetupError("record_model is for a role; the installation's model is "
+                         "recorded by prompt_master.inference.model_choice.")
+    paths = mc_llm_paths.app_paths()
+    try:
+        state = read_json(paths.state_file)
+    except (OSError, ValueError):
+        state = {}
+    mc_llm_roles.apply(state, chosen, {
+        "model": paths.record(Path(model)),
+        "mmproj": paths.record(Path(projector)) if projector is not None else None,
+        "source": "manual",
+        "managed_model_id": None,
+        "managed_profile": None,
+        "managed_profile_version": None,
+    }, keys=mc_llm_roles.STATE_FIELDS)
+    paths.data.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(paths.state_file, state)
+    return state
+
+
+def forget_role(role: str) -> dict:
+    """Drop ``role``'s hardware overrides so it follows the installation again.
+
+    The way back from a split, and the state every role starts in. Nothing is
+    stopped here: the registry notices at the next request that both roles
+    resolve to one identity and hands back one server.
+    """
+    import mc_llm_roles
+    from prompt_master.core.config import atomic_write_json, read_json
+
+    paths = mc_llm_paths.app_paths()
+    try:
+        state = read_json(paths.state_file)
+    except (OSError, ValueError):
+        state = {}
+    mc_llm_roles.clear(state, role)
     paths.data.mkdir(parents=True, exist_ok=True)
     atomic_write_json(paths.state_file, state)
     return state

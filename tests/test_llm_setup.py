@@ -343,7 +343,7 @@ class TestRecord:
 
         state = setup.record(server, setup.device_for_token("mixed:0"))
 
-        assert state["mode"] == "mixed"
+        assert state["mode"] == "mixed_aggressive"
         assert state["gpu_layers"] == "0"
 
     def test_choosing_the_card_itself_still_records_a_full_offload(self, root, a_card):
@@ -363,8 +363,53 @@ class TestRecord:
 
         state = setup.record(server)
 
-        assert state["mode"] == "mixed"
+        assert state["mode"] == "mixed_aggressive"
         assert state["gpu_layers"] == "0"
+
+    def test_recording_for_a_role_writes_only_that_role(self, root, a_card):
+        """Section 8: "Selecting B must not overwrite A." A role's card is
+        recorded beside the installation's, never over it -- the installation is
+        still what every other mode runs on and what the *other* role
+        inherits."""
+        import mc_llm_roles
+        from prompt_master.core.config import read_json
+
+        server = make_build(root / "runtime")
+        setup.record(server, setup.device_for_token("gpu:0"))
+
+        setup.record(server, setup.device_for_token("cpu:-1"),
+                     role=mc_llm_roles.SPATIAL)
+
+        state = read_json(mc_llm_paths.app_paths().state_file)
+        assert state["mode"] == "gpu"
+        assert state["roles"]["spatial"]["mode"] == "cpu"
+        assert "creative" not in state.get("roles", {})
+
+    def test_a_role_reads_back_the_device_it_was_given(self, root, a_card):
+        import mc_llm_roles
+        import mc_llm_runtime
+
+        server = make_build(root / "runtime")
+        setup.record(server, setup.device_for_token("gpu:0"))
+        setup.record(server, setup.device_for_token("mixed_conservative:0"),
+                     role=mc_llm_roles.CREATIVE)
+
+        assert mc_llm_runtime.config().mode == "gpu"
+        assert mc_llm_runtime.config(mc_llm_roles.CREATIVE).mode == "mixed_conservative"
+        assert mc_llm_runtime.config(mc_llm_roles.SPATIAL).mode == "gpu"
+
+    def test_forgetting_a_role_puts_it_back_on_the_installation(self, root, a_card):
+        import mc_llm_roles
+        import mc_llm_runtime
+
+        server = make_build(root / "runtime")
+        setup.record(server, setup.device_for_token("gpu:0"))
+        setup.record(server, setup.device_for_token("cpu:-1"), role=mc_llm_roles.SPATIAL)
+        assert mc_llm_runtime.config(mc_llm_roles.SPATIAL).mode == "cpu"
+
+        setup.forget_role(mc_llm_roles.SPATIAL)
+
+        assert mc_llm_runtime.config(mc_llm_roles.SPATIAL).mode == "gpu"
 
     def test_a_mixed_install_is_never_read_back_as_a_full_offload(self, root, a_card):
         """What every reader downstream turns into --n-gpu-layers."""
@@ -470,17 +515,29 @@ class TestDevices:
     def test_a_preferred_device_is_always_returned(self, root):
         assert setup.preferred_device() is not None
 
-    def test_a_card_is_offered_both_ways_under_two_different_tokens(self, root, a_card):
-        """The index alone is not an identity: the same card appears twice, and
-        keyed on the index the mixed entry is indistinguishable from the entry
-        that fills the card."""
+    def test_a_card_is_offered_three_ways_under_three_different_tokens(self, root, a_card):
+        """The index alone is not an identity: the same card appears three
+        times, and keyed on the index the mixed entries are indistinguishable
+        from the entry that fills the card."""
         tokens = [setup.device_token(found) for found in setup.devices()]
 
         assert len(tokens) == len(set(tokens))
-        assert "mixed:0" in tokens and "gpu:0" in tokens
+        assert {"gpu:0", "mixed_aggressive:0", "mixed_conservative:0"} <= set(tokens)
+
+    def test_the_legacy_mixed_token_still_names_a_device(self, root, a_card):
+        """Every installation configured before the split has "mixed:0" saved.
+        Resolving it to nothing would drop the menu back to its first entry --
+        the full offload — so an install told to keep the card free would
+        quietly start filling it."""
+        found = setup.device_for_token("mixed:0")
+
+        assert found is not None
+        assert found.mode == "mixed_aggressive"
 
     def test_a_token_resolves_to_the_device_it_names(self, root, a_card):
-        assert setup.device_for_token("mixed:0").is_mixed
+        assert setup.device_for_token("mixed_aggressive:0").is_mixed
+        assert setup.device_for_token("mixed_conservative:0").is_conservative
+        assert not setup.device_for_token("mixed_aggressive:0").is_conservative
         assert not setup.device_for_token("gpu:0").is_mixed
         assert setup.device_for_token("cpu:-1").is_cpu
 

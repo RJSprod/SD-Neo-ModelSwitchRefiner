@@ -115,19 +115,32 @@ def detect_cpu() -> GpuInfo:
 
 
 def mixed_device(gpu: GpuInfo) -> GpuInfo:
-    """The same card, chosen for mixed mode instead of a full offload."""
+    """The same card, chosen for Mixed Aggressive instead of a full offload."""
     if gpu.is_cpu:
         raise ValueError("Mixed mode needs a CUDA GPU to hand work to")
-    return dataclasses.replace(gpu, mixed=True)
+    return dataclasses.replace(gpu, mixed=True, conservative=False)
+
+
+def conservative_device(gpu: GpuInfo) -> GpuInfo:
+    """The same card, chosen for Mixed Conservative.
+
+    The third entry a card gets. It is the same hardware as the other two and
+    differs only in what may be put on it, which is why it is a variant of the
+    card rather than a device of its own.
+    """
+    if gpu.is_cpu:
+        raise ValueError("Mixed mode needs a CUDA GPU to hand work to")
+    return dataclasses.replace(gpu, mixed=True, conservative=True)
 
 
 def detect_devices(timeout: float = 15) -> list[GpuInfo]:
     """Every choice an install can be pinned to, in the order they are offered.
 
-    Each CUDA GPU appears twice — once holding the model, once in mixed mode —
-    and the CPU is always last and always present, so a machine with no NVIDIA
-    driver is one with a single option rather than one setup refuses. A failed
-    scan is therefore not an error here; it only shortens the list.
+    Each CUDA GPU appears three times — once holding the model, once for each
+    mixed mode — and the CPU is always last and always present, so a machine
+    with no NVIDIA driver is one with a single option rather than one setup
+    refuses. A failed scan is therefore not an error here; it only shortens the
+    list. Two cards and a processor is seven options.
 
     A card's own entry stays first throughout, so the first option is what it
     has always been.
@@ -138,7 +151,7 @@ def detect_devices(timeout: float = 15) -> list[GpuInfo]:
         gpus = []
     offered: list[GpuInfo] = []
     for gpu in gpus:
-        offered += [gpu, mixed_device(gpu)]
+        offered += [gpu, mixed_device(gpu), conservative_device(gpu)]
     return [*offered, detect_cpu()]
 
 
@@ -152,23 +165,27 @@ def recorded_mode(mode: str = "", device: str = "", gpu_layers: str = "") -> str
     setup writer — disagreeing about which mode an install is in is the same
     bug as not recording the mode at all.
     """
-    from prompt_master.core.models import CPU_MODE, GPU_MODE, MIXED_MODE
+    from prompt_master.core.models import (
+        CPU_MODE, GPU_MODE, MIXED_AGGRESSIVE_MODE, normalise_mode)
 
-    named = str(mode or "").strip().casefold()
-    if named in (GPU_MODE, MIXED_MODE, CPU_MODE):
+    named = normalise_mode(mode)
+    if named:
         return named
     if str(device or "").strip().casefold() == CPU_DEVICE:
         return CPU_MODE
-    return MIXED_MODE if str(gpu_layers) == NO_OFFLOAD else GPU_MODE
+    # An old file with no mode at all. Zero layers meant Mixed when it was
+    # written, and Mixed then did what Aggressive does now -- see
+    # ``models.LEGACY_MIXED_MODE``.
+    return MIXED_AGGRESSIVE_MODE if str(gpu_layers) == NO_OFFLOAD else GPU_MODE
 
 
 def device_token(device: GpuInfo) -> str:
     """A device's identity as one string, for a dropdown value or a saved choice.
 
     The physical index alone is not an identity: a CUDA card is offered twice,
-    once holding the weights and once in mixed mode, and both entries carry the
-    same index. Keyed on the index alone the two options collapse into one, and
-    the one that survives is whichever was listed first — which is how choosing
+    once holding the weights and once for each mixed mode, and all three entries
+    carry the same index. Keyed on the index alone the options collapse into
+    one, and the one that survives is whichever was listed first — which is how choosing
     "mixed" in a menu records a full offload and fills the card it was meant to
     keep free. The mode is the half that tells them apart, so it is in here.
     """
@@ -182,7 +199,16 @@ def device_for_token(token: str, offered: Sequence[GpuInfo]) -> GpuInfo | None:
     when it was all the menu wrote: the first device with that index, which is
     the card itself for a card and the processor for -1. A menu value saved by
     an earlier version therefore selects the same device it selected then.
+
+    So does ``mixed:0``, which is what every installation configured before the
+    two mixed modes were split has saved. It resolves to Mixed Aggressive, for
+    the reason ``models.LEGACY_MIXED_MODE`` gives: that is the behaviour the
+    single Mixed mode had. Without this the saved token matches no offered
+    device, the menu falls back to the first entry, and an install that had been
+    told to keep the card free silently starts filling it.
     """
+    from prompt_master.core.models import normalise_mode
+
     text = str(token or "").strip().casefold()
     if not text:
         return None
@@ -191,6 +217,7 @@ def device_for_token(token: str, offered: Sequence[GpuInfo]) -> GpuInfo | None:
         wanted = int(index if separator else text)
     except ValueError:
         return None
+    mode = normalise_mode(mode) if separator else ""
     for device in offered:
         if device.physical_index == wanted and (not separator or device.mode == mode):
             return device
@@ -206,6 +233,9 @@ def describe(device: GpuInfo) -> str:
     """
     if device.is_cpu:
         return f"{device.name} — {device.memory_total_mb} MiB of system RAM — no GPU used"
+    if device.is_conservative:
+        return (f"{device.name} — mixed conservative: no model layers in VRAM, "
+                "card used for processing")
     if device.is_mixed:
         return f"{device.name} — mixed: model in system RAM, card used for processing"
     return f"{device.name} — {device.memory_total_mb} MiB — {device.uuid}"

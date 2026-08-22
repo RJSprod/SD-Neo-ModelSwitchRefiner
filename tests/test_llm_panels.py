@@ -1378,8 +1378,32 @@ class TestRuntimeSetup:
 
         assert "No llama-server found" in notice
 
+    def test_a_role_s_model_is_recorded_against_that_role(self, store, a_card):
+        """The design intent's own example: a large backbone for the writer and
+        a small instruction follower for the Composer."""
+        import mc_llm_roles
+        import mc_llm_runtime
+        import mc_llm_setup
+
+        runtime = store / mc_llm_setup.RUNTIME_DIRNAME
+        runtime.mkdir(parents=True)
+        server = runtime / "llama-server"
+        server.write_bytes(b"")
+        mc_llm_studio._apply_runtime(str(server), "gpu:0")
+        big = store / "big.gguf"
+        big.write_bytes(b"")
+        small = store / "small.gguf"
+        small.write_bytes(b"")
+        mc_llm_studio._apply_model(str(big), "")
+
+        mc_llm_studio._apply_model(str(small), "", mc_llm_roles.SPATIAL)
+
+        assert mc_llm_runtime.config().model.name == "big.gguf"
+        assert mc_llm_runtime.config(mc_llm_roles.SPATIAL).model.name == "small.gguf"
+        assert mc_llm_runtime.config(mc_llm_roles.CREATIVE).model.name == "big.gguf"
+
     def test_applying_an_empty_path_asks_for_one(self, store):
-        notice, _path, _model = mc_llm_studio._apply_runtime("", None)
+        notice, _path, _model, _role = mc_llm_studio._apply_runtime("", None)
 
         assert "Enter the path" in notice
 
@@ -1422,7 +1446,7 @@ class TestRuntimeSetup:
         mc_llm_studio._apply_runtime(str(server), "mixed:0")
 
         configuration = mc_llm_runtime.config()
-        assert configuration.mode == "mixed"
+        assert configuration.mode == "mixed_aggressive"
         assert configuration.gpu_layers == "0"
 
     def test_the_dropdown_comes_back_on_the_option_that_was_chosen(self, store, a_card):
@@ -1434,7 +1458,7 @@ class TestRuntimeSetup:
         server.write_bytes(b"")
         mc_llm_studio._apply_runtime(str(server), "mixed:0")
 
-        assert mc_llm_studio._current_device() == "mixed:0"
+        assert mc_llm_studio._current_device() == "mixed_aggressive:0"
 
     def test_the_detail_line_says_when_the_weights_are_in_system_ram(self, store):
         state = {"configured": True, "has_runtime": True, "has_model": True,

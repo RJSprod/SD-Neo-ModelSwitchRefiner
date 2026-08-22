@@ -371,6 +371,21 @@ shared.options_templates.update(
                 "Keeping it running moves the model to system RAM instead: no reload, much "
                 "slower generation, and the RAM stays spent"
             ),
+            mc_llm_runtime.OPT_ROLE_SHARING: shared.OptionInfo(
+                mc_llm_runtime.SHARE_AUTO,
+                "When Creative and Spatial want the same memory",
+                gr.Radio,
+                {"choices": [label for _, label in mc_llm_runtime.SHARING_MODES]},
+            ).info(
+                "only reached when the two roles are configured differently and still land in "
+                "the same place. Configure them identically and they share one llama-server "
+                "whatever this says; put them on different devices and they never meet. Two "
+                "servers cannot share a process, so taking turns means stopping one before "
+                "starting the other — a model load per role switch, in exchange for never "
+                "competing. Coexisting leaves both up and lets the existing memory rules sort "
+                "it out, which on one card means loading and unloading as they fight for what "
+                "is left"
+            ),
             mc_llm_paths.OPT_ROOT: shared.OptionInfo(
                 "",
                 "LLM data directory",

@@ -147,18 +147,46 @@ class Config:
         reader did not think to look at the mode: the layer count every one of
         them reads is already the right one.
         """
-        from prompt_master.core.models import CPU_MODE, MIXED_MODE
+        from prompt_master.core.models import CPU_MODE, MIXED_MODES, normalise_mode
         from prompt_master.inference.device_detection import NO_OFFLOAD
 
-        if (str(self.mode).strip().casefold() in (MIXED_MODE, CPU_MODE)
-                and str(self.gpu_layers) != NO_OFFLOAD):
+        named = normalise_mode(self.mode)
+        if named:
+            object.__setattr__(self, "mode", named)
+        if named in (*MIXED_MODES, CPU_MODE) and str(self.gpu_layers) != NO_OFFLOAD:
             object.__setattr__(self, "gpu_layers", NO_OFFLOAD)
 
     @property
     def on_gpu(self) -> bool:
+        """Whether model layers are *resident* in VRAM.
+
+        Deliberately not "uses the card" -- see :attr:`uses_cuda_compute`. Both
+        mixed modes answer False here and one of them ends up holding layers
+        anyway, because what this decides is how the placement is *asked for*:
+        a mixed placement asks for nothing and is then given what the ladder
+        finds. Every residency figure the plan and the broker reason about is
+        measured afterwards rather than read from here.
+        """
         from prompt_master.inference.device_detection import CPU_DEVICE, NO_OFFLOAD
 
         return self.device.casefold() != CPU_DEVICE and str(self.gpu_layers) != NO_OFFLOAD
+
+    @property
+    def uses_cuda_compute(self) -> bool:
+        """Whether a card is named at all, resident layers or not.
+
+        The other half of what ``on_gpu`` used to be asked to mean. Mixed
+        Conservative has no model layers in VRAM and is still a CUDA
+        installation: the card is on ``--device``, it takes the operations
+        llama.cpp can hand it, and it holds a context and compute buffers. A
+        question about the *card* has to be asked here; a question about
+        *residency* is ``on_gpu``.
+        """
+        from prompt_master.core.models import CPU_MODE
+        from prompt_master.inference.device_detection import CPU_DEVICE
+
+        return (self.device.casefold() != CPU_DEVICE
+                and str(self.mode).strip().casefold() != CPU_MODE)
 
     @property
     def configured(self) -> bool:
@@ -169,9 +197,15 @@ class Config:
         return self.mmproj is not None
 
 
-def config() -> Config:
-    """Current runtime configuration. Never raises -- an unconfigured install
+def config(role: str = "") -> Config:
+    """Configuration for ``role``. Never raises -- an unconfigured install
     is a state the panel renders, not an exception it handles.
+
+    ``role`` is ``mc_llm_roles.CREATIVE``, ``mc_llm_roles.SPATIAL``, or the
+    empty string for the installation's own configuration -- which is what
+    Prompt Studio, Conversation, MiniMax and LLM Studio's model loading pass,
+    and what a role that has not been split resolves to anyway. See
+    :mod:`mc_llm_roles` for why that is inheritance rather than a copy.
 
     Read in the usual three layers -- the state file, the preferences file, the
     Settings page -- and then, for a managed backbone only, a fourth that wins:
@@ -189,12 +223,22 @@ def config() -> Config:
     """
     from prompt_master.core.config import read_json
 
+    import mc_llm_roles
+
     paths = mc_llm_paths.app_paths()
     try:
         state = read_json(paths.state_file)
     except (OSError, ValueError):
         state = {}
     prefs = mc_llm_state.preferences()
+    # Layered before anything is read out of either, so every line below is the
+    # line it has always been and none of them has to know a role was asked for.
+    if mc_llm_roles.named(role):
+        overridden = (state, prefs)
+        state = mc_llm_roles.layered(role, state, *overridden,
+                                     keys=mc_llm_roles.STATE_FIELDS)
+        prefs = mc_llm_roles.layered(role, prefs, *overridden,
+                                     keys=mc_llm_roles.PREFS_FIELDS)
     source, managed_id, profile = _managed(state)
 
     def located(key):
@@ -463,17 +507,43 @@ def _requested_placement(configuration: Config, gguf: mc_gguf.Gguf | None,
     return _capped(placement, gguf)
 
 
-def is_mixed(configuration: Config | None = None) -> bool:
-    """Whether this installation is on Mixed placement with a card to use."""
-    from prompt_master.core.models import MIXED_MODE
+def _mode_is(configuration: Config | None, wanted: str) -> bool:
+    """Whether ``configuration`` is in ``wanted``, with a card to use."""
+    from prompt_master.core.models import normalise_mode
     from prompt_master.inference.device_detection import CPU_DEVICE
 
     try:
         configuration = configuration or config()
     except Exception:
         return False
-    return (str(configuration.mode).strip().casefold() == MIXED_MODE
+    return (normalise_mode(configuration.mode) == wanted
             and str(configuration.device).strip().casefold() != CPU_DEVICE)
+
+
+def is_mixed(configuration: Config | None = None) -> bool:
+    """Whether this installation is on Mixed **Aggressive** with a card to use.
+
+    The mode that asks the ladder for everything and takes what it is given.
+    Conservative is a card too and answers False here on purpose: it asks for
+    nothing, so the lift to ``ALL_LAYERS`` in :func:`_requested_placement` --
+    the whole of what this function gates -- must not happen for it.
+    """
+    from prompt_master.core.models import MIXED_AGGRESSIVE_MODE
+
+    return _mode_is(configuration, MIXED_AGGRESSIVE_MODE)
+
+
+def is_conservative(configuration: Config | None = None) -> bool:
+    """Whether this installation keeps every model layer out of VRAM.
+
+    Zero resident layers, by the user's choice rather than by a shortfall, and
+    the card still named so llama.cpp can use it. Nothing negotiates this away:
+    a placement ladder that promoted layers into VRAM because VRAM happened to
+    be free would be answering a question the user has already answered.
+    """
+    from prompt_master.core.models import MIXED_CONSERVATIVE_MODE
+
+    return _mode_is(configuration, MIXED_CONSERVATIVE_MODE)
 
 
 def _capped(placement: mc_llm_context.Placement,
@@ -1006,6 +1076,27 @@ llama.cpp's ordinary processor path, mapping is its default there for good
 reasons, and the flag would trade a slower start for nothing.
 """
 
+NO_KV_OFFLOAD_FLAG = "--no-kv-offload"
+"""Keep the key/value cache in system RAM rather than on the card.
+
+Mixed Conservative's, and only its. The mode's promise is that nothing of this
+model persists in VRAM, and a KV cache is the one thing that would grow there
+all through a generation while the layer count sat honestly at zero -- an 8k
+context of f16 cache on a 26B model is over a gigabyte of exactly the VRAM the
+image plan was told it could have.
+"""
+
+OP_OFFLOAD_FLAG = "--op-offload"
+"""Let the card execute host-tensor operations it supports.
+
+The half of Mixed Conservative that makes it faster than the processor alone:
+no weights move, but the multiplications can still happen on the card. Passed
+only when the build advertises this exact spelling. Several builds enable it by
+default and expose only ``--no-op-offload`` to turn it off, and on those
+``runtime_supports`` answers False and nothing is passed -- which is the right
+answer, because the behaviour is already what this mode wants.
+"""
+
 FULL_ATTENTION_WINDOW_FLAG = "--swa-full"
 """Keep the whole key/value cache, rather than a sliding window of it.
 
@@ -1127,6 +1218,7 @@ def accelerator_flags(configuration: Config, placement) -> list[str]:
     flags: list[str] = []
     if runtime_supports(FULL_ATTENTION_WINDOW_FLAG, configuration):
         flags.append(FULL_ATTENTION_WINDOW_FLAG)
+    flags.extend(conservative_flags(configuration))
     if not getattr(placement, "on_gpu", False):
         return flags
     experts = expert_flags(configuration, placement)
@@ -1139,6 +1231,28 @@ def accelerator_flags(configuration: Config, placement) -> list[str]:
         flags.append(FLASH_ATTENTION_FLAG)
         if _flash_attention_takes_a_value(configuration):
             flags.append("on")
+    return flags
+
+
+def conservative_flags(configuration: Config) -> list[str]:
+    """What Mixed Conservative asks for beyond zero layers, where the build has it.
+
+    Empty for every other mode. Conservative is the only placement that names a
+    card and wants nothing resident on it, so it is the only one with anything
+    to say here: keep the cache off the card, and use the card for arithmetic.
+
+    Both are gated on the build advertising them. Section 21's rule for this
+    mode is that an unsupported optional flag is left off and the reduced
+    capability reported -- never a reason to abandon the zero-layer promise,
+    which is the part of the mode that does not depend on any flag at all.
+    """
+    if not is_conservative(configuration):
+        return []
+    flags = []
+    if runtime_supports(NO_KV_OFFLOAD_FLAG, configuration):
+        flags.append(NO_KV_OFFLOAD_FLAG)
+    if runtime_supports(OP_OFFLOAD_FLAG, configuration):
+        flags.append(OP_OFFLOAD_FLAG)
     return flags
 
 
@@ -1930,6 +2044,14 @@ def _identity(configuration: Config, projector=None) -> tuple:
             str(configuration.gpu_layers), int(configuration.context_size),
             str(configuration.context_mode), str(configuration.kv_type_k),
             str(configuration.kv_type_v),
+            # The mode, because two of them are otherwise indistinguishable
+            # here. Mixed Aggressive and Mixed Conservative name the same card
+            # and both record zero layers -- the difference is what happens
+            # next, and it is a different command line and a different amount
+            # of the card. Without this, switching between them reuses the
+            # server that is already up, and two roles configured one each way
+            # would share one process against the user's explicit choice.
+            str(configuration.mode),
             # The profile is a *choice* even though nobody typed it: switching
             # backbones changes the template flag and the samplers, and two of
             # those are command-line arguments a running server cannot be told
@@ -2130,7 +2252,7 @@ def _next_expert_floor(placement) -> int:
 class Runtime:
     """One managed llama-server, placed by the broker and reclaimable by it."""
 
-    def __init__(self):
+    def __init__(self, residency_key: str = "", roles: tuple = ()):
         self._lock = threading.RLock()
         self._process = None
         self._signature: tuple | None = None
@@ -2139,6 +2261,17 @@ class Runtime:
         self._log: tuple | None = None
         """``(path, offset)`` of the running server's slice of the log."""
         self.report = Report()
+        self.residency_key = residency_key or RESIDENCY_KEY
+        """This server's line in the broker's register.
+
+        Per runtime rather than per module, because two of these may be up at
+        once and one key between them would have each declaration overwrite the
+        other's -- so the broker would believe there was one server holding
+        whatever the last one to start happened to hold. Section 17: "residency
+        keys must be runtime-specific rather than one global LLM key."
+        """
+        self.roles: tuple = tuple(roles)
+        """Which roles resolved to this runtime. Both when they are sharing it."""
 
     # -- lifecycle -------------------------------------------------------- #
 
@@ -2591,7 +2724,7 @@ class Runtime:
                                       or placement.gpu_layers == mc_llm_context.NO_LAYERS):
             return
         estimated = self.report.estimate.resident_bytes if self.report.estimate else 0
-        mc_broker.declare(mc_broker.FAMILY_LLM, RESIDENCY_KEY, self._label(configuration),
+        mc_broker.declare(mc_broker.FAMILY_LLM, self.residency_key, self._label(configuration),
                           held or self.report.observed_bytes or estimated,
                           rank=mc_broker.RANK_HOT)
 
@@ -2630,14 +2763,14 @@ class Runtime:
             mc_broker.note(mc_broker.FAMILY_LLM, text)
 
         if negotiated.placement.on_gpu and observed > 0:
-            mc_broker.declare(mc_broker.FAMILY_LLM, RESIDENCY_KEY, self._label(configuration),
+            mc_broker.declare(mc_broker.FAMILY_LLM, self.residency_key, self._label(configuration),
                               observed, rank=mc_broker.RANK_HOT)
             mc_llm_context.record_observation(configuration.model, negotiated.placement, observed)
         elif negotiated.placement.on_gpu:
-            mc_broker.declare(mc_broker.FAMILY_LLM, RESIDENCY_KEY, self._label(configuration),
+            mc_broker.declare(mc_broker.FAMILY_LLM, self.residency_key, self._label(configuration),
                               negotiated.estimate.resident_bytes, rank=mc_broker.RANK_HOT)
         else:
-            mc_broker.retire(RESIDENCY_KEY)
+            mc_broker.retire(self.residency_key)
 
         logger.info(
             "Model Chain: llama-server ready — %s, %s token context, %.1f GB VRAM%s",
@@ -2723,9 +2856,18 @@ class Runtime:
             observed / _GB, expected / _GB)
 
     def _label(self, configuration: Config) -> str:
+        import mc_llm_roles
+
         name = configuration.quantization or (
             Path(configuration.model).stem if configuration.model else "the LLM")
-        return f"the LLM ({name})"
+        if not _roles_of(self):
+            return f"the LLM ({name})"
+        # Named roles rather than "the LLM", because with two servers up a
+        # register that calls both of them the same thing is a register nobody
+        # can read -- and because which one the broker is about to stop is
+        # exactly what somebody reading that line needs to know.
+        who = " and ".join(mc_llm_roles.label(role) for role in _roles_of(self))
+        return f"the {who} LLM ({name})"
 
     # -- the broker's reclaimer ------------------------------------------- #
 
@@ -2754,7 +2896,7 @@ class Runtime:
             return 0
         try:
             if not self._running:
-                mc_broker.retire(RESIDENCY_KEY)
+                mc_broker.retire(self.residency_key)
                 return 0
             if self._placement is not None and not self._placement.on_gpu:
                 return 0  # already in system RAM; there is nothing on the card to give
@@ -2820,7 +2962,7 @@ class Runtime:
                            configuration.gpu_index, configuration.device,
                            placement.context, placement.gpu_layers)
         self._identity = _identity(configuration)
-        mc_broker.retire(RESIDENCY_KEY)
+        mc_broker.retire(self.residency_key)
         freed = max(mc_broker.free_vram_bytes() - before, 0)
         mc_broker.note(mc_broker.FAMILY_LLM,
                        f"moved the LLM to system RAM for {reason or 'another workload'}; it stays "
@@ -2894,7 +3036,7 @@ class Runtime:
         held = self.report.observed_bytes if self._placement is not None else 0
         self._signature, self._identity, self._placement = None, None, None
         self._log = None
-        mc_broker.retire(RESIDENCY_KEY)
+        mc_broker.retire(self.residency_key)
         self._forget_placement_plan()
         if process is None:
             return
@@ -2928,12 +3070,374 @@ class Runtime:
             }
 
 
+# --------------------------------------------------------------------------- #
+# Role-specific runtimes (design intent sections 9, 10 and 17)
+# --------------------------------------------------------------------------- #
+
+OPT_ROLE_SHARING = "model_chain_llm_role_sharing"
+
+SHARE_AUTO = "auto"
+SHARE_TAKE_TURNS = "take_turns"
+SHARE_COEXIST = "coexist"
+
+SHARING_MODES = (
+    (SHARE_AUTO, "Automatic — take turns on one card, coexist in system RAM"),
+    (SHARE_TAKE_TURNS, "Take turns — stop one role's server before starting the other's"),
+    (SHARE_COEXIST, "Coexist — leave both running and let them compete"),
+)
+"""What to do when Creative and Spatial land in the same memory.
+
+Only reached when the two roles are configured *differently* and still point at
+the same pool: identical configurations share one server outright and have
+nothing to decide. Two servers cannot share a process, so "one" here means one
+at a time -- the second start stops the first through the release path that
+already exists, which is the same mechanism the image side uses and obeys the
+same rules.
+
+Automatic is not a fourth policy, it is the two above chosen per pool. Two
+servers in system RAM coexist happily on a machine with the RAM for them, and
+taking turns there would buy a model reload per role switch for nothing. Two
+servers on one card are the case the user described as "fighting over what is
+left", so that one takes turns. Either can be forced.
+"""
+
+POOL_SYSTEM_RAM = "ram"
+"""Where the weights live for CPU and Mixed Conservative alike.
+
+Conservative belongs here and not with the card it names: its whole promise is
+that no model layer is resident in VRAM, so what two Conservative roles contend
+for is system RAM, exactly as two CPU roles do. The card they are pointed at is
+holding a context and compute buffers, which is real but is not the thing that
+runs a machine out of memory.
+"""
+
+
+def pool(configuration: Config) -> str:
+    """Which memory ``configuration`` will actually fill.
+
+    The question the sharing option is asked about, and it is deliberately
+    about *weights* rather than about devices. A role on CUDA0 in Conservative
+    and a role on the processor are both spending system RAM and neither is
+    spending the card, so they are in one pool; a role on CUDA0 in Aggressive is
+    in the card's.
+    """
+    from prompt_master.core.models import (
+        CPU_MODE, MIXED_CONSERVATIVE_MODE, normalise_mode)
+
+    mode = normalise_mode(configuration.mode)
+    if mode in (CPU_MODE, MIXED_CONSERVATIVE_MODE) or not configuration.uses_cuda_compute:
+        return POOL_SYSTEM_RAM
+    return f"cuda:{int(configuration.gpu_index)}"
+
+
+def _sharing_mode() -> str:
+    return mc_broker.resolve(mc_broker.option(OPT_ROLE_SHARING, SHARE_AUTO),
+                             SHARING_MODES, SHARE_AUTO)
+
+
+def resolved_sharing(where: str, chosen: str = "") -> str:
+    """:data:`SHARE_TAKE_TURNS` or :data:`SHARE_COEXIST` for a pool.
+
+    Automatic resolved to one of the two, so that every caller downstream is
+    looking at a decision rather than at a policy that still has to be applied.
+    """
+    picked = chosen or _sharing_mode()
+    if picked in (SHARE_TAKE_TURNS, SHARE_COEXIST):
+        return picked
+    return SHARE_COEXIST if where == POOL_SYSTEM_RAM else SHARE_TAKE_TURNS
+
+
+class RuntimeRegistry:
+    """The llama-servers this installation is running, one per distinct identity.
+
+    Sections 9 and 10. A role asks for its runtime and gets one back; two roles
+    whose complete resolved identity matches get the *same* one back, which is
+    the whole of "shared-runtime coalescing" -- there is no branch anywhere that
+    decides to share, only an identity that turns out to be equal.
+
+    That is why the identity comes from :func:`_identity`, the function that
+    already decides when a *single* runtime has to be restarted. The two
+    questions are the same question asked from different directions: settings
+    that would force a restart are exactly the settings two roles cannot share
+    a process across. Keeping one answer for both is what stops the registry
+    handing back a server that the next request would immediately replace.
+
+    The registry is also the broker's reclaimer for the LLM family, in place of
+    any one runtime, because with two servers up the broker asking one of them
+    to give VRAM back would free half of what it asked for and be told it had
+    freed all of it.
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._runtimes: dict[tuple, Runtime] = {}
+
+    # -- resolution ------------------------------------------------------- #
+
+    def for_role(self, role: str = "", configuration: Config | None = None) -> Runtime:
+        """The runtime that serves ``role``, started or not.
+
+        Never starts anything: what comes back is the object that owns that
+        role's server, and asking it for a client is what starts one. So this
+        is safe to call from a status panel, which is where half the callers
+        are.
+        """
+        import mc_llm_roles
+
+        chosen = mc_llm_roles.named(role)
+        configuration = configuration or config(chosen)
+        return self._runtime_for(chosen, configuration)
+
+    def _runtime_for(self, role: str, configuration: Config) -> Runtime:
+        import mc_llm_roles
+
+        key = _identity(configuration, configuration.mmproj)
+        with self._lock:
+            found = self._runtimes.get(key)
+            if found is None:
+                found = self._instance(key)
+                self._runtimes[key] = found
+            if role and role not in _roles_of(found):
+                try:
+                    found.roles = tuple(sorted({*_roles_of(found), role},
+                                               key=mc_llm_roles.ROLES.index))
+                except AttributeError:
+                    # A stand-in for the module singleton -- a test double, or
+                    # anything else somebody has substituted. It can still serve
+                    # requests; it just cannot be labelled, and labelling is the
+                    # least important thing this registry does.
+                    logger.debug("Model Chain: %s cannot record which role it serves",
+                                 type(found).__name__)
+            self._forget_stale(key, role)
+            return found
+
+    def _instance(self, key: tuple) -> Runtime:
+        """A new runtime, or the module singleton when this is its identity.
+
+        The singleton is not a legacy wart to route around: it is the server
+        every mode that is not a role already uses, and an installation with no
+        role split resolves both roles to exactly its identity. Adopting it
+        there is what makes "nothing is configured differently" mean *one*
+        llama-server rather than three -- the shared one, plus one per role
+        pointing at the same model with the same settings.
+        """
+        try:
+            shared = config()
+            if key == _identity(shared, shared.mmproj) and not self._holds(runtime):
+                runtime.residency_key = _residency_key(key)
+                return runtime
+        except Exception:
+            logger.debug("Model Chain: could not compare the shared runtime identity",
+                         exc_info=True)
+        return Runtime(residency_key=_residency_key(key))
+
+    def _holds(self, wanted: Runtime) -> bool:
+        return any(found is wanted for found in self._runtimes.values())
+
+    def _forget_stale(self, keeping: tuple, role: str) -> None:
+        """Drop ``role`` from any other runtime, and forget one nobody wants.
+
+        A role that has just been reconfigured leaves its old identity behind.
+        Keeping the entry would keep a stopped server's residency key in the
+        register and would make ``all()`` report a runtime nothing can reach.
+        A runtime still claimed by the other role is left exactly as it is --
+        that is the un-sharing case, and the role that stayed put must not have
+        its server taken away because the other one moved.
+        """
+        if not role:
+            return
+        for key, existing in list(self._runtimes.items()):
+            if key == keeping or role not in _roles_of(existing):
+                continue
+            existing.roles = tuple(other for other in _roles_of(existing) if other != role)
+            if not existing.roles and not _is_running(existing):
+                self._runtimes.pop(key, None)
+
+    def shared(self) -> bool:
+        """Whether both roles currently resolve to one server."""
+        import mc_llm_roles
+
+        try:
+            keys = {_identity(config(role), config(role).mmproj)
+                    for role in mc_llm_roles.ROLES}
+        except Exception:
+            logger.debug("Model Chain: could not compare the role runtimes", exc_info=True)
+            return True
+        return len(keys) == 1
+
+    def contending(self) -> str:
+        """The pool both roles are spending, or ``""`` when they are not sharing one.
+
+        Empty when the roles coalesce -- one server is not two servers competing
+        -- and empty when they are in different pools, which is the arrangement
+        the scenarios companion recommends and which needs no policy at all.
+        """
+        import mc_llm_roles
+
+        if self.shared():
+            return ""
+        try:
+            pools = {pool(config(role)) for role in mc_llm_roles.ROLES}
+        except Exception:
+            logger.debug("Model Chain: could not compare the role pools", exc_info=True)
+            return ""
+        return pools.pop() if len(pools) == 1 else ""
+
+    def all(self) -> tuple:
+        """Every runtime this registry knows about, the shared one included.
+
+        The singleton is unioned in even before any role has asked for it,
+        because the broker registers this object as the LLM family's reclaimer
+        at import and may ask what is resident long before Creative Mode runs.
+        A registry that answered "nothing" then would be telling the image side
+        there was VRAM to take that a running llama-server was holding.
+        """
+        with self._lock:
+            found = list(self._runtimes.values())
+            if not self._holds(runtime):
+                found.append(runtime)
+            return tuple(found)
+
+    def running(self) -> tuple:
+        return tuple(found for found in self.all() if _is_running(found))
+
+    def forget(self) -> None:
+        """Drop every entry. Stops nothing -- for tests and for a settings reset."""
+        with self._lock:
+            self._runtimes.clear()
+
+    # -- taking turns ----------------------------------------------------- #
+
+    def make_room_for(self, role: str, configuration: Config) -> int:
+        """Stop the other role's server when the two may not coexist.
+
+        Called on the way into a start rather than after one, because the point
+        is that the memory is free *before* the next placement is negotiated
+        against it -- a negotiation that reads the card while the other role is
+        still holding it places this one in the gap, which is the flapping the
+        placement rules already exist to prevent.
+
+        Returns bytes released, and does nothing at all in the two cases that
+        are not a contention: roles that share a runtime, and roles in different
+        pools.
+        """
+        import mc_llm_roles
+
+        chosen = mc_llm_roles.named(role)
+        if not chosen:
+            return 0
+        where = pool(configuration)
+        if resolved_sharing(where) != SHARE_TAKE_TURNS:
+            return 0
+        mine = _identity(configuration, configuration.mmproj)
+        freed = 0
+        for other in self.all():
+            if other is self._runtimes.get(mine) or not other.running():
+                continue
+            if not any(name != chosen for name in _roles_of(other)):
+                continue
+            try:
+                if pool(config(_roles_of(other)[0])) != where:
+                    continue
+                freed += int(other.release(0, f"the {mc_llm_roles.label(chosen)} runtime "
+                                              f"needs the same memory") or 0)
+            except Exception:
+                logger.debug("Model Chain: could not stand down the other role's runtime",
+                             exc_info=True)
+        if freed:
+            logger.info("Model Chain: %sstood the other role's llama-server down — %.1f GB, "
+                        "both roles are configured for the same memory",
+                        mc_llm_roles.prefix(chosen), freed / _GB)
+        return freed
+
+    # -- the broker's reclaimer, fanned out ------------------------------- #
+
+    def release(self, needed_bytes: int, reason: str = "") -> int:
+        """Give VRAM back from every runtime until ``needed_bytes`` is covered.
+
+        Ordered by what each is holding, largest first, so the fewest servers
+        are stopped for the memory asked for. A request for zero -- which is how
+        the broker spells "everything" -- goes to all of them.
+        """
+        held = sorted(self.running(), key=lambda found: -_held_by(found))
+        freed = 0
+        for found in held:
+            if needed_bytes and freed >= needed_bytes:
+                break
+            try:
+                freed += int(found.release(max(needed_bytes - freed, 0), reason) or 0)
+            except Exception:
+                logger.debug("Model Chain: a runtime could not release", exc_info=True)
+        return freed
+
+    def resident_bytes(self) -> int:
+        return sum(_held_by(found) for found in self.all())
+
+    def describe(self) -> str:
+        import mc_llm_roles
+
+        live = self.running()
+        if not live:
+            return "the LLM"
+        if len(live) == 1 and not live[0].roles:
+            return live[0].describe()
+        return " and ".join(
+            f"{mc_llm_roles.label(_roles_of(found)[0]) if _roles_of(found) else 'the'} LLM"
+            for found in live)
+
+
+def _roles_of(found) -> tuple:
+    """Which roles ``found`` serves, for an object that may not be a Runtime.
+
+    ``mc_llm_runtime.runtime`` is a module-level name, and a module-level name
+    is something callers substitute -- a test double stands in for it in several
+    files here, and anything that does so is under no obligation to grow the
+    attributes this registry added. Every question the registry asks of the
+    objects it holds goes through one of these three helpers, so a stand-in
+    degrades to "serves nobody in particular, holds nothing, is not running"
+    rather than raising into a generation.
+    """
+    return tuple(getattr(found, "roles", ()) or ())
+
+
+def _is_running(found) -> bool:
+    try:
+        return bool(found.running())
+    except Exception:
+        logger.debug("Model Chain: could not ask a runtime whether it is up", exc_info=True)
+        return False
+
+
+def _held_by(found) -> int:
+    try:
+        return max(int(found.resident_bytes() or 0), 0)
+    except Exception:
+        logger.debug("Model Chain: could not ask a runtime what it holds", exc_info=True)
+        return 0
+
+
+def _residency_key(identity: tuple) -> str:
+    """One register key per distinct runtime.
+
+    Hashed rather than spelled out because the identity carries absolute paths,
+    and a register the panel prints is not the place for somebody's model
+    directory. Stable within a session, which is all the register needs.
+    """
+    import hashlib
+
+    digest = hashlib.blake2b(repr(identity).encode("utf-8"), digest_size=6).hexdigest()
+    return f"{RESIDENCY_KEY}:{digest}"
+
+
 runtime = Runtime()
 """The single managed server. One process per WebUI, as the standalone app had
 one per window: llama.cpp serialises requests within a process anyway, and two
 would double the VRAM for no concurrency the broker would allow to be used."""
 
-mc_broker.register_reclaimer(mc_broker.FAMILY_LLM, runtime)
+registry = RuntimeRegistry()
+"""Every managed llama-server, by identity. See :class:`RuntimeRegistry`."""
+
+mc_broker.register_reclaimer(mc_broker.FAMILY_LLM, registry)
 
 
 def shutdown() -> None:
