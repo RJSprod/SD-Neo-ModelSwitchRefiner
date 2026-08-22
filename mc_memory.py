@@ -200,8 +200,20 @@ inferred from a measurement should be able to quietly annex half the card.
 """
 
 
-def vram_headroom_bytes(width: int = 0, height: int = 0) -> int:
-    """VRAM to keep free for a pass at the given size.
+def vram_headroom_bytes(width: int = 0, height: int = 0, batch: int = 1) -> int:
+    """VRAM to keep free for a pass at the given size and batch.
+
+    ``batch`` multiplies the pixel count, because that is what it multiplies in
+    the sampler: every image in a batch carries its own latents, its own
+    attention buffers and its own residual stream, and they are all live at the
+    same moment. A reserve sized for one image and spent on five is short by
+    four images' worth.
+
+    Not hypothetical. On a 24 GB card holding a 17.8 GB checkpoint, a batch of
+    five needed 2.8 GB of activations where the reserve had allowed for one
+    image's 0.6 GB -- and the difference was very nearly exactly the 1.4 GB a
+    llama-server was holding under a promise the plan had made it. The
+    generation died before its first step.
 
     Four floors, and the largest of them wins:
 
@@ -215,18 +227,25 @@ def vram_headroom_bytes(width: int = 0, height: int = 0) -> int:
     driver spilling into system memory -- so the strongest answer is the useful
     one, and none of them may be undercut by the others.
     """
-    return int(max(_static_headroom_bytes(width, height),
-                   _observed_headroom_bytes(width, height),
+    return int(max(_static_headroom_bytes(width, height, batch),
+                   _observed_headroom_bytes(width, height, batch),
                    manual_reserve_bytes(),
                    host_reserved_bytes()))
 
 
-def _static_headroom_bytes(width: int, height: int) -> int:
-    """The a-priori estimate, from pass size alone."""
+def _batched_megapixels(width: int, height: int, batch: int = 1) -> float:
+    """Pixels in flight at once, in megapixels. Zero when the size is unknown."""
     if width <= 0 or height <= 0:
+        return 0.0
+    return (width * height) / 1_000_000 * max(int(batch or 1), 1)
+
+
+def _static_headroom_bytes(width: int, height: int, batch: int = 1) -> int:
+    """The a-priori estimate, from pass size alone."""
+    megapixels = _batched_megapixels(width, height, batch)
+    if megapixels <= 0:
         return int(VRAM_HEADROOM_BYTES)
 
-    megapixels = (width * height) / 1_000_000
     return int(VRAM_HEADROOM_BYTES + VRAM_HEADROOM_PER_MEGAPIXEL * max(megapixels - 1.0, 0.0))
 
 
@@ -301,7 +320,7 @@ def begin_pass_observation() -> None:
         pass
 
 
-def observe_activation_peak(width: int, height: int, stage: str = "") -> int:
+def observe_activation_peak(width: int, height: int, stage: str = "", batch: int = 1) -> int:
     """Fold the pass that just ran into the automatic reserve estimate.
 
     What is measured is the peak allocation minus the weights resident at the
@@ -332,7 +351,12 @@ def observe_activation_peak(width: int, height: int, stage: str = "") -> int:
         return 0
 
     weights = _all_resident_bytes()
-    megapixels = max((width * height) / 1_000_000, 0.05)
+    # Divided by the batch as well as the size, so what is learned is the cost
+    # of *one* image at this resolution. Without that, a batch of five would
+    # teach the estimator a per-megapixel figure five times too large, and every
+    # single-image generation afterwards would reserve for a batch nobody asked
+    # for -- and squeeze the language model off the card to do it.
+    megapixels = max(_batched_megapixels(width, height, batch), 0.05)
     per_megapixel = max(peak - weights, 0) / megapixels
     per_megapixel = min(per_megapixel, MAX_LEARNED_BYTES_PER_MEGAPIXEL)
 
@@ -340,24 +364,47 @@ def observe_activation_peak(width: int, height: int, stage: str = "") -> int:
     if per_megapixel > _peak_bytes_per_megapixel:
         _peak_bytes_per_megapixel = per_megapixel
         logger.debug(
-            "Model Chain: observed %.2f GB of activations for a %dx%d %s pass; "
+            "Model Chain: observed %.2f GB of activations for a %dx%d %s pass at batch %d; "
             "the automatic VRAM reserve now allows for it",
             (peak - weights) / _GB,
             width,
             height,
             stage or "generation",
+            max(int(batch or 1), 1),
         )
 
+    _report_pass_peak(stage, peak)
     return int(_peak_bytes_per_megapixel)
 
 
-def _observed_headroom_bytes(width: int, height: int) -> int:
+def _report_pass_peak(stage: str, peak: int) -> None:
+    """Tell the plan what the pass really cost, so a wrong reserve is visible.
+
+    The one thing the extension could not see before. When an estimate is short
+    the failure does not come back through any of this module's own paths --
+    the host's allocator spills, or a VRAM guard in another extension stops the
+    generation at ``unet-forward`` and reports it in its own words. Either way
+    nothing here noticed, and the panel went on claiming a budget that had just
+    been exceeded.
+
+    Comparing the measured peak with what the plan protected is how that
+    becomes a recorded miss rather than somebody else's warning.
+    """
+    try:
+        import mc_plan
+
+        mc_plan.check_observed(stage or "the pass", int(peak))
+    except Exception:
+        logger.debug("Model Chain: could not report the pass peak", exc_info=True)
+
+
+def _observed_headroom_bytes(width: int, height: int, batch: int = 1) -> int:
     """What the observed peaks say this pass needs free, or 0 before any."""
-    if _peak_bytes_per_megapixel <= 0 or width <= 0 or height <= 0:
+    megapixels = _batched_megapixels(width, height, batch)
+    if _peak_bytes_per_megapixel <= 0 or megapixels <= 0:
         return 0
 
-    megapixels = max((width * height) / 1_000_000, 0.05)
-    estimate = _peak_bytes_per_megapixel * megapixels * PEAK_MARGIN
+    estimate = _peak_bytes_per_megapixel * max(megapixels, 0.05) * PEAK_MARGIN
 
     total = total_vram_bytes()
     if total > 0:
@@ -371,10 +418,11 @@ def observed_peaks() -> tuple[int, int]:
     return int(_peak_bytes_per_megapixel), _peak_observations
 
 
-def vram_required_bytes(name: str, modules=None, width: int = 0, height: int = 0) -> int:
+def vram_required_bytes(name: str, modules=None, width: int = 0, height: int = 0,
+                        batch: int = 1) -> int:
     """VRAM a pass on ``name`` needs: the model, resident, plus its activations."""
     model = file_size_bytes(name, modules) * (1.0 + VRAM_MODEL_OVERHEAD_FRACTION)
-    return int(model + vram_headroom_bytes(width, height))
+    return int(model + vram_headroom_bytes(width, height, batch))
 
 RAM_RESERVE_BYTES = 2 * _GB
 """System RAM never handed to the cache, so the host process cannot be OOM-killed."""
@@ -2089,7 +2137,8 @@ def _loaded_target_patchers(target_name: str) -> list:
         return []
 
 
-def _pass_requirement(target_name: str, modules, width: int, height: int, patchers: list) -> int:
+def _pass_requirement(target_name: str, modules, width: int, height: int, patchers: list,
+                      batch: int = 1) -> int:
     """VRAM the pass needs in total: the model, resident, plus its activations.
 
     When the target is the loaded model its patchers report their real size, so
@@ -2115,7 +2164,7 @@ def _pass_requirement(target_name: str, modules, width: int, height: int, patche
     else:
         size = int(file_size_bytes(target_name, modules) * (1.0 + VRAM_MODEL_OVERHEAD_FRACTION))
 
-    return size + _attainable_headroom(size, width, height)
+    return size + _attainable_headroom(size, width, height, batch)
 
 
 def _remember_measured_weights(name: str, modules, size: int) -> None:
@@ -2162,7 +2211,8 @@ def measured_weight_bytes(name: str, modules=None) -> int:
     return size
 
 
-def pass_bytes_from_weights(weights: int, width: int = 0, height: int = 0) -> int:
+def pass_bytes_from_weights(weights: int, width: int = 0, height: int = 0,
+                            batch: int = 1) -> int:
     """A pass requirement built from a known weight figure rather than a file size.
 
     The same arithmetic :func:`_pass_requirement` performs, exposed for the
@@ -2174,10 +2224,10 @@ def pass_bytes_from_weights(weights: int, width: int = 0, height: int = 0) -> in
     weights = max(int(weights), 0)
     if weights <= 0:
         return 0
-    return weights + _attainable_headroom(weights, width, height)
+    return weights + _attainable_headroom(weights, width, height, batch)
 
 
-def _attainable_headroom(model_bytes: int, width: int, height: int) -> int:
+def _attainable_headroom(model_bytes: int, width: int, height: int, batch: int = 1) -> int:
     """The reserve, less anything the card could not have given anyway.
 
     A requirement larger than the whole card is not a demanding target, it is an
@@ -2191,7 +2241,7 @@ def _attainable_headroom(model_bytes: int, width: int, height: int) -> int:
     has to be resident to sample at all, whereas the reserve is a margin, and a
     margin that cannot be honoured is better spent than pretended.
     """
-    headroom = vram_headroom_bytes(width, height)
+    headroom = vram_headroom_bytes(width, height, batch)
 
     total = total_vram_bytes()
     if total <= 0:
@@ -2240,7 +2290,8 @@ def _pinned_keep(required: int, stage: str) -> tuple[list, int]:
     return entries, pinned
 
 
-def make_vram_room(target_name: str, modules=None, width: int = 0, height: int = 0, stage: str = STAGE_2) -> int:
+def make_vram_room(target_name: str, modules=None, width: int = 0, height: int = 0,
+                   stage: str = STAGE_2, batch: int = 1) -> int:
     """Evict other models from VRAM if the Stage 2 pass will not otherwise fit.
 
     This is the "demote only under pressure" half of the residency policy, and
@@ -2266,7 +2317,7 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
     Returns the number of bytes freed (0 when nothing needed doing).
     """
     own = _loaded_target_patchers(target_name)
-    required = _pass_requirement(target_name, modules, width, height, own)
+    required = _pass_requirement(target_name, modules, width, height, own, batch)
     resident = _resident_bytes(own)
     needed = max(required - resident, 0)
     free = free_vram_bytes()

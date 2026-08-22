@@ -89,13 +89,23 @@ def plan_view(budget: mc_plan.Budget | None = None) -> str:
         )
 
     limiting = budget.limiting
+    size = ""
+    if plan.width and plan.height:
+        size = f"{plan.width}x{plan.height}"
+        if plan.batch > 1:
+            size += f", batch of {plan.batch}"
     lines = [
         f"**Active plan:** {plan.describe()}",
         "",
         "| | | |",
         "| --- | --- | --- |",
-        _row("Usable VRAM", gigabytes(budget.total_bytes)),
+        _row("Usable VRAM", gigabytes(budget.total_bytes),
+             "what the card can really give, not its nameplate"),
     ]
+    if size:
+        lines.append(_row("Sampling", size,
+                          "a batch multiplies the activations, not the weights"
+                          if plan.batch > 1 else ""))
 
     for phase in plan.phases:
         if not phase.holds_image_vram:
@@ -128,6 +138,54 @@ def plan_view(budget: mc_plan.Budget | None = None) -> str:
                       "already inside each phase peak above"))
     lines.append(_row("**Image-protected budget**", f"**{gigabytes(budget.protected_bytes)}**",
                       "kept clear whatever else asks for it"))
+    return "\n".join(lines)
+
+
+def residency_view() -> str:
+    """Where the card's memory actually is, right now, adding up to the whole card.
+
+    Added because a user watched Task Manager report 20.1 GB on an idle machine
+    whose three model files come to 17.3 GB, and had no way to find the rest.
+    The rest was real and entirely ordinary — a text encoder that loads larger
+    than its file, a CUDA context that never comes back before the process
+    exits, and a language model holding what the plan had given it — but none
+    of it was visible anywhere.
+
+    The last row is the one worth having. It is the card, minus what is free,
+    minus everything this extension can account for, and it is where a stray
+    llama-server from a killed WebUI, another program on the same GPU, or the
+    CUDA context itself shows up. A number nobody can explain is exactly the
+    number somebody needs to see.
+    """
+    try:
+        import mc_broker
+
+        total = int(mc_broker.total_vram_bytes())
+        free = int(mc_broker.free_vram_bytes())
+        image = int(mc_broker.held_bytes(mc_broker.FAMILY_IMAGE))
+        llm = int(mc_broker.held_bytes(mc_broker.FAMILY_LLM))
+    except Exception:
+        logger.debug("Model Chain: could not read the residency map", exc_info=True)
+        return ""
+
+    if total <= 0:
+        return ""
+
+    rest = max(total - free - image - llm, 0)
+    lines = [
+        "**On the card right now**",
+        "",
+        "| | | |",
+        "| --- | --- | --- |",
+        _row("Image models", gigabytes(image), "weights as loaded, not as stored on disk"),
+        _row("Language model", gigabytes(llm), "0 when it is running from system RAM"),
+        _row("Free", gigabytes(free), ""),
+        _row("Everything else", gigabytes(rest),
+             "CUDA context, the desktop, other programs — "
+             "a CUDA context alone is over a gigabyte and never returns "
+             "until the WebUI exits"),
+        _row("**Card total**", f"**{gigabytes(total)}**", ""),
+    ]
     return "\n".join(lines)
 
 
@@ -273,6 +331,9 @@ def report() -> str:
         if absent:
             parts.append(f"_{absent}_")
         parts.append(llm_view(budget))
+        residency = residency_view()
+        if residency:
+            parts.append(residency)
         parts.append(miss_view())
         return "\n\n".join(parts)
     except Exception:

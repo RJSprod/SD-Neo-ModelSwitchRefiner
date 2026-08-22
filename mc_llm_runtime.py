@@ -1987,6 +1987,15 @@ onto a card that will not take it whole -- and small enough that a start which
 is failing for some other reason still fails quickly.
 """
 
+OVERSPEND_TOLERANCE = 256 * 1024 * 1024
+"""How far above its allowance a running server may sit before it is re-placed.
+
+Both sides of that comparison are measurements. A quarter of a gigabyte is
+larger than the noise in either and far smaller than any placement step the
+ladder can offer, so a real overshoot is always acted on and a rounding error
+never is.
+"""
+
 RETRY_HEADROOM = 3 * _GB
 """How much more room each retry leaves. Large enough to change the placement:
 a step that only trimmed the context would ask the driver for the same
@@ -2312,11 +2321,13 @@ class Runtime:
         # the room, and the first LLM call of the next generation is the one
         # that should be placed in it -- but it runs inside a host job, so a
         # host-busy check reached first would decline for the whole generation.
+        overspending = False
         try:
             import mc_plan
 
             if mc_plan.current() is not None:
-                if not mc_plan.boundary_moved():
+                overspending = self._overspending(ours)
+                if not mc_plan.boundary_moved() and not overspending:
                     return False
                 # A real boundary. Fall through and let the negotiation below
                 # say whether the new plan is worth a restart; a boundary alone
@@ -2334,6 +2345,25 @@ class Runtime:
         except Exception:
             logger.debug("Model Chain: could not re-check the LLM placement", exc_info=True)
             return False
+        if overspending:
+            # Downwards, and the one direction :func:`_worth_restarting` will
+            # never ask for. Its rule -- only ever an improvement -- was written
+            # when a running server sat in VRAM nobody else had a claim on, and
+            # moving it somewhere smaller really did free nothing anybody had
+            # asked for. A plan is exactly that claim: it says how much the
+            # image side needs, and a server holding more than what is left over
+            # is holding memory the next pass is going to want.
+            #
+            # A user found this the hard way. A batch of five was planned for
+            # while a llama-server placed under a batch-of-one plan held 1.4 GB,
+            # and the generation died before its first step with 255 MB free on
+            # the card. The placement that had been right five seconds earlier
+            # was the thing in the way.
+            logger.info("Model Chain: re-placing llama-server — it holds %.1f GB where the "
+                        "active plan leaves %.1f GB, so it gives the difference back",
+                        ours / _GB, max(self._allowance(ours), 0) / _GB)
+            return True
+
         if not _worth_restarting(current, preview.placement,
                                  described.block_count if described else 0):
             return False
@@ -2341,6 +2371,38 @@ class Runtime:
                     preview.placement.describe(described.block_count if described else 0),
                     current.describe(described.block_count if described else 0))
         return True
+
+    @staticmethod
+    def _allowance(ours: int) -> int:
+        """What the active plan leaves for the language model, or -1 if it says nothing."""
+        try:
+            import mc_plan
+
+            if mc_plan.current() is None:
+                return -1
+            return mc_plan.persistent_llm_budget(ours)
+        except Exception:
+            logger.debug("Model Chain: could not read the LLM allowance", exc_info=True)
+            return -1
+
+    def _overspending(self, ours: int) -> bool:
+        """Whether this server holds more VRAM than the active plan now allows.
+
+        The question ``_worth_restarting`` cannot answer, because it compares
+        two placements and this compares a placement with a *promise*. Both
+        matter, and they point in opposite directions: one asks whether more of
+        the model could be resident, the other whether it may still be.
+
+        A tolerance, because both sides of the comparison are measurements and
+        neither is exact -- the residency is a difference of two free-VRAM
+        readings taken either side of a process start, and the allowance moves
+        with whatever else is on the card. Restarting a server to recover a
+        rounding error would be the flapping this whole change set removed.
+        """
+        allowance = self._allowance(ours)
+        if allowance < 0:
+            return False
+        return ours > allowance + OVERSPEND_TOLERANCE
 
     def _touch(self, configuration: Config, held: int) -> None:
         """Keep a reused server at the top of the register, and say nothing.
