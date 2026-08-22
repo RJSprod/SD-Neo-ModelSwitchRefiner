@@ -371,6 +371,18 @@ shared.options_templates.update(
                 "Keeping it running moves the model to system RAM instead: no reload, much "
                 "slower generation, and the RAM stays spent"
             ),
+            mc_llm_runtime.OPT_ROLE_PROCESSES: shared.OptionInfo(
+                mc_llm_runtime.PROCESSES_SHARED,
+                "When Creative and Spatial are configured identically",
+                gr.Radio,
+                {"choices": [label for _, label in mc_llm_runtime.PROCESS_MODES]},
+            ).info(
+                "identical roles resolve to one llama-server by default: one process, one copy "
+                "of the weights, one prompt cache. The cost is that the two passes use "
+                "different system prompts on it, so each switch re-reads a prefix the other "
+                "just cached. A card or a machine with room for two servers can have one each "
+                "instead — both stay warm, and neither pass ever re-reads the other's prompt"
+            ),
             mc_llm_runtime.OPT_ROLE_SHARING: shared.OptionInfo(
                 mc_llm_runtime.SHARE_AUTO,
                 "When Creative and Spatial want the same memory",

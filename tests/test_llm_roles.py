@@ -21,6 +21,8 @@ thing the user added to it afterwards:
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 import mc_broker
@@ -1085,3 +1087,225 @@ class TestThePlacementLinesSayWhichConfigurationTheyCameFrom:
     def test_the_shared_runtime_says_nothing_extra(self):
         """Every line this extension has always written keeps its shape."""
         assert runtime.Runtime()._said_for() == ""
+
+
+# --------------------------------------------------------------------------- #
+# A server each, even when the two roles are identical (section 10.3)
+# --------------------------------------------------------------------------- #
+
+
+class TestGivingIdenticalRolesAServerEach:
+    """The memory decision the design intent left optional.
+
+    Sharing is right when memory is tight and wrong when it is not: two servers
+    on a 32 GB card both stay warm and neither pass re-reads the other's system
+    prompt, which is exactly the handoff cost section 10.2 says sharing buys.
+    """
+
+    def test_identical_roles_share_by_default(self, tmp_path, monkeypatch):
+        same = dict(mode="gpu", gpu_index=0)
+        registry = pair(monkeypatch, configured(tmp_path, **same), configured(tmp_path, **same))
+
+        assert registry.for_role(roles.CREATIVE) is registry.for_role(roles.SPATIAL)
+        assert registry.shared()
+
+    def test_asking_for_one_each_gives_two_servers(self, tmp_path, monkeypatch):
+        same = dict(mode="gpu", gpu_index=0)
+        registry = pair(monkeypatch, configured(tmp_path, **same), configured(tmp_path, **same))
+        monkeypatch.setattr(runtime, "_process_mode", lambda: runtime.PROCESSES_SEPARATE)
+
+        assert registry.for_role(roles.CREATIVE) is not registry.for_role(roles.SPATIAL)
+        assert not registry.shared()
+
+    def test_each_gets_its_own_line_in_the_register(self, tmp_path, monkeypatch):
+        same = dict(mode="gpu", gpu_index=0)
+        registry = pair(monkeypatch, configured(tmp_path, **same), configured(tmp_path, **same))
+        monkeypatch.setattr(runtime, "_process_mode", lambda: runtime.PROCESSES_SEPARATE)
+
+        assert (registry.for_role(roles.CREATIVE).residency_key
+                != registry.for_role(roles.SPATIAL).residency_key)
+
+    def test_a_role_still_starts_from_its_own_settings(self, tmp_path, monkeypatch):
+        same = dict(mode="mixed_conservative", gpu_index=1, device="CUDA1")
+        registry = pair(monkeypatch, configured(tmp_path, **same), configured(tmp_path, **same))
+        monkeypatch.setattr(runtime, "_process_mode", lambda: runtime.PROCESSES_SEPARATE)
+
+        found = registry.for_role(roles.SPATIAL)
+
+        assert found.configuration().mode == "mixed_conservative"
+        assert found.configuration().gpu_index == 1
+
+    def test_the_shared_configuration_is_untouched_by_the_setting(self, tmp_path, monkeypatch):
+        """Prompt Studio, Conversation and MiniMax are not roles and have no
+        second server to be given."""
+        shared = configured(tmp_path, mode="gpu")
+        monkeypatch.setattr(runtime, "config", lambda role="": shared)
+        monkeypatch.setattr(runtime, "_process_mode", lambda: runtime.PROCESSES_SEPARATE)
+        registry = runtime.RuntimeRegistry()
+
+        assert registry.for_role() is runtime.runtime
+
+
+# --------------------------------------------------------------------------- #
+# GPU / VRAM Only means what it says (sections 12.4 and 21)
+# --------------------------------------------------------------------------- #
+
+
+class _BigHeader:
+    """A dense 30-block model too large for an empty card."""
+
+    file_bytes = 16 * _GB
+    block_count = 30
+    usable = True
+    context_length = 262144
+    embedding_length = 3584
+    expert_count = 0
+    expert_used_count = 0
+    mixture_of_experts = False
+    expert_share = 0.0
+    head_counts_kv = (8,) * 30
+    key_lengths = (128,) * 30
+    value_lengths = (128,) * 30
+    attending_blocks = 30
+    path = pathlib.Path("big.gguf")
+
+
+class TestAModeThatCouldNotBeCarriedOut:
+    """From a 5090 log: the mode was GPU / VRAM Only and the model went to
+    system RAM without a word about it. Section 21 asks for the opposite --
+    report the inability to satisfy the selected mode rather than silently
+    converting it to something else."""
+
+    def test_gpu_only_says_so_when_nothing_fit(self, tmp_path):
+        configuration = configured(tmp_path, mode="gpu")
+        said = runtime._unsatisfied(configuration,
+                                    ctx.Placement(gpu_layers=ctx.NO_LAYERS), None)
+
+        assert said and "GPU / VRAM Only was chosen and could not be satisfied" in said[0]
+        assert "none of it is on the card" in said[0]
+
+    def test_it_says_how_much_did_fit(self, tmp_path):
+        class Header:
+            block_count = 30
+
+        configuration = configured(tmp_path, mode="gpu")
+        said = runtime._unsatisfied(configuration, ctx.Placement(gpu_layers=2), Header())
+
+        assert "only 2 of 30 layers" in said[0]
+
+    def test_a_satisfied_gpu_placement_says_nothing(self, tmp_path):
+        configuration = configured(tmp_path, mode="gpu")
+
+        assert runtime._unsatisfied(configuration,
+                                    ctx.Placement(gpu_layers=ctx.ALL_LAYERS), None) == []
+
+    def test_the_mixed_modes_are_defined_as_taking_what_fits(self, tmp_path):
+        """Aggressive degrading is Aggressive working, so it says nothing here.
+        Conservative asks for nothing and gets it."""
+        for mode in ("mixed_aggressive", "mixed_conservative", "cpu"):
+            configuration = configured(tmp_path, mode=mode,
+                                       device="none" if mode == "cpu" else "CUDA0")
+            assert runtime._unsatisfied(
+                configuration, ctx.Placement(gpu_layers=ctx.NO_LAYERS), None) == [], mode
+
+    def test_it_reaches_the_negotiation_notes(self, tmp_path, monkeypatch):
+        """Through ``negotiate``, so the sentence really is on the report the
+        panel and the console print rather than only on a helper."""
+        monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
+        monkeypatch.setattr(runtime, "_free_vram", lambda ours=0, card=None: 0)
+        monkeypatch.setattr(runtime, "_spendable", lambda ours=0, card=None: 0)
+        configuration = configured(tmp_path, mode="gpu")
+
+        negotiated = runtime.negotiate(configuration, _BigHeader(), reclaim=False)
+
+        assert negotiated.placement.gpu_layers == ctx.NO_LAYERS
+        assert any("could not be satisfied" in note for note in negotiated.notes), \
+            negotiated.notes
+
+    def test_a_mixed_placement_that_degrades_says_nothing_extra(self, tmp_path,
+                                                                monkeypatch):
+        monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
+        monkeypatch.setattr(runtime, "_free_vram", lambda ours=0, card=None: 0)
+        monkeypatch.setattr(runtime, "_spendable", lambda ours=0, card=None: 0)
+        configuration = configured(tmp_path, mode="mixed_aggressive")
+
+        negotiated = runtime.negotiate(configuration, _BigHeader(), reclaim=False)
+
+        assert not any("could not be satisfied" in note for note in negotiated.notes)
+
+
+class TestTheStartReadsItsOwnCard:
+    def test_the_free_figure_is_the_card_the_server_is_going_on(self, tmp_path, monkeypatch):
+        """It is both the number the start line prints and the baseline the
+        residency is measured against, so a reading of another card makes the
+        second one a subtraction of two unrelated numbers."""
+        asked: list = []
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes",
+                            lambda index=None: asked.append(index) or (30 * _GB))
+        creative = configured(tmp_path, mode="gpu", gpu_index=0, device="CUDA0")
+        registry = pair(monkeypatch, creative, creative)
+        monkeypatch.setattr(runtime, "_prime_prompt_cache", lambda client: None)
+        found = registry.for_role(roles.CREATIVE)
+
+        class Reached(RuntimeError):
+            pass
+
+        def stop_inside_launch(placement, gguf):
+            raise Reached()
+
+        # Inside ``_launch`` rather than instead of it. The reading under test
+        # is taken there, so replacing the whole method would mean this passed
+        # whichever card it asked about -- which it did.
+        monkeypatch.setattr(runtime, "_layers_argument", stop_inside_launch)
+        asked.clear()
+        with pytest.raises(Reached):
+            found.client()
+
+        assert asked, "nothing asked about free VRAM at all"
+        assert 0 in asked, f"the placement never asked about card 0: {asked}"
+        # None is "whichever card the image side is on", which is the question
+        # this placement must never ask: it is going on card 0.
+        assert None not in asked, f"something asked about the image card: {asked}"
+
+
+class TestTheIdleCardWarning:
+    """It fired on Mixed Conservative, where zero layers is the setting working.
+
+    From the log that found it, on a 3090 in Conservative: "will do no work in
+    this placement — nothing was free to offload into". Both halves were wrong.
+    Nothing failed to be free; the user asked for zero layers. And the card was
+    not idle -- ``--op-offload`` gave it the arithmetic, which was 82 tokens a
+    second on prompts against 50 on the processor alone.
+    """
+
+    def test_conservative_is_not_warned_about(self, tmp_path, caplog):
+        configuration = configured(tmp_path, mode="mixed_conservative")
+        with caplog.at_level("INFO"):
+            runtime._warn_about_an_idle_card(configuration, "0")
+
+        assert "will do no work" not in caplog.text
+
+    def test_the_processor_is_not_warned_about(self, tmp_path, caplog):
+        configuration = configured(tmp_path, mode="cpu", device="none")
+        with caplog.at_level("INFO"):
+            runtime._warn_about_an_idle_card(configuration, "0")
+
+        assert "will do no work" not in caplog.text
+
+    def test_a_mode_that_asked_for_layers_and_got_none_still_is(self, tmp_path, caplog):
+        """Aggressive and GPU / VRAM Only both ask for layers, and a card
+        holding none of them really is doing nothing."""
+        for mode in ("mixed_aggressive", "gpu"):
+            caplog.clear()
+            configuration = configured(tmp_path, mode=mode)
+            with caplog.at_level("INFO"):
+                runtime._warn_about_an_idle_card(configuration, "0")
+
+            assert "will do no work" in caplog.text, mode
+
+    def test_a_card_holding_layers_is_never_warned_about(self, tmp_path, caplog):
+        configuration = configured(tmp_path, mode="mixed_aggressive")
+        with caplog.at_level("INFO"):
+            runtime._warn_about_an_idle_card(configuration, "12")
+
+        assert "will do no work" not in caplog.text

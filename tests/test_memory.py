@@ -1048,11 +1048,16 @@ class FakeTorch:
                 return outer.device_free, 24 * GB
 
             @staticmethod
+            def current_device():
+                return outer.current
+
+            @staticmethod
             def empty_cache():
                 outer.emptied += 1
                 outer.device_free += outer.cached
                 outer.cached = 0
 
+        self.current = 0
         self.cuda = _Cuda()
 
     @staticmethod
@@ -1113,10 +1118,28 @@ class TestDriverFreeVram:
         assert mc_memory.device_free_vram_bytes() == 4 * GB
 
     def test_the_image_card_is_named_by_index(self, host, monkeypatch):
+        torch = FakeTorch(device_free=4 * GB)
+        self._install(monkeypatch, torch, free_total=20 * GB)
         from backend import memory_management
 
         monkeypatch.setattr(memory_management, "get_torch_device",
                             lambda: _Device("cuda", 1))
+
+        assert mc_memory.image_device_index() == 1
+
+    def test_a_device_with_no_index_means_the_current_card_not_card_zero(
+            self, host, monkeypatch):
+        """``torch.device("cuda")`` carries no index and does not mean card
+        zero. Reading the missing index as 0 is how a language model pinned to
+        a 5090 was told it shared the image model's card, and capped by a plan
+        protecting a 3090 it was never going to touch."""
+        torch = FakeTorch(device_free=4 * GB)
+        torch.current = 1
+        self._install(monkeypatch, torch, free_total=20 * GB)
+        from backend import memory_management
+
+        monkeypatch.setattr(memory_management, "get_torch_device",
+                            lambda: _Device("cuda", None))
 
         assert mc_memory.image_device_index() == 1
 
