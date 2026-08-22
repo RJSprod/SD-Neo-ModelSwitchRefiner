@@ -2834,7 +2834,7 @@ class TestTheReserveComesFromTheWholePlan:
 
         monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
         monkeypatch.setattr(mc_broker, "held_bytes", lambda family: 0)
-        monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda: 24 * 1024 ** 3)
+        monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda ours=0: 24 * 1024 ** 3)
         mc_plan.publish(mc_plan.Plan((
             mc_plan.Phase(mc_plan.STAGE_1, mc_plan.KIND_IMAGE, "Stage 1",
                           8 * 1024 ** 3),

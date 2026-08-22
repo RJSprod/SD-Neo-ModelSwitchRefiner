@@ -28,7 +28,7 @@ GB = 1024**3
 
 @pytest.fixture
 def budget(host, monkeypatch):
-    monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda: 24 * GB)
+    monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda ours=0: 24 * GB)
     monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 1 * GB)
     monkeypatch.setattr(mc_broker, "held_bytes", lambda family: 0)
     return monkeypatch

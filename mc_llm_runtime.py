@@ -541,13 +541,21 @@ def _spendable(already_ours: int = 0) -> int:
     try:
         import mc_plan
 
-        budget = mc_plan.persistent_llm_budget()
+        # Only an *active plan* caps anything. With none published there is no
+        # image workload to protect, and the budget arithmetic would then return
+        # the whole card -- measured a second way, from a second source, and
+        # therefore very slightly different from the reading above. Capping one
+        # measurement of the card by another measurement of the same card is not
+        # a policy, it is a rounding error with the power to move experts into
+        # system RAM.
+        budget = (mc_plan.persistent_llm_budget(already_ours)
+                  if mc_plan.current() is not None else -1)
         learned = mc_plan.learned_cap_bytes()
     except Exception:
         logger.debug("Model Chain: could not read the active plan's budget", exc_info=True)
         return free
 
-    # -1 is "there is no card to divide up", not "there is no room".
+    # -1 is "there is nothing to divide up", not "there is no room".
     if budget >= 0:
         free = min(free, budget)
     if learned > 0:

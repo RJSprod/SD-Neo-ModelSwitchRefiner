@@ -117,6 +117,61 @@ budget and by any ceiling a previous reserve miss taught. With no plan published
 it is exactly `_free_vram()`, which is what every path did before.
 
 
+## 4a. Obtainable VRAM, not the card's nameplate
+
+`usable_vram_bytes()` measures rather than declares, and the first release of
+this change did not — which was enough on its own to keep restarting the server
+even with every other rule working.
+
+A card's nameplate is not available to anything. The same user's log, at every
+single start:
+
+```
+- CUDA0 : NVIDIA GeForce RTX 3090 (24575 MiB, 23304 MiB free)
+```
+
+24575 total, 23304 free with nothing whatever loaded. The missing **1271 MiB
+(1.24 GB)** is the display, the driver's working set and the desktop, and it is
+never obtainable.
+
+Sized from the nameplate, `PersistentLLMBudget = total - protected` is 1.24 GB
+too generous, so the model is *placed* 1.24 GB larger than the card can carry
+beside the image plan. Nothing fails at that point: llama.cpp starts happily,
+because the VRAM really is free while the checkpoint is not loaded. What fails
+is the next question anybody asks — "does the image plan fit right now?" The
+answer is no, by almost exactly the overshoot, and the only thing the broker can
+do about it is stop llama-server. Every generation, with an identical placement
+every time, because the overshoot is identical every time.
+
+So the figure is measured from three terms that are all really ours:
+
+```
+obtainable = free to the driver, right now
+           + what our own language model is holding
+           + what our own image models are holding
+```
+
+The sum is invariant as models come and go — a checkpoint loading moves bytes
+from the first term into the third and leaves the total alone — which is the
+same stability the plan itself provides. It also means a *third-party* process
+taking VRAM correctly shrinks the budget, which the nameplate could never see.
+
+The invariant this restores: with the language model holding its whole
+allowance, what is left on the card is still the protected peak, so nothing has
+to be handed back and no eviction is reached.
+
+`mc_plan._log_derivation` writes the whole sum to the console once per plan, so
+a budget that looks wrong is wrong visibly:
+
+```
+Model Chain: memory budget — 22.8 GB obtainable of 24.0 GB on the card,
+             17.0 GB protected for the image plan, 5.8 GB for the LLM (auto)
+```
+
+A large gap between the two first figures on any machine is the single likeliest
+explanation for a language model that will not stay up.
+
+
 ## 5. Stability
 
 `Runtime._outgrown` is where re-placement was decided, and it now declines to
