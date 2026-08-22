@@ -799,6 +799,14 @@ PROGRESS_SECONDS = 5.0
 A line per chunk would be a line per token. This is slow enough to read in a
 terminal that is also carrying a generation's progress bar, and quick enough
 that a run which has stalled is visibly not moving.
+
+The clock these lines run on starts at the *first token*, not at the request.
+It used to start at the request, and every line then folded two different things
+into one rate: llama.cpp reads the whole prompt before it emits anything, so the
+first line of a pass that had 230 new tokens to read said "generating, 3
+characters in 5s". Nothing was generating slowly. Nothing was generating at all
+for the first 4.6 seconds of that, and a reader with no way to tell the two
+apart reasonably concluded the server was warming up. See :func:`_traced`.
 """
 
 
@@ -848,6 +856,8 @@ def _traced(label: str, events):
     started = time.monotonic()
     streamed = 0
     spoke_at = started
+    writing_from = None
+    """When the first token arrived, which is when generating actually began."""
     finished = False
     logger.info("Model Chain: LLM run started — %s", label)
     try:
@@ -855,17 +865,25 @@ def _traced(label: str, events):
             if event.kind == CHUNK:
                 streamed += len(event.text or "")
                 now = time.monotonic()
-                if now - spoke_at >= PROGRESS_SECONDS:
+                if writing_from is None:
+                    writing_from, spoke_at = now, now
+                    logger.info("Model Chain: LLM %s — prompt read in %.1fs, writing now",
+                                label, now - started)
+                elif now - spoke_at >= PROGRESS_SECONDS:
                     spoke_at = now
                     logger.info("Model Chain: LLM %s — generating, %s characters in %.0fs",
-                                label, f"{streamed:,}", now - started)
+                                label, f"{streamed:,}", now - writing_from)
             elif event.kind == STATUS:
                 logger.info("Model Chain: LLM %s — %s", label, event.text)
             elif event.kind == DONE:
                 finished = True
-                logger.info("Model Chain: LLM run finished — %s, %s characters in %.1fs%s",
+                logger.info("Model Chain: LLM run finished — %s, %s characters in %.1fs%s%s",
                             label, f"{max(streamed, len(event.text or '')):,}",
-                            time.monotonic() - started, _measured(_role_in(label)))
+                            time.monotonic() - started,
+                            "" if writing_from is None
+                            else f" ({writing_from - started:.1f}s reading, "
+                                 f"{time.monotonic() - writing_from:.1f}s writing)",
+                            _measured(_role_in(label)))
             elif event.kind == CANCELLED:
                 finished = True
                 logger.info("Model Chain: LLM run cancelled — %s after %.1fs",

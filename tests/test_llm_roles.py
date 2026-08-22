@@ -1309,3 +1309,100 @@ class TestTheIdleCardWarning:
             runtime._warn_about_an_idle_card(configuration, "12")
 
         assert "will do no work" not in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# Reading the prompt is not generating slowly
+# --------------------------------------------------------------------------- #
+
+
+class TestTheProgressLinesSeparateReadingFromWriting:
+    """Reported as "the warm Spatial server starts off slow before hitting top
+    speed", and it never did either.
+
+    llama.cpp reads the whole prompt before emitting anything, so a pass with
+    230 new tokens to read spends the first 4.6 seconds producing nothing and
+    then runs at its full rate. The old line measured from the *request* and
+    called all of it "generating", which turned that into "generating, 3
+    characters in 5s" -- a sentence that describes a server crawling, about a
+    server that had not started writing yet.
+    """
+
+    def _events(self, sessions, gap, chunks):
+        """A run whose first token arrives ``gap`` seconds after the request."""
+        clock = {"now": 1000.0}
+
+        def emitted():
+            for text in chunks:
+                clock["now"] += gap if text is chunks[0] else 1.0
+                yield sessions.Event(sessions.CHUNK, text)
+            yield sessions.Event(sessions.DONE, "".join(chunks))
+
+        return clock, emitted()
+
+    def test_the_wait_is_reported_as_reading(self, monkeypatch, caplog):
+        import mc_llm_sessions as sessions
+
+        clock, events = self._events(sessions, 4.6, ["a", "b", "c"])
+        monkeypatch.setattr(sessions.time, "monotonic", lambda: clock["now"])
+
+        with caplog.at_level("INFO"):
+            list(sessions._traced("a spatial composition", events))
+
+        assert "prompt read in 4.6s, writing now" in caplog.text
+        assert "generating, 3 characters in 5s" not in caplog.text
+
+    def test_the_generating_clock_starts_at_the_first_token(self, monkeypatch, caplog):
+        """Otherwise the first rate reported is the prompt's length divided by
+        the writing speed, which is not a speed of anything."""
+        import mc_llm_sessions as sessions
+
+        clock = {"now": 1000.0}
+
+        def emitted():
+            clock["now"] += 10.0          # ten seconds of reading
+            yield sessions.Event(sessions.CHUNK, "x")
+            clock["now"] += 6.0           # then six seconds of writing
+            yield sessions.Event(sessions.CHUNK, "y" * 60)
+            yield sessions.Event(sessions.DONE, "x" + "y" * 60)
+
+        monkeypatch.setattr(sessions.time, "monotonic", lambda: clock["now"])
+        with caplog.at_level("INFO"):
+            list(sessions._traced("a spatial composition", emitted()))
+
+        assert "generating, 61 characters in 6s" in caplog.text
+
+    def test_the_finished_line_splits_the_two(self, monkeypatch, caplog):
+        import mc_llm_sessions as sessions
+
+        clock = {"now": 1000.0}
+
+        def emitted():
+            clock["now"] += 4.6
+            yield sessions.Event(sessions.CHUNK, "abc")
+            clock["now"] += 7.5
+            yield sessions.Event(sessions.DONE, "abc")
+
+        monkeypatch.setattr(sessions.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(sessions, "_measured", lambda role="": "")
+        with caplog.at_level("INFO"):
+            list(sessions._traced("a spatial composition", emitted()))
+
+        assert "12.1s (4.6s reading, 7.5s writing)" in caplog.text
+
+    def test_a_run_that_never_produced_a_token_still_reports(self, monkeypatch, caplog):
+        import mc_llm_sessions as sessions
+
+        clock = {"now": 1000.0}
+
+        def emitted():
+            clock["now"] += 3.0
+            yield sessions.Event(sessions.DONE, "")
+
+        monkeypatch.setattr(sessions.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(sessions, "_measured", lambda role="": "")
+        with caplog.at_level("INFO"):
+            list(sessions._traced("a spatial composition", emitted()))
+
+        assert "LLM run finished" in caplog.text
+        assert "reading," not in caplog.text
