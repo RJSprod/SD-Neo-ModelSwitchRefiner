@@ -804,17 +804,26 @@ counting -- the script's own ``_split`` says as much in the same words.
 
 
 def creative_from(p) -> tuple[bool, str]:
-    """``(writer will run, compose mode)`` as the Creative panel has it set.
+    """``(writer will run, compose mode)`` as the Krea panel has the two set.
 
     The mirror of :func:`stage_2_from`, and it exists for the mirror reason:
-    when Creative Mode is switched off, Model Chain is the script that has to
-    publish the plan, and it cannot see the other panel's controls either.
+    when the Krea script is not the one publishing the plan, Model Chain is, and
+    it cannot see the other panel's controls either.
+
+    Two independent answers, and that is the point. Creative Mode and Spatial
+    Layout are peer features: either can be on without the other, so the
+    Creative flag is read for the writer and the Spatial tail is read for the
+    composition, and neither is allowed to decide the other. Returning early on
+    a cleared Creative checkbox -- which this did -- hid every Spatial-only
+    generation from its own plan, so the bar described a Stage 1 with nothing in
+    front of it and the VRAM arithmetic reserved for a phase that was about to
+    run.
 
     ``compose mode`` is ``"smart"``, ``"direct"`` or empty, and empty is also
     the answer when Spatial Layout is on but the canvas has no boxes on it --
-    though that last case is only visible to the Creative script itself, which
-    has the parsed layout and passes it in explicitly. From here the best that
-    can be said is what the controls say.
+    though that last case is only visible to the Krea script itself, which has
+    the parsed layout and passes it in explicitly. From here the best that can
+    be said is what the controls say.
     """
     script = _script(p, CREATIVE_TITLE)
     if script is None:
@@ -827,18 +836,19 @@ def creative_from(p) -> tuple[bool, str]:
         args = list((getattr(p, "script_args", None) or [])[start:end])
     except (TypeError, KeyError):
         return False, ""
-    if not args or not args[CREATIVE_ENABLED]:
+    if not args:
         return False, ""
 
+    creative = bool(args[CREATIVE_ENABLED])
     if len(args) < CREATIVE_ENABLED + 1 + SPATIAL_TAIL:
-        # An API request that sent only the flag, or a panel that could not
-        # build its axis controls. Creative Mode still runs; there is no layout.
-        return True, ""
+        # An API request that sent only the flag. Whatever Creative Mode is set
+        # to still holds; there is no layout to read.
+        return creative, ""
     spatial_enabled, compose = args[-SPATIAL_TAIL], args[-SPATIAL_TAIL + 1]
     if not spatial_enabled:
-        return True, ""
+        return creative, ""
     mode = str(compose or "").strip().casefold()
-    return True, mode if mode in ("smart", "direct") else "smart"
+    return creative, mode if mode in ("smart", "direct") else "smart"
 
 
 def build_for(p, *, creative: bool | None = None,

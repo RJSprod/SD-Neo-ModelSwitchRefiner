@@ -575,8 +575,33 @@ class TestReadingTheOtherScript:
         assert found and mode == ""
 
     def test_creative_switched_off_is_no_writer(self, card):
+        found, _mode = mc_plan.creative_from(
+            processing(creative_args=[False, 5, "a", "b", False, "smart", "{}"]))
+
+        assert not found
+
+    def test_a_spatial_only_generation_is_still_a_composer_phase(self, card):
+        """The two are peer features, so a cleared Creative checkbox says
+        nothing about the layout. Reading it as though it did hid every
+        Spatial-only generation from its own plan: a bar describing a Stage 1
+        with nothing in front of it, and VRAM reserved for a phase that was
+        about to run."""
         found, mode = mc_plan.creative_from(
             processing(creative_args=[False, 5, "a", "b", True, "smart", "{}"]))
+
+        assert not found
+        assert mode == "smart"
+
+    def test_a_spatial_only_direct_merge_is_a_phase_too(self, card):
+        found, mode = mc_plan.creative_from(
+            processing(creative_args=[False, 5, "a", "b", True, "direct", "{}"]))
+
+        assert not found
+        assert mode == "direct"
+
+    def test_neither_switched_on_is_neither_phase(self, card):
+        found, mode = mc_plan.creative_from(
+            processing(creative_args=[False, 5, "a", "b", False, "smart", "{}"]))
 
         assert not found and mode == ""
 

@@ -137,8 +137,35 @@ SPATIAL_COMPOSER_SEED = "Krea Spatial Composer Seed"
 SPATIAL_COMPOSER_VERSION = "Krea Spatial Composer Instruction"
 SPATIAL_PROMPT_VERSION = "Krea Spatial Prompt Version"
 SPATIAL_ENHANCED_SCENE = "Krea Enhanced Scene"
+"""What a Smart image used to call the scene it handed the Composer.
+
+Read, never written. The name was true while Spatial could only run behind
+Creative Mode and stopped being true the day it could run on its own -- with the
+writer off, that scene is the user's own sentence and nothing enhanced it.
+:data:`SPATIAL_INPUT_SCENE` is the neutral name new images use; this one stays so
+old images still say what they said.
+"""
+
+SPATIAL_INPUT_SCENE = "Krea Spatial Input Scene"
+"""The scene supplied to the Spatial Composer before reconciliation.
+
+Creative on: the Creative Writer's paragraph. Creative off: the prompt exactly
+as typed. One key for one thing, whichever produced it.
+"""
+
+SPATIAL_SOURCE = "Krea Spatial Source"
+"""Where the scene came from, when it did not come from the Creative Writer.
+
+Written as ``prompt`` on a Spatial-only generation and absent otherwise, so the
+question "was this composed around a written scene or around what I typed" has
+an answer in the file rather than being inferred from which other keys are
+missing.
+"""
+
 SPATIAL_SCENE = "Krea Spatial Scene"
-"""What a Spatial BBOX generation records, in its own namespace.
+"""The scene the Composer returned, after reconciliation. Smart merges only."""
+
+_SPATIAL_NAMESPACE = """What a Spatial BBOX generation records, in its own namespace.
 
 The same two questions the Creative keys answer, asked about the composition.
 
@@ -160,15 +187,20 @@ cannot be reconstructed from the prompt, because the prompt carries the derived
 hints rather than the selections they came from.
 
 The two scene keys are diagnostic and are written only in Smart mode, where the
-pass-1 output really is unrecoverable. In Direct mode the enhanced scene *is*
-the ``high_level_description``, and recording it twice would repeat the file to
-itself.
+scene handed to the Composer really is unrecoverable afterwards. In Direct mode
+that scene *is* the ``high_level_description``, and recording it twice would
+repeat the file to itself.
+
+A Spatial-only generation writes these and no Creative keys at all, which is
+what lets its paste switch Spatial Layout off without a Creative key being
+present to switch anything.
 """
 
 SPATIAL_KEYS = (SPATIAL_MODE, SPATIAL_VERSION, SPATIAL_LAYOUT, SPATIAL_COMPOSE_MODE,
                 SPATIAL_COMPOSER_MODEL, SPATIAL_COMPOSER_SEED,
                 SPATIAL_COMPOSER_VERSION, SPATIAL_PROMPT_VERSION,
-                SPATIAL_ENHANCED_SCENE, SPATIAL_SCENE)
+                SPATIAL_ENHANCED_SCENE, SPATIAL_INPUT_SCENE, SPATIAL_SOURCE,
+                SPATIAL_SCENE)
 """Every key a Spatial generation may write, for forwarding and for tests."""
 
 MODULE_PREFIX = "Model Chain Module "
@@ -617,7 +649,8 @@ def _flag(value):
     return str(value).strip().casefold() in ("true", "1", "yes", "on")
 
 
-def build_creative_paste_fields(components: dict, notice=None, view=None) -> list:
+def build_creative_paste_fields(components: dict, notice=None, view=None,
+                                spatial_view=None) -> list:
     """Map a pasted Creative infotext onto the txt2img Creative controls.
 
     Exactly one control is *changed* by an ordinary paste, and it is switched
@@ -700,6 +733,27 @@ def build_creative_paste_fields(components: dict, notice=None, view=None) -> lis
             return None
         return view()
 
+    def spatial_pasted_view(params):
+        if SPATIAL_MODE not in params or spatial_view is None:
+            return None
+        return spatial_view()
+
+    def spatial_said(params):
+        """The Spatial section's own line about what a paste just did.
+
+        Its own, because a Spatial-only image has no Creative record and the
+        Creative line would not be written for it -- so without this a paste
+        that switched Spatial Layout off would do it silently, and the next
+        press would look like the feature had stopped working.
+        """
+        if SPATIAL_MODE not in params:
+            return None
+        said = ("Spatial image restored using its final structured prompt. Spatial "
+                "Layout was disabled so the layout is not composed onto it a second "
+                "time. The canvas it was drawn on is under Spatial options → "
+                "Continue from a pasted image.")
+        return notice(said) if notice else said
+
     fields = [PasteField(components["enabled"], creative_off, api="krea_creative_enabled")]
     if "spatial_enabled" in components:
         fields.append(PasteField(components["spatial_enabled"], spatial_off,
@@ -710,6 +764,12 @@ def build_creative_paste_fields(components: dict, notice=None, view=None) -> lis
     if "pasted" in components and view is not None:
         fields.append(PasteField(components["pasted"], pasted_view,
                                  api="krea_creative_pasted"))
+    if "spatial_pasted" in components and spatial_view is not None:
+        fields.append(PasteField(components["spatial_pasted"], spatial_pasted_view,
+                                 api="krea_spatial_pasted"))
+    if "spatial_status" in components:
+        fields.append(PasteField(components["spatial_status"], spatial_said,
+                                 api="krea_spatial_status"))
     return fields
 
 

@@ -1603,3 +1603,193 @@ and faintly darker than a light one, and never a white box on either.
 
 `appearance: none` takes the dropdown marker with it, so the chevron is drawn
 back on as two gradient triangles. Not a `::before`: see §15.4.
+
+
+## 16. Spatial Layout without Creative Mode (22 August 2026)
+
+Companion to the *Krea 2 Standalone Spatial Layout* design intent (22 August
+2026). Section numbers below are that document's.
+
+Spatial Layout was built inside Creative Mode and behaved like a setting of it:
+the controls lived in Creative's group and disappeared with it, and
+`before_process` returned on the first line unless Creative Mode was on. So
+"place these subjects here" was only reachable by also asking a language model
+to rewrite the prompt — two unrelated questions, one checkbox.
+
+They are peers now. Six pipelines are valid and all six run through one ordered
+path.
+
+### 16.1 The gate was one line and it was the whole coupling
+
+    if not enabled:
+        return
+
+That line made Spatial a mode of Creative rather than a feature. It is now
+"either feature is on", and everything after it decides order rather than
+eligibility. An ordinary generation — both off — still leaves on the first
+line, which is what keeps this free for everybody who does not use it.
+
+The rest of the coupling was smaller than it looked, because the subsystem
+underneath was already independent: `prompt_master.krea.spatial` never knew
+Creative existed, `mc_spatial` owned its own preferences, and the plan already
+modelled the two passes separately. What was tangled was the txt2img surface and
+the orchestration around them.
+
+### 16.2 `mc_krea_pipeline`, and why one hook rather than two
+
+Independent features do not need independent host hooks, and two Forge scripts
+whose execution order happens to be right is not an ordering — it is a
+coincidence with a test. So there is still one hook, and it now calls one
+function whose whole job is the order:
+
+    source = the prompt exactly as typed
+    scene  = source, or what the Creative Writer made of it
+    final  = scene, or the structured prompt built around it
+
+`mc_krea_pipeline.run` is that function. The invariant it exists to hold is one
+sentence: **Creative, when enabled, always runs before Spatial.** Everything
+else in it is a fallback.
+
+The writer arrives as a callable rather than an import. Running it needs an
+event loop, a progress bar and somewhere to put a complaint, all of which belong
+to the hook; the pipeline only needs to know whether it produced a scene. That
+keeps the module free of host state and makes the six combinations testable
+without a page, a checkpoint or a card — which is what `TestTheSixCombinations`
+is.
+
+### 16.3 Spatial takes a string, not a Creative result
+
+`_spatially()` used to read `rolled.expanded`, which is a sentence about where
+the scene came from rather than about what Spatial needs. §7 replaces it with
+one that is not: Spatial takes a **scene string**, and where it came from is not
+its business.
+
+    Creative ON:   spatial_input_scene = the Writer's paragraph
+    Creative OFF:  spatial_input_scene = the prompt as typed
+
+That is the entire change that makes Direct-without-Creative work, and it is why
+Smart-without-Creative works too: the Composer already took `source` and `scene`
+as separate arguments, and with the writer off they are simply the same string.
+Its instruction is unchanged and it is still forbidden to move a box, rewrite a
+region prompt or invent the final BBOX JSON — it must not become a Creative
+Writer merely because Creative Mode is off (§9).
+
+### 16.4 A failed writer no longer takes the boxes with it
+
+The old fallback was correct for a feature that only existed behind Creative
+Mode: no roll meant no scene meant no layout. §21 inverts it, because the user
+explicitly switched Spatial on and a copy-editor being unavailable is not a
+reason to refuse them a composition. A writer that will not answer now leaves
+the scene as the typed prompt and Spatial carries on from it — which is exactly
+the generation Spatial-only mode makes deliberately.
+
+`test_a_writer_failure_no_longer_takes_the_boxes_with_it` used to assert the
+opposite and is worth reading as a pair with the change: the old assertion was
+right about the old design and is the clearest statement of what was wrong with
+it.
+
+One sentence on the result had to move with it. "The image was generated from
+the prompt exactly as typed" is false when the boxes were applied anyway, so the
+hook records which of the two happened and says the right one.
+
+### 16.5 A Composer seed that does not need a Creative seed
+
+Smart Spatial derived its seed from the Creative seed, which does not exist when
+no roll ran. `composer_seed_for` keeps that derivation when there is one and
+falls back to the image seed, and to a fixed basis when the host has not settled
+one — `before_process` runs before Forge resolves `-1`, so "no seed yet" is a
+real answer rather than an error.
+
+A fixed basis there is not a weakness. The Composer reconciles a scene with a
+layout, which is a correction rather than a creative draw, and the same scene
+over the same boxes *should* reconcile the same way twice. What §11 actually
+requires is that the seed be deterministic for replay, independent of Creative,
+and recorded whenever the pass ran — and all three hold.
+
+### 16.6 What a Spatial-only image says about itself
+
+`Prepared.roll` is optional now, and `None` means "no writer ran". Such an image
+records the Spatial keys and **no Creative keys at all**. That is not tidiness:
+an image carrying `Krea Creative Mode` would tell a later paste to switch off a
+feature that never ran, and tell a reader that a language model wrote a sentence
+the user typed.
+
+Which is why the paste already worked. `spatial_off` keys on
+`Krea Spatial Mode` and always did, so a Spatial-only PNG has never depended on
+a Creative key to disable Spatial on paste (§16 of the intent). What it did
+depend on was a *message*: the Creative status line was the only thing that said
+anything after a paste, and it is not written for an image with no Creative
+record. Spatial has its own line now.
+
+Two keys are new. `Krea Spatial Input Scene` replaces `Krea Enhanced Scene`,
+which stopped being true the day the scene handed to the Composer could be the
+user's own sentence; the old key is still read and never written, and nothing
+about exact replay depended on either, because the Prompt line is authoritative.
+`Krea Spatial Source` records `prompt` on a Spatial-only generation, so "was
+this composed around a written scene or around what I typed" is answered in the
+file rather than inferred from which other keys are missing.
+
+### 16.7 Two records, two buttons
+
+The Creative restore used to put the canvas back as well, on the grounds that a
+spatial image was a Creative image with a canvas. It is not any more, and §17
+splits them: Creative Controls restores the source and the recipe, Spatial
+options restores the layout and the mode, and neither touches the other's
+switch. An image carrying both records has two buttons, and pressing one is a
+decision about one of them.
+
+`_restore_spatial` is the minimum §17 asks for and no more: layout, compose
+mode, and Spatial's own checkbox. It leaves Creative Mode exactly as it found
+it, and says so when it finds it off — because "your regions will be composed
+around the prompt exactly as typed" is a different generation from the one the
+image recorded, and somebody should know that before pressing Generate.
+
+### 16.8 The plan, and the phase that was invisible
+
+`creative_from` returned `(False, "")` the moment the Creative checkbox was
+clear, which hid every Spatial-only generation from its own plan: a bar
+describing a Stage 1 with nothing in front of it, and the VRAM arithmetic
+reserving room for a phase that was about to run. It reads the two independently
+now, and `_publish_plan` passes the actual Creative boolean instead of the `True`
+it used to hard-code.
+
+The hand-back rule needed no change, which is worth saying because it looks like
+it should have. `roll()` already declined to hand the card back when a Smart
+Composer followed it, and the pipeline already handed back after the Composer;
+between them that is correct for all six combinations, including the two where
+the Composer is the only language-model phase and the two where there is none.
+
+### 16.9 The checkpoint guard belongs to the pipeline
+
+Direct BBOX Merge makes no language-model request and still hands Krea 2's
+structured JSON prompt to whatever checkpoint is loaded. That prompt is no more
+readable by SD 1.5 for having been built deterministically, so §20 gives the
+guard to the pipeline rather than to Creative Mode. The implementation still
+lives in `mc_creative_krea.checkpoint_objection` — moving it would be churn —
+but `mc_krea_pipeline.objection()` is who owns the rule, and a Spatial-only
+generation asks it before composing anything.
+
+### 16.10 Spatial no longer needs the creativity library
+
+The Spatial block used to be built only when the creativity library loaded,
+because a layout composed boxes around a scene Creative Mode wrote and an
+installation whose Creative Mode could not run had no scene for them to go
+around. With Spatial-only generations that reasoning is gone: the deterministic
+compositor needs no vocabulary at all, and the scene is the prompt.
+
+So the block is built either way, and the Spatial controls now travel on every
+shape of the argument list — including the short one a missing library produces.
+`_split` recognises that shape explicitly rather than by length, because guessing
+in the other direction would read an API request's LoRA field as a layout.
+
+### 16.11 What the panel says
+
+The status line describes the pipeline the two toggles imply, and it is computed
+from both because it has to be: the same Direct merge composes around a written
+scene with Creative on and around the typed prompt with it off, and only one of
+those sentences is true at a time. `mc_krea_pipeline.described` owns the four
+sentences; Creative's toggle repaints Spatial's line, and Spatial's toggle,
+mode and layout all repaint it too.
+
+That is the only thing Creative's checkbox still does to the Spatial block. It
+no longer shows it, hides it, or decides whether it runs.
