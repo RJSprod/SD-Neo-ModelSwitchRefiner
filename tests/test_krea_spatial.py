@@ -829,17 +829,40 @@ class TestFailureFallsBackAndSaysSo:
         assert p.prompt == "A rainy street."
         assert "was not applied" in result.comments
 
-    def test_a_writer_failure_is_still_the_generation_the_user_typed(self, script,
-                                                                     client, store,
-                                                                     monkeypatch):
-        """Unchanged from before this feature: the existing Creative Mode
-        fallback, with the layout reported as not applied rather than composed
-        around a prompt nobody expanded."""
+    def test_a_writer_failure_no_longer_takes_the_boxes_with_it(self, script,
+                                                                client, store,
+                                                                monkeypatch):
+        """§21, and the change independence actually bought.
+
+        This used to assert the opposite: a writer that would not answer meant
+        no layout either, because the layout was applied to the roll's output
+        and there was no roll. Spatial is a peer feature now and the user
+        explicitly enabled it, so the boxes are composed around the prompt as
+        typed -- which is exactly the generation Spatial-only mode makes on
+        purpose."""
         def refuse(*args, **kwargs):
             raise RuntimeError("llama-server is not running")
 
         monkeypatch.setattr(sessions, "_client", refuse)
-        p = generate(script, "a quiet street", spatial_on=True, layout=document())
+        p = generate(script, "a quiet street", spatial_on=True, compose="direct",
+                     layout=document())
+        built = composed(p)
+
+        assert built["high_level_description"] == "a quiet street"
+        assert built["compositional_deconstruction"]["elements"]
+        assert p.extra_generation_params[mc_infotext.SPATIAL_MODE] == "True"
+        # No roll happened, so nothing may claim one did.
+        assert mc_infotext.CREATIVE_MODE not in p.extra_generation_params
+
+    def test_a_writer_failure_with_no_layout_is_still_the_typed_prompt(
+            self, script, client, store, monkeypatch):
+        """The other half of the same rule: with nothing to compose, the
+        existing Creative Mode fallback is unchanged."""
+        def refuse(*args, **kwargs):
+            raise RuntimeError("llama-server is not running")
+
+        monkeypatch.setattr(sessions, "_client", refuse)
+        p = generate(script, "a quiet street")
 
         assert p.prompt == "a quiet street"
         assert p.extra_generation_params == {}
@@ -847,6 +870,338 @@ class TestFailureFallsBackAndSaysSo:
 
 def p_said(result, text) -> bool:
     return text in result.comments
+
+
+# --------------------------------------------------------------------------- #
+# Two peer features, six combinations (standalone spec §3, §23)
+# --------------------------------------------------------------------------- #
+
+
+class TestTheSixCombinations:
+    """Spatial Layout is a peer of Creative Mode, not a mode of it.
+
+    Six valid pipelines, and the two that used to be impossible are the point:
+    Spatial Direct and Spatial Smart with Creative Mode switched off. What makes
+    them worth testing one at a time is that the failure is silent in both
+    directions -- a Spatial-only generation that quietly ran the writer would
+    look fine and cost a request nobody asked for, and one that quietly ran
+    nothing would look like the checkbox does nothing.
+
+    The request count is the assertion in four of the six, because "how many
+    times did this press talk to a language model" is the one property a user
+    can feel and cannot see.
+    """
+
+    def test_a_neither_on_is_the_prompt_exactly_as_typed(self, script, client, store):
+        p = generate(script, "a quiet street", enabled=False, spatial_on=False)
+
+        assert p.prompt == "a quiet street"
+        assert p.extra_generation_params == {}
+        assert client.calls == []
+
+    def test_b_creative_only_is_one_request_and_no_layout(self, script, client, store):
+        client.answers = ["An expanded Krea prompt."]
+        p = generate(script, "a quiet street", enabled=True, spatial_on=False)
+
+        assert len(client.calls) == 1
+        assert p.prompt == "An expanded Krea prompt."
+        assert mc_infotext.SPATIAL_MODE not in p.extra_generation_params
+
+    def test_c_spatial_direct_alone_makes_no_request_at_all(self, script, client,
+                                                            store):
+        """§8: the fastest and most deterministic Spatial option, and the one
+        that could not be reached before this refactor."""
+        p = generate(script, "a woman at a bathroom mirror", enabled=False,
+                     spatial_on=True, compose="direct", layout=document())
+        built = composed(p)
+
+        assert client.calls == []
+        assert built["high_level_description"] == "a woman at a bathroom mirror"
+        element = built["compositional_deconstruction"]["elements"][0]
+        assert "elderly Japanese woman" in element["desc"]
+        assert element["bbox"] == [35, 55, 315, 360]
+        assert p.extra_generation_params[mc_infotext.SPATIAL_MODE] == "True"
+
+    def test_d_spatial_smart_alone_is_exactly_one_request(self, script, client, store):
+        """§9: the Composer runs on the raw prompt and must not silently become
+        a Creative Writer."""
+        client.answers = ['{"scene": "A woman at a bathroom mirror, warm light."}']
+        p = generate(script, "a woman at a bathroom mirror", enabled=False,
+                     spatial_on=True, compose="smart", layout=document())
+        built = composed(p)
+
+        assert len(client.calls) == 1
+        assert built["high_level_description"] == \
+            "A woman at a bathroom mirror, warm light."
+        # The Composer's instruction, not Krea's expansion instruction.
+        assert composer.SYSTEM_PROMPT == client.system(0)
+
+    def test_d_the_smart_composer_is_shown_the_prompt_as_typed(self, script, client,
+                                                               store):
+        client.answers = ['{"scene": "A woman at a bathroom mirror."}']
+        generate(script, "a woman at a bathroom mirror", enabled=False,
+                 spatial_on=True, compose="smart", layout=document())
+
+        assert "a woman at a bathroom mirror" in client.turn(0)
+
+    def test_e_creative_plus_direct_is_one_request(self, script, client, store):
+        client.answers = ["A woman in the centre of a rainy street."]
+        p = generate(script, enabled=True, spatial_on=True, compose="direct",
+                     layout=document())
+
+        assert len(client.calls) == 1
+        assert composed(p)["high_level_description"] == \
+            "A woman in the centre of a rainy street."
+
+    def test_f_creative_plus_smart_is_two_requests_in_that_order(self, script, client,
+                                                                 store):
+        client.answers = ["A woman in the centre of a rainy street.",
+                          '{"scene": "A rainy street."}']
+        p = generate(script, enabled=True, spatial_on=True, compose="smart",
+                     layout=document())
+
+        assert len(client.calls) == 2
+        assert composed(p)["high_level_description"] == "A rainy street."
+        # Creative first, always. The invariant the whole pipeline exists for.
+        assert composer.SYSTEM_PROMPT != client.system(0)
+        assert composer.SYSTEM_PROMPT == client.system(1)
+
+    def test_i_an_empty_layout_is_a_no_op_whichever_toggle_is_on(self, script, client,
+                                                                 store):
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     compose="smart", layout="")
+
+        assert client.calls == []
+        assert p.prompt == "a quiet street"
+        assert p.extra_generation_params == {}
+
+
+class TestSpatialOnlyRecordsItself:
+    """§16 and §18: what a Spatial-only image says about itself, and what it
+    deliberately does not."""
+
+    def test_it_records_no_creative_keys(self, script, client, store):
+        p = generate(script, enabled=False, spatial_on=True, compose="direct",
+                     layout=document())
+        recorded = p.extra_generation_params
+
+        assert recorded[mc_infotext.SPATIAL_MODE] == "True"
+        for key in mc_infotext.CREATIVE_KEYS:
+            assert key not in recorded
+
+    def test_it_says_the_scene_came_from_the_prompt(self, script, client, store):
+        p = generate(script, enabled=False, spatial_on=True, compose="direct",
+                     layout=document())
+
+        assert p.extra_generation_params[mc_infotext.SPATIAL_SOURCE] == "prompt"
+
+    def test_a_creative_generation_says_nothing_of_the_kind(self, script, client,
+                                                            store):
+        p = generate(script, enabled=True, spatial_on=True, compose="direct",
+                     layout=document())
+
+        assert mc_infotext.SPATIAL_SOURCE not in p.extra_generation_params
+
+    def test_the_input_scene_of_a_spatial_only_smart_merge_is_the_typed_prompt(
+            self, script, client, store):
+        client.answers = ['{"scene": "A quiet street at dusk."}']
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     compose="smart", layout=document())
+
+        assert p.extra_generation_params[mc_infotext.SPATIAL_INPUT_SCENE] == \
+            "a quiet street"
+
+
+class TestTheComposerSeedWithoutACreativeRoll:
+    """§11. Smart Spatial used to derive its seed from the Creative seed, which
+    does not exist when no roll ran. Whatever replaces it has to be
+    deterministic for replay and independent of Creative being on."""
+
+    def test_it_is_deterministic_for_the_same_image_seed(self, store):
+        first = mc_spatial.composer_seed_for(image_seed=1234)
+        second = mc_spatial.composer_seed_for(image_seed=1234)
+
+        assert first == second
+
+    def test_a_different_image_seed_is_a_different_composer_seed(self, store):
+        assert mc_spatial.composer_seed_for(image_seed=1) != \
+            mc_spatial.composer_seed_for(image_seed=2)
+
+    def test_an_unsettled_seed_is_a_fixed_basis_rather_than_an_error(self, store):
+        """``before_process`` runs before Forge resolves -1, so "no seed yet" is
+        a real answer here and has to be a usable one."""
+        assert mc_spatial.composer_seed_for(image_seed=-1) == \
+            mc_spatial.composer_seed_for(image_seed=mc_spatial.NO_CREATIVE_SEED)
+
+    def test_a_creative_roll_still_supplies_it_exactly_as_before(self, store):
+        assert mc_spatial.composer_seed_for(creative_seed=99, image_seed=7) == \
+            mc_spatial.composer_seed(99)
+
+    def test_a_spatial_only_smart_merge_records_the_seed_it_used(self, script, client,
+                                                                 store):
+        client.answers = ['{"scene": "A quiet street."}']
+        p = generate(script, enabled=False, spatial_on=True, compose="smart",
+                     layout=document())
+
+        assert p.extra_generation_params[mc_infotext.SPATIAL_COMPOSER_SEED]
+
+
+class TestFallingBackWithoutCreative:
+    """§21. Independence changes what a failure means: a writer that will not
+    answer no longer takes the boxes down with it."""
+
+    def test_a_smart_failure_still_falls_back_to_a_direct_merge(self, script, client,
+                                                                store):
+        client.answers = ["not an object at all"]
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     compose="smart", layout=document())
+
+        assert composed(p)["high_level_description"] == "a quiet street"
+        assert composed(p)["compositional_deconstruction"]["elements"]
+
+    def test_a_compositor_failure_with_no_writer_leaves_the_typed_prompt(
+            self, script, client, store, monkeypatch):
+        def explode(*args, **kwargs):
+            raise RuntimeError("the compositor fell over")
+
+        monkeypatch.setattr(spatial, "compose", explode)
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     compose="direct", layout=document())
+
+        assert p.prompt == "a quiet street"
+        assert p.extra_generation_params == {}
+
+    def test_the_result_says_the_boxes_were_composed_around_the_typed_prompt(
+            self, script, client, store, monkeypatch):
+        def refuse(*args, **kwargs):
+            raise RuntimeError("llama-server is not running")
+
+        monkeypatch.setattr(sessions, "_client", refuse)
+        p = generate(script, "a quiet street", spatial_on=True, compose="direct",
+                     layout=document())
+        result = Result()
+        script.postprocess(p, result)
+
+        assert p_said(result, "composed around the prompt as typed")
+
+
+class TestTheCheckpointGuardCoversSpatialToo:
+    """§20. Direct BBOX Merge makes no language-model request and still hands
+    Krea 2's structured JSON to whatever checkpoint is loaded."""
+
+    def test_a_wrong_checkpoint_stops_a_spatial_only_generation(self, script, client,
+                                                                store, monkeypatch):
+        monkeypatch.setattr(mc_creative_krea, "checkpoint_objection",
+                            lambda: "the selected checkpoint is not Krea 2")
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     compose="direct", layout=document())
+
+        assert p.prompt == "a quiet street"
+        assert p.extra_generation_params == {}
+        assert client.calls == []
+
+    def test_it_says_so_on_the_result(self, script, client, store, monkeypatch):
+        monkeypatch.setattr(mc_creative_krea, "checkpoint_objection",
+                            lambda: "the selected checkpoint is not Krea 2")
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     compose="direct", layout=document())
+        result = Result()
+        script.postprocess(p, result)
+
+        assert p_said(result, "not Krea 2")
+
+
+class TestThePlanNamesTheRealPipeline:
+    """§12, and the phase lists §23's matrix M asks for."""
+
+    def phases(self, script, monkeypatch, **panel):
+        import mc_plan
+
+        seen = []
+        monkeypatch.setattr(mc_plan, "publish", lambda plan: seen.append(plan))
+        generate(script, "a quiet street", **panel)
+        assert seen, "no plan was published"
+        return [phase.name for phase in seen[-1].phases]
+
+    def test_raw_direct_is_a_direct_merge_and_stage_1(self, script, client, store,
+                                                      monkeypatch):
+        import mc_plan
+
+        names = self.phases(script, monkeypatch, enabled=False, spatial_on=True,
+                            compose="direct", layout=document())
+
+        assert mc_plan.CREATIVE_WRITER not in names
+        assert mc_plan.DIRECT_MERGE in names
+
+    def test_raw_smart_is_a_composer_and_stage_1(self, script, client, store,
+                                                 monkeypatch):
+        import mc_plan
+
+        client.answers = ['{"scene": "A quiet street."}']
+        names = self.phases(script, monkeypatch, enabled=False, spatial_on=True,
+                            compose="smart", layout=document())
+
+        assert mc_plan.CREATIVE_WRITER not in names
+        assert mc_plan.SPATIAL_COMPOSER in names
+
+    def test_creative_direct_is_a_writer_then_a_direct_merge(self, script, client,
+                                                             store, monkeypatch):
+        import mc_plan
+
+        names = self.phases(script, monkeypatch, enabled=True, spatial_on=True,
+                            compose="direct", layout=document())
+
+        assert names.index(mc_plan.CREATIVE_WRITER) < names.index(mc_plan.DIRECT_MERGE)
+
+    def test_creative_smart_is_a_writer_then_a_composer(self, script, client, store,
+                                                        monkeypatch):
+        import mc_plan
+
+        client.answers = ["An expanded Krea prompt.", '{"scene": "A quiet street."}']
+        names = self.phases(script, monkeypatch, enabled=True, spatial_on=True,
+                            compose="smart", layout=document())
+
+        assert names.index(mc_plan.CREATIVE_WRITER) < \
+            names.index(mc_plan.SPATIAL_COMPOSER)
+
+
+class TestWhatThePanelSaysThePipelineIs:
+    """§4.4. Four sentences, and each one has to be true of both toggles."""
+
+    def described(self, **kwargs):
+        import mc_krea_pipeline
+
+        return mc_krea_pipeline.described(**kwargs)
+
+    def test_creative_off_and_direct_names_no_model_request(self):
+        said = self.described(creative=False, spatial=True, mode="direct")
+
+        assert "exactly as typed" in said
+        assert "No language-model request" in said
+
+    def test_creative_off_and_smart_names_one_request_and_not_creative(self):
+        said = self.described(creative=False, spatial=True, mode="smart")
+
+        assert "One language-model request" in said
+        assert "Creative Mode is not involved" in said
+
+    def test_creative_on_and_direct_says_the_scene_is_written_first(self):
+        said = self.described(creative=True, spatial=True, mode="direct")
+
+        assert "Creative Mode writes the scene first" in said
+        assert "without a second request" in said
+
+    def test_creative_on_and_smart_says_two_requests(self):
+        said = self.described(creative=True, spatial=True, mode="smart")
+
+        assert "Creative Mode writes the scene first" in said
+        assert "Two language-model requests" in said
+
+    def test_spatial_off_still_describes_what_will_happen(self):
+        assert "exactly as typed" in self.described(creative=False, spatial=False,
+                                                    mode="direct")
+        assert "Creative Mode writes the prompt" in self.described(
+            creative=True, spatial=False, mode="direct")
 
 
 # --------------------------------------------------------------------------- #
@@ -892,8 +1247,11 @@ class TestWhatTheImageRecords:
         p = generate(script, spatial_on=True, compose="smart", layout=document())
         recorded = p.extra_generation_params
 
-        assert recorded[mc_infotext.SPATIAL_ENHANCED_SCENE] == \
+        assert recorded[mc_infotext.SPATIAL_INPUT_SCENE] == \
             "A woman in the centre of a rainy street."
+        # The old name is read, never written: it stopped being true the day
+        # Spatial could run with no writer in front of it.
+        assert mc_infotext.SPATIAL_ENHANCED_SCENE not in recorded
         assert recorded[mc_infotext.SPATIAL_SCENE] == "A rainy street."
         assert recorded[mc_infotext.SPATIAL_COMPOSER_SEED]
 
@@ -1004,10 +1362,10 @@ class TestRestoringTheWorkflow:
     def restore(self):
         import model_chain_krea_creative as creative_script
 
-        return creative_script._restore_setup(False)
+        return creative_script._restore_spatial()
 
     def test_it_puts_the_canvas_back(self, pasted, store):
-        *_head, layout, spatial_on, mode, _status = self.restore()
+        layout, spatial_on, mode, _status = self.restore()
         restored = json.loads(layout["value"])
 
         assert [region["id"] for region in restored["regions"]] == ["r1", "r2"]
@@ -1022,9 +1380,55 @@ class TestRestoringTheWorkflow:
         assert mc_spatial.settings()["enabled"] is True
 
     def test_it_says_it_did(self, pasted, store):
-        _prompt, _enabled, status, *_rest = self.restore()
+        _layout, _on, _mode, status = self.restore()
 
         assert "spatial canvas is back" in status
+
+    def test_it_restores_the_canvas_without_turning_creative_mode_on(self, pasted,
+                                                                     store):
+        """§17. Two records in one PNG, two buttons, and pressing one is a
+        decision about one of them."""
+        mc_creative_krea.remember(**{mc_creative_krea.ENABLED: False})
+        self.restore()
+
+        assert mc_spatial.settings()["enabled"] is True
+        assert mc_creative_krea.settings()["enabled"] is False
+
+    def test_a_spatial_only_image_restores_with_no_creative_record_at_all(self, built,
+                                                                          store):
+        """§17's minimum: a Spatial-only image can restore its canvas."""
+        import model_chain_krea_creative as creative_script
+
+        mc_creative_krea.pasted.remember(mc_infotext.creative_setup({
+            mc_infotext.SPATIAL_MODE: "True",
+            mc_infotext.SPATIAL_VERSION: str(spatial.VERSION),
+            mc_infotext.SPATIAL_COMPOSE_MODE: "direct",
+            mc_infotext.SPATIAL_LAYOUT: document([FACE, SIGN]),
+        }))
+        try:
+            layout, spatial_on, mode, status = creative_script._restore_spatial()
+        finally:
+            mc_creative_krea.pasted.clear()
+
+        assert json.loads(layout["value"])["regions"]
+        assert spatial_on["value"] is True
+        assert mode["value"] == "direct"
+        assert "spatial canvas is back" in status
+
+    def test_the_creative_restore_no_longer_touches_the_canvas(self, pasted, store):
+        """It points at the other button instead. One feature reaching into
+        another's state because they happened to share a PNG is the coupling
+        this refactor removed."""
+        import model_chain_krea_creative as creative_script
+
+        mc_spatial.remember(**{mc_spatial.ENABLED: False, mc_spatial.LAYOUT: ""})
+        returned = creative_script._restore_setup(False)
+        _prompt, _enabled, status, _view = returned
+
+        assert len(returned) == 4
+        assert mc_spatial.settings()["enabled"] is False
+        assert mc_spatial.settings()["layout"] == ""
+        assert "Spatial Layout" in status
 
     def test_a_layout_from_a_later_build_is_left_alone_and_reported(self, built, store):
         """§8.4: exact replay never depended on this record, so the honest thing
@@ -1032,19 +1436,16 @@ class TestRestoringTheWorkflow:
         import model_chain_krea_creative as creative_script
 
         mc_creative_krea.pasted.remember(mc_infotext.creative_setup({
-            mc_infotext.CREATIVE_MODE: "True",
-            mc_infotext.CREATIVE_SOURCE: "a quiet street",
             mc_infotext.SPATIAL_MODE: "True",
             mc_infotext.SPATIAL_VERSION: "99",
             mc_infotext.SPATIAL_LAYOUT: document(),
         }))
         try:
-            _prompt, _enabled, status, _view, layout, *_rest = \
-                creative_script._restore_setup(False)
+            layout, _on, _mode, status = creative_script._restore_spatial()
         finally:
             mc_creative_krea.pasted.clear()
 
-        assert "later version" in status
+        assert "different version" in status
         assert layout == {}  # gr.update() with nothing in it: leave it as it is
 
     def test_the_record_is_readable_before_anything_is_restored(self, pasted, store):

@@ -163,9 +163,19 @@ class Prepared:
     same thread, in the same call.
     """
 
-    roll: Roll
-    generation: str
-    loras: str
+    roll: Roll | None = None
+    """The Creative roll this prompt was written from, or ``None``.
+
+    ``None`` is a Spatial-only generation: the boxes were composed around the
+    prompt exactly as typed and no writer ran. It is not a degraded Creative
+    generation and must not record itself as one -- an image carrying
+    ``Krea Creative Mode`` would tell a later paste to switch off a feature that
+    was never on, and would tell a reader that a language model wrote a sentence
+    the user typed.
+    """
+
+    generation: str = ""
+    loras: str = ""
     settings: dict = field(default_factory=dict)
     spatial: dict = field(default_factory=dict)
     """The Spatial keys for this generation, or nothing at all.
@@ -202,6 +212,12 @@ class Prepared:
         """
         import mc_infotext
 
+        # A Spatial-only generation records the Spatial half and nothing else.
+        # There is no roll to describe, and describing one anyway is how a paste
+        # ends up switching off a feature that never ran.
+        if self.roll is None:
+            return dict(self.spatial or {})
+
         recipe = self.roll.recipe
         recorded = {
             mc_infotext.CREATIVE_MODE: "True",
@@ -236,18 +252,27 @@ class Prepared:
         return recorded
 
 
-def prepare(roll: Roll, loras, stored=None, prompt=None, spatial=None) -> Prepared:
-    """One finished roll, packaged for the processing hook.
+def prepare(roll: Roll | None, loras, stored=None, prompt=None,
+            spatial=None) -> Prepared:
+    """One finished prompt, packaged for the processing hook.
 
     ``prompt`` overrides what the pinned networks are appended to. It is the
     structured Spatial BBOX prompt when there was a layout, and the writer's own
     paragraph when there was not -- and the LoRA tags go on the end either way,
     because that is the order a hand-written Forge prompt uses and because Forge
     parses them off the end before conditioning whatever precedes them.
+
+    ``roll`` is ``None`` for a Spatial-only generation, where no writer ran and
+    ``prompt`` is the whole of what is being substituted. The pinned LoRAs are a
+    Creative Mode setting and are not applied on that path: they live on a panel
+    that is switched off, and appending them would be this feature reaching into
+    another one's preferences.
     """
+    body = prompt
+    if body is None:
+        body = roll.expanded if roll is not None else ""
     return Prepared(roll=roll,
-                    generation=generation_prompt(
-                        roll.expanded if prompt is None else prompt, loras),
+                    generation=generation_prompt(body, loras),
                     loras=lora_suffix(loras),
                     settings=dict(stored or {}),
                     spatial=dict(spatial or {}))

@@ -140,6 +140,45 @@ def composer_seed(creative_seed) -> int:
         return director.stable_hash(0, composer.SEED_PURPOSE)
 
 
+NO_CREATIVE_SEED = 0
+"""The Composer's seed basis when Creative Mode did not run.
+
+Smart Spatial used to be reachable only through a Creative roll, so deriving its
+seed from the Creative seed was both natural and complete: one recorded number
+reproduced the whole generation. Spatial is a peer feature now and can run with
+no roll behind it at all, so the derivation needs a basis that exists in that
+case too.
+
+The image seed is used when the host has settled one, and this constant when it
+has not -- ``before_process`` runs before Forge resolves ``-1``, so a random
+seed genuinely has no number yet. A fixed basis there is not a weakness: the
+Composer reconciles a scene with a layout, which is a correction rather than a
+creative draw, and the same scene over the same boxes *should* reconcile the
+same way twice. What matters is that it is deterministic, independent of
+Creative, and recorded whenever the pass actually ran -- which is all §11 asks
+for.
+"""
+
+
+def composer_seed_for(creative_seed=None, image_seed=0) -> int:
+    """The Composer's seed, whether or not Creative Mode ran before it.
+
+    With a Creative roll behind it, exactly as before: derived from the Creative
+    seed, so one recorded number still reproduces both passes. Without one,
+    derived from the image seed when the host has settled one, and from
+    :data:`NO_CREATIVE_SEED` when it has not.
+    """
+    if creative_seed is not None:
+        return composer_seed(creative_seed)
+    try:
+        basis = int(image_seed)
+    except (TypeError, ValueError):
+        basis = NO_CREATIVE_SEED
+    if basis < 0:
+        basis = NO_CREATIVE_SEED
+    return composer_seed(basis)
+
+
 class Composed:
     """What pass 2 produced, or why it did not, in the form the hook reads."""
 
@@ -246,7 +285,8 @@ def _phase_for(status: str) -> str:
 
 
 def metadata(layout, *, compose_mode: str, composed: Composed | None,
-             enhanced: str = "", record_scenes: bool = True) -> dict:
+             input_scene: str = "", record_scenes: bool = True,
+             creative: bool = True) -> dict:
     """The Spatial keys for one generation's infotext.
 
     Namespaced separately from the Creative keys and answering a different
@@ -255,14 +295,26 @@ def metadata(layout, *, compose_mode: str, composed: Composed | None,
     before Forge wrote the infotext -- and these are the answer to *how do I get
     back to the canvas I drew it on*.
 
-    ``Krea Enhanced Scene`` is recorded only in Smart mode, and that is the same
-    reasoning §5.2 applied to the expanded prompt rather than a different one.
-    In Direct mode the enhanced scene *is* the ``high_level_description`` inside
-    the Prompt line, and a second copy would be a few hundred bytes repeating
-    what the file already says. In Smart mode it is genuinely nowhere else: the
-    Prompt carries the reconciled scene, and the pass-1 output it was reconciled
-    from would otherwise be unrecoverable -- which would make the A/B comparison
-    the design intent asks for impossible to do after the fact.
+    ``Krea Spatial Input Scene`` is recorded only in Smart mode, and that is the
+    same reasoning §5.2 applied to the expanded prompt rather than a different
+    one. In Direct mode the input scene *is* the ``high_level_description``
+    inside the Prompt line, and a second copy would be a few hundred bytes
+    repeating what the file already says. In Smart mode it is genuinely nowhere
+    else: the Prompt carries the reconciled scene, and the text it was
+    reconciled from would otherwise be unrecoverable -- which would make the A/B
+    comparison the design intent asks for impossible to do after the fact.
+
+    It used to be called ``Krea Enhanced Scene``, and that name stopped being
+    true the day Spatial could run without Creative Mode: with the writer off,
+    the scene handed to the Composer is the user's own sentence and nothing
+    enhanced it. The neutral name says what the field *is* -- the scene supplied
+    to the Composer before reconciliation -- in both cases. Old images keep the
+    old key and are still read; nothing about exact replay depended on either,
+    because the Prompt line is authoritative.
+
+    ``creative`` says whether the Creative Writer ran. A Spatial-only image
+    records no Creative keys at all, which is what makes its paste able to
+    switch Spatial off without a Creative key being present to switch.
     """
     import mc_infotext
     from prompt_master.krea import composer, spatial
@@ -274,6 +326,8 @@ def metadata(layout, *, compose_mode: str, composed: Composed | None,
         mc_infotext.SPATIAL_COMPOSE_MODE: compose_mode,
         mc_infotext.SPATIAL_LAYOUT: layout.serialize(),
     }
+    if not creative:
+        recorded[mc_infotext.SPATIAL_SOURCE] = "prompt"
     if compose_mode == spatial.SMART and composed is not None and composed.ran:
         recorded[mc_infotext.SPATIAL_COMPOSER_SEED] = composed.seed
         recorded[mc_infotext.SPATIAL_COMPOSER_VERSION] = composer.INSTRUCTION_VERSION
@@ -281,8 +335,8 @@ def metadata(layout, *, compose_mode: str, composed: Composed | None,
         if model:
             recorded[mc_infotext.SPATIAL_COMPOSER_MODEL] = model
         if record_scenes:
-            if enhanced:
-                recorded[mc_infotext.SPATIAL_ENHANCED_SCENE] = enhanced
+            if input_scene:
+                recorded[mc_infotext.SPATIAL_INPUT_SCENE] = input_scene
             recorded[mc_infotext.SPATIAL_SCENE] = composed.scene
     return recorded
 

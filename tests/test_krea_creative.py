@@ -2276,7 +2276,11 @@ class TestTheCompactPanel:
         returned = instance.ui(False)
 
         assert instance.panel is None
-        assert len(returned) == 2  # the toggle and the slider, and nothing else
+        # The Creative toggle and slider, and nothing of Creative's after them --
+        # but the three Spatial controls are still there. Spatial Layout needs no
+        # vocabulary to place a box, so a library that will not load takes
+        # Creative Mode down and leaves Spatial standing.
+        assert len(returned) == 2 + creative_script.SPATIAL_CONTROLS
 
     def test_both_surfaces_build_the_same_panel(self, built):
         """One implementation. Two would disagree within a release, and the
@@ -2490,21 +2494,29 @@ class TestRestoringTheCreativeSetup:
 
         Two features can be switched on now -- Creative Mode and Spatial Layout
         -- and the rule is the same for both and for the same reason. The paste
-        turned them off so the picture would reproduce; this button is the
-        request to do the opposite, and it is the only one.
+        turned them off so the picture would reproduce; a restore button is the
+        request to do the opposite, and they are the only ones. Two buttons
+        because they are two features: each one turns on its own and leaves the
+        other exactly as it found it.
         """
         import inspect
 
         import model_chain_krea_creative as creative_script
 
         source = Path(creative_script.__file__).read_text(encoding="utf-8")
-        restore = inspect.getsource(creative_script._restore_setup)
+        buttons = (inspect.getsource(creative_script._restore_setup)
+                   + inspect.getsource(creative_script._restore_spatial))
         turning_on = [line.strip() for line in source.splitlines()
                       if "ENABLED: True" in line]
 
         assert len(turning_on) == 2
         for line in turning_on:
-            assert line in restore, line
+            assert line in buttons, line
+        # And neither reaches into the other's switch.
+        assert "mc_spatial.ENABLED: True" not in \
+            inspect.getsource(creative_script._restore_setup)
+        assert "mc_creative_krea.ENABLED: True" not in \
+            inspect.getsource(creative_script._restore_spatial)
 
     def test_it_says_which_of_the_two_things_it_did(self, built, made):
         import model_chain_krea_creative as creative_script
