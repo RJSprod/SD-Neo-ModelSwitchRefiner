@@ -846,3 +846,149 @@ class TestTheDerivationIsWrittenDown:
         card.sizes["krea2"] = 14.0
 
         assert mc_plan.publish(plan_for(card, stage_1=stage("krea2"))) is not None
+
+
+class TestPeaksAreMeasuredWhereTheyCanBe:
+    """A file size plus 15% is a heuristic, and on a real setup it was 3.6 GB out.
+
+    The numbers are one user's Krea 2 install, read off Forge's own load log:
+    a text encoder of 5744 MB, a transformer of 12235 MB and a VAE of 242 MB,
+    17.8 GB in total. The plan reserved 21.4 GB for it -- the checkpoint and its
+    two module files, plus the fixed overhead fraction, plus headroom.
+
+    3.6 GB of phantom reserve is not cosmetic here. The language model gets what
+    the image plan does not need, and on a 24 GB card that was the difference
+    between 1.3 GB (the whole model in system RAM, prompts at 67 tokens a
+    second) and something that fits layers on the GPU.
+    """
+
+    MiB = 1024**2
+    REAL = int((5744 + 12235 + 242) * 1024**2)
+
+    @pytest.fixture
+    def loaded(self, card, monkeypatch):
+        """``krea2`` is the loaded model and reports its real size."""
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "measured_weight_bytes",
+                            lambda name, modules=None: self.REAL if name == "krea2" else 0)
+        monkeypatch.setattr(mc_memory, "pass_bytes_from_weights",
+                            lambda weights, width=0, height=0: int(weights) + GB // 2)
+        return card
+
+    def test_the_measurement_wins_over_the_file_estimate(self, loaded):
+        loaded.sizes["krea2"] = 21.4 - 0.5
+
+        plan = plan_for(loaded, stage_1=stage("krea2"))
+
+        assert plan.image_working_peak() == self.REAL + GB // 2
+
+    def test_the_phantom_reserve_is_what_it_gives_back(self, loaded):
+        loaded.sizes["krea2"] = 20.9
+        estimated = plan_for(loaded, stage_1=stage("krea2"))
+        import mc_memory
+        measured = plan_for(loaded, stage_1=stage("krea2"))
+
+        assert measured.image_working_peak() < estimated.image_working_peak() + 1
+        assert measured.image_working_peak() < 19 * GB
+
+    def test_a_measured_phase_says_so(self, loaded):
+        loaded.sizes["krea2"] = 20.9
+
+        assert plan_for(loaded, stage_1=stage("krea2")).phase(mc_plan.STAGE_1).measured
+
+    def test_an_unloaded_model_is_still_estimated_and_says_so(self, card):
+        card.sizes["krea2"] = 14.0
+
+        phase = plan_for(card, stage_1=stage("krea2")).phase(mc_plan.STAGE_1)
+
+        assert not phase.measured
+        assert phase.peak_bytes == 14 * GB
+
+    def test_the_llm_allowance_recovers_the_difference(self, loaded):
+        """The whole point, in the units the user feels it in."""
+        loaded.sizes["krea2"] = 20.9
+        mc_plan.publish(plan_for(loaded, stage_1=stage("krea2")))
+
+        assert mc_plan.persistent_llm_budget() > 4 * GB
+
+
+class TestAMeasurementOutlivesTheLoad:
+    """Stage 2 is never the loaded model when the plan is built.
+
+    The plan is assembled in ``before_process``, where Stage 1 is loaded and
+    Stage 2 is a name in a dropdown. So a measurement taken while Stage 2 *was*
+    loaded -- during the previous generation's chain -- is the only way its
+    phase is ever anything but a file size.
+    """
+
+    def test_a_remembered_measurement_is_used_for_a_model_that_is_not_loaded(
+            self, card, monkeypatch):
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "measured_weight_bytes",
+                            lambda name, modules=None: 0)
+        monkeypatch.setattr(mc_memory, "pass_bytes_from_weights",
+                            lambda weights, width=0, height=0: int(weights))
+        card.sizes.update({"krea2": 10.0, "klein9b": 18.0})
+        mc_plan.remember_weights("klein9b", None, 11 * GB)
+
+        plan = plan_for(card, stage_1=stage("krea2"),
+                        stage_2=stage("klein9b", multiplier=1.0))
+
+        assert plan.phase(mc_plan.STAGE_2).peak_bytes == 11 * GB
+        assert plan.phase(mc_plan.STAGE_2).measured
+
+    def test_the_modules_are_part_of_the_key(self, card):
+        """A Krea or Flux checkpoint keeps its VAE and text encoder in separate
+        files, and on the setup that prompted this those two were 6 GB of an
+        18 GB total. Changing the text encoder changes what the pass weighs."""
+        mc_plan.remember_weights("krea2", ["vae_a.safetensors"], 11 * GB)
+
+        assert mc_plan.measured_weights("krea2", ["vae_a.safetensors"]) == 11 * GB
+        assert mc_plan.measured_weights("krea2", ["vae_b.safetensors"]) == 0
+
+    def test_a_later_measurement_replaces_an_earlier_one(self, card):
+        mc_plan.remember_weights("krea2", None, 11 * GB)
+        mc_plan.remember_weights("krea2", None, 13 * GB)
+
+        assert mc_plan.measured_weights("krea2") == 13 * GB
+
+    def test_a_zero_measurement_is_not_recorded(self, card):
+        """"I could not measure it" must never be filed as "it weighs nothing"."""
+        mc_plan.remember_weights("krea2", None, 11 * GB)
+        mc_plan.remember_weights("krea2", None, 0)
+
+        assert mc_plan.measured_weights("krea2") == 11 * GB
+
+    def test_a_nameless_model_is_not_recorded(self, card):
+        mc_plan.remember_weights("", None, 11 * GB)
+
+        assert mc_plan.measured_weights("") == 0
+
+    def test_mc_memory_records_what_it_measures(self, host, monkeypatch):
+        """The single hook. Both stages pass through ``_pass_requirement`` as
+        they are switched to, which is the only moment a real figure exists."""
+        import mc_memory
+
+        class Patcher:
+            def model_size(self):
+                return 12 * GB
+
+        mc_memory._pass_requirement("klein9b", None, 1024, 1024, [Patcher()])
+
+        assert mc_plan.measured_weights("klein9b") == 12 * GB
+
+    def test_recording_that_fails_does_not_break_the_pass(self, host, monkeypatch):
+        import mc_memory
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("no")
+
+        monkeypatch.setattr(mc_plan, "remember_weights", explode)
+
+        class Patcher:
+            def model_size(self):
+                return 12 * GB
+
+        assert mc_memory._pass_requirement("klein9b", None, 1024, 1024, [Patcher()]) > 0

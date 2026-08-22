@@ -276,3 +276,40 @@ class TestItIsActuallyOnTheTab:
 
         assert len(components) == 20
         assert max(mc_plan.STAGE_2_ARGUMENTS.values()) < len(components)
+
+
+class TestMeasuredAndEstimatedAreNotTheSameThing:
+    """A user watching Task Manager disagree with this table is owed the reason.
+
+    Almost always the reason is that nothing has loaded yet: the fallback is a
+    file size plus a fixed overhead, and on a quantised, mixed-precision
+    checkpoint it over-read by 3.6 GB of a 24 GB card. A table that presented
+    that with the same authority as a reading would be inviting the user to
+    trust the wrong one.
+    """
+
+    def measured_chain(self, measured):
+        return mc_plan.publish(mc_plan.Plan((
+            mc_plan.Phase(mc_plan.STAGE_1, mc_plan.KIND_IMAGE, "Stage 1", 18 * GB,
+                          measured=measured, detail="krea2"),
+        ), 1024, 1024))
+
+    def test_a_measured_phase_is_labelled(self, budget):
+        self.measured_chain(True)
+
+        assert "measured" in panel.plan_view()
+
+    def test_an_estimated_phase_says_it_has_not_loaded_yet(self, budget):
+        self.measured_chain(False)
+
+        assert "estimated, not yet loaded once" in panel.plan_view()
+
+    def test_an_estimate_invites_the_generation_that_replaces_it(self, budget):
+        self.measured_chain(False)
+
+        assert "becomes a measurement" in panel.plan_view()
+
+    def test_a_measured_peak_does_not_nag(self, budget):
+        self.measured_chain(True)
+
+        assert "becomes a measurement" not in panel.plan_view()

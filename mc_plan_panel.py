@@ -104,12 +104,23 @@ def plan_view(budget: mc_plan.Budget | None = None) -> str:
             lines.append(_row(phase.label, "—", "no image residency"))
             continue
         note = phase.detail
+        # Measured or not, said on every image row. A user watching Task Manager
+        # disagree with this table is owed the reason, and the reason is almost
+        # always that nothing has loaded yet: a file size plus a fixed overhead
+        # is a starting heuristic, and on a quantised, mixed-precision
+        # checkpoint it over-read by 3.6 GB of a 24 GB card.
+        note = (note + "; " if note else "") + (
+            "measured" if phase.measured else "estimated, not yet loaded once")
         if limiting is not None and phase.name == limiting.name:
-            note = (note + "; " if note else "") + "**sets the protected peak**"
+            note += "; **sets the protected peak**"
         lines.append(_row(phase.label, gigabytes(phase.peak_bytes), note))
 
     lines.append(_row("Image working peak", gigabytes(budget.working_peak_bytes),
                       "the largest phase, not the sum of them"))
+    if limiting is not None and not limiting.measured:
+        lines.append(_row("", "",
+                          "_generate once and this becomes a measurement rather than "
+                          "an estimate_"))
     if budget.user_safety_bytes:
         lines.append(_row("Your safety adjustment", gigabytes(budget.user_safety_bytes),
                           "added on top of the automatic reserve"))
