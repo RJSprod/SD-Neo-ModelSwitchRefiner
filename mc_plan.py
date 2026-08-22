@@ -65,7 +65,9 @@ the act of showing them changing anything.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -343,29 +345,65 @@ class Stage:
         return text.strip()
 
 
-_measured_lock = threading.RLock()
-_measured_weights: dict[tuple, int] = {}
-"""What each checkpoint really weighed the last time it was on the card.
+WEIGHTS_FILENAME = "model_chain_weights.json"
+"""Where measured checkpoint weights are kept between sessions.
 
-In memory only, and deliberately. It is re-learned by the first generation of
-any session, it costs nothing to lose, and a figure written to disk would
-outlive the file it describes -- a re-quantised checkpoint under the same name
-would then be planned for at its old size for as long as the file sat there.
+Beside the presets and the timing calibration, in the WebUI data directory
+rather than the extension folder, so reinstalling the extension does not throw
+away figures that took real generations to earn.
+
+Persisted rather than held in memory, which is what it used to be. The cost of
+forgetting showed up on a user's console with the clock on it: the first
+generation of a session planned Stage 1 from its file size at 21.4 GB, the
+second planned it from the measurement at 19.3 GB, and the 2.1 GB between those
+two numbers moved the plan boundary -- which re-placed llama-server, which threw
+away its prompt cache, in the middle of a run the user had every reason to
+expect to be the warm one.
+
+The objection to writing it down was that a figure on disk outlives the file it
+describes: re-quantise a checkpoint, keep the name, and the plan would size the
+new file at the old file's weight. The key answers that -- it carries the total
+size of the checkpoint and its modules, so a file that changes at all is a file
+that gets measured again.
 """
 
+_measured_lock = threading.RLock()
+_measured_weights: dict[str, int] | None = None
+"""What each checkpoint really weighed the last time it was on the card."""
 
-def _weights_key(name: str, modules) -> tuple:
-    """A checkpoint and the modules loaded beside it, as one key.
+
+def _weights_path() -> str:
+    try:
+        from modules import paths
+
+        base = paths.data_path
+    except Exception:
+        base = os.getcwd()
+    return os.path.join(base, WEIGHTS_FILENAME)
+
+
+def _weights_key(name: str, modules) -> str:
+    """A checkpoint, the modules beside it and their total size, as one key.
 
     The modules are part of the answer, not decoration: a Flux-family or Krea
     checkpoint keeps its VAE and text encoder in separate files, and on the
     setup that prompted this work those two were 6 GB of an 18 GB total.
     Changing the text encoder changes what the pass weighs, so a key that
     ignored them would answer the new selection with the old measurement.
-    """
-    try:
-        import os
 
+    The byte count is what makes the figure safe to keep on disk. It is the
+    cheapest available proof that the files have not been replaced since they
+    were measured: re-quantise a checkpoint under the same name and the size
+    moves, the key moves with it, and the stale measurement is simply never
+    found again.
+
+    Empty when there is no checkpoint to describe, which the callers read as
+    "do not store this".
+    """
+    name = str(name or "").strip()
+    if not name:
+        return ""
+    try:
         import mc_memory
 
         resolved = mc_memory.resolve_modules(modules)
@@ -378,9 +416,65 @@ def _weights_key(name: str, modules) -> tuple:
             # apart, so an unresolvable selection keys on what it was given.
             resolved = [modules] if isinstance(modules, str) else list(modules)
         parts = tuple(sorted(os.path.basename(str(module)) for module in resolved or ()))
+        size = int(mc_memory.file_size_bytes(name, modules))
     except Exception:
-        parts = ()
-    return (str(name or "").strip(), parts)
+        logger.debug("Model Chain: could not key the measured weights", exc_info=True)
+        return ""
+    return "|".join((os.path.basename(name), str(size)) + parts)
+
+
+def _load_weights() -> dict[str, int]:
+    global _measured_weights
+
+    if _measured_weights is not None:
+        return _measured_weights
+
+    _measured_weights = {}
+    file = _weights_path()
+    if not os.path.exists(file):
+        return _measured_weights
+    try:
+        with open(file, "r", encoding="utf-8") as handle:
+            stored = json.load(handle)
+    except Exception:
+        logger.debug("Model Chain: could not read measured weights from %s", file,
+                     exc_info=True)
+        return _measured_weights
+
+    weights = stored.get("weights") if isinstance(stored, dict) else None
+    if isinstance(weights, dict):
+        for key, value in weights.items():
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                continue
+            # A stored zero would be read as "this model weighs nothing", which
+            # is worse than having no measurement at all.
+            if value > 0:
+                _measured_weights[str(key)] = value
+    return _measured_weights
+
+
+def _save_weights() -> None:
+    """Write the store, best-effort.
+
+    A failure costs the next session one estimated generation and nothing else,
+    so it is logged at debug rather than surfaced. Written through a temporary
+    file and replaced, so a crash mid-write leaves the previous file intact
+    rather than a truncated one -- the same rule the presets follow.
+    """
+    file = _weights_path()
+    with _measured_lock:
+        payload = {"weights": dict(_measured_weights or {})}
+    try:
+        os.makedirs(os.path.dirname(file) or ".", exist_ok=True)
+        temporary = f"{file}.tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+        os.replace(temporary, file)
+    except Exception:
+        logger.debug("Model Chain: could not write measured weights to %s", file,
+                     exc_info=True)
 
 
 def remember_weights(name: str, modules, weights: int) -> None:
@@ -395,11 +489,15 @@ def remember_weights(name: str, modules, weights: int) -> None:
     if weights <= 0:
         return
     key = _weights_key(name, modules)
-    if not key[0]:
+    if not key:
         return
     with _measured_lock:
-        previous = _measured_weights.get(key)
-        _measured_weights[key] = weights
+        store = _load_weights()
+        previous = store.get(key)
+        if previous == weights:
+            return
+        store[key] = weights
+    _save_weights()
     if previous is None or abs(previous - weights) > _GB // 8:
         logger.info("Model Chain: %s weighs %.1f GB on the card%s",
                     Stage(name=name).shown(), weights / _GB,
@@ -409,14 +507,25 @@ def remember_weights(name: str, modules, weights: int) -> None:
 
 def measured_weights(name: str, modules=None) -> int:
     """The recorded weight of a checkpoint, or 0 if it has never been loaded here."""
+    key = _weights_key(name, modules)
+    if not key:
+        return 0
     with _measured_lock:
-        return _measured_weights.get(_weights_key(name, modules), 0)
+        return _load_weights().get(key, 0)
 
 
 def forget_weights() -> None:
-    """Drop every measurement. For tests, and for an explicit re-measure."""
+    """Drop the in-memory copy, so the next question re-reads the file.
+
+    Deliberately not "delete every measurement": the store is on disk now, and
+    what a caller wants when it says forget is a fresh start from what was
+    actually written down -- which is the same thing a new session gets, and is
+    therefore the one behaviour worth being able to reproduce.
+    """
+    global _measured_weights
+
     with _measured_lock:
-        _measured_weights.clear()
+        _measured_weights = None
 
 
 def _measured_pass_bytes(stage: Stage, width: int, height: int, batch: int = 1) -> int:

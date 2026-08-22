@@ -316,6 +316,83 @@ gigabyte before a single weight arrives. None of that was visible anywhere,
 which is the part that was actually wrong.
 
 
+## 4f. A restart must be worth the cache it destroys
+
+`CONTEXT_UPGRADE_FRACTION` had this rule from the start — a quarter more context
+before a running server is replaced, because a restart re-reads the weights and
+empties llama.cpp's prompt cache. The **layer** comparison beside it had no such
+rule, so any gain at all was acted on.
+
+From a user's console, with timestamps:
+
+```
+[00:22:48.743] re-placing llama-server — 2 of 30 layers on the GPU, experts in
+               system RAM now fits, where it is running no layers on the GPU
+[00:22:51.115] llama-server stopped — making way for a new placement
+[00:22:58.661] llama-server ready — 2 layers on the GPU ... 0.9 GB VRAM
+```
+
+**9.9 seconds** to gain two blocks of thirty. llama.cpp's own timings either
+side:
+
+| | prompt | generation |
+| --- | --- | --- |
+| 0 layers | 61.48 tok/s | 12.71 tok/s |
+| 2 layers | 62.05 tok/s | 12.46 tok/s |
+
+Inside the noise, and slightly worse on the half that matters. And because every
+start begins `cache state: 0 prompts`, the writer's 523-token prompt was read
+from scratch for the second time in a minute — a further 8.4 seconds. Eighteen
+of the fifty-three seconds that "warm" generation spent on the language model
+went on undoing its own warmth.
+
+`_worthwhile_layer_gain` now requires a quarter of the model's blocks, never
+fewer than four. The downward direction is untouched: `_overspending` is about
+correctness, not speed, and still acts on any real overshoot.
+
+
+## 4g. The measurement outlives the session
+
+`mc_plan` keeps measured checkpoint weights in
+`model_chain_weights.json`, beside the presets and the timing calibration in the
+WebUI data directory.
+
+It used to hold them in memory only, on the reasoning that a figure written down
+outlives the file it describes. The cost of that showed up in the same console:
+
+```
+[00:21:19.605] image working peak 21.4 GB (estimated from file sizes)
+[00:22:47.477] image working peak 19.3 GB (measured)
+```
+
+Generation one planned from file sizes, generation two from the measurement, and
+the 2.1 GB between them moved the plan boundary — which is what re-placed
+llama-server above.
+
+The key answers the original objection: it carries the **total size of the
+checkpoint and its modules**, so re-quantising a checkpoint under the same name
+changes the key and the stale figure is never found again.
+
+
+## 4h. Believing a residency of zero
+
+The ready line said `0.0 GB VRAM` about a placement llama.cpp was running at 108
+tokens a second on prompts — a model holding roughly fourteen gigabytes. The
+residency is a difference of two free-VRAM readings, which is the only
+measurement available from outside another process, and the second reading was
+taken before the driver had caught up: the health endpoint answers as soon as
+the server will accept a request, and nothing obliges the free figure to be
+current by then.
+
+That zero is not cosmetic. It is the figure every later question about whether
+that server is overspending its allowance starts from.
+
+`Runtime._observed_residency` now retries a non-positive reading, four times at
+a quarter-second, and only on a placement that is supposed to be holding
+something. A placement with no layers on the card reports zero at once, because
+there zero is the answer.
+
+
 ## 5. Stability
 
 `Runtime._outgrown` is where re-placement was decided, and it now declines to

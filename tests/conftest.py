@@ -689,7 +689,7 @@ def timing_store(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def active_plan():
+def active_plan(tmp_path, monkeypatch):
     """No execution plan in force unless the test under way publishes one.
 
     Autouse for the same reason as the timing store above: the plan is module
@@ -702,6 +702,11 @@ def active_plan():
     """
     import mc_plan
 
+    # Pointed at a throwaway file as well as emptied: the weight store is now on
+    # disk, and a test that measured a checkpoint would otherwise write one into
+    # the working tree and hand it to every test that followed.
+    monkeypatch.setattr(mc_plan, "_weights_path",
+                        lambda: str(tmp_path / mc_plan.WEIGHTS_FILENAME))
     mc_plan.clear()
     mc_plan.note_placement(None)
     mc_plan.forget_misses()
