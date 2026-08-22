@@ -437,7 +437,7 @@ def negotiate(configuration: Config | None = None,
                + projector_bytes(configuration, vision))
     estimate = mc_llm_context.estimate(configuration.model, wanted, described)
 
-    if _fits(estimate, reserve, already_ours):
+    if _fits(estimate, reserve, already_ours, card_of(configuration)):
         return Negotiation(wanted, estimate, (), True)
 
     placement = wanted
@@ -445,7 +445,7 @@ def negotiate(configuration: Config | None = None,
                                                   already_ours)
     if shrunk:
         notes.append(shrunk)
-    if _fits(estimate, reserve, already_ours):
+    if _fits(estimate, reserve, already_ours, card_of(configuration)):
         return Negotiation(placement, estimate, tuple(notes), True)
 
     placement, estimate, offloaded = _shrink_offload(configuration, placement, described, reserve,
@@ -453,7 +453,8 @@ def negotiate(configuration: Config | None = None,
     if offloaded:
         notes.append(offloaded)
 
-    return Negotiation(placement, estimate, tuple(notes), _fits(estimate, reserve, already_ours))
+    return Negotiation(placement, estimate, tuple(notes),
+                       _fits(estimate, reserve, already_ours, card_of(configuration)))
 
 
 def _requested_placement(configuration: Config, gguf: mc_gguf.Gguf | None,
@@ -499,7 +500,8 @@ def _requested_placement(configuration: Config, gguf: mc_gguf.Gguf | None,
         # context, rather than whatever number the state file happens to hold.
         weights = mc_llm_context.weights_bytes(gguf, placement) if gguf is not None else 0
         budget = mc_llm_context.automatic_buffer_bytes(
-            _spendable(already_ours), weights, mc_broker.safety_margin_bytes())
+            _spendable(already_ours, card_of(configuration)), weights,
+            mc_broker.safety_margin_bytes())
         sized = mc_llm_context.context_for_budget(configuration.model, placement, budget)
         if sized >= MINIMUM_CONTEXT:
             placement = placement.with_context(sized)
@@ -556,7 +558,7 @@ def _capped(placement: mc_llm_context.Placement,
     return placement.with_context(gguf.context_length)
 
 
-def _free_vram(already_ours: int = 0) -> int:
+def _free_vram(already_ours: int = 0, card: int | None = None) -> int:
     """Free VRAM, plus whatever a server of ours is holding while it is asked.
 
     The addition is the whole of it, and it is only ever correct because of
@@ -573,10 +575,50 @@ def _free_vram(already_ours: int = 0) -> int:
     process -- and what comes back is ``cudaMalloc failed: out of memory`` on a
     card reporting twenty-two gigabytes free.
     """
-    return mc_broker.device_free_vram_bytes() + max(int(already_ours), 0)
+    return mc_broker.device_free_vram_bytes(card) + max(int(already_ours), 0)
 
 
-def _spendable(already_ours: int = 0) -> int:
+def card_of(configuration: Config) -> int | None:
+    """Which CUDA index ``configuration`` will place against, or None.
+
+    None for a processor-only installation, where there is no card to ask
+    about and every VRAM figure is beside the point.
+    """
+    if not configuration.uses_cuda_compute:
+        return None
+    try:
+        return int(configuration.gpu_index)
+    except (TypeError, ValueError):
+        return None
+
+
+def shares_the_image_card(card: int | None) -> bool:
+    """Whether a placement on ``card`` is competing with the image model.
+
+    The question the plan's protection is really about. Every figure in
+    :mod:`mc_plan` is about the card Forge is generating on, and a role pinned
+    to a different one neither takes from that budget nor is limited by it --
+    which is the whole reason somebody puts a second card in the machine.
+
+    Unanswerable questions are answered *yes*, and deliberately: treating an
+    unknown card as the image card keeps the placement conservative, and the
+    cost of being wrong that way is a smaller language model rather than an
+    image generation that runs out of memory.
+    """
+    if card is None:
+        return True
+    try:
+        image = mc_broker.image_device_index()
+    except Exception:
+        logger.debug("Model Chain: could not ask which card the image side is on",
+                     exc_info=True)
+        return True
+    if image < 0 or int(card) < 0:
+        return True
+    return int(card) == image
+
+
+def _spendable(already_ours: int = 0, card: int | None = None) -> int:
     """What this placement may actually spend, which is not the same as what is free.
 
     Free VRAM is a reading of one instant. A generation is not one instant: the
@@ -607,7 +649,7 @@ def _spendable(already_ours: int = 0) -> int:
     behind it -- this is exactly :func:`_free_vram`, which is the behaviour
     every path had before plans existed.
     """
-    free = _free_vram(already_ours)
+    free = _free_vram(already_ours, card)
     try:
         import mc_plan
 
@@ -618,9 +660,13 @@ def _spendable(already_ours: int = 0) -> int:
         # measurement of the card by another measurement of the same card is not
         # a policy, it is a rounding error with the power to move experts into
         # system RAM.
+        # The plan protects one card. A placement on another one is outside
+        # what it is protecting, so its budget is not this placement's ceiling
+        # -- capping here is what made a role on an idle second card negotiate
+        # itself down to the leftovers of the card it was never going to touch.
         budget = (mc_plan.persistent_llm_budget(already_ours)
-                  if mc_plan.current() is not None else -1)
-        learned = mc_plan.learned_cap_bytes()
+                  if mc_plan.current() is not None and shares_the_image_card(card) else -1)
+        learned = mc_plan.learned_cap_bytes() if shares_the_image_card(card) else 0
     except Exception:
         logger.debug("Model Chain: could not read the active plan's budget", exc_info=True)
         return free
@@ -633,14 +679,15 @@ def _spendable(already_ours: int = 0) -> int:
     return max(free, 0)
 
 
-def _fits(estimate: mc_llm_context.Estimate, reserve: int, already_ours: int = 0) -> bool:
-    return _spendable(already_ours) >= estimate.total_bytes + reserve
+def _fits(estimate: mc_llm_context.Estimate, reserve: int, already_ours: int = 0,
+          card: int | None = None) -> bool:
+    return _spendable(already_ours, card) >= estimate.total_bytes + reserve
 
 
 def _shrink_context(configuration: Config, placement, gguf, reserve: int,
                     already_ours: int = 0):
     """Lower the context until the cache fits what is free, or hit the floor."""
-    free = _spendable(already_ours)
+    free = _spendable(already_ours, card_of(configuration))
     estimate = mc_llm_context.estimate(configuration.model, placement, gguf)
     per_token = estimate.kv_bytes_per_token
     if per_token <= 0:
@@ -700,7 +747,7 @@ def _shrink_offload(configuration: Config, placement, gguf, reserve: int,
         return placement, mc_llm_context.estimate(configuration.model, placement, gguf), ""
 
     total = gguf.block_count
-    free = _spendable(already_ours)
+    free = _spendable(already_ours, card_of(configuration))
     notes: list[str] = []
 
     placement, estimate, spilled = _spill_experts(configuration, placement, gguf, reserve,
@@ -3475,9 +3522,32 @@ def _discard(process, reason: str) -> None:
 
 
 def _own_pid() -> int:
-    process = runtime._process
+    """The shared runtime's server pid, or 0. See :func:`_own_pids`."""
+    return _pid_of(runtime)
+
+
+def _pid_of(found) -> int:
+    process = getattr(found, "_process", None)
     inner = getattr(process, "process", None) if process is not None else None
     return int(getattr(inner, "pid", 0) or 0)
+
+
+def _own_pids() -> set:
+    """Every llama-server pid this WebUI started, across every runtime.
+
+    A stray is a server nothing here has a handle to. Asking only the shared
+    runtime made that definition wrong the moment a role could have a server of
+    its own: two perfectly live role servers answered to nobody's handle as far
+    as this function was concerned, so Unload reported them as strays and killed
+    them -- and any future sweep would have done the same mid-generation.
+    """
+    pids = {_pid_of(runtime)}
+    try:
+        pids.update(_pid_of(found) for found in registry.all())
+    except Exception:
+        logger.debug("Model Chain: could not enumerate the runtimes' server pids",
+                     exc_info=True)
+    return {pid for pid in pids if pid}
 
 
 def strays() -> list[int]:
@@ -3503,12 +3573,12 @@ def strays() -> list[int]:
                      exc_info=True)
         return []
 
-    ours = _own_pid()
+    ours = _own_pids()
     found: list[int] = []
     try:
         for process in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
-                if process.info["pid"] in (ours, os.getpid()):
+                if process.info["pid"] in ours or process.info["pid"] == os.getpid():
                     continue
                 name = (process.info.get("name") or "").casefold()
                 if "llama-server" not in name:

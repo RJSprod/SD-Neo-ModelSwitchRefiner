@@ -46,10 +46,18 @@ def _clean(monkeypatch):
 
 @pytest.fixture
 def two_cards(monkeypatch):
+    """Two cards, and no device list cached from another test.
+
+    ``mc_llm_setup.devices`` keeps its answer for a while -- a scan costs a
+    subprocess -- so patching the detection boundary alone leaves whatever the
+    previous test saw in front of it.
+    """
     cards = [GpuInfo(0, "uuid-a", "NVIDIA GeForce RTX 3090", 24576, 23000, "570"),
              GpuInfo(1, "uuid-b", "NVIDIA GeForce RTX 5090", 32768, 32000, "570")]
     monkeypatch.setattr(detection, "detect_gpus", lambda timeout=15: list(cards))
-    return cards
+    setup.forget_devices()
+    yield cards
+    setup.forget_devices()
 
 
 def configured(tmp_path, **over):
@@ -801,3 +809,122 @@ class TestEachServerHasItsOwnLineInTheRegister:
 
         assert (runtime._residency_key(runtime._identity(same, None))
                 == runtime._residency_key(runtime._identity(same, None)))
+
+
+# --------------------------------------------------------------------------- #
+# A second card is a second pool (reported from a two-card machine)
+# --------------------------------------------------------------------------- #
+
+
+class TestARoleOnAnotherCardIsNotTheImageCardsProblem:
+    """From a 5090 + 3090 log: the plan said "22.7 GB obtainable of 24.0 GB on
+    the card" while llama.cpp reported CUDA0 with 30.2 GB free and CUDA1 with
+    22.8 GB. Every VRAM figure came from whichever card Forge was generating on,
+    so a role pinned to the idle one was sized against, and capped by, a card it
+    was never going to touch.
+    """
+
+    def test_the_free_reading_is_asked_of_the_role_s_own_card(self, monkeypatch):
+        asked: list = []
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes",
+                            lambda index=None: asked.append(index) or (8 * _GB))
+
+        runtime._free_vram(0, 1)
+
+        assert asked == [1]
+
+    def test_a_role_on_the_image_card_is_still_capped_by_the_plan(self, monkeypatch):
+        monkeypatch.setattr(mc_broker, "image_device_index", lambda: 0)
+
+        assert runtime.shares_the_image_card(0)
+
+    def test_a_role_on_another_card_is_not(self, monkeypatch):
+        monkeypatch.setattr(mc_broker, "image_device_index", lambda: 0)
+
+        assert not runtime.shares_the_image_card(1)
+
+    def test_an_unknown_card_is_treated_as_the_image_card(self, monkeypatch):
+        """Conservative on purpose: being wrong this way costs a smaller
+        language model, and being wrong the other way costs a generation that
+        runs out of memory."""
+        monkeypatch.setattr(mc_broker, "image_device_index", lambda: -1)
+
+        assert runtime.shares_the_image_card(1)
+        assert runtime.shares_the_image_card(None)
+
+    def test_the_plan_stops_capping_a_placement_on_another_card(self, monkeypatch):
+        import mc_plan
+
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes",
+                            lambda index=None: 30 * _GB)
+        monkeypatch.setattr(mc_broker, "image_device_index", lambda: 0)
+        monkeypatch.setattr(mc_plan, "current", lambda: object())
+        monkeypatch.setattr(mc_plan, "persistent_llm_budget", lambda ours=0: 3 * _GB)
+        monkeypatch.setattr(mc_plan, "learned_cap_bytes", lambda: 0)
+
+        assert runtime._spendable(0, 0) == 3 * _GB
+        assert runtime._spendable(0, 1) == 30 * _GB
+
+    def test_a_processor_placement_has_no_card_to_ask_about(self, tmp_path):
+        assert runtime.card_of(configured(tmp_path, mode="cpu", device="none")) is None
+        assert runtime.card_of(configured(tmp_path, mode="gpu", gpu_index=1)) == 1
+        assert runtime.card_of(
+            configured(tmp_path, mode="mixed_conservative", gpu_index=1)) == 1
+
+
+# --------------------------------------------------------------------------- #
+# The menu has to be able to express the choice (reported from the UI)
+# --------------------------------------------------------------------------- #
+
+
+class TestEveryDeviceOptionReadsDifferently:
+    def test_the_three_entries_for_one_card_are_three_sentences(self, two_cards):
+        labels = [setup.describe_device(found) for found in setup.devices()]
+
+        assert len(labels) == len(set(labels))
+
+    def test_the_two_mixed_modes_are_named(self, two_cards):
+        labels = " | ".join(setup.describe_device(found) for found in setup.devices())
+
+        assert "Mixed Aggressive" in labels
+        assert "Mixed Conservative" in labels
+
+    def test_conservative_says_it_puts_nothing_on_the_card(self, two_cards):
+        conservative = [found for found in setup.devices() if found.is_conservative]
+
+        assert conservative
+        for found in conservative:
+            assert "no model layers in VRAM" in setup.describe_device(found)
+
+
+# --------------------------------------------------------------------------- #
+# A role's server is not a stray (reported: "stopped 3 stray processes")
+# --------------------------------------------------------------------------- #
+
+
+class TestARunningRoleServerIsNeverAStray:
+    def test_every_runtime_s_pid_counts_as_ours(self, tmp_path, monkeypatch):
+        """A stray is a server nothing here has a handle to. Asking only the
+        shared runtime made two live role servers answer to nobody, so Unload
+        reported them as strays and killed them."""
+        import types
+
+        registry = pair(monkeypatch,
+                        configured(tmp_path, mode="cpu", device="none"),
+                        configured(tmp_path, mode="cpu", device="none", model_name="B.gguf"))
+        monkeypatch.setattr(runtime, "registry", registry)
+        for role, pid in ((roles.CREATIVE, 4242), (roles.SPATIAL, 4343)):
+            found = registry.for_role(role)
+            # Through monkeypatch, not by assignment: one of these may be the
+            # module singleton, and a process left on it outlives the test.
+            monkeypatch.setattr(found, "_process", types.SimpleNamespace(
+                process=types.SimpleNamespace(pid=pid)))
+
+        assert {4242, 4343} <= runtime._own_pids()
+
+    def test_a_runtime_with_no_server_contributes_nothing(self, monkeypatch):
+        registry = runtime.RuntimeRegistry()
+        monkeypatch.setattr(runtime, "registry", registry)
+        monkeypatch.setattr(runtime.runtime, "_process", None)
+
+        assert runtime._own_pids() == set()

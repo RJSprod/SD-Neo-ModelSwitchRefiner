@@ -1030,16 +1030,21 @@ class TestRefusalTracking:
 class FakeTorch:
     """Just enough torch to answer the two memory questions."""
 
-    def __init__(self, device_free, cached=0):
+    def __init__(self, device_free, cached=0, per_card=None):
         self.device_free = device_free
         self.cached = cached
         self.emptied = 0
+        self.per_card = dict(per_card or {})
 
+        self.asked: list = []
         outer = self
 
         class _Cuda:
             @staticmethod
             def mem_get_info(device=None):
+                outer.asked.append(device)
+                if isinstance(device, _Device) and device.index in outer.per_card:
+                    return outer.per_card[device.index], 32 * GB
                 return outer.device_free, 24 * GB
 
             @staticmethod
@@ -1049,6 +1054,18 @@ class FakeTorch:
                 outer.cached = 0
 
         self.cuda = _Cuda()
+
+    @staticmethod
+    def device(kind, index):
+        return _Device(kind, index)
+
+
+class _Device:
+    """torch.device('cuda', n), as much of it as this module touches."""
+
+    def __init__(self, kind, index):
+        self.type = kind
+        self.index = index
 
 
 class TestDriverFreeVram:
@@ -1081,6 +1098,35 @@ class TestDriverFreeVram:
         assert torch.emptied == 1
         assert recovered == 16 * GB
         assert mc_memory.device_free_vram_bytes() == 20 * GB
+
+    def test_a_second_card_is_asked_about_by_index(self, host, monkeypatch):
+        """From a two-card machine: the plan said "24.0 GB on the card" while
+        llama.cpp reported CUDA0 with 30.2 GB free and CUDA1 with 22.8 GB.
+        Every figure came from whichever card Forge generates on, so a language
+        model pinned to the idle one was sized against a card it never touched.
+        """
+        torch = FakeTorch(device_free=4 * GB, per_card={0: 30 * GB, 1: 22 * GB})
+        self._install(monkeypatch, torch, free_total=20 * GB)
+
+        assert mc_memory.device_free_vram_bytes(0) == 30 * GB
+        assert mc_memory.device_free_vram_bytes(1) == 22 * GB
+        assert mc_memory.device_free_vram_bytes() == 4 * GB
+
+    def test_the_image_card_is_named_by_index(self, host, monkeypatch):
+        from backend import memory_management
+
+        monkeypatch.setattr(memory_management, "get_torch_device",
+                            lambda: _Device("cuda", 1))
+
+        assert mc_memory.image_device_index() == 1
+
+    def test_a_processor_install_has_no_image_card(self, host, monkeypatch):
+        from backend import memory_management
+
+        monkeypatch.setattr(memory_management, "get_torch_device",
+                            lambda: _Device("cpu", None))
+
+        assert mc_memory.image_device_index() == -1
 
     def test_a_question_that_cannot_be_put_falls_back_to_the_host_s_answer(
             self, host, monkeypatch):

@@ -1044,7 +1044,28 @@ def free_vram_bytes() -> int:
         return 0
 
 
-def device_free_vram_bytes() -> int:
+def image_device_index() -> int:
+    """Which CUDA card the image side is on, or -1 when there is no card.
+
+    The one card every existing figure in this module is about. It stops being
+    the only card that matters the moment a language-model role is pointed at a
+    different one: the image plan protects VRAM *here*, and a server placed on
+    another card is neither helped nor hindered by that protection.
+    """
+    try:
+        from backend import memory_management
+
+        device = memory_management.get_torch_device()
+        if getattr(device, "type", "") != "cuda":
+            return -1
+        return int(getattr(device, "index", 0) or 0)
+    except Exception:
+        logger.debug("Model Chain: could not ask which card the image side is on",
+                     exc_info=True)
+        return -1
+
+
+def device_free_vram_bytes(index: int | None = None) -> int:
     """VRAM the *driver* has free, which is a smaller number than :func:`free_vram_bytes`.
 
     The host's own figure is free device memory **plus** what its allocator is
@@ -1060,19 +1081,30 @@ def device_free_vram_bytes() -> int:
     the host's figure when the question cannot be put -- a wrong number is
     still better than no placement at all, and it is the number this extension
     used for its whole first year.
+
+    ``index`` asks about one specific card rather than the image side's. A
+    machine with two cards has two answers to "how much is free", and answering
+    the second card's question with the first card's number is how a role
+    pinned to an otherwise idle 5090 gets placed against a 3090 that the image
+    model has nearly filled.
     """
     try:
         import torch
         from backend import memory_management
 
-        device = memory_management.get_torch_device()
-        if getattr(device, "type", "") != "cuda":
+        if index is None:
+            device = memory_management.get_torch_device()
+            if getattr(device, "type", "") != "cuda":
+                return free_vram_bytes()
+        elif int(index) < 0:
             return free_vram_bytes()
+        else:
+            device = torch.device("cuda", int(index))
         free, _total = torch.cuda.mem_get_info(device)
         return int(free)
     except Exception:
         logger.debug("Model Chain: could not ask the driver for free VRAM", exc_info=True)
-        return free_vram_bytes()
+        return free_vram_bytes() if index is None else 0
 
 
 def release_cached_vram() -> int:

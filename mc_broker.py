@@ -752,7 +752,17 @@ def free_vram_bytes() -> int:
         return 0
 
 
-def device_free_vram_bytes() -> int:
+def image_device_index() -> int:
+    """Which card the image side is on, or -1. See :func:`mc_memory.image_device_index`."""
+    try:
+        import mc_memory
+
+        return int(mc_memory.image_device_index())
+    except Exception:
+        return -1
+
+
+def device_free_vram_bytes(index: int | None = None) -> int:
     """Free VRAM as *another process* would find it (section 6's boundary).
 
     :func:`free_vram_bytes` is the host's own accounting and includes what its
@@ -765,7 +775,7 @@ def device_free_vram_bytes() -> int:
     try:
         import mc_memory
 
-        return int(mc_memory.device_free_vram_bytes())
+        return int(mc_memory.device_free_vram_bytes(index))
     except Exception:
         return free_vram_bytes()
 

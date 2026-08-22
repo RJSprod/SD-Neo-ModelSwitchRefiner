@@ -708,7 +708,7 @@ class TestTheBudgetIsMeasuredNotDeclared:
     def card_3090(self, host, monkeypatch):
         state = {"free": 23304 * self.MiB, "image": 0, "llm": 0}
         monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24575 * self.MiB)
-        monkeypatch.setattr(mc_broker, "device_free_vram_bytes", lambda: state["free"])
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes", lambda index=None: state["free"])
         monkeypatch.setattr(mc_broker, "held_bytes",
                             lambda family: state["image"] if family == mc_broker.FAMILY_IMAGE
                             else state["llm"])
@@ -782,7 +782,7 @@ class TestTheBudgetIsMeasuredNotDeclared:
 
     def test_a_host_that_cannot_answer_falls_back_to_the_nameplate(
             self, card_3090, monkeypatch):
-        monkeypatch.setattr(mc_broker, "device_free_vram_bytes", lambda: 0)
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes", lambda index=None: 0)
 
         assert mc_plan.usable_vram_bytes() == 24575 * self.MiB
 

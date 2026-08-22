@@ -622,9 +622,16 @@ def _unload_model():
 
     logger.info("Model Chain: LLM Studio — Unload pressed")
     failed = ""
-    if mc_llm_runtime.runtime.running():
+    # Every runtime, not just the shared one. Unload is a request for the card
+    # back, and with a role configured separately there is more than one server
+    # holding part of it -- the ones this button used to leave running were then
+    # counted as strays by the sweep below and killed anyway, which got to the
+    # right end state by calling live servers lost.
+    for found in mc_llm_runtime.registry.all():
+        if not found.running():
+            continue
         try:
-            mc_llm_runtime.runtime.stop()
+            found.stop()
         except Exception:
             logger.warning("Model Chain: llama-server could not be stopped", exc_info=True)
             failed = "llama-server could not be stopped — see the console."
