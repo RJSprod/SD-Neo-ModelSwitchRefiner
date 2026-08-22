@@ -172,6 +172,63 @@ A large gap between the two first figures on any machine is the single likeliest
 explanation for a language model that will not stay up.
 
 
+## 4b. Measured peaks, not file sizes
+
+`vram_required_bytes` is `file size x 1.15 + headroom`. It is a starting
+heuristic and was always documented as one, and on a quantised,
+mixed-precision checkpoint it is badly out. From the same user's console:
+
+```
+Model Chain: active plan — Creative Writer -> Stage 1 (kromaInt8ConvrotFor_v02Turbo);
+             image working peak 21.4 GB, set by Stage 1
+Model Chain: memory budget — 22.7 GB obtainable of 24.0 GB on the card,
+             21.4 GB protected for the image plan, 1.3 GB for the LLM (auto)
+```
+
+Forge's own load log for that same generation:
+
+```
+Requested to load JointTextEncoder ... 5744.04 MB loaded
+Requested to load KModel           ... 12234.77 MB loaded
+Requested to load WanVAE           ...  242.03 MB loaded
+```
+
+17.8 GB actually loaded against 21.4 GB reserved — **3.6 GB of phantom
+reserve**, on a card with 22.7 GB obtainable. The language model gets what the
+image plan does not need, so those 3.6 GB were the whole difference between a
+placement with layers on the GPU and this:
+
+```
+Model Chain: starting llama-server — Q3_K_P, no layers on the GPU
+             (weights in system RAM), 8,192 token context
+```
+
+which reads prompts at 67 tokens a second instead of several hundred. The
+Spatial Composer's 611-token prompt then takes 9.1 s to evaluate, which is the
+"few seconds before the spatial prompt starts" — not a reload, not a cache
+reset, just arithmetic on the wrong processor.
+
+So a phase is measured wherever it can be:
+
+1. **the loaded model, asked directly** — `mc_memory.measured_weight_bytes`
+   sums the patchers' own `model_size()`, which is true right now;
+2. **a remembered measurement** — every checkpoint records what it weighed the
+   last time it was switched to (`mc_plan.remember_weights`, hooked into
+   `_pass_requirement`, the one place a real figure for a named model exists).
+   This is how Stage 2 gets a real peak in a plan built while Stage 1 is loaded;
+3. **the file estimate**, only when neither of the above has ever seen it.
+
+The measurement is keyed by checkpoint *and* its module files: a Krea or Flux
+checkpoint keeps its VAE and text encoder separately, and on this setup those
+two were 6 GB of the 18 GB total, so changing the text encoder changes what the
+pass weighs. It is held in memory only — re-learned by the first generation of
+any session, and a figure written to disk would outlive the file it describes.
+
+`Phase.measured` carries which of the three answered, and the panel says so on
+every image row. A table that presented an estimate with the same authority as
+a reading would be inviting the user to trust the wrong one.
+
+
 ## 5. Stability
 
 `Runtime._outgrown` is where re-placement was decided, and it now declines to

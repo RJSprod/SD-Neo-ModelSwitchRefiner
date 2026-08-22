@@ -336,6 +336,126 @@ class Stage:
         return text.strip()
 
 
+_measured_lock = threading.RLock()
+_measured_weights: dict[tuple, int] = {}
+"""What each checkpoint really weighed the last time it was on the card.
+
+In memory only, and deliberately. It is re-learned by the first generation of
+any session, it costs nothing to lose, and a figure written to disk would
+outlive the file it describes -- a re-quantised checkpoint under the same name
+would then be planned for at its old size for as long as the file sat there.
+"""
+
+
+def _weights_key(name: str, modules) -> tuple:
+    """A checkpoint and the modules loaded beside it, as one key.
+
+    The modules are part of the answer, not decoration: a Flux-family or Krea
+    checkpoint keeps its VAE and text encoder in separate files, and on the
+    setup that prompted this work those two were 6 GB of an 18 GB total.
+    Changing the text encoder changes what the pass weighs, so a key that
+    ignored them would answer the new selection with the old measurement.
+    """
+    try:
+        import os
+
+        import mc_memory
+
+        resolved = mc_memory.resolve_modules(modules)
+        if resolved is None:
+            resolved = mc_memory.current_modules()
+        if not resolved and modules:
+            # Resolution drops names the host does not know, which would collapse
+            # two different selections onto one key and answer the second with
+            # the first one's measurement. The names themselves still tell them
+            # apart, so an unresolvable selection keys on what it was given.
+            resolved = [modules] if isinstance(modules, str) else list(modules)
+        parts = tuple(sorted(os.path.basename(str(module)) for module in resolved or ()))
+    except Exception:
+        parts = ()
+    return (str(name or "").strip(), parts)
+
+
+def remember_weights(name: str, modules, weights: int) -> None:
+    """Record what a checkpoint really weighs, from the moment it is loaded.
+
+    Called by ``mc_memory`` as each stage is switched to, which is the only
+    moment a real figure for that stage exists. It is what lets the *next*
+    generation's plan -- built before anything is loaded -- reserve for Stage 2
+    from a measurement rather than from its file size.
+    """
+    weights = max(int(weights), 0)
+    if weights <= 0:
+        return
+    key = _weights_key(name, modules)
+    if not key[0]:
+        return
+    with _measured_lock:
+        previous = _measured_weights.get(key)
+        _measured_weights[key] = weights
+    if previous is None or abs(previous - weights) > _GB // 8:
+        logger.info("Model Chain: %s weighs %.1f GB on the card%s",
+                    Stage(name=name).shown(), weights / _GB,
+                    f" (was planned at {previous / _GB:.1f} GB)" if previous else
+                    " — the plan will use that rather than its file size")
+
+
+def measured_weights(name: str, modules=None) -> int:
+    """The recorded weight of a checkpoint, or 0 if it has never been loaded here."""
+    with _measured_lock:
+        return _measured_weights.get(_weights_key(name, modules), 0)
+
+
+def forget_weights() -> None:
+    """Drop every measurement. For tests, and for an explicit re-measure."""
+    with _measured_lock:
+        _measured_weights.clear()
+
+
+def _measured_pass_bytes(stage: Stage, width: int, height: int) -> int:
+    """What this stage costs according to a measurement, or 0 if there is none.
+
+    The loaded model is asked first, because that answer is true right now.
+    Failing that, what this checkpoint weighed the last time it was loaded --
+    which is how Stage 2 gets a real figure in a plan built while Stage 1 is
+    the loaded model.
+    """
+    if not stage.present:
+        return 0
+    try:
+        import mc_memory
+
+        weights = int(mc_memory.measured_weight_bytes(stage.name, stage.modules))
+        if weights <= 0:
+            weights = measured_weights(stage.name, stage.modules)
+        if weights <= 0:
+            return 0
+        return int(mc_memory.pass_bytes_from_weights(weights, width, height))
+    except Exception:
+        logger.debug("Model Chain: could not measure the %s pass", stage.shown(),
+                     exc_info=True)
+        return 0
+
+
+def _phase_cost(stage: Stage, width: int, height: int) -> tuple[int, bool]:
+    """``(bytes, measured)`` for one image stage.
+
+    Measurement wins whenever there is one. The estimate behind it -- the file
+    size plus 15% -- is a starting heuristic and was always documented as one;
+    on a quantised, mixed-precision checkpoint it over-read by 3.6 GB, which on
+    a 24 GB card is the difference between a language model with layers on the
+    GPU and one running entirely from system RAM.
+
+    The boolean is not decoration. Section 21 asks the panel to distinguish a
+    figure somebody measured from a figure nobody has, and a user watching Task
+    Manager disagree with the panel deserves to know which they are looking at.
+    """
+    measured = _measured_pass_bytes(stage, width, height)
+    if measured > 0:
+        return measured, True
+    return _pass_bytes(stage, width, height), False
+
+
 def _pass_bytes(stage: Stage, width: int, height: int) -> int:
     """VRAM one sampling pass on ``stage`` needs: weights resident, plus activations.
 
@@ -434,13 +554,13 @@ def build(*, width: int = 0, height: int = 0,
     elif mode:
         phases.append(Phase(DIRECT_MERGE, KIND_PREPARATION, "Direct BBOX Merge"))
 
-    stage_1_peak = _pass_bytes(stage_1, width, height)
+    stage_1_peak, stage_1_measured = _phase_cost(stage_1, width, height)
     phases.append(Phase(STAGE_1, KIND_IMAGE, "Stage 1", stage_1_peak,
-                        detail=stage_1.shown()))
+                        measured=stage_1_measured, detail=stage_1.shown()))
 
     if stage_2 is not None and stage_2.present:
         wide, tall = _stage_2_size(width, height, stage_2.multiplier)
-        stage_2_peak = _pass_bytes(stage_2, wide, tall)
+        stage_2_peak, stage_2_measured = _phase_cost(stage_2, wide, tall)
         # The overlap the switch actually creates, and only that. The whole of
         # Stage 1 is not assumed to survive into Stage 2 -- it does not, the
         # UNet is evicted -- but its encoders are deliberately spared, and
@@ -448,17 +568,18 @@ def build(*, width: int = 0, height: int = 0,
         # where two models are on the card together.
         spared = _module_bytes(stage_1)
         phases.append(Phase(HANDOFF, KIND_TRANSITION, "Handoff",
-                            stage_2_peak + spared,
+                            stage_2_peak + spared, measured=stage_2_measured,
                             detail=("Stage 1 encoders kept" if spared else "")))
         phases.append(Phase(STAGE_2, KIND_IMAGE, "Stage 2", stage_2_peak,
-                            detail=stage_2.shown()))
+                            measured=stage_2_measured, detail=stage_2.shown()))
         if warm_up:
             # After Stage 2 the chain restores Stage 1 and warms it for the next
             # press. It is speculative and it yields (section 16), so it is a
             # phase with a real peak that is almost never the limiting one --
             # and when it *is*, the panel should say so rather than hide it.
             phases.append(Phase(WARM_UP, KIND_WARMUP, "Stage 1 warm-up",
-                                stage_1_peak, detail="restored for the next press"))
+                                stage_1_peak, measured=stage_1_measured,
+                                detail="restored for the next press"))
 
     return Plan(tuple(phases), int(max(width, 0)), int(max(height, 0)))
 
@@ -680,10 +801,12 @@ def publish(plan: Plan | None) -> Plan | None:
         if previous is None or previous.identity() != plan.identity():
             limiting = plan.limiting()
             logger.info(
-                "Model Chain: active plan — %s; image working peak %.1f GB%s",
+                "Model Chain: active plan — %s; image working peak %.1f GB%s (%s)",
                 plan.describe(),
                 plan.image_working_peak() / _GB,
                 f", set by {limiting.label}" if limiting else "",
+                "measured" if limiting is not None and limiting.measured
+                else "estimated from file sizes until the models have been loaded once",
             )
             _log_derivation()
         return plan

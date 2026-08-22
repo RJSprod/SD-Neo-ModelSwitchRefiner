@@ -705,10 +705,12 @@ def active_plan():
     mc_plan.clear()
     mc_plan.note_placement(None)
     mc_plan.forget_misses()
+    mc_plan.forget_weights()
     yield
     mc_plan.clear()
     mc_plan.note_placement(None)
     mc_plan.forget_misses()
+    mc_plan.forget_weights()
 
 
 @pytest.fixture

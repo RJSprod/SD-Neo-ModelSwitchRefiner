@@ -2106,10 +2106,75 @@ def _pass_requirement(target_name: str, modules, width: int, height: int, patche
             size = 0
             break
 
-    if size <= 0:
+    if size > 0:
+        # The one moment a real figure for this checkpoint exists. Both stages
+        # pass through here as they are switched to, so recording it is how the
+        # *plan* -- built long before either is loaded -- stops having to guess
+        # from a file size. See :func:`mc_plan.remember_weights`.
+        _remember_measured_weights(target_name, modules, size)
+    else:
         size = int(file_size_bytes(target_name, modules) * (1.0 + VRAM_MODEL_OVERHEAD_FRACTION))
 
     return size + _attainable_headroom(size, width, height)
+
+
+def _remember_measured_weights(name: str, modules, size: int) -> None:
+    """Tell the plan what this checkpoint really weighs. Never raises."""
+    try:
+        import mc_plan
+
+        mc_plan.remember_weights(name, modules, size)
+    except Exception:
+        logger.debug("Model Chain: could not record the measured weights", exc_info=True)
+
+
+def measured_weight_bytes(name: str, modules=None) -> int:
+    """What ``name``'s weights really occupy on the card, or 0 if it is not loaded.
+
+    A checkpoint file's size is a proxy and it is wrong in both directions:
+    quantised formats read larger than they land, and a mixed-precision build
+    lands larger than it reads. The extension's own a-priori figure is the file
+    plus 15%, and on one user's Krea 2 setup that came to 21.4 GB against the
+    17.8 GB Forge actually loaded -- 3.6 GB of a 24 GB card reserved for
+    nothing.
+
+    That is not a cosmetic error. The language model gets what the image plan
+    does not need, so 3.6 GB of phantom reserve was the whole difference
+    between a placement with layers on the GPU and one with the entire model in
+    system RAM, running its prompts at 67 tokens a second instead of several
+    hundred.
+
+    So when the model is loaded, it is asked rather than estimated. Zero when
+    it is not the loaded model, which the caller reads as "no measurement,
+    use the estimate".
+    """
+    patchers = _loaded_target_patchers(name)
+    if not patchers:
+        return 0
+    size = 0
+    for patcher in patchers:
+        try:
+            size += int(patcher.model_size())
+        except Exception:
+            return 0
+    if size > 0:
+        _remember_measured_weights(name, modules, size)
+    return size
+
+
+def pass_bytes_from_weights(weights: int, width: int = 0, height: int = 0) -> int:
+    """A pass requirement built from a known weight figure rather than a file size.
+
+    The same arithmetic :func:`_pass_requirement` performs, exposed for the
+    plan, which has a measurement and no patchers to hand. The headroom is the
+    attainable one -- trimmed to what the card could actually have given -- for
+    the reason given there: a reserve larger than the card is not a demanding
+    target but an impossible one.
+    """
+    weights = max(int(weights), 0)
+    if weights <= 0:
+        return 0
+    return weights + _attainable_headroom(weights, width, height)
 
 
 def _attainable_headroom(model_bytes: int, width: int, height: int) -> int:

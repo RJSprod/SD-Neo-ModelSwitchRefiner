@@ -655,6 +655,19 @@ replaced, and it is worth naming what that looked like. In one user's
   `invalid device: CUDA0` because no CUDA device could be enumerated on a card
   another process had filled.
 
+Each phase peak is **measured** wherever it can be. The loaded model is asked
+directly; a model that is not loaded uses what it weighed the last time it was,
+which is how Stage 2 gets a real figure in a plan built while Stage 1 is on the
+card. Only a checkpoint this session has never loaded falls back to its file
+size plus a fixed overhead — and the panel labels every row so you can tell
+which you are looking at.
+
+That distinction is worth more than it sounds. On one Krea 2 setup the file
+estimate read 21.4 GB where Forge actually loaded 17.8 GB, and on a 24 GB card
+those 3.6 GB of phantom reserve were the entire difference between a language
+model with layers on the GPU and one running from system RAM at a fifth of the
+prompt speed.
+
 **Persistent LLM VRAM** in Settings controls the ceiling:
 
 | Setting | Effect |
