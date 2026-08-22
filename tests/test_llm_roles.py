@@ -928,3 +928,160 @@ class TestARunningRoleServerIsNeverAStray:
         monkeypatch.setattr(runtime.runtime, "_process", None)
 
         assert runtime._own_pids() == set()
+
+
+# --------------------------------------------------------------------------- #
+# A role's server is started from that role's settings
+# --------------------------------------------------------------------------- #
+
+
+class TestTheServerIsStartedFromTheRoleSConfiguration:
+    """The gap the first version of this feature left, and what it cost.
+
+    ``registry.for_role`` resolved *which* runtime serves a role, correctly, and
+    then ``Runtime.client`` asked ``config()`` -- with no role -- for what to
+    start. So a Creative role pinned to a 5090 got a server of its own and that
+    server was launched from the installation's settings.
+
+    From the log that found it: two llama-servers, each with its own prompt
+    cache, both reporting "system RAM (no GPU offload)" on the processor, and
+    llama.cpp's own fit line saying "projected to use 14157 MiB of host memory"
+    while it listed a 5090 with 30.9 GB free and a 3090 with 23.2 GB free. Every
+    role-specific thing worked except the one that makes the feature worth
+    having.
+    """
+
+    def test_a_split_role_starts_from_its_own_settings(self, tmp_path, monkeypatch):
+        creative = configured(tmp_path, mode="mixed_aggressive", gpu_index=0,
+                              device="CUDA0")
+        shared = configured(tmp_path, mode="cpu", device="none")
+        registry = pair(monkeypatch, creative, shared, shared)
+
+        found = registry.for_role(roles.CREATIVE)
+
+        assert found.configuration().mode == "mixed_aggressive"
+        assert found.configuration().device == "CUDA0"
+
+    def test_the_other_role_starts_from_its_own(self, tmp_path, monkeypatch):
+        creative = configured(tmp_path, mode="mixed_aggressive", gpu_index=0,
+                              device="CUDA0")
+        spatial = configured(tmp_path, mode="cpu", device="none", model_name="B.gguf")
+        registry = pair(monkeypatch, creative, spatial, creative)
+
+        assert registry.for_role(roles.CREATIVE).configuration().device == "CUDA0"
+        assert registry.for_role(roles.SPATIAL).configuration().device == "none"
+
+    def test_a_runtime_nobody_claimed_starts_from_the_installation(self, tmp_path,
+                                                                   monkeypatch):
+        shared = configured(tmp_path, mode="cpu", device="none")
+        monkeypatch.setattr(runtime, "config", lambda role="": shared)
+
+        assert runtime.Runtime().configuration() is shared
+
+    def test_a_role_that_moved_away_no_longer_speaks_for_the_shared_runtime(
+            self, tmp_path, monkeypatch):
+        """The check that makes this safe rather than merely correct. The shared
+        runtime is every non-role mode's server too, so a Creative role that was
+        mapped onto it and has since been given a card of its own must not go on
+        deciding what Prompt Studio starts."""
+        shared = configured(tmp_path, mode="cpu", device="none")
+        registry = pair(monkeypatch, shared, shared, shared)
+        found = registry.for_role(roles.CREATIVE)
+        assert found is runtime.runtime
+        assert found.configuration().device == "none"
+
+        # Creative is reconfigured onto a card; its identity no longer matches
+        # the runtime it was adopted by.
+        moved = configured(tmp_path, mode="mixed_aggressive", gpu_index=0, device="CUDA0")
+        monkeypatch.setattr(runtime, "config",
+                            lambda role="": moved if role == roles.CREATIVE else shared)
+
+        assert found.configuration().device == "none"
+
+    def test_client_launches_the_server_from_the_role_s_settings(self, tmp_path,
+                                                                 monkeypatch):
+        """Through ``client``, not through ``configuration``.
+
+        The version that shipped got the second one right and the first one
+        wrong, so every test about roles passed while the servers all came up on
+        the installation's placement. What has to be asserted is what reaches
+        the launch.
+        """
+        creative = configured(tmp_path, mode="mixed_aggressive", gpu_index=0,
+                              device="CUDA0")
+        shared = configured(tmp_path, mode="cpu", device="none")
+        registry = pair(monkeypatch, creative, shared, shared)
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes",
+                            lambda index=None: 30 * _GB)
+        monkeypatch.setattr(runtime, "_prime_prompt_cache", lambda client: None)
+        found = registry.for_role(roles.CREATIVE)
+
+        launched: list = []
+
+        class Reached(RuntimeError):
+            """Far enough: the configuration is decided by now."""
+
+        def capture(configuration, placement, projector):
+            launched.append(configuration)
+            raise Reached()
+
+        monkeypatch.setattr(found, "_launch", capture)
+        with pytest.raises(Reached):
+            found.client()
+
+        assert launched, "the launch was never reached"
+        assert launched[0].mode == "mixed_aggressive"
+        assert launched[0].device == "CUDA0"
+
+    def test_the_shared_runtime_still_launches_from_the_installation(self, tmp_path,
+                                                                     monkeypatch):
+        shared = configured(tmp_path, mode="cpu", device="none")
+        monkeypatch.setattr(runtime, "config", lambda role="": shared)
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes",
+                            lambda index=None: 30 * _GB)
+        monkeypatch.setattr(runtime, "_prime_prompt_cache", lambda client: None)
+        found = runtime.Runtime()
+
+        launched: list = []
+
+        class Reached(RuntimeError):
+            pass
+
+        def capture(configuration, placement, projector):
+            launched.append(configuration)
+            raise Reached()
+
+        monkeypatch.setattr(found, "_launch", capture)
+        with pytest.raises(Reached):
+            found.client()
+
+        assert launched[0].device == "none"
+
+    def test_coalesced_roles_agree_about_what_to_start(self, tmp_path, monkeypatch):
+        """Either role answers, because roles only share a runtime when their
+        complete resolved identity is equal."""
+        same = configured(tmp_path, mode="mixed_conservative", gpu_index=1, device="CUDA1")
+        registry = pair(monkeypatch, same, same, same)
+        registry.for_role(roles.CREATIVE)
+        found = registry.for_role(roles.SPATIAL)
+
+        assert found.configuration().mode == "mixed_conservative"
+        assert found.configuration().gpu_index == 1
+
+
+class TestThePlacementLinesSayWhichConfigurationTheyCameFrom:
+    """With two servers up, "on Intel(R) Core(TM) Ultra 9" names a processor and
+    not a role -- and which role it was is the fact somebody needs when one of
+    the two is on the wrong card."""
+
+    def test_a_role_s_runtime_prefixes_its_own_lines(self, tmp_path, monkeypatch):
+        creative = configured(tmp_path, mode="mixed_aggressive", gpu_index=0,
+                              device="CUDA0")
+        shared = configured(tmp_path, mode="cpu", device="none")
+        registry = pair(monkeypatch, creative, shared, shared)
+
+        assert registry.for_role(roles.CREATIVE)._said_for() == "[Creative] "
+
+    def test_the_shared_runtime_says_nothing_extra(self):
+        """Every line this extension has always written keeps its shape."""
+        assert runtime.Runtime()._said_for() == ""

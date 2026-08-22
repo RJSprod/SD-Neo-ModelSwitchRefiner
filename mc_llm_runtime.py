@@ -2319,6 +2319,55 @@ class Runtime:
         """
         self.roles: tuple = tuple(roles)
         """Which roles resolved to this runtime. Both when they are sharing it."""
+        self._role: str = ""
+        """Whose configuration to start from. See :meth:`configuration`."""
+        self._key: tuple | None = None
+        """The identity the registry filed this runtime under."""
+
+    def _said_for(self) -> str:
+        """``"[Creative] "`` or ``""``, for the front of this runtime's own lines.
+
+        The placement lines used to say which model, which device and which
+        context, and not which *configuration* they came from -- which is
+        exactly the fact somebody needs when two servers are up and one of them
+        is on the wrong card. A user reading "on Intel(R) Core(TM) Ultra 9" had
+        no way to tell whether that was the Creative role they had pointed at a
+        5090, or the Spatial one they had pointed at the processor.
+        """
+        import mc_llm_roles
+
+        return mc_llm_roles.prefix(self._role)
+
+    def adopt(self, role: str, key: tuple) -> None:
+        """Record whose configuration this server runs on. Called by the registry."""
+        if role:
+            self._role, self._key = role, key
+        elif self._key is None:
+            self._key = key
+
+    def configuration(self) -> Config:
+        """The configuration this server is, or would be, started from.
+
+        The bug this exists to close: the registry resolved *which* runtime
+        serves a role, and then the runtime asked ``config()`` -- with no role
+        -- for what to start. So a Creative role pinned to a 5090 got a server
+        of its own, correctly, and that server was launched from the
+        installation's settings. Two roles on different cards both came up on
+        whatever the installation said, which in a user's log was the processor:
+        two llama-servers, two prompt caches, and one wrong placement each.
+
+        The identity is re-checked rather than trusted, because the shared
+        runtime is also every non-role mode's server. A role that was mapped
+        here and has since been reconfigured no longer belongs to this runtime,
+        and starting Prompt Studio from the settings of a Creative role that has
+        moved to another card would be this same bug pointing the other way.
+        """
+        if not self._role:
+            return config()
+        resolved = config(self._role)
+        if self._key is not None and _identity(resolved, resolved.mmproj) != self._key:
+            return config()
+        return resolved
 
     # -- lifecycle -------------------------------------------------------- #
 
@@ -2369,7 +2418,7 @@ class Runtime:
         from prompt_master.inference.service import CPU_READY_TIMEOUT, GPU_READY_TIMEOUT
 
         with self._lock:
-            configuration = config()
+            configuration = self.configuration()
             if not configuration.configured:
                 raise NotConfigured(
                     "No local model is configured yet. Choose a GGUF and a llama.cpp runtime "
@@ -2502,8 +2551,9 @@ class Runtime:
         written_before = log_path.stat().st_size if log_path.exists() else 0
 
         logger.info(
-            "Model Chain: starting llama-server — %s on %s, %s, %s token context, "
+            "Model Chain: %sstarting llama-server — %s on %s, %s, %s token context, "
             "%.1f GB free",
+            self._said_for(),
             configuration.quantization or Path(configuration.model).stem,
             _device_label(configuration),
             placement.describe(),
@@ -2820,7 +2870,8 @@ class Runtime:
             mc_broker.retire(self.residency_key)
 
         logger.info(
-            "Model Chain: llama-server ready — %s, %s token context, %.1f GB VRAM%s",
+            "Model Chain: %sllama-server ready — %s, %s token context, %.1f GB VRAM%s",
+            self._said_for(),
             negotiated.placement.describe(),
             f"{negotiated.placement.context:,}",
             observed / _GB,
@@ -2969,7 +3020,7 @@ class Runtime:
         from prompt_master.inference.device_detection import NO_OFFLOAD
         from prompt_master.inference.service import CPU_READY_TIMEOUT
 
-        configuration = config()
+        configuration = self.configuration()
         if not configuration.configured:
             return 0
         try:
@@ -3055,7 +3106,7 @@ class Runtime:
         return f"{measured}, prompt at {prompt:.0f} tokens/s" if prompt > 0 else measured
 
     def describe(self) -> str:
-        return self._label(config())
+        return self._label(self.configuration())
 
     def stop(self) -> None:
         with self._lock:
@@ -3100,7 +3151,7 @@ class Runtime:
     def status(self) -> dict:
         """Everything the panel needs about the runtime, and nothing that costs a load."""
         with self._lock:
-            configuration = config()
+            configuration = self.configuration()
             return {
                 "configured": configuration.configured,
                 "has_runtime": configuration.runtime is not None,
@@ -3244,6 +3295,11 @@ class RuntimeRegistry:
             if found is None:
                 found = self._instance(key)
                 self._runtimes[key] = found
+            try:
+                found.adopt(role, key)
+            except AttributeError:
+                logger.debug("Model Chain: %s cannot be told which role it serves",
+                             type(found).__name__)
             if role and role not in _roles_of(found):
                 try:
                     found.roles = tuple(sorted({*_roles_of(found), role},
