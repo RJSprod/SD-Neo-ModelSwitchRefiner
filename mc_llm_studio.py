@@ -58,6 +58,7 @@ import gradio as gr
 
 import mc_broker
 import mc_llm_files
+import mc_llm_roles
 import mc_llm_paths
 import mc_llm_ui as ui
 
@@ -892,6 +893,15 @@ def _setup_panel() -> dict:
             # the runtime directory, and the panel wants three answers from it.
             found = _runtime_status()
             choices = _device_choices()
+            # Which configuration the controls below are editing. First rather
+            # than last because everything under it means something different
+            # depending on the answer, and a control that changes what the
+            # controls beneath it are about belongs above them.
+            role = gr.Radio(
+                label="Configure for", choices=_role_choices(), value=mc_llm_roles.SHARED,
+                elem_id=ui.ident("settings", "role"))
+            role_notice = gr.HTML(_role_line(mc_llm_roles.SHARED),
+                                  elem_id=ui.ident("settings", "role-line"))
             runtime_notice = gr.HTML(_runtime_setup_line(found))
             runtime_path = gr.Textbox(
                 label="llama-server", value=str(found.recorded or found.found or ""),
@@ -909,6 +919,7 @@ def _setup_panel() -> dict:
                 detect_runtime = gr.Button("Detect", size="sm")
                 fetch_runtime = gr.Button("Download the pinned build", size="sm",
                                           interactive=found.downloadable)
+                follow_shared = gr.Button("Follow the installation", size="sm")
 
             # The catalogue sits between the runtime and the path boxes because
             # that is the order somebody new goes through them in: get a
@@ -975,14 +986,21 @@ def _setup_panel() -> dict:
 
     # -- wiring ----------------------------------------------------------- #
 
-    use_runtime.click(fn=_apply_runtime, inputs=[runtime_path, device],
-                      outputs=[runtime_notice, runtime_path, model_notice], queue=False)
-    detect_runtime.click(fn=_detect_runtime, outputs=[runtime_notice, runtime_path],
-                         queue=False)
-    fetch_runtime.click(fn=_download_runtime, inputs=[device],
+    use_runtime.click(fn=_apply_runtime, inputs=[runtime_path, device, role],
+                      outputs=[runtime_notice, runtime_path, model_notice, role_notice],
+                      queue=False)
+    detect_runtime.click(fn=_detect_runtime, inputs=[role],
+                         outputs=[runtime_notice, runtime_path], queue=False)
+    fetch_runtime.click(fn=_download_runtime, inputs=[device, role],
                         outputs=[runtime_notice, runtime_path])
+    role.change(fn=_switch_role, inputs=[role],
+                outputs=[role_notice, runtime_path, device, model_path, mmproj_path],
+                queue=False)
+    follow_shared.click(fn=_follow_shared, inputs=[role],
+                        outputs=[role_notice, runtime_path, device, model_path,
+                                 mmproj_path], queue=False)
 
-    apply_model.click(fn=_apply_model, inputs=[model_path, mmproj_path],
+    apply_model.click(fn=_apply_model, inputs=[model_path, mmproj_path, role],
                       outputs=[model_notice, estimator, model_path, mmproj_path],
                       queue=False)
     suggest.click(fn=_suggest_projector, inputs=[model_path],
@@ -1391,11 +1409,110 @@ def _device_choices() -> list[tuple[str, str]]:
         return []
 
 
-def _current_device(choices=None) -> str | None:
+def _role_choices() -> list[tuple[str, str]]:
+    """What the Configure-for selector offers.
+
+    The installation first, because it is what every mode that is not one of
+    the two roles runs on and what an unsplit role inherits -- somebody who
+    never opens this selector is configuring the thing they have always
+    configured.
+    """
+    return [("Installation (shared)", mc_llm_roles.SHARED),
+            *((mc_llm_roles.LABELS[role], role) for role in mc_llm_roles.ROLES)]
+
+
+def _role_line(role: str) -> str:
+    """Whether ``role`` is split, and what that currently costs or buys.
+
+    The one place the shared-runtime tradeoff is stated in the UI. Section 10.2
+    asks for it to be visible rather than hidden behind invented scheduling:
+    two roles on one server switch system prompts, and switching system prompts
+    re-reads the prefix.
+    """
+    import mc_llm_runtime
+
+    chosen = mc_llm_roles.named(role)
+    try:
+        shared = mc_llm_runtime.registry.shared()
+        where = mc_llm_runtime.registry.contending()
+    except Exception:
+        logger.debug("Model Chain: could not describe the role runtimes", exc_info=True)
+        return ""
+
+    if not chosen:
+        if shared:
+            return ui.notice("Creative and Spatial both follow this configuration, so they "
+                             "share one llama-server. Switching between them re-reads the "
+                             "system prompt — configure one of them separately to stop that.")
+        return ui.notice("Creative and/or Spatial are configured separately. Changes here "
+                         "still apply to Prompt Studio, Conversation and MiniMax.")
+
+    label = mc_llm_roles.LABELS[chosen]
+    if not _role_is_split(chosen):
+        return ui.notice(f"{label} follows the installation. Record a runtime here to give "
+                         f"it hardware of its own; it keeps its own prompt cache only once "
+                         f"something differs.")
+    if shared:
+        return ui.notice(f"{label} is configured separately but resolves to the same runtime "
+                         f"as the other role, so they still share one llama-server.")
+    if where:
+        policy = mc_llm_runtime.resolved_sharing(where)
+        wording = ("take turns — one stops before the other starts"
+                   if policy == mc_llm_runtime.SHARE_TAKE_TURNS
+                   else "coexist — both stay up and compete")
+        pool = "system RAM" if where == mc_llm_runtime.POOL_SYSTEM_RAM else where.upper()
+        return ui.notice(f"{label} has its own runtime. Both roles are in {pool}, so they "
+                         f"{wording}. Change that in Settings → Model Chain.")
+    return ui.notice(f"{label} has its own runtime and its own prompt cache, in different "
+                     f"memory from the other role.")
+
+
+def _role_is_split(role: str) -> bool:
+    from prompt_master.core.config import read_json
+
+    try:
+        state = read_json(mc_llm_paths.app_paths().state_file)
+    except (OSError, ValueError):
+        state = {}
+    return mc_llm_roles.split(role, state)
+
+
+def _switch_role(role):
+    """Re-point the runtime controls at ``role``'s configuration."""
+    import mc_llm_runtime
+
+    chosen = mc_llm_roles.named(role)
+    configuration = mc_llm_runtime.config(chosen)
+    choices = _device_choices()
+    return (_role_line(chosen),
+            gr.update(value=str(configuration.runtime or "")),
+            gr.update(choices=choices, value=_current_device(choices, chosen)),
+            gr.update(value=str(configuration.model or "")),
+            gr.update(value=str(configuration.mmproj or "")))
+
+
+def _follow_shared(role):
+    """Clear ``role``'s overrides so it inherits the installation again."""
+    import mc_llm_setup
+
+    chosen = mc_llm_roles.named(role)
+    if not chosen:
+        return (ui.notice("The installation is what the roles follow; there is nothing to "
+                          "reset here. Choose a role first.", "warn"),
+                gr.update(), gr.update(), gr.update(), gr.update())
+    try:
+        mc_llm_setup.forget_role(chosen)
+    except Exception as exc:
+        return (ui.notice(ui.failure(exc), "error"),
+                gr.update(), gr.update(), gr.update(), gr.update())
+    return _switch_role(chosen)
+
+
+def _current_device(choices=None, role: str = "") -> str | None:
     """The dropdown value for the device the install is recorded as using."""
     import mc_llm_runtime
 
-    configuration = mc_llm_runtime.config()
+    configuration = mc_llm_runtime.config(mc_llm_roles.named(role))
     choices = _device_choices() if choices is None else choices
     values = [value for _, value in choices]
     token = f"{_recorded_mode(configuration)}:{configuration.gpu_index}"
@@ -1419,7 +1536,7 @@ def _device_for(value):
     return found if found is not None else mc_llm_setup.preferred_device()
 
 
-def _apply_runtime(path, device_value):
+def _apply_runtime(path, device_value, role=""):
     """Adopt the build at ``path`` and record it, with the device beside it.
 
     The panel's first step, and also the only way to change the device -- so an
@@ -1438,14 +1555,14 @@ def _apply_runtime(path, device_value):
         if source is None:
             return (ui.notice("Enter the path to llama-server, or to the folder holding it, "
                               "or press Browse to find it.", "warn"),
-                    gr.update(), gr.update())
+                    gr.update(), gr.update(), gr.update())
     else:
         try:
             source = mc_llm_files.resolve_runtime(source).path
         except mc_llm_files.PathError as exc:
             # Not an error in the sense the panel colours red: nothing was
             # attempted and the sentence says what to do instead.
-            return ui.notice(str(exc), "warn"), gr.update(), gr.update()
+            return ui.notice(str(exc), "warn"), gr.update(), gr.update(), gr.update()
 
     # Stopped *before* the copy, not after it, and only when there is a copy.
     # The running server holds the build it was started with -- on Windows it
@@ -1454,19 +1571,24 @@ def _apply_runtime(path, device_value):
     # "[WinError 5] Access is denied: ...\\runtime\\cublas64_12.dll". A build
     # already in place is not copied at all, and unloading a model to record a
     # device beside it would cost a reload for nothing.
+    chosen = mc_llm_roles.named(role)
     if not mc_llm_setup.in_place(source):
-        mc_llm_runtime.runtime.stop()
+        # Every runtime, not just the shared one: adopting a build copies files
+        # that a running server on any role may be holding open.
+        for found in mc_llm_runtime.registry.all():
+            found.stop()
     try:
         executable, note = mc_llm_setup.adopt(source)
-        mc_llm_setup.record(executable, _device_for(device_value))
+        mc_llm_setup.record(executable, _device_for(device_value), role=chosen)
     except Exception as exc:
-        return ui.notice(ui.failure(exc), "error"), gr.update(), gr.update()
+        return ui.notice(ui.failure(exc), "error"), gr.update(), gr.update(), gr.update()
 
-    return (ui.notice(f"{note} Runtime recorded."), str(executable),
-            _model_line(mc_llm_runtime.config()))
+    where = f" for {mc_llm_roles.LABELS[chosen]}" if chosen else ""
+    return (ui.notice(f"{note} Runtime recorded{where}."), str(executable),
+            _model_line(mc_llm_runtime.config(chosen)), _role_line(chosen))
 
 
-def _detect_runtime():
+def _detect_runtime(role=""):
     """Record a build already sitting under the install root."""
     import mc_llm_setup
 
@@ -1477,35 +1599,37 @@ def _detect_runtime():
                           "warn"),
                 gr.update())
     try:
-        mc_llm_setup.record(found)
+        mc_llm_setup.record(found, role=mc_llm_roles.named(role))
     except Exception as exc:
         return ui.notice(ui.failure(exc), "error"), gr.update()
     return ui.notice(f"Found and recorded {found}."), str(found)
 
 
-def _download_runtime(device_value, progress=gr.Progress()):
+def _download_runtime(device_value, role="", progress=gr.Progress()):
     """Fetch the pinned build. Weights are not downloaded here."""
     import mc_llm_runtime
     import mc_llm_setup
 
     # Before the download rather than after it, for the reason ``_apply_runtime``
-    # stops first: extracting the pinned build replaces the runtime folder, and
-    # a running server holds the files in it open.
-    mc_llm_runtime.runtime.stop()
+    # stops first: extracting the pinned build replaces a runtime folder, and a
+    # running server holds the files in it open. Every runtime, because the
+    # family being installed may be the one another role is running.
+    for found in mc_llm_runtime.registry.all():
+        found.stop()
     try:
         chosen = _device_for(device_value)
         executable = mc_llm_setup.download(
             chosen,
             on_status=lambda text: progress(0, desc=text),
             on_progress=lambda fraction: progress(fraction))
-        mc_llm_setup.record(executable, chosen)
+        mc_llm_setup.record(executable, chosen, role=mc_llm_roles.named(role))
     except Exception as exc:
         return ui.notice(ui.failure(exc), "error"), gr.update()
 
     return ui.notice(f"Downloaded and recorded {executable}."), str(executable)
 
 
-def _apply_model(model, mmproj):
+def _apply_model(model, mmproj, role=""):
     """Point the install at a different GGUF, without re-provisioning anything.
 
     Four outputs rather than two: the two path boxes are written back with what
@@ -1516,8 +1640,9 @@ def _apply_model(model, mmproj):
     import mc_llm_runtime
     from prompt_master.inference import model_choice
 
+    chosen_role = mc_llm_roles.named(role)
     unchanged = (gr.update(), gr.update(), gr.update())
-    if mc_llm_runtime.config().runtime is None:
+    if mc_llm_runtime.config(chosen_role).runtime is None:
         # Checked here so the answer names something in this tab. Upstream's own
         # refusal ends "Run Models and Hardware setup first", which is a Qt
         # wizard this extension does not have -- a dead end rather than an
@@ -1535,19 +1660,32 @@ def _apply_model(model, mmproj):
         return (ui.notice(ui.failure(exc), "error"),) + unchanged
 
     try:
-        model_choice.choose(mc_llm_paths.app_paths(), chosen.path,
-                            projector.path if projector is not None else None)
-        _follow_managed(chosen.path)
+        if chosen_role:
+            import mc_llm_setup
+
+            mc_llm_setup.record_model(
+                chosen.path, projector.path if projector is not None else None,
+                role=chosen_role)
+        else:
+            model_choice.choose(mc_llm_paths.app_paths(), chosen.path,
+                                projector.path if projector is not None else None)
+            _follow_managed(chosen.path)
     except Exception as exc:
         return (ui.notice(ui.failure(exc), "error"),) + unchanged
 
     # The running server holds the weights it was started with, so it is
-    # stopped rather than left to answer as the previous model.
-    mc_llm_runtime.runtime.stop()
+    # stopped rather than left to answer as the previous model. The role's own
+    # server when a role was named, and every one of them otherwise: the
+    # installation's model is what an unsplit role is running too.
+    if chosen_role:
+        mc_llm_runtime.registry.for_role(chosen_role).stop()
+    else:
+        for found in mc_llm_runtime.registry.all():
+            found.stop()
     notes = list(chosen.notes) + list(projector.notes if projector is not None else ())
     if projector is None:
         notes.extend(_projector_hint(chosen.path))
-    return (_model_line(mc_llm_runtime.config(), notes), _estimator_html(),
+    return (_model_line(mc_llm_runtime.config(chosen_role), notes), _estimator_html(),
             str(chosen.path), str(projector.path) if projector is not None else "")
 
 

@@ -108,8 +108,8 @@ def client(monkeypatch, host, store):
     mc_broker.clear()
     monkeypatch.setattr(mc_broker, "host_busy", lambda: False)
     fake = FakeClient()
-    monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0: fake)
-    monkeypatch.setattr(sessions, "_placement_notes", list)
+    monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0, role='': fake)
+    monkeypatch.setattr(sessions, "_placement_notes", lambda role="": [])
     monkeypatch.setattr(mc_creative_krea, "checkpoint_objection", lambda: "")
     monkeypatch.setattr(mc_creative_krea, "_warm", lambda: True)
     mc_creative_krea.creative = mc_creative_krea.Creative()
@@ -272,8 +272,8 @@ class TestTheBarNeverBlocksTheRunItDescribes:
         a generation.
         """
         mc_broker.clear()
-        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0: FakeClient())
-        monkeypatch.setattr(sessions, "_placement_notes", list)
+        monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0, role='': FakeClient())
+        monkeypatch.setattr(sessions, "_placement_notes", lambda role="": [])
         monkeypatch.setattr(mc_creative_krea, "checkpoint_objection", lambda: "")
         mc_creative_krea.creative = mc_creative_krea.Creative()
         mc_llm_progress.reporter = mc_llm_progress.Reporter()
@@ -759,8 +759,8 @@ class TestTheRollRunsInsideTheGeneration:
         mc_broker.clear()
         fake = FakeClient()
         monkeypatch.setattr(sessions, "_client",
-                            lambda needs_vision=False, reserve=0: fake)
-        monkeypatch.setattr(sessions, "_placement_notes", list)
+                            lambda needs_vision=False, reserve=0, role='': fake)
+        monkeypatch.setattr(sessions, "_placement_notes", lambda role="": [])
         monkeypatch.setattr(mc_creative_krea, "checkpoint_objection", lambda: "")
         monkeypatch.setattr(mc_creative_krea, "_warm", lambda: True)
         mc_creative_krea.creative = mc_creative_krea.Creative()

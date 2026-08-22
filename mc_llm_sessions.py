@@ -44,8 +44,10 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import mc_broker
+import mc_llm_roles
 import mc_llm_runtime
 
 logger = logging.getLogger("model_chain")
@@ -234,18 +236,52 @@ class _Gpu:
             self._held = None
 
 
-def _client(needs_vision: bool, reserve: int = 0):
+def _client(needs_vision: bool, reserve: int = 0, role: str = ""):
     """A ready client, optionally promising to leave ``reserve`` bytes of VRAM.
 
     Only Krea's Creative Mode passes anything: it is the one caller that knows
     another workload -- an image generation on a checkpoint several gigabytes
     wide -- starts moments after the writer finishes. Every other mode leaves
     it at zero and behaves exactly as it did.
+
+    ``role`` picks which configured LLM answers. Empty -- which is what every
+    mode but the Krea writer and the Composer passes -- is the installation's
+    own, exactly as before roles existed. A role that has not been configured
+    separately resolves to that same installation and gets the same running
+    server back, so this parameter costs nothing until somebody uses it.
     """
-    return mc_llm_runtime.runtime.client(needs_vision, reserve=reserve)
+    chosen = _runtime_for(role)
+    if role:
+        try:
+            chosen.registry.make_room_for(role, chosen.configuration)
+        except Exception:
+            logger.debug("Model Chain: could not check the other role's runtime",
+                         exc_info=True)
+    return chosen.runtime.client(needs_vision, reserve=reserve)
 
 
-def _preparing() -> str:
+class _Resolved(NamedTuple):
+    """One role's runtime and the configuration it was resolved from."""
+
+    runtime: object
+    configuration: object
+    registry: object
+
+
+def _runtime_for(role: str = "") -> _Resolved:
+    """Which server serves ``role``, and what it was configured from.
+
+    One lookup rather than four, because the status line, the placement notes
+    and the speed reading all have to be about the *same* server as the request
+    -- and with two of them up, asking the module singleton is how a Composer
+    running on the processor comes to report the writer's card.
+    """
+    registry = mc_llm_runtime.registry
+    configuration = mc_llm_runtime.config(role)
+    return _Resolved(registry.for_role(role, configuration), configuration, registry)
+
+
+def _preparing(role: str = "") -> str:
     """What to say before asking for a client, which may not start anything.
 
     Every mode used to announce "Starting llama-server…" before every request,
@@ -257,7 +293,7 @@ def _preparing() -> str:
     for.
     """
     try:
-        if mc_llm_runtime.runtime.running():
+        if _runtime_for(role).runtime.running():
             return "Preparing…"
     except Exception:  # a runtime that cannot say is a runtime about to start
         logger.debug("Model Chain: could not ask the LLM runtime whether it is up",
@@ -265,7 +301,7 @@ def _preparing() -> str:
     return "Starting llama-server…"
 
 
-def _measured() -> str:
+def _measured(role: str = "") -> str:
     """llama.cpp's own timing for the reply that just finished, if it said one.
 
     Characters per second is what this module can count and is not what anybody
@@ -275,16 +311,16 @@ def _measured() -> str:
     compare across two placements without arithmetic.
     """
     try:
-        note = mc_llm_runtime.runtime.speed_note()
+        note = _runtime_for(role).runtime.speed_note()
     except Exception:
         logger.debug("Model Chain: could not read llama.cpp's timings", exc_info=True)
         return ""
     return f" ({note})" if note else ""
 
 
-def _placement_notes() -> list[Event]:
+def _placement_notes(role: str = "") -> list[Event]:
     """Report anything negotiation changed (section 13)."""
-    report = mc_llm_runtime.runtime.report
+    report = _runtime_for(role).runtime.report
     return [Event(STATUS, note) for note in (report.notes or ())]
 
 
@@ -615,14 +651,14 @@ def _krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=N
             yield Event(CANCELLED, "Cancelled")
             return
 
-        yield Event(STATUS, _preparing())
+        yield Event(STATUS, _preparing(mc_llm_roles.CREATIVE))
         # Vision is asked for only when there is something to look at, which is
         # what lets a text-only Krea prompt be written by any model that can
         # hold a conversation. The panel has already refused a run that would
         # need a projector the model has not got; this is the same requirement
         # stated where the client is actually obtained.
-        client = _client(bool(references), reserve)
-        for event in _placement_notes():
+        client = _client(bool(references), reserve, mc_llm_roles.CREATIVE)
+        for event in _placement_notes(mc_llm_roles.CREATIVE):
             yield event
 
         captions: list[str] = []
@@ -711,9 +747,9 @@ def _compose(source: str, scene: str, layout, ratio: str, seed: int,
             yield Event(CANCELLED, "Cancelled")
             return
 
-        yield Event(STATUS, _preparing())
-        client = _client(False, reserve)
-        for event in _placement_notes():
+        yield Event(STATUS, _preparing(mc_llm_roles.SPATIAL))
+        client = _client(False, reserve, mc_llm_roles.SPATIAL)
+        for event in _placement_notes(mc_llm_roles.SPATIAL):
             yield event
 
         yield Event(STATUS, COMPOSING)
@@ -766,6 +802,20 @@ that a run which has stalled is visibly not moving.
 """
 
 
+def _role_in(label: str) -> str:
+    """Which role a traced label belongs to, read back off its own prefix.
+
+    A small indignity, and the alternative is threading the role through every
+    event a generator yields so that one timing line can be read off the right
+    server. The prefix is written by exactly two callers a dozen lines apart and
+    is the only thing in a label that ever looks like this.
+    """
+    for role in mc_llm_roles.ROLES:
+        if label.startswith(mc_llm_roles.prefix(role)):
+            return role
+    return mc_llm_roles.SHARED
+
+
 def _traced(label: str, events):
     """Pass ``events`` through, and narrate the run to the WebUI console.
 
@@ -815,7 +865,7 @@ def _traced(label: str, events):
                 finished = True
                 logger.info("Model Chain: LLM run finished — %s, %s characters in %.1fs%s",
                             label, f"{max(streamed, len(event.text or '')):,}",
-                            time.monotonic() - started, _measured())
+                            time.monotonic() - started, _measured(_role_in(label)))
             elif event.kind == CANCELLED:
                 finished = True
                 logger.info("Model Chain: LLM run cancelled — %s after %.1fs",
@@ -868,7 +918,8 @@ def krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=No
     counted = (f"a Krea prompt from {len(references)} reference"
                f"{'' if len(references) == 1 else 's'}" if references else "a Krea prompt")
     directed = " with creative direction" if str(direction or "").strip() else ""
-    yield from _traced(f"{counted} at creativity {resolve(creativity)}{directed}",
+    yield from _traced(f"{mc_llm_roles.prefix(mc_llm_roles.CREATIVE)}{counted} at "
+                       f"creativity {resolve(creativity)}{directed}",
                        _krea(prompt, references, seed, cancel, creativity, direction,
                              reserve))
 
@@ -885,6 +936,6 @@ def krea_compose(source: str, scene: str, layout, ratio: str, seed: int,
     was in it.
     """
     counted = len(getattr(layout, "regions", ()) or ())
-    yield from _traced(f"a spatial composition over {counted} "
-                       f"region{'' if counted == 1 else 's'}",
+    yield from _traced(f"{mc_llm_roles.prefix(mc_llm_roles.SPATIAL)}a spatial composition "
+                       f"over {counted} region{'' if counted == 1 else 's'}",
                        _compose(source, scene, layout, ratio, seed, cancel, reserve))

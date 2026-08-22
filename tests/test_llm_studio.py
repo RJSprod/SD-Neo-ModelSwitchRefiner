@@ -62,8 +62,8 @@ def client(monkeypatch, host):
     mc_broker.clear()
     monkeypatch.setattr(mc_broker, "host_busy", lambda: False)
     fake = FakeClient()
-    monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0: fake)
-    monkeypatch.setattr(sessions, "_placement_notes", list)
+    monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0, role='': fake)
+    monkeypatch.setattr(sessions, "_placement_notes", lambda role="": [])
     yield fake
     mc_broker.clear()
 
@@ -205,7 +205,7 @@ class TestConversationRun:
 
     def test_a_failure_is_reported_rather_than_raised(self, client, monkeypatch):
         monkeypatch.setattr(sessions, "_client",
-                            lambda needs_vision=False, reserve=0: FakeClient(fail=RuntimeError("no server")))
+                            lambda needs_vision=False, reserve=0, role='': FakeClient(fail=RuntimeError("no server")))
 
         events = drain(sessions.conversation(sessions.ChatRequest(messages=[]),
                                              sessions.Cancellation()))
@@ -258,7 +258,7 @@ class TestWhatTheConsoleIsTold:
     def test_a_failure_is_logged_with_the_sentence_that_explains_it(self, client, monkeypatch,
                                                                     caplog):
         monkeypatch.setattr(sessions, "_client",
-                            lambda needs_vision=False, reserve=0: FakeClient(fail=RuntimeError("no server")))
+                            lambda needs_vision=False, reserve=0, role='': FakeClient(fail=RuntimeError("no server")))
 
         with caplog.at_level("INFO", logger="model_chain"):
             drain(sessions.conversation(sessions.ChatRequest(messages=[]),
@@ -331,7 +331,7 @@ class TestMinimaxRun:
 
     def test_an_empty_answer_is_an_error_not_an_empty_prompt(self, client, monkeypatch):
         monkeypatch.setattr(sessions, "_client",
-                            lambda needs_vision=False, reserve=0: FakeClient(pieces=("",)))
+                            lambda needs_vision=False, reserve=0, role='': FakeClient(pieces=("",)))
 
         events = drain(sessions.minimax("a shot", "fl2va", None, 7, sessions.Cancellation()))
 
@@ -410,7 +410,7 @@ class TestSerializedRuns:
         """Section 15: cancellation and failure both have to leave the system in
         a known residency state -- a held lock would strand every later run."""
         monkeypatch.setattr(sessions, "_client",
-                            lambda needs_vision=False, reserve=0: FakeClient(fail=RuntimeError("boom")))
+                            lambda needs_vision=False, reserve=0, role='': FakeClient(fail=RuntimeError("boom")))
 
         drain(sessions.conversation(sessions.ChatRequest(messages=[]),
                                     sessions.Cancellation()))
@@ -647,7 +647,7 @@ class TestSwappingTheRuntime:
         monkeypatch.setattr(mc_llm_setup, "adopt",
                             lambda source: (order.append("copy"), (source, "Copied."))[1])
         monkeypatch.setattr(mc_llm_setup, "record",
-                            lambda executable, device=None: order.append("record"))
+                            lambda executable, device=None, role="": order.append("record"))
 
         mc_llm_studio._apply_runtime(str(elsewhere), "gpu:0")
 
@@ -670,7 +670,7 @@ class TestSwappingTheRuntime:
         monkeypatch.setattr(mc_llm_setup, "adopt",
                             lambda source: (source, "Using the build already in place."))
         monkeypatch.setattr(mc_llm_setup, "record",
-                            lambda executable, device=None: order.append("record"))
+                            lambda executable, device=None, role="": order.append("record"))
 
         mc_llm_studio._apply_runtime(str(store / "runtime" / "llama-server"), "mixed:0")
 
@@ -689,9 +689,9 @@ class TestSwappingTheRuntime:
         in_place.write_bytes(b"")
         recorded = []
         monkeypatch.setattr(mc_llm_setup, "record",
-                            lambda executable, device=None: recorded.append((executable, device)))
+                            lambda executable, device=None, role="": recorded.append((executable, device)))
 
-        notice, path, _model = mc_llm_studio._apply_runtime("", "mixed:0")
+        notice, path, _model, _role = mc_llm_studio._apply_runtime("", "mixed:0")
 
         assert recorded and recorded[0][0] == in_place
         assert "already in place" in notice
@@ -708,7 +708,7 @@ class TestSwappingTheRuntime:
                             lambda device, on_status=None, on_progress=None:
                             (order.append("extract"), store / "llama-server")[1])
         monkeypatch.setattr(mc_llm_setup, "record",
-                            lambda executable, device=None: order.append("record"))
+                            lambda executable, device=None, role="": order.append("record"))
 
         mc_llm_studio._download_runtime("0")
 
