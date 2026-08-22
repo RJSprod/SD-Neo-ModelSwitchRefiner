@@ -1450,7 +1450,9 @@ def _role_line(role: str) -> str:
         if shared:
             return ui.notice("Creative and Spatial both follow this configuration, so they "
                              "share one llama-server. Switching between them re-reads the "
-                             "system prompt — configure one of them separately to stop that.")
+                             "system prompt — configure one of them separately to stop that, "
+                             "or give them a server each in Settings → Model Chain without "
+                             "changing anything else.")
         return ui.notice("Creative and/or Spatial are configured separately. Changes here "
                          "still apply to Prompt Studio, Conversation and MiniMax.")
 
@@ -1461,7 +1463,8 @@ def _role_line(role: str) -> str:
                          f"something differs.")
     if shared:
         return ui.notice(f"{label} is configured separately but resolves to the same runtime "
-                         f"as the other role, so they still share one llama-server.")
+                         f"as the other role, so they still share one llama-server. Settings "
+                         f"→ Model Chain can give them one each instead.")
     if where:
         policy = mc_llm_runtime.resolved_sharing(where)
         wording = ("take turns — one stops before the other starts"

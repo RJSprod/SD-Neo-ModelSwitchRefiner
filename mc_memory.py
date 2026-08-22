@@ -1053,12 +1053,21 @@ def image_device_index() -> int:
     another card is neither helped nor hindered by that protection.
     """
     try:
+        import torch
         from backend import memory_management
 
         device = memory_management.get_torch_device()
         if getattr(device, "type", "") != "cuda":
             return -1
-        return int(getattr(device, "index", 0) or 0)
+        index = getattr(device, "index", None)
+        if index is not None:
+            return int(index)
+        # ``torch.device("cuda")`` carries no index and does not mean card
+        # zero -- it means whichever card is current, which on a two-card
+        # machine is very often not card zero. Reading the missing index as 0
+        # is how a language model pinned to a 5090 was told it was sharing the
+        # image model's card, and capped by a plan protecting the 3090.
+        return int(torch.cuda.current_device())
     except Exception:
         logger.debug("Model Chain: could not ask which card the image side is on",
                      exc_info=True)

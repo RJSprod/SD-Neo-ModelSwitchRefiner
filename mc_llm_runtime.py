@@ -453,8 +453,39 @@ def negotiate(configuration: Config | None = None,
     if offloaded:
         notes.append(offloaded)
 
-    return Negotiation(placement, estimate, tuple(notes),
-                       _fits(estimate, reserve, already_ours, card_of(configuration)))
+    fits = _fits(estimate, reserve, already_ours, card_of(configuration))
+    notes.extend(_unsatisfied(configuration, placement, described))
+    return Negotiation(placement, estimate, tuple(notes), fits)
+
+
+def _unsatisfied(configuration: Config, placement, gguf) -> list[str]:
+    """Say so when the mode the user chose could not be carried out.
+
+    Section 21: "GPU-only placement does not fit: report the inability to
+    satisfy the selected mode rather than silently converting it." The ladder
+    below is the same ladder for every placement, and for the mixed modes its
+    degradations *are* the mode -- Aggressive is defined as "take what fits".
+    GPU / VRAM Only is not. It is a statement that the model belongs on the
+    card, and a run that quietly put it in system RAM answered a question the
+    user had already answered.
+
+    A sentence rather than a refusal, because the fallback contract everywhere
+    else in this module is to degrade and report, and a generation that stops
+    dead because a card filled up is worse than a slow one that says why. What
+    it must not do is stay quiet.
+    """
+    from prompt_master.core.models import GPU_MODE, normalise_mode
+
+    if normalise_mode(configuration.mode) != GPU_MODE:
+        return []
+    if placement.gpu_layers == mc_llm_context.ALL_LAYERS:
+        return []
+    total = gguf.block_count if gguf is not None else 0
+    where = ("none of it is on the card" if placement.gpu_layers == mc_llm_context.NO_LAYERS
+             else f"only {placement.gpu_layers} of {total or '?'} layers are")
+    return [f"GPU / VRAM Only was chosen and could not be satisfied — {where}. "
+            f"Free VRAM on this card, pick a smaller quantization, or choose Mixed "
+            f"Aggressive, which is this fallback as a deliberate setting"]
 
 
 def _requested_placement(configuration: Config, gguf: mc_gguf.Gguf | None,
@@ -1979,19 +2010,29 @@ PRIME_SEED = 1
 
 
 def _warn_about_an_idle_card(configuration: Config, layers: str) -> None:
-    """Say once, per start, when a card is present and doing nothing.
+    """Say once, per start, when a card is present and holding nothing it wanted to.
 
-    Mixed placement records ``--n-gpu-layers 0``, and llama.cpp with no
-    offloaded layers runs every matrix multiply on the processor -- so a machine
+    Mixed Aggressive and GPU / VRAM Only both ask for layers, and llama.cpp with
+    none offloaded runs every matrix multiply on the processor -- so a machine
     with a 3090 in it can spend twenty seconds a press at four tokens a second
     while the card sits idle, with nothing on screen or in the log saying that
     was the arrangement. This is that line.
+
+    Mixed Conservative is not that arrangement and is excluded. Zero layers is
+    what the user asked that mode for, so there is no shortfall to report; and
+    the card is not idle either -- it takes the operations ``--op-offload``
+    hands it, which in a user's log was the difference between 50 tokens a
+    second on the processor and 82 with the card named. Warning about a setting
+    working correctly is how somebody comes to change it back.
     """
+    from prompt_master.core.models import CPU_MODE, MIXED_CONSERVATIVE_MODE, normalise_mode
     from prompt_master.inference.device_detection import CPU_DEVICE, NO_OFFLOAD
 
     if str(layers) != NO_OFFLOAD:
         return
     if str(configuration.device).casefold() == CPU_DEVICE:
+        return
+    if normalise_mode(configuration.mode) in (MIXED_CONSERVATIVE_MODE, CPU_MODE):
         return
     logger.info("Model Chain: %s will do no work in this placement — nothing was free "
                 "to offload into, so the processor writes the whole prompt. Free VRAM "
@@ -2541,7 +2582,11 @@ class Runtime:
         from prompt_master.inference.device_detection import CPU_DEVICE, NO_OFFLOAD
         from prompt_master.inference.service import CPU_READY_TIMEOUT, GPU_READY_TIMEOUT
 
-        before = mc_broker.device_free_vram_bytes()
+        # This card's, not the image side's: it is both what the start line
+        # reports and what the residency is measured against afterwards, and a
+        # reading of another card makes the second of those a subtraction of two
+        # unrelated numbers.
+        before = mc_broker.device_free_vram_bytes(card_of(configuration))
         layers = _layers_argument(placement, mc_gguf.describe(configuration.model))
         paths = mc_llm_paths.app_paths()
         paths.logs.mkdir(parents=True, exist_ok=True)
@@ -3172,6 +3217,29 @@ class Runtime:
 # Role-specific runtimes (design intent sections 9, 10 and 17)
 # --------------------------------------------------------------------------- #
 
+OPT_ROLE_PROCESSES = "model_chain_llm_role_processes"
+
+PROCESSES_SHARED = "shared"
+PROCESSES_SEPARATE = "separate"
+
+PROCESS_MODES = (
+    (PROCESSES_SHARED, "One server — identical roles share it, and its prompt cache"),
+    (PROCESSES_SEPARATE, "One each — a server per role even when they are identical"),
+)
+"""What to do when Creative and Spatial are configured *identically*.
+
+The other half of the memory question, and the half the design intent left
+optional (section 10.3). Sharing is right when the memory is tight: one process,
+one copy of the weights, one cache. It is wrong when it is not, and a user with
+a 32 GB card said so plainly -- two servers on that card both stay warm, and
+each keeps its own system prompt, so neither pass ever re-reads the other's.
+
+Section 10.2's handoff cost is the thing being bought off here. Two roles on one
+server switch system prompts, and switching system prompts re-reads a prefix
+llama.cpp had cached; two servers never do. That is the entire trade, and it is
+a memory decision, so it is the user's.
+"""
+
 OPT_ROLE_SHARING = "model_chain_llm_role_sharing"
 
 SHARE_AUTO = "auto"
@@ -3226,6 +3294,16 @@ def pool(configuration: Config) -> str:
     if mode in (CPU_MODE, MIXED_CONSERVATIVE_MODE) or not configuration.uses_cuda_compute:
         return POOL_SYSTEM_RAM
     return f"cuda:{int(configuration.gpu_index)}"
+
+
+def _process_mode() -> str:
+    return mc_broker.resolve(mc_broker.option(OPT_ROLE_PROCESSES, PROCESSES_SHARED),
+                             PROCESS_MODES, PROCESSES_SHARED)
+
+
+def separate_processes() -> bool:
+    """Whether identical roles should still get a server each."""
+    return _process_mode() == PROCESSES_SEPARATE
 
 
 def _sharing_mode() -> str:
@@ -3289,7 +3367,7 @@ class RuntimeRegistry:
     def _runtime_for(self, role: str, configuration: Config) -> Runtime:
         import mc_llm_roles
 
-        key = _identity(configuration, configuration.mmproj)
+        key = self.key_for(role, configuration)
         with self._lock:
             found = self._runtimes.get(key)
             if found is None:
@@ -3356,13 +3434,27 @@ class RuntimeRegistry:
             if not existing.roles and not _is_running(existing):
                 self._runtimes.pop(key, None)
 
+    @staticmethod
+    def key_for(role: str, configuration: Config) -> tuple:
+        """What this role's runtime is filed under.
+
+        The resolved identity, and the role beside it when the user has asked
+        for a server each. Two roles cannot be told apart by an identity that is
+        equal by definition, so the only way to give them separate processes is
+        to file them separately -- everything downstream then follows, because
+        the registry has never decided anything except by this key.
+        """
+        key = _identity(configuration, configuration.mmproj)
+        if role and separate_processes():
+            return (*key, role)
+        return key
+
     def shared(self) -> bool:
         """Whether both roles currently resolve to one server."""
         import mc_llm_roles
 
         try:
-            keys = {_identity(config(role), config(role).mmproj)
-                    for role in mc_llm_roles.ROLES}
+            keys = {self.key_for(role, config(role)) for role in mc_llm_roles.ROLES}
         except Exception:
             logger.debug("Model Chain: could not compare the role runtimes", exc_info=True)
             return True
@@ -3432,7 +3524,7 @@ class RuntimeRegistry:
         where = pool(configuration)
         if resolved_sharing(where) != SHARE_TAKE_TURNS:
             return 0
-        mine = _identity(configuration, configuration.mmproj)
+        mine = self.key_for(chosen, configuration)
         freed = 0
         for other in self.all():
             if other is self._runtimes.get(mine) or not other.running():
