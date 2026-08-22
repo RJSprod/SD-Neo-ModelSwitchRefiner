@@ -2214,6 +2214,64 @@
     opacity: 0.5;
 }
 
+/* Themed against the panel, at id strength, on our own elements only.
+   Lobe rendered these as white boxes on a dark panel: a bare <input> inside
+   custom DOM is a surface a Gradio theme has no reason to have styled, so
+   whichever rule wins is either the user agent's (a white `field` colour) or a
+   theme rule aimed at something else. Rather than guess which, this states
+   every colour explicitly, ends the fallback chain in the panel's own colour
+   rather than a hard-coded dark, and turns the native widget off so nothing is
+   painted underneath. `#mc-krea-spatial-workspace` rather than !important:
+   an id is enough to win and still leaves a theme able to override us on
+   purpose. */
+#mc-krea-spatial-workspace input[type="text"],
+#mc-krea-spatial-workspace textarea,
+#mc-krea-spatial-workspace select {
+    appearance: none;
+    -webkit-appearance: none;
+    color: var(--input-text-color, var(--body-text-color, inherit));
+    -webkit-text-fill-color: currentColor;
+    border: 1px solid var(--input-border-color,
+                         var(--border-color-primary, currentColor));
+    border-radius: var(--radius-sm);
+    color-scheme: inherit;
+    /* Two layers, because one of them cannot be trusted. The colour is the
+       theme's input fill when there is one; the gradient over it is a tint
+       mixed out of the theme's *text* colour, which every theme sets because
+       it is the one it cannot do without. So a theme that leaves
+       --input-background-fill undefined, or defines it as nothing, gets a
+       field that is faintly lighter than a dark panel and faintly darker than
+       a light one, rather than a white box on either. */
+    background-color: var(--input-background-fill,
+                      var(--background-fill-primary, transparent));
+    background-image:
+        linear-gradient(color-mix(in srgb, var(--body-text-color) 7%, transparent),
+                        color-mix(in srgb, var(--body-text-color) 7%, transparent));
+    background-repeat: no-repeat;
+}
+
+#mc-krea-spatial-workspace input[type="text"]:focus,
+#mc-krea-spatial-workspace textarea:focus,
+#mc-krea-spatial-workspace select:focus {
+    outline: 2px solid var(--mc-accent);
+    outline-offset: -1px;
+    border-color: var(--mc-accent);
+}
+
+/* appearance: none takes the dropdown marker with it, so it is drawn back on
+   as a gradient chevron -- no pseudo-element, same reason as the handles. */
+#mc-krea-spatial-workspace select {
+    padding-right: 1.6em;
+    background-image:
+        linear-gradient(45deg, transparent 50%, currentColor 50%),
+        linear-gradient(135deg, currentColor 50%, transparent 50%),
+        linear-gradient(color-mix(in srgb, var(--body-text-color) 7%, transparent),
+                        color-mix(in srgb, var(--body-text-color) 7%, transparent));
+    background-size: 5px 5px, 5px 5px, auto;
+    background-position: right 0.85em top 55%, right 0.6em top 55%, center;
+    background-repeat: no-repeat, no-repeat, no-repeat;
+}
+
 /* §11: the prompt gets the vertical space, because it is the field that is
    actually written in. */
 .mc-krea-spatial-field textarea {
@@ -2231,15 +2289,6 @@
     flex: 1 1 9em;
 }
 
-/* §8.3: four numbers, in normalized 0-1000 units. Optional for casual use and
-   the only way to place a box exactly -- or to place one at all with a
-   keyboard and no pointer. */
-.mc-krea-spatial-numbers {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 0.4em;
-}
-
 .mc-krea-spatial-check {
     display: flex;
     align-items: center;
@@ -2250,21 +2299,6 @@
 .mc-krea-spatial-check input {
     width: 1.1em;
     height: 1.1em;
-}
-
-/* The one place a coordinate is shown as a coordinate, in a monospaced font for
-   the same reason the recipe view is: two boxes are compared by reading four
-   numbers against four numbers. */
-.mc-krea-spatial-readout {
-    display: flex;
-    justify-content: space-between;
-    gap: 0.5em;
-    font-size: var(--text-sm);
-    color: var(--body-text-color-subdued);
-}
-
-.mc-krea-spatial-readout code {
-    font-family: var(--font-mono, ui-monospace, monospace);
 }
 
 /* §11: the destructive controls live together, at the bottom, away from
@@ -2358,6 +2392,37 @@
         animation: none !important;
         scroll-behavior: auto !important;
     }
+}
+
+/* Full screen, both ways of getting there. Written as two rules and not one
+   selector list: a browser that does not know :fullscreen would throw away a
+   list containing it, and the .fullpage fallback is exactly the case where
+   that browser needs the rule. */
+.mc-krea-spatial-workspace.fullpage {
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    margin: 0;
+    max-width: none;
+    max-height: none;
+    overflow: auto;
+    border: none;
+    border-radius: 0;
+    padding: 0.8em;
+    background: var(--background-fill-primary);
+    --mc-frame-h: clamp(320px, 78vh, 1600px);
+}
+
+.mc-krea-spatial-workspace:fullscreen {
+    margin: 0;
+    max-width: none;
+    max-height: none;
+    overflow: auto;
+    border: none;
+    border-radius: 0;
+    padding: 0.8em;
+    background: var(--background-fill-primary);
+    --mc-frame-h: clamp(320px, 78vh, 1600px);
 }
 
 /* Undo and Redo are one control in two halves. Left to the toolbar's own

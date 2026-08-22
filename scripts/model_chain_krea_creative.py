@@ -432,6 +432,8 @@ def spatial_editor() -> str:
     <span class="{SPATIAL_PREFIX}-title">Spatial Layout</span>
     <span id="{_spatial_id("size")}" class="{SPATIAL_PREFIX}-dims"></span>
     <span class="{SPATIAL_PREFIX}-spacer"></span>
+    <button type="button" id="{_spatial_id("full")}"
+            class="{SPATIAL_PREFIX}-tool" aria-pressed="false">Full screen</button>
     <button type="button" id="{_spatial_id("save")}"
             class="{SPATIAL_PREFIX}-tool {SPATIAL_PREFIX}-primary">Save &amp; Return</button>
   </div>
@@ -485,10 +487,10 @@ def spatial_editor() -> str:
         <label class="{SPATIAL_PREFIX}-inline">
           <span>Grid</span>
           <select id="{_spatial_id("grid")}">
+            <option value="none" selected>None</option>
             <option value="thirds">Thirds</option>
             <option value="center">Centre</option>
             <option value="both">Thirds + centre</option>
-            <option value="none">None</option>
           </select>
         </label>
         <span class="{SPATIAL_PREFIX}-zoom" role="group" aria-label="Zoom">
@@ -570,33 +572,6 @@ def spatial_editor() -> str:
             <span>Camera angle</span>
             <select id="{_spatial_id("angle")}">{_options(spatial.ANGLES, "Automatic")}</select>
           </label>
-        </div>
-
-        <div class="{SPATIAL_PREFIX}-numbers">
-          <label class="{SPATIAL_PREFIX}-field">
-            <span>X</span>
-            <input type="number" id="{_spatial_id("x")}" min="0" max="{spatial.SCALE}"
-                   step="1" inputmode="numeric" />
-          </label>
-          <label class="{SPATIAL_PREFIX}-field">
-            <span>Y</span>
-            <input type="number" id="{_spatial_id("y")}" min="0" max="{spatial.SCALE}"
-                   step="1" inputmode="numeric" />
-          </label>
-          <label class="{SPATIAL_PREFIX}-field">
-            <span>W</span>
-            <input type="number" id="{_spatial_id("w")}" min="0" max="{spatial.SCALE}"
-                   step="1" inputmode="numeric" />
-          </label>
-          <label class="{SPATIAL_PREFIX}-field">
-            <span>H</span>
-            <input type="number" id="{_spatial_id("h")}" min="0" max="{spatial.SCALE}"
-                   step="1" inputmode="numeric" />
-          </label>
-        </div>
-        <div class="{SPATIAL_PREFIX}-readout">
-          <span>Box (0–{spatial.SCALE})</span>
-          <code id="{_spatial_id("bbox")}">—</code>
         </div>
 
         <div class="{SPATIAL_PREFIX}-destructive">

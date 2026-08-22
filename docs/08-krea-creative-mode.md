@@ -1482,18 +1482,34 @@ and does not survive leaving the editor, which is asserted rather than assumed.
 Added: `+ Add region` (a centred default box, so a touch user does not have to
 perform a precision drag to get one at all), Clear All, Undo/Redo, To front and
 To back beside the existing Forward and Back, eight resize handles instead of
-four, numeric X/Y/W/H in normalized units, per-row delete, a grid selector
-writing `canvas.grid`, Fit/−/+ zoom, a dimension label reading
-`1024 × 1536 · 2:3 · Portrait`, an in-page discard-or-keep prompt on Back, and
-arrow-key nudging.
+four, per-row delete, a grid selector writing `canvas.grid`, Fit/−/+ zoom, a
+dimension label reading `1024 × 1536 · 2:3 · Portrait`, Full screen (§15.9), an
+in-page discard-or-keep prompt on Back, and arrow-key nudging.
 
 Kept, every one of them: Name, Type, Visible text, Region prompt, Framing, Camera
-angle, the auto-position-hint checkbox, the normalized box readout, Duplicate,
-Delete, Forward, Back, Draw region, Save, Cancel, the 24-region cap, the
-frame-reshape notice, and the refusal to open a document this build cannot read.
+angle, the auto-position-hint checkbox, Duplicate, Delete, Forward, Back, Draw
+region, Save, Cancel, the 24-region cap, the frame-reshape notice, and the
+refusal to open a document this build cannot read.
 `test_every_control_the_editor_had_is_still_there` names them, because a refactor
 that quietly dropped Framing would pass every behavioural test by never
 exercising it.
+
+Removed on purpose: the numeric X/Y/W/H fields and the `Box (0–1000)` readout
+that §8.3 asks for. They were built and then taken out, which is worth recording
+rather than quietly reverting. The editor is pointer-first — finger, mouse, pen —
+and a normalized coordinate is an implementation detail of the storage format
+rather than something anybody composes in. Four number boxes and a coordinate
+readout invited people to think in a unit the picture does not have, and they
+were the two widest things in a sidebar whose job is the prompt.
+`test_the_editor_offers_no_coordinates_anywhere` checks the markup rather than
+the behaviour, because the failure mode is a control coming back, not a control
+misbehaving. Boxes are still clamped, ordered and validated exactly as before;
+what is gone is the way of typing one.
+
+The auto-position-hint checkbox stays, and is not a coordinate control despite
+sounding like one: it decides whether the *compositor* adds "in the upper left,
+occupying a small area" to a region's prompt. That is model-facing behaviour
+(§14.5), not a number on screen.
 
 Two things the design intent asks for that are not built as asked. §4.4's *Reset
 all regions* is Clear All — a second button doing the same thing to the same
@@ -1521,3 +1537,69 @@ frame), D (Clear All then Undo), E (delete with no canvas hit-testing), F (three
 aspect ratios), G (a v1 layout opening and saving unchanged) and I (the workspace
 is not a modal and is not on `document.body`) are all executed rather than
 asserted.
+
+### 15.9 Full screen, and why two mechanisms
+
+The frame is the object being worked on and the txt2img column is not where it
+wants to live. Full screen gives the whole display to the editor; Back and Save
+& Return still come back to txt2img, and leaving the editor leaves full screen
+with it — a txt2img tab still filling the screen with a hidden editor would be a
+tab nobody could use.
+
+The Fullscreen API is asked first. It is the only mechanism nothing can clip,
+overlap or out-stack: the element is promoted out of the page's layout entirely,
+so no theme's `overflow: hidden`, `transform` or z-index is in the argument. It
+also takes the browser's own chrome away, which on a tablet is most of the screen
+being asked for. A page that refuses it — an iframe without `allowfullscreen`, a
+browser that does not offer it, a user who said no — falls back to a fixed block
+over the page.
+
+That fallback is the thing §3.1 told this editor not to be, and it is right here
+for the reason the modal was not: it is somewhere the user asked to go and can
+leave by a visible button, rather than the only way to edit at all. The two are
+styled by separate rules and not one selector list, because a browser that does
+not understand `:fullscreen` would throw away a list containing it — and that is
+exactly the browser the fallback exists for.
+
+Both raise `--mc-frame-h` to `clamp(320px, 78vh, 1600px)`, and the container
+query does the rest: a workspace that was 600 px wide in the txt2img column is
+1400 px wide in full screen, so it crosses the 880 px breakpoint and lays itself
+out as frame-plus-sidebar without being told to.
+
+While the API is in charge the browser owns Escape, so the editor is told about
+the exit rather than hearing the key: `fullscreenchange` on the document, which
+is the second and last of this file's document-level listeners.
+
+### 15.10 The grid is off until somebody wants it
+
+`canvas.grid` defaults to `none` for a new layout and for any document that does
+not name one. The old editor hardcoded thirds and drew both the thirds lines and
+a centre cross with no way to turn either off, so a stored `"thirds"` in a
+version-1 document is an artefact of that rather than a preference — but it is
+indistinguishable from a preference, so it is honoured. Open an old layout, pick
+None, save, and it stays None.
+
+Guides are an aid for placing a subject, not a default state: a frame with lines
+across it is a frame you compose *around* rather than in.
+
+### 15.11 Inputs a theme never styled
+
+Lobe rendered the workspace's `<input>` elements as white boxes on a dark panel
+while its `<select>` and `<textarea>` came out correctly. A bare input inside
+custom DOM is a surface a Gradio theme has no reason to have styled, so whichever
+rule wins is either the user agent's — `background-color: field`, which is white
+under a light `color-scheme` — or a theme rule aimed at something else entirely.
+
+Rather than work out which, the rule states every colour explicitly at
+`#mc-krea-spatial-workspace` strength (an id is enough to win, and still leaves a
+theme able to override on purpose), turns the native widget off with
+`appearance: none` so nothing is painted underneath, and paints the field in two
+layers. The colour is the theme's `--input-background-fill` when there is one;
+the gradient over it is a tint mixed from `--body-text-color`, which every theme
+sets because it is the one variable it cannot do without. A theme that leaves the
+input fill undefined — or defines it as empty, which is worse, because then the
+`var()` fallback does not fire — gets a field faintly lighter than a dark panel
+and faintly darker than a light one, and never a white box on either.
+
+`appearance: none` takes the dropdown marker with it, so the chevron is drawn
+back on as two gradient triangles. Not a `::before`: see §15.4.
