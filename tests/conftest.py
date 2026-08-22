@@ -718,6 +718,30 @@ def active_plan(tmp_path, monkeypatch):
     mc_plan.forget_weights()
 
 
+@pytest.fixture(autouse=True)
+def _forget_runtime_roles():
+    """An empty runtime registry, and a shared runtime nobody has claimed.
+
+    Both are module state, and the registry writes to the *shared* runtime: it
+    adopts it for a role whose configuration matches the installation's, which
+    leaves that role recorded on an object every other test also uses. A test
+    that then patched ``config`` with a no-argument double got it called with a
+    role name, from a binding a completely different test had left behind.
+    """
+    import mc_llm_runtime
+
+    def clean():
+        mc_llm_runtime.registry.forget()
+        mc_llm_runtime.runtime.roles = ()
+        mc_llm_runtime.runtime._role = ""
+        mc_llm_runtime.runtime._key = None
+        mc_llm_runtime.runtime.residency_key = mc_llm_runtime.RESIDENCY_KEY
+
+    clean()
+    yield
+    clean()
+
+
 @pytest.fixture
 def host():
     """The faked host modules, reset between tests.
