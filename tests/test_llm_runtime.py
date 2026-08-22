@@ -72,7 +72,8 @@ def set_free(monkeypatch, gigabytes):
     one of them would be describing a machine that does not exist.
     """
     monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: int(gigabytes * _GB))
-    monkeypatch.setattr(mc_broker, "device_free_vram_bytes", lambda: int(gigabytes * _GB))
+    monkeypatch.setattr(mc_broker, "device_free_vram_bytes",
+                        lambda index=None: int(gigabytes * _GB))
 
 
 class Recorder:
@@ -997,7 +998,8 @@ class TestMovingTheExpertsRatherThanTheBlocks:
 
         def run(header, free_gb):
             monkeypatch.setattr(runtime, "_free_vram",
-                                lambda ours=0, gigabytes=free_gb: int(gigabytes * 1024 ** 3))
+                                lambda ours=0, card=None, gigabytes=free_gb:
+                                    int(gigabytes * 1024 ** 3))
             placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, context=8192)
             return runtime._shrink_offload(configuration, placement, header, 0)
 
@@ -1159,7 +1161,8 @@ class TestProgressiveExpertOffload:
             monkeypatch.setattr(runtime, "runtime_supports",
                                 lambda flag, config=None, offered=flags: flag in offered)
             monkeypatch.setattr(runtime, "_free_vram",
-                                lambda ours=0, gigabytes=free_gb: int(gigabytes * 1024 ** 3))
+                                lambda ours=0, card=None, gigabytes=free_gb:
+                                    int(gigabytes * 1024 ** 3))
             placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, context=8192)
             return runtime._shrink_offload(configuration, placement, header, 0, 0, floor)
 
@@ -1799,7 +1802,7 @@ class TestPlacingAgainstWhatTheDriverHas:
         configuration = configure(monkeypatch, tmp_path, size_mb=64, blocks=30)
         # Twenty free by the host's accounting, four of them really on offer.
         monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: 20 * _GB)
-        monkeypatch.setattr(mc_broker, "device_free_vram_bytes", lambda: 0.2 * _GB)
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes", lambda index=None: 0.2 * _GB)
 
         negotiated = runtime.negotiate(configuration)
 
@@ -2534,7 +2537,7 @@ class TestAZeroResidencyIsNotBelievedStraightAway:
     def card(self, monkeypatch, readings):
         seen = iter(readings)
         monkeypatch.setattr(mc_broker, "device_free_vram_bytes",
-                            lambda: next(seen, readings[-1]))
+                            lambda index=None: next(seen, readings[-1]))
 
     def test_a_reading_that_settles_late_is_waited_for(self, placed, monkeypatch):
         self.card(monkeypatch, [20 * _GB, 20 * _GB, 6 * _GB])

@@ -86,7 +86,8 @@ def set_free(monkeypatch, gigabytes):
     be describing a machine that does not exist.
     """
     monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: int(gigabytes * _GB))
-    monkeypatch.setattr(mc_broker, "device_free_vram_bytes", lambda: int(gigabytes * _GB))
+    monkeypatch.setattr(mc_broker, "device_free_vram_bytes",
+                        lambda index=None: int(gigabytes * _GB))
 
 
 class TestFitFirst:
@@ -143,7 +144,7 @@ class TestWhatTheNoteSays:
         host.shared.opts.set(broker.OPT_MODE, broker.MODE_EXCLUSIVE)
         card = [4 * _GB]
         monkeypatch.setattr(broker, "free_vram_bytes", lambda: card[0])
-        monkeypatch.setattr(broker, "device_free_vram_bytes", lambda: card[0])
+        monkeypatch.setattr(broker, "device_free_vram_bytes", lambda index=None: card[0])
 
         class Mover(Recorder):
             def release(self, needed_bytes, reason=""):
