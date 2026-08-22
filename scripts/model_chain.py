@@ -28,6 +28,8 @@ import mc_llm_state
 import mc_llm_studio
 import mc_lora
 import mc_memory
+import mc_plan
+import mc_plan_panel
 import mc_presets
 import mc_progress
 import mc_references
@@ -327,6 +329,36 @@ shared.options_templates.update(
                 "byte. Keeping it costs the generation nothing measurable and saves a "
                 "model load — which on a slow placement is twenty seconds before the "
                 "first word of the next prompt"
+            ),
+            mc_plan.OPT_CAP_MODE: shared.OptionInfo(
+                mc_plan.CAP_AUTO,
+                "Persistent LLM VRAM",
+                gr.Radio,
+                {"choices": [label for _, label in mc_plan.CAP_MODES]},
+            ).info(
+                "Auto sizes llama-server from what the generation's own plan leaves over — "
+                "the largest single phase of it, not the sum of the phases, because Stage 1 "
+                "and Stage 2 take over one another's VRAM rather than sharing the card. "
+                "Custom puts a lower ceiling on that, which buys image headroom back at the "
+                "cost of LLM tokens per second. Off keeps no persistent residency at all"
+            ),
+            mc_plan.OPT_CAP_GB: shared.OptionInfo(
+                0.0,
+                "Custom persistent LLM cap (GB)",
+                gr.Number,
+            ).info(
+                "only read when the setting above is Custom. A figure above the calculated "
+                "allowance does not raise it — this control is a way to be more "
+                "conservative than the arithmetic, never less"
+            ),
+            mc_plan.OPT_SAFETY_GB: shared.OptionInfo(
+                0.0,
+                "Extra image safety headroom (GB)",
+                gr.Number,
+            ).info(
+                "added on top of the automatic reserve when the plan's budget is worked "
+                "out, and therefore taken off what the LLM may hold. Raise it if a "
+                "generation has ever had to evict llama-server to finish"
             ),
             mc_llm_runtime.OPT_RELEASE: shared.OptionInfo(
                 mc_llm_runtime.RELEASE_STOP,
@@ -1070,6 +1102,19 @@ class ScriptModelChain(scripts.Script):
                         elem_id=self.elem_id("fixed_seed"),
                     )
 
+        # -- the memory contract ------------------------------------------- #
+        #
+        # Outside the Model Chain accordion, and deliberately. What it describes
+        # is the memory policy for *this generation*, which exists whether or
+        # not Stage 2 is armed: a plain Stage 1 press has a plan, a peak and a
+        # persistent LLM allowance just as a long chain does, and a section that
+        # only appeared alongside Stage 2 would suggest the policy did too.
+        try:
+            mc_plan_panel.build(self.elem_id)
+        except Exception:
+            errors.report("Model Chain: failed to build the generation memory section",
+                          exc_info=True)
+
         # -- wiring -------------------------------------------------------- #
 
         def on_prompt_mode(mode):
@@ -1558,6 +1603,18 @@ class ScriptModelChain(scripts.Script):
         joined = entered
         prepared = entered
         freed = 0
+
+        # Before anything is waited for or freed, because everything below is
+        # sized against it. Published from here as well as from Creative Mode
+        # so that a generation with no writer in it still has a plan: the panel
+        # needs one to show, and a llama-server left running by LLM Studio needs
+        # one to stay stable inside. Both scripts build it from ``p``, so the
+        # answer does not depend on which of the two the host runs first.
+        try:
+            mc_plan.publish(mc_plan.build_for(p))
+        except Exception:
+            errors.report("Model Chain: could not build this generation's plan",
+                          exc_info=True)
 
         # An LLM turn already in flight gets to finish before this generation
         # touches the card (section 15). This waits; it does not take a lock,

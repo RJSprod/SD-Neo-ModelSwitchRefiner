@@ -78,6 +78,7 @@ import mc_creative_panel
 import mc_infotext
 import mc_llm_sessions as sessions
 import mc_memory
+import mc_plan
 import mc_spatial
 from modules import errors, scripts
 
@@ -1067,6 +1068,7 @@ class ScriptKreaCreative(scripts.Script):
         self._spatial_note = ""
         settings = _settings_for(args)
         layout = self._layout(p, args)
+        self._publish_plan(p, layout)
 
         # Both passes, inside one declaration and under one re-entrancy flag.
         #
@@ -1099,6 +1101,38 @@ class ScriptKreaCreative(scripts.Script):
                     "%s-character source at creativity %s, creative seed %s",
                     f"{len(written.generation):,}", f"{len(written.roll.source):,}",
                     written.roll.creativity, written.roll.creative_seed)
+
+    def _publish_plan(self, p, layout) -> None:
+        """Work out what this generation will actually do, before any of it happens.
+
+        This is the whole point of running here. ``before_process`` is earlier
+        than the checkpoint load and much earlier than Stage 2, which is
+        precisely why the language model used to be sized so badly: it is
+        placed against a card that nothing has taken yet, and everything that
+        *will* take it is still in the future.
+
+        Building the plan first turns that future into a number. The writer is
+        then placed in what the largest phase of the generation does not need,
+        and it keeps that placement through Stage 1, the handoff, Stage 2 and
+        the warm-up -- because none of those is a plan boundary and none of
+        them re-opens the question.
+
+        Failure here is never a refused generation. A plan that cannot be built
+        is simply not published, and every path falls back to the behaviour it
+        had before plans existed.
+        """
+        from prompt_master.krea import spatial as spatial_module
+
+        try:
+            compose = ""
+            if getattr(layout, "regions", ()):
+                compose = (spatial_module.SMART
+                           if layout.compose_mode == spatial_module.SMART
+                           else spatial_module.DIRECT)
+            mc_plan.publish(mc_plan.build_for(p, creative=True, spatial_compose=compose))
+        except Exception:
+            logger.debug("Model Chain: could not build this generation's plan",
+                         exc_info=True)
 
     def postprocess(self, p, processed, *args):
         """Say on the result when Creative Mode did not write the prompt.
@@ -1199,6 +1233,19 @@ class ScriptKreaCreative(scripts.Script):
                                            getattr(p, "height", 0)),
                 seed=mc_spatial.composer_seed(rolled.creative_seed),
                 reserve=mc_creative_krea.image_reserve_bytes())
+            # The last LLM phase of this plan has now finished, so this is where
+            # the card goes back to the image side. The roll deliberately did
+            # not do it: between the writer and the Composer the only way to
+            # free image VRAM is to stop the server the Composer was about to
+            # use, which buys nothing and costs a GGUF load mid-generation.
+            #
+            # Run whether or not the Composer succeeded. A Composer that failed
+            # still leaves the same card behind it, and the image pass that
+            # follows needs the same room either way.
+            freed = mc_creative_krea.hand_back_vram()
+            if freed:
+                logger.info("Model Chain: freed %.1f GB for the image generation that "
+                            "follows the Spatial Composer", freed / (1024 ** 3))
             if composed.ran:
                 scene, background = composed.scene, composed.background
             else:

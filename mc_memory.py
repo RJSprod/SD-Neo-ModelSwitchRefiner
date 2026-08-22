@@ -2250,9 +2250,18 @@ def make_vram_room(target_name: str, modules=None, width: int = 0, height: int =
         # image model to RAM is cheap and keeps it warm, and ending a
         # llama-server process is neither, so it is the second answer and not
         # the first (sections 8 and 9).
-        foreign = _reclaim_foreign(needed - after, f"the {stage} pass")
+        #
+        # Reaching here at all is a reserve miss. The plan said this phase would
+        # fit inside the protected image budget and it did not, so it is filed
+        # as such before anything is taken -- emergency eviction is recovery,
+        # not scheduling, and a recovery nobody is told about is indistinguishable
+        # from the policy working.
+        shortfall = needed - after
+        held = _llm_residency_bytes()
+        foreign = _reclaim_foreign(shortfall, f"the {stage} pass")
         if foreign:
             after = free_vram_bytes()
+        _record_reserve_miss(stage, shortfall, held, evicted=bool(foreign))
 
     freed = max(after - free, 0)
     names = [type(getattr(m, "model", m)).__name__ for m in (evicted or [])]
@@ -2328,6 +2337,36 @@ technically respected and practically gone, and the next thing to allocate would
 push the driver into system memory. Speculative work should only happen when
 there is room to be wrong about it.
 """
+
+
+def _llm_residency_bytes() -> int:
+    """What the language model is holding on the card right now, or 0.
+
+    Asked before the eviction rather than after it, because after it the answer
+    is zero for every miss and the panel could not tell a model that gave up
+    five gigabytes from one that was never on the card.
+    """
+    try:
+        import mc_broker
+
+        return max(int(mc_broker.reported_bytes(mc_broker.FAMILY_LLM)), 0)
+    except Exception:
+        return 0
+
+
+def _record_reserve_miss(stage: str, shortfall: int, llm_bytes: int,
+                         evicted: bool = False) -> None:
+    """File the miss with the plan, so the panel can show it and Auto can learn.
+
+    Never raises. A generation that is already short of VRAM must not also fail
+    because the bookkeeping did.
+    """
+    try:
+        import mc_plan
+
+        mc_plan.record_miss(stage, shortfall, llm_bytes=llm_bytes, evicted=evicted)
+    except Exception:
+        logger.debug("Model Chain: could not record the reserve miss", exc_info=True)
 
 
 def capture_stage_2_components() -> int:
