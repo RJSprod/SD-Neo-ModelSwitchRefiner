@@ -57,13 +57,76 @@ from dataclasses import dataclass, field
 import mc_lora
 
 
+LOG_TIME_FORMAT = "%H:%M:%S"
+"""Wall clock, to the millisecond -- see :class:`_Timestamped`."""
+
+
+class _Timestamped(logging.Filter):
+    """Stamps the time of day into every line this extension writes.
+
+    The host's console handler prints the message, the module and the level and
+    no clock at all, which is fine for a line that says what happened and
+    useless for a line that says how long something took. Half of what this
+    extension logs is the second kind: a plan and the budget it implies, a
+    placement and the reason for it, a phase peak against the reserve that was
+    meant to cover it. Reading those in order tells you what the extension
+    decided; reading them against a clock tells you what it cost, and lets a
+    console log be lined up with llama-server's own log, with a profiler, or
+    with what Task Manager was showing at the time.
+
+    Done here rather than at the two hundred and eighty-odd call sites, and
+    done on the *formatted* message rather than the format string, because one
+    of those call sites passes its whole sentence through ``%s`` -- so a filter
+    that only rewrote ``record.msg`` would leave exactly one line unstamped,
+    which is the sort of gap somebody eventually spends an afternoon on.
+
+    Formatting the message here costs the laziness ``logging`` normally offers,
+    and costs it only on records that are actually being emitted: a filter runs
+    after the level check, so a suppressed ``debug`` call still never builds its
+    string.
+
+    The prefix is kept inside the extension's own name rather than in front of
+    it -- ``Model Chain [10:14:07.912]: ...`` -- so that a log somebody greps
+    for ``Model Chain:`` still finds every line it used to.
+    """
+
+    PREFIX = "Model Chain"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            when = time.strftime(LOG_TIME_FORMAT, time.localtime(record.created))
+            when = f"{when}.{int(record.msecs):03d}"
+            message = record.getMessage()
+            if message.startswith(f"{self.PREFIX}: "):
+                message = (f"{self.PREFIX} [{when}]: "
+                           f"{message[len(self.PREFIX) + 2:]}")
+            else:
+                # A line from somewhere that does not use the house prefix. It
+                # still gets a clock, because a log with a hole in it is worse
+                # than one with an odd-looking line in it.
+                message = f"[{when}] {message}"
+            record.msg = message
+            record.args = ()
+        except Exception:
+            # A logger that raises while logging takes the caller with it, and
+            # the caller is usually in the middle of a generation. An unstamped
+            # line is a complete answer to that.
+            pass
+        return True
+
+
 def _make_logger() -> logging.Logger:
-    """Console logger using the host's Rich formatting.
+    """Console logger using the host's Rich formatting, with a clock on it.
 
     ``logging.getLogger`` alone yields a logger with no handler, so every
     diagnostic this extension emits would be swallowed -- including the cache
     decisions that explain why a switch was slow. ``setup_logger`` attaches the
     same handler the host's own modules use.
+
+    The filter goes on the *logger*, not on a handler, which is what makes one
+    call here cover every module: they all reach this same object through
+    ``logging.getLogger("model_chain")``, which is why each of them carries the
+    note that the handler is attached once, here.
     """
     log = logging.getLogger("model_chain")
     try:
@@ -72,6 +135,8 @@ def _make_logger() -> logging.Logger:
         setup_logger(log)
     except Exception:
         log.setLevel(logging.INFO)
+    if not any(isinstance(existing, _Timestamped) for existing in log.filters):
+        log.addFilter(_Timestamped())
     return log
 
 

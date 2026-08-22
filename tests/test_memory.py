@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import types
 
@@ -1091,3 +1092,95 @@ class TestDriverFreeVram:
         monkeypatch.setattr(memory_management, "get_torch_device", lambda: "cuda")
 
         assert mc_memory.device_free_vram_bytes() == 11 * GB
+
+
+# --------------------------------------------------------------------------- #
+# The console clock
+# --------------------------------------------------------------------------- #
+
+
+class TestEveryLineCarriesTheTime:
+    """Half of what this extension logs is a number that only means something
+    against a clock: a plan and the budget it implies, a placement and the
+    reason for it, a phase peak against the reserve meant to cover it. The
+    host's handler prints the message, the module and the level, and no time at
+    all.
+    """
+
+    def stamp(self, message, *args, level=logging.INFO):
+        record = logging.LogRecord("model_chain", level, __file__, 1, message, args, None)
+        assert mc_memory._Timestamped().filter(record) is True
+        return record.getMessage()
+
+    def test_a_house_line_gets_the_clock_inside_its_own_name(self):
+        stamped = self.stamp("Model Chain: Stage 1 is warm")
+
+        assert re.fullmatch(r"Model Chain \[\d\d:\d\d:\d\d\.\d\d\d\]: Stage 1 is warm",
+                            stamped), stamped
+
+    def test_it_stays_greppable(self):
+        """Somebody with a shell history full of ``grep 'Model Chain:'`` should
+        not have to notice this change at all."""
+        assert "Model Chain:" not in self.stamp("Model Chain: Stage 1 is warm")
+        assert self.stamp("Model Chain: Stage 1 is warm").startswith("Model Chain [")
+
+    def test_the_arguments_are_still_substituted(self):
+        stamped = self.stamp("Model Chain: llama-server ready — %d layers, %.1f GB", 14, 1.4)
+
+        assert stamped.endswith("llama-server ready — 14 layers, 1.4 GB")
+
+    def test_a_whole_sentence_passed_through_a_placeholder_is_stamped_too(self):
+        """The one call site that does this. A filter that only rewrote the
+        format string would leave exactly one line unstamped."""
+        stamped = self.stamp("%s", "Model Chain: Stage 1 will load from disk")
+
+        assert stamped.startswith("Model Chain [")
+        assert stamped.endswith(": Stage 1 will load from disk")
+
+    def test_a_line_without_the_house_prefix_still_gets_a_clock(self):
+        """A log with a hole in it is worse than one with an odd-looking line."""
+        stamped = self.stamp("something else entirely")
+
+        assert re.fullmatch(r"\[\d\d:\d\d:\d\d\.\d\d\d\] something else entirely", stamped)
+
+    def test_the_milliseconds_are_always_three_digits(self):
+        """So the column lines up and a sort by time is a sort by string."""
+        record = logging.LogRecord("model_chain", logging.INFO, __file__, 1,
+                                   "Model Chain: x", (), None)
+        record.msecs = 7.0
+        mc_memory._Timestamped().filter(record)
+
+        assert ".007]" in record.getMessage()
+
+    def test_a_message_that_cannot_be_formatted_is_still_logged(self):
+        """A logger that raises while logging takes the caller with it, and the
+        caller is usually in the middle of a generation."""
+        record = logging.LogRecord("model_chain", logging.INFO, __file__, 1,
+                                   "Model Chain: %d", ("not a number",), None)
+
+        assert mc_memory._Timestamped().filter(record) is True
+
+    def test_the_filter_is_attached_to_the_logger(self, host):
+        assert any(isinstance(f, mc_memory._Timestamped)
+                   for f in logging.getLogger("model_chain").filters)
+
+    def test_it_is_not_attached_twice(self, host):
+        before = sum(isinstance(f, mc_memory._Timestamped)
+                     for f in logging.getLogger("model_chain").filters)
+
+        mc_memory._make_logger()
+
+        after = sum(isinstance(f, mc_memory._Timestamped)
+                    for f in logging.getLogger("model_chain").filters)
+        assert before == after == 1
+
+    def test_it_reaches_a_module_that_only_asked_for_the_logger(self, caplog):
+        """Every module reaches the same logger object through
+        ``getLogger("model_chain")``, which is what makes one call cover all of
+        them."""
+        import mc_broker
+
+        with caplog.at_level(logging.INFO, logger="model_chain"):
+            mc_broker.logger.info("Model Chain: a broker line")
+
+        assert any(r.getMessage().startswith("Model Chain [") for r in caplog.records)
