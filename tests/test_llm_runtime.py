@@ -39,6 +39,9 @@ def placed(host, tmp_path, monkeypatch):
     # waiting for a port nothing is listening on. Its own tests call the body
     # directly; everything else here is about placement.
     monkeypatch.setattr(runtime, "_prime_prompt_cache", lambda client: None)
+    # The card is a constant in these tests, so the settle loop that waits for a
+    # real driver to catch up can only ever wait. Its own tests set it back.
+    monkeypatch.setattr(runtime, "RESIDENCY_SETTLE_SECONDS", 0.0)
     yield
     mc_broker.clear()
     ctx.forget()
@@ -2248,3 +2251,111 @@ class TestAServerGivesBackWhatThePlanNoLongerAllows:
         set_free(monkeypatch, 8)
 
         assert not self.server(layers=6)._outgrown(configuration, 2 * _GB)
+
+
+class TestARestartHasToBeWorthTheCacheItThrowsAway:
+    """``CONTEXT_UPGRADE_FRACTION`` had this rule and the layer comparison did not.
+
+    From a user's console with the clock on it: a second generation of an
+    identical request stopped a server holding no layers and started one holding
+    two of thirty. It took 9.9 seconds. llama.cpp's timings either side were
+    61.5 tok/s on prompts before and 62.1 after, 12.71 generating before and
+    12.46 after — inside the noise, and slightly worse on the half that matters.
+
+    The restart also emptied the prompt cache, so the writer's 523-token prompt
+    was read from scratch for the second time in a minute, at a further 8.4
+    seconds. Eighteen of the fifty-three seconds that "warm" generation spent on
+    the language model went on undoing its own warmth.
+    """
+
+    def test_two_of_thirty_layers_is_not_worth_it(self):
+        """The exact case from the log."""
+        assert not runtime._worth_restarting(ctx.Placement(gpu_layers=ctx.NO_LAYERS),
+                                             ctx.Placement(gpu_layers=2), 30)
+
+    def test_a_quarter_of_the_model_is(self):
+        assert runtime._worth_restarting(ctx.Placement(gpu_layers=ctx.NO_LAYERS),
+                                         ctx.Placement(gpu_layers=8), 30)
+
+    def test_the_whole_model_certainly_is(self):
+        assert runtime._worth_restarting(ctx.Placement(gpu_layers=ctx.NO_LAYERS),
+                                         ctx.Placement(gpu_layers=ctx.ALL_LAYERS), 30)
+
+    def test_a_quarter_of_a_small_model_is_still_too_few_blocks(self):
+        """Two of eight really is a quarter, and two blocks are not worth ten
+        seconds of anybody's time."""
+        assert not runtime._worth_restarting(ctx.Placement(gpu_layers=ctx.NO_LAYERS),
+                                             ctx.Placement(gpu_layers=2), 8)
+
+    def test_an_unknown_block_count_uses_the_floor(self):
+        assert not runtime._worth_restarting(ctx.Placement(gpu_layers=2),
+                                             ctx.Placement(gpu_layers=4), 0)
+        assert runtime._worth_restarting(ctx.Placement(gpu_layers=2),
+                                         ctx.Placement(gpu_layers=8), 0)
+
+    def test_fewer_layers_is_still_never_worth_it(self):
+        """The downward direction has its own route -- ``_overspending`` -- and
+        it is about correctness rather than speed."""
+        assert not runtime._worth_restarting(ctx.Placement(gpu_layers=ctx.ALL_LAYERS),
+                                             ctx.Placement(gpu_layers=2), 30)
+
+    def test_the_threshold_scales_with_the_model(self):
+        assert runtime._worthwhile_layer_gain(80) == 20
+        assert runtime._worthwhile_layer_gain(30) == 7
+        assert runtime._worthwhile_layer_gain(8) == runtime.MINIMUM_LAYER_GAIN
+
+
+class TestAZeroResidencyIsNotBelievedStraightAway:
+    """It came back zero for a placement llama.cpp was running at 108 tok/s.
+
+    The health endpoint answers as soon as the server will take a request, and
+    the driver's free figure is not obliged to have caught up. A zero there is
+    printed on the ready line as "0.0 GB VRAM" about a model holding fourteen,
+    and it is the figure every later question about that server's allowance
+    starts from.
+    """
+
+    def card(self, monkeypatch, readings):
+        seen = iter(readings)
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes",
+                            lambda: next(seen, readings[-1]))
+
+    def test_a_reading_that_settles_late_is_waited_for(self, placed, monkeypatch):
+        self.card(monkeypatch, [20 * _GB, 20 * _GB, 6 * _GB])
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
+
+        assert runtime.Runtime()._observed_residency(20 * _GB, placement) == 14 * _GB
+
+    def test_a_reading_that_is_right_first_time_is_not_waited_for(self, placed,
+                                                                 monkeypatch):
+        self.card(monkeypatch, [6 * _GB])
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
+
+        assert runtime.Runtime()._observed_residency(20 * _GB, placement) == 14 * _GB
+
+    def test_a_placement_with_nothing_on_the_card_reports_zero_at_once(
+            self, placed, monkeypatch):
+        """Zero is the right answer there, and waiting for it would be a second
+        spent proving something already known."""
+        waited = []
+        monkeypatch.setattr(runtime.time, "sleep", lambda s: waited.append(s))
+        self.card(monkeypatch, [20 * _GB])
+        placement = ctx.Placement(gpu_layers=ctx.NO_LAYERS, on_gpu=True)
+
+        assert runtime.Runtime()._observed_residency(20 * _GB, placement) == 0
+        assert not waited
+
+    def test_a_card_that_never_settles_gives_up_and_says_zero(self, placed,
+                                                              monkeypatch):
+        self.card(monkeypatch, [20 * _GB])
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
+
+        assert runtime.Runtime()._observed_residency(20 * _GB, placement) == 0
+
+    def test_an_unmeasurable_card_is_not_retried(self, placed, monkeypatch):
+        waited = []
+        monkeypatch.setattr(runtime.time, "sleep", lambda s: waited.append(s))
+        placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
+
+        assert runtime.Runtime()._observed_residency(0, placement) == 0
+        assert not waited

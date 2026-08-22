@@ -1150,3 +1150,110 @@ class TestAnOverrunIsNoticedRatherThanSurvived:
         monkeypatch.setattr(mc_plan, "check_observed", explode)
 
         mc_memory._report_pass_peak("Stage 1", 17 * GB)
+
+
+class TestAMeasurementSurvivesTheSession:
+    """The first generation of a session used to plan from a file size.
+
+    From a user's console: generation one planned Stage 1 at 21.4 GB from its
+    files, generation two planned it at 19.3 GB from the measurement, and the
+    2.1 GB between them moved the plan boundary — which re-placed llama-server,
+    which threw away its prompt cache, in the middle of a run the user had every
+    reason to expect to be the warm one.
+
+    The objection to writing the figure down was that it would outlive the file
+    it describes. The key answers that: it carries the total size of the
+    checkpoint and its modules, so a file that changes at all is measured again.
+    """
+
+    @pytest.fixture
+    def store(self, card, tmp_path, monkeypatch):
+        sizes = {"krea2": 18_000_000_000}
+        monkeypatch.setattr(mc_plan, "_weights_path", lambda: str(tmp_path / "w.json"))
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "file_size_bytes",
+                            lambda name, modules=None: sizes.get(str(name), 0))
+        monkeypatch.setattr(mc_memory, "resolve_modules",
+                            lambda values: list(values or []) if values is not None else [])
+        mc_plan.forget_weights()
+        return sizes
+
+    def test_a_measurement_is_written_down(self, store, tmp_path):
+        mc_plan.remember_weights("krea2", None, 17 * GB)
+
+        assert (tmp_path / "w.json").exists()
+
+    def test_a_new_session_reads_it_back(self, store):
+        mc_plan.remember_weights("krea2", None, 17 * GB)
+        mc_plan.forget_weights()
+
+        assert mc_plan.measured_weights("krea2") == 17 * GB
+
+    def test_a_re_quantised_file_is_measured_again(self, store):
+        """Same name, different bytes. The stale figure is simply never found."""
+        mc_plan.remember_weights("krea2", None, 17 * GB)
+        store["krea2"] = 9_000_000_000
+
+        assert mc_plan.measured_weights("krea2") == 0
+
+    def test_the_modules_still_key_it(self, store):
+        mc_plan.remember_weights("krea2", ["vae_a.safetensors"], 17 * GB)
+
+        assert mc_plan.measured_weights("krea2", ["vae_a.safetensors"]) == 17 * GB
+        assert mc_plan.measured_weights("krea2", ["vae_b.safetensors"]) == 0
+
+    def test_an_unwritable_store_costs_one_estimate_and_nothing_else(
+            self, store, monkeypatch):
+        monkeypatch.setattr(mc_plan, "_weights_path", lambda: "/nowhere/at/all/w.json")
+
+        mc_plan.remember_weights("krea2", None, 17 * GB)
+
+        assert mc_plan.measured_weights("krea2") == 17 * GB
+
+    def test_an_unreadable_store_starts_from_nothing(self, store, tmp_path):
+        (tmp_path / "w.json").write_text("{ not json", encoding="utf-8")
+        mc_plan.forget_weights()
+
+        assert mc_plan.measured_weights("krea2") == 0
+
+    def test_a_stored_zero_is_never_read_back(self, store, tmp_path):
+        """"I could not measure it" must not come back as "it weighs nothing"."""
+        import json
+
+        key = mc_plan._weights_key("krea2", None)
+        (tmp_path / "w.json").write_text(json.dumps({"weights": {key: 0}}),
+                                         encoding="utf-8")
+        mc_plan.forget_weights()
+
+        assert mc_plan.measured_weights("krea2") == 0
+
+    def test_an_unchanged_measurement_is_not_rewritten(self, store, tmp_path, monkeypatch):
+        mc_plan.remember_weights("krea2", None, 17 * GB)
+        writes = []
+        monkeypatch.setattr(mc_plan, "_save_weights", lambda: writes.append(True))
+
+        mc_plan.remember_weights("krea2", None, 17 * GB)
+
+        assert not writes
+
+    def test_a_nameless_checkpoint_stores_nothing(self, store):
+        mc_plan.remember_weights("", None, 17 * GB)
+
+        assert mc_plan.measured_weights("") == 0
+
+    def test_the_first_plan_of_a_session_is_already_measured(self, store, monkeypatch):
+        """The whole point: no boundary to move on the second generation."""
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "measured_weight_bytes",
+                            lambda name, modules=None: 0)
+        monkeypatch.setattr(mc_memory, "pass_bytes_from_weights",
+                            lambda weights, width=0, height=0, batch=1: int(weights))
+        mc_plan.remember_weights("krea2", None, 17 * GB)
+        mc_plan.forget_weights()
+
+        phase = plan_for(store, stage_1=stage("krea2")).phase(mc_plan.STAGE_1)
+
+        assert phase.measured
+        assert phase.peak_bytes == 17 * GB

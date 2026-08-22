@@ -1661,6 +1661,31 @@ def _await_offload(log_path, offset: int) -> Offload:
 
 RESIDENCY_KEY = "llm:llama.cpp"
 
+LAYER_UPGRADE_FRACTION = 0.25
+"""How much more of the model has to reach the card before a restart is worth it.
+
+The same quarter, and the same reasoning, as :data:`CONTEXT_UPGRADE_FRACTION` --
+which had it and the layer comparison beside it did not, so *any* gain at all
+was acted on.
+
+What that cost, from a user's console with the clock on it: a second generation
+of an identical request stopped a server holding no layers and started one
+holding two of thirty, which took 9.9 seconds. llama.cpp's own timings either
+side of it were 61.5 tokens a second on prompts before and 62.1 after, 12.71 a
+second generating before and 12.46 after -- inside the noise, and slightly
+worse on the half that matters. The restart also emptied the prompt cache, so
+the writer's 523-token prompt was read from scratch for the second time in a
+minute at a further 8.4 seconds. Eighteen of the fifty-three seconds that
+"warm" generation spent on the language model went on undoing its own warmth.
+
+A floor as well as a fraction, because a quarter of a small model is a rounding
+error: on an eight-block model two blocks really are a quarter, and two blocks
+are not worth ten seconds of anybody's time.
+"""
+
+MINIMUM_LAYER_GAIN = 4
+"""Blocks a restart must move regardless of how few the model has in total."""
+
 CONTEXT_UPGRADE_FRACTION = 0.25
 """How much more context has to be available before a running server is replaced.
 
@@ -1884,6 +1909,19 @@ def _spilled_experts(placement: mc_llm_context.Placement, total: int) -> int:
     return max(layers, 0)
 
 
+def _worthwhile_layer_gain(total_layers: int) -> int:
+    """The fewest extra blocks on the card that justify stopping a working server.
+
+    A quarter of the model, never fewer than :data:`MINIMUM_LAYER_GAIN`. With no
+    block count to go on the floor is the whole answer, which is the
+    conservative direction: an unknown model is not a reason to restart for one
+    block.
+    """
+    if total_layers <= 0:
+        return MINIMUM_LAYER_GAIN
+    return max(int(total_layers * LAYER_UPGRADE_FRACTION), MINIMUM_LAYER_GAIN)
+
+
 def _worth_restarting(current: mc_llm_context.Placement, wanted: mc_llm_context.Placement,
                       total_layers: int = 0) -> bool:
     """Whether ``wanted`` is enough of an improvement to stop a server for.
@@ -1902,7 +1940,7 @@ def _worth_restarting(current: mc_llm_context.Placement, wanted: mc_llm_context.
     here = _offloaded_layers(current, total_layers)
     there = _offloaded_layers(wanted, total_layers)
     if there != here:
-        return there > here
+        return there - here >= _worthwhile_layer_gain(total_layers)
 
     # Same blocks on the card, fewer of their experts in system RAM: the same
     # placement with more of the weights resident, which is the improvement this
@@ -1985,6 +2023,16 @@ Only a placement that ran out of VRAM is retried, and each attempt asks for
 meaningfully less than the last, so three is enough to walk a large model down
 onto a card that will not take it whole -- and small enough that a start which
 is failing for some other reason still fails quickly.
+"""
+
+RESIDENCY_SETTLE_ATTEMPTS = 4
+RESIDENCY_SETTLE_SECONDS = 0.25
+"""How long to keep asking the driver what a new server took.
+
+A second at the outside, and only on the path where the first answer was
+impossible -- an on-GPU placement that appears to be holding nothing. A start
+already costs several seconds; a fifth of one to stop printing "0.0 GB VRAM"
+about a model holding fourteen is cheap.
 """
 
 OVERSPEND_TOLERANCE = 256 * 1024 * 1024
@@ -2259,8 +2307,47 @@ class Runtime:
             said = read_failure(_text_since(log_path, written_before))
             raise _StartFailed(said.text or str(exc), said.out_of_memory) from exc
 
-        observed = max(before - mc_broker.device_free_vram_bytes(), 0) if before > 0 else 0
+        observed = self._observed_residency(before, placement)
         return process, observed, _await_offload(log_path, written_before)
+
+    @staticmethod
+    def _observed_residency(before: int, placement: mc_llm_context.Placement) -> int:
+        """How much VRAM the server that just started actually took.
+
+        A difference of two free-VRAM readings, which is the only measurement
+        available from outside another process -- and which came back as *zero*
+        for a placement that llama.cpp was demonstrably running at 108 tokens a
+        second on prompts, in a user's log with the clock on it. The card had
+        not finished settling when the second reading was taken: the health
+        endpoint answers as soon as the server will accept a request, and the
+        driver's free figure is not obliged to have caught up by then.
+
+        A zero there is not a small error. It is printed on the ready line as
+        "0.0 GB VRAM" about a model holding fourteen, and it is the figure every
+        later question about whether that server is overspending its allowance
+        starts from.
+
+        So a non-positive reading on a placement that is supposed to be on the
+        card is retried, briefly, before it is believed.
+        """
+        if before <= 0:
+            return 0
+        observed = max(before - mc_broker.device_free_vram_bytes(), 0)
+        if observed > 0 or not getattr(placement, "on_gpu", False):
+            return observed
+        if placement.gpu_layers == mc_llm_context.NO_LAYERS:
+            return observed  # nothing was asked for; zero is the right answer
+
+        for _attempt in range(RESIDENCY_SETTLE_ATTEMPTS):
+            time.sleep(RESIDENCY_SETTLE_SECONDS)
+            observed = max(before - mc_broker.device_free_vram_bytes(), 0)
+            if observed > 0:
+                return observed
+
+        logger.debug("Model Chain: the card reported no change in free VRAM after "
+                     "llama-server started; the residency figure falls back to the "
+                     "estimate")
+        return 0
 
     def _client(self, configuration: Config):
         """A client for the server that is up, carrying the profile's samplers.
