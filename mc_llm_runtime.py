@@ -455,7 +455,7 @@ def _requested_placement(configuration: Config, gguf: mc_gguf.Gguf | None,
         # context, rather than whatever number the state file happens to hold.
         weights = mc_llm_context.weights_bytes(gguf, placement) if gguf is not None else 0
         budget = mc_llm_context.automatic_buffer_bytes(
-            _free_vram(already_ours), weights, mc_broker.safety_margin_bytes())
+            _spendable(already_ours), weights, mc_broker.safety_margin_bytes())
         sized = mc_llm_context.context_for_budget(configuration.model, placement, budget)
         if sized >= MINIMUM_CONTEXT:
             placement = placement.with_context(sized)
@@ -506,14 +506,63 @@ def _free_vram(already_ours: int = 0) -> int:
     return mc_broker.device_free_vram_bytes() + max(int(already_ours), 0)
 
 
+def _spendable(already_ours: int = 0) -> int:
+    """What this placement may actually spend, which is not the same as what is free.
+
+    Free VRAM is a reading of one instant. A generation is not one instant: the
+    Creative Writer runs on a card the checkpoint has not been loaded onto yet,
+    so what is free when the language model is placed is very nearly the whole
+    card -- and what is free three hundred milliseconds later, when Stage 1
+    loads and Stage 2 follows it, is not.
+
+    Sizing against the reading is how a user's log comes to contain 71 server
+    starts in one session, the negotiated context stepping 7168 -> 8192 -> 7168
+    as consecutive generations found the card in different states, and five
+    consecutive generations whose every start attempt died with ``cudaMalloc
+    failed: out of memory`` on a card that had reported 22.7 GB free moments
+    earlier.
+
+    So when a plan is in force, the reading is capped by what that plan leaves
+    over -- :func:`mc_plan.persistent_llm_budget` -- and the same answer comes
+    back whether the checkpoint happens to be resident at this instant or not.
+    That stability is the point: a placement that does not change is a server
+    that does not restart, and a server that does not restart keeps llama.cpp's
+    prompt cache, which is the difference between a warm second call and
+    thirteen seconds of prompt evaluation.
+
+    A learned cap from a previous reserve miss applies on top, and only ever
+    downwards (rule 16: no silent promotion back to a placement that failed).
+
+    With no plan published -- LLM Studio writing a prompt with no generation
+    behind it -- this is exactly :func:`_free_vram`, which is the behaviour
+    every path had before plans existed.
+    """
+    free = _free_vram(already_ours)
+    try:
+        import mc_plan
+
+        budget = mc_plan.persistent_llm_budget()
+        learned = mc_plan.learned_cap_bytes()
+    except Exception:
+        logger.debug("Model Chain: could not read the active plan's budget", exc_info=True)
+        return free
+
+    # -1 is "there is no card to divide up", not "there is no room".
+    if budget >= 0:
+        free = min(free, budget)
+    if learned > 0:
+        free = min(free, learned)
+    return max(free, 0)
+
+
 def _fits(estimate: mc_llm_context.Estimate, reserve: int, already_ours: int = 0) -> bool:
-    return _free_vram(already_ours) >= estimate.total_bytes + reserve
+    return _spendable(already_ours) >= estimate.total_bytes + reserve
 
 
 def _shrink_context(configuration: Config, placement, gguf, reserve: int,
                     already_ours: int = 0):
     """Lower the context until the cache fits what is free, or hit the floor."""
-    free = _free_vram(already_ours)
+    free = _spendable(already_ours)
     estimate = mc_llm_context.estimate(configuration.model, placement, gguf)
     per_token = estimate.kv_bytes_per_token
     if per_token <= 0:
@@ -573,7 +622,7 @@ def _shrink_offload(configuration: Config, placement, gguf, reserve: int,
         return placement, mc_llm_context.estimate(configuration.model, placement, gguf), ""
 
     total = gguf.block_count
-    free = _free_vram(already_ours)
+    free = _spendable(already_ours)
     notes: list[str] = []
 
     placement, estimate, spilled = _spill_experts(configuration, placement, gguf, reserve,
@@ -756,6 +805,29 @@ _LOAD_FAILED = re.compile(r"(?:error loading model|failed to load model|exiting 
 _NO_DEVICE = re.compile(
     r"invalid value for main_gpu:\s*(-?\d+)\s*\(available devices:\s*0\s*\)")
 """A start told to use a GPU by a process that can see none. See :func:`without_gpu_selection`."""
+_DEVICE_GONE = re.compile(
+    r'error while handling argument "--device":\s*invalid device:\s*(\S+)')
+"""The card was named on the command line and llama.cpp could not find it.
+
+The sibling of :data:`_NO_DEVICE`, and the more alarming one, because it fires
+on installations where the same token worked seconds earlier. From one user's
+log, 31 starts in a single session died here while 86 others enumerated
+``CUDA0 : NVIDIA GeForce RTX 3090`` perfectly well.
+
+It is an argument-parsing failure, so it happens before the model is opened and
+leaves nothing else in the log to go on. What makes it a *memory* symptom
+rather than a configuration one is where it appears: interleaved with
+``cudaMalloc failed: out of memory`` on the same card, during the stretch of
+the session where the image side was holding nearly all of it. A CUDA context
+needs VRAM of its own before any device can be enumerated, and a process that
+cannot create one registers no CUDA devices at all -- at which point the
+perfectly correct ``--device CUDA0`` on the command line names a device that,
+for this process, does not exist.
+
+So it is treated as an out-of-memory failure: the start is retried with more
+headroom, exactly as an allocation failure would be, rather than being reported
+as a permanent misconfiguration the user is asked to go and fix.
+"""
 _SPEED = re.compile(
     r"(prompt eval|eval) time\s*=.*?\(\s*[0-9.]+ ms per token,\s*([0-9.]+) tokens per second\)")
 
@@ -1467,6 +1539,16 @@ def read_failure(text: str) -> Failure:
             f"llama-server could not fit on the card: it asked the driver for "
             f"{asked / _GB:.1f} GB in one piece and was refused ({why}){seen}",
             out_of_memory=True)
+    gone = _DEVICE_GONE.search(text)
+    if gone:
+        return Failure(
+            f"llama-server could not find {gone.group(1)} when it started, though the "
+            "card is configured and has worked before. That normally means no CUDA "
+            "context could be created — another process was holding the card when this "
+            "one started, leaving too little for a CUDA context. If it persists, check "
+            "that the runtime build has its CUDA backend beside it and that "
+            "CUDA_VISIBLE_DEVICES is not set in the environment.",
+            out_of_memory=True)
     no_device = _NO_DEVICE.search(text)
     if no_device:
         # Said in full because the log's own sentence -- "invalid value for
@@ -2075,14 +2157,34 @@ class Runtime:
                         raise RuntimeError(str(failure)) from None
                     penalty += RETRY_HEADROOM
                     expert_floor = _next_expert_floor(placement)
-                    logger.warning("Model Chain: %s. Trying again with %.1f GB more headroom%s",
+                    # And hand the allocator's blocks back again. They were
+                    # released before the first attempt, but a failed start
+                    # takes seconds and the image side is free to re-cache in
+                    # them -- which for the ``invalid device`` failure is the
+                    # whole difference, because what that start could not find
+                    # room for was a CUDA context of a few hundred megabytes,
+                    # not the model.
+                    reclaimed = mc_broker.release_cached_vram()
+                    logger.warning("Model Chain: %s. Trying again with %.1f GB more headroom%s%s",
                                    failure, penalty / _GB,
                                    f" and the experts of at least {expert_floor} layers in "
-                                   "system RAM" if expert_floor > 0 else "")
+                                   "system RAM" if expert_floor > 0 else "",
+                                   f", having returned {reclaimed / _GB:.1f} GB of cached VRAM "
+                                   "to the driver" if reclaimed else "")
 
             self._process, self._signature, self._placement = process, signature, placement
             self._identity = _identity(configuration, projector)
             self._record(configuration, negotiated, observed, offload)
+            # Which plan this placement answers. Everything after this point
+            # compares against it rather than against free VRAM, so the server
+            # survives every phase of the generation it was started for.
+            try:
+                import mc_plan
+
+                mc_plan.note_placement(mc_plan.current())
+            except Exception:
+                logger.debug("Model Chain: could not record the plan this server was "
+                             "placed for", exc_info=True)
             prepared = self._client(configuration)
             _prime_prompt_cache(prepared)
             return prepared
@@ -2170,10 +2272,54 @@ class Runtime:
         ever see room that is already free -- which is the right way round.
         A guess that goes wrong keeps the server that is running, because the
         placement it has is one that worked.
+
+        Two things now stop the question being asked at all, and both are the
+        same rule from different angles (sections 10 and 11): a placement is
+        reconsidered at plan boundaries, and a normal phase transition inside
+        one generation is not a plan boundary.
+
+        The first is the image job. Halfway through a generation there is
+        always memory that has just been released and is about to be taken
+        again -- Stage 1's weights after sampling, a VAE between decodes, the
+        gap before Stage 2 loads. Every one of those instants looks like room
+        to grow into, and growing into them means stopping the server the next
+        LLM call was going to reuse. Free VRAM during a generation is not an
+        offer.
+
+        The second is the plan. When the plan the running server was placed for
+        is still the plan in force, its placement is by definition the one this
+        module would choose again, and re-deriving it can only produce noise --
+        which is exactly what a user's log shows it producing: a context of
+        7168 and one of 8192 alternating across consecutive generations, each
+        change a restart, each restart a lost prompt cache and a cold thirteen
+        seconds of prompt evaluation.
         """
         current = self._placement
         if current is None:
             return True
+
+        # The plan decides when there is one, and it decides both ways. Asking
+        # about the image job first would be wrong in the case that matters
+        # most: a user who has just switched Stage 2 off has genuinely freed
+        # the room, and the first LLM call of the next generation is the one
+        # that should be placed in it -- but it runs inside a host job, so a
+        # host-busy check reached first would decline for the whole generation.
+        try:
+            import mc_plan
+
+            if mc_plan.current() is not None:
+                if not mc_plan.boundary_moved():
+                    return False
+                # A real boundary. Fall through and let the negotiation below
+                # say whether the new plan is worth a restart; a boundary alone
+                # is permission to ask, not an answer.
+            elif (mc_broker.host_busy()
+                  or mc_broker.active_family() == mc_broker.FAMILY_IMAGE):
+                return False
+        except Exception:
+            logger.debug("Model Chain: could not check the plan boundary", exc_info=True)
+            if mc_broker.host_busy():
+                return False
         try:
             described = mc_gguf.describe(configuration.model)
             preview = negotiate(configuration, described, reclaim=False, already_ours=ours)
@@ -2488,12 +2634,30 @@ class Runtime:
         with self._lock:
             self._stop_locked("stop requested")
 
+    def _forget_placement_plan(self) -> None:
+        """Let the next start re-decide, because this one is no longer running.
+
+        Called wherever the server stops for a reason that was not a change of
+        plan -- an emergency eviction, a demotion to system RAM, a shutdown.
+        Without it the plan the dead server was placed for stays recorded, and
+        :func:`mc_plan.boundary_moved` goes on answering "no" about a placement
+        that no longer exists.
+        """
+        try:
+            import mc_plan
+
+            mc_plan.note_placement(None)
+        except Exception:
+            logger.debug("Model Chain: could not clear the recorded placement plan",
+                         exc_info=True)
+
     def _stop_locked(self, reason: str) -> None:
         process, self._process = self._process, None
         held = self.report.observed_bytes if self._placement is not None else 0
         self._signature, self._identity, self._placement = None, None, None
         self._log = None
         mc_broker.retire(RESIDENCY_KEY)
+        self._forget_placement_plan()
         if process is None:
             return
         try:

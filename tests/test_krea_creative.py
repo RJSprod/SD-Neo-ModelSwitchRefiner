@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import collections
 import json
+import types
 from pathlib import Path
 
 import pytest
@@ -2752,3 +2753,112 @@ class TestTheAcceptanceCases:
         recipe = roll(fixed["source"], creativity=fixed["creativity"], settings=settings)
         assert any(item.variant_id == fixed["setting"]["texture"]["fixed_id"]
                    for item in recipe.items)
+
+
+class TestOneWarmServerForTheWholePlan:
+    """Section 13: consecutive LLM calls share one process.
+
+    The Creative Writer and the Spatial Composer are two requests a fraction of
+    a second apart. Between them the roll used to hand the card back to the
+    image side -- and the only way the broker can hand image VRAM back is to
+    stop llama-server, which is the very process the Composer was about to send
+    its one request to. The cost is a second GGUF load and a cold prompt cache
+    in the middle of one generation, to free room nothing uses until the
+    Composer has finished with the card anyway.
+    """
+
+    def layout(self, mode, regions=("a",)):
+        from prompt_master.krea import spatial as spatial_module
+
+        return types.SimpleNamespace(regions=tuple(regions), compose_mode=mode,
+                                     notes=(), unreadable=False)
+
+    def test_a_smart_layout_means_a_composer_is_still_to_run(self):
+        from prompt_master.krea import spatial as spatial_module
+
+        assert mc_creative_krea._composer_follows(self.layout(spatial_module.SMART))
+
+    def test_a_direct_merge_asks_no_model_anything(self):
+        from prompt_master.krea import spatial as spatial_module
+
+        assert not mc_creative_krea._composer_follows(self.layout(spatial_module.DIRECT))
+
+    def test_an_empty_canvas_composes_nothing(self):
+        from prompt_master.krea import spatial as spatial_module
+
+        assert not mc_creative_krea._composer_follows(
+            self.layout(spatial_module.SMART, regions=()))
+
+    def test_no_layout_at_all_is_the_end_of_the_llm_work(self):
+        assert not mc_creative_krea._composer_follows(None)
+
+    def test_the_roll_does_not_reclaim_before_a_composer(self, client, monkeypatch):
+        from prompt_master.krea import spatial as spatial_module
+
+        asked = []
+        monkeypatch.setattr(mc_creative_krea, "hand_back_vram",
+                            lambda *a, **k: asked.append(True) or 0)
+        stored = mc_creative_krea.settings()
+
+        list(mc_creative_krea.creative.roll(
+            "car", stored, guard_checkpoint=True,
+            spatial_layout=self.layout(spatial_module.SMART)))
+
+        assert not asked
+
+    def test_the_roll_does_reclaim_when_it_is_the_last_llm_phase(
+            self, client, monkeypatch):
+        asked = []
+        monkeypatch.setattr(mc_creative_krea, "hand_back_vram",
+                            lambda *a, **k: asked.append(True) or 0)
+        stored = mc_creative_krea.settings()
+
+        list(mc_creative_krea.creative.roll("car", stored, guard_checkpoint=True))
+
+        assert asked
+
+
+class TestTheReserveComesFromTheWholePlan:
+    """The long-chain bug, at the point it was actually paid.
+
+    ``image_reserve_bytes`` answered a Stage-1-shaped question, and a long
+    chain is not Stage-1-shaped: Krea 2 into Klein 9B has its largest moment in
+    the handoff, where Stage 2's weights and Stage 1's spared encoders are on
+    the card together. A writer placed against Stage 1 alone is holding VRAM
+    that phase needs, and pays for it with an eviction seconds later.
+    """
+
+    @pytest.fixture
+    def chained(self, monkeypatch, host):
+        import mc_plan
+
+        monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
+        monkeypatch.setattr(mc_broker, "held_bytes", lambda family: 0)
+        monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda: 24 * 1024 ** 3)
+        mc_plan.publish(mc_plan.Plan((
+            mc_plan.Phase(mc_plan.STAGE_1, mc_plan.KIND_IMAGE, "Stage 1",
+                          8 * 1024 ** 3),
+            mc_plan.Phase(mc_plan.HANDOFF, mc_plan.KIND_TRANSITION, "Handoff",
+                          17 * 1024 ** 3),
+            mc_plan.Phase(mc_plan.STAGE_2, mc_plan.KIND_IMAGE, "Stage 2",
+                          15 * 1024 ** 3),
+        ), 1024, 1024))
+        yield
+
+    def test_the_reserve_is_the_largest_phase_not_the_first(self, chained):
+        assert mc_creative_krea.image_reserve_bytes() == 17 * 1024 ** 3
+
+    def test_it_falls_back_to_stage_1_when_no_plan_was_built(self, chained, monkeypatch):
+        """An API request that never went through either script's hook still
+        gets the behaviour it had before plans existed."""
+        import mc_memory
+        import mc_plan
+        from modules import shared
+
+        mc_plan.clear()
+        monkeypatch.setattr(mc_memory, "vram_required_bytes",
+                            lambda name, *a, **k: 8 * 1024 ** 3)
+        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None: 0)
+        shared.opts.sd_model_checkpoint = "krea2.safetensors"
+
+        assert mc_creative_krea.image_reserve_bytes() == 8 * 1024 ** 3

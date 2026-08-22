@@ -1932,3 +1932,249 @@ class TestPrimingThePromptCache:
         managed.client()
 
         assert len(scheduled) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Placement against the plan, rather than against the instant
+# --------------------------------------------------------------------------- #
+#
+# Every test below is a line out of a real llama-server.log: 71 starts in one
+# session, 47 of them dying at model load, the negotiated context alternating
+# 7168 / 8192 across consecutive generations, and a run of starts that never
+# reached the model at all because no CUDA device could be enumerated on a card
+# another process had filled.
+#
+# They have one cause between them. A placement sized against free VRAM is
+# sized against one instant of a generation that has several, and the instant
+# the Creative Writer runs in -- before the checkpoint is loaded -- is the one
+# instant in the whole generation when the card looks empty.
+
+
+import mc_plan
+
+
+def publish_plan(*, stage_1_gb=14.0, stage_2_gb=0.0, total_gb=24.0, monkeypatch=None):
+    """A plan whose phases weigh what the test says, published as the live one."""
+    phases = [mc_plan.Phase(mc_plan.STAGE_1, mc_plan.KIND_IMAGE, "Stage 1",
+                            int(stage_1_gb * _GB), detail="krea2")]
+    if stage_2_gb:
+        phases.append(mc_plan.Phase(mc_plan.STAGE_2, mc_plan.KIND_IMAGE, "Stage 2",
+                                    int(stage_2_gb * _GB), detail="klein9b"))
+    if monkeypatch is not None:
+        monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda: int(total_gb * _GB))
+    return mc_plan.publish(mc_plan.Plan(tuple(phases), 1024, 1024))
+
+
+class TestThePlanCapsWhatAPlacementMaySpend:
+    def test_with_no_plan_the_answer_is_what_is_free(self, placed, monkeypatch):
+        """Every path had this behaviour before plans existed, and LLM Studio
+        writing a prompt with no generation behind it still should."""
+        set_free(monkeypatch, 20)
+        mc_plan.clear()
+
+        assert runtime._spendable() == 20 * _GB
+
+    def test_an_empty_looking_card_does_not_hand_over_the_whole_card(
+            self, placed, monkeypatch):
+        """The Creative Writer runs before the checkpoint is loaded. What is
+        free then is very nearly everything, and three hundred milliseconds
+        later it is not."""
+        set_free(monkeypatch, 23)
+        publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
+
+        assert runtime._spendable() == 10 * _GB
+
+    def test_a_long_chain_is_budgeted_for_its_largest_phase(self, placed, monkeypatch):
+        set_free(monkeypatch, 23)
+        publish_plan(stage_1_gb=10.0, stage_2_gb=18.0, monkeypatch=monkeypatch)
+
+        assert runtime._spendable() == 6 * _GB
+
+    def test_the_same_answer_whether_the_checkpoint_is_resident_or_not(
+            self, placed, monkeypatch):
+        """The whole point. A placement that changes with the state of the card
+        is a placement that changes between the writer and the composer, and a
+        placement that changes is a restart."""
+        publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
+
+        set_free(monkeypatch, 23)
+        empty_card = runtime._spendable()
+        set_free(monkeypatch, 9)
+        loaded_card = runtime._spendable()
+
+        assert empty_card == 10 * _GB
+        assert loaded_card == 9 * _GB  # never more than is actually free
+
+    def test_free_vram_still_wins_when_it_is_the_smaller_number(
+            self, placed, monkeypatch):
+        """The budget is a ceiling, not a promise. Something outside this
+        extension holding VRAM is still a reason to place lower."""
+        set_free(monkeypatch, 4)
+        publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
+
+        assert runtime._spendable() == 4 * _GB
+
+    def test_a_learned_ceiling_from_a_miss_applies_on_top(self, placed, monkeypatch):
+        set_free(monkeypatch, 23)
+        publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
+        mc_plan.record_miss("Stage 2", 3 * _GB, llm_bytes=9 * _GB, evicted=True)
+
+        assert runtime._spendable() < 10 * _GB
+
+    def test_a_card_that_cannot_be_measured_does_not_starve_the_model(
+            self, placed, monkeypatch):
+        set_free(monkeypatch, 20)
+        monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda: 0)
+        publish_plan(stage_1_gb=14.0)
+
+        assert runtime._spendable() == 20 * _GB
+
+    def test_the_negotiated_context_stops_moving_with_the_card(
+            self, placed, tmp_path, monkeypatch):
+        """The 7168 / 8192 oscillation, directly. Two negotiations, one on an
+        empty card and one on a full one, inside the same plan."""
+        configuration = configure(monkeypatch, tmp_path, mode="auto")
+        publish_plan(stage_1_gb=20.0, monkeypatch=monkeypatch)
+
+        set_free(monkeypatch, 10)
+        first = runtime.negotiate(configuration).placement
+        set_free(monkeypatch, 5)
+        second = runtime.negotiate(configuration).placement
+
+        assert first.context == second.context
+
+    def test_and_without_a_plan_it_moves_with_it(self, placed, tmp_path, monkeypatch):
+        """The behaviour being replaced, kept as a test so the one above is
+        known to be measuring something."""
+        configuration = configure(monkeypatch, tmp_path, mode="auto")
+        mc_plan.clear()
+
+        set_free(monkeypatch, 10)
+        first = runtime.negotiate(configuration).placement
+        set_free(monkeypatch, 5)
+        second = runtime.negotiate(configuration).placement
+
+        assert first.context != second.context
+
+
+class TestAPlacementIsReconsideredOnlyAtPlanBoundaries:
+    def test_a_phase_transition_inside_one_generation_is_not_one(
+            self, placed, tmp_path, monkeypatch):
+        """Stage 1's weights are released between the pass and the swap. That
+        gap is not an offer, and taking it means stopping the server the next
+        LLM call was going to reuse."""
+        configuration = configure(monkeypatch, tmp_path)
+        publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
+        mc_plan.note_placement(mc_plan.current())
+        server = runtime.Runtime()
+        server._placement = ctx.Placement(gpu_layers=4, context=8192,
+                                          kv_type_k="f16", kv_type_v="f16", on_gpu=True)
+        set_free(monkeypatch, 23)
+
+        assert not server._outgrown(configuration, 0)
+
+    def test_an_image_job_holding_the_card_is_never_a_moment_to_grow_into(
+            self, placed, tmp_path, monkeypatch):
+        configuration = configure(monkeypatch, tmp_path)
+        mc_plan.clear()
+        server = runtime.Runtime()
+        server._placement = ctx.Placement(gpu_layers=4, context=8192,
+                                          kv_type_k="f16", kv_type_v="f16", on_gpu=True)
+        set_free(monkeypatch, 23)
+        monkeypatch.setattr(mc_broker, "host_busy", lambda: True)
+
+        assert not server._outgrown(configuration, 0)
+
+    def test_a_real_boundary_still_re_places(self, placed, tmp_path, monkeypatch):
+        """Not a rule that never fires. Turning Stage 2 off genuinely frees the
+        room, and a language model that ignored that would be leaving speed on
+        the table for no reason."""
+        configuration = configure(monkeypatch, tmp_path)
+        publish_plan(stage_1_gb=10.0, stage_2_gb=18.0, monkeypatch=monkeypatch)
+        mc_plan.note_placement(mc_plan.current())
+        server = runtime.Runtime()
+        server._placement = ctx.Placement(gpu_layers=4, context=8192,
+                                          kv_type_k="f16", kv_type_v="f16", on_gpu=True)
+        publish_plan(stage_1_gb=10.0, monkeypatch=monkeypatch)
+        set_free(monkeypatch, 23)
+
+        assert server._outgrown(configuration, 0)
+
+    def test_stopping_the_server_forgets_the_plan_it_was_placed_for(
+            self, placed, monkeypatch):
+        """Otherwise the plan a dead server was placed for goes on answering
+        "no boundary" about a placement that no longer exists."""
+        publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
+        mc_plan.note_placement(mc_plan.current())
+        server = runtime.Runtime()
+
+        server._stop_locked("a test")
+
+        assert mc_plan.placed_for() is None
+
+
+class TestTheCardVanishingIsDiagnosed:
+    def test_an_unenumerable_device_is_named_and_retried(self):
+        """31 starts in one session died here, interleaved with 86 that
+        enumerated the same card perfectly well. A CUDA context needs VRAM of
+        its own, and a process that cannot make one registers no devices --
+        at which point a correct ``--device CUDA0`` names nothing."""
+        failure = runtime.read_failure(
+            'error while handling argument "--device": invalid device: CUDA0\n')
+
+        assert failure.out_of_memory
+        assert "CUDA0" in failure.text
+
+    def test_it_is_not_reported_as_a_permanent_misconfiguration(self):
+        failure = runtime.read_failure(
+            'error while handling argument "--device": invalid device: CUDA0\n')
+
+        assert "has worked before" in failure.text
+        assert "CUDA context" in failure.text
+
+    def test_the_older_no_device_failure_still_reads_as_itself(self):
+        failure = runtime.read_failure(
+            "llama_prepare_model_devices: invalid value for main_gpu: 0 "
+            "(available devices: 0)\n")
+
+        assert not failure.out_of_memory
+        assert "CPU placement" in failure.text
+
+
+class TestABoundaryStillWinsInsideAHostJob:
+    """The case that would be broken by checking the image job first.
+
+    A user who has just switched Stage 2 off has genuinely freed the room, and
+    the first LLM call of the next generation is the one that should be placed
+    in it. That call runs inside ``mc_broker.host_job``, so a host-busy check
+    reached before the plan check would decline for the whole generation and
+    the language model would stay small until the user pressed Generate on
+    something else.
+    """
+
+    def test_a_real_boundary_is_acted_on_even_while_a_generation_holds_the_card(
+            self, placed, tmp_path, monkeypatch):
+        configuration = configure(monkeypatch, tmp_path)
+        publish_plan(stage_1_gb=10.0, stage_2_gb=18.0, monkeypatch=monkeypatch)
+        mc_plan.note_placement(mc_plan.current())
+        server = runtime.Runtime()
+        server._placement = ctx.Placement(gpu_layers=4, context=8192,
+                                          kv_type_k="f16", kv_type_v="f16", on_gpu=True)
+        publish_plan(stage_1_gb=10.0, monkeypatch=monkeypatch)
+        set_free(monkeypatch, 23)
+        monkeypatch.setattr(mc_broker, "host_busy", lambda: True)
+
+        assert server._outgrown(configuration, 0)
+
+    def test_and_an_unchanged_plan_is_still_left_alone_inside_one(
+            self, placed, tmp_path, monkeypatch):
+        configuration = configure(monkeypatch, tmp_path)
+        publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
+        mc_plan.note_placement(mc_plan.current())
+        server = runtime.Runtime()
+        server._placement = ctx.Placement(gpu_layers=4, context=8192,
+                                          kv_type_k="f16", kv_type_v="f16", on_gpu=True)
+        set_free(monkeypatch, 23)
+        monkeypatch.setattr(mc_broker, "host_busy", lambda: True)
+
+        assert not server._outgrown(configuration, 0)

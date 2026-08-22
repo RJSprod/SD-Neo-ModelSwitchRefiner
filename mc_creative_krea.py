@@ -1006,7 +1006,20 @@ class Creative:
         # that is about to generate an image. The reserve above should mean
         # there is nothing to do; this is what recovers a card that was already
         # full when the roll started.
-        if guard_checkpoint:
+        #
+        # Not when a Spatial Composer is still to run, though, and that
+        # exception is the whole of section 13. Handing the card back here asks
+        # the broker for image VRAM, and the only way the broker can give it is
+        # by stopping llama-server -- the same llama-server the Composer is
+        # about to send its one request to, a fraction of a second later. What
+        # that costs is a second GGUF load and a cold prompt cache in the
+        # middle of one generation, to free VRAM that nothing will use until
+        # the Composer has finished with the card anyway.
+        #
+        # The rule generalises: do not reclaim a persistent service between two
+        # consecutive operations that both need it. The hand-back happens after
+        # the last LLM phase instead, which the caller performs.
+        if guard_checkpoint and not _composer_follows(spatial_layout):
             freed = hand_back_vram()
             if freed:
                 logger.info("Model Chain: freed %.1f GB for the image generation that "
@@ -1056,6 +1069,27 @@ def _prompt_size(source: str, references, brief: str, cached: bool = False) -> i
     return max(size, 1)
 
 
+def _composer_follows(spatial_layout) -> bool:
+    """Whether a Spatial Composer call comes after this roll on the same server.
+
+    ``True`` only for a Smart layout that actually has boxes in it. Spatial
+    Layout switched on over an empty canvas composes nothing, and a Direct
+    merge is deterministic and asks no model anything -- in both of those the
+    roll really is the last LLM phase of the plan, and the card may go back to
+    the image side immediately.
+    """
+    if spatial_layout is None or not getattr(spatial_layout, "regions", ()):
+        return False
+    try:
+        from prompt_master.krea import spatial as spatial_module
+
+        return getattr(spatial_layout, "compose_mode", "") == spatial_module.SMART
+    except Exception:
+        logger.debug("Model Chain: could not tell whether a Composer follows this roll",
+                     exc_info=True)
+        return False
+
+
 def image_reserve_bytes() -> int:
     """VRAM to keep clear for the image generation this roll is about to trigger.
 
@@ -1086,9 +1120,27 @@ def image_reserve_bytes() -> int:
     13.9 GB: sixteen of forty-eight blocks on the card and the rest crawling
     from system RAM, on a machine with room for far more than that.
 
+    What this function answers on its own is a Stage-1-shaped question, and a
+    long chain is not Stage-1-shaped. Krea 2 into Klein 9B at a 1.5x multiplier
+    has its largest moment in the *handoff*, where Stage 2's weights and Stage
+    1's spared encoders are on the card together, and a language model placed
+    against Stage 1's requirement alone is holding VRAM that phase needs. So
+    when a plan has been published, the plan answers -- it knows about Stage 2,
+    the transition and the warm-up, and it takes the largest of them rather
+    than the first. See :func:`mc_plan.llm_reserve_bytes`.
+
     Zero on any failure, and zero is the old behaviour: an unknown checkpoint
     is not a reason to refuse to write a prompt.
     """
+    try:
+        import mc_plan
+
+        if mc_plan.current() is not None:
+            return mc_plan.llm_reserve_bytes()
+    except Exception:
+        logger.debug("Model Chain: could not size the reserve from the active plan",
+                     exc_info=True)
+
     try:
         import mc_broker
         import mc_memory

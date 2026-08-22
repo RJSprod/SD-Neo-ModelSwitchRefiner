@@ -360,3 +360,100 @@ class TestTheCheckpointStaysOnTheCard:
             mc_broker.unregister_reclaimer(mc_broker.FAMILY_LLM)
             mc_broker.unregister_reclaimer(mc_broker.FAMILY_IMAGE)
             mc_broker.register_reclaimer(mc_broker.FAMILY_IMAGE, mc_broker._ImageReclaimer())
+
+
+class TestAReserveMissIsRecordedNotJustSurvived:
+    """Section 17, and the sentence at the end of it: emergency eviction is
+    recovery, not ordinary scheduling.
+
+    Reaching the cross-workload reclaim at all means the plan said this phase
+    would fit inside the protected image budget and it did not. That is worth
+    recording whether or not the recovery worked, because a recovery nobody is
+    told about is indistinguishable from the policy working -- the user sees a
+    language model that got slower and has nothing to connect it to.
+    """
+
+    @pytest.fixture
+    def short(self, wired, host, monkeypatch):
+        """A pass that does not fit, and a Forge eviction that cannot close it."""
+        import mc_plan
+        from backend import memory_management
+
+        memory_management.freed.clear()
+        set_free(monkeypatch, 1)
+        monkeypatch.setattr(mc_memory, "_pass_requirement", lambda *a, **k: 6 * _GB)
+        monkeypatch.setattr(mc_memory, "_loaded_target_patchers", lambda name: [])
+        monkeypatch.setattr(mc_memory, "_resident_bytes", lambda patchers: 0)
+        monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda: 24 * _GB)
+        mc_plan.publish(mc_plan.Plan((
+            mc_plan.Phase(mc_plan.STAGE_1, mc_plan.KIND_IMAGE, "Stage 1", 14 * _GB),
+        ), 1024, 1024))
+        return wired
+
+    def test_the_miss_is_filed_with_the_phase_that_overran(self, short):
+        import mc_plan
+
+        mc_memory.make_vram_room("Model B.safetensors", stage="Stage 2")
+
+        assert mc_plan.last_miss() is not None
+        assert mc_plan.last_miss().phase == "Stage 2"
+
+    def test_the_shortfall_is_the_amount_the_estimate_was_out_by(self, short):
+        import mc_plan
+
+        mc_memory.make_vram_room("Model B.safetensors", stage="Stage 2")
+
+        assert mc_plan.last_miss().shortfall_bytes > 0
+
+    def test_the_llm_residency_is_read_before_it_is_taken(self, short):
+        """After the eviction the answer is zero for every miss, and the panel
+        could not tell a model that gave up eight gigabytes from one that was
+        never on the card."""
+        import mc_plan
+
+        mc_broker.declare(mc_broker.FAMILY_LLM, "llm", "the LLM", 8 * _GB)
+
+        mc_memory.make_vram_room("Model B.safetensors", stage="Stage 2")
+
+        assert mc_plan.last_miss().llm_bytes == 8 * _GB
+
+    def test_the_eviction_is_recorded_as_having_happened(self, short):
+        import mc_plan
+
+        mc_memory.make_vram_room("Model B.safetensors", stage="Stage 2")
+
+        assert mc_plan.last_miss().evicted
+
+    def test_a_safer_cap_is_learned_and_not_promoted_back(self, short):
+        import mc_plan
+
+        mc_broker.declare(mc_broker.FAMILY_LLM, "llm", "the LLM", 8 * _GB)
+
+        mc_memory.make_vram_room("Model B.safetensors", stage="Stage 2")
+
+        assert 0 < mc_plan.learned_cap_bytes() < 8 * _GB
+
+    def test_a_pass_that_fits_files_nothing(self, wired, host, monkeypatch):
+        """A miss log that fires on healthy generations is a miss log nobody
+        reads by the third one."""
+        import mc_plan
+
+        set_free(monkeypatch, 20)
+        monkeypatch.setattr(mc_memory, "_pass_requirement", lambda *a, **k: 6 * _GB)
+        monkeypatch.setattr(mc_memory, "_loaded_target_patchers", lambda name: [])
+        monkeypatch.setattr(mc_memory, "_resident_bytes", lambda patchers: 0)
+
+        mc_memory.make_vram_room("Model B.safetensors", stage="Stage 2")
+
+        assert mc_plan.last_miss() is None
+
+    def test_bookkeeping_that_fails_does_not_fail_the_generation(
+            self, short, monkeypatch):
+        import mc_plan
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("no")
+
+        monkeypatch.setattr(mc_plan, "record_miss", explode)
+
+        mc_memory.make_vram_room("Model B.safetensors", stage="Stage 2")

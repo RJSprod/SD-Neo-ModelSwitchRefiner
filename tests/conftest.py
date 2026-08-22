@@ -688,6 +688,29 @@ def timing_store(tmp_path, monkeypatch):
     mc_progress.abandon()
 
 
+@pytest.fixture(autouse=True)
+def active_plan():
+    """No execution plan in force unless the test under way publishes one.
+
+    Autouse for the same reason as the timing store above: the plan is module
+    state that outlives a test, and it is *load-bearing* module state -- a plan
+    left behind by a test that ran a generation caps what the next test's
+    language model may hold, so a reserve assertion that passes alone fails in
+    a suite. It also mirrors what the extension does, where a plan deliberately
+    survives its generation so that the VRAM freed at the end of one is not
+    read as room to grow into before the next.
+    """
+    import mc_plan
+
+    mc_plan.clear()
+    mc_plan.note_placement(None)
+    mc_plan.forget_misses()
+    yield
+    mc_plan.clear()
+    mc_plan.note_placement(None)
+    mc_plan.forget_misses()
+
+
 @pytest.fixture
 def host():
     """The faked host modules, reset between tests.

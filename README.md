@@ -593,6 +593,89 @@ residency of that pair realistically wants a 24 GB card. Quantised Flux builds
 (GGUF, nf4, fp4, fp8) are substantially smaller and make dual residency workable
 on less. The extension handles both cases and never assumes dual residency.
 
+#### Generation Memory & Persistent LLM
+
+Everything above is about one workload. A generation is often several — a
+Creative Writer call, a Spatial Composer call, Stage 1, the handoff into
+Stage 2, Stage 2 itself, and the Stage 1 warm-up afterwards — and the phases do
+not all happen at once.
+
+Before anything runs, the extension works out which of those phases this
+generation will actually contain and what each will cost at its peak. That is
+the **active plan**, and the accordion of the same name on txt2img shows it:
+
+```
+Active plan: Creative Writer -> Spatial Composer -> Stage 1 (krea2) -> Handoff -> Stage 2 (klein9b)
+
+Usable VRAM              24.0 GB
+Creative Writer          —          no image residency
+Spatial Composer         —          no image residency
+Stage 1                  10.0 GB    krea2
+Handoff                  17.0 GB    Stage 1 encoders kept; sets the protected peak
+Stage 2                  15.0 GB    klein9b
+Stage 1 warm-up          10.0 GB    restored for the next press
+Image working peak       17.0 GB    the largest phase, not the sum of them
+Image-protected budget   17.0 GB    kept clear whatever else asks for it
+```
+
+Two rules do the work.
+
+**Mutually exclusive phases share VRAM rather than adding up.** Stage 1 and
+Stage 2 take over one another's arena — they never sample at the same time —
+so the reserve is the *largest* phase, not the sum. On a 24 GB card, summing a
+10 GB Stage 1 and a 15 GB Stage 2 describes a machine that cannot run the
+generation at all.
+
+**Real overlaps are still counted.** The handoff deliberately keeps Stage 1's
+VAE and text encoder resident while Stage 2 loads, so for that moment there
+genuinely are two models' worth of weights on the card. That is a phase of its
+own, and on a long chain it is frequently the largest one.
+
+The language model is then placed in what the plan leaves over, and left there.
+A phase transition inside a generation is not a reason to re-place it: the
+moment Stage 1's weights are released looks like room to grow into, but taking
+it means stopping the server the next request was going to reuse. The placement
+is reconsidered only when the plan itself changes — a different checkpoint, a
+different resolution class, Stage 2 switched on or off — or when the estimate is
+demonstrably wrong.
+
+Sizing a placement against instantaneous free VRAM instead is what the section
+replaced, and it is worth naming what that looked like. In one user's
+`llama-server.log` covering a single session:
+
+- 71 server starts, 47 of which died loading the model;
+- the negotiated context alternating 7168 / 8192 across consecutive generations,
+  because free VRAM alternated with it, and every change of placement is a
+  restart and a lost prompt cache — roughly thirteen seconds of prompt
+  evaluation paid again on each one;
+- five consecutive generations whose every start attempt failed with
+  `cudaMalloc failed: out of memory` on a card that had reported 22.7 GB free
+  moments earlier;
+- 31 starts that never reached the model at all, dying at argument parsing with
+  `invalid device: CUDA0` because no CUDA device could be enumerated on a card
+  another process had filled.
+
+**Persistent LLM VRAM** in Settings controls the ceiling:
+
+| Setting | Effect |
+| --- | --- |
+| **Auto** (default) | size llama-server from what the plan leaves over |
+| **Custom** | a lower ceiling than the calculated allowance |
+| **Off** | no persistent residency; the whole arena is the image plan's |
+
+A lower Custom cap means more image headroom, fewer GPU-resident expert layers,
+lower tokens per second, and a greater chance the server survives every phase
+without being touched. A Custom figure *above* the calculated allowance does not
+raise it — the control is a way to be more conservative than the arithmetic,
+never less.
+
+If a phase overruns its estimate anyway, the image generation wins: optional
+warm state is released first, then llama-server is evicted if that is what it
+takes to finish the picture. That is recovery rather than scheduling, so it is
+recorded and shown in the same section, with the amount of the miss and a
+suggested safer cap — and the language model is not silently promoted back to
+the placement that failed.
+
 #### How this works on Forge Neo, and one honest limitation
 
 Forge Neo keeps exactly one checkpoint in `sd_models.model_data.sd_model`, and
@@ -2146,6 +2229,8 @@ Settings toggle removes the tab entirely.
 ```
 mc_arch.py            architecture detection + per-architecture geometry
 mc_memory.py          image model residency / cache management
+mc_plan.py            the generation's execution plan and the VRAM budget from it
+mc_plan_panel.py      the Generation Memory & Persistent LLM section on txt2img
 mc_lora.py            prepared LoRA state + stage isolation
 mc_infotext.py        infotext write + paste-field registration
 mc_presets.py         named Stage 2 configurations
