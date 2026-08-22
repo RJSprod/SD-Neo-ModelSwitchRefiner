@@ -45,6 +45,16 @@ to a limit is trusting a length prefix out of a file the user picked, and a
 corrupt one would otherwise ask for an allocation the size of the disk.
 """
 
+KEPT_ARRAY_LENGTH = 1024
+"""Longest metadata array kept as its values rather than as its length.
+
+A settings array -- a rope scaling table, a list of head counts -- is a handful
+of numbers and is worth having. A tokenizer vocabulary is a quarter of a million
+strings, is read by nothing here (see :class:`Gguf`, which asks only for
+``general.*`` and ``{architecture}.*`` keys), and is the reason this file used
+to take the better part of a second to parse.
+"""
+
 
 class GgufError(ValueError):
     """The file is not a GGUF this module can read."""
@@ -309,7 +319,7 @@ def read(path: str | Path) -> Gguf:
                 f"{file_path.name} is GGUF version {version}; this reads version 2 and later"
             )
         tensor_count, kv_count = struct.unpack("<QQ", _exactly(handle, 16))
-        reader = _Reader(handle)
+        reader = _Reader(handle, size)
         metadata: dict = {}
         for _ in range(min(int(kv_count), 1_000_000)):
             key = reader.string()
@@ -321,25 +331,89 @@ def read(path: str | Path) -> Gguf:
                 file_bytes=size, tensor_count=int(tensor_count))
 
 
+_described: dict[Path, tuple[tuple, "Gguf"]] = {}
+"""Headers already parsed, against the file stamp they were parsed from.
+
+Small and deliberate. :func:`describe` is called on the path that leads to
+*reusing* a running llama-server -- before every request, once the active plan
+has moved -- and the header it reads cannot have changed unless the file has.
+Keeping the answer turns that call from a parse of the whole header into a
+stat, which is the difference between a second of silence before a warm request
+and none.
+"""
+
+_DESCRIBED_LIMIT = 8
+"""How many models are remembered before the lot is dropped.
+
+A ceiling rather than a policy. Nobody has eight backbones in play at once, and
+an eviction that gets it wrong costs one re-parse -- so the simplest rule that
+cannot grow without bound is the right one here.
+"""
+
+
+def _stamp(path: Path) -> tuple:
+    """What has to be unchanged for a parsed header to still be true."""
+    status = path.stat()
+    return (status.st_mtime_ns, status.st_size)
+
+
+def forget(path: str | Path | None = None) -> None:
+    """Drop remembered headers, for ``path`` or for everything.
+
+    Nothing in the extension needs this -- the stamp already notices a file that
+    changed -- but a test that writes two different headers to one path inside a
+    single mtime tick does, and so does anybody debugging a header by hand.
+    """
+    if path is None:
+        _described.clear()
+        return
+    _described.pop(Path(path).expanduser(), None)
+
+
 def describe(path: str | Path) -> Gguf | None:
     """:func:`read`, or ``None`` when the file cannot be described.
 
     Used by the UI, where a model whose header will not parse is a reason to
     fall back to a coarser estimate and say so -- never a reason to refuse to
     draw the panel.
+
+    The answer is remembered against the file's size and modification time, so a
+    second call on an unchanged file costs a ``stat`` instead of a parse. A file
+    that has been touched at all is parsed again: the stamp is the guarantee,
+    not the path.
+
+    A failure is not remembered. It is cheap -- a header that will not parse
+    fails in its first few bytes -- and a model being copied into place is
+    exactly the case that must not be answered from a cache of "no".
     """
+    file_path = Path(path).expanduser()
     try:
-        return read(path)
+        stamp = _stamp(file_path)
+    except OSError:
+        return None
+
+    remembered = _described.get(file_path)
+    if remembered is not None and remembered[0] == stamp:
+        return remembered[1]
+
+    try:
+        described = read(file_path)
     except (GgufError, OSError, struct.error):
         return None
+
+    if len(_described) >= _DESCRIBED_LIMIT:
+        _described.clear()
+    _described[file_path] = (stamp, described)
+    return described
 
 
 class _Reader:
     """Sequential metadata reader with a budget. See ``MAX_METADATA_BYTES``."""
 
-    def __init__(self, handle):
+    def __init__(self, handle, file_bytes: int = 0):
         self._handle = handle
         self._spent = 0
+        self._file_bytes = int(file_bytes)
 
     def take(self, count: int) -> bytes:
         count = int(count)
@@ -347,6 +421,26 @@ class _Reader:
             raise GgufError("GGUF metadata is implausibly large; refusing to read further")
         self._spent += count
         return _exactly(self._handle, count)
+
+    def skip(self, count: int) -> None:
+        """Step over ``count`` bytes, spending the budget and keeping nothing.
+
+        A seek rather than a read, which is the whole point: the bytes being
+        stepped over are a tokenizer vocabulary, and reading them costs the same
+        whether or not anything is done with them afterwards.
+
+        The end-of-file check that :func:`_exactly` performs for free has to be
+        done by hand here, because seeking past the end of a file succeeds
+        silently. Without it a truncated GGUF would be reported as one with a
+        very short vocabulary rather than as the damaged file it is.
+        """
+        count = int(count)
+        if count < 0 or self._spent + count > MAX_METADATA_BYTES:
+            raise GgufError("GGUF metadata is implausibly large; refusing to read further")
+        self._spent += count
+        landing = self._handle.seek(count, 1)
+        if self._file_bytes and landing > self._file_bytes:
+            raise GgufError("GGUF file ended inside its metadata header")
 
     def string(self) -> str:
         length, = struct.unpack("<Q", self.take(8))
@@ -357,16 +451,50 @@ class _Reader:
             return self.string()
         if value_type == ARRAY:
             element_type, count = struct.unpack("<IQ", self.take(12))
+            element_type, count = int(element_type), int(count)
             # Vocabularies run to hundreds of thousands of entries and nothing
-            # here reads one, so an array is walked to keep the stream aligned
-            # and only kept when it is small enough to be a real setting.
-            values = [self.value(int(element_type)) for _ in range(int(count))]
-            return values if len(values) <= 1024 else len(values)
+            # here reads one, so a long array is walked to keep the stream
+            # aligned and reported as its length. Only an array short enough to
+            # be a real setting is built.
+            if count > KEPT_ARRAY_LENGTH:
+                self._walk(element_type, count)
+                return count
+            return [self.value(element_type) for _ in range(count)]
         layout = _SCALARS.get(value_type)
         if layout is None:
             raise GgufError(f"unknown GGUF metadata value type {value_type}")
         fmt, width = layout
         return struct.unpack(fmt, self.take(width))[0]
+
+    def _walk(self, element_type: int, count: int) -> None:
+        """Advance past an array's payload without materialising any of it.
+
+        The stream is sequential, so an array that is not wanted still has to be
+        stepped over exactly -- but stepping over it and building it are two
+        very different amounts of work. A 262,144-entry vocabulary built as a
+        Python list of ``str`` and thrown away immediately afterwards was
+        costing the better part of a second per call, on a call this extension
+        makes before every language-model request.
+
+        Fixed-width elements are one seek for the lot. Strings still cost one
+        length prefix each, because that is the only way to know where the next
+        one starts, but not the decode and not the object.
+        """
+        layout = _SCALARS.get(element_type)
+        if layout is not None:
+            self.skip(layout[1] * count)
+            return
+        if element_type == STRING:
+            for _ in range(count):
+                length, = struct.unpack("<Q", self.take(8))
+                self.skip(length)
+            return
+        if element_type == ARRAY:
+            for _ in range(count):
+                nested_type, nested_count = struct.unpack("<IQ", self.take(12))
+                self._walk(int(nested_type), int(nested_count))
+            return
+        raise GgufError(f"unknown GGUF metadata value type {element_type}")
 
 
 def _exactly(handle, count: int) -> bytes:

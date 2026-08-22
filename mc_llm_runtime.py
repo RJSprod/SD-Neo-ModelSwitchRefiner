@@ -647,15 +647,32 @@ def _shrink_offload(configuration: Config, placement, gguf, reserve: int,
             note = (f"offload reduced to {max(layers, 0)} of {total} layers on the GPU; "
                     "the rest run from system RAM and will be slower")
             if layers <= 0:
+                _supersede(notes)
                 note = ("the whole model was placed in system RAM -- there is not enough free "
                         "VRAM for any of it alongside what is resident; generation will be slow")
             notes.append(note)
             return candidate, estimate, "; ".join(notes)
 
     candidate = placement.with_layers(mc_llm_context.NO_LAYERS)
+    _supersede(notes)
     notes.append("the whole model was placed in system RAM; generation will be slow")
     return (candidate, mc_llm_context.estimate(configuration.model, candidate, gguf),
             "; ".join(notes))
+
+
+def _supersede(notes: list[str]) -> None:
+    """Drop the rungs that a landing in system RAM has just contradicted.
+
+    Which is all of them. Every rung above the last describes a saving made by
+    leaving *part* of the model behind, and the last rung leaves all of it
+    behind: reporting both produced the sentence a user sent in, which said in
+    one breath that "the experts stay in system RAM and the rest of the model is
+    on the GPU" and that "the whole model was placed in system RAM". Both halves
+    were written by this function, the second one is the true one, and somebody
+    reading the first half would go looking for a partial offload that was never
+    there -- as, in that report, they did.
+    """
+    notes.clear()
 
 
 def _spill_experts(configuration: Config, placement, gguf, reserve: int, free: int,
@@ -974,6 +991,21 @@ that has one, the other, or neither is a build this module still places.
 FLASH_ATTENTION_FLAG = "--flash-attn"
 """Fused attention kernels. A CUDA thing: worth nothing with no layers offloaded."""
 
+NO_MMAP_FLAG = "--no-mmap"
+"""Read the weights into memory instead of mapping the file.
+
+Added for one placement and no other: the one that overrides some tensors to
+the processor while the rest stay on the card. llama.cpp warns about that
+combination itself -- ``tensor overrides to CPU are used with mmap enabled --
+consider using --no-mmap for better performance`` -- because an overridden
+tensor is reached through the page cache on every token rather than out of a
+buffer of its own.
+
+It is not added to a placement that is entirely in system RAM. That is
+llama.cpp's ordinary processor path, mapping is its default there for good
+reasons, and the flag would trade a slower start for nothing.
+"""
+
 FULL_ATTENTION_WINDOW_FLAG = "--swa-full"
 """Keep the whole key/value cache, rather than a sliding window of it.
 
@@ -1097,7 +1129,10 @@ def accelerator_flags(configuration: Config, placement) -> list[str]:
         flags.append(FULL_ATTENTION_WINDOW_FLAG)
     if not getattr(placement, "on_gpu", False):
         return flags
-    flags.extend(expert_flags(configuration, placement))
+    experts = expert_flags(configuration, placement)
+    flags.extend(experts)
+    if experts and runtime_supports(NO_MMAP_FLAG, configuration):
+        flags.append(NO_MMAP_FLAG)
     if placement.gpu_layers == mc_llm_context.NO_LAYERS:
         return flags
     if runtime_supports(FLASH_ATTENTION_FLAG, configuration):
@@ -1114,9 +1149,21 @@ def expert_flags(configuration: Config, placement) -> list[str]:
     advertises neither flag, and for a dense model -- which never reaches a
     placement with experts moved, because :func:`_shrink_offload` reads the
     header before it makes one.
+
+    Empty, too, for a placement with no layers on the card at all. "The experts
+    are in system RAM" is not a thing that can be asked for once *everything* is
+    in system RAM: the flag selects nothing that ``--n-gpu-layers 0`` has not
+    already selected, and asking for it anyway puts llama.cpp on its tensor-
+    override path, which costs a warning about mmap and the performance that
+    warning is about. It also produced a console line that contradicted itself,
+    announcing that the experts had been left behind and that the whole model
+    had been -- see :func:`_shrink_offload`.
     """
     layers = int(getattr(placement, "cpu_expert_layers", mc_llm_context.NO_EXPERTS))
     if layers == mc_llm_context.NO_EXPERTS:
+        return []
+    resident = int(getattr(placement, "gpu_layers", mc_llm_context.ALL_LAYERS))
+    if resident == mc_llm_context.NO_LAYERS:
         return []
     if layers == mc_llm_context.ALL_EXPERTS:
         return [CPU_MOE_FLAG] if runtime_supports(CPU_MOE_FLAG, configuration) else []
@@ -2453,11 +2500,45 @@ class Runtime:
 
         if not _worth_restarting(current, preview.placement,
                                  described.block_count if described else 0):
+            self._reconciled()
             return False
         logger.info("Model Chain: re-placing llama-server — %s now fits, where it is running %s",
                     preview.placement.describe(described.block_count if described else 0),
                     current.describe(described.block_count if described else 0))
         return True
+
+    @staticmethod
+    def _reconciled() -> None:
+        """Record that the running placement has been checked against this plan.
+
+        The missing half of :func:`mc_plan.boundary_moved`, and the reason a
+        warm request could pause for a second before every generation.
+
+        ``mc_plan.note_placement`` was called from exactly one place -- the path
+        that starts a server -- so a plan boundary that was examined and
+        *declined* left the old plan recorded. ``boundary_moved`` then went on
+        answering "yes" to every later request, and every one of them paid for
+        the answer: a GGUF header re-read and a full re-negotiation, to reach
+        the same conclusion as the request before it. It never healed, because
+        the only thing that could record the new plan was the restart this
+        function has just decided against.
+
+        A boundary that has been considered has been considered whichever way it
+        came out, so the plan is recorded here too. What that costs is nothing
+        the overspend guard was doing: :meth:`_overspending` is measured on
+        every call, before the boundary is consulted at all, and still forces
+        the check through when a running server holds more than the plan leaves
+        it.
+        """
+        try:
+            import mc_plan
+
+            plan = mc_plan.current()
+            if plan is not None:
+                mc_plan.note_placement(plan)
+        except Exception:
+            logger.debug("Model Chain: could not record the reconciled placement plan",
+                         exc_info=True)
 
     @staticmethod
     def _allowance(ours: int) -> int:

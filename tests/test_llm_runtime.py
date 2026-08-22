@@ -1033,6 +1033,54 @@ class TestMovingTheExpertsRatherThanTheBlocks:
         assert placement.gpu_layers == ctx.NO_LAYERS
         assert "system RAM" in note
 
+    def test_landing_on_system_RAM_does_not_also_report_the_rungs_above_it(
+            self, shrink, moe, monkeypatch):
+        """From a user's console, in one sentence: "the experts stay in system
+        RAM and the rest of the model is on the GPU [...] the whole model was
+        placed in system RAM". Both halves came from this function, only the
+        second was true, and the first is the one somebody reads first — the
+        report that prompted this went looking for a partial offload that was
+        never there.
+
+        The build matters, which is why it is set here. A runtime with only the
+        all-or-nothing flag skips the progressive rung, so the expert note is
+        written by the branch that always writes one, and it survives all the
+        way down to a landing that contradicts it.
+        """
+        monkeypatch.setattr(runtime, "runtime_supports",
+                            lambda flag, config=None: flag == runtime.CPU_MOE_FLAG)
+        placement, _estimate, note = shrink(moe, 0.5)
+
+        assert placement.gpu_layers == ctx.NO_LAYERS
+        assert "the whole model was placed in system RAM" in note
+        assert "the rest of the model is on the GPU" not in note
+        assert "experts" not in note
+
+    def test_the_other_wording_for_the_same_landing_is_clean_too(
+            self, shrink, moe, monkeypatch):
+        """There are two ways to arrive at zero layers -- the ladder finding
+        that zero is what fits, and the ladder running out of rungs -- and they
+        are worded differently. Both contradict an expert note, so both drop
+        it."""
+        monkeypatch.setattr(runtime, "runtime_supports",
+                            lambda flag, config=None: flag == runtime.CPU_MOE_FLAG)
+        placement, _estimate, note = shrink(moe, 1.3)
+
+        assert placement.gpu_layers == ctx.NO_LAYERS
+        assert "not enough free VRAM for any of it" in note
+        assert "experts" not in note
+
+    def test_a_partial_offload_still_reports_both_rungs(self, shrink, moe, monkeypatch):
+        """The expert note is only superseded by the landing that contradicts
+        it. With blocks still on the card, both sentences are true."""
+        monkeypatch.setattr(runtime, "runtime_supports",
+                            lambda flag, config=None: flag == runtime.CPU_MOE_FLAG)
+        placement, _estimate, note = shrink(moe, 2.0)
+
+        assert 0 < placement.gpu_layers < 40
+        assert "experts" in note
+        assert "of 40 layers" in note
+
     def test_a_build_without_the_flag_is_not_given_the_placement(self, shrink, moe,
                                                                  monkeypatch):
         """The placement means ``--cpu-moe``, so a runtime that has never heard
@@ -1601,6 +1649,76 @@ class TestTheExpertFlagOnTheCommandLine:
         assert monkeyed.index("--n-cpu-moe") < monkeyed.index("--flash-attn")
         assert monkeyed[monkeyed.index("--n-cpu-moe") + 1] == "8"
 
+    def test_nothing_is_overridden_when_nothing_is_on_the_card(self, build):
+        """The last rung of the ladder keeps whatever expert split the rung
+        above it chose, so a placement with no layers on the GPU can still carry
+        one. Asking for it selects nothing that ``--n-gpu-layers 0`` has not
+        already selected, and puts llama.cpp on its tensor-override path for
+        nothing -- which is where its own mmap warning comes from."""
+        configuration = build(runtime.N_CPU_MOE_FLAG, runtime.CPU_MOE_FLAG)
+
+        for experts in (8, ctx.ALL_EXPERTS):
+            placement = ctx.Placement(gpu_layers=ctx.NO_LAYERS, cpu_expert_layers=experts)
+            assert runtime.expert_flags(configuration, placement) == [], experts
+
+    def test_a_placement_with_layers_left_still_overrides(self, build):
+        configuration = build(runtime.CPU_MOE_FLAG)
+        placement = ctx.Placement(gpu_layers=20, cpu_expert_layers=ctx.ALL_EXPERTS)
+
+        assert runtime.expert_flags(configuration, placement) == [runtime.CPU_MOE_FLAG]
+
+
+class TestMappingIsTurnedOffForATensorOverride:
+    """llama.cpp asks for this itself, in the log the session that prompted it
+    came from: ``tensor overrides to CPU are used with mmap enabled - consider
+    using --no-mmap for better performance``. An overridden tensor is reached
+    through the page cache on every token rather than out of a buffer of its own.
+    """
+
+    @pytest.fixture
+    def build(self, monkeypatch, tmp_path):
+        def announce(*flags):
+            configuration = runtime.Config(
+                runtime=tmp_path / "llama-server", model=tmp_path / "m.gguf", mmproj=None,
+                gpu_index=0, device="CUDA0", gpu_layers="all", context_size=8192,
+                context_mode="fixed", context_buffer_gb=4.0, kv_type_k="f16",
+                kv_type_v="f16")
+            monkeypatch.setattr(runtime, "runtime_supports",
+                                lambda flag, config=None, offered=flags: flag in offered)
+            return configuration
+
+        return announce
+
+    def test_it_follows_an_expert_override(self, build):
+        configuration = build(runtime.CPU_MOE_FLAG, runtime.NO_MMAP_FLAG)
+        placement = ctx.Placement(gpu_layers=20, cpu_expert_layers=ctx.ALL_EXPERTS)
+
+        assert runtime.NO_MMAP_FLAG in runtime.accelerator_flags(configuration, placement)
+
+    def test_a_placement_with_no_override_keeps_mapping(self, build):
+        """Mapping is llama.cpp's default for good reasons. The flag is a
+        response to the override, not a general opinion about loading."""
+        configuration = build(runtime.CPU_MOE_FLAG, runtime.NO_MMAP_FLAG)
+
+        assert runtime.NO_MMAP_FLAG not in runtime.accelerator_flags(
+            configuration, ctx.Placement(gpu_layers=20))
+
+    def test_a_whole_model_in_system_RAM_keeps_mapping(self, build):
+        """No override is emitted for that placement any more, so there is
+        nothing for this flag to answer -- and it would trade a slower start
+        for nothing on llama.cpp's ordinary processor path."""
+        configuration = build(runtime.CPU_MOE_FLAG, runtime.NO_MMAP_FLAG)
+        placement = ctx.Placement(gpu_layers=ctx.NO_LAYERS,
+                                  cpu_expert_layers=ctx.ALL_EXPERTS)
+
+        assert runtime.accelerator_flags(configuration, placement) == []
+
+    def test_a_build_that_has_never_heard_of_it_is_not_given_it(self, build):
+        configuration = build(runtime.CPU_MOE_FLAG)
+        placement = ctx.Placement(gpu_layers=20, cpu_expert_layers=ctx.ALL_EXPERTS)
+
+        assert runtime.accelerator_flags(configuration, placement) == [runtime.CPU_MOE_FLAG]
+
 
 class TestRetryingASmallerPlacement:
     """A start that ran out of VRAM is tried again with more headroom, because
@@ -2102,6 +2220,104 @@ class TestAPlacementIsReconsideredOnlyAtPlanBoundaries:
         set_free(monkeypatch, 23)
 
         assert server._outgrown(configuration, 0)
+
+    def test_a_boundary_that_was_declined_is_recorded_as_considered(
+            self, placed, tmp_path, monkeypatch):
+        """The half of this rule that was missing, and what it cost.
+
+        ``note_placement`` was reached from one place -- the path that starts a
+        server -- so a boundary that was examined and declined left the *old*
+        plan recorded. ``boundary_moved`` then answered "yes" to every request
+        after it, for ever: the only thing that could record the new plan was
+        the restart this path has just decided against.
+
+        From the console this came from: the first generation planned against a
+        21.4 GB estimate, the second against the 19.3 GB the checkpoint turned
+        out to weigh. That is a real boundary, it is worth looking at once, and
+        it was then looked at before every request for the rest of the session
+        -- a GGUF header re-read and a full re-negotiation each time, to reach
+        the same answer as the request before it.
+        """
+        configuration = configure(monkeypatch, tmp_path)
+        publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
+        mc_plan.note_placement(mc_plan.current())
+        server = runtime.Runtime()
+        server._placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, context=8192,
+                                          kv_type_k="f16", kv_type_v="f16", on_gpu=True)
+        set_free(monkeypatch, 23)
+        publish_plan(stage_1_gb=20.0, monkeypatch=monkeypatch)
+        assert mc_plan.boundary_moved()
+
+        assert not server._outgrown(configuration, 0)
+
+        assert not mc_plan.boundary_moved()
+        assert mc_plan.placed_for() == mc_plan.current().identity()
+
+    def test_the_request_after_a_declined_boundary_re_reads_nothing(
+            self, placed, tmp_path, monkeypatch):
+        """The second half of the same bug, and the second a warm request spent
+        on it: the re-negotiation begins by parsing the model's whole header."""
+        configuration = configure(monkeypatch, tmp_path)
+        publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
+        mc_plan.note_placement(mc_plan.current())
+        server = runtime.Runtime()
+        server._placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, context=8192,
+                                          kv_type_k="f16", kv_type_v="f16", on_gpu=True)
+        set_free(monkeypatch, 23)
+        publish_plan(stage_1_gb=20.0, monkeypatch=monkeypatch)
+        assert not server._outgrown(configuration, 0)
+
+        reads: list = []
+        described = mc_gguf.describe
+        monkeypatch.setattr(mc_gguf, "describe",
+                            lambda path: (reads.append(path), described(path))[1])
+
+        assert not server._outgrown(configuration, 0)
+        assert reads == []
+
+    def test_a_boundary_that_moves_again_is_still_examined(
+            self, placed, tmp_path, monkeypatch):
+        """Recording the declined plan must not mean never looking again. What
+        is recorded is "this plan has been considered", not "stop asking"."""
+        configuration = configure(monkeypatch, tmp_path)
+        publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
+        mc_plan.note_placement(mc_plan.current())
+        server = runtime.Runtime()
+        server._placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, context=8192,
+                                          kv_type_k="f16", kv_type_v="f16", on_gpu=True)
+        set_free(monkeypatch, 23)
+        publish_plan(stage_1_gb=20.0, monkeypatch=monkeypatch)
+        assert not server._outgrown(configuration, 0)
+
+        publish_plan(stage_1_gb=8.0, monkeypatch=monkeypatch)
+        reads: list = []
+        described = mc_gguf.describe
+        monkeypatch.setattr(mc_gguf, "describe",
+                            lambda path: (reads.append(path), described(path))[1])
+
+        assert mc_plan.boundary_moved()
+        server._outgrown(configuration, 0)
+        assert reads, "a plan that moved again was never looked at"
+
+    def test_an_overspending_server_is_still_caught_after_a_decline(
+            self, placed, tmp_path, monkeypatch):
+        """The guard that must not be weakened by any of this. It is measured
+        before the boundary is consulted at all, so a server holding more than
+        the plan leaves it is re-placed whether or not the boundary has already
+        been considered."""
+        configuration = configure(monkeypatch, tmp_path)
+        publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
+        mc_plan.note_placement(mc_plan.current())
+        server = runtime.Runtime()
+        server._placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, context=8192,
+                                          kv_type_k="f16", kv_type_v="f16", on_gpu=True)
+        set_free(monkeypatch, 23)
+        publish_plan(stage_1_gb=20.0, monkeypatch=monkeypatch)
+        assert not server._outgrown(configuration, 0)
+
+        publish_plan(stage_1_gb=23.5, monkeypatch=monkeypatch)
+
+        assert server._outgrown(configuration, int(1.4 * _GB))
 
     def test_stopping_the_server_forgets_the_plan_it_was_placed_for(
             self, placed, monkeypatch):
