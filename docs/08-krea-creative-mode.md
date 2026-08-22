@@ -1193,7 +1193,7 @@ non-blocking warning. What is implemented is the warning, and the boxes are left
 exactly where they are. Reprojection would mean this code deciding which of
 somebody's boxes deserved to keep its shape and which deserved to keep its
 position, and there is no answer to that which is right for both a face and a
-horizon. The warning is a line of text in the editor's header — nothing to
+horizon. The warning is a line of text in the editor — nothing to
 dismiss, nothing that can be dismissed by accident, and no path on which layout
 state is lost.
 
@@ -1267,7 +1267,8 @@ in somebody's browser.
 The overlay is moved to `document.body` on first wire. A `position: fixed` modal
 inside a Gradio accordion is one `overflow: hidden` or one `transform` away from
 being invisible, and neither of those is this extension's to promise about a
-theme.
+theme. *(§15 replaced the overlay with a workspace in ordinary flow and this
+paragraph with it; it is left here because §15 is largely an argument with it.)*
 
 ### 14.10 Failure, in the order it is tried
 
@@ -1309,3 +1310,214 @@ is the same mistake §13.3 fixed between backbones, one level down.
 
 The Composer borrows the generation's bar exactly as the roll does (§7.3): no
 `start_task`, no `finish_task`, counters handed back on every path out.
+
+
+## 15. The layout editor rebuilt for a finger (22 August 2026)
+
+Companion to the *Krea 2 Spatial Layout Editor — UI Refactor* design intent
+(22 August 2026). Section numbers below are that document's.
+
+Nothing under §14 changed. The schema is version 1, the coordinates are the same
+normalized 0–1000 fractions, the Creative Writer and the Spatial Composer run the
+same passes in the same order, the compositor is untouched, the infotext keys are
+the same ten, and the hidden state box is still an input that no generation waits
+for. This section is about the half a user actually touches.
+
+### 15.1 What was wrong, and which of it was styling
+
+Four of the complaints were interaction and one was architecture, and only the
+architectural one is interesting.
+
+The interaction complaints: resize handles were 10 px squares with 10 px hit
+areas; deletion meant selecting on the canvas and finding the right button;
+there was no Clear All; and every listener was a mouse listener, so on a tablet
+the editor was either inert or answering a synthesised echo that arrived after a
+scroll had already started.
+
+The architectural one is §6's. **Selecting a region in the list did not make it
+draggable.** It set the logical selection, drew the outline in the right place,
+and filled the inspector — and then the browser hit-tested the pointer against
+paint order, as it must, and gave the drag to whatever was on top. A region
+behind another one could be selected and could not be moved, which is the exact
+case somebody opens a layout editor to fix.
+
+The obvious repair is to raise the selected region. It is also wrong: z-order is
+composition, the compositor reads it, and changing it because somebody tapped a
+row would edit the picture as a side effect of looking at it.
+
+### 15.2 The selection proxy
+
+So the selection is drawn twice.
+
+Region bodies are painted in their real semantic order, `z-index` from `z`, and
+they are what you touch to select something. Above all of them sits one element —
+`#mc-krea-spatial-proxy`, `z-index: 9000` — carrying the selected region's
+outline, its label, its move surface and its eight resize handles. It reads that
+region's bbox and writes back to it. It never touches `z`.
+
+The result is the acceptance requirement, in one sentence: select a buried region
+from the list and the topmost thing under your finger is that region's handles,
+while the compositor is still told it is at the back. `TestTheSelectionProxy`
+builds the design intent's test A — two fully overlapping boxes, A behind B, A
+selected from the list, a drag through the middle — and asserts all three halves
+of it: A moved, B did not, and the order the compositor is given is unchanged.
+
+This is also why the selected region's *body* goes transparent. Two outlines on
+one rectangle is a rendering bug that looks like a feature.
+
+### 15.3 One pointer path
+
+`pointerdown`, `pointermove`, `pointerup`, `pointercancel`, all four on the frame,
+with `setPointerCapture` on the first of them.
+
+Capture is what removed code rather than adding it. The old file kept
+`mousemove` and `mouseup` on `document` for one reason — a drag that leaves the
+canvas still has to be followed — and paid for it with a listener that no dataset
+flag could make idempotent, guarded by a hand-rolled `state.listening` boolean. A
+captured pointer is delivered to the capturing element wherever it goes, so both
+listeners moved onto the frame and became ordinary idempotent ones. One document
+listener remains, for keystrokes, and the test asserts there is exactly one after
+three re-wires.
+
+`pointercancel` is new behaviour and not merely a fourth event name: the system
+taking the contact away — a phone call, a gesture the browser reclassified as a
+scroll — puts the region back where the drag started rather than leaving it
+halfway.
+
+The mouse path survives behind `"PointerEvent" in window`, for the one embedded
+browser that has no Pointer Events. It is deliberately the old path and not a
+second maintained one.
+
+`touch-action` is scoped rather than global (§5.3). The frame scrolls the page
+like any other block; region bodies, the proxy and the handles are `none`, and so
+is the frame while Draw is armed. A phone where the whole editor refuses to
+scroll is worse than one where a box is hard to grab.
+
+### 15.4 Targets, and the pseudo-element that could not be used
+
+§5.5 asks for a visible knob of 10–12 px inside a hit target of 32–44 px. The
+usual way to write that is a small bordered element with an oversized invisible
+`::before` around it.
+
+This stylesheet cannot do that. `tests/test_progress.py` enforces a rule the
+progress work established: nothing in `style.css` draws into `::before` or
+`::after`, because a WebUI theme may already own them, and a second thing drawn
+there replaces the theme's rather than layering with it. The rule is about
+`.progress` and the test is about the whole file, which is the right way round —
+an exception is one grep away from being a precedent.
+
+So the handle *is* the hit target: transparent, `--mc-grab` across, with the
+visible knob painted as two centred background gradients — an accent square with
+a page-coloured square on top of it. Same picture, one element, no pseudo.
+
+Eight handles on a small region would otherwise fight each other for one finger,
+so corners are square targets at `z-index: 2` and edges are strips at `z-index: 1`
+that stop short of the corners. `@media (pointer: coarse)` takes `--mc-grab` to
+44 px and every button to a 44 px minimum.
+
+### 15.5 A workspace, not a modal
+
+§14.9 ended with a paragraph defending moving the overlay into `document.body`. It
+was a correct answer to a real problem — a `position: fixed` modal inside a Gradio
+accordion is one `overflow: hidden` away from being invisible — and it bought two
+more: two copies of every id whenever Gradio rebuilt the tab, which the file
+handled with a deduplicating `adopt()`, and a modal whose scrolling was its own
+business on exactly the devices with the least room.
+
+The editor is now a block in ordinary document flow that Edit Layout unhides and
+Back hides. It scrolls the way the page scrolls, it inherits the theme it is
+standing in, and it cannot be clipped out of existence by a container it is no
+longer trying to escape. `claim()` is what is left of `adopt()`: no move, just the
+duplicate guard, keeping the newest copy because that is the one Gradio is
+managing. A rebuild under an open editor re-shows and repaints it, which the
+overlay never had to do because it was not where Gradio could rebuild it.
+
+Layout is container queries, not media queries. The editor lives in a Gradio
+column whose width the window says nothing about, so a viewport query would give
+a phone layout to a wide window and a desktop layout to a narrow column inside
+one. Narrow is the default — frame, inspector, region list, in that order, so the
+selected box and the prompt describing it stay adjacent on a phone — and 560 px
+and 880 px of *container* width are where it becomes two columns and then
+frame-plus-sidebar. A browser without container query support gets the narrow
+layout, which is a layout rather than a failure.
+
+The frame's size is CSS arithmetic and not measurement:
+
+    width: calc(var(--mc-zoom) * min(100%, var(--mc-frame-h) * var(--mc-ar-w) / var(--mc-ar-h)))
+
+`--mc-ar-w` and `--mc-ar-h` are written from the txt2img width and height,
+`aspect-ratio` supplies the height, and Fit is what that expression already
+computes at zoom 1. There is no resize observer, no measuring pass and no
+recomputation on window resize, because there is nothing to recompute.
+
+### 15.6 Undo, and what it is allowed to know
+
+A snapshot is the editable half of the document as a string: regions, the
+auto-hint flag, the grid. The frame size is deliberately not in it — the frame is
+a fact about txt2img rather than an edit, and undoing back onto a stale one would
+be a lie about what is going to be generated.
+
+Two things stop the stack filling with noise. A drag records the state it started
+from and pushes it on release, and only if the release left something different —
+so one gesture is one entry and a drag that moved nothing is not an entry at all.
+Typing and arrow-key nudges use a coalescing token naming the field and the
+region: the first call with a given token records, every later call with the same
+token is a no-op, and any other action clears it. A typed word is one entry.
+
+`Ctrl/Cmd+Z` inside a text field is left to the browser. Taking it over is how a
+mistyped prompt costs somebody a region.
+
+Clear All is the reason the history exists at all. §10.2 offers a choice between
+undo and a two-step confirmation, and a confirmation is a dialog standing between
+somebody and a button they meant to press. With undo, Clear All is one action, it
+says how many regions it took and that Undo brings them back, and the test builds
+the design intent's test D — four regions, Clear All, Undo — and asserts the four
+come back byte for byte.
+
+The stack is browser state (§15). It is not serialized, not recorded in infotext,
+and does not survive leaving the editor, which is asserted rather than assumed.
+
+### 15.7 What was added, and what was kept
+
+Added: `+ Add region` (a centred default box, so a touch user does not have to
+perform a precision drag to get one at all), Clear All, Undo/Redo, To front and
+To back beside the existing Forward and Back, eight resize handles instead of
+four, numeric X/Y/W/H in normalized units, per-row delete, a grid selector
+writing `canvas.grid`, Fit/−/+ zoom, a dimension label reading
+`1024 × 1536 · 2:3 · Portrait`, an in-page discard-or-keep prompt on Back, and
+arrow-key nudging.
+
+Kept, every one of them: Name, Type, Visible text, Region prompt, Framing, Camera
+angle, the auto-position-hint checkbox, the normalized box readout, Duplicate,
+Delete, Forward, Back, Draw region, Save, Cancel, the 24-region cap, the
+frame-reshape notice, and the refusal to open a document this build cannot read.
+`test_every_control_the_editor_had_is_still_there` names them, because a refactor
+that quietly dropped Framing would pass every behavioural test by never
+exercising it.
+
+Two things the design intent asks for that are not built as asked. §4.4's *Reset
+all regions* is Clear All — a second button doing the same thing to the same
+regions is a second button — and the reshape notice points at it by name. And
+§13.1 prefers native Gradio components for ordinary controls; the inspector stays
+custom DOM with theme variables, because every field in it is edited between
+presses of a button that has not been pressed yet, and routing them through Gradio
+would put a server round-trip inside a drag. Section 13.1 permits custom DOM for
+the frame, the geometry, the proxy and the layer rows; this extends that to the
+inspector for the same reason the state box exists at all.
+
+### 15.8 The fake page grew a DOM
+
+The node harness used to build the editor's elements as a flat list of ids, which
+was enough when every listener was on the canvas or the document. It is not enough
+now: a resize handle is inside the proxy, the proxy is inside the frame, and
+`closest()` has to walk that. So `spatial_editor()`'s markup is parsed into a tree
+— tags, ids, classes, `hidden`, `checked` and `data-*` — and rebuilt element for
+element, and the delegated listeners on the region list are exercised the way a
+browser delivers them, on the container with the row as the target.
+
+That is more harness than before and it buys the tests that matter: the design
+intent's A (buried region), C (a resize that continues when the contact leaves the
+frame), D (Clear All then Undo), E (delete with no canvas hit-testing), F (three
+aspect ratios), G (a v1 layout opening and saving unchanged) and I (the workspace
+is not a modal and is not on `document.body`) are all executed rather than
+asserted.
