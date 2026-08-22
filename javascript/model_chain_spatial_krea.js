@@ -104,11 +104,6 @@
         angleField: P + "-angle-field",
         autoHint: P + "-auto-hint",
         grid: P + "-grid",
-        bbox: P + "-bbox",
-        x: P + "-x",
-        y: P + "-y",
-        w: P + "-w",
-        h: P + "-h",
         size: P + "-size",
         warning: P + "-warning",
         message: P + "-message",
@@ -130,6 +125,7 @@
         zoomIn: P + "-zoom-in",
         zoomOut: P + "-zoom-out",
         zoomLevel: P + "-zoom-level",
+        full: P + "-full",
         save: P + "-save",
         cancel: P + "-cancel",
     };
@@ -235,7 +231,7 @@
     function blank() {
         return {
             version: 1,
-            canvas: {width: 0, height: 0, grid: "thirds"},
+            canvas: {width: 0, height: 0, grid: "none"},
             compose_mode: "smart",
             auto_position_hint: true,
             regions: [],
@@ -330,7 +326,7 @@
             canvas: {
                 width: Number(state.working.canvas.width) || 0,
                 height: Number(state.working.canvas.height) || 0,
-                grid: state.working.canvas.grid || "thirds",
+                grid: state.working.canvas.grid || "none",
             },
             compose_mode: state.working.compose_mode,
             auto_position_hint: !!state.working.auto_position_hint,
@@ -370,7 +366,7 @@
         return JSON.stringify({
             regions: state.working.regions,
             auto: !!state.working.auto_position_hint,
-            grid: state.working.canvas.grid || "thirds",
+            grid: state.working.canvas.grid || "none",
         });
     }
 
@@ -383,7 +379,7 @@
         }
         state.working.regions = (read.regions || []).map(normalise).filter(Boolean);
         state.working.auto_position_hint = read.auto !== false;
-        state.working.canvas.grid = read.grid || "thirds";
+        state.working.canvas.grid = read.grid || "none";
     }
 
     function keep(before) {
@@ -544,6 +540,70 @@
         zoomTo(direction > 0 ? at[0] : at[at.length - 1]);
     }
 
+    // Full screen: the whole display for the frame, and Back still comes back.
+    //
+    // Two mechanisms, and the order matters. The Fullscreen API is asked first
+    // because it is the only one nothing can clip, overlap or out-stack: the
+    // element is promoted out of the page's layout entirely, so no theme's
+    // `overflow: hidden`, `transform` or z-index is in the argument. It also
+    // takes the browser's own chrome away, which on a tablet is most of the
+    // screen this is asking for.
+    //
+    // A page that refuses it -- an iframe without `allowfullscreen`, a browser
+    // that does not offer it, a user who said no -- falls back to a fixed block
+    // over the page. That is the thing §3.1 told this editor not to be, and it
+    // is fine here for the reason the modal was not: it is somewhere the user
+    // asked to go and can leave, rather than the only way to edit at all.
+    function fullscreenOn() {
+        const workspace = byId(IDS.workspace);
+        if (!workspace) return false;
+        if (typeof document !== "undefined" && document.fullscreenElement === workspace) {
+            return true;
+        }
+        return !!(workspace.classList && workspace.classList.contains("fullpage"));
+    }
+
+    function leaveFullscreen() {
+        const workspace = byId(IDS.workspace);
+        if (workspace && workspace.classList) workspace.classList.remove("fullpage");
+        if (typeof document === "undefined") return;
+        if (document.fullscreenElement === workspace
+            && typeof document.exitFullscreen === "function") {
+            try {
+                const left = document.exitFullscreen();
+                if (left && typeof left.catch === "function") left.catch(function () {});
+            } catch (error) {
+                // Already out, or refused. The class is off either way.
+            }
+        }
+    }
+
+    function toggleFullscreen() {
+        const workspace = byId(IDS.workspace);
+        if (!workspace) return;
+        if (fullscreenOn()) {
+            leaveFullscreen();
+            paintChrome();
+            return;
+        }
+        function fallback() {
+            if (workspace.classList) workspace.classList.add("fullpage");
+            paintChrome();
+        }
+        if (typeof workspace.requestFullscreen !== "function") {
+            fallback();
+            return;
+        }
+        try {
+            const asked = workspace.requestFullscreen();
+            if (asked && typeof asked.catch === "function") asked.catch(fallback);
+        } catch (error) {
+            fallback();
+            return;
+        }
+        paintChrome();
+    }
+
     // ------------------------------------------------------------------ //
     // Painting -- frame, list, inspector, chrome
     // ------------------------------------------------------------------ //
@@ -605,7 +665,7 @@
         paintProxy();
         const guides = byId(IDS.guides);
         if (guides) guides.className = P + "-guides "
-            + (state.working.canvas.grid || "thirds");
+            + (state.working.canvas.grid || "none");
     }
 
     // SelectionController's visible half: one element, above every region body,
@@ -686,7 +746,7 @@
         if (!state.working) return;
         const region = find(state.selected);
         const fields = [IDS.name, IDS.type, IDS.text, IDS.prompt, IDS.framing,
-                        IDS.angle, IDS.x, IDS.y, IDS.w, IDS.h];
+                        IDS.angle];
         fields.forEach(function (id) { enable(id, !!region); });
         enable(IDS.duplicate, !!region);
         enable(IDS.remove, !!region);
@@ -694,20 +754,18 @@
             enable(id, !!region);
         });
 
-        const readout = byId(IDS.bbox);
         const auto = byId(IDS.autoHint);
         const grid = byId(IDS.grid);
         const title = byId(IDS.selectedName);
         if (auto) auto.checked = !!state.working.auto_position_hint;
-        if (grid) grid.value = state.working.canvas.grid || "thirds";
+        if (grid) grid.value = state.working.canvas.grid || "none";
         // Emptied rather than left showing the last region's answers: an
         // inspector still saying "Text" and "How the text should look" after
         // the text region it described was deleted is a panel lying about what
         // is selected.
         if (!region) {
-            if (readout) readout.textContent = "—";
             if (title) title.textContent = "nothing selected";
-            [IDS.name, IDS.text, IDS.prompt, IDS.x, IDS.y, IDS.w, IDS.h]
+            [IDS.name, IDS.text, IDS.prompt]
                 .forEach(function (id) { set(id, ""); });
             set(IDS.type, "obj");
             set(IDS.framing, "");
@@ -735,15 +793,6 @@
                 ? "How the text should look (not rendered as words)"
                 : "Region prompt";
         }
-        paintNumbers(region);
-        if (readout) readout.textContent = region.bbox.join(", ");
-    }
-
-    function paintNumbers(region) {
-        set(IDS.x, String(region.bbox[0]));
-        set(IDS.y, String(region.bbox[1]));
-        set(IDS.w, String(region.bbox[2] - region.bbox[0]));
-        set(IDS.h, String(region.bbox[3] - region.bbox[1]));
     }
 
     function paintChrome() {
@@ -763,6 +812,13 @@
         if (canvas && canvas.classList) canvas.classList.toggle("drawing", state.drawing);
         const confirm = byId(IDS.confirm);
         if (confirm) confirm.hidden = !state.confirming;
+        const full = byId(IDS.full);
+        if (full) {
+            const on = fullscreenOn();
+            full.textContent = on ? "Exit full screen" : "Full screen";
+            full.classList.toggle("active", on);
+            full.setAttribute && full.setAttribute("aria-pressed", on ? "true" : "false");
+        }
     }
 
     function set(id, value) {
@@ -927,38 +983,6 @@
         paint();
     }
 
-    // §8.3. Four numbers rather than a corner pair, because "make this 200
-    // wide" is the question somebody has when they open this, and a keyboard
-    // is the only way to place a box exactly.
-    function applyNumbers() {
-        const region = find(state.selected);
-        if (!region) return;
-        function read(id) {
-            const field = byId(id);
-            const value = field ? Number(field.value) : NaN;
-            return Number.isFinite(value) ? Math.round(value) : NaN;
-        }
-        const x = read(IDS.x);
-        const y = read(IDS.y);
-        const w = read(IDS.w);
-        const h = read(IDS.h);
-        if (![x, y, w, h].every(Number.isFinite)) return;
-        const width = clamp(w, MIN_SIZE, SCALE);
-        const height = clamp(h, MIN_SIZE, SCALE);
-        const left = clamp(x, 0, SCALE - width);
-        const top = clamp(y, 0, SCALE - height);
-        const settled = orient([left, top, left + width, top + height]);
-        if (!settled) return;
-        mark("numbers:" + region.id);
-        region.bbox = settled;
-        // The frame and the readout, but not the four fields: rewriting them
-        // under a cursor is how a typed "12" becomes "21".
-        paintFrame();
-        const readout = byId(IDS.bbox);
-        if (readout) readout.textContent = region.bbox.join(", ");
-        paintChrome();
-    }
-
     // ------------------------------------------------------------------ //
     // PointerController -- one path for mouse, finger and pen
     // ------------------------------------------------------------------ //
@@ -1083,9 +1107,6 @@
             region.bbox = resized(origin, state.drag.corner, dx, dy);
         }
         paintFrame();
-        paintNumbers(region);
-        const readout = byId(IDS.bbox);
-        if (readout) readout.textContent = region.bbox.join(", ");
     }
 
     // §8.2: an edge dragged past its opposite clamps at the minimum size rather
@@ -1209,6 +1230,7 @@
     }
 
     function close() {
+        leaveFullscreen();
         const workspace = byId(IDS.workspace);
         if (workspace) workspace.hidden = true;
         state.open = false;
@@ -1305,16 +1327,6 @@
         });
     }
 
-    function number(id) {
-        const element = byId(id);
-        once(element, "input", applyNumbers);
-        once(element, "change", function () {
-            applyNumbers();
-            state.editing = "";
-            paint();
-        });
-    }
-
     function press(id, handler) {
         once(clickable(id) || byId(id), "click", function (event) {
             prevent(event);
@@ -1346,6 +1358,7 @@
             press(IDS.zoomFit, function () { zoomTo(1); });
             press(IDS.zoomIn, function () { zoomStep(1); });
             press(IDS.zoomOut, function () { zoomStep(-1); });
+            press(IDS.full, toggleFullscreen);
             press(IDS.save, save);
             press(IDS.cancel, leave);
             press(IDS.discard, close);
@@ -1387,7 +1400,7 @@
             once(byId(IDS.grid), "change", function (event) {
                 if (!state.working) return;
                 mark("");
-                state.working.canvas.grid = String(event.target.value || "thirds");
+                state.working.canvas.grid = String(event.target.value || "none");
                 paint();
             });
 
@@ -1399,7 +1412,6 @@
             field(IDS.prompt, function (region, value) { region.prompt = value; });
             field(IDS.framing, function (region, value) { region.framing = value; });
             field(IDS.angle, function (region, value) { region.angle = value; });
-            [IDS.x, IDS.y, IDS.w, IDS.h].forEach(number);
 
             // §5.1/§5.2: one pointer path, captured on the frame, so a drag
             // that leaves the frame is still this drag and a finger is not a
@@ -1438,6 +1450,11 @@
             if (!state.listening) {
                 state.listening = true;
                 document.addEventListener("keydown", onKey);
+                // The browser owns Escape while the Fullscreen API is in
+                // charge, so the only way to know it was pressed is to be told.
+                document.addEventListener("fullscreenchange", function () {
+                    if (state.open) paintChrome();
+                });
             }
 
             // Gradio rebuilding the tab under an open editor would otherwise
@@ -1548,6 +1565,8 @@
         undo: undo,
         redo: redo,
         zoomTo: zoomTo,
+        toggleFullscreen: toggleFullscreen,
+        fullscreenOn: fullscreenOn,
         dimensions: dimensions,
         ordered: function () { return state.working ? ordered() : []; },
     };

@@ -324,6 +324,16 @@ globalThis.document = {
     body: body,
     dataset: {},
     readyState: "complete",
+    // Present but empty, the way a browser that offers the Fullscreen API and
+    // is not currently in it looks. A test that wants the API to work installs
+    // requestFullscreen on the workspace itself; one that wants the fallback
+    // simply does not.
+    fullscreenElement: null,
+    exitFullscreen() {
+        globalThis.document.fullscreenElement = null;
+        (docListeners.fullscreenchange || []).forEach((fn) => fn({}));
+        return Promise.resolve();
+    },
     createElement: (tag) => new El(tag),
     querySelector: (selector) => body.querySelector(selector),
     querySelectorAll: (selector) => body.querySelectorAll(selector),
@@ -380,6 +390,22 @@ function draw(from, to) {
 }
 
 function proxy() { return el("mc-krea-spatial-proxy"); }
+
+// A workspace whose requestFullscreen answers the way `answer` says: "yes"
+// resolves and promotes it, "no" rejects so the fallback has to take over.
+function fullscreenAnswers(answer) {
+    const workspace = el("mc-krea-spatial-workspace");
+    workspace.requestFullscreen = function () {
+        if (answer === "no") return Promise.reject(new Error("refused"));
+        globalThis.document.fullscreenElement = workspace;
+        return Promise.resolve();
+    };
+    return workspace;
+}
+
+function fullpage() {
+    return el("mc-krea-spatial-workspace").classList.contains("fullpage");
+}
 
 function handle(corner) {
     return proxy().querySelector(".mc-krea-spatial-handle-" + corner);
@@ -465,9 +491,10 @@ FACE = {"id": "r1", "name": "Face", "type": "obj", "bbox": [35, 55, 315, 360],
         "z": 0}
 
 
-def document(regions=(FACE,), mode="smart", width=1024, height=1344) -> str:
+def document(regions=(FACE,), mode="smart", width=1024, height=1344,
+             grid="none") -> str:
     return json.dumps({"version": 1, "canvas": {"width": width, "height": height,
-                                                "grid": "thirds"},
+                                                "grid": grid},
                        "compose_mode": mode, "auto_position_hint": True,
                        "regions": list(regions)})
 
@@ -517,16 +544,19 @@ class TestTheGenerationDoesNotWaitForThisFile:
     def test_re_wiring_does_not_stack_up_document_listeners(self):
         """``onAfterUiUpdate`` fires on most interactions, and ``document`` has
         no dataset for a flag to live on -- so the guard that makes every other
-        listener idempotent cannot cover the keydown one. Pointer capture is
-        what removed the other two: a drag that leaves the frame is still
-        delivered to the frame, so there is nothing left for the document to
-        hear except a keystroke."""
+        listener idempotent cannot cover them. Two are left -- a keystroke, and
+        the browser saying it has left full screen. Pointer capture removed the
+        rest: a drag that leaves the frame is still delivered to the frame, so
+        there is nothing else for the document to hear."""
         found = run("""
+            const first = Object.keys(docListeners)
+                .reduce((total, kind) => total + docListeners[kind].length, 0);
             ks.wire(); ks.wire(); ks.wire();
-            report();
+            report({first: first});
         """, initial=document())
 
-        assert found["documentListeners"] == 1
+        assert found["first"] == 2
+        assert found["documentListeners"] == 2
 
     def test_there_is_no_polling_of_any_kind(self):
         found = run("""
@@ -1088,39 +1118,17 @@ class TestTheInspector:
         assert region["framing"] == "Wide shot"
         assert region["angle"] == "Low angle"
 
-    def test_the_box_readout_is_the_normalized_one(self):
-        found = run("""
-            ks.open();
-            report({readout: el("mc-krea-spatial-bbox").textContent});
-        """, initial=document())
+    def test_the_editor_offers_no_coordinates_anywhere(self):
+        """Boxes are placed with a finger, a mouse or a pen. A normalized
+        coordinate is an implementation detail of the format, and typing one
+        into a field is not an interaction this editor has."""
+        emitted = {identifier for _tag, identifier in editor_elements()}
+        gone = {"mc-krea-spatial-" + name for name in ("x", "y", "w", "h", "bbox")}
+        markup = _markup()
 
-        assert found["readout"] == "35, 55, 315, 360"
-
-    def test_the_numeric_fields_place_a_box_exactly(self):
-        """§8.3, and the only way to place a region with a keyboard alone."""
-        found = run("""
-            ks.open();
-            commit("mc-krea-spatial-x", "100");
-            commit("mc-krea-spatial-y", "200");
-            commit("mc-krea-spatial-w", "300");
-            commit("mc-krea-spatial-h", "400");
-            report();
-        """, initial=document())
-
-        assert found["regions"][0]["bbox"] == [100, 200, 400, 600]
-
-    def test_the_numeric_fields_are_filled_in_from_a_drag(self):
-        found = run("""
-            ks.open();
-            drag([100, 100], [200, 150], proxy());
-            report({x: el("mc-krea-spatial-x").value,
-                    y: el("mc-krea-spatial-y").value,
-                    w: el("mc-krea-spatial-w").value,
-                    h: el("mc-krea-spatial-h").value});
-        """, initial=document())
-
-        assert [found["x"], found["y"], found["w"], found["h"]] == ["135", "105",
-                                                                    "280", "305"]
+        assert emitted & gone == set()
+        assert "0\u20131000" not in markup
+        assert "0-1000" not in markup
 
     def test_the_inspector_empties_when_the_selection_goes(self):
         """An inspector still saying "Text" and "How the text should look"
@@ -1134,7 +1142,6 @@ class TestTheInspector:
                     type: el("mc-krea-spatial-type").value,
                     label: el("mc-krea-spatial-prompt-label").textContent,
                     title: el("mc-krea-spatial-selected-name").textContent,
-                    readout: el("mc-krea-spatial-bbox").textContent,
                     textShown: !el("mc-krea-spatial-text-field").hidden,
                     framingShown: !el("mc-krea-spatial-framing-field").hidden,
                     promptOff: !!el("mc-krea-spatial-prompt").disabled});
@@ -1144,23 +1151,9 @@ class TestTheInspector:
         assert found["type"] == "obj"
         assert found["label"] == "Region prompt"
         assert found["title"] == "nothing selected"
-        assert found["readout"] == "\u2014"
         assert found["textShown"] is False
         assert found["framingShown"] is True
         assert found["promptOff"] is True
-
-    def test_a_number_outside_the_frame_is_clamped_not_refused(self):
-        found = run("""
-            ks.open();
-            commit("mc-krea-spatial-x", "900");
-            commit("mc-krea-spatial-w", "400");
-            report();
-        """, initial=document())
-        left, _top, right, _bottom = found["regions"][0]["bbox"]
-
-        assert right <= 1000
-        assert right - left == 400
-
 
 # --------------------------------------------------------------------------- #
 # Undo, redo, clear all
@@ -1330,7 +1323,32 @@ class TestSavingAndLeaving:
         """)
 
         assert found["document"]["canvas"] == {"width": 1024, "height": 1344,
-                                               "grid": "thirds"}
+                                               "grid": "none"}
+
+    def test_a_new_layout_draws_no_grid(self):
+        """The guides are an aid, not a default. A frame with lines across it
+        is a frame you compose around rather than in."""
+        found = run("""
+            ks.open();
+            report({guides: el("mc-krea-spatial-guides").className,
+                    chosen: el("mc-krea-spatial-grid").value});
+        """)
+
+        assert "none" in found["guides"].split()
+        assert "thirds" not in found["guides"]
+        assert found["chosen"] == "none"
+
+    def test_a_grid_somebody_chose_is_kept(self):
+        found = run("""
+            ks.open();
+            commit("mc-krea-spatial-grid", "thirds");
+            press("mc-krea-spatial-save");
+            report({document: saved(),
+                    guides: el("mc-krea-spatial-guides").className});
+        """, initial=document())
+
+        assert found["document"]["canvas"]["grid"] == "thirds"
+        assert "thirds" in found["guides"].split()
 
     def test_back_with_nothing_changed_leaves_at_once(self):
         found = run("""
@@ -1612,6 +1630,102 @@ class TestTheWorkspaceIsNotAModal:
         assert found["rows"] == 1
 
 
+class TestFullScreen:
+    """The frame is the object being worked on, and on a tablet the page around
+    it is most of the screen. Full screen gives the whole display to the editor
+    and Back still comes back to txt2img."""
+
+    def test_the_browser_is_asked_first(self):
+        """The Fullscreen API is the only mechanism nothing can clip, overlap or
+        out-stack -- and the only one that takes the browser's own chrome away,
+        which on a tablet is most of what is being asked for."""
+        found = run("""
+            ks.open();
+            fullscreenAnswers("yes");
+            press("mc-krea-spatial-full");
+            await flush();
+            report({promoted: document.fullscreenElement
+                        === el("mc-krea-spatial-workspace"),
+                    fixed: fullpage(),
+                    label: el("mc-krea-spatial-full").textContent});
+        """, initial=document())
+
+        assert found["promoted"] is True
+        # No fixed-position fallback while the real thing is in force.
+        assert found["fixed"] is False
+        assert found["label"] == "Exit full screen"
+
+    def test_a_refusal_falls_back_to_a_fixed_block(self):
+        """An iframe without allowfullscreen, or a user who said no. §3.1 told
+        this editor not to be a fixed overlay, and this is fine for the reason
+        the modal was not: it is somewhere the user asked to go."""
+        found = run("""
+            ks.open();
+            fullscreenAnswers("no");
+            press("mc-krea-spatial-full");
+            await flush();
+            report({fixed: fullpage(),
+                    label: el("mc-krea-spatial-full").textContent});
+        """, initial=document())
+
+        assert found["fixed"] is True
+        assert found["label"] == "Exit full screen"
+
+    def test_a_browser_without_the_api_at_all_gets_the_same_fallback(self):
+        found = run("""
+            ks.open();
+            press("mc-krea-spatial-full");
+            report({fixed: fullpage()});
+        """, initial=document())
+
+        assert found["fixed"] is True
+
+    def test_pressing_it_again_comes_back(self):
+        found = run("""
+            ks.open();
+            fullscreenAnswers("yes");
+            press("mc-krea-spatial-full");
+            await flush();
+            press("mc-krea-spatial-full");
+            await flush();
+            report({promoted: !!document.fullscreenElement,
+                    fixed: fullpage(),
+                    label: el("mc-krea-spatial-full").textContent});
+        """, initial=document())
+
+        assert found["promoted"] is False
+        assert found["fixed"] is False
+        assert found["label"] == "Full screen"
+
+    def test_leaving_the_editor_leaves_full_screen_with_it(self):
+        """Save & Return returns to txt2img, and a txt2img tab still filling the
+        screen with a hidden editor would be a tab nobody could use."""
+        found = run("""
+            ks.open();
+            fullscreenAnswers("yes");
+            press("mc-krea-spatial-full");
+            await flush();
+            press("mc-krea-spatial-save");
+            await flush();
+            report({promoted: !!document.fullscreenElement, fixed: fullpage()});
+        """, initial=document())
+
+        assert found["open"] is False
+        assert found["promoted"] is False
+        assert found["fixed"] is False
+
+    def test_going_full_screen_changes_no_layout_state(self):
+        found = run("""
+            ks.open();
+            const before = ks.serialize();
+            press("mc-krea-spatial-full");
+            report({same: ks.serialize() === before, past: ks.state.past.length});
+        """, initial=document())
+
+        assert found["same"] is True
+        assert found["past"] == 0
+
+
 class TestTheMarkupAndTheFileAgree:
     def test_every_id_the_file_uses_is_an_id_python_emits(self):
         """The one failure mode a fake page cannot catch on its own: a control
@@ -1638,12 +1752,12 @@ class TestTheMarkupAndTheFileAgree:
         expected = {
             "name", "type", "text", "text-field", "prompt", "prompt-label",
             "framing", "framing-field", "angle", "angle-field", "auto-hint",
-            "bbox", "list", "draw", "duplicate", "delete", "raise", "lower",
+            "list", "draw", "duplicate", "delete", "raise", "lower",
             "save", "cancel", "size", "warning", "canvas", "regions",
             # and everything the refactor added
             "workspace", "proxy", "add", "clear", "undo", "redo", "front",
-            "bottom", "x", "y", "w", "h", "grid", "zoom-fit", "zoom-in",
-            "zoom-out", "confirm", "keep", "discard",
+            "bottom", "grid", "zoom-fit", "zoom-in", "zoom-out", "confirm",
+            "keep", "discard", "full",
         }
 
         assert {"mc-krea-spatial-" + name for name in expected} <= emitted
