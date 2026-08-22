@@ -52,7 +52,7 @@ from __future__ import annotations
 import json
 import re
 
-INSTRUCTION_VERSION = 1
+INSTRUCTION_VERSION = 2
 """Bumped when the wording below changes in a way that changes what comes back.
 
 Recorded beside the image, because "the Composer behaved differently" is
@@ -158,17 +158,38 @@ def region_line(position: int, region) -> str:
 
 
 def user_content(source: str, scene: str, layout, ratio: str = "") -> str:
-    """The Composer's turn: what was asked for, what was written, what was drawn.
+    """The Composer's turn: what was asked for, what was drawn, what was written.
 
-    The order is the order of authority, the same as
-    :func:`prompt_master.krea.enhancer.user_content` uses: the user's own idea,
-    then the pass this one is editing, then the material it has to agree with.
+    The stable things first and the new thing last, which is a statement about
+    llama.cpp's prompt cache rather than about authority.
+
+    That cache reuses a common *prefix* and stops at the first difference. The
+    scene is written by the pass immediately before this one, so it is new text
+    on every single generation and the prefix can never survive it. Everything
+    placed after it is therefore re-read every time -- and the layout, which is
+    the same four boxes the user drew once and has not touched since, was
+    sitting there. A user measured it: 230 tokens re-read on a warm pass, about
+    130 of them a layout that had not changed, at fifty tokens a second.
+
+    Ordered this way the layout joins the reusable prefix and only the scene is
+    read again. Redrawing a box re-reads the layout from the change onwards,
+    which is what the previous order did on every run regardless. The one run
+    that pays for this is a pinned creative seed and a moved box: the scene
+    repeats, the old order kept it, and this one does not. That trade buys the
+    saving on every run where the scene is new, which is every run where the
+    seed is left to roll.
+
+    The cost is that the model now reads the constraint before the text it has
+    to fit to it. That is a real change to what it sees and the reason
+    :data:`INSTRUCTION_VERSION` moves with it. What it cannot change is the
+    layout: the boxes reach the picture through
+    :func:`prompt_master.krea.spatial.compose`, in code, and :func:`parse` reads
+    two strings out of the reply and nothing else.
     """
     blocks = []
     source = str(source or "").strip()
     if source:
         blocks.append(f"{SOURCE_HEADING}\n{source}")
-    blocks.append(f"{USER_HEADING}\n{str(scene or '').strip()}")
 
     lines = [LAYOUT_HEADING]
     if ratio:
@@ -176,6 +197,8 @@ def user_content(source: str, scene: str, layout, ratio: str = "") -> str:
     lines.extend(region_line(position, region)
                  for position, region in enumerate(layout.ordered, start=1))
     blocks.append("\n".join(lines))
+
+    blocks.append(f"{USER_HEADING}\n{str(scene or '').strip()}")
     return "\n\n".join(blocks)
 
 

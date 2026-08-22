@@ -26,6 +26,7 @@ free for everybody who does not use it.
 from __future__ import annotations
 
 import json
+import os
 import threading
 
 import pytest
@@ -169,6 +170,18 @@ def generate(script, prompt="a quiet street", enabled=True, timeout=20.0,
 def composed(p) -> dict:
     """The structured prompt this generation produced, parsed back."""
     return json.loads(p.prompt)
+
+
+def shared_prefix(first: str, second: str) -> str:
+    """What llama.cpp's prompt cache keeps between two requests: the common
+    head, up to the first thing that differs.
+
+    The cache works in tokens rather than characters, so the real boundary can
+    sit a token either side of this one. Nothing below turns on that: the
+    property being measured is which *blocks* survive the comparison, and a
+    block is hundreds of characters wide.
+    """
+    return os.path.commonprefix([first, second])
 
 
 # --------------------------------------------------------------------------- #
@@ -627,6 +640,117 @@ class TestTheSpatialComposer:
 
         assert client.calls[1]["temperature"] == composer.TEMPERATURE
         assert client.calls[1]["temperature"] < client.calls[0]["temperature"]
+
+
+# --------------------------------------------------------------------------- #
+# The order of the Composer's turn is a prompt-cache decision
+# --------------------------------------------------------------------------- #
+
+
+class TestTheComposerReadsTheBoxesBeforeTheScene:
+    """llama.cpp reuses a common prefix and stops at the first difference.
+
+    The scene is written by the pass immediately before this one, so it is new
+    text on every generation and the prefix can never survive it. Whatever sits
+    after it is re-read every time. The layout is the boxes the user drew once
+    and has not touched since, and it used to sit there -- about 130 tokens of a
+    230-token re-read, on a server that was already warm.
+
+    So the turn is ordered stable-first: source, layout, scene. The exchange is
+    that a run which redraws the boxes *and* keeps the scene identical -- a
+    locked creative seed and a dragged box -- re-reads the scene it would
+    previously have kept. That is the one case this costs anything, and it is
+    priced below, not hidden.
+    """
+
+    def turn(self, scene, regions=(FACE,), source="a quiet street", ratio="3:4"):
+        return composer.user_content(source, scene, spatial.parse(document(regions)),
+                                     ratio)
+
+    def previous_order(self, scene, regions=(FACE,), source="a quiet street",
+                       ratio="3:4"):
+        """The turn as it was built before this change: source, scene, layout.
+
+        Written out here rather than imported, because the whole point of the
+        comparisons below is that this shape no longer exists in the code.
+        """
+        layout = spatial.parse(document(regions))
+        lines = [composer.LAYOUT_HEADING, f"frame aspect ratio: {ratio}"]
+        lines.extend(composer.region_line(position, region)
+                     for position, region in enumerate(layout.ordered, start=1))
+        return "\n\n".join([f"{composer.SOURCE_HEADING}\n{source}",
+                             f"{composer.USER_HEADING}\n{scene}",
+                             "\n".join(lines)])
+
+    def test_the_stable_blocks_come_first_and_the_new_one_comes_last(self):
+        turn = self.turn("Rain over an empty street.", regions=(FACE, SIGN))
+
+        assert turn.index(composer.SOURCE_HEADING) \
+            < turn.index(composer.LAYOUT_HEADING) \
+            < turn.index(composer.USER_HEADING)
+
+    def test_a_new_scene_over_the_same_boxes_reaches_the_model_as_a_new_tail(self):
+        """The warm path, and the one that runs on nearly every generation."""
+        kept = shared_prefix(self.turn("Rain over an empty street."),
+                             self.turn("Noon at a dry harbour."))
+
+        assert kept.endswith(f"{composer.USER_HEADING}\n")
+        assert composer.LAYOUT_HEADING in kept
+        assert FACE["prompt"] in kept
+        assert "upper-left" in kept
+
+    def test_which_is_the_layout_no_longer_being_read_a_second_time(self):
+        """The same two runs, stated as what stopped being re-read."""
+        first = self.turn("Rain over an empty street.", regions=(FACE, SIGN))
+        second = self.turn("Noon at a dry harbour.", regions=(FACE, SIGN))
+        reread = first[len(shared_prefix(first, second)):]
+        before = self.previous_order("Rain over an empty street.",
+                                     regions=(FACE, SIGN))
+        reread_before = before[len(shared_prefix(
+            before, self.previous_order("Noon at a dry harbour.",
+                                        regions=(FACE, SIGN)))):]
+
+        assert composer.LAYOUT_HEADING not in reread
+        assert SIGN["text"] not in reread
+        assert len(reread) < len(reread_before) / 2
+
+    def test_redrawing_a_box_is_no_worse_than_the_order_this_replaced(self):
+        """The other ordinary case: the user moves a box, and pass 1 writes a
+        fresh scene as it always does. Both orders re-read from the change
+        onwards; this one starts re-reading later, because the part of the
+        layout above the change is still shared."""
+        moved = dict(FACE, bbox=[400, 55, 700, 360])
+        now = shared_prefix(self.turn("Rain over an empty street.",
+                                      regions=(FACE, SIGN)),
+                            self.turn("Noon at a dry harbour.",
+                                      regions=(moved, SIGN)))
+        was = shared_prefix(self.previous_order("Rain over an empty street.",
+                                                regions=(FACE, SIGN)),
+                            self.previous_order("Noon at a dry harbour.",
+                                                regions=(moved, SIGN)))
+
+        assert len(now) >= len(was)
+
+    def test_the_one_run_it_costs_something_is_a_locked_seed_and_a_moved_box(self):
+        """Priced rather than papered over. With the creative seed pinned the
+        scene repeats, so the old order kept it and re-read only the layout
+        below it; this one re-reads the scene as well. It buys the saving on
+        every run where the scene is new, which is every run where the seed is
+        not held still."""
+        same = "Rain over an empty street."
+        moved = dict(FACE, bbox=[400, 55, 700, 360])
+        now = shared_prefix(self.turn(same, regions=(FACE, SIGN)),
+                            self.turn(same, regions=(moved, SIGN)))
+        was = shared_prefix(self.previous_order(same, regions=(FACE, SIGN)),
+                            self.previous_order(same, regions=(moved, SIGN)))
+
+        assert len(now) < len(was)
+        assert composer.USER_HEADING not in now
+
+    def test_the_recorded_instruction_version_moved_with_the_order(self):
+        """What the model is shown changed, so an image made before this and an
+        image made after it are not the same recipe. §7's whole purpose."""
+        assert composer.INSTRUCTION_VERSION == 2
 
 
 # --------------------------------------------------------------------------- #
