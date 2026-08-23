@@ -241,6 +241,16 @@ KLEIN_SPATIAL_SOURCE = "Klein Spatial Source"
 KLEIN_SPATIAL_SOURCE_COUNT = "Klein Spatial Source Count"
 KLEIN_SPATIAL_BACKEND = "Klein Spatial Regional Backend"
 KLEIN_SPATIAL_BACKEND_VERSION = "Klein Spatial Regional Backend Version"
+KLEIN_SPATIAL_ATTACHED = "Klein Spatial Regions Attached"
+"""How many regions actually conditioned the image, out of how many were drawn.
+
+An observation and not an intention, and recorded because the two came apart:
+for several runs the boxes were drawn, compiled and encoded and then reached
+nothing, and the images looked exactly like images where they had. "3 of 3" and
+"0 of 3" are the difference between a spatial generation and an ordinary one
+wearing its metadata.
+"""
+
 KLEIN_SPATIAL_COMPOSE_MODE = "Klein Spatial Compose Mode"
 KLEIN_SPATIAL_COMPOSER_SEED = "Klein Spatial Composer Seed"
 KLEIN_SPATIAL_COMPOSER_VERSION = "Klein Spatial Composer Instruction"
@@ -264,7 +274,7 @@ KLEIN_SPATIAL_KEYS = (KLEIN_SPATIAL_MODE, KLEIN_SPATIAL_RESOLVED,
                       KLEIN_SPATIAL_SOURCE, KLEIN_SPATIAL_SOURCE_COUNT,
                       KLEIN_SPATIAL_BACKEND, KLEIN_SPATIAL_BACKEND_VERSION,
                       KLEIN_SPATIAL_COMPOSE_MODE, KLEIN_SPATIAL_COMPOSER_SEED,
-                      KLEIN_SPATIAL_COMPOSER_VERSION)
+                      KLEIN_SPATIAL_COMPOSER_VERSION, KLEIN_SPATIAL_ATTACHED)
 
 _KLEIN_SPATIAL_NAMESPACE = """What a FLUX.2 Klein spatial generation records.
 

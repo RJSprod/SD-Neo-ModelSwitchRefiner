@@ -483,7 +483,8 @@ class CompiledRegions:
     against the wrong geometry.
     """
 
-    __slots__ = ("pairs", "grid", "notes", "backend", "request")
+    __slots__ = ("pairs", "grid", "notes", "backend", "request", "attached",
+                 "diagnosis")
 
     def __init__(self, pairs, grid, notes=(), backend=None, request=None):
         self.pairs = tuple(pairs)
@@ -491,6 +492,15 @@ class CompiledRegions:
         self.notes = tuple(notes)
         self.backend = backend
         self.request = request
+        self.attached = 0
+        """How many regions actually reached the model. Set after installation.
+
+        The number to trust, and the one recorded in infotext: it is an
+        observation rather than an intention, and "three boxes drawn" and "three
+        boxes conditioning the image" are not the same claim.
+        """
+
+        self.diagnosis = ""
 
     def __bool__(self) -> bool:
         return bool(self.pairs)
@@ -555,6 +565,56 @@ def compile_regions(request, tensor=None, grid=None, backend=None) -> CompiledRe
 # --------------------------------------------------------------------------- #
 
 
+def describe_conditioning(conditioning, target=None) -> str:
+    """What the host actually handed this hook, in enough detail to act on.
+
+    Printed when no region could be attached, and printed *once* rather than per
+    region. It exists because the alternative -- guessing again at a structure
+    that lives in a host this extension does not ship and cannot pin -- has now
+    been wrong twice, and each guess cost somebody a run of images that looked
+    like the feature working.
+
+    Deliberately shape and type names only. No tensor data, no prompt text: this
+    goes to a log a user may paste into an issue, and what is needed from it is
+    the structure.
+    """
+    def name(value):
+        return type(value).__name__
+
+    lines = [f"conditioning={name(conditioning)}"]
+
+    for attribute in ("batch", "schedules", "shape"):
+        found = getattr(conditioning, attribute, None)
+        if found is not None:
+            lines.append(f"  .{attribute}={name(found)}"
+                         + (f" len={len(found)}" if hasattr(found, "__len__") else ""))
+
+    if target is None:
+        target = _conditioning_list(conditioning)
+    if target is None:
+        lines.append("  no list of entries could be located")
+        return "; ".join(lines)
+
+    lines.append(f"entries={name(target)} len={len(target)}")
+    if target:
+        first = target[0]
+        lines.append(f"  [0]={name(first)}"
+                     + (f" len={len(first)}" if isinstance(first, (list, tuple)) else ""))
+        if isinstance(first, (list, tuple)) and first:
+            inner = first[0]
+            lines.append(f"  [0][0]={name(inner)}")
+            fields = [key for key in dir(inner) if not key.startswith("_")][:12]
+            if fields:
+                lines.append(f"  [0][0] fields: {', '.join(fields)}")
+        elif isinstance(first, dict):
+            lines.append(f"  [0] keys: {', '.join(sorted(first)[:12])}")
+        else:
+            fields = [key for key in dir(first) if not key.startswith("_")][:12]
+            if fields:
+                lines.append(f"  [0] fields: {', '.join(fields)}")
+    return "; ".join(lines)
+
+
 class _InstalledRegions:
     """What one pass added to the conditioning, and how to take it away again.
 
@@ -566,12 +626,20 @@ class _InstalledRegions:
     they were.
     """
 
-    __slots__ = ("target", "added", "count")
+    __slots__ = ("target", "added", "count", "diagnosis")
 
-    def __init__(self, target=None, added=()):
+    def __init__(self, target=None, added=(), diagnosis=""):
         self.target = target
         self.added = list(added)
         self.count = len(self.added)
+        self.diagnosis = str(diagnosis or "")
+        """Why nothing was attached, when nothing was.
+
+        Empty on the ordinary path. A sentence when the host's conditioning is a
+        shape an area cannot be written into -- which is a fact about the host
+        and not about the layout, and is exactly what a user staring at an image
+        that ignored their boxes needs to be told.
+        """
 
     def remove(self) -> None:
         if self.target is None:
@@ -670,7 +738,16 @@ def _install_conditioning_regions(conditioning, compiled, model, p,
         target.append(entry)
         added.append(entry)
 
-    return _InstalledRegions(target=target, added=added)
+    diagnosis = ""
+    if compiled.pairs and not added:
+        # The silent failure this whole feature is arranged against, caught at
+        # the one place it can be caught: regions were compiled, encoding
+        # succeeded, and not one of them could be given a geometry. That is a
+        # property of the host's conditioning shape, so the shape is what gets
+        # reported.
+        diagnosis = describe_conditioning(conditioning, target)
+
+    return _InstalledRegions(target=target, added=added, diagnosis=diagnosis)
 
 
 def _encode(model, text: str, p=None):
@@ -763,10 +840,21 @@ def _prompt_container(prompts, p=None):
 def _entry_like(target, encoded):
     """A conditioning entry in whatever shape the host's existing ones use.
 
-    Forge has carried two over its life -- ``[tensor, {options}]`` from ComfyUI,
-    and a dict with the conditioning under a key -- and which one a build uses is
-    not something to hard-code from the outside. So the first existing entry is
-    the template, and a region is built to match it.
+    Two shapes are supported and both are ComfyUI's: ``[tensor, {options}]``, and
+    a dict with the conditioning under a key. Those are the shapes that carry an
+    ``area``, which is the whole point of building one.
+
+    ``None`` when the host's entries are neither -- and that is a real case
+    rather than a defensive branch. A1111-derived hosts hand this hook a
+    ``MulticondLearnedConditioning`` whose batch entries are lists of
+    *composable* conditionings with a weight and no geometry at all; the
+    ComfyUI-style cond dicts those become do not exist until later, inside the
+    sampler. A region cannot be given an area there because there is nowhere to
+    put one, and the honest answer is to say so rather than to append something
+    that would condition the whole frame.
+
+    :func:`describe_conditioning` is what turns that ``None`` into a sentence
+    naming what was actually found.
     """
     if not target:
         return None
@@ -994,10 +1082,25 @@ def regional_conditioning(request, conditioning, tensor=None, grid=None,
         return
 
     with backend.apply(conditioning, compiled, model, p) as installed:
-        logger.info("Model Chain: Klein Spatial attached %d of %d region(s) to a "
-                    "%dx%d conditioning grid via %s",
-                    getattr(installed, "count", 0), len(compiled),
-                    compiled.grid[0], compiled.grid[1], backend.name)
+        attached = getattr(installed, "count", 0)
+        compiled.attached = attached
+        compiled.diagnosis = getattr(installed, "diagnosis", "")
+
+        if attached:
+            logger.info("Model Chain: Klein Spatial attached %d of %d region(s) to "
+                        "a %dx%d conditioning grid via %s",
+                        attached, len(compiled), compiled.grid[0], compiled.grid[1],
+                        backend.name)
+        else:
+            # ERROR and not INFO. "attached 0 of 3" read as a status line for
+            # several runs of images that looked like the feature working, which
+            # is the exact failure §28 is about: a plausible picture with nothing
+            # anywhere saying the regions never arrived.
+            logger.error(
+                "Model Chain: Klein Spatial attached NONE of %d region(s) — the "
+                "%s backend could not write a region geometry into this host's "
+                "conditioning, so your boxes did not reach the model. Observed "
+                "%s", len(compiled), backend.name, compiled.diagnosis)
         yield compiled
 
 

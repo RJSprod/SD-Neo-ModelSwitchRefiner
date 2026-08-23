@@ -1678,7 +1678,8 @@ region:          tall brass floor lamp        bbox [680, 150, 910, 820]
 
 It is still guidance rather than geometry. A regional condition biases *where* a
 concept appears; it does not confine it to the rectangle, and nothing here
-promises exact bbox occupancy.
+promises exact bbox occupancy — and see **Status** below for what is and is not
+landing today.
 
 ##### Smart Compose, and why it matters more here than on Krea
 
@@ -1802,6 +1803,47 @@ puts the canvas and the mode back.
 Reference pixels are never in the file. If the image was made with ImageStitch
 references, the restore says how many and asks you to re-add them; the mode stays
 visible and unavailable until you do.
+
+##### Status: the regional conditioning is not landing yet
+
+**Read this before drawing boxes.** On the Forge Neo builds tested so far, the
+region geometry does not reach the model. The boxes are read, validated,
+compiled onto the right latent grid and encoded through the model's own text
+encoder — and then the host's conditioning at the point this extension hooks it
+has nowhere to write an area into, so every region is dropped.
+
+What that means in practice:
+
+| Part | State |
+| --- | --- |
+| **Smart Compose** | works — and on the runs tested it is doing all of the visible work |
+| **The layout, the editor, the modes, the source rules** | work |
+| **Region geometry reaching the model** | **not landing** |
+
+So if Smart Compose is giving you usable placement, that is the language model
+rewriting your prompt so it stops arguing with the boxes. It is a real effect and
+worth having. It is not regional conditioning.
+
+This used to fail *silently* — the console said `attached 0 of 3` among the
+ordinary status lines and the images looked like images where it had worked. It
+now says so loudly, on the result and in the PNG:
+
+```
+Klein Spatial attached NONE of 3 region(s) — the host-area-conditioning backend
+could not write a region geometry into this host's conditioning, so your boxes
+did not reach the model. Observed conditioning=MulticondLearnedConditioning; ...
+```
+
+```
+Klein Spatial Regions Attached: 0 of 3
+```
+
+That `Observed …` line is the thing needed to fix it properly. The
+ComfyUI-style cond dicts that carry an `area` are built inside Forge's sampler,
+*after* the hook this extension uses; the A1111-derived structure the hook
+receives carries a weight and no geometry. Attaching a region there would
+condition the whole frame, which is not a region — so it refuses rather than
+doing that.
 
 ##### If the checkpoint cannot do it
 

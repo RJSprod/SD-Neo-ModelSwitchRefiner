@@ -1391,6 +1391,9 @@ class ScriptKreaCreative(scripts.Script):
         self._klein_compose = False
         self._klein_layout_parsed = None
         self._klein_composed = None
+        # (attached, drawn) for the last sampling pass, so the result and the
+        # infotext report an observation rather than an intention.
+        self._klein_attached = (0, 0)
         # Two scopes, and they close at different times. The job stack holds the
         # reference set, which one encode serves for the whole batch; the pass
         # stack holds the regional conditioning, which is rebuilt against every
@@ -2308,6 +2311,9 @@ class ScriptKreaCreative(scripts.Script):
         self._klein_compose = False
         self._klein_layout_parsed = None
         self._klein_composed = None
+        # (attached, drawn) for the last sampling pass, so the result and the
+        # infotext report an observation rather than an intention.
+        self._klein_attached = (0, 0)
 
     def process(self, p, *args, **kwargs):
         """Settle the Klein spatial job against the model that actually loaded.
@@ -2420,7 +2426,7 @@ class ScriptKreaCreative(scripts.Script):
 
         stack = contextlib.ExitStack()
         try:
-            stack.enter_context(mc_spatial_klein.regional_conditioning(
+            compiled = stack.enter_context(mc_spatial_klein.regional_conditioning(
                 request, conditioning, tensor=tensor,
                 backend=self._klein_backend,
                 model=getattr(p, "sd_model", None), p=p))
@@ -2428,6 +2434,27 @@ class ScriptKreaCreative(scripts.Script):
             stack.close()
             raise
         self._klein_pass = stack
+        self._klein_attached = (compiled.attached, len(compiled))
+
+        if compiled.pairs and not compiled.attached:
+            # Said where the user is looking, not only in the console. An image
+            # whose boxes reached nothing is indistinguishable from one whose
+            # boxes reached the model and were merely weak guidance, and telling
+            # those apart by eye is impossible -- which is how several runs went
+            # by looking like the feature worked.
+            self._klein_note = (
+                f"none of your {len(compiled)} region(s) reached the model — this "
+                f"build cannot write a region geometry into this host's "
+                f"conditioning, so the image was generated from the prompt alone. "
+                f"The console line beginning \"Klein Spatial attached NONE\" has "
+                f"the details needed to fix it")
+
+        try:
+            p.extra_generation_params[mc_infotext.KLEIN_SPATIAL_ATTACHED] = (
+                f"{compiled.attached} of {len(compiled)}")
+        except Exception:
+            logger.debug("Model Chain: could not record how many regions attached",
+                         exc_info=True)
 
     def _publish_plan(self, p, layout, creative: bool = True) -> None:
         """Work out what this generation will actually do, before any of it happens.
