@@ -44,6 +44,7 @@ answered rather than routed around.
 | `prompt_master/krea/CREATIVITY_LIBRARY_SOURCE.txt` | its provenance, digests and the one edit |
 | `prompt_master/krea/library.py` | loads and validates it; no UI, no inference |
 | `prompt_master/krea/director.py` | the local Creative Director |
+| `prompt_master/krea/literals.py` | the `[[literal command]]` parser; pure, no Forge, no LLM (§17) |
 | `prompt_master/krea/variation.py` | reduced to the writer's sampling profile |
 | `prompt_master/krea/enhancer.py` | accepts a finished brief for the user turn |
 | `mc_llm_sessions.py` | one writer request, carrying the brief |
@@ -56,6 +57,7 @@ answered rather than routed around.
 | `mc_llm_krea_panel.py` | the same controls in LLM Studio |
 | `mc_llm_progress.py` | the roll, reported on the host's progress bar (§7) |
 | `tests/test_krea_creative.py` | the library, the Director, the scale, one-call |
+| `tests/test_krea_literals.py` | the literal grammar, its scopes, and every path that restores it (§17) |
 | `tests/test_krea_creative_js.py` | that the click is never held, and the absence of a scheduler |
 | `tests/test_krea_progress.py` | the reporting, and the bar always being given back |
 
@@ -1793,3 +1795,179 @@ mode and layout all repaint it too.
 
 That is the only thing Creative's checkbox still does to the Spatial block. It
 no longer shows it, hides it, or decides whether it runs.
+
+
+## 17. Literal commands: text the language models are not allowed to see (23 August 2026)
+
+Against the *Stage-1 Literal / Reference Commands* design intent (22 August
+2026). Section numbers in this chapter are that document's.
+
+The feature is one sentence — anything inside `[[...]]` reaches the image model
+unchanged and reaches nothing else — and it is smaller than the problem it
+solves, which is worth saying first. The motivating workflow was reference
+editing: an ImageStitch reference of a person, a Krea 2 edit LoRA, and "her
+shirt from image 1" as a bounding-box region. The obvious implementation of that
+is a reference gallery of our own, captions for the images, a vision projector
+check and a caption cache. None of that was built, and §3 is why: Forge Neo
+already owns references, and the only thing actually missing was that a prompt
+mentioning them could not survive being rewritten by two language models.
+
+### 17.1 Structural, not probabilistic
+
+The alternative to this feature is asking the writer to preserve things, which
+is what the design intent means by calling preservation "structural, not
+probabilistic". A model told to keep `<lora:krea2_edit:1>` intact usually does.
+Usually is the problem: the failure is one roll in twenty, it is silent, and
+what it looks like from the outside is that the edit LoRA "sometimes doesn't
+work".
+
+So the payload never enters a request. `prompt_master/krea/literals.py` lifts it
+out before the Director runs and the pipeline puts it back after the compositor
+has finished. The module imports nothing — no Forge, no gradio, no LLM stack —
+and the whole grammar is a substring search, which is what makes the acceptance
+tests statements about text rather than about a WebUI.
+
+### 17.2 The Director reads the clean text too
+
+§12, and the detail most likely to be lost in a refactor. The Creative Director
+reads the source prompt to notice decisions the user has already made — type
+"oil painting of a car" and the Medium axis stays out of the brief. Handing it a
+payload would let a *filename* make that decision: `[[<lora:anime_style:1>]]`
+would lock Medium to anime on every roll, invisibly, because "anime" appeared in
+a path.
+
+Both passes therefore read one string, and the lift happens one layer above both
+of them — in `before_process`, before `mc_krea_pipeline.Request` is built. The
+`Request.source` field is the transformable text and `raw_source` is what the
+user typed; nothing in the pipeline reads the second one.
+
+### 17.3 Two prompts, built rather than edited
+
+§9.1 is the part that looks like over-engineering until the counter-example is
+written down. Stage 2 must not inherit a Stage 1 literal, and the tempting
+implementation is to build the final prompt and remove the payloads before
+handing it on.
+
+```
+[[red hat]]
+portrait with a red hat
+```
+
+The writer independently writes "a red hat" into its paragraph. A string-based
+cleanup cannot tell which occurrence came from the sidecar, so it removes the
+writer's words too — and the Stage 2 prompt is now missing something nobody
+asked it to remove.
+
+So two finished prompts leave the pipeline: `Prepared.generation`, with the
+literals restored, and `Prepared.inheritable`, which none were ever written
+into. In Spatial mode both are built by `spatial.compose`, from the same
+validated layout, with `literals=True` and `literals=False`. The second is left
+on the processing object by `mc_lora.remember_inheritable` and read by Model
+Chain's `_resolve_prompts`; `strip_networks` stays underneath it as
+defence-in-depth for a bare tag typed outside a command.
+
+`mc_lora` is where that lives rather than `mc_creative_krea` because the module
+is already the answer to "what must not leak between stages", and because Model
+Chain should not have to import Creative Mode to read one attribute.
+
+### 17.4 Where a global literal goes in a structured prompt
+
+§7.5 leaves this open and asks for an acceptance test. The decision is that
+global literals go **inside** `high_level_description`, so the model-facing
+prompt stays a single valid Krea structured object:
+
+```json
+{"aspect_ratio":"2:3","high_level_description":"<lora:krea2_edit:1> A written scene.", …}
+```
+
+Outside the object was the other candidate and is rejected: it produces two
+semantic texts in one prompt, and which of them Krea's structured parser reads
+is a question about a parser this extension does not own. Inside, the object is
+still an object, and Forge's extra-network pass removes a tag from the middle of
+a JSON *string* without the document ceasing to parse — which is asserted rather
+than assumed.
+
+Region literals are unaffected by that choice and were never in question: §21's
+invariant 7 is that a BBOX-local command reaches that element's `desc`, and it
+does, in `Region.describe`, wrapped around the user's own words and the existing
+hints in the order §7.4 specifies.
+
+### 17.5 A region with no prompt is not an empty region
+
+§7.2. `_region` used to skip an object region with no prompt, which is correct
+for a click or a bad paste and wrong for a box whose entire content is
+`[[Her shirt from image 1]]`. Validity is now `Region.has_content` — a
+transformable prompt, or a prefix command, or a suffix command — and the
+skip-with-a-note behaviour is unchanged for a region that really has nothing.
+
+`Region.prompt` is the *cleaned* text, so everything that already read it — the
+Composer's context line, the element description, the panel summary — became
+literal-free with no change at each call site. `Region.raw_prompt` holds what
+was typed and is what `state()` serializes, so opening the editor after a
+restore returns the user's brackets rather than eating them (§15).
+
+### 17.6 Exactly once, on every path
+
+§14, and the reason the assembly is one function. `restore()` is called once per
+prompt, at the single point where the finished body is decided, and every
+fallback route reaches that same point: a writer that failed, a Composer that
+returned nonsense, a compositor that raised, a checkpoint that refused the
+layout, both features switched off. The tests assert a count of one on each of
+them rather than asserting presence.
+
+One case genuinely loses something and says so: a compositor that raises loses
+the *region* literals, because they are content of elements of a document that
+could not be built. The alternative would be moving a BBOX-local command into
+the global scene, which invariant 20 forbids outright.
+
+### 17.7 The syntax means the same thing with the feature off
+
+The hook used to return on its first line unless one of the two features was on.
+It now also runs when the prompt contains `[[`, which costs one substring search
+per generation and buys the property that makes the syntax teachable: a user who
+switches Creative Mode off for one image does not discover that their reference
+instruction has started reaching the text encoder with its brackets on. The
+negative prompt is handled the same way, on its own, at the top of the hook — no
+language model has ever seen it, so there is nothing to protect it *from*; what
+it needs is the same syntax behaving the same way.
+
+### 17.8 The pinned LoRAs are gone
+
+§18 recommends keeping them through a phase 1 and deprecating later. They were
+removed instead, at the maintainer's request, and the reasoning is worth
+recording because it is not the design intent's: the field was a second prompt
+input with a narrower grammar, sitting next to the prompt box, accepting exactly
+one kind of syntax and parsing prose out of itself to enforce that. Every reason
+it existed is served better by `[[<lora:name:weight>]]` in the prompt.
+
+What went: the control, `mc_creative_krea.LORAS`, `pinned_tags`, `lora_suffix`,
+`generation_prompt`, the `loras` setting, the profile field and the `loras`
+argument to `mc_creative_panel.build`. The Creative argument tuple is three
+scalars rather than four, which `_split` now cuts accordingly.
+
+What stayed: `mc_infotext.CREATIVE_LORAS`. Images made with the field still
+exist, and *Continue from a pasted image* still says which tags one used — read
+and shown, never applied, never written again. There is no migration: a profile
+written by an older build simply has one key nobody reads, because `normalise`
+keeps the fields it knows and drops the rest.
+
+### 17.9 What was not built
+
+No escaping, no nesting, no payload inspection, no per-region extra-network
+scope, no second reference gallery, no captioning, no vision-projector
+requirement. The syntax is version 1 and says so in
+`literals.SYNTAX_VERSION`, recorded beside any image that used one along with a
+count — two numbers and not the payloads, which are already in the image's own
+`Prompt:` line and in `Krea Source Prompt` with their brackets on.
+
+### 17.10 Tests
+
+`tests/test_krea_literals.py`, 49 of them, organised by the way the claim can
+fail rather than by the module under test: leakage forwards (a payload reaching
+the writer, the Composer or Stage 2), leakage sideways (a region's command in
+the global scene or another region), arithmetic (twice, dropped, reordered), and
+the payload stopping being opaque. That last one is asserted against the *code*
+as well as the text — a watcher on `mc_lora.RE_EXTRA_NET` that fails if anything
+on the Stage 1 literal path consults it, because the day it does,
+`[[<custom-extension:foo>]]` starts being something this extension has an
+opinion about.

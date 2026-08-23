@@ -1,8 +1,8 @@
 """Named Creative Mode configurations, and the one the user opens with.
 
 A profile is every Creative Mode decision except one: the Creativity position,
-the Creative seed, anti-repetition, each axis's mode, its pinned value, its
-exclusions, and the pinned LoRAs. What it deliberately does not carry is whether
+the Creative seed, anti-repetition, each axis's mode, its pinned value and its
+exclusions. What it deliberately does not carry is whether
 Creative Mode is *on*. A profile describes how the feature behaves when it runs;
 switching it on is a decision somebody makes at the moment they press Generate,
 and a preset that could flip it would be a preset that changes what the button
@@ -80,9 +80,15 @@ BUILT_IN = (FACTORY, SPREAD)
 """The profiles that are computed rather than stored. Never deletable."""
 
 FIELDS = ("creativity", "seed", "anti_repetition", "axis_modes", "fixed_values",
-          "excluded_values", "loras")
+          "excluded_values")
 """Every field a profile carries, by the name :func:`mc_creative_krea.settings`
-uses for it, so a profile reads like the settings it restores."""
+uses for it, so a profile reads like the settings it restores.
+
+``loras`` was one of them and is not any more. The Pinned LoRAs control is gone
+-- ``[[<lora:name:weight>]]`` in the prompt replaced it -- and a profile written
+by an older build simply has one key nobody reads: :func:`normalise` keeps the
+fields it knows and drops the rest, so an existing profile still loads and still
+restores everything it can."""
 
 EXCLUDED_FIELDS = ("enabled",)
 """Settings a profile intentionally does not carry. See the module docstring."""
@@ -209,7 +215,6 @@ def factory() -> dict:
         "fixed_values": dict(defaults.get("fixed_values") or {}),
         "excluded_values": {key: list(values) for key, values
                             in (defaults.get("excluded_values") or {}).items()},
-        "loras": "",
     }
 
 
@@ -256,7 +261,6 @@ def normalise(values) -> dict:
         "axis_modes": modes,
         "fixed_values": mc_creative_krea.known_fixed(values.get("fixed_values")),
         "excluded_values": mc_creative_krea.known_excluded(values.get("excluded_values")),
-        "loras": mc_creative_krea.lora_suffix(values.get("loras", "")),
     }
 
 
@@ -433,6 +437,5 @@ def apply(name: str) -> tuple[dict, str]:
         mc_creative_krea.AXIS_MODES: values["axis_modes"],
         mc_creative_krea.FIXED_VALUES: values["fixed_values"],
         mc_creative_krea.EXCLUDED_VALUES: values["excluded_values"],
-        mc_creative_krea.LORAS: values["loras"],
     })
     return mc_creative_krea.settings(), complaint

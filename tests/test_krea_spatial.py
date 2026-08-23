@@ -126,16 +126,16 @@ def document(regions=(FACE,), mode="smart", width=1024, height=1344, auto=True) 
                        "regions": list(regions)})
 
 
-def panel_values(creativity=10, seed=director.RANDOM_SEED, anti=True, loras="",
+def panel_values(creativity=10, seed=director.RANDOM_SEED, anti=True,
                  mode=director.NATURAL, spatial_on=False, compose="smart", layout=""):
     """What Forge hands ``before_process`` after the enabled flag.
 
-    The four scalars, three controls per axis, then the three Spatial controls,
+    The three scalars, three controls per axis, then the three Spatial controls,
     exactly as ``ui()`` returns them. Built from the library rather than written
     out, because the middle block's length is the library's and a test that
     hard-coded it would pass against the wrong shape.
     """
-    values = [creativity, seed, anti, loras]
+    values = [creativity, seed, anti]
     for _key in library_module.library().axis_keys:
         values.extend([mode, None, []])
     values.extend([spatial_on, compose, layout])

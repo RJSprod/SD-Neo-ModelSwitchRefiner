@@ -1574,6 +1574,12 @@ class ScriptModelChain(scripts.Script):
         worst in exactly the case this extension exists for, where the two
         models are different architectures and the LoRA lands on the wrong
         tensors or fails outright.
+
+        What arrives as ``stage1_positive`` may already be the *inheritable*
+        prompt rather than the generated one -- see the caller. That covers what
+        a pattern cannot: a Krea literal command can carry any syntax at all,
+        and the only reliable way to keep it out of Stage 2 is to inherit a
+        prompt it was never written into.
         """
         if mode == "Replace":
             positive, negative = extra_positive, extra_negative
@@ -1874,10 +1880,22 @@ class ScriptModelChain(scripts.Script):
         # image index, so a prompt that varies across the batch is recorded
         # accurately for each image rather than collapsing to image 0's.
         total = len(p.all_prompts or [p.prompt])
+        # What a Stage 1 prompt-writing feature left for Stage 2, if one ran.
+        # Two empty strings mean nobody rewrote this generation's prompt, and
+        # ``all_prompts`` answers as it always has.
+        #
+        # One value for the whole batch rather than one per image, because that
+        # is what it is: Creative Mode writes one prompt for the press, and the
+        # per-image variation below it is the host's wildcard and style
+        # expansion of *that* -- expansions of literal payloads Stage 2 is not
+        # supposed to receive in the first place.
+        inherit_positive, inherit_negative = mc_lora.stage1_inheritable(p)
         resolved_positive, resolved_negative = [], []
         for i in range(total):
-            stage1_positive = p.all_prompts[i] if p.all_prompts else p.prompt
-            stage1_negative = p.all_negative_prompts[i] if p.all_negative_prompts else p.negative_prompt
+            stage1_positive = inherit_positive or (
+                p.all_prompts[i] if p.all_prompts else p.prompt)
+            stage1_negative = inherit_negative or (
+                p.all_negative_prompts[i] if p.all_negative_prompts else p.negative_prompt)
             pos, neg = self._resolve_prompts(
                 stage1_positive, stage1_negative, prompt_mode, prompt, negative, styles
             )

@@ -792,7 +792,7 @@ class TestTheRollRunsInsideTheGeneration:
         from prompt_master.krea import library as library_module
 
         script = creative_script.ScriptKreaCreative()
-        values = [10, director.RANDOM_SEED, True, ""]
+        values = [10, director.RANDOM_SEED, True]
         for _key in library_module.library().axis_keys:
             values.extend([director.VARY, None, []])
         if spatial is not None:

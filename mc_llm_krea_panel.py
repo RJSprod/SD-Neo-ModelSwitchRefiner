@@ -180,7 +180,7 @@ def build() -> dict:
                 # does.
                 panel = mc_creative_panel.build(
                     lambda *parts: ui.ident("krea", *parts), ui.notice, status,
-                    creativity, loras=False, stored=stored)
+                    creativity, stored=stored)
                 axis_controls = list(panel.axis_controls) if panel is not None else []
                 if panel is not None:
                     creative_seed, anti = panel.seed, panel.anti
@@ -381,8 +381,16 @@ def _generate(prompt, seed, creative, creativity, creative_seed, anti, *rest):
     The tail of the arguments is the axis table followed by the reference slots,
     both variable in length, so they are split by the library's axis count
     rather than unpacked positionally.
+
+    Literal commands are honoured here for the same reason they are honoured in
+    txt2img: the prompt this tab produces is a prompt somebody pastes into a
+    prompt box, and ``[[<lora:krea2_edit:1>]]`` has to survive the round trip.
+    They are lifted out before the Director reads the source, and put back
+    around the finished text -- so the writer never sees them and the box the
+    user copies from already has them in it.
     """
     from prompt_master.core.models import RANDOM_SEED, draw_seed
+    from prompt_master.krea import literals
     from prompt_master.krea.variation import clamp
 
     busy = (gr.update(interactive=False), gr.update(interactive=True))
@@ -396,6 +404,20 @@ def _generate(prompt, seed, creative, creativity, creative_seed, anti, *rest):
         yield (None, "", hidden, keep,
                ui.notice("Describe the image you want first.", "warn"), *idle)
         return
+
+    parsed = literals.parse(prompt)
+    written_source = parsed.clean_text.strip()
+    if not written_source:
+        # Nothing transformable, and nothing to write from. The commands are
+        # handed back exactly as typed rather than sent to a model that would
+        # expand them into prose about a LoRA filename.
+        yield (None, literals.restore("", parsed), hidden, keep,
+               ui.notice("That prompt is nothing but literal commands, so there was "
+                         "nothing for the writer to expand. They are returned "
+                         "unchanged.", "warn"), *idle)
+        return
+    for warning in parsed.warnings:
+        logger.warning("Model Chain: the Krea source prompt — %s", warning)
 
     found, complaint = references(paths)
     if complaint:
@@ -426,7 +448,8 @@ def _generate(prompt, seed, creative, creativity, creative_seed, anti, *rest):
     # asked for: it is ordinary Python over a vendored vocabulary, it cannot
     # fail slowly, and doing it first means the recipe is on screen while the
     # model is still being waited for.
-    recipe, complaint = _direct(prompt, creative, position, creative_seed, anti, axis_values)
+    recipe, complaint = _direct(written_source, creative, position, creative_seed, anti,
+                                axis_values)
     if complaint:
         yield None, "", hidden, keep, ui.notice(complaint, "error"), *idle
         return
@@ -439,7 +462,7 @@ def _generate(prompt, seed, creative, creativity, creative_seed, anti, *rest):
     yield cancel, "", hidden, shown, ui.working("Starting…"), *busy
 
     try:
-        for event in sessions.krea(prompt.strip(), found, resolved, cancel, position,
+        for event in sessions.krea(written_source, found, resolved, cancel, position,
                                    direction):
             if event.kind == sessions.CHUNK:
                 text += event.text
@@ -454,7 +477,11 @@ def _generate(prompt, seed, creative, creativity, creative_seed, anti, *rest):
             elif event.kind == sessions.STATUS:
                 yield cancel, text, keep, keep, ui.working(event.text), *busy
             elif event.kind == sessions.DONE:
-                text = event.text
+                # Restored once, here, on the finished text -- the same rule the
+                # txt2img hook follows and for the same reason: one assembly
+                # point per prompt is how "exactly once" stays true across every
+                # path out of this loop.
+                text = literals.restore(event.text, parsed)
                 _remember(prompt, text, resolved, found, described, position, recipe)
                 if recipe is not None and anti:
                     mc_creative_krea.note_roll(recipe)

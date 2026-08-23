@@ -383,7 +383,6 @@ class Panel:
         self.add = None
         self.seed = None
         self.anti = None
-        self.loras = None
         self.rows: dict = {}
         self.labels: dict = {}
         self.editors: dict = {}
@@ -408,19 +407,21 @@ class Panel:
 
     @property
     def settings_controls(self) -> list:
-        """The secondary settings, in the order a surface passes them on."""
-        found = [self.seed, self.anti]
-        if self.loras is not None:
-            found.append(self.loras)
-        return found
+        """The secondary settings, in the order a surface passes them on.
+
+        Two, and it used to be three. The Pinned LoRAs box is gone: a text box
+        beside a prompt box that accepted exactly one kind of syntax was a
+        second, narrower prompt input, and ``[[<lora:name:weight>]]`` in the
+        prompt itself does the same job for every kind. See
+        :mod:`prompt_master.krea.literals`.
+        """
+        return [self.seed, self.anti]
 
     def outputs(self) -> list:
         """Every component :meth:`render` returns an update for, in order."""
         found = [self.status, self.creativity, self.profile, self.name_row,
                  self.profile_name, self.summary, self.cost, self.add, self.seed,
                  self.anti]
-        if self.loras is not None:
-            found.append(self.loras)
         for key in self.keys:
             found.extend([self.rows[key], self.labels[key], self.editors[key],
                           self.modes[key], self.fixed[key], self.excluded[key]])
@@ -437,8 +438,6 @@ class Panel:
                  "labels": [self.labels[key] for key in self.keys],
                  "editors": [self.editors[key] for key in self.keys],
                  "buttons": list(self.buttons)}
-        if self.loras is not None:
-            found["loras"] = self.loras
         return found
 
     def render(self, stored=None, editing=None, told=None, kind="info",
@@ -472,8 +471,6 @@ class Panel:
             gr.update(value=stored.get("seed")),
             gr.update(value=bool(stored.get("anti_repetition"))),
         ]
-        if self.loras is not None:
-            updates.append(gr.update(value=stored.get("loras", "")))
 
         for key in self.keys:
             setting = _axis_setting(stored, key)
@@ -497,7 +494,7 @@ class Panel:
 # --------------------------------------------------------------------------- #
 
 
-def build(ident, notice, status, creativity, *, loras=True, stored=None) -> Panel | None:
+def build(ident, notice, status, creativity, *, stored=None) -> Panel | None:
     """Assemble the panel into whatever container is open. ``None`` if it cannot.
 
     A creativity library that will not load leaves a sentence on the page saying
@@ -627,11 +624,6 @@ def build(ident, notice, status, creativity, *, loras=True, stored=None) -> Pane
             elem_id=ident("anti"),
             info="pushes the last few rolls' choices away at high Creativity")
         forget = button("Clear recent memory", "forget")
-        if loras:
-            panel.loras = gr.Textbox(
-                label="Pinned LoRAs", value=stored["loras"],
-                placeholder="<lora:name:0.8> <lora:other:0.5>", elem_id=ident("loras"),
-                info="appended to the generated prompt; never sent to the language model")
 
     for key, edit, done, natural in editor_buttons:
         _wire_axis(panel, key, edit, done, natural)
@@ -814,17 +806,6 @@ def _wire_settings(panel, forget) -> None:
         return panel.notice("Recent-roll memory cleared; every treatment is available "
                             "again.")
 
-    def remember_loras(value):
-        # The box is rewritten with the parsed tags rather than with what was
-        # typed, which is the visible half of the rule that this field
-        # contributes networks and never prompt text: prose typed here
-        # disappears in front of the person who typed it, instead of quietly
-        # reaching the image model.
-        suffix = mc_creative_krea.lora_suffix(value)
-        mc_creative_krea.remember(**{mc_creative_krea.LORAS: suffix})
-        counted = len(mc_creative_krea.pinned_tags(suffix))
-        return suffix, panel.notice(f"{counted} pinned LoRA{'' if counted == 1 else 's'}.")
-
     panel.add.input(fn=add_direction, inputs=[panel.add], outputs=panel.outputs(),
                     queue=False)
     panel.seed.input(fn=remember_seed, inputs=[panel.seed], outputs=[panel.seed],
@@ -832,9 +813,6 @@ def _wire_settings(panel, forget) -> None:
     panel.anti.input(fn=remember_anti, inputs=[panel.anti], outputs=[panel.anti],
                      queue=False)
     forget.click(fn=forget_history, outputs=[panel.status], queue=False)
-    if panel.loras is not None:
-        panel.loras.blur(fn=remember_loras, inputs=[panel.loras],
-                         outputs=[panel.loras, panel.status], queue=False)
 
 
 # --------------------------------------------------------------------------- #

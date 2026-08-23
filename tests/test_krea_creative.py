@@ -921,25 +921,24 @@ def script():
     return creative_script.ScriptKreaCreative()
 
 
-def rolled(client, source="car", loras="", creativity=10):
+def rolled(client, source="car", creativity=10):
     """One roll, packaged the way the processing hook packages it."""
     stored = mc_creative_krea.settings()
     stored["creativity"] = creativity
-    stored["loras"] = loras
     list(mc_creative_krea.creative.roll(source, stored))
-    return mc_creative_krea.prepare(mc_creative_krea.creative.last, loras)
+    return mc_creative_krea.prepare(mc_creative_krea.creative.last)
 
 
-def panel_values(creativity=10, seed=director.RANDOM_SEED, anti=True, loras="",
+def panel_values(creativity=10, seed=director.RANDOM_SEED, anti=True,
                  mode=director.VARY, modes=None, fixed=None, excluded=None):
     """What Forge hands ``before_process`` after the enabled flag.
 
-    The panel's own controls, in the order ``ui()`` returns them: the four
+    The panel's own controls, in the order ``ui()`` returns them: the three
     scalars and then the axis controls, three per axis -- mode, pinned value,
     excluded ids. Built from the library rather than written out, for the same
     reason the panel is.
     """
-    values = [creativity, seed, anti, loras]
+    values = [creativity, seed, anti]
     for key in library_module.library().axis_keys:
         values.extend([(modes or {}).get(key, mode),
                        (fixed or {}).get(key),
@@ -1005,14 +1004,15 @@ class TestTheProcessingHook:
         assert len(client.calls) == 1
         assert "a car in the rain" in client.turn
 
-    def test_the_pinned_loras_arrive_with_it(self, script, client):
+    def test_a_literal_command_arrives_with_it(self, script, client):
+        """What the Pinned LoRAs field used to do, said in the prompt instead."""
         client.answers = ["A painted car."]
-        p = generate(script, loras="<lora:film:0.8>")
+        p = generate(script, "[[<lora:film:0.8>]] car")
 
-        assert p.prompt == "A painted car. <lora:film:0.8>"
+        assert p.prompt == "<lora:film:0.8> A painted car."
 
     def test_everything_needed_to_roll_it_again_is_recorded(self, script, client):
-        p = generate(script, "car", loras="<lora:film:0.8>")
+        p = generate(script, "car")
         recorded = p.extra_generation_params
 
         assert recorded[mc_infotext.CREATIVE_MODE] == "True"
@@ -1022,7 +1022,6 @@ class TestTheProcessingHook:
         assert recorded[mc_infotext.CREATIVE_LLM_SEED] == director.derive(
             recorded[mc_infotext.CREATIVE_SEED])[1]
         assert "medium=" in recorded[mc_infotext.CREATIVE_RECIPE]
-        assert recorded[mc_infotext.CREATIVE_LORAS] == "<lora:film:0.8>"
 
     def test_the_expanded_paragraph_is_not_recorded_twice(self, script, client):
         """It is already the generation's own prompt line."""
@@ -1240,27 +1239,52 @@ class TestTheGpuIsGivenBack:
 
 
 # --------------------------------------------------------------------------- #
-# The pinned LoRAs
+# What replaced the pinned LoRAs
 # --------------------------------------------------------------------------- #
 
 
-class TestPinnedLoras:
-    def test_the_language_model_is_never_shown_a_tag(self, client):
-        rolled(client, loras="<lora:film:0.8>")
+class TestThePinnedLorasFieldIsGone:
+    """The control, its setting and its profile field, all of them.
 
-        assert "lora" not in client.turn
+    A text box beside a prompt box that accepted one kind of syntax was a second
+    prompt input with a narrower grammar. ``[[<lora:name:weight>]]`` in the
+    prompt does the same job for every kind of syntax, in the place a person
+    would have typed the tag anyway -- so what is asserted here is absence, and
+    the presence of the thing that replaced it is asserted in
+    ``test_krea_literals.py``.
+    """
 
-    def test_prose_typed_into_the_field_is_not_smuggled_into_the_prompt(self):
-        assert mc_creative_krea.lora_suffix(
-            "a beautiful sunset <lora:film:0.8> masterpiece") == "<lora:film:0.8>"
-        assert mc_creative_krea.pinned_tags("nothing but words") == []
+    def test_the_setting_is_gone(self):
+        assert "loras" not in mc_creative_krea.settings()
+        assert not hasattr(mc_creative_krea, "LORAS")
 
-    def test_they_are_appended_to_the_generation_prompt_only(self, client):
-        client.answers = ["A painted car."]
-        record = rolled(client, loras="<lora:film:0.8>")
+    def test_the_helpers_that_parsed_it_are_gone(self):
+        assert not hasattr(mc_creative_krea, "lora_suffix")
+        assert not hasattr(mc_creative_krea, "pinned_tags")
 
-        assert record.generation == "A painted car. <lora:film:0.8>"
-        assert record.roll.expanded == "A painted car."
+    def test_a_profile_no_longer_carries_one(self):
+        import mc_creative_profiles
+
+        assert "loras" not in mc_creative_profiles.FIELDS
+        assert "loras" not in mc_creative_profiles.factory()
+
+    def test_a_profile_written_by_an_older_build_still_loads(self):
+        """One key nobody reads, and every other field restored."""
+        import mc_creative_profiles
+
+        values = mc_creative_profiles.normalise(
+            {"creativity": 7, "loras": "<lora:film:0.8>"})
+
+        assert values["creativity"] == 7
+        assert "loras" not in values
+
+    def test_an_older_image_still_says_which_tags_it_used(self):
+        """Read and shown, never applied. There is nothing left to apply it to."""
+        setup = mc_infotext.creative_setup(
+            {mc_infotext.CREATIVE_MODE: "True",
+             mc_infotext.CREATIVE_LORAS: "<lora:film:0.8>"})
+
+        assert setup.loras == "<lora:film:0.8>"
 
 
 # --------------------------------------------------------------------------- #
@@ -2105,8 +2129,8 @@ class TestTheCompactPanel:
 
         assert built.arguments[:2] == [built.components["enabled"],
                                        built.components["creativity"]]
-        assert built.arguments[2:5] == list(panel.settings_controls)
-        assert built.arguments[5:-3] == list(panel.axis_controls)
+        assert built.arguments[2:4] == list(panel.settings_controls)
+        assert built.arguments[4:-3] == list(panel.axis_controls)
         # The Spatial block goes last and stays last. The axis block is the only
         # variable-length part of this tuple, so the two fixed ends are the two
         # that can be found without counting -- which is what _split does.
