@@ -1245,6 +1245,72 @@ the PNG metadata and the gallery.
 The same controls are in **LLM Studio → Krea 2**, sharing one settings file, one
 Director and one panel, where they write a prompt and generate no image.
 
+### Literal commands: `[[keep this exactly]]`
+
+Some of what goes in a prompt box is not language for a model to improve. A LoRA
+tag, a wildcard, a `$style`, another extension's macro, an instruction about one
+of your ImageStitch reference images — all of those are meant for something
+*downstream* of the writer, and a prompt-writing LLM handed one will reword it,
+move it or drop it, one roll in twenty, silently.
+
+So anything you put inside **double square brackets** is lifted out of the prompt
+before any language model sees it and put back at the end, on its way into
+Forge's own prompt processing:
+
+```
+[[<lora:krea2_edit:1>]]
+a stylish editorial portrait in an elegant restaurant
+-[[__lighting_wildcard__]]
+```
+
+```
+the writer sees:   a stylish editorial portrait in an elegant restaurant
+Krea 2 is given:   <lora:krea2_edit:1> A richly written scene … __lighting_wildcard__
+```
+
+| Syntax | Where the payload goes |
+| --- | --- |
+| `[[…]]` | in front of the written prompt (the default) |
+| `+[[…]]` | in front, said explicitly |
+| `-[[…]]` | after it |
+
+Several commands keep the order you wrote them in within each group, so
+`-[[D]] +[[A]] [[B]] -[[E]] +[[C]] scene` becomes `A B C <written scene> D E`.
+
+**The payload is never interpreted.** Model Chain does not know or care whether
+what you bracketed is a LoRA tag, a wildcard, a style, prose, or the syntax of an
+extension released next year — it is a run of characters that gets delivered
+unchanged to the place your own extensions are already listening. What the
+feature guarantees is delivery and position, not what anything downstream then
+does with it.
+
+It works the same way with Creative Mode **off**, and in the negative prompt,
+which is the point: the brackets mean one thing everywhere, so switching the
+writer off for one image does not start sending `[[` to the text encoder.
+
+A few details worth knowing:
+
+* **Reference edits are native.** `[[her shirt from image 1]]` is just text
+  reaching Krea; the actual image comes from Forge Neo's own **ImageStitch**
+  gallery, which Creative Mode does not touch, caption, re-encode or reorder.
+  Nothing here needs a vision projector.
+* **Region prompts take commands too** — see *Spatial Layout* below — and a
+  command written in a box stays in that box.
+* **Stage 1 commands never reach Stage 2.** A Model Chain second stage inherits
+  a version of the prompt the payloads were never written into, so a Krea edit
+  LoRA does not follow your image into a Flux or SDXL pass. Put Stage 2 syntax
+  in the Stage 2 controls.
+* **Malformed is left alone.** `[[` with no closing `]]` stays in the prompt
+  exactly as typed and logs a warning; nothing is silently deleted.
+* `[[]]` carries nothing and is ignored. There is no nesting and no escape
+  syntax: the first `]]` closes the command.
+
+This replaced the old **Pinned LoRAs** box. That field accepted one kind of
+syntax and lived next to the prompt rather than in it; `[[<lora:name:0.8>]]`
+does the same job for every kind of syntax, in the place you would have typed
+the tag anyway. Images made with the old field still show what they used, under
+*Continue from a pasted image* — nothing applies it any more.
+
 ### The drawer shows what you decided
 
 Open **Creative Controls** on a fresh install and there is nothing in it:
@@ -1275,8 +1341,8 @@ as twenty permanent controls, nine of them saying Vary because the shipped
 defaults said Vary — nine art-direction decisions nobody had made, invisible
 until you opened the drawer and read the table.
 
-**The Creative seed, anti-repetition, Clear recent memory and Pinned LoRAs** are
-in a **Settings** accordion below. They are configuration, not everyday art
+**The Creative seed, anti-repetition and Clear recent memory** are in a
+**Settings** accordion below. They are configuration, not everyday art
 direction, and they used to sit in the middle of the axis rows.
 
 ### Excluding treatments you never want
@@ -1303,8 +1369,7 @@ and it never eats one of the activation slots the Creativity position allows.
 ### Profiles
 
 A profile is every Creative setting — the Creativity position, the seed,
-anti-repetition, each axis's mode, pin and exclusions, and the pinned LoRAs —
-under a name.
+anti-repetition, and each axis's mode, pin and exclusions — under a name.
 
 | Button | What it does |
 | --- | --- |
@@ -1453,6 +1518,28 @@ Krea gets:   elderly Japanese woman, silver hair, gentle expression,
              shown in a close-up view, in a three-quarter view from the left,
              positioned in the upper-left area, occupying a medium-sized area
 ```
+
+**A region prompt takes literal commands too**, and they stay in that region.
+Write `[[her shirt from image 1]]` in a box and that instruction reaches *that
+element* of the structured prompt, beside its coordinates — it is never flattened
+into the global scene, never moved into another box, and never shown to the
+Spatial Composer. A box whose entire content is a literal command is a valid
+region: it is not empty, it is a region whose content was deliberately kept away
+from the language models.
+
+```
+you typed:   +[[her shirt from image 1]]
+             red satin blouse
+             -[[__fabric_detail__]]
+Krea gets:   her shirt from image 1, red satin blouse, shown as a medium shot,
+             positioned in the left-center area, occupying a medium-sized area,
+             __fabric_detail__
+```
+
+A LoRA tag written inside a box is *not* regional, and cannot be: the bracket
+scope decides where text survives the LLM passes, and Forge's extra-network
+system then applies the tag with its own, global, scope. Spatial Layout is not
+regional diffusion.
 
 #### The editor
 

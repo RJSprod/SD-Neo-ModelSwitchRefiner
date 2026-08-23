@@ -22,6 +22,16 @@ background -- and code supplies the *structure*. The elements array is built
 here, from what the user drew, in the order they stacked it, with their words in
 it verbatim.
 
+Literal commands stay in their box
+----------------------------------
+A region prompt may carry ``[[...]]`` commands -- a reference instruction, a
+wildcard, an extra-network tag -- and those are lifted out here, at parse time,
+by :mod:`prompt_master.krea.literals`. What the Composer is shown and what this
+module rewrites is the cleaned text; the payloads are held on the Region and
+written back into that element's ``desc`` and nowhere else. A command written
+inside Region 1 reaches Region 1, or it reaches nothing: it never lands in the
+global scene, in the background, or in another region.
+
 What is authoritative, and what is not
 -------------------------------------
 These are the user's and no pass may change them: the bbox, the raw region
@@ -56,6 +66,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from math import gcd
+
+from . import literals
 
 VERSION = 1
 """The editable-state version this module reads and writes.
@@ -273,6 +285,13 @@ class Region:
     kind: str
     bbox: tuple[int, int, int, int]
     prompt: str = ""
+    """The region's transformable text: what the user typed, minus its literals.
+
+    This is the string every other pass sees -- the Composer's context line, the
+    element's ``desc``, the panel's summary -- because a literal command inside a
+    box is content for the image model and for nothing before it.
+    """
+
     text: str = ""
     framing: str = ""
     angle: str = ""
@@ -280,6 +299,55 @@ class Region:
     index: int = 0
     """Draw order. Not user intent and not in the prompt -- it is the tie-break
     that keeps two regions at the same z from swapping places between runs."""
+
+    raw_prompt: str = ""
+    """Exactly what the user typed, ``[[...]]`` included, or "" when they are the
+    same thing.
+
+    Kept so :meth:`state` can write the canvas back as it was drawn. A layout
+    round-trip that returned the *cleaned* prompt would silently eat a user's
+    reference instruction the first time they opened the editor after a restore,
+    which is the one failure §6.4 of the layout design calls unforgivable.
+    """
+
+    prefix_literals: tuple[str, ...] = ()
+    suffix_literals: tuple[str, ...] = ()
+    """This region's literal payloads, in source order, split by direction.
+
+    Strings and not :class:`~prompt_master.krea.literals.LiteralCommand`
+    objects, because by the time a Region exists the only questions left are
+    "which side" and "in what order", and both are answered by two tuples. What
+    is *not* stored anywhere is a copy in the global scope: a region's commands
+    reach the prompt through this region's ``desc`` or they do not reach it at
+    all.
+    """
+
+    @property
+    def source_prompt(self) -> str:
+        """What the user actually typed in the region's prompt box.
+
+        The raw text when a literal command was lifted out of it, and the
+        ordinary prompt otherwise -- so a region that never carried one is
+        recorded exactly as it always was.
+        """
+        return self.raw_prompt or self.prompt
+
+    @property
+    def literals(self) -> tuple[str, ...]:
+        """Every literal payload this region carries, prefixes first."""
+        return tuple(self.prefix_literals) + tuple(self.suffix_literals)
+
+    @property
+    def has_content(self) -> bool:
+        """Whether the user put anything in this region at all.
+
+        Three ways to have, and the second and third are why this is a property
+        rather than ``bool(region.prompt)`` at each call site: a region whose
+        whole content is ``[[Her shirt from image 1]]`` has an empty
+        transformable prompt *by design*, and discarding it for that would
+        discard exactly the regions this feature exists to carry.
+        """
+        return bool(self.prompt or self.prefix_literals or self.suffix_literals)
 
     @property
     def area(self) -> float:
@@ -309,19 +377,39 @@ class Region:
             found.append(size_hint(self.bbox))
         return found
 
-    def describe(self, auto_position: bool = True) -> str:
+    def describe(self, auto_position: bool = True, literals: bool = True) -> str:
         """The element's ``desc``: the user's words first, then the hints.
 
         The user's own text is present verbatim and first. That is the promise
         this whole feature makes about region prompts, and it is kept by
         concatenation rather than by asking anything to preserve it.
+
+        Literal commands wrap that content rather than joining the end of it:
+        prefixes, then the region's own words, then the deterministic hints,
+        then suffixes. So ``+[[Her shirt from image 1]]`` reads as the first
+        thing said about the element and ``-[[__fabric_detail__]]`` as the last,
+        which is what ``+`` and ``-`` mean everywhere else in the syntax, and the
+        existing hint order is untouched in between.
+
+        ``literals`` false builds the same description without them, for the
+        prompt Stage 2 may inherit. It is not a debugging switch: a Stage 1
+        reference instruction is meaningless to a Stage 2 model that has no
+        ImageStitch reference behind it, and the only way to be sure none
+        travels is to have a representation none was ever put into.
         """
-        base = self.prompt.strip() or (DEFAULT_TEXT_DESC if self.kind == TEXT else "")
-        parts = [base] if base else []
+        prefix = tuple(self.prefix_literals) if literals else ()
+        suffix = tuple(self.suffix_literals) if literals else ()
+        base = self.prompt.strip()
+        if not base and self.kind == TEXT and not (prefix or suffix):
+            base = DEFAULT_TEXT_DESC
+        parts = list(prefix)
+        if base:
+            parts.append(base)
         parts.extend(self.hints(auto_position))
+        parts.extend(suffix)
         return ", ".join(parts)
 
-    def element(self, auto_position: bool = True) -> dict:
+    def element(self, auto_position: bool = True, literals: bool = True) -> dict:
         """This region as one entry of ``compositional_deconstruction.elements``.
 
         A text region carries ``text`` *and* ``desc`` and they mean different
@@ -332,13 +420,13 @@ class Region:
         found: dict = {"type": self.kind, "bbox": list(self.bbox)}
         if self.kind == TEXT:
             found["text"] = self.text
-        found["desc"] = self.describe(auto_position)
+        found["desc"] = self.describe(auto_position, literals)
         return found
 
     def state(self) -> dict:
         """This region back in editable form, with the keys in a fixed order."""
         found = {"id": self.identifier, "name": self.name, "type": self.kind,
-                 "bbox": list(self.bbox), "prompt": self.prompt}
+                 "bbox": list(self.bbox), "prompt": self.source_prompt}
         if self.kind == TEXT:
             found["text"] = self.text
         found.update({"framing": self.framing, "angle": self.angle, "z": self.z})
@@ -547,12 +635,21 @@ def _region(entry, position: int) -> tuple[Region | None, str]:
                      f"treated as an object.")
         kind = OBJECT
 
-    prompt = str(entry.get("prompt") or "").strip()
+    raw_prompt = str(entry.get("prompt") or "").strip()
+    parsed = literals.parse(raw_prompt, scope=literals.REGION, region_id=identifier)
+    prompt = parsed.clean_text.strip()
+    for warning in parsed.warnings:
+        notes.append(f"{label}: {warning}")
+
     text = str(entry.get("text") or "").strip()
     if kind == TEXT and not text:
         return None, (f"{label} is a text region with no text to render and was "
                       f"skipped.")
-    if kind == OBJECT and not prompt:
+    if kind == OBJECT and not (prompt or parsed.commands):
+        # "No prompt" now means "nothing of the user's, in any form". A region
+        # holding only [[Her shirt from image 1]] has an empty transformable
+        # prompt on purpose, and skipping it would delete the box for having
+        # said exactly what this feature was built to carry.
         return None, f"{label} has no prompt and was skipped."
 
     framing = str(entry.get("framing") or "").strip()
@@ -573,7 +670,10 @@ def _region(entry, position: int) -> tuple[Region | None, str]:
 
     return (Region(identifier=identifier, name=name, kind=kind, bbox=tuple(bbox),
                    prompt=prompt, text=text, framing=framing, angle=angle, z=z,
-                   index=position),
+                   index=position,
+                   raw_prompt=raw_prompt if raw_prompt != prompt else "",
+                   prefix_literals=parsed.prefixes,
+                   suffix_literals=parsed.suffixes),
             " ".join(notes))
 
 
@@ -583,7 +683,7 @@ def _region(entry, position: int) -> tuple[Region | None, str]:
 
 
 def compose(layout: Layout, scene: str, background: str = "",
-            ratio: str = "") -> str:
+            ratio: str = "", literals: bool = True) -> str:
     """The final model-facing prompt: one compact structured Krea 2 prompt.
 
     This is the function the whole feature is arranged around, and it is worth
@@ -597,8 +697,16 @@ def compose(layout: Layout, scene: str, background: str = "",
     between runs is a prompt whose A/B comparison means nothing; compact because
     every space in here is a token the image model's text encoder pays for and
     none of them is read by a person.
+
+    ``literals`` false builds the same document with every region's literal
+    payload left out, which is the representation Stage 2 may inherit. Two
+    strings are built rather than one string edited, because the alternative --
+    finding the payloads in the finished prompt and deleting them -- cannot tell
+    a user's ``[[red hat]]`` from a red hat the Creative Writer thought of by
+    itself, and would delete both.
     """
-    elements = [region.element(layout.auto_position_hint) for region in layout.ordered]
+    elements = [region.element(layout.auto_position_hint, literals)
+                for region in layout.ordered]
     payload = {
         "aspect_ratio": str(ratio or ""),
         "high_level_description": str(scene or "").strip(),

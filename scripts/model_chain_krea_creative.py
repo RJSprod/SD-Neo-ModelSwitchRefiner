@@ -77,6 +77,7 @@ import mc_creative_krea
 import mc_creative_panel
 import mc_infotext
 import mc_llm_sessions as sessions
+import mc_lora
 import mc_memory
 import mc_plan
 import mc_krea_pipeline
@@ -134,21 +135,26 @@ SPATIAL_CONTROLS = 3
 def _split(values) -> tuple[tuple, tuple, tuple]:
     """``before_process``'s tuple, cut into its three parts.
 
-    ``ui()`` returns, after the enabled flag: four scalars, then three controls
+    ``ui()`` returns, after the enabled flag: three scalars, then three controls
     per axis, then the three Spatial controls. Two of those three lengths are
     fixed and the middle one is the library's, so the cut is made by *asking the
     library* rather than by pattern-matching a length -- both a layout with
     spatial and one without are multiples of three long, and a tuple cannot say
     which it is.
 
+    Three scalars and not four: the Pinned LoRAs box is gone, and
+    ``[[<lora:name:weight>]]`` in the prompt is what replaced it. An older API
+    caller that still sends four will have its LoRA string read as the first
+    axis mode, which is not a mode and is dropped by
+    :func:`mc_creative_panel.axes_from` -- the axis falls back to the saved
+    setting rather than to something invented.
+
     The second shape is the one that matters now Spatial is a peer feature. A
     creativity library that will not load takes the axis controls with it and
     Creative Mode with them -- but not Spatial, which needs no vocabulary at all
     to place a box. So ``ui()`` still emits the Spatial tail on that path, and
     this cut recognises the exact shape it emits rather than guessing from a
-    length: one scalar and three Spatial controls. Guessing would be dangerous
-    in the other direction, because an API request that sent four Creative
-    scalars and no Spatial block would have its LoRA field read as a layout.
+    length: one scalar and three Spatial controls.
 
     Anything else means there is no panel behind this call -- an API request
     that sent only the flag. The saved settings answer for it, which is what
@@ -163,18 +169,18 @@ def _split(values) -> tuple[tuple, tuple, tuple]:
         axes = None
 
     if axes is not None:
-        expected = 4 + axes
+        expected = 3 + axes
         if len(values) >= expected + SPATIAL_CONTROLS:
-            return (values[:4], values[4:expected],
+            return (values[:3], values[3:expected],
                     values[expected:expected + SPATIAL_CONTROLS])
         if len(values) >= expected:
-            return values[:4], values[4:expected], ()
+            return values[:3], values[3:expected], ()
 
     if len(values) == 1 + SPATIAL_CONTROLS:
         # The no-panel shape: creativity, then the Spatial tail.
         return (), (), values[-SPATIAL_CONTROLS:]
-    if len(values) >= 4:
-        return values[:4], (), ()
+    if len(values) >= 3:
+        return values[:3], (), ()
     return (), (), ()
 
 
@@ -190,8 +196,8 @@ def _settings_for(values) -> dict:
     scalars, axes, _ = _split(values)
     if not scalars:
         return mc_creative_krea.settings()
-    creativity, seed, anti_repetition, loras = scalars
-    return _stored(creativity, seed, anti_repetition, loras, axes)
+    creativity, seed, anti_repetition = scalars
+    return _stored(creativity, seed, anti_repetition, axes)
 
 
 def _spatial_for(values) -> dict:
@@ -219,7 +225,7 @@ def _spatial_for(values) -> dict:
     return stored
 
 
-def _stored(creativity, seed, anti_repetition, loras, axis_values) -> dict:
+def _stored(creativity, seed, anti_repetition, axis_values) -> dict:
     """The settings for this roll, taken from the controls rather than the file.
 
     Read off the panel and not out of preferences, because the panel is what the
@@ -232,7 +238,6 @@ def _stored(creativity, seed, anti_repetition, loras, axis_values) -> dict:
     stored = mc_creative_krea.settings()
     stored["creativity"] = variation.clamp(creativity)
     stored["anti_repetition"] = bool(anti_repetition)
-    stored["loras"] = mc_creative_krea.lora_suffix(loras)
     try:
         stored["seed"] = int(seed)
     except (TypeError, ValueError):
@@ -517,7 +522,8 @@ def spatial_editor() -> str:
           <span>Auto position hints</span>
         </label>
         <span class="{SPATIAL_PREFIX}-note">Scene prompt goes through the Creative
-          LLM · region prompts bypass it</span>
+          LLM · region prompts bypass it · [[double brackets]] bypass every
+          language model and stay in this box</span>
       </div>
     </div>
 
@@ -570,7 +576,7 @@ def spatial_editor() -> str:
         <label class="{SPATIAL_PREFIX}-field {SPATIAL_PREFIX}-grow">
           <span id="{_spatial_id("prompt-label")}">Region prompt</span>
           <textarea id="{_spatial_id("prompt")}" rows="5"
-                    placeholder="what is in this box, in your own words"></textarea>
+                    placeholder="what is in this box, in your own words &#10;&#10;[[her shirt from image 1]] is passed straight to the image model"></textarea>
         </label>
         <div class="{SPATIAL_PREFIX}-pair">
           <label class="{SPATIAL_PREFIX}-field" id="{_spatial_id("framing-field")}">
@@ -704,6 +710,13 @@ def _pasted_view() -> str:
         lines.append(f"Creativity library: {setup.library_version}")
     if setup.writer:
         lines.append(f"Written by: {setup.writer}")
+    if setup.loras:
+        # Read from an older image and shown, never restored. The control it
+        # came from is gone; what is useful about it now is that somebody
+        # continuing from that picture can see which tags it used and put them
+        # back as literal commands, where they belong.
+        lines.append(f"Pinned LoRAs (this build has no such field — type them into "
+                     f"the prompt as [[{setup.loras}]]): {setup.loras}")
     if setup.spatial:
         from prompt_master.krea import spatial as spatial_module
 
@@ -711,7 +724,8 @@ def _pasted_view() -> str:
         lines.append(f"{spatial_module.summarise(drawn)}"
                      f"{f' · {setup.spatial_compose_mode} merge' if setup.spatial_compose_mode else ''}")
         for region in drawn.ordered:
-            body = region.text if region.kind == spatial_module.TEXT else region.prompt
+            body = (region.text if region.kind == spatial_module.TEXT
+                    else region.source_prompt)
             lines.append(f"  [{region.identifier}] {list(region.bbox)} "
                          f"{region.kind}: {body}")
     for warning in setup.warnings():
@@ -753,8 +767,6 @@ def _restore_setup(replay_exactly):
         remembered[mc_creative_krea.AXIS_MODES] = setup.axis_modes
         remembered[mc_creative_krea.FIXED_VALUES] = setup.fixed_values
         remembered[mc_creative_krea.EXCLUDED_VALUES] = setup.excluded_values
-    if setup.loras:
-        remembered[mc_creative_krea.LORAS] = setup.loras
     if remembered:
         mc_creative_krea.remember(**remembered)
         stored = mc_creative_krea.settings()
@@ -919,9 +931,19 @@ def _say_what_ran(outcome, written) -> None:
                     length, f"{len(roll.source):,}", roll.creativity,
                     roll.creative_seed)
         return
-    logger.info("Model Chain: Spatial Layout prompt applied — %s merge over the "
-                "prompt as typed, %s characters of structured prompt",
-                outcome.merge, length)
+    if outcome.ran_spatial:
+        logger.info("Model Chain: Spatial Layout prompt applied — %s merge over the "
+                    "prompt as typed, %s characters of structured prompt",
+                    outcome.merge, length)
+        return
+    # Neither pass produced anything and a prompt was still substituted, so the
+    # literal commands are the whole of what happened to it. Said rather than
+    # left silent: this is the one path where the prompt changed and no feature
+    # will admit to having changed it.
+    from prompt_master.krea import literals
+
+    logger.info("Model Chain: the prompt carried %s and was restored around them",
+                literals.describe(getattr(written, "literals", None)))
 
 
 def _disarm_replay():
@@ -968,6 +990,10 @@ class ScriptKreaCreative(scripts.Script):
         # failed rather than because Creative Mode was off. Read only by
         # postprocess, to get one sentence right.
         self._composed_without_creative = False
+        # This generation's negative prompt with its literal commands lifted
+        # out, for Stage 2 to inherit instead of the restored one. Set at the
+        # top of before_process, before anything can fail.
+        self._inheritable_negative = ""
 
     def title(self):
         return "Krea Creative Mode"
@@ -1062,6 +1088,16 @@ class ScriptKreaCreative(scripts.Script):
                         elem_id=ident("expanded"))
 
                 gr.Markdown(
+                    "**Literal commands.** Anything you write inside `[[double "
+                    "brackets]]` is lifted out of the prompt before any language "
+                    "model sees it and put back at the end, on its way to Forge's "
+                    "own prompt processing — so LoRA tags, wildcards, `$styles`, "
+                    "another extension's syntax and instructions about your "
+                    "ImageStitch reference images all arrive exactly as you typed "
+                    "them. `[[<lora:krea2_edit:1>]]` goes in front of the written "
+                    "prompt; `-[[__grain__]]` goes after it. Written inside a "
+                    "region's prompt on the Spatial canvas, a command stays with "
+                    "that region and reaches that element of the composition.\n\n"
                     "**Natural** leaves the axis out of the brief entirely — the model "
                     "decides as it would without Creative Mode, and a Natural axis has "
                     "no row above. **Vary** lets the local director choose, and the "
@@ -1341,10 +1377,18 @@ class ScriptKreaCreative(scripts.Script):
         ----------------------
         This used to return immediately unless Creative Mode was on, which made
         Spatial Layout unreachable without it. The gate is now "did the user
-        switch on either of them", and everything after it is
-        :mod:`mc_krea_pipeline` deciding the order. An ordinary generation --
-        both switched off -- still leaves on the first line, which is what keeps
-        this feature free for everybody who does not use it.
+        switch on either of them, or write a literal command", and everything
+        after it is :mod:`mc_krea_pipeline` deciding the order. An ordinary
+        generation -- both switched off, no ``[[`` in the prompt -- still leaves
+        on the first line, which is what keeps this feature free for everybody
+        who does not use it.
+
+        The third reason is the one that costs a substring search on every
+        generation, and it buys the property that makes the syntax teachable:
+        ``[[...]]`` means the same thing whether or not a language model was
+        going to run. A user who switches Creative Mode off for one image does
+        not discover that their reference instruction has started reaching the
+        text encoder with its brackets on.
         """
         import mc_broker
 
@@ -1357,12 +1401,28 @@ class ScriptKreaCreative(scripts.Script):
                          "nested generation is left alone")
             return
 
+        from prompt_master.krea import literals
+
         self._complaint = ""
         self._spatial_note = ""
         self._composed_without_creative = False
+
+        # The negative prompt first, and on its own. No language model in this
+        # extension has ever seen it, so there is nothing to protect it from --
+        # what it needs is the same syntax honoured in the same way, so that a
+        # wildcard written ``[[__grain__]]`` in one box behaves as it does in
+        # the other. It is restored here and not in the pipeline because the
+        # pipeline is about the positive prompt and should stay that way.
+        self._restore_negative(p)
+
+        parsed = literals.parse(getattr(p, "prompt", "") or "")
         layout = self._layout(p, args)
         creative = bool(enabled)
         if not creative and not getattr(layout, "regions", ()):
+            # Neither feature is on. If the prompt carries literal commands they
+            # still have to come off it; if it does not, this is the ordinary
+            # generation that leaves here having done nothing at all.
+            self._literals_only(p, parsed)
             return
 
         settings = _settings_for(args)
@@ -1379,12 +1439,19 @@ class ScriptKreaCreative(scripts.Script):
         if objection:
             logger.warning("Model Chain: Spatial Layout was not applied — %s", objection)
             self._spatial_note = objection
+            # The layout is refused and the literals are not. They are ordinary
+            # Forge prompt syntax that the user typed into a prompt box, and a
+            # checkpoint this feature will not build a structured prompt for is
+            # still a checkpoint that can be sent a LoRA tag.
+            self._literals_only(p, parsed)
             return
 
         from prompt_master.krea import spatial as spatial_module
 
         request = mc_krea_pipeline.Request(
-            source=str(getattr(p, "prompt", "") or "").strip(),
+            source=parsed.clean_text.strip(),
+            raw_source=str(getattr(p, "prompt", "") or ""),
+            literals=parsed,
             creative=creative,
             creative_settings=settings,
             layout=layout,
@@ -1407,7 +1474,8 @@ class ScriptKreaCreative(scripts.Script):
             with mc_broker.host_job():
                 outcome = mc_krea_pipeline.run(
                     request,
-                    write=lambda source: (self._roll(p, settings, layout),
+                    write=lambda source: (self._roll(source, settings, layout,
+                                                     request.raw_source),
                                           self._complaint))
         finally:
             self._rolling = False
@@ -1415,12 +1483,18 @@ class ScriptKreaCreative(scripts.Script):
         if outcome.spatial_note and not self._spatial_note:
             self._spatial_note = outcome.spatial_note
         self._composed_without_creative = bool(
-            creative and not outcome.ran_creative and outcome.prepared is not None)
+            creative and not outcome.ran_creative and outcome.ran_spatial)
         written = outcome.prepared
         if written is None:
             return
 
         p.prompt = written.generation
+        # What Stage 2 may inherit, if there is a Stage 2. Recorded whether or
+        # not this generation had literals in it: the two prompts are the same
+        # string when it did not, and a Stage 2 that reads one attribute on
+        # every chain is simpler than one that has to know when to.
+        mc_lora.remember_inheritable(p, written.inheritable,
+                                     self._inheritable_negative)
         try:
             p.extra_generation_params.update(written.metadata)
         except Exception:
@@ -1514,6 +1588,84 @@ class ScriptKreaCreative(scripts.Script):
             logger.debug("Model Chain: could not put the Creative Mode notice on the "
                          "result", exc_info=True)
 
+    def _restore_negative(self, p) -> None:
+        """Take the brackets off the negative prompt, if it has any.
+
+        Cheap and unconditional, in that order: :func:`literals.parse` returns
+        the string it was given, untouched, when there is no ``[[`` in it, so a
+        negative prompt nobody wrote a command in is the same object it was.
+
+        The inheritable half is kept for Stage 2 the same way the positive one
+        is. A Stage 1 negative that names another extension's syntax has no more
+        business in a Stage 2 pass than a Stage 1 LoRA does.
+        """
+        from prompt_master.krea import literals
+
+        self._inheritable_negative = ""
+        negative = getattr(p, "negative_prompt", "") or ""
+        if not literals.present(negative):
+            self._inheritable_negative = str(negative)
+            return
+        parsed = literals.parse(negative)
+        for warning in parsed.warnings:
+            logger.warning("Model Chain: the negative prompt — %s", warning)
+        self._inheritable_negative = parsed.clean_text
+        if not parsed.commands:
+            return
+        try:
+            p.negative_prompt = literals.restore(parsed.clean_text, parsed)
+        except Exception:
+            logger.debug("Model Chain: could not restore the negative prompt's literal "
+                         "commands", exc_info=True)
+            self._inheritable_negative = str(negative)
+            return
+        # Recorded here and not only at the end, because this half can be the
+        # only half: a generation whose positive prompt carried no command and
+        # whose negative did takes none of the paths below, and Stage 2 would
+        # otherwise inherit the restored negative. Whatever runs after this
+        # writes the pair again with the positive filled in.
+        mc_lora.remember_inheritable(p, "", self._inheritable_negative)
+        logger.info("Model Chain: the negative prompt carried %s",
+                    literals.describe(parsed))
+
+    def _literals_only(self, p, parsed) -> None:
+        """Substitute a prompt whose only change is that its brackets came off.
+
+        The path an ordinary generation takes when somebody has typed a literal
+        command with both features switched off, and the path a refused one
+        takes on its way out. It runs no model, publishes no plan and records no
+        Creative or Spatial key -- there is nothing to say about a pipeline that
+        did not run.
+
+        Does nothing at all when there are no commands, which is the case it is
+        called in almost every time.
+        """
+        from prompt_master.krea import literals
+
+        if not getattr(parsed, "commands", ()):
+            return
+        try:
+            restored = literals.restore(parsed.clean_text, parsed)
+        except Exception:
+            logger.debug("Model Chain: could not restore the prompt's literal commands",
+                         exc_info=True)
+            return
+        p.prompt = restored
+        # The clean text and not the restored one: this is the whole of §9 in a
+        # generation with no language model in it. A Stage 2 inheriting
+        # ``<lora:krea2_edit:1>`` from here would be applying a Stage 1 edit LoRA
+        # to a model that has never seen the reference it edits against.
+        mc_lora.remember_inheritable(p, parsed.clean_text,
+                                     self._inheritable_negative)
+        try:
+            p.extra_generation_params.update(
+                mc_creative_krea.prepare(None, literals=parsed).metadata)
+        except Exception:
+            logger.debug("Model Chain: could not record the literal command metadata",
+                         exc_info=True)
+        logger.info("Model Chain: the prompt carried %s; no language model ran",
+                    literals.describe(parsed))
+
     def _layout(self, p, values):
         """This generation's spatial layout, or an empty one.
 
@@ -1547,7 +1699,7 @@ class ScriptKreaCreative(scripts.Script):
             self._spatial_note = " ".join(layout.notes)
         return layout
 
-    def _roll(self, p, settings, layout):
+    def _roll(self, source, settings, layout, raw_source=""):
         """One creative roll for this generation, or ``None`` to leave it alone.
 
         Returns the :class:`mc_creative_krea.Roll` rather than the finished
@@ -1566,11 +1718,24 @@ class ScriptKreaCreative(scripts.Script):
         event to forward them to -- the press became a native generation, not a
         handler with an output list -- so the progress bar carries the phase and
         the log carries the rest.
+
+        ``source`` is handed in rather than read off ``p``, and it is the
+        *transformable* text: the pipeline has already lifted the literal
+        commands out of the prompt box. Reading ``p.prompt`` here would put them
+        back in front of the writer, which is the one thing this feature exists
+        to prevent.
         """
-        source = str(getattr(p, "prompt", "") or "").strip()
+        source = str(source or "").strip()
         if not source:
+            # A prompt that was nothing but literal commands lands here, and it
+            # is not an error: there was no transformable text to write from,
+            # the commands are restored around nothing, and the generation goes
+            # ahead with them. §14.
             logger.info("Model Chain: Creative Mode has no source prompt to work from")
-            self._complaint = "there was no prompt to work from"
+            self._complaint = ("there was no transformable text to work from — the "
+                               "prompt was entirely literal commands"
+                               if raw_source.strip() else
+                               "there was no prompt to work from")
             return None
 
         session = mc_creative_krea.creative
@@ -1581,7 +1746,7 @@ class ScriptKreaCreative(scripts.Script):
         # the workload lock back. Closing it is what runs that now rather than
         # whenever the interpreter next collects the frame.
         events = session.roll(source, settings, guard_checkpoint=True, own_bar=False,
-                              spatial_layout=layout)
+                              spatial_layout=layout, raw_source=raw_source)
         written = False
         try:
             for event in events:

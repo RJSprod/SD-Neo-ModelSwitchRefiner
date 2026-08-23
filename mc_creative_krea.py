@@ -4,11 +4,12 @@ Creative Mode sits in front of Forge's Generate button and in front of LLM
 Studio's *Generate Krea Prompt*, and it does the same thing in both places:
 
     source prompt
+        -> lift the [[literal commands]] out of it            (no model)
         -> resolve the Creative seed
-        -> local Creative Director picks the art direction   (no model)
+        -> local Creative Director picks the art direction    (no model)
         -> exactly ONE Krea writer request
         -> one expanded Krea prompt
-        -> pinned LoRA tags appended                          (txt2img only)
+        -> the literal commands restored around it            (txt2img only)
         -> native Forge generation                            (txt2img only)
 
 Nothing here starts on its own. There is no idle timer, no observer on the
@@ -56,12 +57,28 @@ roll made *by* the generation, the hook that writes the prompt is the hook that
 applies it, on one thread, in one call. What used to be a token is now the shape
 of the code.
 
-Three prompts, and only one of them is on screen
-------------------------------------------------
+Four prompts, and only one of them is on screen
+-----------------------------------------------
 ``source`` is what the user typed and keeps editing; it stays in the txt2img box
-untouched. ``expanded`` is the writer's one result. ``generation`` is that plus
-the pinned LoRA tags, and it exists only between :meth:`Creative.consume` and
-the line in the processing hook that assigns it.
+untouched. The writer never sees it -- it sees ``transform_source``, which is
+``source`` with every ``[[literal command]]`` lifted out of it. ``expanded`` is
+the writer's one result. ``generation`` is that with the literal commands
+restored around it, and it exists only between :func:`prepare` and the line in
+the processing hook that assigns it.
+
+There is a fifth that is never on screen and never in a file: ``inheritable``,
+the same finished prompt built without the literals, which is the only thing
+Stage 2 is allowed to inherit. See :class:`Prepared`.
+
+What replaced the pinned LoRAs
+------------------------------
+Creative Controls used to carry a Pinned LoRAs box whose contents were parsed
+for ``<...>`` tags and appended to every generation. It is gone, and the literal
+syntax is what replaced it: ``[[<lora:krea2_edit:1>]]`` in the prompt does the
+same thing, in the place the tag belongs, without a second prompt input that
+only accepted one kind of syntax. Nothing migrates it -- an image that recorded
+``Krea Pinned LoRAs`` still shows the tags it used under "what the pasted image
+records", and they are not applied to anything.
 """
 
 from __future__ import annotations
@@ -86,42 +103,6 @@ ERROR = "Error"
 
 
 # --------------------------------------------------------------------------- #
-# The pinned LoRAs
-# --------------------------------------------------------------------------- #
-
-
-def pinned_tags(text) -> list[str]:
-    """The extra-network tags in ``text``, and nothing else that was in it.
-
-    The pinned-LoRA field is a text box, and a text box next to a prompt box is
-    a text box somebody will eventually type prose into. Prose there would be
-    prompt text reaching the image model without ever passing the writer -- a
-    second, invisible prompt input. So the field is *parsed*, not appended: only
-    ``<...>`` tags survive it.
-    """
-    import mc_lora
-
-    return [match.group(0) for match in mc_lora.RE_EXTRA_NET.finditer(str(text or ""))]
-
-
-def lora_suffix(text) -> str:
-    """The pinned tags as one trailing fragment, or an empty string."""
-    return " ".join(pinned_tags(text))
-
-
-def generation_prompt(expanded: str, loras) -> str:
-    """The expanded prompt with the pinned tags after it.
-
-    The order is the order a hand-written Forge prompt uses: the sentence first,
-    the networks at the end, so a prompt read back out of PNG metadata looks like
-    something a person could have typed.
-    """
-    suffix = lora_suffix(loras)
-    body = str(expanded or "").strip()
-    return f"{body} {suffix}".strip() if suffix else body
-
-
-# --------------------------------------------------------------------------- #
 # One roll's result
 # --------------------------------------------------------------------------- #
 
@@ -132,7 +113,27 @@ class Roll:
 
     recipe: object
     source: str
+    """The text the writer was given: the user's prompt minus its literals.
+
+    Named ``source`` still, because that is what it is from the writer's point
+    of view and because it is what the Creative metadata has always recorded.
+    :attr:`raw_source` is the other half of the answer when the two differ.
+    """
+
     expanded: str
+    raw_source: str = ""
+    """Exactly what the user typed, ``[[...]]`` included, or "" when identical.
+
+    Recorded rather than reconstructed. The literal payloads and the clean text
+    could in principle be reassembled into something close to the original, but
+    only *close*: the user's own ordering, spacing and line breaks are theirs,
+    and "Restore Creative setup" is supposed to hand back the prompt they wrote.
+    """
+
+    @property
+    def typed(self) -> str:
+        """What the user actually typed, for metadata and for restoring."""
+        return self.raw_source or self.source
 
     @property
     def creativity(self) -> int:
@@ -166,16 +167,40 @@ class Prepared:
     roll: Roll | None = None
     """The Creative roll this prompt was written from, or ``None``.
 
-    ``None`` is a Spatial-only generation: the boxes were composed around the
-    prompt exactly as typed and no writer ran. It is not a degraded Creative
-    generation and must not record itself as one -- an image carrying
+    ``None`` is a Spatial-only generation -- the boxes were composed around the
+    prompt exactly as typed and no writer ran -- or a generation whose only
+    change was that its literal commands were put back. It is not a degraded
+    Creative generation and must not record itself as one: an image carrying
     ``Krea Creative Mode`` would tell a later paste to switch off a feature that
     was never on, and would tell a reader that a language model wrote a sentence
     the user typed.
     """
 
     generation: str = ""
-    loras: str = ""
+    """The prompt Stage 1 generates from: the finished text, literals restored."""
+
+    inheritable: str = ""
+    """The same prompt with no literal payload ever written into it.
+
+    The one thing Stage 2 may inherit, and the reason it is built rather than
+    derived. Removing the payloads from :attr:`generation` afterwards would mean
+    searching the finished prompt for the strings that were put into it -- and
+    a user who writes ``[[red hat]]`` over a scene the writer independently
+    described as having a red hat would lose the writer's words too. Two
+    representations, assembled separately, cannot make that mistake.
+
+    Empty means "nothing to isolate": Stage 2 inherits the ordinary prompt, as
+    it did before this existed.
+    """
+
+    literals: object = None
+    """The parsed global sidecar for this generation, or ``None``.
+
+    Held for the metadata count and for nothing else. Nothing downstream reads a
+    payload out of here -- by the time a :class:`Prepared` exists the payloads
+    are already in :attr:`generation`, exactly once.
+    """
+
     settings: dict = field(default_factory=dict)
     spatial: dict = field(default_factory=dict)
     """The Spatial keys for this generation, or nothing at all.
@@ -216,7 +241,9 @@ class Prepared:
         # There is no roll to describe, and describing one anyway is how a paste
         # ends up switching off a feature that never ran.
         if self.roll is None:
-            return dict(self.spatial or {})
+            found = dict(self.spatial or {})
+            found.update(self.literal_metadata)
+            return found
 
         recipe = self.roll.recipe
         recorded = {
@@ -224,7 +251,11 @@ class Prepared:
             mc_infotext.CREATIVE_CREATIVITY: self.roll.creativity,
             mc_infotext.CREATIVE_SEED: self.roll.creative_seed,
             mc_infotext.CREATIVE_LLM_SEED: self.roll.llm_seed,
-            mc_infotext.CREATIVE_SOURCE: self.roll.source,
+            # What the user typed, brackets and all -- not the cleaned text the
+            # writer saw. §15: a restore is supposed to hand back the prompt
+            # they wrote, and a source phrase with its literal commands quietly
+            # missing would be a workflow that cannot be continued from.
+            mc_infotext.CREATIVE_SOURCE: self.roll.typed,
         }
         compact = getattr(recipe, "compact", "")
         if compact:
@@ -232,9 +263,6 @@ class Prepared:
         version = getattr(recipe, "library_version", "")
         if version:
             recorded[mc_infotext.CREATIVE_LIBRARY] = version
-        if self.loras:
-            recorded[mc_infotext.CREATIVE_LORAS] = self.loras
-
         axes = mc_infotext.creative_axes(self.settings.get("axis_modes"),
                                          self.settings.get("fixed_values"))
         if axes:
@@ -249,31 +277,63 @@ class Prepared:
         if writer:
             recorded[mc_infotext.CREATIVE_WRITER] = writer
         recorded.update(self.spatial or {})
+        recorded.update(self.literal_metadata)
         return recorded
 
+    @property
+    def literal_metadata(self) -> dict:
+        """What this generation records about its literal commands: how many.
 
-def prepare(roll: Roll | None, loras, stored=None, prompt=None,
-            spatial=None) -> Prepared:
+        The count and the syntax version, and deliberately not the payloads. The
+        payloads are already in the image's own ``Prompt:`` line, which is where
+        a reader looks for what the model was given, and in the recorded source
+        prompt with their brackets on, which is where a restore looks for what
+        the user wrote. A third copy under a key of ours would be a few hundred
+        bytes repeating the file, and a copy a later paste could disagree with.
+
+        Absent entirely when there were none, like every other optional key
+        here: an ordinary image should say nothing about a feature it did not
+        use.
+        """
+        import mc_infotext
+        from prompt_master.krea import literals
+
+        count = len(getattr(self.literals, "commands", ()) or ())
+        if not count:
+            return {}
+        return {mc_infotext.LITERAL_VERSION: literals.SYNTAX_VERSION,
+                mc_infotext.LITERAL_COUNT: count}
+
+
+def prepare(roll: Roll | None, stored=None, prompt=None, spatial=None,
+            inheritable=None, literals=None) -> Prepared:
     """One finished prompt, packaged for the processing hook.
 
-    ``prompt`` overrides what the pinned networks are appended to. It is the
-    structured Spatial BBOX prompt when there was a layout, and the writer's own
-    paragraph when there was not -- and the LoRA tags go on the end either way,
-    because that is the order a hand-written Forge prompt uses and because Forge
-    parses them off the end before conditioning whatever precedes them.
+    ``prompt`` is what Stage 1 generates from, with the literal commands already
+    restored into it: the structured Spatial BBOX prompt when there was a
+    layout, and the writer's own paragraph when there was not. It is assembled
+    by the caller because only the caller knows which of those two it is, and
+    because restoring the literals exactly once means doing it in exactly one
+    place per generation.
 
-    ``roll`` is ``None`` for a Spatial-only generation, where no writer ran and
-    ``prompt`` is the whole of what is being substituted. The pinned LoRAs are a
-    Creative Mode setting and are not applied on that path: they live on a panel
-    that is switched off, and appending them would be this feature reaching into
-    another one's preferences.
+    ``inheritable`` is the same prompt with no literal payload in it, for
+    Stage 2. It defaults to ``prompt`` -- a generation with no literals has
+    nothing to isolate, and the two really are the same string then.
+
+    ``roll`` is ``None`` for a Spatial-only generation and for a generation
+    whose only change was its literals, where no writer ran and ``prompt`` is
+    the whole of what is being substituted.
     """
     body = prompt
     if body is None:
         body = roll.expanded if roll is not None else ""
+    body = str(body or "").strip()
+    if inheritable is None:
+        inheritable = body
     return Prepared(roll=roll,
-                    generation=generation_prompt(body, loras),
-                    loras=lora_suffix(loras),
+                    generation=body,
+                    inheritable=str(inheritable or "").strip(),
+                    literals=literals,
                     settings=dict(stored or {}),
                     spatial=dict(spatial or {}))
 
@@ -361,7 +421,6 @@ ANTI_REPETITION = "krea_creative_anti_repetition"
 AXIS_MODES = "krea_creative_axis_modes"
 FIXED_VALUES = "krea_creative_fixed"
 EXCLUDED_VALUES = "krea_creative_excluded"
-LORAS = "krea_creative_loras"
 HISTORY = "krea_creative_history"
 PROFILE = "krea_creative_profile"
 """Which named profile the settings above were last loaded from, or "".
@@ -373,7 +432,7 @@ whatever was adjusted in the last one.
 """
 
 CONFIGURATION = (CREATIVITY, SEED, ANTI_REPETITION, AXIS_MODES, FIXED_VALUES,
-                 EXCLUDED_VALUES, LORAS)
+                 EXCLUDED_VALUES)
 """The keys a Creative profile describes, and the ones it deliberately does not.
 
 :data:`ENABLED` is absent and stays absent. A profile says *how* Creative Mode
@@ -435,7 +494,6 @@ def settings() -> dict:
         "axis_modes": {key: modes.get(key, director.NATURAL) for key in axis_keys},
         "fixed_values": known_fixed(fixed),
         "excluded_values": known_excluded(excluded),
-        "loras": lora_suffix(stored.get(LORAS, "")),
     }
 
 
@@ -592,6 +650,15 @@ class Setup:
     excluded_values: dict = field(default_factory=dict)
     anti_repetition: bool | None = None
     loras: str = ""
+    """What an older image recorded in its Pinned LoRAs field, if it had one.
+
+    Read and shown, never applied. The control it came from is gone and
+    ``[[<lora:name:weight>]]`` in the prompt is what replaced it, so restoring
+    this into a setting that no longer exists would restore nothing; showing it
+    is how somebody continuing from an old image can see which tags that picture
+    used and type them back where they now belong.
+    """
+
     writer: str = ""
 
     spatial_layout: str = ""
@@ -862,7 +929,7 @@ class Creative:
     # -- one roll ---------------------------------------------------------- #
 
     def roll(self, source: str, stored=None, references=(), guard_checkpoint=False,
-             task_id="", own_bar: bool = True, spatial_layout=None):
+             task_id="", own_bar: bool = True, spatial_layout=None, raw_source=""):
         """One creative roll: direct locally, then ask the model once.
 
         Yields :class:`mc_llm_sessions.Event` throughout so a caller can put the
@@ -896,6 +963,17 @@ class Creative:
         the user turn is assembled from ``recipe.brief`` exactly as it always
         was, down to the byte, so llama.cpp resumes at the same prefix and
         Creativity 1 stays the compatibility guarantee it is documented as.
+
+        ``source`` is the *transformable* text and the caller has already lifted
+        the literal commands out of it. That is the whole boundary this feature
+        draws, and it is drawn one layer up rather than here for a reason worth
+        stating: the Director reads the source too -- to notice that the user
+        said "oil painting" and lock the Medium axis -- and it must not lock an
+        axis because the word "anime" appears inside a LoRA filename. Both
+        passes read one string, and neither of them can see a payload.
+
+        ``raw_source`` is what the user typed, kept on the :class:`Roll` so the
+        metadata can record it. Nothing in this method reads it.
         """
         from prompt_master.core.models import draw_seed
         from prompt_master.krea import director
@@ -1019,7 +1097,8 @@ class Creative:
             return
 
         with self._lock:
-            self._last = Roll(recipe=recipe, source=source, expanded=written.strip())
+            self._last = Roll(recipe=recipe, source=source, expanded=written.strip(),
+                              raw_source=str(raw_source or ""))
         # A replay is not a new choice and does not go in the recent memory. The
         # ids it used were already recorded when they were first drawn, and
         # writing them again would push a user's own reproduction away from the

@@ -26,6 +26,17 @@ that parses but is in a different order than last time. The model here is a
 copy-editor with two paragraphs in front of it and no access to the filing
 cabinet.
 
+What it is never shown
+----------------------
+Region prompts reach this pass as :attr:`~prompt_master.krea.spatial.Region.prompt`,
+which is the user's text with its ``[[...]]`` literal commands already lifted
+out by :mod:`prompt_master.krea.literals`. A reference instruction, a wildcard or
+an extra-network tag written inside a box is image-pipeline content, and this
+pass is a copy-editor: it would paraphrase "Her shirt from image 1" into
+something about a shirt, and the paraphrase would then sit in the elements array
+beside the original. The payloads are restored by the compositor, after this
+pass has finished and into the element they came from.
+
 Its own instruction, and what that costs
 ----------------------------------------
 The system message here is *not* Krea's expansion instruction. It cannot be:
@@ -138,6 +149,11 @@ def region_line(position: int, region) -> str:
     the Composer needs to know is that a face is in the upper-left, so that it
     can stop the scene saying "centred"; the numbers are the compositor's and
     telling the model about them only gives it something to helpfully adjust.
+
+    ``region.prompt`` is the cleaned text and never the raw one, so a region
+    whose whole content was a literal command contributes its geometry and an
+    empty description here -- which is exactly what the Composer needs in order
+    to leave that part of the frame alone, and nothing it could paraphrase.
     """
     from . import spatial
 

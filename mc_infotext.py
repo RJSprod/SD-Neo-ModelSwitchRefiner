@@ -89,6 +89,14 @@ CREATIVE_RECIPE = "Krea Creative Recipe"
 CREATIVE_SOURCE = "Krea Source Prompt"
 CREATIVE_LIBRARY = "Krea Creativity Library"
 CREATIVE_LORAS = "Krea Pinned LoRAs"
+"""What images made before the literal syntax recorded, and nothing writes now.
+
+The Pinned LoRAs control is gone and ``[[<lora:name:weight>]]`` in the prompt is
+what replaced it. The key stays readable because the images that carry it still
+exist and "what the pasted image records" should be able to say what tags that
+picture used -- read and shown, never applied, never written again.
+"""
+
 CREATIVE_AXES = "Krea Creative Axes"
 CREATIVE_EXCLUDED = "Krea Creative Excluded"
 CREATIVE_ANTI = "Krea Anti Repetition"
@@ -194,6 +202,28 @@ repeat the file to itself.
 A Spatial-only generation writes these and no Creative keys at all, which is
 what lets its paste switch Spatial Layout off without a Creative key being
 present to switch anything.
+"""
+
+LITERAL_VERSION = "Krea Literal Syntax Version"
+LITERAL_COUNT = "Krea Literal Command Count"
+LITERAL_KEYS = (LITERAL_VERSION, LITERAL_COUNT)
+"""What a generation records about the ``[[literal commands]]`` in its prompt.
+
+Two numbers, and deliberately not the payloads. The payloads are in the image's
+own ``Prompt:`` line, which is what the model was given, and in
+:data:`CREATIVE_SOURCE` with their brackets still on, which is what the user
+typed. A third copy would be bytes repeating the file and a copy a later paste
+could disagree with.
+
+The count is what makes a silent failure visible after the fact: an image whose
+prompt looks as though a command went missing either records a count that says
+otherwise, or records nothing at all and never had one. The version is here for
+the same reason every other version key in this module is -- the syntax is small
+and will grow, and an image made under version 1 should be read as version 1.
+
+Written by Creative, Spatial and plain generations alike, in their own
+namespace, because a literal command is a property of the prompt rather than of
+either feature.
 """
 
 SPATIAL_KEYS = (SPATIAL_MODE, SPATIAL_VERSION, SPATIAL_LAYOUT, SPATIAL_COMPOSE_MODE,
@@ -780,7 +810,7 @@ def creative_paste_field_names() -> list[str]:
     forward by exact name, so a key that is not listed here simply does not
     arrive, and "restore the setup" would find half a record.
     """
-    return list(CREATIVE_KEYS) + list(SPATIAL_KEYS)
+    return list(CREATIVE_KEYS) + list(SPATIAL_KEYS) + list(LITERAL_KEYS)
 
 
 def paste_field_names() -> list[str]:

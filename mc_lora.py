@@ -44,6 +44,28 @@ architectures, so the LoRA either fails to apply or applies to the wrong tensors
 ``strip_networks`` removes the tags from the inherited half of the prompt only.
 Anything typed into the Stage 2 boxes is untouched, which is how a Stage 2 LoRA
 is meant to be requested.
+
+
+The prompt Stage 2 is allowed to inherit
+----------------------------------------
+``strip_networks`` is a pattern, and a pattern can only remove what it can
+recognise. Krea's literal commands (``[[...]]``) can carry *anything* a user
+wants delivered to the Stage 1 image pipeline unchanged -- a reference
+instruction about an ImageStitch image, another extension's macro, a wildcard --
+and none of that is meaningful to a Stage 2 model that has a different text
+encoder, different references and possibly a different architecture.
+
+So the answer there is not a better pattern. Krea's pipeline builds *two*
+finished prompts, one with its literals restored and one that never had them,
+and leaves the second on the processing object with :func:`remember_inheritable`
+for Stage 2 to read. Searching the first for the payloads afterwards is what
+this deliberately avoids: a user who writes ``[[red hat]]`` over a scene the
+Creative Writer independently described as having a red hat would lose the
+writer's words along with their own.
+
+``strip_networks`` stays, on top of it, as defence in depth -- a bare
+``<lora:...>`` typed outside a literal command is still a Stage 1 tag, and is
+still removed the way it always was.
 """
 
 from __future__ import annotations
@@ -103,6 +125,51 @@ def _tidy(text: str) -> str:
     text = _REPEATED_SEPARATORS.sub(",", text)
     text = _RUNS_OF_SPACES.sub(" ", text)
     return text.strip().strip(",").strip()
+
+
+INHERITABLE = "mc_stage1_inheritable_prompts"
+"""Where a Stage 1 prompt-writing feature leaves what Stage 2 may inherit.
+
+An attribute on the host's processing object, because that object is the one
+thing both halves of this extension are handed for one generation and neither
+of them owns. It is set in ``before_process`` by whatever wrote the prompt and
+read in ``process`` by Model Chain; a generation nothing wrote a prompt for
+never has it, and Stage 2 inherits ``all_prompts`` exactly as it always did.
+
+A pair rather than one string: the negative prompt can carry literal commands
+too, no language model ever sees it, and a Stage 1 negative that mentions
+another extension's syntax has no more business in Stage 2 than a positive one.
+"""
+
+
+def remember_inheritable(p, positive: str = "", negative: str = "") -> None:
+    """Leave the prompts Stage 2 may inherit on this generation.
+
+    Never fatal, and never partial: a host object that will not take an
+    attribute leaves Stage 2 doing what it did before, which is inheriting the
+    finished prompt. That is the old behaviour rather than a broken one.
+    """
+    try:
+        setattr(p, INHERITABLE, (str(positive or ""), str(negative or "")))
+    except Exception:
+        logger.debug("Model Chain: could not record the inheritable Stage 1 prompt",
+                     exc_info=True)
+
+
+def stage1_inheritable(p) -> tuple[str, str]:
+    """``(positive, negative)`` Stage 2 may inherit, or two empty strings.
+
+    Empty means "nobody rewrote this generation's prompt", which is the ordinary
+    case and is not a failure: the caller falls back to ``all_prompts``, which is
+    what it read before any of this existed.
+    """
+    try:
+        found = getattr(p, INHERITABLE, None)
+    except Exception:
+        return "", ""
+    if not isinstance(found, (tuple, list)) or len(found) != 2:
+        return "", ""
+    return str(found[0] or ""), str(found[1] or "")
 
 
 # --------------------------------------------------------------------------- #

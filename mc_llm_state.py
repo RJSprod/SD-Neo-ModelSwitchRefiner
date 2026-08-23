@@ -144,7 +144,6 @@ DEFAULTS: dict = {
     # about how to vary, and making it a mode would force somebody who wants two
     # treatments gone to stop varying altogether.
     "krea_creative_excluded": {},
-    "krea_creative_loras": "",
     # The named profile the settings above were last loaded from, for the panel
     # to open showing. A label on the settings rather than a source of them.
     "krea_creative_profile": "",
