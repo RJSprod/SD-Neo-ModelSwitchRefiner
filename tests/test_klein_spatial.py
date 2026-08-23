@@ -981,6 +981,117 @@ class TestZeroRegions:
         assert request.references == IMAGES[:2]
 
 
+class TestWhenNoRegionCanBeAttached:
+    """The failure that looked like success, and the tests that make it look like
+    what it is.
+
+    Regions drawn, compiled, encoded -- and then given to a host whose
+    conditioning has nowhere to put a geometry. Nothing raised, nothing warned,
+    the console said "attached 0 of 3" among a hundred other INFO lines, and the
+    images were ordinary generations that could not be told from spatial ones by
+    eye. That went on for several runs.
+
+    A1111-derived hosts are the real case: they hand this hook a
+    ``MulticondLearnedConditioning`` whose batch entries are lists of composable
+    conditionings carrying a weight and no geometry at all. Appending to one
+    would condition the whole frame, which is not a region.
+    """
+
+    def multicond(self):
+        """The shape an A1111-derived host actually hands this hook."""
+        composable = types.SimpleNamespace(weight=1.0, schedules=[
+            types.SimpleNamespace(end_at_step=999, cond="the global prompt")])
+        return types.SimpleNamespace(shape=[1], batch=[[composable]])
+
+    def test_nothing_is_appended_to_a_shape_with_no_room_for_geometry(
+            self, host, monkeypatch):
+        klein(monkeypatch)
+        request = generic.request_from(layout([REGION, SECOND]), enabled=True)
+        conditioning = self.multicond()
+
+        with mc_spatial_klein.regional_conditioning(
+                request, conditioning, grid=(64, 64),
+                backend=mc_spatial_klein.AreaConditioningBackend(),
+                model=FakeEngine()) as compiled:
+            assert compiled.attached == 0
+            # And the host's own conditioning was left exactly as it was found.
+            assert len(conditioning.batch[0]) == 1
+
+    def test_it_says_so_loudly_rather_than_counting_quietly(self, host, monkeypatch,
+                                                            caplog):
+        klein(monkeypatch)
+        request = generic.request_from(layout(), enabled=True)
+
+        with caplog.at_level("ERROR", logger="model_chain"):
+            with mc_spatial_klein.regional_conditioning(
+                    request, self.multicond(), grid=(64, 64),
+                    backend=mc_spatial_klein.AreaConditioningBackend(),
+                    model=FakeEngine()):
+                pass
+
+        assert any("attached NONE" in record.message for record in caplog.records)
+
+    def test_the_diagnosis_names_the_shape_it_found(self, host, monkeypatch):
+        """Guessing at this structure has been wrong twice. The next fix is made
+        from what the host reports, not from a third guess."""
+        klein(monkeypatch)
+        request = generic.request_from(layout(), enabled=True)
+
+        with mc_spatial_klein.regional_conditioning(
+                request, self.multicond(), grid=(64, 64),
+                backend=mc_spatial_klein.AreaConditioningBackend(),
+                model=FakeEngine()) as compiled:
+            pass
+
+        assert "SimpleNamespace" in compiled.diagnosis
+        assert ".batch" in compiled.diagnosis
+
+    def test_the_diagnosis_carries_no_prompt_text_or_tensor_data(self, host,
+                                                                 monkeypatch):
+        """It goes into a log somebody may paste into an issue."""
+        klein(monkeypatch)
+        request = generic.request_from(layout(), enabled=True)
+        described = mc_spatial_klein.describe_conditioning(self.multicond())
+
+        assert "the global prompt" not in described
+        assert "tall brass floor lamp" not in described
+
+    def test_a_working_shape_still_attaches(self, host, monkeypatch):
+        """The control. The loud path must not fire on the path that works."""
+        klein(monkeypatch)
+        request = generic.request_from(layout(), enabled=True)
+        conditioning = [["the global prompt", {}]]
+
+        with mc_spatial_klein.regional_conditioning(
+                request, conditioning, grid=(64, 64),
+                backend=mc_spatial_klein.AreaConditioningBackend(),
+                model=FakeEngine()) as compiled:
+            assert compiled.attached == 1
+            assert compiled.diagnosis == ""
+
+    def test_the_hook_records_the_count_and_says_so_on_the_result(
+            self, host, monkeypatch, store):
+        import model_chain_krea_creative as creative_script
+
+        klein(monkeypatch)
+        mc_spatial.remember(**{mc_spatial.ENABLED: True, mc_spatial.LAYOUT: layout(),
+                               mc_spatial.COMPOSE_MODE: "direct"})
+        script = creative_script.ScriptKreaCreative()
+        p = make_p(())
+        p.prompt = "a living room"
+        p.negative_prompt = ""
+        script.before_process(p, False)
+        script._klein_backend = mc_spatial_klein.AreaConditioningBackend()
+        script.process_before_every_sampling(
+            p, c=self.multicond(),
+            x=types.SimpleNamespace(shape=(1, 16, 64, 64)))
+
+        assert p.extra_generation_params[mc_infotext.KLEIN_SPATIAL_ATTACHED] \
+            == "0 of 1"
+        assert "did not reach" in script._klein_note or \
+            "reached the model" in script._klein_note
+
+
 # --------------------------------------------------------------------------- #
 # Smart Compose on Klein
 # --------------------------------------------------------------------------- #
