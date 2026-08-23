@@ -794,21 +794,24 @@ CREATIVE_TITLE = "Krea Creative Mode"
 
 CREATIVE_ENABLED = 0
 """``ScriptKreaCreative.ui`` returns the enable flag first and always."""
-SPATIAL_TAIL = 4
-"""...and the four Spatial controls last and always.
+SPATIAL_TAIL = 5
+"""...and the five Spatial controls last and always.
 
-Enabled, Krea's compose mode, Klein's spatial mode, the serialized layout. Its
-middle is a variable number of axis controls, sized by the vocabulary the library
-loaded, which is why the two ends are the two that can be read without counting
--- the script's own ``_split`` says as much in the same words.
+Enabled, the compose mode, the backend, Klein's spatial mode, the serialized
+layout. Its middle is a variable number of axis controls, sized by the vocabulary
+the library loaded, which is why the two ends are the two that can be read
+without counting -- the script's own ``_split`` says as much in the same words.
+
+Only the first two are read here, and they are first precisely so that this
+offset survives the tail growing again.
 """
 
-LEGACY_SPATIAL_TAIL = 3
-"""The tail before the Klein backend existed, still sent by older API scripts.
+SPATIAL_TAILS = (SPATIAL_TAIL, 4, 3)
+"""Every tail length in circulation, longest first.
 
-A length alone cannot tell the two apart, because the variable middle absorbs
-the difference. What can is the *compose slot*: its vocabulary is two words
-long, so a tail read at the wrong offset almost never finds one there. See
+A length alone cannot tell them apart, because the variable middle absorbs the
+difference. What can is the *compose slot*: its vocabulary is two words long, so
+a tail read at the wrong offset almost never finds one there. See
 :func:`creative_from`.
 """
 
@@ -831,7 +834,14 @@ def creative_from(p) -> tuple[bool, str]:
     front of it and the VRAM arithmetic reserved for a phase that was about to
     run.
 
-    ``compose mode`` is ``"smart"``, ``"direct"`` or empty, and empty is also
+    ``compose mode`` is read for either backend, because both of them have one:
+    the Spatial Composer is a copy-editor over two paragraphs and reconciles a
+    scene with a layout whether the scene is about to become a Krea structured
+    prompt or the prompt a Klein checkpoint reads directly. Which backend is
+    loaded therefore does not change whether a Composer phase belongs in the
+    plan, and this function does not ask.
+
+    It is ``"smart"``, ``"direct"`` or empty, and empty is also
     the answer when Spatial Layout is on but the canvas has no boxes on it --
     though that last case is only visible to the Krea script itself, which has
     the parsed layout and passes it in explicitly. From here the best that can
@@ -852,7 +862,7 @@ def creative_from(p) -> tuple[bool, str]:
         return False, ""
 
     creative = bool(args[CREATIVE_ENABLED])
-    if len(args) < CREATIVE_ENABLED + 1 + LEGACY_SPATIAL_TAIL:
+    if len(args) < CREATIVE_ENABLED + 1 + min(SPATIAL_TAILS):
         # An API request that sent only the flag. Whatever Creative Mode is set
         # to still holds; there is no layout to read.
         return creative, ""
@@ -862,15 +872,6 @@ def creative_from(p) -> tuple[bool, str]:
         return creative, ""
     spatial_enabled, compose = found
     if not spatial_enabled:
-        return creative, ""
-
-    if _klein_backend(p):
-        # A Klein checkpoint consumes the canvas as regional conditioning and
-        # makes no language-model request at all, so there is no Spatial
-        # Composer phase to plan for. Reporting one would have the bar describing
-        # a request nobody is going to make and the VRAM arithmetic reserving
-        # room for it -- the same mistake, in the same place, that reading a
-        # cleared Creative checkbox as "no spatial generation" used to make.
         return creative, ""
 
     mode = str(compose or "").strip().casefold()
@@ -890,29 +891,13 @@ def _spatial_tail(args):
     ``None`` when neither offset finds one, which means this is not a shape this
     build recognises and the honest plan is the one that claims no phases.
     """
-    for tail in (SPATIAL_TAIL, LEGACY_SPATIAL_TAIL):
+    for tail in SPATIAL_TAILS:
         if len(args) < CREATIVE_ENABLED + 1 + tail:
             continue
         compose = str(args[-tail + 1] or "").strip().casefold()
         if compose in COMPOSE_MODES:
             return args[-tail], compose
     return None
-
-
-def _klein_backend(p) -> bool:
-    """Whether this generation's canvas goes to the Klein backend rather than Krea.
-
-    Imported inside the function so that a plan can still be built by a host --
-    or a test -- in which the spatial backend module is not importable. A plan
-    that cannot answer this question assumes Krea, which is what every plan
-    assumed before the Klein backend existed.
-    """
-    try:
-        import mc_spatial_klein
-
-        return mc_spatial_klein.active(p)
-    except Exception:
-        return False
 
 
 def build_for(p, *, creative: bool | None = None,

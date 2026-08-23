@@ -2134,6 +2134,7 @@ class TestTheCompactPanel:
 
         spatial = [built.components["spatial_enabled"],
                    built.components["spatial_compose"],
+                   built.components["spatial_backend"],
                    built.components["klein_mode"],
                    built.components["spatial_state"]]
         tail = creative_script.SPATIAL_CONTROLS

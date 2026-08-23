@@ -55,7 +55,8 @@ COMPOSE_MODE = "krea_spatial_compose_mode"
 LAYOUT = "krea_spatial_layout"
 RECORD_SCENES = "krea_spatial_record_scenes"
 KLEIN_MODE = "klein_spatial_mode"
-"""The preferences this feature owns. All five are its own keys.
+BACKEND = "spatial_backend"
+"""The preferences this feature owns. All six are its own keys.
 
 The layout is persisted, and that is deliberate rather than incidental: boxes
 are minutes of work with a mouse, and a WebUI restart that quietly emptied the
@@ -100,7 +101,28 @@ def settings() -> dict:
         # written by a build that offered a mode this one does not must land on
         # Auto rather than reach the resolver as a string nothing matches.
         "klein_mode": generic.normalise_mode(stored.get(KLEIN_MODE), generic.AUTO),
+        # Which backend the panel shows. Auto follows the checkpoint; the other
+        # two are the user telling the page what they have, for the case where
+        # a host's model chooser is not something this extension can read.
+        "backend": _backend(stored.get(BACKEND)),
     }
+
+
+def _backend(value) -> str:
+    """The stored backend preference, normalised, defaulting to Auto.
+
+    Imported lazily so that :func:`settings` stays answerable on an installation
+    where the Klein module could not load at all -- the Krea half of this feature
+    has never needed it and must not start needing it now.
+    """
+    try:
+        import mc_spatial_klein
+
+        return mc_spatial_klein.normalise_backend(value)
+    except Exception:
+        logger.debug("Model Chain: could not read the Spatial backend preference",
+                     exc_info=True)
+        return "auto"
 
 
 def remember(**values) -> None:

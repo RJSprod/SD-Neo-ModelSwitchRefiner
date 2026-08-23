@@ -679,6 +679,7 @@ class Setup:
     klein_source: str = ""
     klein_source_count: int | None = None
     klein_backend: str = ""
+    klein_compose_mode: str = ""
     """What a FLUX.2 Klein spatial image recorded, if it was one.
 
     The same canvas, restored by the same button, from a different namespace --
