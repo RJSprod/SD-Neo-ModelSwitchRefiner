@@ -312,6 +312,36 @@ make("div", "txt2img_height").appendChild(height);
 const published = [];
 stateBox.addEventListener("input", function () { published.push(stateBox.value); });
 
+// The saved-layout round trip, as Gradio provides it: a hidden textbox the
+// editor writes a request into, and a div whose contents the server replaces.
+// `asked` is every request that left the page; `reply` is the server answering.
+const requestBox = new El("textarea");
+const requestHolder = make("div", "mc-krea-spatial-preset-request");
+requestHolder.appendChild(requestBox);
+const asked = [];
+requestBox.addEventListener("input", function () { asked.push(JSON.parse(requestBox.value)); });
+
+const results = make("div", "mc-krea-spatial-preset-result");
+const watchers = [];
+globalThis.MutationObserver = function (fn) {
+    this.observe = function () { watchers.push(fn); };
+    this.disconnect = function () {};
+};
+
+function reply(payload) {
+    const holder = new El("div");
+    holder.className = "mc-krea-spatial-presets-payload";
+    holder.textContent = JSON.stringify(payload);
+    results.textContent = "";
+    results.appendChild(holder);
+    watchers.forEach((fn) => fn());
+}
+
+function presetNames() {
+    return el("mc-krea-spatial-preset-list").children
+        .map((child) => child.value).filter(Boolean);
+}
+
 // Present so a file that went looking for it would find it. Nothing here may
 // touch it: a generation that a browser can delay is the arrangement this whole
 // design removed.
@@ -466,6 +496,11 @@ const report = (extra) => console.log(JSON.stringify(Object.assign({
     confirming: ks.state.confirming,
     published: published.length,
     stateBox: stateBox.value,
+    asked: asked,
+    presetNames: presetNames(),
+    presetChosen: el("mc-krea-spatial-preset-list").value,
+    namingRow: !el("mc-krea-spatial-preset-row").hidden,
+    watchers: watchers.length,
 }, extra || {})));
 
 BODY
@@ -1726,6 +1761,242 @@ class TestFullScreen:
         assert found["past"] == 0
 
 
+class TestSavedLayouts:
+    """Save, recall and delete a composition, driven through the real file.
+
+    The rule every one of these is really checking is the one at the top of the
+    file: the editor may *ask* the server for something a person pressed a
+    button for, and nothing anywhere waits for the answer.
+    """
+
+    def test_a_save_writes_one_request_and_presses_nothing(self):
+        out = run("""
+            ks.wire(); ks.open();
+            ks.beginSave();
+            el("mc-krea-spatial-preset-name").value = "Portrait";
+            ks.commitSave();
+            report({});
+        """, initial=document())
+
+        assert len(out["asked"]) == 1
+        assert out["asked"][0]["action"] == "save"
+        assert out["asked"][0]["name"] == "Portrait"
+        assert json.loads(out["asked"][0]["layout"])["regions"][0]["id"] == "r1"
+        assert out["timers"] == 0
+        assert out["generateListeners"] == 0
+
+    def test_the_naming_row_is_hidden_until_save_is_pressed(self):
+        out = run("""
+            ks.wire(); ks.open();
+            const before = !el("mc-krea-spatial-preset-row").hidden;
+            ks.beginSave();
+            report({before: before});
+        """, initial=document())
+
+        assert out["before"] is False
+        assert out["namingRow"] is True
+
+    def test_saving_an_empty_canvas_asks_for_nothing(self):
+        out = run("""
+            ks.wire(); ks.open(); ks.clear();
+            ks.beginSave();
+            report({said: el("mc-krea-spatial-message").textContent});
+        """, initial=document())
+
+        assert out["asked"] == []
+        assert "Draw a box first" in out["said"]
+
+    def test_the_dropdown_is_filled_from_the_reply(self):
+        out = run("""
+            ks.wire();
+            reply({action: "list", ok: true, names: ["Diptych", "Portrait"],
+                   summaries: {Portrait: "3 regions, all with prompts"}});
+            report({});
+        """, initial=document())
+
+        assert out["presetNames"] == ["Diptych", "Portrait"]
+
+    def test_load_is_a_press_and_not_a_change_of_the_dropdown(self):
+        """Changing a dropdown by accident is easy, and this one replaces every
+        box on the canvas."""
+        out = run("""
+            ks.wire(); ks.open();
+            reply({action: "list", ok: true, names: ["Portrait"], summaries: {}});
+            commit("mc-krea-spatial-preset-list", "Portrait");
+            const afterChange = asked.length;
+            press("mc-krea-spatial-preset-load");
+            report({afterChange: afterChange});
+        """, initial=document())
+
+        assert out["afterChange"] == 0
+        assert [entry["action"] for entry in out["asked"]] == ["load"]
+
+    def test_a_recalled_layout_arrives_in_the_editor(self):
+        out = run("""
+            ks.wire(); ks.open();
+            reply({action: "load", ok: true, n: 1, names: ["Portrait"], summaries: {},
+                   name: "Portrait", message: "Loaded “Portrait”.",
+                   regions: [{id: "r7", name: "Sky", type: "obj",
+                              bbox: [10, 20, 500, 600], prompt: "a wide sky", z: 0}]});
+            report({said: el("mc-krea-spatial-message").textContent});
+        """, initial=document())
+
+        assert [region["name"] for region in out["regions"]] == ["Sky"]
+        assert out["regions"][0]["prompt"] == "a wide sky"
+        assert "Loaded" in out["said"]
+
+    def test_recalling_does_not_apply_it(self):
+        """The whole difference between recalling a layout and replacing one:
+        it is in the editor, it is undoable, and the hidden state box the
+        generation reads has not been touched."""
+        out = run("""
+            ks.wire(); ks.open();
+            reply({action: "load", ok: true, n: 1, names: [], summaries: {},
+                   regions: [{id: "r7", name: "Sky", type: "obj",
+                              bbox: [10, 20, 500, 600], prompt: "a wide sky", z: 0}]});
+            report({});
+        """, initial=document())
+
+        assert out["published"] == 0
+        assert json.loads(out["stateBox"])["regions"][0]["name"] == "Face"
+        assert out["past"] == 1
+
+    def test_a_recalled_layout_can_be_undone(self):
+        out = run("""
+            ks.wire(); ks.open();
+            reply({action: "load", ok: true, n: 1, names: [], summaries: {},
+                   regions: [{id: "r7", name: "Sky", type: "obj",
+                              bbox: [10, 20, 500, 600], prompt: "a wide sky", z: 0}]});
+            ks.undo();
+            report({});
+        """, initial=document())
+
+        assert [region["name"] for region in out["regions"]] == ["Face"]
+
+    def test_a_region_added_after_a_recall_gets_a_fresh_id(self):
+        """Otherwise the next box drawn would carry an id the recalled layout is
+        already using, and the two would be one region to everything downstream."""
+        out = run("""
+            ks.wire(); ks.open();
+            reply({action: "load", ok: true, n: 1, names: [], summaries: {},
+                   regions: [{id: "r9", name: "Sky", type: "obj",
+                              bbox: [10, 20, 500, 600], prompt: "", z: 0}]});
+            ks.add();
+            report({});
+        """, initial=document())
+
+        identifiers = [region["id"] for region in out["regions"]]
+        assert len(set(identifiers)) == len(identifiers)
+        assert "r10" in identifiers
+
+    def test_a_name_that_is_taken_offers_to_replace_it(self):
+        out = run("""
+            ks.wire(); ks.open();
+            ks.beginSave();
+            el("mc-krea-spatial-preset-name").value = "Portrait";
+            ks.commitSave();
+            reply({action: "save", ok: false, exists: true, name: "Portrait",
+                   names: ["Portrait"], summaries: {},
+                   message: "There is already a layout called “Portrait”."});
+            const label = el("mc-krea-spatial-preset-confirm").textContent;
+            ks.commitSave();
+            report({label: label});
+        """, initial=document())
+
+        assert out["label"] == "Replace"
+        assert out["asked"][-1]["overwrite"] is True
+        assert out["asked"][0]["overwrite"] is False
+
+    def test_typing_a_different_name_is_no_longer_a_replace(self):
+        out = run("""
+            ks.wire(); ks.open();
+            ks.beginSave();
+            el("mc-krea-spatial-preset-name").value = "Portrait";
+            ks.commitSave();
+            reply({action: "save", ok: false, exists: true, name: "Portrait",
+                   names: ["Portrait"], summaries: {}, message: "taken"});
+            field("mc-krea-spatial-preset-name", "Portrait two");
+            ks.commitSave();
+            report({label: el("mc-krea-spatial-preset-confirm").textContent});
+        """, initial=document())
+
+        assert out["label"] == "Save"
+        assert out["asked"][-1]["overwrite"] is False
+
+    def test_two_identical_requests_both_leave_the_page(self):
+        """Gradio fires change on a *changed* value, so deleting the same name
+        twice would otherwise be one event and one stale dropdown."""
+        out = run("""
+            ks.wire(); ks.open();
+            reply({action: "list", ok: true, names: ["Portrait"], summaries: {}});
+            commit("mc-krea-spatial-preset-list", "Portrait");
+            press("mc-krea-spatial-preset-delete");
+            press("mc-krea-spatial-preset-delete");
+            report({});
+        """, initial=document())
+
+        assert len(out["asked"]) == 2
+        assert out["asked"][0]["n"] != out["asked"][1]["n"]
+
+    def test_a_reply_that_will_not_parse_changes_nothing(self):
+        out = run("""
+            ks.wire();
+            reply({action: "list", ok: true, names: ["Portrait"], summaries: {}});
+            const holder = el("mc-krea-spatial-preset-result");
+            holder.children[0].textContent = "{not json";
+            watchers.forEach((fn) => fn());
+            report({});
+        """, initial=document())
+
+        assert out["presetNames"] == ["Portrait"]
+
+    def test_a_page_with_no_preset_channel_still_edits(self):
+        """Every other control has to go on working if this one is missing --
+        the store is a convenience and the editor is the feature."""
+        out = run("""
+            const gone = el("mc-krea-spatial-preset-request");
+            gone.parentNode.removeChild(gone);
+            ks.wire(); ks.open();
+            ks.beginSave();
+            el("mc-krea-spatial-preset-name").value = "Portrait";
+            ks.commitSave();
+            ks.add();
+            report({});
+        """, initial=document())
+
+        assert out["asked"] == []
+        assert len(out["regions"]) == 2
+
+    def test_a_recall_is_applied_once_however_often_gradio_rebuilds(self):
+        """wire() re-reads whatever payload is in the page, and a recall that
+        applied itself again would silently undo everything drawn since."""
+        out = run("""
+            ks.wire(); ks.open();
+            reply({action: "load", ok: true, n: 1, names: [], summaries: {},
+                   regions: [{id: "r7", name: "Sky", type: "obj",
+                              bbox: [10, 20, 500, 600], prompt: "", z: 0}]});
+            ks.add();
+            rebuildMarkup();
+            ks.wire();
+            report({});
+        """, initial=document())
+
+        assert len(out["regions"]) == 2
+        assert out["past"] == 2
+
+    def test_nothing_here_introduces_a_timer(self):
+        out = run("""
+            ks.wire(); ks.open();
+            ks.beginSave();
+            el("mc-krea-spatial-preset-name").value = "Portrait";
+            ks.commitSave();
+            advance(60 * 60 * 1000);
+            report({});
+        """, initial=document())
+
+        assert out["timers"] == 0
+
+
 class TestTheMarkupAndTheFileAgree:
     def test_every_id_the_file_uses_is_an_id_python_emits(self):
         """The one failure mode a fake page cannot catch on its own: a control
@@ -1738,9 +2009,13 @@ class TestTheMarkupAndTheFileAgree:
         used = {"mc-krea-spatial-" + name for name in
                 re.findall(r'P \+ "-([a-z-]+)"', table.group(1))}
         emitted = {identifier for _tag, identifier in editor_elements()}
-        # The state box and the Edit button are Gradio's components, not the
-        # editor markup's, so they are named by the panel instead.
-        external = {"mc-krea-spatial-state", "mc-krea-spatial-open"}
+        # Gradio's components rather than the editor markup's, so they are
+        # named by the panel instead. The two preset ids are the saved-layout
+        # round trip: a request written into a hidden textbox, and a reply the
+        # server writes into a hidden div.
+        external = {"mc-krea-spatial-state", "mc-krea-spatial-open",
+                    "mc-krea-spatial-preset-request",
+                    "mc-krea-spatial-preset-result"}
 
         assert used - external <= emitted
 

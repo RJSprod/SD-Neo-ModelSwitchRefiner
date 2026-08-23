@@ -128,6 +128,22 @@
         full: P + "-full",
         save: P + "-save",
         cancel: P + "-cancel",
+        // Saved layouts. The first three are the compact group in the top bar;
+        // the rest are the naming row, which is hidden until Save is pressed
+        // so that the editor gains one dropdown and three buttons and no rows.
+        presetList: P + "-preset-list",
+        presetLoad: P + "-preset-load",
+        presetSave: P + "-preset-save",
+        presetDelete: P + "-preset-delete",
+        presetRow: P + "-preset-row",
+        presetPrompt: P + "-preset-prompt",
+        presetName: P + "-preset-name",
+        presetConfirm: P + "-preset-confirm",
+        presetCancel: P + "-preset-cancel",
+        // Gradio's, not the workspace's: the request goes out through a hidden
+        // textbox, and the answer comes back as the contents of a hidden div.
+        presetRequest: P + "-preset-request",
+        presetResult: P + "-preset-result",
     };
 
     // ------------------------------------------------------------------ //
@@ -157,6 +173,11 @@
         editing: "",        // history coalescing token; see mark()
         past: [],
         future: [],
+        // Saved layouts. `names` and `summaries` are the server's answer, kept
+        // so the dropdown can be repainted without asking again; `naming` and
+        // `replacing` are what the naming row is currently doing.
+        presets: {names: [], summaries: {}, naming: false, replacing: "",
+                  sent: 0, applied: 0},
     };
 
     function root() {
@@ -842,6 +863,198 @@
     }
 
     // ------------------------------------------------------------------ //
+    // PresetsController -- saved layouts, and the one round trip in this file
+    // ------------------------------------------------------------------ //
+    //
+    // A composition is minutes of work with a mouse, and until now the only
+    // copy of one was whichever was currently loaded. This is the half of
+    // "save, edit and recall a layout" that lives in the page.
+    //
+    // The rule at the top of this file still holds and is worth restating,
+    // because this is the section that could break it: **nothing here polls,
+    // and no generation waits for any of it.** The request is sent when a
+    // person presses a button. The answer arrives when it arrives, into a
+    // hidden div, and is noticed by a MutationObserver rather than by a timer.
+    // If the server never answers, the dropdown does not update and everything
+    // else in the editor carries on working -- which is the whole reason the
+    // reply is a div and not a value some other control is waiting for.
+    //
+    // Loading does not apply. A recalled layout is put into the *editor*, where
+    // it is visible as boxes and prompts, is one Undo away from being taken
+    // back, and reaches a generation only when Save & Return is pressed. That
+    // is the difference between recalling a layout and replacing one.
+
+    function requestBox() {
+        const holder = byId(IDS.presetRequest);
+        return holder ? holder.querySelector("textarea, input") : null;
+    }
+
+    // Written, never pressed. This file does not know where any button that
+    // starts server work is, and that is the property the whole Creative Mode
+    // browser story turns on -- so the request travels exactly the way the
+    // layout already does: a value published into a hidden textbox, which
+    // Gradio's own change event carries to the server. `spatial_state` has
+    // worked that way since §15 and this adds no new mechanism.
+    //
+    // `n` is why two identical requests both arrive. Gradio fires change on a
+    // *changed* value, so deleting the same name twice, or reopening the editor
+    // and re-listing, would otherwise be one event and one stale dropdown.
+    function ask(command) {
+        const box = requestBox();
+        if (!box) {
+            say("Saved layouts are not available on this page.");
+            return;
+        }
+        state.presets.sent += 1;
+        publish(box, JSON.stringify(Object.assign({n: state.presets.sent}, command)));
+    }
+
+    // The answer, read out of the div the server rewrote. textContent rather
+    // than an attribute, and escaped on the way in, because a region prompt may
+    // legitimately contain `[[<lora:name:1>]]`.
+    function readPayload() {
+        const holder = byId(IDS.presetResult);
+        const element = holder
+            ? (holder.querySelector("." + P + "-presets-payload") || holder)
+            : null;
+        const text = element ? String(element.textContent || "").trim() : "";
+        if (!text) return null;
+        try {
+            return JSON.parse(text);
+        } catch (error) {
+            console.warn("Model Chain: a saved-layout reply could not be read", error);
+            return null;
+        }
+    }
+
+    function onPayload() {
+        const reply = readPayload();
+        if (!reply) return;
+        state.presets.names = Array.isArray(reply.names) ? reply.names.slice() : [];
+        state.presets.summaries = reply.summaries || {};
+        if (reply.ok && reply.action === "save") {
+            state.presets.naming = false;
+            state.presets.replacing = "";
+        }
+        // The one error worth offering a second press for: the name is taken,
+        // and replacing it is a thing somebody may well mean. Read as a flag
+        // rather than parsed back out of the sentence.
+        if (!reply.ok && reply.exists) state.presets.replacing = reply.name || "";
+        // Applied once, ever. Gradio rebuilding the tab re-runs wire(), which
+        // re-reads whatever payload is in the page -- and a recall that applied
+        // itself a second time would silently undo everything drawn since.
+        const answered = Number(reply.n);
+        if (reply.ok && reply.action === "load" && Array.isArray(reply.regions)
+            && Number.isFinite(answered) && answered > state.presets.applied) {
+            state.presets.applied = answered;
+            loadRegions(reply.regions);
+        }
+        paintPresets(reply.name || "");
+        if (reply.message) say(reply.message);
+    }
+
+    // The recalled boxes, into the editor and nowhere else.
+    function loadRegions(regions) {
+        if (!state.working) return;
+        mark("");
+        state.working.regions = regions.map(normalise).filter(Boolean);
+        // So a region added after a recall cannot be handed an id the recalled
+        // layout is already using. Same arithmetic as open().
+        state.counter = state.working.regions.reduce(function (top, region) {
+            const number = parseInt(String(region.id).replace(/^r/, ""), 10);
+            return Number.isFinite(number) ? Math.max(top, number) : top;
+        }, 0);
+        state.selected = state.working.regions.length
+            ? ordered()[ordered().length - 1].id : "";
+        state.editing = "";
+        paint();
+    }
+
+    function selectedPreset() {
+        const list = byId(IDS.presetList);
+        return list ? String(list.value || "") : "";
+    }
+
+    // Options are built as elements rather than assembled as markup, the same
+    // way the region list is: a name is a string somebody typed, and the only
+    // reliable way not to have to escape it is never to concatenate it into
+    // HTML in the first place.
+    function paintPresets(prefer) {
+        const list = byId(IDS.presetList);
+        if (list) {
+            const wanted = prefer || String(list.value || "");
+            list.textContent = "";
+            list.appendChild(option("", "Saved layouts…", ""));
+            state.presets.names.forEach(function (name) {
+                list.appendChild(option(name, name,
+                                        state.presets.summaries[name] || ""));
+            });
+            list.value = state.presets.names.indexOf(wanted) >= 0 ? wanted : "";
+        }
+        const chosen = selectedPreset();
+        enable(IDS.presetLoad, !!chosen);
+        enable(IDS.presetDelete, !!chosen);
+
+        const row = byId(IDS.presetRow);
+        if (row) row.hidden = !state.presets.naming;
+        const confirm = byId(IDS.presetConfirm);
+        if (confirm) {
+            confirm.textContent = state.presets.replacing ? "Replace" : "Save";
+        }
+        const prompt = byId(IDS.presetPrompt);
+        if (prompt) {
+            prompt.textContent = state.presets.replacing
+                ? "Replace the layout called"
+                : "Save this layout as";
+        }
+    }
+
+    function option(value, label, title) {
+        const element = document.createElement("option");
+        element.value = value;
+        element.textContent = label;
+        if (title) element.title = title;
+        return element;
+    }
+
+    function beginSave() {
+        if (!state.working) return;
+        if (!state.working.regions.length) {
+            say("There are no regions to save. Draw a box first.");
+            return;
+        }
+        state.presets.naming = true;
+        state.presets.replacing = "";
+        paintPresets("");
+        const field_ = byId(IDS.presetName);
+        if (field_) {
+            if (!String(field_.value || "").trim()) field_.value = selectedPreset();
+            if (typeof field_.focus === "function") field_.focus();
+        }
+    }
+
+    function commitSave() {
+        if (!state.working) return;
+        const field_ = byId(IDS.presetName);
+        const name = field_ ? String(field_.value || "").trim() : "";
+        if (!name) {
+            say("Give the layout a name.");
+            return;
+        }
+        ask({action: "save", name: name, layout: serialize(),
+             overwrite: state.presets.replacing === name});
+    }
+
+    function cancelSave() {
+        state.presets.naming = false;
+        state.presets.replacing = "";
+        const field_ = byId(IDS.presetName);
+        if (field_) field_.value = "";
+        paintPresets("");
+        say("");
+    }
+
+    // ------------------------------------------------------------------ //
     // SelectionController -- one selection, three surfaces
     // ------------------------------------------------------------------ //
 
@@ -1361,6 +1574,57 @@
             press(IDS.full, toggleFullscreen);
             press(IDS.save, save);
             press(IDS.cancel, leave);
+
+            // Saved layouts. Load is a press and not a select-change: changing
+            // a dropdown by accident is easy, and this one replaces every box
+            // on the canvas.
+            press(IDS.presetLoad, function () {
+                const name = selectedPreset();
+                if (!state.open || !name) return;
+                ask({action: "load", name: name});
+            });
+            press(IDS.presetSave, beginSave);
+            press(IDS.presetConfirm, commitSave);
+            press(IDS.presetCancel, cancelSave);
+            press(IDS.presetDelete, function () {
+                const name = selectedPreset();
+                if (!name) return;
+                ask({action: "delete", name: name});
+            });
+            once(byId(IDS.presetList), "change", function () {
+                state.presets.replacing = "";
+                paintPresets(selectedPreset());
+            });
+            once(byId(IDS.presetName), "keydown", function (event) {
+                if (event.key !== "Enter") return;
+                prevent(event);
+                commitSave();
+            });
+            once(byId(IDS.presetName), "input", function () {
+                // Typing a different name is no longer a replace of the old one.
+                const field_ = byId(IDS.presetName);
+                const typed = field_ ? String(field_.value || "").trim() : "";
+                if (state.presets.replacing && state.presets.replacing !== typed) {
+                    state.presets.replacing = "";
+                    paintPresets(selectedPreset());
+                }
+            });
+
+            // The server's answers arrive as a rewritten div. A MutationObserver
+            // and not a timer: this fires when something actually changed, it
+            // stops costing anything when nothing is happening, and there is no
+            // interval for a background tab to throttle. Guarded by a dataset
+            // flag like every other listener, so re-wiring cannot stack them.
+            const results = byId(IDS.presetResult);
+            if (results && results.dataset && !results.dataset.mcKreaSpatialWatch
+                && typeof MutationObserver === "function") {
+                results.dataset.mcKreaSpatialWatch = "1";
+                new MutationObserver(onPayload).observe(results, {
+                    childList: true, subtree: true, characterData: true});
+            }
+            // The page arrives with the names already in it, so the dropdown is
+            // correct before anybody presses anything.
+            onPayload();
             press(IDS.discard, close);
             press(IDS.keep, function () {
                 state.confirming = false;
@@ -1569,5 +1833,10 @@
         fullscreenOn: fullscreenOn,
         dimensions: dimensions,
         ordered: function () { return state.working ? ordered() : []; },
+        onPayload: onPayload,
+        beginSave: beginSave,
+        commitSave: commitSave,
+        cancelSave: cancelSave,
+        paintPresets: paintPresets,
     };
 })();

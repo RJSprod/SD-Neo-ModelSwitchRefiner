@@ -1401,8 +1401,17 @@ class TestTheTxt2imgSurface:
                 # the difference between it and the token box the old gate had.
                 # tests/test_krea_spatial_js.py is where that is checked rather
                 # than asserted.
+                #
+                # "presets_request" is the same shape of thing one step further:
+                # the editor writes a saved-layout request into it and Gradio's
+                # change event carries it to the server. It is reachable -- Save,
+                # Load and Delete are three visible buttons in the editor's top
+                # bar -- nothing polls it, and no generation waits for it. Its
+                # reply is a *visible* HTML component hidden by CSS, so it is not
+                # in this list at all.
                 assert (name in ("creativity", "status", "controls", "name_row",
-                                 "spatial_group", "spatial_state")
+                                 "spatial_group", "spatial_state",
+                                 "presets_request")
                         or id(component) in disclosure), name
 
     def test_what_ui_returns_is_what_before_process_reads(self, store, host, client):

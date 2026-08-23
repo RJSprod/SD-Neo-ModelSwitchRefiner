@@ -1799,6 +1799,53 @@
     border-color: var(--error-border-color, var(--border-color-primary));
 }
 
+/* Saved layouts: one group in the top bar, and no new rows.
+   The bar already wraps, so on a narrow screen this becomes its own line
+   rather than pushing Save & Return off the edge -- which is the whole of what
+   "fits in the existing editor" had to mean. */
+.mc-krea-spatial-presets {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.4em;
+    min-width: 0;
+}
+
+.mc-krea-spatial-preset-select {
+    min-height: var(--mc-touch);
+    max-width: 14em;
+    padding: 0.3em 0.4em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-sm);
+    background: var(--input-background-fill);
+    color: var(--body-text-color);
+    font-family: inherit;
+    font-size: var(--text-sm);
+}
+
+/* Hidden until Save is pressed, so the editor's resting state is unchanged. */
+.mc-krea-spatial-preset-row {
+    display: flex;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 0.4em;
+    padding: 0.4em 0.6em;
+    border: 1px solid var(--mc-accent);
+    border-radius: var(--radius-sm);
+    background: var(--background-fill-secondary);
+}
+
+.mc-krea-spatial-preset-row[hidden] {
+    display: none;
+}
+
+/* The reply channel. Rendered so its contents can be replaced and watched,
+   never seen: a Gradio block with nothing visible in it still reserves the
+   padding of a block. */
+#mc-krea-spatial-preset-result {
+    display: none;
+}
+
 .mc-krea-spatial-body {
     display: flex;
     flex-direction: column;

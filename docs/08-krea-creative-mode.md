@@ -2184,3 +2184,112 @@ publisher documents and its text encoder can read, which is a much better
 starting point than another model's key names, and is still not the same thing.
 The Creativity scale, the axis vocabulary and the expression tiers were tuned
 against Krea 2's writer and are not retuned here.
+
+
+## 20. Saved layouts (23 August 2026)
+
+A composition is minutes of work with a mouse — seven boxes, named, a prompt
+typed into each, a framing chosen for two of them — and until now the only copy
+of one was whichever was currently loaded. Drawing the next picture ended the
+last one. `mc_spatial_presets.py` is the store that makes a composition
+something you can come back to.
+
+### 20.1 What a preset is, and the three things it is not
+
+It is the **regions**: each box, its name, its Object/Text type, the visible
+text, the region prompt, the framing and camera-angle selections, and the
+stacking order.
+
+It is not the **canvas size**. The frame belongs to txt2img and to the
+generation somebody is about to press Generate on. Coordinates are normalized
+0..1000 precisely so a composition drawn at 1024×1344 is the same composition at
+1536×2016, and a recall that quietly resized the image would be spending that
+property on the opposite of what it is for.
+
+It is not the **compose mode**, the auto-hint toggle or the grid. Those are
+settings — how this installation behaves right now — and a preset that reached
+out and flipped Smart to Direct would be changing what the Generate button does.
+Same line §10.4 draws around a Creative profile and the enabled checkbox.
+
+It is not a **Creative profile**. The two stores stay separate and say so in both
+directions: a profile describes how art direction behaves and carries no layout;
+a layout describes one picture and carries no Creativity position. Somebody who
+wants both keeps one of each, which is more honest than one list that means two
+things.
+
+### 20.2 Recall does not apply
+
+`get()` hands back regions. Nothing in the module writes to preferences, touches
+the hidden state box, or changes any generation.
+
+The browser loads a recalled preset into the **editor** — visible as boxes and
+prompts, draggable, retypable, one Undo away from being taken back — and it
+reaches a generation only when Save & Return is pressed, exactly as anything
+else the user drew would. That is the whole difference between recalling a
+layout and replacing one, and it is asserted twice: once in Python (the store
+changes no settings) and once under node (`published == 0`, the state box still
+holds the old layout, and `past == 1` so Undo has somewhere to go).
+
+One thing recall does have to touch: `state.counter`. The recalled ids come from
+another document, and a box added afterwards must not be handed one of them —
+two regions with one id are one region to everything downstream. It is
+recomputed the same way `open()` does it.
+
+### 20.3 The one round trip, and why it presses nothing
+
+This feature needed something the editor had never needed: an answer *from* the
+server. That is the exact shape of the thing §9 removed, so it is worth saying
+how this is not that.
+
+**Out** is the mechanism the layout already uses. A value is published into a
+hidden textbox and Gradio's own change event carries it; `spatial_state` has
+worked that way since the editor was built. The file presses no hidden button —
+it does not know where one is, and `tests/test_krea_spatial_js.py` asserts the
+string `.click(` does not appear in it, which is what caught the first draft of
+this feature and is why the second one is written this way.
+
+**Back** is a `gr.HTML` whose contents the server replaces, watched by a
+`MutationObserver`. Not a textbox: a Textbox whose value the *server* changes
+fires no event in the page, which is precisely why the old gate had to poll one.
+An observer fires when something actually changed, costs nothing when nothing is
+happening, and has no interval for a background tab to throttle to one tick a
+minute. The status line above the editor is already the same mechanism, so this
+adds no new assumption about Gradio.
+
+And nothing waits. If the server never answers, the dropdown does not update and
+every other control in the editor carries on working — which is the reason the
+reply is a div rather than a value some other control is blocked on.
+
+`n` is on every request because Gradio fires `change` on a *changed* value:
+deleting the same name twice, or re-listing after a rebuild, would otherwise be
+one event and one stale dropdown.
+
+### 20.4 One flag, not a parsed sentence
+
+Saving under a name that exists is the one error worth offering a second press
+for, so the reply carries `exists: true` and the confirm button becomes
+**Replace**. It is a flag rather than something the browser reads back out of
+the message, because a message is wording and a flag is a fact: the day somebody
+rewrites "There is already a layout called X", a parser would silently stop
+finding it and the button would silently stop appearing.
+
+Typing a different name clears it again. Offering to replace *Portrait* while
+the box says *Portrait two* is the kind of small lie that costs somebody a
+composition.
+
+### 20.5 It fits in the top bar because the top bar already wraps
+
+Asked for explicitly: the controls had to fit the existing editor without
+rearranging it. The top bar is `display: flex; flex-wrap: wrap`, so a dropdown
+and three buttons added before Full screen become their own line on a narrow
+screen rather than pushing Save & Return off the edge. The naming row is the
+only new block, and it is `hidden` until Save is pressed — the editor's resting
+state is the editor's resting state.
+
+Options are built as elements rather than assembled as markup, the same way the
+region list is. A preset name is a string somebody typed, and the only reliable
+way not to have to escape it is never to concatenate it into HTML. The reply
+payload, which *is* a string in a page, is escaped on the way out and read back
+through `textContent` — a region prompt may legitimately contain
+`[[<lora:krea2_edit:1>]]`, and an unescaped `<` there is a broken page rather
+than a broken preset.

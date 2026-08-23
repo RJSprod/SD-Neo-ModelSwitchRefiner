@@ -37,6 +37,7 @@ import mc_infotext
 import mc_llm_paths
 import mc_llm_sessions as sessions
 import mc_spatial
+import mc_spatial_presets as presets
 from prompt_master.krea import composer, director, spatial
 from prompt_master.krea import library as library_module
 
@@ -1352,6 +1353,232 @@ class TestTheTextEncoderBudget:
         script.postprocess(p, result)
 
         assert not p_said(result, "truncated")
+
+
+class TestSavedLayouts:
+    """The store behind Save, Load and Delete in the editor's top bar.
+
+    A composition is minutes of work with a mouse, and until this existed the
+    only copy of one was whichever was currently loaded. Everything below is the
+    server half; ``tests/test_krea_spatial_js.py`` drives the page half.
+    """
+
+    @pytest.fixture
+    def data(self, tmp_path, monkeypatch, host):
+        """Point the preset store at a throwaway WebUI data directory."""
+        from modules import paths
+
+        monkeypatch.setattr(paths, "data_path", str(tmp_path), raising=False)
+        return tmp_path
+
+    def test_a_layout_round_trips_through_the_file(self, data):
+        presets.save("Portrait", document((FACE, SIGN)))
+
+        # A fresh read of the file, as a restarted WebUI would do.
+        loaded = presets.get("Portrait")["regions"]
+
+        assert [region["name"] for region in loaded] == ["Face", "Sign"]
+        assert loaded[0]["prompt"] == FACE["prompt"]
+        assert loaded[0]["framing"] == "Close-up" and loaded[0]["angle"] == "3/4 left"
+        assert loaded[1]["text"] == "MIDNIGHT CAFE"
+        assert loaded[0]["bbox"] == FACE["bbox"]
+
+    def test_it_carries_the_boxes_and_the_words_and_nothing_else(self, data):
+        """Not the canvas size, because the frame belongs to the generation
+        somebody is about to make: a recalled layout must never quietly change
+        the size of the image. Not the compose mode either -- that is what the
+        Generate button does."""
+        presets.save("Portrait", document((FACE,), mode="direct",
+                                          width=1024, height=1344))
+        stored = presets.get("Portrait")
+
+        assert set(stored) == {"regions", "saved"}
+        text = json.dumps(stored)
+        assert "1344" not in text and "direct" not in text
+
+    def test_a_layout_drawn_at_one_size_recalls_at_another(self, data):
+        """The point of normalized coordinates, stated as a property of the
+        store rather than trusted to be one."""
+        presets.save("Portrait", document((FACE,), width=1024, height=1344))
+        recalled = presets.get("Portrait")["regions"]
+
+        assert recalled[0]["bbox"] == FACE["bbox"]
+
+    def test_saving_over_a_name_is_refused_until_it_is_asked_for(self, data):
+        """Ten minutes of drawing is exactly the sort of thing the design intent
+        forbids losing silently."""
+        presets.save("Portrait", document((FACE,)))
+        with pytest.raises(presets.PresetError):
+            presets.save("Portrait", document((SIGN,)))
+
+        presets.save("Portrait", document((SIGN,)), overwrite=True)
+        assert [r["name"] for r in presets.get("Portrait")["regions"]] == ["Sign"]
+
+    def test_an_empty_layout_is_not_a_preset(self, data):
+        with pytest.raises(presets.PresetError):
+            presets.save("Nothing", document(()))
+
+    def test_a_layout_that_cannot_be_read_is_refused_rather_than_stored(self, data):
+        with pytest.raises(presets.PresetError):
+            presets.save("Broken", "{not json")
+        assert presets.names() == []
+
+    def test_names_are_collapsed_rather_than_merely_stripped(self, data):
+        """Two entries a user cannot tell apart in a dropdown is a bug report
+        nobody can act on."""
+        presets.save("Portrait  triptych ", document((FACE,)))
+
+        assert presets.names() == ["Portrait triptych"]
+
+    def test_a_nameless_save_says_so(self, data):
+        with pytest.raises(presets.PresetError):
+            presets.save("   ", document((FACE,)))
+
+    def test_renaming_keeps_what_is_in_it(self, data):
+        presets.save("Portrait", document((FACE, SIGN)))
+        presets.rename("Portrait", "Triptych")
+
+        assert presets.names() == ["Triptych"]
+        assert len(presets.get("Triptych")["regions"]) == 2
+
+    def test_deleting_one_keeps_the_others(self, data):
+        presets.save("One", document((FACE,)))
+        presets.save("Two", document((SIGN,)))
+        presets.delete("One")
+
+        assert presets.names() == ["Two"]
+
+    def test_deleting_something_that_is_not_there_says_so(self, data):
+        with pytest.raises(presets.PresetError):
+            presets.delete("Portrait")
+
+    def test_a_damaged_store_reads_as_empty_rather_than_raising(self, data):
+        """An editor that will not open because of a stray byte in a settings
+        file is a worse answer than a user who can see their layouts are gone."""
+        (data / presets.FILENAME).write_text("{ not json", encoding="utf-8")
+
+        assert presets.names() == []
+        assert presets.get("Portrait") is None
+
+    def test_a_stored_region_that_no_longer_parses_is_dropped_not_fatal(self, data):
+        presets.save("Portrait", document((FACE, SIGN)))
+        raw = json.loads((data / presets.FILENAME).read_text(encoding="utf-8"))
+        raw["presets"]["Portrait"]["regions"][0]["bbox"] = [5, 5, 5, 5]
+        (data / presets.FILENAME).write_text(json.dumps(raw), encoding="utf-8")
+
+        assert [r["name"] for r in presets.get("Portrait")["regions"]] == ["Sign"]
+
+    def test_the_store_has_a_ceiling(self, data, monkeypatch):
+        """It is written from a browser control, and a store with no ceiling is
+        one a stuck key can grow without bound."""
+        monkeypatch.setattr(presets, "MAX_PRESETS", 2)
+        presets.save("One", document((FACE,)))
+        presets.save("Two", document((FACE,)))
+        with pytest.raises(presets.PresetError):
+            presets.save("Three", document((FACE,)))
+
+        # Replacing one of the two is still allowed: the ceiling is on how many
+        # there are, not on how often they are written.
+        presets.save("Two", document((SIGN,)), overwrite=True)
+
+    def test_recall_writes_nothing_and_applies_nothing(self, data, store):
+        """The whole difference between recalling a layout and replacing one."""
+        presets.save("Portrait", document((FACE,)))
+        before = mc_spatial.settings()
+        presets.get("Portrait")
+
+        assert mc_spatial.settings() == before
+
+
+class TestTheSavedLayoutRequests:
+    """One request in, one payload out. The editor's whole half of the store."""
+
+    @pytest.fixture
+    def data(self, tmp_path, monkeypatch, host):
+        from modules import paths
+
+        monkeypatch.setattr(paths, "data_path", str(tmp_path), raising=False)
+        return tmp_path
+
+    def ask(self, **command):
+        return presets.handle(json.dumps(command))
+
+    def test_a_save_and_a_load(self, data):
+        saved = self.ask(action="save", name="Portrait", layout=document((FACE,)))
+        assert saved["ok"] and saved["names"] == ["Portrait"]
+
+        loaded = self.ask(action="load", name="Portrait")
+        assert loaded["ok"]
+        assert [r["name"] for r in loaded["regions"]] == ["Face"]
+        assert "Save & Return" in loaded["message"]
+
+    def test_a_collision_comes_back_as_a_flag_and_not_as_wording(self, data):
+        """The editor offers a second press for exactly this one error, and
+        parsing a sentence to find out which error it was is how a reworded
+        message becomes a silently missing button."""
+        self.ask(action="save", name="Portrait", layout=document((FACE,)))
+        again = self.ask(action="save", name="Portrait", layout=document((SIGN,)))
+
+        assert again["ok"] is False and again["exists"] is True
+
+        replaced = self.ask(action="save", name="Portrait",
+                            layout=document((SIGN,)), overwrite=True)
+        assert replaced["ok"] is True
+
+    def test_every_reply_carries_the_current_names(self, data):
+        """So the dropdown is right after a save that collided, a delete that
+        raced another tab, or a file edited on disk."""
+        self.ask(action="save", name="Portrait", layout=document((FACE,)))
+
+        for reply in (self.ask(action="list"),
+                      self.ask(action="load", name="Nothing"),
+                      self.ask(action="delete", name="Nothing"),
+                      self.ask(action="save", name="", layout=document((FACE,)))):
+            assert reply["names"] == ["Portrait"]
+
+    def test_nonsense_is_a_listing_rather_than_an_exception(self, data):
+        """Everything in the request is text from a page."""
+        for asked in ("", "not json", "[]", '{"action": "explode"}', "null"):
+            reply = presets.handle(asked)
+            assert reply["ok"] is True and reply["action"] == "list"
+
+    def test_a_failure_is_a_sentence_and_never_a_traceback(self, data):
+        reply = self.ask(action="load", name="Portrait")
+
+        assert reply["ok"] is False
+        assert "no saved layout" in reply["message"]
+
+    def test_the_payload_survives_a_region_prompt_full_of_angle_brackets(self, data):
+        """A region prompt may legitimately contain ``[[<lora:name:1>]]``, and an
+        unescaped ``<`` in the page is a broken page rather than a broken
+        preset."""
+        region = dict(FACE, prompt="a face [[<lora:krea2_edit:1>]]")
+        self.ask(action="save", name="Portrait", layout=document((region,)))
+        rendered = presets.payload(self.ask(action="load", name="Portrait"))
+
+        assert "<lora" not in rendered
+        assert rendered.count("<div") == 1 and rendered.rstrip().endswith("</div>")
+
+        import html
+        import re
+
+        inner = re.search(r">(.*)</div>", rendered, re.S).group(1)
+        back = json.loads(html.unescape(inner))
+        assert back["regions"][0]["prompt"] == region["prompt"]
+
+    def test_the_request_number_comes_straight_back(self, data):
+        """What lets the page tell a fresh answer from the one already in it."""
+        reply = self.ask(action="save", name="Portrait", n=7,
+                         layout=document((FACE,)))
+
+        assert reply["n"] == 7
+        assert presets.handle("{}")["n"] is None
+
+    def test_the_page_arrives_with_the_names_already_in_it(self, data):
+        """So the dropdown is correct before anybody presses anything."""
+        self.ask(action="save", name="Portrait", layout=document((FACE,)))
+
+        assert "Portrait" in presets.payload()
 
 
 class TestThePlanNamesTheRealPipeline:

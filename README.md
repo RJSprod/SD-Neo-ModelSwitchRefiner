@@ -1590,6 +1590,37 @@ stay exactly where they are and a line appears at the top of the editor saying
 the frame is now a different shape — your layout is never silently reprojected
 and never silently deleted.
 
+#### Saved layouts
+
+A composition is minutes of work with a mouse, and it used to last exactly as
+long as the next one. The editor's top bar carries a dropdown and three buttons:
+
+```
+‹ Back   Spatial Layout   1024×1344      [Saved layouts… ▾] [Load] [Save…] [Delete]   [Full screen] [Save & Return]
+```
+
+**Save…** reveals a name box — the only new row, and it is hidden again the
+moment you are done with it. Saving under a name that is taken asks first, and
+the button becomes **Replace** so a second press is a decision rather than an
+accident.
+
+**Load** puts the saved boxes *into the editor*, where you can see them, drag
+them, retype them and **Undo** them. It changes nothing about the generation
+until you press **Save & Return**, exactly as anything else you drew would.
+That is the whole difference between recalling a layout and replacing one.
+
+A preset carries the boxes and the words in them: each region's prompt, name,
+Object/Text choice, visible text, framing, camera angle and stacking order. It
+deliberately does not carry the canvas size — coordinates are fractions of the
+frame, so the same preset composes a portrait and a landscape and recalling one
+never changes the size of the image you are about to make — and it does not
+carry Smart/Direct or Creative Mode's settings either. Those are Creative
+profiles, which are a separate list for a separate question.
+
+Presets live in `krea_spatial_presets.json` in your WebUI's data directory,
+written through a temporary file and an atomic replace, so updating the
+extension does not throw them away and an interrupted save cannot truncate them.
+
 #### Smart or Direct
 
 | Mode | What happens | Cost |
@@ -2405,12 +2436,16 @@ mc_llm_ui.py          shared UI helpers and the element-id contract
 mc_creative_krea.py   Creative Mode: settings, roll history, one roll
 mc_creative_panel.py  the Creative control surface, built once for both surfaces
 mc_creative_profiles.py    named Creative configurations and the chosen default
+mc_spatial.py         Spatial Layout: preferences, the Composer pass, the metadata
+mc_spatial_presets.py      named Spatial Layouts: the boxes and the words in them
+mc_krea_pipeline.py   one ordered path for both features, and the checkpoint guard
 mc_llm_progress.py    the Krea roll, reported on the host's progress bar
 prompt_master/        vendored LTX business logic (see VENDORED_FROM.txt)
 prompt_master/krea/creativity/    the versioned creative vocabulary (data only)
 prompt_master/krea/library.py     loads and validates that package
 prompt_master/krea/director.py    the local Creative Director; no inference
 prompt_master/krea/variation.py   Creativity 0-10, as sampling settings
+prompt_master/krea/spatial.py     the layout, its hints, and the structured prompt
 prompt_master/models/managed-models.json  the curated backbone registry (data only)
 prompt_master/models/managed_profiles.py  the hidden per-backbone quality profiles
 

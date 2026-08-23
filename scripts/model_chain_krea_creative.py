@@ -82,6 +82,7 @@ import mc_memory
 import mc_plan
 import mc_krea_pipeline
 import mc_spatial
+import mc_spatial_presets
 from modules import errors, scripts
 
 logger = mc_memory.logger
@@ -447,10 +448,35 @@ def spatial_editor() -> str:
     <span class="{SPATIAL_PREFIX}-title">Spatial Layout</span>
     <span id="{_spatial_id("size")}" class="{SPATIAL_PREFIX}-dims"></span>
     <span class="{SPATIAL_PREFIX}-spacer"></span>
+    <span id="{_spatial_id("presets")}" class="{SPATIAL_PREFIX}-presets"
+          role="group" aria-label="Saved layouts">
+      <select id="{_spatial_id("preset-list")}" class="{SPATIAL_PREFIX}-preset-select"
+              aria-label="Saved layouts">
+        <option value="">Saved layouts…</option>
+      </select>
+      <button type="button" id="{_spatial_id("preset-load")}"
+              class="{SPATIAL_PREFIX}-tool" disabled>Load</button>
+      <button type="button" id="{_spatial_id("preset-save")}"
+              class="{SPATIAL_PREFIX}-tool">Save…</button>
+      <button type="button" id="{_spatial_id("preset-delete")}"
+              class="{SPATIAL_PREFIX}-tool {SPATIAL_PREFIX}-danger" disabled>Delete</button>
+    </span>
     <button type="button" id="{_spatial_id("full")}"
             class="{SPATIAL_PREFIX}-tool" aria-pressed="false">Full screen</button>
     <button type="button" id="{_spatial_id("save")}"
             class="{SPATIAL_PREFIX}-tool {SPATIAL_PREFIX}-primary">Save &amp; Return</button>
+  </div>
+
+  <div id="{_spatial_id("preset-row")}" class="{SPATIAL_PREFIX}-preset-row" hidden>
+    <label class="{SPATIAL_PREFIX}-field {SPATIAL_PREFIX}-grow">
+      <span id="{_spatial_id("preset-prompt")}">Save this layout as</span>
+      <input type="text" id="{_spatial_id("preset-name")}" maxlength="80"
+             placeholder="a name you will recognise" />
+    </label>
+    <button type="button" id="{_spatial_id("preset-confirm")}"
+            class="{SPATIAL_PREFIX}-tool {SPATIAL_PREFIX}-primary">Save</button>
+    <button type="button" id="{_spatial_id("preset-cancel")}"
+            class="{SPATIAL_PREFIX}-tool">Cancel</button>
   </div>
 
   <div class="{SPATIAL_PREFIX}-toolbar" role="toolbar" aria-label="Region actions">
@@ -601,6 +627,17 @@ def spatial_editor() -> str:
     </div>
   </div>
 </div>'''
+
+
+def _preset_request(asked) -> str:
+    """One saved-layout request, answered into the page.
+
+    Thin on purpose. Everything about what a preset is, what may be saved and
+    what a collision means lives in :mod:`mc_spatial_presets`, which knows
+    nothing about Gradio and can be tested without a page; this is the two lines
+    that turn a hidden textbox into a hidden div.
+    """
+    return mc_spatial_presets.payload(mc_spatial_presets.handle(asked))
 
 
 def spatial_summary(serialized, enabled: bool = True, creative=None,
@@ -1150,6 +1187,30 @@ class ScriptKreaCreative(scripts.Script):
                 elem_id=_spatial_id("state"))
             gr.HTML(spatial_editor(), elem_id=_spatial_id("editor"))
 
+            # Saved layouts: one hidden round trip, and it is the *only* thing
+            # in this feature that travels browser -> server -> browser.
+            #
+            # The request goes out the way the layout already comes in: a value
+            # published into a hidden textbox, carried by the same change event
+            # spatial_state above has used since the editor was built. The
+            # browser presses no hidden button -- it does not know where one is,
+            # and that is the property the whole Creative Mode browser story
+            # turns on.
+            #
+            # The reply comes back as the contents of an HTML component rather
+            # than a textbox, because a Textbox whose value the server changes
+            # fires no event in the page, while an HTML component's contents
+            # being replaced is a DOM mutation the browser can watch -- and the
+            # status line above is already that same mechanism, so this adds no
+            # new assumption about Gradio either.
+            #
+            # Nothing waits for any of it. A generation neither triggers this
+            # nor is held up by it: it is somebody pressing Save on a drawing.
+            presets_request = gr.Textbox(value="", visible=False, lines=1,
+                                         elem_id=_spatial_id("preset-request"))
+            presets_result = gr.HTML(mc_spatial_presets.payload(),
+                                     elem_id=_spatial_id("preset-result"))
+
             with gr.Accordion("Spatial options", open=False,
                               elem_id=ident("spatial", "options")):
                 record_scenes = gr.Checkbox(
@@ -1189,7 +1250,9 @@ class ScriptKreaCreative(scripts.Script):
             "spatial_compose": spatial_compose, "spatial_status": spatial_status,
             "spatial_state": spatial_state, "spatial_edit": edit,
             "spatial_scenes": record_scenes, "spatial_pasted": spatial_pasted,
-            "spatial_restore": restore_spatial}
+            "spatial_restore": restore_spatial,
+            "presets_request": presets_request,
+            "presets_result": presets_result}
         if panel is not None:
             self.components.update(panel.components())
 
@@ -1198,6 +1261,8 @@ class ScriptKreaCreative(scripts.Script):
         self._wire_spatial(spatial_enabled, spatial_compose, spatial_status,
                            spatial_state, record_scenes, restore_spatial,
                            enabled)
+        presets_request.change(fn=_preset_request, inputs=[presets_request],
+                               outputs=[presets_result], queue=False)
         self._register_paste_fields()
 
         # Every control travels to before_process, because that is where the
