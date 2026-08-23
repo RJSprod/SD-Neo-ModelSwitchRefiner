@@ -1409,7 +1409,7 @@ class TestTheTxt2imgSurface:
                 # polls them and no generation waits for them.
                 assert (name in ("creativity", "status", "controls", "name_row",
                                  "spatial_group", "spatial_state",
-                                 "klein_mode", "klein_status")
+                                 "klein_mode", "klein_status", "klein_steps")
                         or id(component) in disclosure), name
 
     def test_what_ui_returns_is_what_before_process_reads(self, store, host, client):

@@ -56,7 +56,8 @@ LAYOUT = "krea_spatial_layout"
 RECORD_SCENES = "krea_spatial_record_scenes"
 KLEIN_MODE = "klein_spatial_mode"
 BACKEND = "spatial_backend"
-"""The preferences this feature owns. All six are its own keys.
+REGION_STEPS = "klein_spatial_region_steps"
+"""The preferences this feature owns. All seven are its own keys.
 
 The layout is persisted, and that is deliberate rather than incidental: boxes
 are minutes of work with a mouse, and a WebUI restart that quietly emptied the
@@ -105,7 +106,19 @@ def settings() -> dict:
         # two are the user telling the page what they have, for the case where
         # a host's model chooser is not something this extension can read.
         "backend": _backend(stored.get(BACKEND)),
+        # How much of the sample the Klein regions apply for. Klein's backend
+        # costs one model evaluation per region per step, and composition is
+        # settled long before the last step -- so this is the dial between the
+        # two, and it is a real one rather than a placebo.
+        "region_steps": _percent(stored.get(REGION_STEPS), 60),
     }
+
+
+def _percent(value, fallback: int) -> int:
+    try:
+        return max(10, min(100, int(value)))
+    except (TypeError, ValueError):
+        return fallback
 
 
 def _backend(value) -> str:

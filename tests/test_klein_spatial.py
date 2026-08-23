@@ -1197,13 +1197,15 @@ class TestTheComposableBackend:
         sampler = types.SimpleNamespace(model_wrap_cfg=Denoiser())
         return types.SimpleNamespace(sampler=sampler), calls
 
-    def install(self, monkeypatch, p, conditioning, regions=(REGION,)):
+    def install(self, monkeypatch, p, conditioning, regions=(REGION,), percent=60):
         monkeypatch.setattr(mc_spatial_klein, "_rect_mask",
                             lambda width, height, cell, like=None: Fake(1.0))
         request = generic.request_from(layout(list(regions)), enabled=True)
-        compiled = mc_spatial_klein.compile_regions(request, grid=(64, 64))
+        compiled = mc_spatial_klein.compile_regions(request, grid=(64, 64),
+                                                    region_percent=percent)
         return mc_spatial_klein._install_composable_regions(
-            conditioning, compiled, FakeEngine(), p)
+            conditioning, compiled, FakeEngine(), p,
+            cutoff=mc_spatial_klein.region_cutoff(getattr(p, "steps", 0), percent))
 
     def test_it_recognises_the_structure_this_host_hands_the_hook(self):
         conditioning = Multicond()
@@ -1346,6 +1348,72 @@ class TestTheComposableBackend:
         assert installed.count == 0
         assert len(conditioning.batch[0]) == 1
         assert "combine_denoised" in installed.diagnosis
+
+    def test_the_cutoff_is_a_share_of_the_steps_and_never_zero(self):
+        """A region that never applied is not a cheaper version of the feature,
+        it is the feature switched off."""
+        assert mc_spatial_klein.region_cutoff(20, 60) == 12
+        assert mc_spatial_klein.region_cutoff(4, 60) == 2
+        assert mc_spatial_klein.region_cutoff(4, 100) == 4
+        assert mc_spatial_klein.region_cutoff(4, 10) == 1
+        assert mc_spatial_klein.region_cutoff(1, 10) == 1
+
+    def test_past_the_cutoff_the_regions_stop_costing_evaluations(self, host,
+                                                                  monkeypatch):
+        """Ignoring a region in the blend saves nothing -- the host evaluates
+        every composable prompt in the batch either way. It stops costing an
+        evaluation only when it stops being in the batch."""
+        p, calls = self.denoiser()
+        p.steps = 4
+        conditioning = Multicond()
+        denoiser = p.sampler.model_wrap_cfg
+        denoiser.step = 0
+
+        installed = self.install(monkeypatch, p, conditioning)
+        assert installed.count == 1
+        assert len(conditioning.batch[0]) == 2
+
+        blend = denoiser.combine_denoised
+        x_out = {0: Fake(1.0), 1: Fake(2.0)}
+        conds = [[(0, 1.0), (1, 1.0)]]
+
+        # Inside the cutoff: the region is still in the batch.
+        blend(x_out, conds, None, 1.0)
+        assert len(conditioning.batch[0]) == 2
+
+        # Past it: taken out, so the next step does not evaluate it.
+        denoiser.step = 99
+        blend(x_out, conds, None, 1.0)
+        assert len(conditioning.batch[0]) == 1
+
+    def test_past_the_cutoff_the_blend_is_the_global_prompt_alone(self, host,
+                                                                  monkeypatch):
+        p, calls = self.denoiser()
+        p.steps = 4
+        denoiser = p.sampler.model_wrap_cfg
+        denoiser.step = 99
+        self.install(monkeypatch, p, Multicond())
+
+        del calls[:]
+        out = denoiser.combine_denoised({0: Fake(1.0), 1: Fake(2.0)},
+                                        [[(0, 1.0), (1, 1.0)]], None, 1.0)
+
+        assert calls == [[[(0, 1.0)]]]
+        assert out.value == 1.0
+
+    def test_a_denoiser_with_no_step_counter_simply_never_retires(self, host,
+                                                                  monkeypatch):
+        """Degrading to "the regions apply throughout" is the safe direction: it
+        costs time and produces the picture that was asked for."""
+        p, _calls = self.denoiser()
+        p.steps = 4
+        conditioning = Multicond()
+        self.install(monkeypatch, p, conditioning)
+
+        p.sampler.model_wrap_cfg.combine_denoised(
+            {0: Fake(1.0), 1: Fake(2.0)}, [[(0, 1.0), (1, 1.0)]], None, 1.0)
+
+        assert len(conditioning.batch[0]) == 2
 
     def test_it_sorts_last_so_a_native_area_path_wins(self):
         """It works against a structure every A1111-derived host has, so asked

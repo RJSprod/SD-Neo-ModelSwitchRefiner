@@ -958,6 +958,22 @@ def _klein_mode_chosen(mode, gallery=None, checkpoint=None):
     return gr.update(value=_klein_status(live, mode, checkpoint))
 
 
+def _klein_steps_chosen(percent):
+    """Remember how long the regions apply for, and say what it costs.
+
+    The one control in this block whose units are seconds rather than pixels, so
+    the line under it is about time.
+    """
+    percent = max(10, min(100, int(percent or 60)))
+    mc_spatial.remember(**{mc_spatial.REGION_STEPS: percent})
+    return gr.update(value=notice(
+        f"Regions apply for the first {percent}% of the steps, then the sample "
+        f"finishes on the global prompt alone. Each region costs one model "
+        f"evaluation per step it is active — four regions at 100% is roughly "
+        f"five evaluations a step; at {percent}% it is that for {percent}% of "
+        f"the sample and one for the rest."))
+
+
 def _backend_chosen(backend, mode, serialized, enabled, compose):
     """Remember which backend the panel should show, and repaint everything.
 
@@ -1394,6 +1410,9 @@ class ScriptKreaCreative(scripts.Script):
         # (attached, drawn) for the last sampling pass, so the result and the
         # infotext report an observation rather than an intention.
         self._klein_attached = (0, 0)
+        # How much of the sample the regions apply for. Read off the panel with
+        # the rest of the settings; the sampling hook is far too late to ask.
+        self._klein_steps = 60
         # Two scopes, and they close at different times. The job stack holds the
         # reference set, which one encode serves for the whole batch; the pass
         # stack holds the regional conditioning, which is rebuilt against every
@@ -1587,6 +1606,14 @@ class ScriptKreaCreative(scripts.Script):
                 visible=klein_visible, elem_id=ident("spatial", "klein", "mode"),
                 info="how the regions reach FLUX.2 Klein, and what the source "
                      "image is")
+            klein_steps = gr.Slider(
+                minimum=10, maximum=100, step=10, value=spatial["region_steps"],
+                label="Regions active for (%)", visible=klein_visible,
+                elem_id=ident("spatial", "klein", "steps"),
+                info="how much of the sample the regions apply for. The step "
+                     "count is Forge's and is not changed; each region costs one "
+                     "model evaluation per step it is active, and composition is "
+                     "settled early")
             klein_status = gr.HTML(
                 _klein_status(klein_live, spatial["klein_mode"]),
                 visible=klein_visible, elem_id=ident("spatial", "klein", "status"))
@@ -1640,7 +1667,7 @@ class ScriptKreaCreative(scripts.Script):
             "spatial_scenes": record_scenes, "spatial_pasted": spatial_pasted,
             "spatial_restore": restore_spatial,
             "klein_mode": klein_mode, "klein_status": klein_status,
-            "spatial_backend": spatial_backend}
+            "klein_steps": klein_steps, "spatial_backend": spatial_backend}
         if panel is not None:
             self.components.update(panel.components())
 
@@ -1650,7 +1677,8 @@ class ScriptKreaCreative(scripts.Script):
                            spatial_state, record_scenes, restore_spatial,
                            enabled)
         self._wire_klein(klein_mode, klein_status, spatial_enabled, spatial_compose,
-                         spatial_backend, spatial_state, spatial_status)
+                         spatial_backend, spatial_state, spatial_status,
+                         klein_steps)
         self._register_paste_fields()
 
         # Every control travels to before_process, because that is where the
@@ -1783,7 +1811,7 @@ class ScriptKreaCreative(scripts.Script):
 
     def _wire_klein(self, klein_mode, klein_status, spatial_enabled,
                     spatial_compose, spatial_backend, spatial_state,
-                    spatial_status):
+                    spatial_status, klein_steps):
         """The Klein block's handlers, and the ones that have to wait.
 
         Two of §9's four triggers are this script's own controls and are wired
@@ -1800,6 +1828,8 @@ class ScriptKreaCreative(scripts.Script):
         """
         outputs = [klein_mode, klein_status, spatial_compose]
 
+        klein_steps.release(fn=_klein_steps_chosen, inputs=[klein_steps],
+                            outputs=[klein_status], queue=False)
         klein_mode.change(fn=_klein_mode_chosen, inputs=[klein_mode],
                           outputs=[klein_status], queue=False)
         # The one control that repaints the summary line as well, because it is
@@ -2158,6 +2188,7 @@ class ScriptKreaCreative(scripts.Script):
             str(chosen.get("compose_mode") or "").strip().casefold()
             == spatial_module.SMART and bool(request.regions))
         self._klein_layout_parsed = layout
+        self._klein_steps = int(chosen.get("region_steps", 60) or 60)
 
         # The canvas has gone to the other backend, so the Krea pipeline is told
         # there is nothing to compose. It still runs for Creative Mode and for
@@ -2433,7 +2464,8 @@ class ScriptKreaCreative(scripts.Script):
             # attempt is what chooses.
             compiled = stack.enter_context(mc_spatial_klein.regional_conditioning(
                 request, conditioning, tensor=tensor,
-                model=getattr(p, "sd_model", None), p=p))
+                model=getattr(p, "sd_model", None), p=p,
+                region_percent=self._klein_steps))
         except Exception:
             stack.close()
             raise
