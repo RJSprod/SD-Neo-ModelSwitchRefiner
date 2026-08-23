@@ -233,83 +233,6 @@ SPATIAL_KEYS = (SPATIAL_MODE, SPATIAL_VERSION, SPATIAL_LAYOUT, SPATIAL_COMPOSE_M
                 SPATIAL_SCENE)
 """Every key a Spatial generation may write, for forwarding and for tests."""
 
-KLEIN_SPATIAL_MODE = "Klein Spatial Mode"
-KLEIN_SPATIAL_RESOLVED = "Klein Spatial Resolved Mode"
-KLEIN_SPATIAL_VERSION = "Klein Spatial Version"
-KLEIN_SPATIAL_LAYOUT = "Klein Spatial Layout"
-KLEIN_SPATIAL_SOURCE = "Klein Spatial Source"
-KLEIN_SPATIAL_SOURCE_COUNT = "Klein Spatial Source Count"
-KLEIN_SPATIAL_BACKEND = "Klein Spatial Regional Backend"
-KLEIN_SPATIAL_BACKEND_VERSION = "Klein Spatial Regional Backend Version"
-KLEIN_SPATIAL_ATTACHED = "Klein Spatial Regions Attached"
-"""How many regions actually conditioned the image, out of how many were drawn.
-
-An observation and not an intention, and recorded because the two came apart:
-for several runs the boxes were drawn, compiled and encoded and then reached
-nothing, and the images looked exactly like images where they had. "3 of 3" and
-"0 of 3" are the difference between a spatial generation and an ordinary one
-wearing its metadata.
-"""
-
-KLEIN_SPATIAL_COMPOSE_MODE = "Klein Spatial Compose Mode"
-KLEIN_SPATIAL_COMPOSER_SEED = "Klein Spatial Composer Seed"
-KLEIN_SPATIAL_COMPOSER_VERSION = "Klein Spatial Composer Instruction"
-"""What the Smart Compose pass did to the global prompt, if it ran.
-
-Its own three keys rather than Krea's, for the same reason the rest of this
-namespace is separate: the same Composer instruction runs for both backends and
-what it *produces* lands in two different places -- a field of a structured
-document for Krea, the whole prompt the model reads for Klein. An image that
-recorded ``Krea Spatial Composer Seed`` and was made by Klein would be readable
-and wrong.
-
-The composed prompt itself is not recorded, and does not need to be: unlike
-Krea's, it *is* the image's own ``Prompt:`` line. The seed and the instruction
-version are what make "why did the same layout compose differently today"
-answerable.
-"""
-
-KLEIN_SPATIAL_KEYS = (KLEIN_SPATIAL_MODE, KLEIN_SPATIAL_RESOLVED,
-                      KLEIN_SPATIAL_VERSION, KLEIN_SPATIAL_LAYOUT,
-                      KLEIN_SPATIAL_SOURCE, KLEIN_SPATIAL_SOURCE_COUNT,
-                      KLEIN_SPATIAL_BACKEND, KLEIN_SPATIAL_BACKEND_VERSION,
-                      KLEIN_SPATIAL_COMPOSE_MODE, KLEIN_SPATIAL_COMPOSER_SEED,
-                      KLEIN_SPATIAL_COMPOSER_VERSION, KLEIN_SPATIAL_ATTACHED)
-
-_KLEIN_SPATIAL_NAMESPACE = """What a FLUX.2 Klein spatial generation records.
-
-A separate namespace from the Krea keys above, and §37 is unusually firm about
-why: the two backends consume the same canvas and mean different things by it,
-so an old ``Krea Spatial Layout`` record must never be read as a Klein
-regional-conditioning job. Separate prefixes make that a property of the file
-format rather than of a reader remembering to check.
-
-**How do I make this picture again?** Not from the ``Prompt:`` line alone, and
-this is the one real difference from Krea (§39). Krea's structured prompt carries
-its boxes as text, so an ordinary paste reproduces a Krea spatial image exactly.
-Klein's regional conditioning never touches ``p.prompt`` -- the recorded prompt
-is the user's own global prompt -- so an image pasted back without its layout
-reproduces the scene and not the composition. :data:`KLEIN_SPATIAL_LAYOUT` is
-therefore essential metadata rather than a convenience, and it is why a paste
-does not silently switch Spatial Layout *off* the way a Krea paste must: there is
-no double-composition to prevent here.
-
-It does not silently switch it *on* either. §39 asks for both halves: an ordinary
-paste restores the ordinary prompt and settings, and "Restore Spatial setup" is
-the explicit action that puts the canvas, the requested mode and the source
-expectation back.
-
-**Which mechanism made it?** :data:`KLEIN_SPATIAL_BACKEND` and its version. Two
-images made from the same layout by two different regional-conditioning
-mechanisms are two different experiments, and a file that recorded only "regional
-conditioning happened" could not tell them apart afterwards.
-
-:data:`KLEIN_SPATIAL_SOURCE_COUNT` is an expectation and never a payload: it says
-the image was made with N ImageStitch references so that a restore into an empty
-gallery can say so out loud. The reference pixels themselves are not in the file,
-which is the same policy Stage 2 references already follow.
-"""
-
 MODULE_PREFIX = "Model Chain Module "
 """Numbered VAE / text encoder keys: "Model Chain Module 1", "... 2", and so on.
 
@@ -740,13 +663,6 @@ def creative_setup(params: dict):
         spatial_layout=str(params.get(SPATIAL_LAYOUT) or ""),
         spatial_compose_mode=str(params.get(SPATIAL_COMPOSE_MODE) or ""),
         spatial_version=_number(params.get(SPATIAL_VERSION)),
-        klein_layout=str(params.get(KLEIN_SPATIAL_LAYOUT) or ""),
-        klein_mode=str(params.get(KLEIN_SPATIAL_MODE) or ""),
-        klein_resolved_mode=str(params.get(KLEIN_SPATIAL_RESOLVED) or ""),
-        klein_source=str(params.get(KLEIN_SPATIAL_SOURCE) or ""),
-        klein_source_count=_number(params.get(KLEIN_SPATIAL_SOURCE_COUNT)),
-        klein_backend=str(params.get(KLEIN_SPATIAL_BACKEND) or ""),
-        klein_compose_mode=str(params.get(KLEIN_SPATIAL_COMPOSE_MODE) or ""),
     )
 
 
@@ -848,9 +764,7 @@ def build_creative_paste_fields(components: dict, notice=None, view=None,
         return view()
 
     def spatial_pasted_view(params):
-        if spatial_view is None:
-            return None
-        if SPATIAL_MODE not in params and KLEIN_SPATIAL_MODE not in params:
+        if SPATIAL_MODE not in params or spatial_view is None:
             return None
         return spatial_view()
 
@@ -862,19 +776,6 @@ def build_creative_paste_fields(components: dict, notice=None, view=None,
         that switched Spatial Layout off would do it silently, and the next
         press would look like the feature had stopped working.
         """
-        if KLEIN_SPATIAL_MODE in params:
-            # A Klein spatial image is the opposite case, and §39 asks for the
-            # opposite behaviour. Its recorded Prompt is the user's own global
-            # prompt -- regional conditioning never rewrote it -- so there is no
-            # second composition to prevent and nothing to switch off. What the
-            # paste must *not* do is switch Spatial Layout on, because a canvas
-            # arriving with a picture is not somebody asking to compose with it.
-            said = ("This image was made with Spatial Layout on FLUX.2 Klein. Its "
-                    f"prompt and settings have been restored; the "
-                    f"{_klein_restore_hint(params)} is under Spatial options → "
-                    "Continue from a pasted image, and Restore Spatial setup puts "
-                    "it back.")
-            return notice(said) if notice else said
         if SPATIAL_MODE not in params:
             return None
         said = ("Spatial image restored using its final structured prompt. Spatial "
@@ -902,21 +803,6 @@ def build_creative_paste_fields(components: dict, notice=None, view=None,
     return fields
 
 
-def _klein_restore_hint(params: dict) -> str:
-    """How to describe what a pasted Klein spatial image left to restore.
-
-    Names the references when the image had them, because that is the half a
-    restore cannot supply: the layout is in the file and the reference pixels
-    deliberately are not, so a restore into an empty gallery has to say so rather
-    than present an image-required mode that will refuse at the next press.
-    """
-    count = _number(params.get(KLEIN_SPATIAL_SOURCE_COUNT)) or 0
-    if count > 0:
-        return (f"canvas it was drawn on (made with {count} ImageStitch reference "
-                f"image{'' if count == 1 else 's'}, which are not stored in the file)")
-    return "canvas it was drawn on"
-
-
 def creative_paste_field_names() -> list[str]:
     """Keys the "Send to txt2img" buttons must forward for the above to work.
 
@@ -924,8 +810,7 @@ def creative_paste_field_names() -> list[str]:
     forward by exact name, so a key that is not listed here simply does not
     arrive, and "restore the setup" would find half a record.
     """
-    return (list(CREATIVE_KEYS) + list(SPATIAL_KEYS) + list(KLEIN_SPATIAL_KEYS)
-            + list(LITERAL_KEYS))
+    return list(CREATIVE_KEYS) + list(SPATIAL_KEYS) + list(LITERAL_KEYS)
 
 
 def paste_field_names() -> list[str]:

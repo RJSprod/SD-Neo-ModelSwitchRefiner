@@ -794,28 +794,13 @@ CREATIVE_TITLE = "Krea Creative Mode"
 
 CREATIVE_ENABLED = 0
 """``ScriptKreaCreative.ui`` returns the enable flag first and always."""
-SPATIAL_TAIL = 5
-"""...and the five Spatial controls last and always.
+SPATIAL_TAIL = 3
+"""...and the three Spatial controls last and always.
 
-Enabled, the compose mode, the backend, Klein's spatial mode, the serialized
-layout. Its middle is a variable number of axis controls, sized by the vocabulary
-the library loaded, which is why the two ends are the two that can be read
-without counting -- the script's own ``_split`` says as much in the same words.
-
-Only the first two are read here, and they are first precisely so that this
-offset survives the tail growing again.
+Its middle is a variable number of axis controls, sized by the vocabulary the
+library loaded, which is why the two ends are the two that can be read without
+counting -- the script's own ``_split`` says as much in the same words.
 """
-
-SPATIAL_TAILS = (SPATIAL_TAIL, 4, 3)
-"""Every tail length in circulation, longest first.
-
-A length alone cannot tell them apart, because the variable middle absorbs the
-difference. What can is the *compose slot*: its vocabulary is two words long, so
-a tail read at the wrong offset almost never finds one there. See
-:func:`creative_from`.
-"""
-
-COMPOSE_MODES = ("smart", "direct")
 
 
 def creative_from(p) -> tuple[bool, str]:
@@ -834,14 +819,7 @@ def creative_from(p) -> tuple[bool, str]:
     front of it and the VRAM arithmetic reserved for a phase that was about to
     run.
 
-    ``compose mode`` is read for either backend, because both of them have one:
-    the Spatial Composer is a copy-editor over two paragraphs and reconciles a
-    scene with a layout whether the scene is about to become a Krea structured
-    prompt or the prompt a Klein checkpoint reads directly. Which backend is
-    loaded therefore does not change whether a Composer phase belongs in the
-    plan, and this function does not ask.
-
-    It is ``"smart"``, ``"direct"`` or empty, and empty is also
+    ``compose mode`` is ``"smart"``, ``"direct"`` or empty, and empty is also
     the answer when Spatial Layout is on but the canvas has no boxes on it --
     though that last case is only visible to the Krea script itself, which has
     the parsed layout and passes it in explicitly. From here the best that can
@@ -862,42 +840,15 @@ def creative_from(p) -> tuple[bool, str]:
         return False, ""
 
     creative = bool(args[CREATIVE_ENABLED])
-    if len(args) < CREATIVE_ENABLED + 1 + min(SPATIAL_TAILS):
+    if len(args) < CREATIVE_ENABLED + 1 + SPATIAL_TAIL:
         # An API request that sent only the flag. Whatever Creative Mode is set
         # to still holds; there is no layout to read.
         return creative, ""
-
-    found = _spatial_tail(args)
-    if found is None:
-        return creative, ""
-    spatial_enabled, compose = found
+    spatial_enabled, compose = args[-SPATIAL_TAIL], args[-SPATIAL_TAIL + 1]
     if not spatial_enabled:
         return creative, ""
-
     mode = str(compose or "").strip().casefold()
-    return creative, mode if mode in COMPOSE_MODES else "smart"
-
-
-def _spatial_tail(args):
-    """``(spatial enabled, compose mode)`` off the end of a Creative argument list.
-
-    Two tail lengths are in circulation and a length cannot tell them apart: the
-    axis block in the middle is sized by whatever vocabulary the library loaded,
-    so both shapes are simply "some number of arguments". What distinguishes them
-    is the compose slot, whose whole vocabulary is ``smart`` and ``direct`` --
-    read at the wrong offset it lands on an axis mode or a JSON document, and
-    neither of those is one of two words.
-
-    ``None`` when neither offset finds one, which means this is not a shape this
-    build recognises and the honest plan is the one that claims no phases.
-    """
-    for tail in SPATIAL_TAILS:
-        if len(args) < CREATIVE_ENABLED + 1 + tail:
-            continue
-        compose = str(args[-tail + 1] or "").strip().casefold()
-        if compose in COMPOSE_MODES:
-            return args[-tail], compose
-    return None
+    return creative, mode if mode in ("smart", "direct") else "smart"
 
 
 def build_for(p, *, creative: bool | None = None,

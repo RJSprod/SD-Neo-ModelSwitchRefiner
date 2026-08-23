@@ -1365,7 +1365,7 @@ class TestRestoringTheWorkflow:
         return creative_script._restore_spatial()
 
     def test_it_puts_the_canvas_back(self, pasted, store):
-        layout, spatial_on, mode, _status, *_klein = self.restore()
+        layout, spatial_on, mode, _status = self.restore()
         restored = json.loads(layout["value"])
 
         assert [region["id"] for region in restored["regions"]] == ["r1", "r2"]
@@ -1380,7 +1380,7 @@ class TestRestoringTheWorkflow:
         assert mc_spatial.settings()["enabled"] is True
 
     def test_it_says_it_did(self, pasted, store):
-        _layout, _on, _mode, status, *_klein = self.restore()
+        _layout, _on, _mode, status = self.restore()
 
         assert "spatial canvas is back" in status
 
@@ -1406,8 +1406,7 @@ class TestRestoringTheWorkflow:
             mc_infotext.SPATIAL_LAYOUT: document([FACE, SIGN]),
         }))
         try:
-            layout, spatial_on, mode, status, *_klein = \
-                creative_script._restore_spatial()
+            layout, spatial_on, mode, status = creative_script._restore_spatial()
         finally:
             mc_creative_krea.pasted.clear()
 
@@ -1442,7 +1441,7 @@ class TestRestoringTheWorkflow:
             mc_infotext.SPATIAL_LAYOUT: document(),
         }))
         try:
-            layout, _on, _mode, status, *_klein = creative_script._restore_spatial()
+            layout, _on, _mode, status = creative_script._restore_spatial()
         finally:
             mc_creative_krea.pasted.clear()
 
