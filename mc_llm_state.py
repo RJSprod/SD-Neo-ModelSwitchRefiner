@@ -176,6 +176,11 @@ DEFAULTS: dict = {
     # which is right whenever the host announces one in a way this extension can
     # read; the override is for when it does not.
     "spatial_backend": "auto",
+    # How much of the sample Klein's regions apply for, as a percentage of the
+    # steps. Not 100: that backend costs one model evaluation per region per
+    # step, and the first steps of a sample are the ones that decide where things
+    # are. 60 keeps the placement and gives most of the time back.
+    "klein_spatial_region_steps": 60,
 }
 
 

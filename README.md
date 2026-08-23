@@ -1819,12 +1819,45 @@ once for the global prompt alone and once per region, and the difference is what
 gets masked — so whatever the host knows about CFG scale, a skipped
 unconditional pass, or an edit model stays true without being guessed at.
 
-**This costs time, and the cost is inherent.** Each region is another
-conditioning the model evaluates at every step: four regions is roughly five
-model evaluations a step instead of one. Separate evaluation is exactly what
-makes a region's contribution separable enough to mask, so it is the price of
-the technique rather than of this implementation. Fewer, larger boxes are
-cheaper than many small ones.
+##### What it costs, and why
+
+Each region is another conditioning the model evaluates at every step it is
+active: four regions is roughly five model evaluations a step instead of one.
+That is the price of *this* technique — separate evaluation is exactly what makes
+a region's contribution separable enough to mask.
+
+It is not the price of regional conditioning in general, and it is worth being
+clear about that. ComfyUI's own area path, which Forge Neo's backend contains,
+runs the model on a *crop* of each region and batches the crops together — so a
+box covering a fifth of the frame costs about a fifth of an evaluation, not a
+whole one. That path is unreachable from the hook this extension has: the cond
+dicts it needs are built inside the sampler, after `process_before_every_sampling`
+has come and gone. So the cost here is an artefact of *where the extension can
+attach*, not of what the model is being asked to do.
+
+Two things follow.
+
+**Regions active for (%)** is the dial. Composition is settled early in a sample
+— the first steps decide where the large shapes go and the last ones settle
+texture — so regions stop contributing part-way through and the sample finishes
+on the global prompt alone. Past the cutoff they are *removed from the batch*,
+not merely ignored in the blend: the host evaluates every composable prompt it
+holds either way, so a region only stops costing an evaluation when it stops
+being there. At the default 60% with four regions, roughly three evaluations a
+step averaged over the sample instead of five.
+
+**A cheaper backend is the open work.** Every job that runs on this backend logs
+which model-patching hooks the host offers:
+
+```
+Klein Spatial costs one model evaluation per region per step on this backend;
+for a cheaper one this host offers patcher=... hooks=set_model_attn2_patch, ...
+```
+
+Regional *attention* — masking each region's tokens inside cross-attention — is
+one forward pass and is roughly free. It needs the attention call's shape for
+this architecture, which that line is there to establish. Until it does, fewer
+and larger boxes are cheaper than many small ones.
 
 Three backends are registered and tried in order — the host's own area metadata,
 a mask on the conditioning, then the composable path above. A probe can only say

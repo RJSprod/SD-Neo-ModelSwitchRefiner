@@ -448,7 +448,10 @@ class ComposableRegionBackend(RegionalBackend):
 
     @contextlib.contextmanager
     def apply(self, conditioning, compiled, model=None, p=None):
-        installed = _install_composable_regions(conditioning, compiled, model, p)
+        installed = _install_composable_regions(
+            conditioning, compiled, model, p,
+            cutoff=region_cutoff(getattr(p, "steps", 0),
+                                 getattr(compiled, "region_percent", 100)))
         try:
             yield installed
         finally:
@@ -573,7 +576,7 @@ class CompiledRegions:
     """
 
     __slots__ = ("pairs", "grid", "notes", "backend", "request", "attached",
-                 "diagnosis")
+                 "diagnosis", "region_percent")
 
     def __init__(self, pairs, grid, notes=(), backend=None, request=None):
         self.pairs = tuple(pairs)
@@ -590,6 +593,14 @@ class CompiledRegions:
         """
 
         self.diagnosis = ""
+
+        self.region_percent = 100
+        """How much of the sample the regions apply for, as a percentage.
+
+        Carried here rather than read from a preference inside the backend so
+        that a test can set it and a spike can vary it, and so the backend keeps
+        knowing nothing about where settings live.
+        """
 
     def __bool__(self) -> bool:
         return bool(self.pairs)
@@ -624,7 +635,8 @@ def latent_grid(tensor) -> tuple[int, int] | None:
     return width, height
 
 
-def compile_regions(request, tensor=None, grid=None, backend=None) -> CompiledRegions:
+def compile_regions(request, tensor=None, grid=None, backend=None,
+                    region_percent: int = 100) -> CompiledRegions:
     """Every region of ``request`` on the grid ``tensor`` is about to be sampled at.
 
     ``grid`` may be given directly instead, which is what a test does and what a
@@ -645,8 +657,10 @@ def compile_regions(request, tensor=None, grid=None, backend=None) -> CompiledRe
 
     width, height = int(grid[0]), int(grid[1])
     pairs, notes = spatial.compile_grid(getattr(request, "regions", ()), width, height)
-    return CompiledRegions(pairs=pairs, grid=(width, height), notes=notes,
-                           backend=backend, request=request)
+    compiled = CompiledRegions(pairs=pairs, grid=(width, height), notes=notes,
+                               backend=backend, request=request)
+    compiled.region_percent = max(1, min(100, int(region_percent or 100)))
+    return compiled
 
 
 # --------------------------------------------------------------------------- #
@@ -839,6 +853,72 @@ def _install_conditioning_regions(conditioning, compiled, model, p,
     return _InstalledRegions(target=target, added=added, diagnosis=diagnosis)
 
 
+PATCHER_HOOKS = (
+    "set_model_unet_function_wrapper",
+    "set_model_attn1_patch",
+    "set_model_attn2_patch",
+    "set_model_attn1_replace",
+    "set_model_attn2_replace",
+    "set_model_attn1_output_patch",
+    "set_model_attn2_output_patch",
+    "set_model_sampler_cfg_function",
+    "set_model_sampler_pre_cfg_function",
+    "set_model_sampler_post_cfg_function",
+    "set_model_patch",
+    "set_model_patch_replace",
+    "add_patches",
+)
+"""ModelPatcher hooks worth knowing about, for a cheaper implementation.
+
+None of these are used yet. They are *reported*, once per job, because the
+composable backend that works today costs one model evaluation per region per
+step and the mechanisms that would not are all reached through one of these.
+
+The cheap ones, in order of how much they would save:
+
+``set_model_attn2_patch`` and friends
+    Regional attention: one forward pass, with each region's tokens masked to
+    its rectangle inside cross-attention. Roughly free, and the reason to want
+    it. Needs the attention call's shape for this architecture, which is the
+    thing to establish before writing any of it.
+
+``set_model_unet_function_wrapper``
+    Wraps the model call. Enough to implement a crop-and-composite pass, which
+    costs the *area* of each region rather than a whole frame -- a fifth of a
+    frame for a fifth-of-a-frame box, instead of another whole evaluation.
+
+Printed rather than guessed at, because guessing at this host's internals has
+been wrong twice and each time the cost was somebody's afternoon.
+"""
+
+
+def describe_patcher(p=None) -> str:
+    """Which model-patching hooks this host offers, in one line.
+
+    Written to the log once per Klein spatial job that attaches regions, so the
+    next implementation is chosen from what is there rather than from what is
+    usually there.
+    """
+    try:
+        from modules import shared
+
+        model = getattr(p, "sd_model", None) if p is not None else None
+        model = model or shared.sd_model
+        objects = getattr(model, "forge_objects", None)
+        unet = getattr(objects, "unet", None)
+    except Exception:
+        return "no loaded model to inspect"
+
+    if unet is None:
+        return "the loaded model exposes no forge_objects.unet"
+
+    offered = [name for name in PATCHER_HOOKS if callable(getattr(unet, name, None))]
+    options = getattr(unet, "model_options", None)
+    keys = sorted(options)[:16] if isinstance(options, dict) else []
+    return (f"patcher={type(unet).__name__} hooks={', '.join(offered) or 'none'}"
+            + (f" model_options={', '.join(keys)}" if keys else ""))
+
+
 class _InstalledComposable:
     """What the composable backend added, and how to take all of it away.
 
@@ -857,15 +937,25 @@ class _InstalledComposable:
         self.restore = restore
         self.diagnosis = str(diagnosis or "")
 
-    def remove(self) -> None:
+    def retire(self) -> None:
+        """Take the regions out of the conditioning, mid-sample.
+
+        Separate from :meth:`remove` because it happens at a different time for a
+        different reason: this is the step cutoff arriving, and the blend stays
+        installed because it is what will notice. :meth:`remove` is the end of
+        the job and takes everything.
+        """
         for batch, entries in self.batches:
             for entry in entries:
                 try:
                     batch.remove(entry)
                 except (ValueError, AttributeError):
                     logger.debug("Model Chain: a Klein region conditioning was "
-                                 "already gone at cleanup", exc_info=True)
+                                 "already gone", exc_info=True)
         self.batches = []
+
+    def remove(self) -> None:
+        self.retire()
 
         if self.restore is not None:
             try:
@@ -957,7 +1047,7 @@ def _compatible_cond(candidate, template) -> bool:
         return True
 
 
-def _install_composable_regions(conditioning, compiled, model, p):
+def _install_composable_regions(conditioning, compiled, model, p, cutoff=0):
     """Append each region as a composable prompt, and mask how it is blended in.
 
     The order the regions are appended in is the order their masks are listed in,
@@ -1019,7 +1109,10 @@ def _install_composable_regions(conditioning, compiled, model, p):
             entries.append(copy)
         added.append((batch, entries))
 
-    restore = _install_masked_blend(p, [mask for _composable, mask in prepared])
+    installed = _InstalledComposable(batches=added, added=len(prepared))
+    restore = _install_masked_blend(
+        p, [mask for _composable, mask in prepared], cutoff=cutoff,
+        prune=installed.retire)
     if restore is None:
         # Without the masked blend a region would be composed across the whole
         # frame, which is a different picture rather than a weaker version of the
@@ -1031,10 +1124,31 @@ def _install_composable_regions(conditioning, compiled, model, p):
         installed.remove()
         return installed
 
-    return _InstalledComposable(batches=added, added=len(prepared), restore=restore)
+    installed.restore = restore
+    return installed
 
 
-def _install_masked_blend(p, masks):
+def region_cutoff(steps, percent) -> int:
+    """The last step regions are applied on, from a percentage of ``steps``.
+
+    Composition is decided early. The first steps of a diffusion sample settle
+    where the large shapes are and the last ones settle texture, so a region that
+    stops contributing part-way through has usually already done its work -- and
+    every step it does not contribute on is one fewer model evaluation per
+    region.
+
+    At least one step, always: a region that never applied is not a cheaper
+    version of the feature, it is the feature switched off.
+    """
+    try:
+        steps = max(int(steps), 1)
+        percent = max(1, min(100, int(percent)))
+    except (TypeError, ValueError):
+        return 0
+    return max(1, round(steps * percent / 100.0))
+
+
+def _install_masked_blend(p, masks, cutoff=0, prune=None):
     """Make the host blend each region only inside its rectangle.
 
     Returns a callable that puts the original blend back, or ``None`` when there
@@ -1045,6 +1159,16 @@ def _install_masked_blend(p, masks):
     reimplementing the arithmetic is the whole point: CFG scale, a skipped
     unconditional pass at CFG 1, an edit model's own formula -- all of that stays
     exactly as the host computes it, and none of it has to be known here.
+
+    ``cutoff`` is the last step regions apply on, and ``prune`` is what removes
+    them from the host's conditioning once it passes. Pruning rather than merely
+    ignoring is the part that saves anything: the host evaluates every composable
+    prompt in the batch whether or not this function uses the result, so a region
+    stops costing a model evaluation only when it stops being in the batch.
+
+    The prune happens one step late by construction -- this function runs after
+    the evaluation for the current step -- and that is fine. One extra evaluation
+    is not worth reaching further into the denoiser to avoid.
     """
     sampler = getattr(p, "sampler", None) if p is not None else None
     denoiser = getattr(sampler, "model_wrap_cfg", None) or getattr(
@@ -1055,12 +1179,26 @@ def _install_masked_blend(p, masks):
 
     count = len(masks)
     owned = "combine_denoised" in getattr(denoiser, "__dict__", {})
+    spent = []
 
     def combine(x_out, conds_list, uncond, cond_scale):
         try:
             base_list = [conds[:-count] for conds in conds_list]
             if any(not conds for conds in base_list):
                 return original(x_out, conds_list, uncond, cond_scale)
+
+            step = getattr(denoiser, "step", None)
+            if cutoff and step is not None and step >= cutoff and not spent:
+                # Past the cutoff: blend without the regions, and take them out
+                # of the batch so the next step does not evaluate them.
+                spent.append(True)
+                if prune is not None:
+                    try:
+                        prune()
+                    except Exception:
+                        logger.debug("Model Chain: could not retire the Klein "
+                                     "spatial regions", exc_info=True)
+                return original(x_out, base_list, uncond, cond_scale)
 
             blended = original(x_out, base_list, uncond, cond_scale)
             for index in range(count):
@@ -1394,7 +1532,8 @@ def reference_scope(p=None):
 
 @contextlib.contextmanager
 def regional_conditioning(request, conditioning, tensor=None, grid=None,
-                          backend=None, model=None, p=None):
+                          backend=None, model=None, p=None,
+                          region_percent: int = 100):
     """Regional conditioning for one sampling pass, installed and then removed.
 
     The whole of §41's unwind requirement for the conditioning half, in one
@@ -1415,7 +1554,7 @@ def regional_conditioning(request, conditioning, tensor=None, grid=None,
         raise RegionalConditioningUnavailable(compatibility_error(model=model))
 
     compiled = compile_regions(request, tensor=tensor, grid=grid,
-                               backend=candidates[0])
+                               backend=candidates[0], region_percent=region_percent)
     for note in compiled.notes:
         logger.warning("Model Chain: %s", note)
 
@@ -1456,6 +1595,14 @@ def regional_conditioning(request, conditioning, tensor=None, grid=None,
                             "region(s) to a %dx%d conditioning grid via %s",
                             attached, len(compiled), compiled.grid[0],
                             compiled.grid[1], candidate.name)
+                if candidate.name == ComposableRegionBackend.name:
+                    # The working-but-expensive path. Say what this host offers
+                    # that a cheaper one could use, so the next implementation is
+                    # chosen from what is there.
+                    logger.info("Model Chain: Klein Spatial costs one model "
+                                "evaluation per region per step on this backend; "
+                                "for a cheaper one this host offers %s",
+                                describe_patcher(p))
                 yield compiled
                 return
 
