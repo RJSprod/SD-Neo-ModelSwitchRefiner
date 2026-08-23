@@ -81,7 +81,10 @@ class FakeEngine:
             raise AssertionError("a region is positive conditioning (§32)")
         self.containers.append(prompt)
         self.encoded.extend(prompt)
-        return [[f"cond({prompt[0]})", {}]]
+        # One conditioning per prompt, which is the shape a host's encoder
+        # returns and the shape ``ScheduledPromptConditioning.cond`` is taken
+        # from.
+        return [f"cond({prompt[0]})"]
 
 
 def make_image(colour):
@@ -1050,7 +1053,6 @@ class TestWhenNoRegionCanBeAttached:
                                                                  monkeypatch):
         """It goes into a log somebody may paste into an issue."""
         klein(monkeypatch)
-        request = generic.request_from(layout(), enabled=True)
         described = mc_spatial_klein.describe_conditioning(self.multicond())
 
         assert "the global prompt" not in described
@@ -1081,7 +1083,13 @@ class TestWhenNoRegionCanBeAttached:
         p.prompt = "a living room"
         p.negative_prompt = ""
         script.before_process(p, False)
-        script._klein_backend = mc_spatial_klein.AreaConditioningBackend()
+        # Only the area backend on offer, so the fall-through has nowhere to fall
+        # to and the "nothing attached" path is the one under test. torch is not
+        # installed in the test environment, so the composable backend that would
+        # otherwise answer here is not available anyway.
+        monkeypatch.setattr(
+            mc_spatial_klein, "usable_backends",
+            lambda model=None: (mc_spatial_klein.AreaConditioningBackend(),))
         script.process_before_every_sampling(
             p, c=self.multicond(),
             x=types.SimpleNamespace(shape=(1, 16, 64, 64)))
@@ -1090,6 +1098,261 @@ class TestWhenNoRegionCanBeAttached:
             == "0 of 1"
         assert "did not reach" in script._klein_note or \
             "reached the model" in script._klein_note
+
+
+# --------------------------------------------------------------------------- #
+# The composable backend: the one that fits the structure this host really has
+# --------------------------------------------------------------------------- #
+
+
+class Scheduled:
+    """``ScheduledPromptConditioning``: a step to run until, and a conditioning."""
+
+    def __init__(self, end_at_step, cond):
+        self.end_at_step = end_at_step
+        self.cond = cond
+
+
+class Composable:
+    """``ComposableScheduledPromptConditioning``: schedules and a weight.
+
+    Two fields, no geometry -- which is the whole reason an ``area`` could never
+    be written here and the reason this backend exists.
+    """
+
+    def __init__(self, schedules, weight):
+        self.schedules = list(schedules)
+        self.weight = weight
+
+
+class Multicond:
+    """What Forge Neo actually hands ``process_before_every_sampling``.
+
+    Reconstructed from the structure the diagnostic reported off a real run:
+    ``MulticondLearnedConditioning`` with ``.batch`` a list of lists of
+    ``ComposableScheduledPromptConditioning``.
+    """
+
+    def __init__(self, images=1):
+        self.shape = (images,)
+        self.batch = [[Composable([Scheduled(999, f"global-{index}")], 1.0)]
+                      for index in range(images)]
+
+
+class Fake:
+    """Just enough tensor to check the blend arithmetic without torch.
+
+    The blend is where a mistake would be invisible -- a wrong sign or a missed
+    mask produces a picture rather than an error -- so it is checked on numbers
+    rather than on the absence of an exception. torch is not installed in this
+    environment and does not need to be: what is under test is the algebra.
+    """
+
+    def __init__(self, value):
+        self.value = float(value)
+        self.device = "cpu"
+        self.dtype = "float32"
+
+    def to(self, device=None, dtype=None):
+        return self
+
+    def __add__(self, other):
+        return Fake(self.value + Fake._value(other))
+
+    def __sub__(self, other):
+        return Fake(self.value - Fake._value(other))
+
+    def __mul__(self, other):
+        return Fake(self.value * Fake._value(other))
+
+    __rmul__ = __mul__
+
+    @staticmethod
+    def _value(other):
+        return other.value if isinstance(other, Fake) else float(other)
+
+
+class TestTheComposableBackend:
+    """Built against the structure the host reported, not against a guess.
+
+    Two guesses at Forge Neo's conditioning were wrong -- a list of strings where
+    a prompt container was wanted, then an ``area`` key in a structure that has
+    never had one. This backend is written from what the diagnostic printed off a
+    real generation, and these tests are written from the same thing.
+    """
+
+    def denoiser(self, results=None):
+        """A sampler whose blend is the host's: sum the conds it is given."""
+        calls = []
+
+        class Denoiser:
+            def combine_denoised(self, x_out, conds_list, uncond, cond_scale):
+                calls.append([list(conds) for conds in conds_list])
+                total = Fake(0.0)
+                for conds in conds_list:
+                    for index, weight in conds:
+                        total = total + x_out[index] * weight
+                return total
+
+        sampler = types.SimpleNamespace(model_wrap_cfg=Denoiser())
+        return types.SimpleNamespace(sampler=sampler), calls
+
+    def install(self, monkeypatch, p, conditioning, regions=(REGION,)):
+        monkeypatch.setattr(mc_spatial_klein, "_rect_mask",
+                            lambda width, height, cell, like=None: Fake(1.0))
+        request = generic.request_from(layout(list(regions)), enabled=True)
+        compiled = mc_spatial_klein.compile_regions(request, grid=(64, 64))
+        return mc_spatial_klein._install_composable_regions(
+            conditioning, compiled, FakeEngine(), p)
+
+    def test_it_recognises_the_structure_this_host_hands_the_hook(self):
+        conditioning = Multicond()
+
+        assert mc_spatial_klein._composable_batches(conditioning) is conditioning.batch
+
+    def test_it_refuses_a_structure_it_does_not_recognise(self):
+        assert mc_spatial_klein._composable_batches([["not", "composable"]]) is None
+        assert mc_spatial_klein._composable_batches(types.SimpleNamespace()) is None
+
+    def test_a_region_is_appended_as_one_more_composable_prompt(self, host,
+                                                                monkeypatch):
+        p, _calls = self.denoiser()
+        conditioning = Multicond()
+        installed = self.install(monkeypatch, p, conditioning)
+
+        assert installed.count == 1
+        assert len(conditioning.batch[0]) == 2
+        assert conditioning.batch[0][1].schedules[0].cond == \
+            "cond(tall brass floor lamp)"
+
+    def test_every_image_in_a_batch_gets_its_own_copy(self, host, monkeypatch):
+        """A region appended to only the first image would leave the second
+        generated without it -- and two images sharing one object would make
+        removing it from the first remove it from the second."""
+        p, _calls = self.denoiser()
+        conditioning = Multicond(images=2)
+        self.install(monkeypatch, p, conditioning)
+
+        assert len(conditioning.batch[0]) == len(conditioning.batch[1]) == 2
+        assert conditioning.batch[0][1] is not conditioning.batch[1][1]
+
+    def test_the_region_carries_its_own_strength_as_the_weight(self, host,
+                                                              monkeypatch):
+        p, _calls = self.denoiser()
+        conditioning = Multicond()
+        self.install(monkeypatch, p, conditioning,
+                     regions=(dict(REGION, strength=1.5),))
+
+        assert conditioning.batch[0][1].weight == 1.5
+
+    def test_removing_it_leaves_the_conditioning_exactly_as_found(self, host,
+                                                                  monkeypatch):
+        p, _calls = self.denoiser()
+        conditioning = Multicond()
+        before = list(conditioning.batch[0])
+        installed = self.install(monkeypatch, p, conditioning)
+        installed.remove()
+
+        assert conditioning.batch[0] == before
+
+    def test_the_blend_is_restored_afterwards(self, host, monkeypatch):
+        p, _calls = self.denoiser()
+        denoiser = p.sampler.model_wrap_cfg
+        original = denoiser.combine_denoised
+        installed = self.install(monkeypatch, p, Multicond())
+
+        assert denoiser.combine_denoised is not original
+        installed.remove()
+        assert denoiser.combine_denoised == original
+
+    def test_the_region_is_blended_only_where_its_mask_is(self, host, monkeypatch):
+        """The arithmetic, on numbers.
+
+        The host's own blend is called once without the regions and once per
+        region, and the difference is masked. With a mask of 1 the region lands
+        in full; with a mask of 0 it lands not at all -- and the global prompt is
+        untouched either way.
+        """
+        p, _calls = self.denoiser()
+        conditioning = Multicond()
+        masks = [Fake(0.0)]
+        restore = mc_spatial_klein._install_masked_blend(p, masks)
+        conditioning.batch[0].append(
+            Composable([Scheduled(999, "region")], 1.0))
+
+        blend = p.sampler.model_wrap_cfg.combine_denoised
+        x_out = {0: Fake(10.0), 1: Fake(4.0)}
+        masked_out = blend(x_out, [[(0, 1.0), (1, 1.0)]], None, 1.0)
+
+        # mask 0: the global prompt alone, 10.
+        assert masked_out.value == 10.0
+
+        masks[0] = Fake(1.0)
+        full = blend(x_out, [[(0, 1.0), (1, 1.0)]], None, 1.0)
+        # mask 1: the host's own answer for global + region, 14.
+        assert full.value == 14.0
+        restore()
+
+    def test_the_hosts_own_blend_is_what_does_the_arithmetic(self, host,
+                                                             monkeypatch):
+        """Derived, not reimplemented. Whatever the host knows about CFG scale, a
+        skipped unconditional pass or an edit model stays true, and none of it
+        has to be guessed at here -- guessing is what put an ``area`` into a
+        structure that never had one."""
+        p, calls = self.denoiser()
+        restore = mc_spatial_klein._install_masked_blend(p, [Fake(1.0)])
+
+        p.sampler.model_wrap_cfg.combine_denoised(
+            {0: Fake(1.0), 1: Fake(2.0)}, [[(0, 1.0), (1, 1.0)]], None, 1.0)
+        restore()
+
+        # Once for the global prompt alone, once with the region added.
+        assert calls == [[[(0, 1.0)]], [[(0, 1.0), (1, 1.0)]]]
+
+    def test_conditioning_it_cannot_stack_is_left_out_and_said(self, host,
+                                                               monkeypatch,
+                                                               caplog):
+        """The host stacks every composable conditioning into one tensor. A
+        region of a different shape would raise inside the sampler with nothing
+        in the traceback naming this feature."""
+        p, _calls = self.denoiser()
+
+        class Wrong(FakeEngine):
+            def get_learned_conditioning(self, prompt):
+                return [types.SimpleNamespace(shape=(7, 999))]
+
+        monkeypatch.setattr(mc_spatial_klein, "_rect_mask",
+                            lambda width, height, cell, like=None: Fake(1.0))
+        conditioning = Multicond()
+        conditioning.batch[0][0].schedules[0].cond = types.SimpleNamespace(
+            shape=(7, 64))
+        request = generic.request_from(layout(), enabled=True)
+        compiled = mc_spatial_klein.compile_regions(request, grid=(64, 64))
+
+        with caplog.at_level("WARNING", logger="model_chain"):
+            installed = mc_spatial_klein._install_composable_regions(
+                conditioning, compiled, Wrong(), p)
+
+        assert installed.count == 0
+        assert len(conditioning.batch[0]) == 1
+
+    def test_no_maskable_blend_means_nothing_is_appended(self, host, monkeypatch):
+        """A region composed across the whole frame is a different picture, not a
+        weaker version of the one asked for."""
+        p = types.SimpleNamespace(sampler=types.SimpleNamespace())
+        conditioning = Multicond()
+        installed = self.install(monkeypatch, p, conditioning)
+
+        assert installed.count == 0
+        assert len(conditioning.batch[0]) == 1
+        assert "combine_denoised" in installed.diagnosis
+
+    def test_it_sorts_last_so_a_native_area_path_wins(self):
+        """It works against a structure every A1111-derived host has, so asked
+        first it would answer for hosts whose own area path is cheaper."""
+        names = [backend.name for backend in mc_spatial_klein.BACKENDS]
+
+        assert names[-1] == "composable-masked-regions"
 
 
 # --------------------------------------------------------------------------- #

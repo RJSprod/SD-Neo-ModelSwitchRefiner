@@ -394,9 +394,71 @@ class MaskConditioningBackend(RegionalBackend):
             installed.remove()
 
 
+class ComposableRegionBackend(RegionalBackend):
+    """Regional conditioning built on the host's own composable diffusion.
+
+    The backend for A1111-derived hosts, which is what Forge Neo turns out to be
+    at the hook this extension can reach. Its conditioning is a
+    ``MulticondLearnedConditioning`` whose batch entries are lists of
+    ``ComposableScheduledPromptConditioning`` -- schedules and a weight, and no
+    geometry anywhere. That is the ``AND`` composition A1111 has always had: each
+    composable prompt is evaluated by the model separately and their results are
+    blended by weight.
+
+    Blended *globally* by weight, which is the one thing that makes it not
+    regional. So this backend does two things:
+
+    1. appends each region as one more composable prompt, which the host then
+       evaluates for free because evaluating composable prompts is what it
+       already does;
+    2. replaces the blend with a spatially masked one, so a region's
+       contribution lands only inside its rectangle.
+
+    The masked blend is derived from the host's own blend rather than
+    reimplemented. ``combine_denoised`` is called once for the global prompt
+    alone and once per region, and the difference between them is what gets
+    masked -- so whatever that function knows about CFG scale, skipped
+    unconditional passes and edit models stays true, and none of it has to be
+    guessed at from outside. Guessing at it is what put an ``area`` key into a
+    structure that has never had one.
+
+    **The cost is real and is the reason this is not free.** Each region is
+    another conditioning the model evaluates at every step, so four regions is
+    roughly five model evaluations a step instead of one. That is inherent to
+    the technique rather than to this implementation: separate evaluation is
+    exactly what makes a region's contribution separable enough to mask.
+    """
+
+    name = "composable-masked-regions"
+    version = 1
+    summary = ("the host's composable diffusion, with the blend between prompts "
+               "masked to each region's rectangle")
+
+    def available(self, model) -> bool:
+        """Torch, and nothing else.
+
+        Deliberately the least demanding probe of the three, and deliberately
+        last in :data:`BACKENDS`: this one works against a structure every
+        A1111-derived host has, so if it were asked first it would answer for
+        hosts whose native area path is both cheaper and better.
+        """
+        import importlib.util
+
+        return importlib.util.find_spec("torch") is not None
+
+    @contextlib.contextmanager
+    def apply(self, conditioning, compiled, model=None, p=None):
+        installed = _install_composable_regions(conditioning, compiled, model, p)
+        try:
+            yield installed
+        finally:
+            installed.remove()
+
+
 BACKENDS: tuple[RegionalBackend, ...] = (
     AreaConditioningBackend(),
     MaskConditioningBackend(),
+    ComposableRegionBackend(),
 )
 """Every regional-conditioning mechanism this build knows, in preference order.
 
@@ -434,6 +496,33 @@ def select_backend(model=None) -> RegionalBackend | None:
             logger.debug("Model Chain: the %s regional backend could not be probed",
                          backend.name, exc_info=True)
     return None
+
+
+def usable_backends(model=None) -> tuple:
+    """Every backend whose mechanism this host exposes, in preference order.
+
+    A pre-filter and not a decision. :func:`regional_conditioning` tries them in
+    turn against the conditioning it was actually handed, because "the host has
+    an area path somewhere" and "a region can be written into *this* object" are
+    different questions and only the second one matters.
+    """
+    if model is None:
+        try:
+            from modules import shared
+
+            model = shared.sd_model
+        except Exception:
+            model = None
+
+    found = []
+    for backend in BACKENDS:
+        try:
+            if backend.available(model):
+                found.append(backend)
+        except Exception:
+            logger.debug("Model Chain: the %s regional backend could not be probed",
+                         backend.name, exc_info=True)
+    return tuple(found)
 
 
 def supports_klein_regional_conditioning(model=None) -> bool:
@@ -748,6 +837,261 @@ def _install_conditioning_regions(conditioning, compiled, model, p,
         diagnosis = describe_conditioning(conditioning, target)
 
     return _InstalledRegions(target=target, added=added, diagnosis=diagnosis)
+
+
+class _InstalledComposable:
+    """What the composable backend added, and how to take all of it away.
+
+    Two things to unwind rather than one: the region prompts appended to the
+    host's conditioning, and the masked blend installed on its denoiser. Both are
+    removed on every exit, and the denoiser is restored to whatever it was --
+    including to *not having* an instance attribute, if that is what it had.
+    """
+
+    __slots__ = ("batches", "added", "count", "restore", "diagnosis")
+
+    def __init__(self, batches=(), added=0, restore=None, diagnosis=""):
+        self.batches = list(batches)
+        self.added = int(added)
+        self.count = int(added)
+        self.restore = restore
+        self.diagnosis = str(diagnosis or "")
+
+    def remove(self) -> None:
+        for batch, entries in self.batches:
+            for entry in entries:
+                try:
+                    batch.remove(entry)
+                except (ValueError, AttributeError):
+                    logger.debug("Model Chain: a Klein region conditioning was "
+                                 "already gone at cleanup", exc_info=True)
+        self.batches = []
+
+        if self.restore is not None:
+            try:
+                self.restore()
+            except Exception:
+                logger.warning("Model Chain: the Klein masked blend did not unwind "
+                               "cleanly", exc_info=True)
+            self.restore = None
+
+
+def _composable_batches(conditioning):
+    """Every per-image list of composable conditionings, or ``None``.
+
+    ``MulticondLearnedConditioning.batch`` is a list of lists: one inner list per
+    image in the batch, each holding the composable prompts for that image. Both
+    levels matter -- a region has to be appended to *every* image's list, or the
+    second image in a batch of two would be generated without it.
+    """
+    batch = getattr(conditioning, "batch", None)
+    if not isinstance(batch, list) or not batch:
+        return None
+
+    for entry in batch:
+        if not isinstance(entry, list) or not entry:
+            return None
+        if not hasattr(entry[0], "schedules") or not hasattr(entry[0], "weight"):
+            return None
+    return batch
+
+
+def _composable_like(template, encoded, weight: float):
+    """One composable conditioning shaped like ``template``, holding ``encoded``.
+
+    Built from the classes of the objects already there rather than by importing
+    them by name. The host's own entry is the specification, which is the only
+    approach in this file that has not had to be corrected: a name can move
+    between releases and the object in front of you cannot be wrong about what it
+    is.
+    """
+    schedules = list(getattr(template, "schedules", ()) or ())
+    if not schedules:
+        return None
+    step = schedules[-1]
+
+    cond = _conditioning_tensor(encoded, getattr(step, "cond", None))
+    if cond is None:
+        return None
+
+    try:
+        scheduled = type(step)(getattr(step, "end_at_step", 0), cond)
+    except Exception:
+        try:
+            scheduled = type(step)(end_at_step=getattr(step, "end_at_step", 0),
+                                   cond=cond)
+        except Exception:
+            logger.debug("Model Chain: could not build a scheduled conditioning",
+                         exc_info=True)
+            return None
+
+    try:
+        return type(template)([scheduled], float(weight))
+    except Exception:
+        try:
+            return type(template)(schedules=[scheduled], weight=float(weight))
+        except Exception:
+            logger.debug("Model Chain: could not build a composable conditioning",
+                         exc_info=True)
+            return None
+
+
+def _compatible_cond(candidate, template) -> bool:
+    """Whether ``candidate`` can sit in the same batch as ``template``.
+
+    The host stacks every composable conditioning into one tensor before calling
+    the model, padding the token axis but not reconciling anything else. A region
+    whose conditioning is a different type, or has a different feature width,
+    would raise inside the sampler with nothing in the traceback naming this
+    feature -- so it is refused here, where the message can say what happened.
+    """
+    if type(candidate) is not type(template):
+        return False
+
+    left, right = getattr(candidate, "shape", None), getattr(template, "shape", None)
+    if left is None or right is None:
+        return True
+    try:
+        return tuple(left)[1:] == tuple(right)[1:]
+    except Exception:
+        return True
+
+
+def _install_composable_regions(conditioning, compiled, model, p):
+    """Append each region as a composable prompt, and mask how it is blended in.
+
+    The order the regions are appended in is the order their masks are listed in,
+    and the masked blend relies on that correspondence and on nothing else: it
+    identifies the regions as *the last N entries* of each image's list rather
+    than by absolute index, so anything else in the conditioning -- another
+    extension's composable prompt, a batch of several images -- is left alone and
+    keeps working.
+    """
+    batches = _composable_batches(conditioning)
+    if batches is None:
+        return _InstalledComposable(
+            diagnosis=describe_conditioning(conditioning))
+
+    template = batches[0][0]
+    width, height = compiled.grid
+    prepared = []
+
+    for region, cell in compiled.pairs:
+        text = region.qualified_prompt()
+        if not text:
+            continue
+        encoded = _encode(model, text, p)
+        if encoded is None:
+            continue
+
+        composable = _composable_like(template, encoded, region.strength)
+        if composable is None:
+            continue
+
+        reference = getattr(template.schedules[-1], "cond", None)
+        if not _compatible_cond(getattr(composable.schedules[-1], "cond", None),
+                                reference):
+            logger.warning("Model Chain: the conditioning for region %r is not the "
+                           "shape this host stacks; it was left out",
+                           region.identifier)
+            continue
+
+        mask = _rect_mask(width, height, cell)
+        if mask is None:
+            continue
+        prepared.append((composable, mask))
+
+    if not prepared:
+        return _InstalledComposable(
+            diagnosis=describe_conditioning(conditioning))
+
+    added = []
+    for batch in batches:
+        entries = []
+        for composable, _mask in prepared:
+            # A separate object per image: the host may hold on to these, and two
+            # images sharing one would make removing it from the first remove it
+            # from the second.
+            copy = _composable_like(template,
+                                    getattr(composable.schedules[-1], "cond", None),
+                                    composable.weight) or composable
+            batch.append(copy)
+            entries.append(copy)
+        added.append((batch, entries))
+
+    restore = _install_masked_blend(p, [mask for _composable, mask in prepared])
+    if restore is None:
+        # Without the masked blend a region would be composed across the whole
+        # frame, which is a different picture rather than a weaker version of the
+        # one asked for. Everything appended above comes straight back off.
+        installed = _InstalledComposable(
+            batches=added, added=0,
+            diagnosis="the host's denoiser does not expose a blend this build can "
+                      "mask (no sampler.model_wrap_cfg.combine_denoised)")
+        installed.remove()
+        return installed
+
+    return _InstalledComposable(batches=added, added=len(prepared), restore=restore)
+
+
+def _install_masked_blend(p, masks):
+    """Make the host blend each region only inside its rectangle.
+
+    Returns a callable that puts the original blend back, or ``None`` when there
+    is no blend to replace.
+
+    The replacement calls the *original* once for the global prompt alone and
+    once per region, and masks the difference. Deriving it that way rather than
+    reimplementing the arithmetic is the whole point: CFG scale, a skipped
+    unconditional pass at CFG 1, an edit model's own formula -- all of that stays
+    exactly as the host computes it, and none of it has to be known here.
+    """
+    sampler = getattr(p, "sampler", None) if p is not None else None
+    denoiser = getattr(sampler, "model_wrap_cfg", None) or getattr(
+        sampler, "model_wrap", None)
+    original = getattr(denoiser, "combine_denoised", None)
+    if denoiser is None or not callable(original):
+        return None
+
+    count = len(masks)
+    owned = "combine_denoised" in getattr(denoiser, "__dict__", {})
+
+    def combine(x_out, conds_list, uncond, cond_scale):
+        try:
+            base_list = [conds[:-count] for conds in conds_list]
+            if any(not conds for conds in base_list):
+                return original(x_out, conds_list, uncond, cond_scale)
+
+            blended = original(x_out, base_list, uncond, cond_scale)
+            for index in range(count):
+                one = [list(conds[:-count]) + [conds[len(conds) - count + index]]
+                       for conds in conds_list]
+                with_region = original(x_out, one, uncond, cond_scale)
+                mask = masks[index].to(device=blended.device, dtype=blended.dtype)
+                blended = blended + (with_region - blended) * mask
+            return blended
+        except Exception:
+            # A blend that raised would take the generation with it. The
+            # unmasked answer is the host's own and is a picture; it is also
+            # wrong about placement, so it is said out loud rather than returned
+            # quietly.
+            logger.error("Model Chain: the Klein masked blend failed; this image "
+                         "was blended without region masks and its placement is "
+                         "not what the layout asked for", exc_info=True)
+            return original(x_out, conds_list, uncond, cond_scale)
+
+    denoiser.combine_denoised = combine
+
+    def restore():
+        if owned:
+            denoiser.combine_denoised = original
+        else:
+            try:
+                del denoiser.combine_denoised
+            except AttributeError:
+                denoiser.combine_denoised = original
+
+    return restore
 
 
 def _encode(model, text: str, p=None):
@@ -1066,11 +1410,12 @@ def regional_conditioning(request, conditioning, tensor=None, grid=None,
     Yields the compiled regions, so the caller can record how many actually
     reached the model rather than how many were drawn.
     """
-    backend = backend if backend is not None else select_backend(model)
-    if backend is None:
+    candidates = [backend] if backend is not None else list(usable_backends(model))
+    if not candidates:
         raise RegionalConditioningUnavailable(compatibility_error(model=model))
 
-    compiled = compile_regions(request, tensor=tensor, grid=grid, backend=backend)
+    compiled = compile_regions(request, tensor=tensor, grid=grid,
+                               backend=candidates[0])
     for note in compiled.notes:
         logger.warning("Model Chain: %s", note)
 
@@ -1081,26 +1426,54 @@ def regional_conditioning(request, conditioning, tensor=None, grid=None,
         yield compiled
         return
 
-    with backend.apply(conditioning, compiled, model, p) as installed:
-        attached = getattr(installed, "count", 0)
-        compiled.attached = attached
-        compiled.diagnosis = getattr(installed, "diagnosis", "")
+    # Tried in order until one actually attaches something, and this fall-through
+    # is the correction to the design error that cost several runs of images. A
+    # probe can only ask whether a *mechanism* exists in the host; whether a
+    # region can be written into the conditioning object this pass was handed is
+    # a question only the attempt can answer. The area backend probes present on
+    # this host and fails here, every time, because the cond dicts it writes into
+    # are built later, inside the sampler.
+    diagnosis = ""
+    with contextlib.ExitStack() as stack:
+        for candidate in candidates:
+            compiled.backend = candidate
+            try:
+                installed = stack.enter_context(
+                    candidate.apply(conditioning, compiled, model, p))
+            except RegionalConditioningUnavailable:
+                raise
+            except Exception:
+                logger.warning("Model Chain: the %s regional backend failed while "
+                               "installing; trying the next one", candidate.name,
+                               exc_info=True)
+                continue
 
-        if attached:
-            logger.info("Model Chain: Klein Spatial attached %d of %d region(s) to "
-                        "a %dx%d conditioning grid via %s",
-                        attached, len(compiled), compiled.grid[0], compiled.grid[1],
-                        backend.name)
-        else:
-            # ERROR and not INFO. "attached 0 of 3" read as a status line for
-            # several runs of images that looked like the feature working, which
-            # is the exact failure §28 is about: a plausible picture with nothing
-            # anywhere saying the regions never arrived.
-            logger.error(
-                "Model Chain: Klein Spatial attached NONE of %d region(s) — the "
-                "%s backend could not write a region geometry into this host's "
-                "conditioning, so your boxes did not reach the model. Observed "
-                "%s", len(compiled), backend.name, compiled.diagnosis)
+            attached = getattr(installed, "count", 0)
+            if attached:
+                compiled.attached = attached
+                compiled.diagnosis = ""
+                logger.info("Model Chain: Klein Spatial attached %d of %d "
+                            "region(s) to a %dx%d conditioning grid via %s",
+                            attached, len(compiled), compiled.grid[0],
+                            compiled.grid[1], candidate.name)
+                yield compiled
+                return
+
+            diagnosis = getattr(installed, "diagnosis", "") or diagnosis
+            logger.debug("Model Chain: the %s regional backend attached nothing; "
+                         "trying the next one", candidate.name)
+
+        compiled.attached = 0
+        compiled.diagnosis = diagnosis
+        # ERROR and not INFO. "attached 0 of 3" read as a status line for several
+        # runs of images that looked like the feature working, which is the exact
+        # failure §28 is about: a plausible picture with nothing anywhere saying
+        # the regions never arrived.
+        logger.error(
+            "Model Chain: Klein Spatial attached NONE of %d region(s) — no "
+            "backend could write a region geometry into this host's conditioning, "
+            "so your boxes did not reach the model. Tried %s. Observed %s",
+            len(compiled), ", ".join(one.name for one in candidates), diagnosis)
         yield compiled
 
 
