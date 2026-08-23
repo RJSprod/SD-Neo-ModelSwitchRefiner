@@ -671,6 +671,9 @@ what arrived.
 `excluded_values` is added to the same file, and an absent key still reads as "no
 exclusions", so a package update that does not know about the key costs nothing.
 
+`creativity` is edited in it too, from 5 to 1 — see §18, which also explains why
+editing this file alone would not have moved the slider.
+
 ### 10.3 Exclusion is a modifier of Vary, never a fourth mode
 
 The gap was real: a user could allow everything on an axis or pin exactly one
@@ -1971,3 +1974,106 @@ as well as the text — a watcher on `mc_lora.RE_EXTRA_NET` that fails if anythi
 on the Stage 1 literal path consults it, because the day it does,
 `[[<custom-extension:foo>]]` starts being something this extension has an
 opinion about.
+
+
+## 18. The slider opens at the legacy position (23 August 2026)
+
+Creative Mode used to open at Creativity 5. It now opens at 1, which is
+`variation.LEGACY` — the position defined as *exactly what the Krea writer
+did before any of this existed*: no axis activates, nothing is appended to the
+user turn, and the sampler gets temperature 0.6 and top_p 0.9.
+
+The reason is the same one §10 gives for shipping every axis Natural, applied to
+the one control §10 left alone. §10 made the axis configuration direct nothing
+until somebody adds a direction; the Creativity position was still arriving at
+the middle of its scale, so *switching the feature on* was the moment the
+prompt changed, rather than the moment the user asked for something. Now the
+checkbox arms the controls and the slider is what starts using them.
+
+The counter-argument is written into the old docstring and is worth keeping
+visible: somebody who has deliberately turned a feature on wants to see what it
+does, and 1 shows them nothing. That is true, and it is the price. It buys the
+property that every difference in the output is one a user chose, which matters
+more here than elsewhere because the two states are indistinguishable from the
+image: an unexpectedly directed prompt does not look like a bug, it looks like
+the model.
+
+### 18.1 The number lives in three places
+
+Three, not one, and only one of them is ever read:
+
+| Where | What it is |
+| --- | --- |
+| `mc_llm_state.DEFAULTS["krea_creativity"]` | the preferences fallback — **the one that reaches a fresh panel** |
+| `creativity/defaults.json` `"creativity"` | the package's own opening position (§10.2) |
+| `variation.DEFAULT` | the fallback for a package that will not load |
+
+The comment above the Krea block in `mc_llm_state` said the package's
+`defaults.json` was authoritative and `mc_creative_krea.settings()` layered it
+over the preferences. It is the other way round for every key that appears in
+both: `settings()` reads `stored.get(CREATIVITY, defaults.get("creativity"))`,
+and `preferences()` fills in every key in `DEFAULTS`, so the stored value always
+exists and the package's number is never consulted. Editing `defaults.json`
+alone would have changed nothing at all.
+
+All three are set to 1, and `test_the_three_copies_of_the_opening_position_agree`
+asserts they match — the same treatment §6 gives the sampling table, for the same
+reason: a duplicated number that can drift silently is worse than one that fails
+loudly.
+
+### 18.2 "No directions" was suddenly the wrong thing to say
+
+§12.1 taught `describe_creativity()` to name *both* ways a configuration
+produces nothing, because they are indistinguishable from outside: no directions
+at all, and directions that sit below Creativity 2, where the Director emits
+nothing by design.
+
+Moving the opening position to 1 made the second one the *common* state — a new
+user's first two directions produce an empty brief — and `describe_cost()` still
+had only the first answer:
+
+```
+Creativity 1, Medium and Lighting both on Vary
+  → panel said: "No directions: nothing extra for the model to read"
+```
+
+It now distinguishes them, and names the lever:
+
+> *Creativity 1 expresses nothing, so your 2 directions cost nothing to read,
+> then about 20s of writing with the model in system RAM. Raise Creativity to 2
+> or above to spend them.*
+
+Fixed values are deliberately not counted in that clause. A pinned axis is
+explicit configuration rather than variation, so it survives Creativity 0 and 1
+(§3) and does produce a brief — the only way to reach zero characters with
+directions set is for all of them to be varying.
+
+`active_note()` — the status line the toggle writes, and the only Creative text
+on screen while the drawer is *shut* — took the same treatment for the same
+reason:
+
+> *2 directions set, but Creativity 1 expresses none of the varying ones — raise
+> it to 2 or above.*
+
+That is three functions now saying a version of the same sentence, which is what
+it costs to have the answer available in the three places a user can be standing
+when they ask. The alternative is one of them being confidently wrong.
+
+### 18.3 The one profile that carries its own position
+
+`profiles.spread()` — **Everything varies**, §10.4 — is built from Factory with
+every axis switched to Vary, so it inherited the opening position along with
+everything else. At 1 that makes the one built-in whose entire purpose is
+variation the one built-in that varies nothing, and pressing it *lowers* the
+slider for anybody who had already raised it: a profile carries a Creativity
+position, so applying one sets it.
+
+So `SPREAD_CREATIVITY = 5` travels with the axes. It is the only field of that
+profile which is not Factory's, and the reason it can be is that this profile is
+a choice rather than a default — the argument for opening at 1 is about what
+happens when nobody has chosen anything, and somebody who presses *Everything
+varies* has.
+
+Five and not ten: this is the configuration people had before the panel was
+rebuilt, which is what the profile exists to give back. 10 is a different
+request, and the slider is directly above the drawer.

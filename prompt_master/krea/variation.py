@@ -43,15 +43,16 @@ from types import MappingProxyType
 
 MINIMUM = 0
 MAXIMUM = 10
-DEFAULT = 5
+DEFAULT = 1
 """Where the slider sits on a fresh install, from the package's defaults.json.
 
-5 and not 1, because Creative Mode is off on a fresh install: the slider only
-does anything once somebody has deliberately turned the feature on, and
-somebody who has just done that wants to see what it does. The compatibility
-guarantee lives at 1 and is reachable by anyone who wants it; it no longer has
-to be the default, because the default no longer applies to anybody who has not
-opted in.
+1 and not 5, because turning Creative Mode on should not, by itself, change what
+comes out. 1 is :data:`LEGACY`: no axis activates, nothing is appended to the
+user turn, and the sampler gets exactly what it got before the feature existed
+-- so the checkbox arms the controls and the slider is the thing that starts
+using them. Every difference from here is one somebody asked for, which is the
+same rule the shipped axis configuration follows (every axis Natural: the
+feature directs nothing until a direction is added).
 """
 
 LEGACY = 1
@@ -151,6 +152,11 @@ def resolve(value) -> int:
     been taught about the slider keeps legacy sampling and no creative
     direction, which is what makes Creative Mode an addition rather than a
     change.
+
+    The two answers happen to be the same number while :data:`DEFAULT` is 1. The
+    distinction is kept anyway: it is about what the caller said, not about where
+    the slider happens to open, and it has to still be right if the install
+    default moves.
     """
     return LEGACY if value is None else clamp(value)
 

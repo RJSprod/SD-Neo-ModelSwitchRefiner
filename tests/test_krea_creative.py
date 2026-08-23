@@ -1726,10 +1726,21 @@ class TestTheFactoryConfiguration:
         assert not lib.defaults.get("fixed_values")
         assert not lib.defaults.get("excluded_values")
 
-    def test_the_creativity_position_is_still_five(self, store):
-        """Neutral means no *decisions*, not a feature turned down: somebody who
-        adds one direction should get it at the middle of the scale."""
-        assert mc_creative_krea.settings()["creativity"] == 5
+    def test_the_creativity_position_opens_at_legacy(self, store):
+        """Turning Creative Mode on changes nothing on its own: 1 is the legacy
+        position, so the difference starts when the slider moves."""
+        assert mc_creative_krea.settings()["creativity"] == variation.LEGACY
+        assert variation.DEFAULT == variation.LEGACY
+
+    def test_the_three_copies_of_the_opening_position_agree(self, lib):
+        """The number lives in three places -- the preferences fallback, the
+        package's defaults.json and variation.DEFAULT -- and only one of them
+        reaches a fresh panel. A drift would move the slider without anybody
+        editing the file they thought held it."""
+        import mc_llm_state
+
+        assert mc_llm_state.DEFAULTS["krea_creativity"] == variation.DEFAULT
+        assert lib.defaults["creativity"] == variation.DEFAULT
 
 
 # --------------------------------------------------------------------------- #
@@ -1866,6 +1877,21 @@ class TestProfiles:
         assert set(values["axis_modes"]) == set(lib.axis_keys)
         assert set(values["axis_modes"].values()) == {director.VARY}
         assert values["fixed_values"] == {} and values["excluded_values"] == {}
+
+    def test_the_built_in_that_varies_everything_carries_a_position_that_varies(
+            self, data, store, lib):
+        """Factory opens at Creativity 1, where no Vary axis activates. Inherited,
+        it would make the one profile that exists to vary the one profile that
+        varies nothing -- and pressing it would drop a user who had already
+        raised the slider back to 1."""
+        values = profiles.get(profiles.SPREAD)
+
+        assert values["creativity"] > variation.LEGACY
+        assert profiles.get(profiles.FACTORY)["creativity"] == variation.DEFAULT
+
+        recipe = director.roll("car", values["creativity"], 7,
+                               mc_creative_krea.axis_settings(values))
+        assert recipe.items != ()
 
     def test_neither_built_in_can_be_deleted_or_overwritten(self, data, store):
         for name in profiles.BUILT_IN:
@@ -2144,6 +2170,7 @@ class TestTheCompactPanel:
         somebody makes on this panel, so the panel is where the number belongs
         -- the progress bar is the first place they see it and the last place
         they can act on it."""
+        mc_creative_krea.remember(**{mc_creative_krea.CREATIVITY: 8})
         panel = self.panel(built)
         _fire(built, panel.add, "medium")
         updates = self.rendered(built, _fire(built, panel.add, "lighting"))
@@ -2151,6 +2178,19 @@ class TestTheCompactPanel:
 
         assert "characters of brief" in said
         assert "of reading" in said
+
+    def test_directions_below_the_opening_position_are_named_as_such(self, built, lib):
+        """The panel opens at Creativity 1, where a Vary axis is not expressed,
+        so "No directions" is the one thing the line must not say to somebody
+        who has just added two."""
+        panel = self.panel(built)
+        _fire(built, panel.add, "medium")
+        updates = self.rendered(built, _fire(built, panel.add, "lighting"))
+        said = updates[id(panel.cost)]["value"]
+
+        assert "No directions" not in said
+        assert "2 directions" in said
+        assert "Creativity 1" in said
 
     def test_a_configuration_that_directs_nothing_costs_nothing(self, built):
         assert "No directions" in built.components["cost"].value
@@ -2257,9 +2297,22 @@ class TestTheCompactPanel:
         its own."""
         assert "No directions are set" in mc_creative_panel.active_note()
 
-        mc_creative_krea.remember(**{mc_creative_krea.AXIS_MODES:
+        mc_creative_krea.remember(**{mc_creative_krea.CREATIVITY: 6,
+                                     mc_creative_krea.AXIS_MODES:
                                      {lib.axis_keys[0]: director.VARY}})
         assert mc_creative_panel.active_note() == "1 direction set."
+
+    def test_the_status_line_names_a_position_that_expresses_nothing(self, built,
+                                                                     store, lib):
+        """A direction added at the opening position is set and silent, and the
+        drawer is shut: this line is the only place that can be said."""
+        mc_creative_krea.remember(**{mc_creative_krea.CREATIVITY: variation.LEGACY,
+                                     mc_creative_krea.AXIS_MODES:
+                                     {lib.axis_keys[0]: director.VARY}})
+        said = mc_creative_panel.active_note()
+
+        assert "1 direction set" in said
+        assert "Creativity 1" in said and "2 or above" in said
 
     def test_the_cost_line_names_the_writing_as_well_as_the_reading(self, built,
                                                                     store, lib,

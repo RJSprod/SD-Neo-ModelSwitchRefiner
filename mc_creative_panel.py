@@ -150,12 +150,12 @@ def brief_cost(stored=None) -> tuple[int, float]:
     has been timed. Both numbers are honest about being estimates: which axes
     activate is a draw, so the length varies roll to roll around this.
     """
-    from prompt_master.krea import director
+    from prompt_master.krea import director, variation
 
     stored = stored or mc_creative_krea.settings()
     try:
         settings = mc_creative_krea.axis_settings(stored)
-        creativity = int(stored.get("creativity", 5))
+        creativity = variation.clamp(stored.get("creativity", variation.DEFAULT))
         lengths = [len(director.roll(COST_SOURCE, creativity, seed, settings).brief)
                    for seed in range(1, COST_SAMPLES + 1)]
     except Exception:
@@ -220,8 +220,14 @@ def active_note(stored=None) -> str:
     screen while the drawer is shut. "Creative Mode is on" is true and, on a
     fresh configuration, deeply misleading on its own: on and directing nothing
     looks exactly like on and directing everything until the image arrives.
+
+    Which is why the Creativity position is named here too. The panel opens at 1,
+    where no varying axis is expressed, and "2 directions set." is the same kind
+    of half-truth over that as "Creative Mode is on" was over an empty
+    configuration -- with the drawer shut this line is the only place it can be
+    said.
     """
-    from prompt_master.krea import director
+    from prompt_master.krea import director, variation
 
     stored = stored or mc_creative_krea.settings()
     modes = stored.get("axis_modes") or {}
@@ -231,6 +237,11 @@ def active_note(stored=None) -> str:
         return ("No directions are set, so nothing is being art-directed — open "
                 "Creative Controls to add one.")
     counted = f"{len(active)} direction{'' if len(active) == 1 else 's'}"
+    varying = [key for key in active if modes.get(key) == director.VARY]
+    creativity = variation.clamp(stored.get("creativity", variation.DEFAULT))
+    if varying and creativity <= variation.LEGACY:
+        return (f"{counted} set, but Creativity {creativity} expresses none of the "
+                "varying ones — raise it to 2 or above.")
     return f"{counted} set."
 
 
@@ -242,13 +253,31 @@ def describe_cost(stored=None) -> str:
     user who wants the image to start sooner has three levers -- fewer
     directions, a lower Creativity, and where the language model runs -- and two
     of the three are on this panel.
+
+    Zero has the same two causes here as it does in
+    :func:`describe_creativity`, and for the same reason they are named
+    separately: the panel opens at Creativity 1, so "you have added directions
+    and they are below the position that expresses them" is the state a new user
+    is most likely to be in, and "No directions" is a flatly wrong thing to tell
+    somebody who has just added two.
     """
+    from prompt_master.krea import director, variation
+
+    stored = stored or mc_creative_krea.settings()
     characters, seconds = brief_cost(stored)
     writing = _writing_seconds()
     where = _placement_note()
     after = (f", then about {writing:.0f}s of writing" if writing else "")
 
     if not characters:
+        modes = stored.get("axis_modes") or {}
+        varying = [key for key, mode in modes.items() if mode == director.VARY]
+        creativity = variation.clamp(stored.get("creativity", variation.DEFAULT))
+        if varying and creativity <= variation.LEGACY:
+            counted = f"{len(varying)} direction{'' if len(varying) == 1 else 's'}"
+            return (f"*Creativity {creativity} expresses nothing, so your {counted} "
+                    f"cost nothing to read{after}{where}. Raise Creativity to 2 or "
+                    "above to spend them.*")
         return (f"*No directions: nothing extra for the model to read{after}"
                 f"{where}. A press is the plain Krea expansion of what you typed.*")
 

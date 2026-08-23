@@ -133,8 +133,18 @@ DEFAULTS: dict = {
     # Every default here is a fallback for a headless read; the authoritative
     # ones are the creativity package's own defaults.json, which
     # mc_creative_krea.settings() layers over these.
+    #
+    # "Layers over" is the wrong way round for anything this file names,
+    # though: preferences() fills every key below in, so a stored value always
+    # exists and the package's defaults.json only ever answers for a key this
+    # file has never heard of. The Creativity position is in both, so the number
+    # that actually reaches a fresh panel is the one here -- it has to stay
+    # equal to defaults.json's "creativity" and to variation.DEFAULT, and
+    # tests/test_krea_creative.py asserts all three agree rather than trusting
+    # the comment. It is 1 because 1 is the legacy position: switching Creative
+    # Mode on arms the controls without, on its own, changing what comes out.
     "krea_creative_enabled": False,
-    "krea_creativity": 5,
+    "krea_creativity": 1,
     "krea_creative_seed": -1,
     "krea_creative_anti_repetition": True,
     "krea_creative_axis_modes": {},

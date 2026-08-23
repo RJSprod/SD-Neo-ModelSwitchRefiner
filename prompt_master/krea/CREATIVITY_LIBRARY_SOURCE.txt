@@ -34,7 +34,7 @@ baaa36878d545cdc70d893b68657d31aca1381634871fc778101cb21e3f78fb9  axes/style.jso
 38a6748da11a20003721d2d3af68695dbff8ec31615844db6da02915e5ddf07f  axes/viewpoint.json
 6ef052c945b667404ea50fa2c65fddb80aa33b3dd106c04f1a786db0b840e5e6  compatibility.json
 e10fcd4f7120042c2cb2e5ba3d2863353a55e1ffaaa2ddc5f67b5d2a3bccb2b1  creativity_policy.json
-1eea9429f4b070ae85341372d06292651a9d7105feabce6638a34bea33c32fee  defaults.json  (edited; as delivered: f4d95add5800461133f3460e83c5ab4c475b2f91a30fbf2f6da8605eab0b73b0)
+41ac54f0ea5e67e83b410b433e13d215fea672e52afb0bd6e99389392fa884c4  defaults.json  (edited; as delivered: f4d95add5800461133f3460e83c5ab4c475b2f91a30fbf2f6da8605eab0b73b0)
 b1a1c6eba6ee53da8d98aba7b64faa25ee87a02691b1f03b55ceef2f2492c68a  developer_pseudocode.txt
 fdd4d4069a7c3831f9920fd0703c05e62d16c887bac5ca4dbbe5ab3ea3ac93f0  examples/car_creativity_10.json
 abbbb2b4cfd0aec4c4fd4813aec92e4fb5255c370d8d34ccc789b9f8be7a346b  examples/car_creativity_2.json
@@ -54,12 +54,19 @@ rows. The fresh state is now every axis Natural, no Fixed values and no
 exclusions: Creative Mode influences nothing until somebody adds a direction, and
 what it influences is exactly the list of directions they added.
 
-Nothing else in the package moved. The Vary-by-default choice is a *preference*
-about how the feature should open, which is what a defaults file is for, and it
-is the one file in here that describes this installation rather than the
-vocabulary. `excluded_values` is added to it for the same reason the panel has
-exclusions at all — see §3 of the Creative Mode rebuild spec — and an absent key
-still reads as "no exclusions".
+`creativity` is edited in the same file and for the same reason: the package
+opens the slider at 5, and this installation opens it at 1. 1 is the legacy
+position — no axis activates, nothing is appended to the user turn — so turning
+Creative Mode on changes nothing on its own, and every change after that is one
+the user made. `prompt_master/krea/variation.py` carries the same number as
+`DEFAULT`, for the case where this file cannot be read.
+
+Nothing else in the package moved. The Vary-by-default choice and the opening
+Creativity position are both *preferences* about how the feature should open,
+which is what a defaults file is for, and it is the one file in here that
+describes this installation rather than the vocabulary. `excluded_values` is
+added to it for the same reason the panel has exclusions at all — see §3 of the
+Creative Mode rebuild spec — and an absent key still reads as "no exclusions".
 
 # why it is vendored rather than fetched
 

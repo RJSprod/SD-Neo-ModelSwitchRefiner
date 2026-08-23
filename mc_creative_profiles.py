@@ -76,6 +76,22 @@ It is not the default and should not be: this is a configuration to *choose*,
 and choosing it is exactly what makes it different from the old behaviour.
 """
 
+SPREAD_CREATIVITY = 5
+"""The position :data:`SPREAD` carries, and the one place that is not the install
+default.
+
+Everything else about this profile comes from Factory, which opens at Creativity
+1 -- the legacy position, where no Vary axis activates at all. Inheriting that
+would make the one profile whose entire purpose is variation the one profile that
+varies nothing, and would drop a user who had already raised the slider back down
+to 1 for pressing it. So the position travels with the axes: turning ten axes on
+is the choice, and 5 is what makes it one.
+
+The middle of the scale rather than the top, because this is the configuration
+people had before the panel was rebuilt, not a maximum -- 10 is a different
+request and the slider is right there.
+"""
+
 BUILT_IN = (FACTORY, SPREAD)
 """The profiles that are computed rather than stored. Never deletable."""
 
@@ -219,11 +235,12 @@ def factory() -> dict:
 
 
 def spread() -> dict:
-    """Every axis varying, at the package's own Creativity position."""
+    """Every axis varying, at a Creativity position that expresses them."""
     from prompt_master.krea import director
 
     values = factory()
     values["axis_modes"] = {key: director.VARY for key in values["axis_modes"]}
+    values["creativity"] = SPREAD_CREATIVITY
     return values
 
 

@@ -1234,13 +1234,19 @@ made the image late and a closed one meant it never came.)
 The checkbox is under the txt2img prompt, and off on a fresh install:
 
 ```
-[ Creative Mode ]   Creativity [0----5----10]   ▸ Creative Controls
+[ Creative Mode ]   Creativity [-1--------10]   ▸ Creative Controls
 ```
 
 That is the whole surface until you open the drawer. Forge still owns the image
 entirely — the checkpoint, the sampler and scheduler, the size, Steps, the CFG,
 the image seed, the extra networks, every other extension's hooks, the saving,
 the PNG metadata and the gallery.
+
+**Ticking the box, on its own, changes nothing.** The slider opens at 1, which is
+the legacy position — no axis activates and nothing is added to what the writer
+is asked, so the prompt you get is the prompt you would have got with the box
+unticked. Adding a direction and raising Creativity is what starts changing it,
+in that order.
 
 The same controls are in **LLM Studio → Krea 2**, sharing one settings file, one
 Director and one panel, where they write a prompt and generate no image.
@@ -1384,9 +1390,12 @@ the neutral configuration: every axis Natural, nothing pinned, nothing excluded.
 **Everything varies** is its opposite — all ten axes on Vary — and it is there
 because the creativity package shipped nine of its ten axes that way, so anybody
 who used Creative Mode before the panel was rebuilt had been running something
-close to it without choosing it. One click puts that back. If the
-default you chose has been deleted or the store is damaged, the panel opens on
-Factory and says so rather than refusing to build.
+close to it without choosing it. One click puts that back. It is the one profile
+that carries a Creativity position of its own — 5, the middle of the scale —
+because Factory's 1 expresses no varying axis at all, and a profile that turned
+ten axes on and then said nothing would be a strange thing to hand somebody. If
+the default you chose has been deleted or the store is damaged, the panel opens
+on Factory and says so rather than refusing to build.
 
 Opening the panel *shows* a profile; it never applies one. The dropdown names
 the profile your current settings were last loaded from, and the settings
@@ -1436,11 +1445,13 @@ Sampling climbs gently alongside — 0.60/0.90 at 1 up to 0.96/0.98 at 10 — be
 the *brief* is what makes 10 different from 2. A temperature high enough to
 create that difference on its own produces prompts with broken grammar in them.
 
-**Creativity 1 is a compatibility guarantee.** At 1 the writer gets temperature
-0.6, top_p 0.9, no extra sampler fields, and a user turn with nothing added to
-it: byte-identical to the request made before any of this existed. 0 is the
-deterministic end — temperature 0, top_p 1 — and describes intent, not a promise
-of identical bytes across llama.cpp builds, model revisions or kernels.
+**Creativity 1 is a compatibility guarantee, and where the slider opens.** At 1
+the writer gets temperature 0.6, top_p 0.9, no extra sampler fields, and a user
+turn with nothing added to it: byte-identical to the request made before any of
+this existed. That is the point of opening there — turning Creative Mode on is
+not, by itself, a change to your prompts. 0 is the deterministic end —
+temperature 0, top_p 1 — and describes intent, not a promise of identical bytes
+across llama.cpp builds, model revisions or kernels.
 
 At 10, a bare `car` reaches impasto oil painting, children's-book illustration,
 anime keyframes, direct-flash editorial photography, risograph, gouache,
