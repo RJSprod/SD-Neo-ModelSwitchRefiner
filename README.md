@@ -1629,22 +1629,44 @@ and they become regional conditioning. The panel swaps its own controls to match
 and says which backend it is showing.
 
 ```
-[x] Spatial Layout                                        [Edit Layout…]
+[x] Spatial Layout      Composition: (o) Smart Compose      [Edit Layout…]
+                                     ( ) Direct — prompt as typed
+
+    Backend: (o) Auto — follow the loaded checkpoint
+             ( ) Krea 2 — structured BBOX prompt
+             ( ) FLUX.2 Klein 9B — regional conditioning
 
     Spatial mode:  (o) Auto
                    ( ) Regional Generate
-                   ( ) Regional Img2Img       — needs an ImageStitch image
+                   ( ) Regional Img2Img       — not implemented yet
                    ( ) Reference + Regions    — needs an ImageStitch image
-                   ( ) Strict Regional Edit   — needs an ImageStitch image
+                   ( ) Strict Regional Edit   — not implemented yet
 
     Backend: Flux.2 Klein 9B. Source: No active ImageStitch image.
     Auto will use Regional Generate.
 ```
 
-The difference that matters: **Klein leaves your prompt exactly as you typed
-it.** No language model runs, nothing is rewritten, and the boxes never appear
-in the prompt as text. Each region's own words are conditioned on the part of
-the frame its rectangle covers, beside your global prompt rather than inside it.
+Two radios, two questions, and they are independent. **Composition** asks whether
+a language model reconciles the *text* with the boxes — both backends ask it.
+**Spatial mode** asks what the *source image* is and what happens to it, which
+only Klein has.
+
+**Backend** is neither: it is you telling the panel which checkpoint you have.
+Auto follows the loaded checkpoint and is right whenever the host announces its
+model selection in a way this extension can read. Forge Neo builds its model
+chooser in `modules_forge.main_entry` rather than as a quicksetting, so on some
+builds the panel keeps describing the checkpoint that is still resident and the
+right options appear only after a generation has loaded the new one. Pinning the
+backend fixes the display immediately.
+
+It fixes the *display* and nothing else. Pinning Klein does not make a Krea
+checkpoint take the Klein path — the generation still asks the engine that
+actually loaded, and says so if the two disagree. An override that could reroute
+a generation would be a worse bug than the one it fixes.
+
+The difference that matters: **the boxes never appear in the prompt as text.**
+Each region's own words are conditioned on the part of the frame its rectangle
+covers, beside your global prompt rather than inside it.
 
 ```
 global prompt:   photorealistic modern living room
@@ -1657,6 +1679,37 @@ region:          tall brass floor lamp        bbox [680, 150, 910, 820]
 It is still guidance rather than geometry. A regional condition biases *where* a
 concept appears; it does not confine it to the rectangle, and nothing here
 promises exact bbox occupancy.
+
+##### Smart Compose, and why it matters more here than on Krea
+
+Klein reads the global prompt as written. So if you type *"a living room with a
+tall brass floor lamp on the left"* and then draw the lamp on the right, you have
+said two things: the prompt asks for a lamp, and the regional condition asks for
+a lamp somewhere else. What comes back is usually two lamps — and that is not the
+conditioning failing, it is your prompt competing with it.
+
+| Mode | What happens | Cost |
+| --- | --- | --- |
+| **Smart Compose** | a short language-model pass rewrites your prompt so it stops arguing with the boxes — it drops "on the left" when your box is on the right, and stops describing subjects the layout already places | one extra request per generation |
+| **Direct** | your prompt is used exactly as typed | nothing extra |
+
+It is the same Spatial Composer pass Krea 2 uses, and sharing it is deliberate:
+its instruction never mentions Krea, it is forbidden from emitting structure, and
+its whole job is "rewrite this scene so it stops arguing with these boxes" —
+which is as true for Klein as for Krea. What is *not* shared is the Krea
+compositor, the deterministic step that builds coordinates into a structured JSON
+prompt. That step never runs for Klein and would be meaningless if it did.
+
+The one difference is where the result goes. Krea puts the composed scene and
+background into two fields of a document; Klein has one prompt, so the two are
+folded into it. Region prompts are never shown to the pass in their raw form and
+`[[literal commands]]` never reach it at all — it is a copy-editor, and a
+reference instruction paraphrased into prose about a shirt is an image-pipeline
+instruction turned into scenery.
+
+If it fails, times out or is interrupted, the generation falls back to your
+prompt as typed and finishes. A copy-editor being unavailable is not a reason to
+refuse you a picture.
 
 ##### ImageStitch is the only source image
 
@@ -1702,13 +1755,22 @@ change what a mode means.
 | **Regional Img2Img** | ImageStitch image 1 becomes the starting latent; denoise controls how much the whole image may move |
 | **Strict Regional Edit** | edits image 1 only inside the union of the regions and preserves the source outside it |
 
-Regional Img2Img and Strict Regional Edit are **selectable but not yet
-implemented** in this build: they appear in the panel, the availability rules and
-the mode resolver already treat them correctly, and the sampling behaviour behind
-them lands with the source-preserving work. Strict Regional Edit in particular
-does not ship until it can demonstrably preserve pixels outside its mask — a
-"strict" edit that quietly moved the rest of the picture would be the wrong thing
-wearing the right name.
+Regional Img2Img and Strict Regional Edit are **not implemented yet**, and this
+build refuses them rather than running them. They appear in the panel marked as
+such, the availability rules and the mode resolver already treat them correctly,
+and the sampling behaviour behind them lands with the source-preserving work.
+
+Refused and not quietly run, because the rule that stops an explicit mode being
+silently reinterpreted does not care *why* it cannot run. Asking for a strict
+edit and getting an ordinary generation is the same experience whether the reason
+is a missing image or a missing implementation: a different picture, and no
+error. Strict Regional Edit in particular does not ship until it can demonstrably
+preserve pixels outside its mask — a "strict" edit that quietly moved the rest of
+the picture would be the wrong thing wearing the right name.
+
+**Creative Mode does not run on a Klein checkpoint.** It writes Krea 2 prompts,
+and the checkpoint guard says so; a Klein spatial generation with Creative Mode
+left on records the complaint on the result and generates from your prompt.
 
 ##### What a Klein spatial image records
 
@@ -1718,11 +1780,16 @@ record can never be read as a Klein one:
 ```
 Klein Spatial Mode: Auto
 Klein Spatial Resolved Mode: Reference + Regions
+Klein Spatial Compose Mode: smart
+Klein Spatial Composer Seed: 1473536467
 Klein Spatial Source: ImageStitch
 Klein Spatial Source Count: 2
 Klein Spatial Regional Backend: host-area-conditioning
 Klein Spatial Layout: {"version":1,...}
 ```
+
+The composed prompt itself is not recorded and does not need to be: unlike
+Krea's, it *is* the image's own `Prompt:` line.
 
 The recorded layout matters more here than it does for Krea. A Krea spatial
 image's `Prompt:` line *is* its composition, so pasting the PNG back reproduces

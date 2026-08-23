@@ -33,6 +33,7 @@ import types
 import pytest
 
 import mc_arch
+import mc_creative_krea
 import mc_infotext
 import mc_references
 import mc_spatial
@@ -58,18 +59,29 @@ class FakeStitch:
 
 
 class FakeEngine:
-    """A reference-capable engine, with an encoder that answers predictably."""
+    """A reference-capable engine, with an encoder that answers predictably.
+
+    ``get_learned_conditioning`` reads ``is_negative_prompt`` off what it is
+    given *before* it reads any text, exactly as Forge Neo's Flux.2 engine does
+    on its first line. That is not decoration: passing a bare list of strings is
+    the mistake this fake exists to catch, and an encoder that accepted one would
+    have let it through to a user's console.
+    """
 
     def __init__(self, config=None):
         self.ref_latents = []
         self.ini_latent = None
         self.encoded = []
+        self.containers = []
         if config is not None:
             self.model_config = config
 
-    def get_learned_conditioning(self, prompts):
-        self.encoded.extend(prompts)
-        return [[f"cond({prompts[0]})", {}]]
+    def get_learned_conditioning(self, prompt):
+        if prompt.is_negative_prompt:
+            raise AssertionError("a region is positive conditioning (§32)")
+        self.containers.append(prompt)
+        self.encoded.extend(prompt)
+        return [[f"cond({prompt[0]})", {}]]
 
 
 def make_image(colour):
@@ -167,10 +179,16 @@ class TestWhichModesAreOffered:
 
         assert offered == list(generic.MODES)
         for label, value in choices:
-            if value in generic.IMAGE_REQUIRED_MODES:
+            if not generic.is_implemented(value):
+                # Said first, because it is the reason a source cannot fix. A
+                # mode marked only "needs an image" would send somebody to add
+                # one and then be refused anyway.
+                assert "not implemented yet" in label
+            elif value in generic.IMAGE_REQUIRED_MODES:
                 assert "ImageStitch" in label
             else:
                 assert "ImageStitch" not in label
+                assert "not implemented" not in label
 
 
 class TestSourceA_NoImageStitchScriptAtAll:
@@ -332,6 +350,52 @@ class TestSourceF_AnExplicitModeLosesItsSource:
 
         # And the prompt was not touched on the way out.
         assert p.prompt == "a living room"
+
+
+class TestModesWithNothingBehindThem:
+    """§10's rule does not care *why* an explicit mode cannot run.
+
+    Regional Img2Img and Strict Regional Edit are offered, resolved and validated
+    and then have no sampling behaviour. Running one as an ordinary generation is
+    the same failure as running a strict edit with no source: the user asked for
+    their picture preserved and got a different one, with nothing anywhere saying
+    so. Both are refused, with sentences that name different remedies.
+    """
+
+    @pytest.mark.parametrize("mode", (generic.REGIONAL_IMG2IMG,
+                                      generic.STRICT_REGIONAL_EDIT))
+    def test_an_unimplemented_mode_is_refused_rather_than_run(self, host,
+                                                              monkeypatch, store,
+                                                              mode):
+        import model_chain_krea_creative as creative_script
+
+        klein(monkeypatch)
+        mc_spatial.remember(**{mc_spatial.ENABLED: True, mc_spatial.LAYOUT: layout(),
+                               mc_spatial.KLEIN_MODE: mode})
+        script = creative_script.ScriptKreaCreative()
+        p = make_p(IMAGES[:1])
+        p.prompt = "a living room"
+        p.negative_prompt = ""
+
+        with pytest.raises(RuntimeError, match="not implemented"):
+            script.before_process(p, False)
+
+        assert p.prompt == "a living room"
+
+    def test_the_two_refusals_name_different_remedies(self):
+        """One is answered by adding an image, the other by a later build."""
+        missing = str(generic.ModeUnavailable(generic.STRICT_REGIONAL_EDIT))
+        absent = str(generic.ModeNotImplemented(generic.STRICT_REGIONAL_EDIT))
+
+        assert "ImageStitch" in missing and "not implemented" not in missing
+        assert "not implemented" in absent and "ImageStitch" not in absent
+
+    def test_the_implemented_set_is_what_the_panel_and_the_hook_agree_on(self):
+        assert generic.IMPLEMENTED_MODES == (generic.AUTO,
+                                             generic.REGIONAL_GENERATE,
+                                             generic.REFERENCE_REGIONS)
+        for mode in generic.SOURCE_PRESERVING_MODES:
+            assert not generic.is_implemented(mode)
 
 
 class TestSourceG_RegionalGenerateIgnoresAFullGallery:
@@ -547,6 +611,95 @@ class TestTheCoordinateCompiler:
 
         with pytest.raises(ValueError, match="shape"):
             mc_spatial_klein.compile_regions(request)
+
+
+# --------------------------------------------------------------------------- #
+# Encoding a region, the way the host's engines are actually called
+# --------------------------------------------------------------------------- #
+
+
+class TestEncodingARegionPrompt:
+    """The calling convention, pinned. It is not "a list of strings".
+
+    A diffusion engine's ``get_learned_conditioning`` takes the host's own prompt
+    container and reads attributes off it before it reads any text -- Flux.2's
+    asks ``prompt.is_negative_prompt`` on its first line. Passing a bare list
+    raised there, every region was dropped with a warning, and the generation
+    carried on looking perfectly healthy: three regions drawn, zero attached, an
+    image that was simply the global prompt.
+
+    That is exactly the shape of failure this feature is arranged against, so the
+    convention gets its own tests rather than being left implied by one that
+    happens to exercise it.
+    """
+
+    def test_the_engine_is_given_a_prompt_container_and_not_a_list(self, host,
+                                                                   monkeypatch):
+        klein(monkeypatch)
+        engine = FakeEngine()
+        request = generic.request_from(layout(), enabled=True)
+        conditioning = [["the global prompt", {}]]
+
+        with mc_spatial_klein.regional_conditioning(
+                request, conditioning, grid=(48, 64),
+                backend=mc_spatial_klein.AreaConditioningBackend(), model=engine):
+            pass
+
+        assert engine.containers, "the region prompt never reached the encoder"
+        assert engine.containers[0].is_negative_prompt is False
+        assert list(engine.containers[0]) == ["tall brass floor lamp"]
+
+    def test_the_generation_geometry_travels_with_it(self, host, monkeypatch):
+        """A region encoded at no particular size, beside a global prompt encoded
+        at 768x1024, is two conditionings that need not agree about anything."""
+        klein(monkeypatch)
+        engine = FakeEngine()
+        p = make_p((), width=768, height=1024)
+        p.distilled_cfg_scale = 3.5
+        request = generic.request_from(layout(), enabled=True)
+
+        with mc_spatial_klein.regional_conditioning(
+                request, [["the global prompt", {}]], grid=(48, 64),
+                backend=mc_spatial_klein.AreaConditioningBackend(), model=engine,
+                p=p):
+            pass
+
+        container = engine.containers[0]
+        assert (container.width, container.height) == (768, 1024)
+        assert container.distilled_cfg_scale == 3.5
+
+    def test_the_regions_actually_reach_the_conditioning(self, host, monkeypatch):
+        """The observable half. "attached 0 of 3" is what the bug looked like."""
+        klein(monkeypatch)
+        engine = FakeEngine()
+        request = generic.request_from(layout([REGION, SECOND]), enabled=True)
+        conditioning = [["the global prompt", {}]]
+
+        with mc_spatial_klein.regional_conditioning(
+                request, conditioning, grid=(48, 64),
+                backend=mc_spatial_klein.AreaConditioningBackend(),
+                model=engine) as compiled:
+            assert len(conditioning) == 3
+            assert len(compiled) == 2
+            areas = [entry[1]["area"] for entry in conditioning[1:]]
+            assert all(isinstance(area, tuple) and len(area) == 4 for area in areas)
+
+    def test_a_host_without_its_own_container_still_encodes(self, host, monkeypatch):
+        """The stand-in carries the same three attributes, for the same reason."""
+        klein(monkeypatch)
+        engine = FakeEngine()
+        import modules
+
+        monkeypatch.delattr(modules.prompt_parser, "SdConditioning")
+        request = generic.request_from(layout(), enabled=True)
+
+        with mc_spatial_klein.regional_conditioning(
+                request, [["the global prompt", {}]], grid=(48, 64),
+                backend=mc_spatial_klein.AreaConditioningBackend(), model=engine):
+            pass
+
+        assert engine.containers[0].is_negative_prompt is False
+        assert list(engine.containers[0]) == ["tall brass floor lamp"]
 
 
 # --------------------------------------------------------------------------- #
@@ -826,6 +979,249 @@ class TestZeroRegions:
 
         assert request.resolved_mode == generic.REFERENCE_REGIONS
         assert request.references == IMAGES[:2]
+
+
+# --------------------------------------------------------------------------- #
+# Smart Compose on Klein
+# --------------------------------------------------------------------------- #
+
+
+class Composed:
+    """What the Spatial Composer hands back, as the hook reads it."""
+
+    def __init__(self, scene="", background="", failed="", seed=7):
+        self.scene = scene
+        self.background = background
+        self.failed = failed
+        self.seed = seed
+
+    @property
+    def ran(self):
+        return not self.failed
+
+
+class TestSmartComposeOnKlein:
+    """The other half of Spatial Layout, and the half conditioning cannot supply.
+
+    Klein reads the global prompt as written. So a prompt that already describes
+    what a region describes asks for the subject twice, in two places, and gets
+    it -- which looks like the regional conditioning failing and is the prompt
+    competing with it. §31 states the rule; Direct leaves following it to the
+    user and Smart has a language model do it.
+    """
+
+    @pytest.fixture
+    def composer(self, monkeypatch):
+        """Capture what the Composer was asked, and answer with a fixed scene."""
+        calls = []
+
+        def compose_scene(prompt, layout, ratio="", seed=0, reserve=0, task_id=""):
+            calls.append({"prompt": prompt, "layout": layout, "ratio": ratio,
+                          "seed": seed})
+            return Composed(scene="a living room, daylight")
+
+        monkeypatch.setattr(mc_spatial_klein, "compose_scene", compose_scene)
+        monkeypatch.setattr(mc_creative_krea, "hand_back_vram", lambda: 0)
+        return calls
+
+    def run(self, monkeypatch, compose="smart", prompt="a living room with a lamp"):
+        import model_chain_krea_creative as creative_script
+
+        klein(monkeypatch)
+        mc_spatial.remember(**{mc_spatial.ENABLED: True, mc_spatial.LAYOUT: layout(),
+                               mc_spatial.COMPOSE_MODE: compose})
+        script = creative_script.ScriptKreaCreative()
+        p = make_p(())
+        p.prompt = prompt
+        p.negative_prompt = ""
+        script.before_process(p, False)
+        return script, p
+
+    def test_smart_reconciles_the_prompt_with_the_layout(self, host, monkeypatch,
+                                                         store, composer):
+        _script, p = self.run(monkeypatch)
+
+        assert len(composer) == 1
+        assert composer[0]["prompt"] == "a living room with a lamp"
+        assert p.prompt == "a living room, daylight"
+
+    def test_the_composer_is_shown_the_boxes_it_is_reconciling_against(
+            self, host, monkeypatch, store, composer):
+        self.run(monkeypatch)
+
+        given = composer[0]["layout"]
+        assert [region.identifier for region in given.ordered] == ["lamp"]
+
+    def test_direct_makes_no_request_at_all(self, host, monkeypatch, store,
+                                            composer):
+        _script, p = self.run(monkeypatch, compose="direct")
+
+        assert composer == []
+        assert p.prompt == "a living room with a lamp"
+
+    def test_smart_with_no_regions_makes_no_request_either(self, host, monkeypatch,
+                                                           store, composer):
+        """§33. Spatial on with nothing drawn is valid, and there is nothing to
+        reconcile a prompt *with*."""
+        import model_chain_krea_creative as creative_script
+
+        klein(monkeypatch)
+        mc_spatial.remember(**{mc_spatial.ENABLED: True,
+                               mc_spatial.LAYOUT: layout(regions=()),
+                               mc_spatial.COMPOSE_MODE: "smart"})
+        script = creative_script.ScriptKreaCreative()
+        p = make_p(())
+        p.prompt = "a living room"
+        p.negative_prompt = ""
+        script.before_process(p, False)
+
+        assert composer == []
+        assert p.prompt == "a living room"
+
+    def test_a_composer_that_did_not_run_falls_back_to_the_prompt_as_typed(
+            self, host, monkeypatch, store):
+        """A copy-editor being unavailable is not a reason to refuse a picture."""
+        monkeypatch.setattr(mc_spatial_klein, "compose_scene",
+                            lambda *a, **k: Composed(failed="the pass was stopped"))
+        monkeypatch.setattr(mc_creative_krea, "hand_back_vram", lambda: 0)
+        script, p = self.run(monkeypatch)
+
+        assert p.prompt == "a living room with a lamp"
+        assert "did not run" in script._klein_note
+
+    def test_the_composer_never_sees_a_literal_command(self, host, monkeypatch,
+                                                       store, composer):
+        """It is a copy-editor. ``[[her shirt from image 1]]`` paraphrased into
+        prose about a shirt is an image-pipeline instruction turned into
+        scenery."""
+        _script, p = self.run(
+            monkeypatch, prompt="a living room [[<lora:klein_detail:1>]]")
+
+        assert "[[" not in composer[0]["prompt"]
+        assert "lora" not in composer[0]["prompt"]
+        # ...and it is restored around whatever came back.
+        assert "<lora:klein_detail:1>" in p.prompt
+        assert "a living room, daylight" in p.prompt
+
+    def test_the_background_is_folded_into_the_one_prompt_klein_reads(self):
+        """Krea has two fields for these. Klein has one prompt."""
+        composed = Composed(scene="a living room", background="oak floor, tall windows")
+
+        assert mc_spatial_klein.composed_prompt(composed, "fallback") == \
+            "a living room, oak floor, tall windows"
+
+    def test_a_background_already_inside_the_scene_is_not_repeated(self):
+        composed = Composed(scene="a living room with an oak floor",
+                            background="oak floor")
+
+        assert mc_spatial_klein.composed_prompt(composed, "fallback") == \
+            "a living room with an oak floor"
+
+    def test_a_pass_that_did_not_run_returns_the_fallback(self):
+        assert mc_spatial_klein.composed_prompt(None, "as typed") == "as typed"
+        assert mc_spatial_klein.composed_prompt(
+            Composed(failed="stopped"), "as typed") == "as typed"
+
+    def test_it_records_which_compose_mode_ran(self, host, monkeypatch, store,
+                                               composer):
+        _script, p = self.run(monkeypatch)
+
+        assert p.extra_generation_params[mc_infotext.KLEIN_SPATIAL_COMPOSE_MODE] \
+            == "smart"
+        assert mc_infotext.KLEIN_SPATIAL_COMPOSER_SEED in p.extra_generation_params
+
+    def test_a_direct_generation_records_no_composer_keys(self, host, monkeypatch,
+                                                          store, composer):
+        _script, p = self.run(monkeypatch, compose="direct")
+
+        assert p.extra_generation_params[mc_infotext.KLEIN_SPATIAL_COMPOSE_MODE] \
+            == "direct"
+        assert mc_infotext.KLEIN_SPATIAL_COMPOSER_SEED not in p.extra_generation_params
+
+    def test_the_krea_composer_keys_are_never_written_by_a_klein_job(
+            self, host, monkeypatch, store, composer):
+        """§37. One instruction, two namespaces, and no image readable as both."""
+        _script, p = self.run(monkeypatch)
+
+        for key in mc_infotext.SPATIAL_KEYS:
+            assert key not in p.extra_generation_params
+
+
+# --------------------------------------------------------------------------- #
+# Telling the panel which checkpoint you have
+# --------------------------------------------------------------------------- #
+
+
+class TestTheBackendOverride:
+    """Detection has a blind spot in a live page, and this is the way out of it.
+
+    A checkpoint *selected* and not yet loaded is not something every host
+    announces in a way an extension can read -- Forge Neo builds its model
+    chooser in ``modules_forge.main_entry`` rather than as an A1111 quicksetting,
+    so the component this panel watches may simply not exist. The panel then
+    keeps describing the checkpoint that is still resident, and the right options
+    appear only after a generation has loaded the new one.
+    """
+
+    def test_auto_follows_the_checkpoint(self, host, monkeypatch, store):
+        import model_chain_krea_creative as creative_script
+
+        klein(monkeypatch)
+        assert creative_script._klein_visible(backend="auto") is True
+
+        monkeypatch.setattr(mc_arch, "detect_loaded_engine",
+                            lambda: mc_arch.by_key("krea2"))
+        monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name",
+                            lambda name: mc_arch.by_key("krea2"))
+        assert creative_script._klein_visible(backend="auto") is False
+
+    def test_pinning_klein_shows_the_klein_controls_on_any_checkpoint(
+            self, host, monkeypatch, store):
+        import model_chain_krea_creative as creative_script
+
+        monkeypatch.setattr(mc_arch, "detect_loaded_engine",
+                            lambda: mc_arch.by_key("krea2"))
+        monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name",
+                            lambda name: mc_arch.by_key("krea2"))
+
+        assert creative_script._klein_visible(backend="flux2_9b") is True
+        assert creative_script._klein_visible(backend="krea2") is False
+
+    def test_pinning_does_not_route_a_generation(self, host, monkeypatch, store):
+        """The override decides what the *panel shows* and nothing else.
+
+        An override that could make a Krea checkpoint take the Klein path would
+        be a worse bug than the one it fixes: the prompt would be left as typed
+        for a model that wanted a structured one, and the boxes would be attached
+        to conditioning the engine has no regional path for.
+        """
+        import model_chain_krea_creative as creative_script
+
+        monkeypatch.setattr(mc_arch, "detect_loaded_engine",
+                            lambda: mc_arch.by_key("krea2"))
+        monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name",
+                            lambda name: mc_arch.by_key("krea2"))
+        mc_spatial.remember(**{mc_spatial.ENABLED: True, mc_spatial.LAYOUT: layout(),
+                               mc_spatial.BACKEND: "flux2_9b"})
+        script = creative_script.ScriptKreaCreative()
+        p = make_p(())
+        p.prompt = "a living room"
+        p.negative_prompt = ""
+        script.before_process(p, False)
+
+        assert script._klein is None
+        assert p.prompt != "a living room"
+
+    def test_an_unknown_preference_falls_back_to_auto(self):
+        assert mc_spatial_klein.normalise_backend("nonsense") == \
+            mc_spatial_klein.BACKEND_AUTO
+        assert mc_spatial_klein.normalise_backend(None) == \
+            mc_spatial_klein.BACKEND_AUTO
+
+    def test_the_preference_survives_a_round_trip(self, host, store):
+        mc_spatial.remember(**{mc_spatial.BACKEND: "flux2_9b"})
+
+        assert mc_spatial.settings()["backend"] == "flux2_9b"
 
 
 # --------------------------------------------------------------------------- #

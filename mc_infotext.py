@@ -241,11 +241,30 @@ KLEIN_SPATIAL_SOURCE = "Klein Spatial Source"
 KLEIN_SPATIAL_SOURCE_COUNT = "Klein Spatial Source Count"
 KLEIN_SPATIAL_BACKEND = "Klein Spatial Regional Backend"
 KLEIN_SPATIAL_BACKEND_VERSION = "Klein Spatial Regional Backend Version"
+KLEIN_SPATIAL_COMPOSE_MODE = "Klein Spatial Compose Mode"
+KLEIN_SPATIAL_COMPOSER_SEED = "Klein Spatial Composer Seed"
+KLEIN_SPATIAL_COMPOSER_VERSION = "Klein Spatial Composer Instruction"
+"""What the Smart Compose pass did to the global prompt, if it ran.
+
+Its own three keys rather than Krea's, for the same reason the rest of this
+namespace is separate: the same Composer instruction runs for both backends and
+what it *produces* lands in two different places -- a field of a structured
+document for Krea, the whole prompt the model reads for Klein. An image that
+recorded ``Krea Spatial Composer Seed`` and was made by Klein would be readable
+and wrong.
+
+The composed prompt itself is not recorded, and does not need to be: unlike
+Krea's, it *is* the image's own ``Prompt:`` line. The seed and the instruction
+version are what make "why did the same layout compose differently today"
+answerable.
+"""
 
 KLEIN_SPATIAL_KEYS = (KLEIN_SPATIAL_MODE, KLEIN_SPATIAL_RESOLVED,
                       KLEIN_SPATIAL_VERSION, KLEIN_SPATIAL_LAYOUT,
                       KLEIN_SPATIAL_SOURCE, KLEIN_SPATIAL_SOURCE_COUNT,
-                      KLEIN_SPATIAL_BACKEND, KLEIN_SPATIAL_BACKEND_VERSION)
+                      KLEIN_SPATIAL_BACKEND, KLEIN_SPATIAL_BACKEND_VERSION,
+                      KLEIN_SPATIAL_COMPOSE_MODE, KLEIN_SPATIAL_COMPOSER_SEED,
+                      KLEIN_SPATIAL_COMPOSER_VERSION)
 
 _KLEIN_SPATIAL_NAMESPACE = """What a FLUX.2 Klein spatial generation records.
 
@@ -717,6 +736,7 @@ def creative_setup(params: dict):
         klein_source=str(params.get(KLEIN_SPATIAL_SOURCE) or ""),
         klein_source_count=_number(params.get(KLEIN_SPATIAL_SOURCE_COUNT)),
         klein_backend=str(params.get(KLEIN_SPATIAL_BACKEND) or ""),
+        klein_compose_mode=str(params.get(KLEIN_SPATIAL_COMPOSE_MODE) or ""),
     )
 
 

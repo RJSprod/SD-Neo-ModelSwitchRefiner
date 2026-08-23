@@ -78,6 +78,22 @@ things -- the panel's enabled states, the Auto resolver, the runtime validation,
 the tests and the diagnostics -- and five copies of a matrix is four too many.
 """
 
+IMPLEMENTED_MODES = (AUTO, REGIONAL_GENERATE, REFERENCE_REGIONS)
+"""The modes whose sampling behaviour this build actually implements.
+
+The other two are offered, resolved and validated correctly and then have
+nothing behind them. They are named here rather than quietly left out because
+half of the design intent's compatibility matrix is about them, and a mode that
+vanished would be indistinguishable from one that never existed.
+
+What is *not* acceptable is running one of them as an ordinary generation. §10's
+rule -- do not silently turn an explicit strict edit into a new txt2img -- says
+nothing about whether the reason is a missing image or a missing implementation,
+and the user's experience of the two is identical: they asked for their source
+preserved and got a different picture with no error. So an unimplemented mode is
+refused with a sentence, exactly as an unavailable one is.
+"""
+
 SOURCE_PRESERVING_MODES = (REGIONAL_IMG2IMG, STRICT_REGIONAL_EDIT)
 """Modes in which image #1 is a canvas rather than a reference.
 
@@ -163,6 +179,28 @@ def available_modes(has_source: bool) -> tuple[str, ...]:
 
 def is_available(mode, has_source: bool) -> bool:
     return normalise_mode(mode, "") in available_modes(bool(has_source))
+
+
+def is_implemented(mode) -> bool:
+    """Whether ``mode`` has sampling behaviour behind it in this build."""
+    return normalise_mode(mode, "") in IMPLEMENTED_MODES
+
+
+class ModeNotImplemented(ValueError):
+    """A mode this build offers and cannot yet run.
+
+    Separate from :class:`ModeUnavailable` because the remedies are different --
+    one is answered by adding an image, the other by a later build -- and a
+    message that conflated them would send somebody to their ImageStitch gallery
+    to fix something that is not there.
+    """
+
+    def __init__(self, mode: str):
+        self.mode = mode
+        super().__init__(
+            f"Spatial mode {label_for(mode)!r} is not implemented yet. Choose "
+            f"{MODE_LABELS[REGIONAL_GENERATE]} or {MODE_LABELS[REFERENCE_REGIONS]} "
+            f"(or Auto, which picks between them), or turn Spatial Layout off.")
 
 
 class ModeUnavailable(ValueError):
@@ -404,6 +442,17 @@ class SpatialRequest:
     enabled: bool = False
     requested_mode: str = AUTO
     resolved_mode: str = ""
+    compose_mode: str = ""
+    """Whether a language model reconciles the global prompt with the layout.
+
+    ``smart`` or ``direct``, and it is a different question from
+    :attr:`resolved_mode` in the way that matters: the mode decides what the
+    *source image* is and the compose mode decides what the *text* is. Both
+    backends ask it, which is why it lives on the shared request rather than
+    inside either of them -- Krea reconciles the scene it is about to build a
+    structured prompt from, and Klein reconciles the prompt the model reads
+    directly.
+    """
     canvas_width: int = 0
     canvas_height: int = 0
     regions: tuple[SpatialRegion, ...] = ()
@@ -492,7 +541,7 @@ def regions_from(layout) -> tuple[SpatialRegion, ...]:
 
 def request_from(serialized, *, enabled: bool, requested_mode=AUTO,
                  source: SpatialSource | None = None, width: int = 0,
-                 height: int = 0) -> SpatialRequest:
+                 height: int = 0, compose_mode: str = "") -> SpatialRequest:
     """One serialized layout and one panel state, as a :class:`SpatialRequest`.
 
     Never raises, and never resolves. Parsing is separate from deciding on
@@ -512,6 +561,7 @@ def request_from(serialized, *, enabled: bool, requested_mode=AUTO,
         resolved_mode="",
         canvas_width=int(getattr(layout, "width", 0) or 0),
         canvas_height=int(getattr(layout, "height", 0) or 0),
+        compose_mode=str(compose_mode or "").strip().casefold(),
         regions=regions_from(layout),
         source=source if source is not None else NO_SOURCE,
         notes=tuple(getattr(layout, "notes", ()) or ()),

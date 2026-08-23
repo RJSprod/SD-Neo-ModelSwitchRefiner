@@ -84,9 +84,58 @@ card rather than a keystroke.
 """
 
 
+BACKEND_AUTO = "auto"
+BACKEND_KREA = "krea2"
+BACKEND_KLEIN = "flux2_9b"
+BACKENDS_OFFERED = (BACKEND_AUTO, BACKEND_KREA, BACKEND_KLEIN)
+"""Which backend the panel is being asked to show, as the user may pin it.
+
+Auto follows the checkpoint and is the default. The other two are an override,
+and they exist because detection has a real blind spot in a live page: a
+checkpoint *selected* and not yet loaded is not something every host announces
+in a way this extension can read. Forge Neo builds its model chooser in
+``modules_forge.main_entry`` rather than as an A1111 quicksetting, so the
+component this panel watches may simply not be there -- and the panel then keeps
+describing the checkpoint that is still resident until the next generation
+loads the new one.
+
+Pinning it is not a promise about what will be loaded, and nothing here treats
+it as one: it decides what the *panel shows*, and the generation still checks
+the engine that actually loaded and says so if the two disagree. An override
+that could make a Krea checkpoint take the Klein path would be a worse bug than
+the one it fixes.
+"""
+
+BACKEND_LABELS = {
+    BACKEND_AUTO: "Auto — follow the loaded checkpoint",
+    BACKEND_KREA: "Krea 2 — structured BBOX prompt",
+    BACKEND_KLEIN: "FLUX.2 Klein 9B — regional conditioning",
+}
+
+
+def normalise_backend(value) -> str:
+    """One backend preference, from whatever a control or a file supplied."""
+    text = str(value or "").strip().casefold()
+    return text if text in BACKENDS_OFFERED else BACKEND_AUTO
+
+
 def is_klein(arch) -> bool:
     """Whether ``arch`` is an architecture this backend serves."""
     return bool(arch is not None and getattr(arch, "key", "") in ARCHITECTURES)
+
+
+def chosen_architecture(preference=BACKEND_AUTO, p=None):
+    """Which backend the panel should show, honouring an explicit pin.
+
+    Auto detects. Anything else is the user telling this panel which checkpoint
+    they have, and is taken at face value *for the panel only* -- see
+    :data:`BACKENDS_OFFERED` for why that is a display decision and not a
+    routing one.
+    """
+    preference = normalise_backend(preference)
+    if preference != BACKEND_AUTO:
+        return mc_arch.by_key(preference)
+    return intended_architecture(p) if p is not None else loaded_architecture()
 
 
 def loaded_architecture():
@@ -178,8 +227,8 @@ def source_for(p) -> spatial.SpatialSource:
                                  origin="imagestitch", enabled=bool(enabled))
 
 
-def request_for(p, serialized, *, enabled: bool,
-                requested_mode=spatial.AUTO) -> spatial.SpatialRequest:
+def request_for(p, serialized, *, enabled: bool, requested_mode=spatial.AUTO,
+                compose_mode: str = "") -> spatial.SpatialRequest:
     """One press of Generate, parsed and resolved.
 
     Raises :class:`prompt_master.spatial.ModeUnavailable` when an explicitly
@@ -194,6 +243,7 @@ def request_for(p, serialized, *, enabled: bool,
         source=source_for(p),
         width=int(getattr(p, "width", 0) or 0),
         height=int(getattr(p, "height", 0) or 0),
+        compose_mode=compose_mode,
     )
     return spatial.resolved_request(request)
 
@@ -236,7 +286,7 @@ class RegionalBackend:
         raise NotImplementedError
 
     @contextlib.contextmanager
-    def apply(self, conditioning, compiled, model=None):
+    def apply(self, conditioning, compiled, model=None, p=None):
         raise NotImplementedError
 
     def __repr__(self) -> str:
@@ -289,8 +339,8 @@ class AreaConditioningBackend(RegionalBackend):
         return callable(getattr(module, "get_area_and_mult", None))
 
     @contextlib.contextmanager
-    def apply(self, conditioning, compiled, model=None):
-        installed = _install_conditioning_regions(conditioning, compiled, model,
+    def apply(self, conditioning, compiled, model=None, p=None):
+        installed = _install_conditioning_regions(conditioning, compiled, model, p,
                                                   use_mask=False)
         try:
             yield installed
@@ -335,8 +385,8 @@ class MaskConditioningBackend(RegionalBackend):
             return False
 
     @contextlib.contextmanager
-    def apply(self, conditioning, compiled, model=None):
-        installed = _install_conditioning_regions(conditioning, compiled, model,
+    def apply(self, conditioning, compiled, model=None, p=None):
+        installed = _install_conditioning_regions(conditioning, compiled, model, p,
                                                   use_mask=True)
         try:
             yield installed
@@ -573,7 +623,7 @@ def _conditioning_list(conditioning):
     return None
 
 
-def _install_conditioning_regions(conditioning, compiled, model,
+def _install_conditioning_regions(conditioning, compiled, model, p,
                                   use_mask: bool) -> _InstalledRegions:
     """Append one conditioning entry per region, each scoped to its rectangle.
 
@@ -594,7 +644,7 @@ def _install_conditioning_regions(conditioning, compiled, model,
         text = region.qualified_prompt()
         if not text:
             continue
-        encoded = _encode(model, text)
+        encoded = _encode(model, text, p)
         if encoded is None:
             continue
         entry = _entry_like(target, encoded)
@@ -623,14 +673,29 @@ def _install_conditioning_regions(conditioning, compiled, model,
     return _InstalledRegions(target=target, added=added)
 
 
-def _encode(model, text: str):
+def _encode(model, text: str, p=None):
     """One region prompt through the loaded model's own text encoder.
 
     The host's path, not a reimplementation of it: whatever Klein's Qwen3 encoder
     wants -- padding, attention mask, pooled output -- the model already knows,
     and a second encode written here would be a second thing to keep in step with
-    the loader. Returns ``None`` on failure, which drops that one region with a
-    warning rather than failing the generation.
+    the loader.
+
+    What it is given matters as much as which function is called. A diffusion
+    engine's ``get_learned_conditioning`` does not take a list of strings; it
+    takes the host's own prompt container, and it reads attributes off it before
+    it reads any text. Flux.2's asks ``prompt.is_negative_prompt`` on its first
+    line, so a bare ``[text]`` raises ``AttributeError`` there -- which is not a
+    Klein quirk but the ordinary calling convention, and passing a list was
+    simply wrong.
+
+    :func:`_prompt_container` builds the real thing, carrying this generation's
+    width, height and distilled CFG across, because an architecture that sizes
+    its conditioning from those would otherwise size a region differently from
+    the global prompt beside it.
+
+    Returns ``None`` on failure, which drops that one region with a warning
+    rather than failing the generation.
     """
     try:
         if model is None:
@@ -640,11 +705,59 @@ def _encode(model, text: str):
         encode = getattr(model, "get_learned_conditioning", None)
         if not callable(encode):
             return None
-        return encode([text])
+        return encode(_prompt_container([text], p))
     except Exception:
         logger.warning("Model Chain: a Klein spatial region prompt could not be "
                        "encoded and was left out", exc_info=True)
         return None
+
+
+class _Conditioning(list):
+    """A stand-in for the host's prompt container, when its own cannot be found.
+
+    Same shape and the same three attributes an engine reads off one. Used only
+    where ``modules.prompt_parser`` is missing or has been rearranged; the host's
+    own class is preferred wherever it exists, because it is the one the engines
+    were written against and it is free to grow a fourth attribute without
+    telling this file.
+    """
+
+    def __init__(self, prompts, is_negative_prompt=False, width=None, height=None,
+                 distilled_cfg_scale=None):
+        super().__init__()
+        self.extend(prompts)
+        self.is_negative_prompt = is_negative_prompt
+        self.width = width
+        self.height = height
+        self.distilled_cfg_scale = distilled_cfg_scale
+
+
+def _prompt_container(prompts, p=None):
+    """``prompts`` in whatever container this host's engines expect.
+
+    ``modules.prompt_parser.SdConditioning`` when it is there, which it is on
+    every build this extension supports, and :class:`_Conditioning` when it is
+    not. Either way the geometry comes off the generation rather than being left
+    unset: a region encoded at no particular size, beside a global prompt encoded
+    at 768x1024, is two conditionings that need not agree about anything.
+
+    Never a negative prompt. V1 conditions regions positively only (§32), and the
+    global negative continues through the host's own path untouched.
+    """
+    width = int(getattr(p, "width", 0) or 0) or None
+    height = int(getattr(p, "height", 0) or 0) or None
+    distilled = getattr(p, "distilled_cfg_scale", None)
+
+    try:
+        from modules.prompt_parser import SdConditioning
+
+        return SdConditioning(prompts, is_negative_prompt=False, width=width,
+                              height=height, distilled_cfg_scale=distilled)
+    except Exception:
+        logger.debug("Model Chain: the host's prompt container was not available; "
+                     "using the local stand-in", exc_info=True)
+        return _Conditioning(prompts, is_negative_prompt=False, width=width,
+                             height=height, distilled_cfg_scale=distilled)
 
 
 def _entry_like(target, encoded):
@@ -849,7 +962,7 @@ def reference_scope(p=None):
 
 @contextlib.contextmanager
 def regional_conditioning(request, conditioning, tensor=None, grid=None,
-                          backend=None, model=None):
+                          backend=None, model=None, p=None):
     """Regional conditioning for one sampling pass, installed and then removed.
 
     The whole of §41's unwind requirement for the conditioning half, in one
@@ -880,7 +993,7 @@ def regional_conditioning(request, conditioning, tensor=None, grid=None,
         yield compiled
         return
 
-    with backend.apply(conditioning, compiled, model) as installed:
+    with backend.apply(conditioning, compiled, model, p) as installed:
         logger.info("Model Chain: Klein Spatial attached %d of %d region(s) to a "
                     "%dx%d conditioning grid via %s",
                     getattr(installed, "count", 0), len(compiled),
@@ -889,11 +1002,94 @@ def regional_conditioning(request, conditioning, tensor=None, grid=None,
 
 
 # --------------------------------------------------------------------------- #
+# Smart Compose: reconciling the global prompt with the layout
+# --------------------------------------------------------------------------- #
+#
+# The second half of what Spatial Layout means, and the half regional
+# conditioning does not supply on its own.
+#
+# Klein reads the global prompt as written. So a user who types "a living room
+# with a tall brass floor lamp on the left" and then draws the lamp on the right
+# has said two things: the prompt asks for a lamp, and the regional condition
+# asks for a lamp somewhere else. What comes back is usually two lamps -- and
+# that is not a failure of the conditioning, it is the prompt competing with it.
+#
+# §31 says the same thing as a rule: do not repeat region prompts in the global
+# prompt, because that encourages duplicated objects outside the target boxes.
+# Direct mode leaves that to the user, which is what a control half of them will
+# want. Smart mode has a language model take it out.
+
+
+def compose_scene(prompt: str, layout, ratio: str = "", seed: int = 0,
+                  reserve: int = 0, task_id: str = ""):
+    """Reconcile ``prompt`` with ``layout``. Returns a :class:`mc_spatial.Composed`.
+
+    The same Spatial Composer pass Krea 2 uses, and reused rather than rewritten
+    for a reason worth stating, because §31 warns against running "the Krea
+    composer" for Klein.
+
+    What that warning is about is the Krea *compositor* -- the deterministic step
+    that turns a scene and a layout into a structured JSON prompt with
+    coordinates in it. That step is emphatically not run here and would be
+    meaningless if it were: Klein reads prose, and the boxes reach it as
+    conditioning geometry rather than as text.
+
+    The Composer is a different thing. Its instruction never mentions Krea, it is
+    forbidden from emitting structure, and its whole job is "rewrite this scene
+    so it stops arguing with these boxes" -- which is a copy-editing task over
+    two paragraphs and is exactly as true for Klein as for Krea. Sharing it means
+    one instruction to maintain, one recorded instruction version, and a Smart
+    against Direct comparison that means the same thing on both backends.
+
+    The one difference is where the result goes. For Krea the scene becomes a
+    field of a structured document and ``background`` becomes another; for Klein
+    the composed text *is* the prompt the model reads, so the two are folded into
+    one string by :func:`composed_prompt`.
+
+    Never raises, and never cancels a generation: every failure here falls back
+    to the prompt as typed, which is Direct mode, which is a perfectly good
+    generation.
+    """
+    import mc_spatial
+
+    return mc_spatial.compose(source=prompt, scene=prompt, layout=layout,
+                              ratio=ratio, seed=seed, reserve=reserve,
+                              task_id=task_id)
+
+
+def composed_prompt(composed, fallback: str) -> str:
+    """One prompt string out of the Composer's two fields.
+
+    ``scene`` carries the picture and ``background`` the setting behind it, and
+    Klein has one prompt rather than two fields to put them in. Joined with a
+    comma, which is how every other part of this feature joins prose, and
+    skipped entirely when the background is empty or already inside the scene --
+    a Composer that answered both with the same sentence should not produce it
+    twice.
+
+    ``fallback`` is returned whenever the pass did not run or came back with
+    nothing, so a caller can assign the result unconditionally.
+    """
+    if composed is None or not getattr(composed, "ran", False):
+        return fallback
+
+    scene = str(getattr(composed, "scene", "") or "").strip()
+    if not scene:
+        return fallback
+
+    background = str(getattr(composed, "background", "") or "").strip()
+    if background and background.casefold() not in scene.casefold():
+        return f"{scene}, {background}"
+    return scene
+
+
+# --------------------------------------------------------------------------- #
 # What one Klein spatial generation says about itself
 # --------------------------------------------------------------------------- #
 
 
-def metadata(request, backend=None, layout_serialized: str = "") -> dict:
+def metadata(request, backend=None, layout_serialized: str = "",
+             composed=None) -> dict:
     """The Klein Spatial keys for one generation's infotext.
 
     Its own namespace, separate from Krea's, because they describe different
@@ -918,6 +1114,14 @@ def metadata(request, backend=None, layout_serialized: str = "") -> dict:
         mc_infotext.KLEIN_SPATIAL_VERSION: VERSION,
         mc_infotext.KLEIN_SPATIAL_LAYOUT: str(layout_serialized or ""),
     }
+    if request.compose_mode:
+        recorded[mc_infotext.KLEIN_SPATIAL_COMPOSE_MODE] = request.compose_mode
+    if composed is not None and getattr(composed, "ran", False):
+        from prompt_master.krea import composer as composer_module
+
+        recorded[mc_infotext.KLEIN_SPATIAL_COMPOSER_SEED] = composed.seed
+        recorded[mc_infotext.KLEIN_SPATIAL_COMPOSER_VERSION] = \
+            composer_module.INSTRUCTION_VERSION
     if request.uses_source and source is not None and source.usable:
         recorded[mc_infotext.KLEIN_SPATIAL_SOURCE] = "ImageStitch"
         recorded[mc_infotext.KLEIN_SPATIAL_SOURCE_COUNT] = source.image_count

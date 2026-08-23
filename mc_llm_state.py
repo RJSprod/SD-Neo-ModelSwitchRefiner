@@ -172,6 +172,10 @@ DEFAULTS: dict = {
     # image is and how much of it survives. Both are remembered so that switching
     # checkpoints back and forth does not lose either answer.
     "klein_spatial_mode": "auto",
+    # And which backend the panel shows. Auto follows the loaded checkpoint,
+    # which is right whenever the host announces one in a way this extension can
+    # read; the override is for when it does not.
+    "spatial_backend": "auto",
 }
 
 

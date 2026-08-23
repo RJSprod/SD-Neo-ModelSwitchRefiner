@@ -302,6 +302,27 @@ class FakeOptionInfo:
         return self
 
 
+class SdConditioning(list):
+    """The host's own prompt container, as the diffusion engines read it.
+
+    A ``list`` subclass carrying three attributes an engine looks at *before* it
+    looks at any text -- Flux.2's ``get_learned_conditioning`` asks
+    ``prompt.is_negative_prompt`` on its first line. Faked here rather than
+    stubbed away because "a bare list is not a prompt" is precisely the mistake
+    it exists to catch, and a stub that accepted one would have let it through.
+    """
+
+    def __init__(self, prompts, is_negative_prompt=False, width=None, height=None,
+                 copy_from=None, distilled_cfg_scale=None):
+        super().__init__()
+        self.extend(prompts)
+        self.is_negative_prompt = is_negative_prompt
+        self.width = width or getattr(copy_from, "width", None)
+        self.height = height or getattr(copy_from, "height", None)
+        self.distilled_cfg_scale = distilled_cfg_scale or getattr(
+            copy_from, "distilled_cfg_scale", None)
+
+
 class FakeScript:
     AlwaysVisible = object()
 
@@ -465,6 +486,10 @@ def _install_modules() -> None:
         return image
 
     sd_samplers_common.images_tensor_to_samples = images_tensor_to_samples
+
+    prompt_parser = types.ModuleType("modules.prompt_parser")
+    prompt_parser.SdConditioning = SdConditioning
+    modules.prompt_parser = prompt_parser
 
     api_module = types.ModuleType("modules.api")
     api_module.__path__ = []
@@ -643,6 +668,7 @@ def _install_modules() -> None:
         "modules.processing": processing,
         "modules.infotext_utils": infotext_utils,
         "modules.sd_samplers_common": sd_samplers_common,
+        "modules.prompt_parser": prompt_parser,
         "modules.api": api_module,
         "modules.api.api": api_api,
         "modules.ui_common": ui_common,
