@@ -2426,9 +2426,13 @@ class ScriptKreaCreative(scripts.Script):
 
         stack = contextlib.ExitStack()
         try:
+            # Deliberately not pinned to the backend ``process`` probed. That
+            # probe can only say a mechanism exists somewhere in the host;
+            # whether a region can be written into the conditioning object this
+            # pass was handed is a question only the attempt answers, so the
+            # attempt is what chooses.
             compiled = stack.enter_context(mc_spatial_klein.regional_conditioning(
                 request, conditioning, tensor=tensor,
-                backend=self._klein_backend,
                 model=getattr(p, "sd_model", None), p=p))
         except Exception:
             stack.close()
@@ -2452,6 +2456,16 @@ class ScriptKreaCreative(scripts.Script):
         try:
             p.extra_generation_params[mc_infotext.KLEIN_SPATIAL_ATTACHED] = (
                 f"{compiled.attached} of {len(compiled)}")
+            if compiled.attached and compiled.backend is not None:
+                # The backend that actually attached, which is not always the one
+                # probed: several can be available and only one can write into
+                # the conditioning this host builds.
+                self._klein_backend = compiled.backend
+                p.extra_generation_params[mc_infotext.KLEIN_SPATIAL_BACKEND] = \
+                    compiled.backend.name
+                p.extra_generation_params[
+                    mc_infotext.KLEIN_SPATIAL_BACKEND_VERSION] = \
+                    compiled.backend.version
         except Exception:
             logger.debug("Model Chain: could not record how many regions attached",
                          exc_info=True)
