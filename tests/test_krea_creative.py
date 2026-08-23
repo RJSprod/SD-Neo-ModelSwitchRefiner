@@ -1401,15 +1401,8 @@ class TestTheTxt2imgSurface:
                 # the difference between it and the token box the old gate had.
                 # tests/test_krea_spatial_js.py is where that is checked rather
                 # than asserted.
-                # "klein_mode" and "klein_status" are progressive disclosure
-                # too, revealed by the loaded checkpoint rather than by a press:
-                # they are FLUX.2 Klein's half of the Spatial panel and there is
-                # no Klein checkpoint in a test host, so they are built hidden
-                # and appear when one loads. Still not a channel -- nothing
-                # polls them and no generation waits for them.
                 assert (name in ("creativity", "status", "controls", "name_row",
-                                 "spatial_group", "spatial_state",
-                                 "klein_mode", "klein_status", "klein_steps")
+                                 "spatial_group", "spatial_state")
                         or id(component) in disclosure), name
 
     def test_what_ui_returns_is_what_before_process_reads(self, store, host, client):
@@ -2128,26 +2121,20 @@ class TestTheCompactPanel:
     def test_what_the_panel_holds_is_what_the_generation_reads(self, built):
         """The contract that is easiest to break and hardest to notice: the
         argument list is positional both ways."""
-        import model_chain_krea_creative as creative_script
-
         panel = self.panel(built)
 
         spatial = [built.components["spatial_enabled"],
                    built.components["spatial_compose"],
-                   built.components["spatial_backend"],
-                   built.components["klein_mode"],
                    built.components["spatial_state"]]
-        tail = creative_script.SPATIAL_CONTROLS
-        assert len(spatial) == tail
 
         assert built.arguments[:2] == [built.components["enabled"],
                                        built.components["creativity"]]
         assert built.arguments[2:4] == list(panel.settings_controls)
-        assert built.arguments[4:-tail] == list(panel.axis_controls)
+        assert built.arguments[4:-3] == list(panel.axis_controls)
         # The Spatial block goes last and stays last. The axis block is the only
         # variable-length part of this tuple, so the two fixed ends are the two
         # that can be found without counting -- which is what _split does.
-        assert built.arguments[-tail:] == spatial
+        assert built.arguments[-3:] == spatial
 
     def test_it_says_what_the_directions_cost_before_the_image_starts(self, built,
                                                                        lib):
@@ -2542,16 +2529,11 @@ class TestRestoringTheCreativeSetup:
 
         source = Path(creative_script.__file__).read_text(encoding="utf-8")
         buttons = (inspect.getsource(creative_script._restore_setup)
-                   + inspect.getsource(creative_script._restore_spatial)
-                   + inspect.getsource(creative_script._restore_klein))
+                   + inspect.getsource(creative_script._restore_spatial))
         turning_on = [line.strip() for line in source.splitlines()
                       if "ENABLED: True" in line]
 
-        # Three lines, still two buttons. _restore_klein is not a third button:
-        # it is the FLUX.2 Klein half of _restore_spatial, called by it and
-        # reachable only through it, because the two backends record different
-        # things about the same canvas and one of them has to be read.
-        assert len(turning_on) == 3
+        assert len(turning_on) == 2
         for line in turning_on:
             assert line in buttons, line
         # And neither reaches into the other's switch.
@@ -2559,8 +2541,6 @@ class TestRestoringTheCreativeSetup:
             inspect.getsource(creative_script._restore_setup)
         assert "mc_creative_krea.ENABLED: True" not in \
             inspect.getsource(creative_script._restore_spatial)
-        assert "mc_creative_krea.ENABLED: True" not in \
-            inspect.getsource(creative_script._restore_klein)
 
     def test_it_says_which_of_the_two_things_it_did(self, built, made):
         import model_chain_krea_creative as creative_script

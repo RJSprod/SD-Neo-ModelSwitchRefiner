@@ -825,12 +825,9 @@ class ScriptModelChain(scripts.Script):
         if attribute is not None:
             setattr(self, attribute, component)
 
-        # Matched on the tail rather than the whole id, and matched by
-        # mc_references rather than here: Script.elem_id prefixes the tab name
-        # for a script shown on both tabs, and ImageStitch is one. Klein Spatial
-        # Layout captures the same component the same way, so the knowledge of
-        # which id that is stays in the one module that owns it.
-        if mc_references.is_stitch_gallery(elem_id) and self._stitch_gallery_component is None:
+        # Matched on the tail rather than the whole id: Script.elem_id prefixes
+        # the tab name for a script shown on both tabs, and ImageStitch is one.
+        if elem_id.endswith(mc_references.STITCH_GALLERY_SUFFIX) and self._stitch_gallery_component is None:
             self._stitch_gallery_component = component
             self._wire_deferred_reference_notice(component)
 

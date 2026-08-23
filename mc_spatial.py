@@ -54,23 +54,13 @@ ENABLED = "krea_spatial_enabled"
 COMPOSE_MODE = "krea_spatial_compose_mode"
 LAYOUT = "krea_spatial_layout"
 RECORD_SCENES = "krea_spatial_record_scenes"
-KLEIN_MODE = "klein_spatial_mode"
-BACKEND = "spatial_backend"
-REGION_STEPS = "klein_spatial_region_steps"
-"""The preferences this feature owns. All seven are its own keys.
+"""The preferences this feature owns. All four are its own keys.
 
 The layout is persisted, and that is deliberate rather than incidental: boxes
 are minutes of work with a mouse, and a WebUI restart that quietly emptied the
 canvas would be exactly the silent loss of layout state the design intent
 forbids. It is *not* part of a Creative profile -- a profile describes how art
 direction behaves, and a composition is about one picture.
-
-``KLEIN_MODE`` is the odd one out and is named for its backend rather than for
-Krea, because it is the only preference here that means nothing to Krea 2. There
-is one canvas and one enabled switch; what differs between the two backends is
-what they *do* with the canvas, so the compose mode is Krea's question and the
-spatial mode is Klein's, and both are remembered so that switching checkpoints
-back and forth does not lose either answer.
 """
 
 
@@ -82,7 +72,6 @@ def settings() -> dict:
     an empty canvas makes no request, because there is nothing for pass 2 to
     reconcile the scene with.
     """
-    from prompt_master import spatial as generic
     from prompt_master.krea import spatial
 
     try:
@@ -98,44 +87,7 @@ def settings() -> dict:
         "compose_mode": mode if mode in spatial.COMPOSE_MODES else spatial.SMART,
         "layout": str(stored.get(LAYOUT) or ""),
         "record_scenes": bool(stored.get(RECORD_SCENES, True)),
-        # Normalised on the way out rather than trusted: a preference file
-        # written by a build that offered a mode this one does not must land on
-        # Auto rather than reach the resolver as a string nothing matches.
-        "klein_mode": generic.normalise_mode(stored.get(KLEIN_MODE), generic.AUTO),
-        # Which backend the panel shows. Auto follows the checkpoint; the other
-        # two are the user telling the page what they have, for the case where
-        # a host's model chooser is not something this extension can read.
-        "backend": _backend(stored.get(BACKEND)),
-        # How much of the sample the Klein regions apply for. Klein's backend
-        # costs one model evaluation per region per step, and composition is
-        # settled long before the last step -- so this is the dial between the
-        # two, and it is a real one rather than a placebo.
-        "region_steps": _percent(stored.get(REGION_STEPS), 60),
     }
-
-
-def _percent(value, fallback: int) -> int:
-    try:
-        return max(10, min(100, int(value)))
-    except (TypeError, ValueError):
-        return fallback
-
-
-def _backend(value) -> str:
-    """The stored backend preference, normalised, defaulting to Auto.
-
-    Imported lazily so that :func:`settings` stays answerable on an installation
-    where the Klein module could not load at all -- the Krea half of this feature
-    has never needed it and must not start needing it now.
-    """
-    try:
-        import mc_spatial_klein
-
-        return mc_spatial_klein.normalise_backend(value)
-    except Exception:
-        logger.debug("Model Chain: could not read the Spatial backend preference",
-                     exc_info=True)
-        return "auto"
 
 
 def remember(**values) -> None:

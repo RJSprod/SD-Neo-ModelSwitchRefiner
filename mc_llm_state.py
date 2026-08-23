@@ -152,8 +152,8 @@ DEFAULTS: dict = {
     # medium", and storing the prompts to answer that would be keeping a
     # transcript of everything anybody asked for in a preferences file.
     "krea_creative_history": [],
-    # Spatial Layout. Five keys, and the third of them is the only place in this
-    # file that holds a *document* rather than a setting.
+    # Krea Creative Mode's Spatial Layout. Four keys, and the third of them is
+    # the only place in this file that holds a *document* rather than a setting.
     #
     # The canvas is persisted deliberately. Boxes are minutes of work with a
     # mouse, and a WebUI restart that quietly emptied them would be exactly the
@@ -165,22 +165,6 @@ DEFAULTS: dict = {
     "krea_spatial_compose_mode": "smart",
     "krea_spatial_layout": "",
     "krea_spatial_record_scenes": True,
-    # The fifth is FLUX.2 Klein's, and is named for its backend rather than for
-    # Krea because it means nothing to Krea 2. One canvas, one enabled switch,
-    # and two questions about what happens to the boxes: Krea's is whether a
-    # language model reconciles the scene around them, Klein's is what the source
-    # image is and how much of it survives. Both are remembered so that switching
-    # checkpoints back and forth does not lose either answer.
-    "klein_spatial_mode": "auto",
-    # And which backend the panel shows. Auto follows the loaded checkpoint,
-    # which is right whenever the host announces one in a way this extension can
-    # read; the override is for when it does not.
-    "spatial_backend": "auto",
-    # How much of the sample Klein's regions apply for, as a percentage of the
-    # steps. Not 100: that backend costs one model evaluation per region per
-    # step, and the first steps of a sample are the ones that decide where things
-    # are. 60 keeps the placement and gives most of the time back.
-    "klein_spatial_region_steps": 60,
 }
 
 

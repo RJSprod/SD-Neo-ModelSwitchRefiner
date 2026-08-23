@@ -673,61 +673,16 @@ class Setup:
     workflow they put back.
     """
 
-    klein_layout: str = ""
-    klein_mode: str = ""
-    klein_resolved_mode: str = ""
-    klein_source: str = ""
-    klein_source_count: int | None = None
-    klein_backend: str = ""
-    klein_compose_mode: str = ""
-    """What a FLUX.2 Klein spatial image recorded, if it was one.
-
-    The same canvas, restored by the same button, from a different namespace --
-    and the namespaces are separate because §37 requires that an old Krea record
-    can never be read as a Klein regional-conditioning job. A record carries one
-    set or the other; :attr:`klein` is which.
-
-    The layout matters more here than it does for Krea, and §39 says why: a Krea
-    image's structured ``Prompt:`` line contains its boxes as text, so the
-    picture is reproducible without this field. Klein's regional conditioning
-    leaves nothing in the prompt at all, so this is the only record of what was
-    drawn.
-
-    ``klein_source`` and ``klein_source_count`` are an *expectation*, not a
-    payload. They say the image was made with N ImageStitch references so that a
-    restore into an empty gallery can say so, and they are emphatically not the
-    references themselves -- this extension does not embed reference pixels in
-    infotext.
-    """
-
     @property
     def present(self) -> bool:
         """Whether this describes a Creative generation at all."""
         return bool(self.source or self.recipe or self.creativity is not None
-                    or self.spatial_layout or self.klein_layout)
+                    or self.spatial_layout)
 
     @property
     def spatial(self) -> bool:
         """Whether this image recorded a spatial layout worth restoring."""
-        return bool(self.spatial_layout or self.klein_layout)
-
-    @property
-    def klein(self) -> bool:
-        """Whether the recorded layout was consumed by the Klein backend.
-
-        The two backends are told apart by which namespace the file carries and
-        never by inspecting the layout, because the layout is the same document
-        either way -- that is the whole design. An image with neither key is not
-        a spatial image; an image with both is not a shape this build writes, and
-        Klein wins on the reading side so that a future build which recorded both
-        would restore the stronger semantics rather than the weaker.
-        """
-        return bool(self.klein_layout)
-
-    @property
-    def layout(self) -> str:
-        """The canvas to restore, whichever backend recorded it."""
-        return self.klein_layout or self.spatial_layout
+        return bool(self.spatial_layout)
 
     @property
     def replayable(self) -> bool:
