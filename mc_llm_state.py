@@ -152,8 +152,8 @@ DEFAULTS: dict = {
     # medium", and storing the prompts to answer that would be keeping a
     # transcript of everything anybody asked for in a preferences file.
     "krea_creative_history": [],
-    # Krea Creative Mode's Spatial Layout. Four keys, and the third of them is
-    # the only place in this file that holds a *document* rather than a setting.
+    # Spatial Layout. Five keys, and the third of them is the only place in this
+    # file that holds a *document* rather than a setting.
     #
     # The canvas is persisted deliberately. Boxes are minutes of work with a
     # mouse, and a WebUI restart that quietly emptied them would be exactly the
@@ -165,6 +165,13 @@ DEFAULTS: dict = {
     "krea_spatial_compose_mode": "smart",
     "krea_spatial_layout": "",
     "krea_spatial_record_scenes": True,
+    # The fifth is FLUX.2 Klein's, and is named for its backend rather than for
+    # Krea because it means nothing to Krea 2. One canvas, one enabled switch,
+    # and two questions about what happens to the boxes: Krea's is whether a
+    # language model reconciles the scene around them, Klein's is what the source
+    # image is and how much of it survives. Both are remembered so that switching
+    # checkpoints back and forth does not lose either answer.
+    "klein_spatial_mode": "auto",
 }
 
 

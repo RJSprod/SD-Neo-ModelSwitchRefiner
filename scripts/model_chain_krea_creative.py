@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import gradio as gr
 
+import mc_arch
 import mc_creative_krea
 import mc_creative_panel
 import mc_infotext
@@ -81,7 +82,9 @@ import mc_lora
 import mc_memory
 import mc_plan
 import mc_krea_pipeline
+import mc_references
 import mc_spatial
+import mc_spatial_klein
 from modules import errors, scripts
 
 logger = mc_memory.logger
@@ -93,6 +96,15 @@ PREFIX = "mc-krea-creative"
 The browser gate finds its elements by these ids and by nothing else -- no
 Gradio-generated class, no DOM shape. A theme that replaces Gradio's internals
 can change how this looks and cannot stop it working.
+"""
+
+CHECKPOINT_ELEM_ID = "setting_sd_model_checkpoint"
+"""The host's own checkpoint dropdown, read and never written.
+
+Watched for one reason: which backend consumes the Spatial canvas is decided by
+the loaded architecture, and §9 asks the panel to say so as soon as it changes
+rather than on the next press. Nothing here selects a checkpoint or reacts to
+one beyond repainting a status line.
 """
 
 PROMPT_ELEM_ID = "txt2img_prompt"
@@ -128,8 +140,27 @@ def notice(text: str, kind: str = "info") -> str:
 # --------------------------------------------------------------------------- #
 
 
-SPATIAL_CONTROLS = 3
-"""How many controls the Spatial block contributes: enabled, mode, layout."""
+SPATIAL_CONTROLS = 4
+"""How many controls the Spatial block contributes.
+
+Enabled, Krea's compose mode, Klein's spatial mode, and the serialized layout --
+in that order, and the order is the contract :func:`_split` cuts by.
+
+Four and not three because there is one canvas with two backends behind it. The
+compose mode is Krea's question (does a language model reconcile the scene) and
+the spatial mode is Klein's (what is the source image, and what happens to it),
+and neither is answerable in the other's terms. They both travel on every
+generation because which one is *read* depends on the checkpoint that happens to
+be loaded when Generate is pressed, which is not knowable while the tuple is
+being assembled.
+
+An older API caller that still sends three lands on the pre-Klein shape and is
+answered from the saved preferences, which is what :func:`_spatial_for` already
+did for a caller that sent none.
+"""
+
+LEGACY_SPATIAL_CONTROLS = 3
+"""The tail an API script written against the pre-Klein build still sends."""
 
 
 def _split(values) -> tuple[tuple, tuple, tuple]:
@@ -170,15 +201,17 @@ def _split(values) -> tuple[tuple, tuple, tuple]:
 
     if axes is not None:
         expected = 3 + axes
-        if len(values) >= expected + SPATIAL_CONTROLS:
-            return (values[:3], values[3:expected],
-                    values[expected:expected + SPATIAL_CONTROLS])
+        for tail in (SPATIAL_CONTROLS, LEGACY_SPATIAL_CONTROLS):
+            if len(values) >= expected + tail:
+                return (values[:3], values[3:expected],
+                        values[expected:expected + tail])
         if len(values) >= expected:
             return values[:3], values[3:expected], ()
 
-    if len(values) == 1 + SPATIAL_CONTROLS:
-        # The no-panel shape: creativity, then the Spatial tail.
-        return (), (), values[-SPATIAL_CONTROLS:]
+    for tail in (SPATIAL_CONTROLS, LEGACY_SPATIAL_CONTROLS):
+        if len(values) == 1 + tail:
+            # The no-panel shape: creativity, then the Spatial tail.
+            return (), (), values[-tail:]
     if len(values) >= 3:
         return values[:3], (), ()
     return (), (), ()
@@ -212,10 +245,21 @@ def _spatial_for(values) -> dict:
     """
     _, _, spatial = _split(values)
     stored = mc_spatial.settings()
-    if len(spatial) < SPATIAL_CONTROLS:
+    if len(spatial) < LEGACY_SPATIAL_CONTROLS:
         return stored
-    enabled, mode, layout = spatial
+
+    from prompt_master import spatial as generic
     from prompt_master.krea import spatial as spatial_module
+
+    if len(spatial) >= SPATIAL_CONTROLS:
+        enabled, mode, klein_mode, layout = spatial[:SPATIAL_CONTROLS]
+        stored["klein_mode"] = generic.normalise_mode(klein_mode,
+                                                      stored["klein_mode"])
+    else:
+        # A caller from before the Klein backend existed. Its three controls
+        # still mean what they meant; the mode it does not send is the saved
+        # one, which is the same answer an API caller with no panel gets.
+        enabled, mode, layout = spatial[:LEGACY_SPATIAL_CONTROLS]
 
     mode = str(mode or "").strip().casefold()
     stored["enabled"] = bool(enabled)
@@ -632,14 +676,36 @@ def spatial_summary(serialized, enabled: bool = True, creative=None,
         return notice(" ".join(layout.notes) or "The saved layout could not be read.",
                       "warn")
 
-    pipeline = mc_krea_pipeline.described(creative=bool(creative),
-                                          spatial=bool(enabled), mode=mode)
+    # Which backend the boxes go to decides what this line can truthfully say
+    # about them. Krea composes a prompt; Klein conditions a region. Describing
+    # one in the other's words is how a user ends up expecting a mask from a
+    # sentence, or a sentence from a mask.
+    klein = _klein_visible()
+    if klein:
+        pipeline = _klein_pipeline_sentence()
+    else:
+        pipeline = mc_krea_pipeline.described(creative=bool(creative),
+                                              spatial=bool(enabled), mode=mode)
     if not layout.regions:
         return notice("No regions yet. Press Edit Layout to draw one. " + pipeline)
     said = spatial.summarise(layout)
     if not enabled:
         return notice(f"{said} — Spatial Layout is off, so they are not applied.")
     return notice(f"{said}. Region prompts are used exactly as typed. {pipeline}")
+
+
+def _klein_pipeline_sentence() -> str:
+    """What Spatial Layout does on a Klein checkpoint, in one sentence.
+
+    The Krea sentence's counterpart, and deliberately not a copy of it. Krea's
+    turns on how the *scene* is written; Klein's turns on the fact that the scene
+    is not written at all -- the prompt reaches the model as typed, and the boxes
+    reach it as conditioning geometry beside it.
+    """
+    return ("Your prompt is generated exactly as typed and each region's prompt is "
+            "conditioned on its own part of the frame. No language-model request is "
+            "made. This is spatial conditioning rather than a mask: it biases where "
+            "a concept appears and does not confine it to the rectangle.")
 
 
 def _spatial_toggled(enabled, serialized, creative, mode):
@@ -673,6 +739,158 @@ def _spatial_saved(serialized, enabled, creative, mode):
     mc_spatial.remember(**{mc_spatial.LAYOUT: str(serialized or "")})
     return spatial_summary(serialized, bool(enabled), creative=bool(creative),
                            mode=mode)
+
+
+# --------------------------------------------------------------------------- #
+# The Klein backend's own controls
+# --------------------------------------------------------------------------- #
+#
+# One canvas, two backends, and the difference between them is what the boxes
+# are *for*. Krea's question is whether a language model reconciles the scene
+# with them; Klein's is what the source image is and how much of it survives.
+# Neither question is answerable in the other's terms, so the panel shows
+# whichever belongs to the loaded checkpoint and remembers both.
+#
+# §8: the existing "Smart Spatial Compose" / "Direct BBOX Merge" pair is a Krea
+# prompt-composition concept and is deliberately *not* offered as a Klein mode.
+
+
+def _klein_choices(has_source: bool) -> list:
+    """``(label, value)`` pairs for the Klein spatial mode radio.
+
+    Every mode is listed whether or not it can run, which is §4: a mode that
+    vanished when a gallery emptied would look like an upgrade removed it, and
+    somebody would go looking for a feature that is sitting right there waiting
+    for an image. The unavailable ones carry their reason in the label.
+
+    A label and not a disabled attribute, because Gradio's Radio disables all of
+    its choices or none of them, and the alternative -- five checkboxes, or a
+    dropdown rebuilt on every gallery change -- would trade a real control for a
+    cosmetic property. That is a smaller cost than it looks: §9 is explicit that
+    UI availability is advisory and generation-time revalidation is
+    authoritative, so an unavailable mode selected here is refused before
+    sampling by :func:`prompt_master.spatial.resolve` with the same sentence.
+    """
+    from prompt_master import spatial as generic
+
+    available = generic.available_modes(bool(has_source))
+    choices = []
+    for mode in generic.MODES:
+        label = generic.MODE_LABELS[mode]
+        if mode not in available:
+            label = f"{label} — needs an ImageStitch image"
+        choices.append((label, mode))
+    return choices
+
+
+def _klein_architecture(checkpoint=None):
+    """Which architecture the Spatial canvas will be consumed by.
+
+    The *selected* checkpoint when the panel has one to look at, and the loaded
+    engine otherwise. That order is the right way round for a live panel and the
+    wrong way round for a generation, which is why only the panel calls it this
+    way: a user who has just picked a Klein checkpoint from the dropdown has not
+    loaded it yet -- the reload happens on the same change event this handler is
+    racing -- and a status line that answered from the model still in VRAM would
+    describe the checkpoint they just left.
+
+    :func:`mc_spatial_klein.loaded_architecture` is the generation-time answer
+    and stays that way. It asks the engine first, because by then there is
+    nothing left to predict.
+    """
+    name = str(checkpoint or "").strip()
+    if name:
+        found = mc_arch.detect_from_checkpoint_name(name)
+        if found is not mc_arch.UNKNOWN:
+            return found
+    return mc_spatial_klein.loaded_architecture()
+
+
+def _klein_status(live=None, mode=None, checkpoint=None) -> str:
+    """The Backend / Source line under the Klein mode radio.
+
+    Three facts, in the order somebody reads them: which backend the loaded
+    checkpoint gets, what ImageStitch is currently holding, and -- because Auto
+    is the default and its whole promise is that it is predictable -- what Auto
+    would resolve to right now.
+    """
+    from prompt_master import spatial as generic
+
+    arch = _klein_architecture(checkpoint)
+    if not mc_spatial_klein.is_klein(arch):
+        return notice("Spatial Layout composes a Krea 2 structured prompt for this "
+                      "checkpoint. Load a FLUX.2 Klein 9B checkpoint for regional "
+                      "conditioning instead.")
+
+    if live is None:
+        live = mc_references.live_source()
+    mode = generic.normalise_mode(mode, generic.AUTO)
+
+    said = [f"Backend: {arch.label}.", f"Source: {live.describe()}"]
+    if mode == generic.AUTO and not live.known:
+        # Both halves, because the panel genuinely does not know which one it
+        # will be. Naming one of them would be a guess dressed as a readout.
+        said.append(f"Auto will use {generic.MODE_LABELS[generic.REFERENCE_REGIONS]} "
+                    f"if ImageStitch holds an image and "
+                    f"{generic.MODE_LABELS[generic.REGIONAL_GENERATE]} if it does "
+                    f"not.")
+    elif mode == generic.AUTO:
+        resolved = generic.resolve(generic.AUTO, live.usable)
+        said.append(f"Auto will use {generic.MODE_LABELS[resolved]}.")
+    elif not generic.is_available(mode, live.usable):
+        said.append(f"{generic.MODE_LABELS[mode]} {generic.NO_SOURCE_REASON} "
+                    "This generation will be refused rather than run as something "
+                    "else.")
+    else:
+        said.append(generic.MODE_HELP.get(mode, ""))
+    return notice(" ".join(part for part in said if part),
+                  "warn" if (mode != generic.AUTO
+                             and not generic.is_available(mode, live.usable))
+                  else "info")
+
+
+def _klein_visible(checkpoint=None) -> bool:
+    """Whether the Klein block belongs on the page right now."""
+    try:
+        return mc_spatial_klein.is_klein(_klein_architecture(checkpoint))
+    except Exception:
+        logger.debug("Model Chain: could not decide whether to show the Klein "
+                     "Spatial controls", exc_info=True)
+        return False
+
+
+def _klein_refresh(mode, gallery=None, checkpoint=None):
+    """Repaint the Klein block: the choices, the status, and nothing else.
+
+    Called whenever any of §9's four triggers fires -- the checkpoint, the
+    ImageStitch gallery, the Spatial toggle, or the mode itself. It never
+    *changes* the selected mode: a gallery emptying is not somebody choosing a
+    different picture, and a control that reset itself under the cursor would be
+    the silent adaptation §10 reserves for Auto alone.
+    """
+    from prompt_master import spatial as generic
+
+    live = mc_references.live_source(gallery=gallery)
+    mode = generic.normalise_mode(mode, generic.AUTO)
+    klein = _klein_visible(checkpoint)
+    # Krea's compose radio and Klein's mode radio are the same question asked of
+    # two backends, so exactly one of them belongs on the page at a time. Hiding
+    # the other is not tidiness: "Smart Spatial Compose" offered beside a Klein
+    # checkpoint would be a control that does nothing, and §8 asks for it not to
+    # be shown rather than for it to be shown and ignored.
+    return (gr.update(choices=_klein_choices(live.usable), visible=klein),
+            gr.update(value=_klein_status(live, mode, checkpoint), visible=klein),
+            gr.update(visible=not klein))
+
+
+def _klein_mode_chosen(mode, gallery=None, checkpoint=None):
+    """Remember the chosen Klein mode, and say what it will do."""
+    from prompt_master import spatial as generic
+
+    mode = generic.normalise_mode(mode, generic.AUTO)
+    mc_spatial.remember(**{mc_spatial.KLEIN_MODE: mode})
+    live = mc_references.live_source(gallery=gallery)
+    return gr.update(value=_klein_status(live, mode, checkpoint))
 
 
 def _spatial_scenes(record):
@@ -828,13 +1046,30 @@ def _spatial_pasted_view() -> str:
     if setup is None or not setup.spatial:
         return "No spatial layout has been pasted in this session."
 
-    layout = spatial_module.parse(setup.spatial_layout)
+    layout = spatial_module.parse(setup.layout)
     lines = []
     if setup.spatial_version is not None and setup.spatial_version != spatial_module.VERSION:
         lines.append(f"Recorded with Spatial Layout version {setup.spatial_version}; "
                      f"this build reads version {spatial_module.VERSION}.")
+    if setup.klein:
+        # A Klein record says three things a Krea one does not, and the third is
+        # the one somebody needs before pressing Generate: the references are not
+        # in the file and cannot be, so a mode that needs them needs them putting
+        # back by hand.
+        lines.append("Backend: FLUX.2 Klein regional conditioning"
+                     + (f" ({setup.klein_backend})" if setup.klein_backend else ""))
+        lines.append(f"Spatial mode: {setup.klein_mode or 'Auto'}"
+                     + (f" → {setup.klein_resolved_mode}"
+                        if setup.klein_resolved_mode else ""))
+        if setup.klein_source_count:
+            lines.append(f"Made with {setup.klein_source_count} ImageStitch reference "
+                         f"image(s). Reference pixels are not stored in the file — "
+                         f"add them back to ImageStitch to use an image-required "
+                         f"mode.")
+        else:
+            lines.append("Made with no source image.")
     mode = str(setup.spatial_compose_mode or "").strip().casefold()
-    if mode:
+    if mode and not setup.klein:
         lines.append(f"Composition: {mode} merge")
     lines.append(f"Frame: {layout.width} × {layout.height}" if layout.width
                  else "Frame: not recorded")
@@ -856,8 +1091,9 @@ def _restore_spatial():
     pressing Generate makes the same image again. This is the other thing
     somebody might want -- the canvas it was drawn on, to carry on from.
 
-    It restores three things and nothing else: the layout, the compose mode, and
-    Spatial Layout's own switch. Creative Mode's checkbox, the prompt box and
+    It restores three things and nothing else: the layout, the backend's own mode
+    -- Krea's compose mode or Klein's spatial mode, whichever the image recorded
+    -- and Spatial Layout's own switch. Creative Mode's checkbox, the prompt box and
     every Creative setting are left exactly as they are, because a Spatial-only
     image has nothing to say about them and an image with both records has a
     second button that does.
@@ -868,7 +1104,11 @@ def _restore_spatial():
     if setup is None or not setup.spatial:
         return (gr.update(), gr.update(), gr.update(),
                 notice("There is no spatial layout from a pasted image to restore.",
-                       "warn"))
+                       "warn"),
+                gr.update(), gr.update())
+
+    if setup.klein:
+        return _restore_klein(setup)
 
     if setup.spatial_version is not None \
             and setup.spatial_version != spatial_module.VERSION:
@@ -879,7 +1119,8 @@ def _restore_spatial():
         return (gr.update(), gr.update(), gr.update(),
                 notice("The recorded spatial layout is from a different version of "
                        "this feature and was not restored; your canvas is "
-                       "untouched.", "warn"))
+                       "untouched.", "warn"),
+                gr.update(), gr.update())
 
     remembered = {mc_spatial.LAYOUT: setup.spatial_layout, mc_spatial.ENABLED: True}
     mode = str(setup.spatial_compose_mode or "").strip().casefold()
@@ -897,7 +1138,48 @@ def _restore_spatial():
     return (gr.update(value=setup.spatial_layout), gr.update(value=True), mode_update,
             notice(" ".join(said) + " " + mc_krea_pipeline.described(
                 creative=creative, spatial=True,
-                mode=mode or mc_spatial.settings()["compose_mode"])))
+                mode=mode or mc_spatial.settings()["compose_mode"])),
+            gr.update(), gr.update())
+
+
+def _restore_klein(setup):
+    """Put a pasted FLUX.2 Klein spatial image's workflow back.
+
+    §39's three things: the layout, the *requested* mode, and the source
+    expectation. The requested mode and not the resolved one -- the resolved mode
+    is what Auto decided on the day, and restoring that would turn somebody's
+    Auto into a fixed choice they never made.
+
+    The source expectation is the half that cannot be restored, and saying so is
+    the whole of what this can do about it: reference pixels are not in the file
+    by policy, so an image made with references restores into whatever
+    ImageStitch happens to hold now. The mode stays visible and, if its source is
+    missing, unavailable -- which is the state §39 asks for, and which the next
+    press refuses rather than silently reinterprets.
+    """
+    from prompt_master import spatial as generic
+
+    mode = generic.mode_from_label(setup.klein_mode, generic.AUTO)
+    mc_spatial.remember(**{mc_spatial.LAYOUT: setup.klein_layout,
+                           mc_spatial.ENABLED: True,
+                           mc_spatial.KLEIN_MODE: mode})
+
+    live = mc_references.live_source()
+    said = ["The spatial canvas is back as it was drawn and Spatial Layout is on.",
+            f"Spatial mode: {generic.MODE_LABELS[mode]}."]
+    kind = "info"
+    if setup.klein_source_count and not live.usable:
+        said.append(f"This image was made with {setup.klein_source_count} ImageStitch "
+                    "reference image(s); re-add them to continue.")
+        kind = "warn"
+    elif mode in generic.IMAGE_REQUIRED_MODES and not live.usable:
+        said.append(generic.NO_SOURCE_REASON)
+        kind = "warn"
+
+    return (gr.update(value=setup.klein_layout), gr.update(value=True), gr.update(),
+            notice(" ".join(said), kind),
+            gr.update(value=mode, choices=_klein_choices(live.usable), visible=True),
+            gr.update(value=_klein_status(live, mode), visible=True))
 
 
 def _image_seed(p) -> int:
@@ -969,6 +1251,19 @@ class ScriptKreaCreative(scripts.Script):
         # The native prompt box, handed over by after_component. Only the
         # restore action writes to it. See PROMPT_ELEM_ID.
         self.prompt_box = None
+        # ImageStitch's own gallery and the checkpoint dropdown, also handed
+        # over by after_component. Both are read and never written: they are
+        # somebody else's controls, and all this script does with them is
+        # repaint its own line when they change.
+        self.stitch_gallery = None
+        self.checkpoint_box = None
+        # Set by ui() once the Klein controls exist, and called by
+        # after_component when a component it was waiting for arrives. Both
+        # orderings happen -- ImageStitch sorts after this script and the
+        # checkpoint dropdown is built before it -- so the wiring is deferred
+        # from whichever side is not ready yet.
+        self._wire_klein_live = None
+        self._klein_wired: set = set()
         # True while this hook is inside its own roll. A nested process_images()
         # -- Stage 2's, or any extension's -- must not start a second one, and
         # the cost of getting that wrong is not a duplicate image but an LLM
@@ -994,6 +1289,25 @@ class ScriptKreaCreative(scripts.Script):
         # out, for Stage 2 to inherit instead of the restored one. Set at the
         # top of before_process, before anything can fail.
         self._inheritable_negative = ""
+        # This generation's Klein spatial request, when the loaded checkpoint is
+        # a Klein one and Spatial Layout is on. Set in before_process, validated
+        # against the resident engine in process, consumed by
+        # process_before_every_sampling and dropped at both ends.
+        self._klein = None
+        self._klein_backend = None
+        self._klein_layout = ""
+        self._klein_note = ""
+        # Two scopes, and they close at different times. The job stack holds the
+        # reference set, which one encode serves for the whole batch; the pass
+        # stack holds the regional conditioning, which is rebuilt against every
+        # sampling pass because hires fix runs a second one at a different size.
+        #
+        # Both are closed at the *top* of before_process as well as at the
+        # bottom of postprocess, which is what makes §41 hold: an exception
+        # during sampling skips postprocess entirely, so the guarantee that a
+        # failed generation leaves the next one ordinary cannot rest on it.
+        self._klein_job = None
+        self._klein_pass = None
 
     def title(self):
         return "Krea Creative Mode"
@@ -1005,15 +1319,33 @@ class ScriptKreaCreative(scripts.Script):
         return scripts.AlwaysVisible if not is_img2img else None
 
     def after_component(self, component, **kwargs):
-        """Keep hold of the txt2img prompt box, and nothing else.
+        """Keep hold of three of the host's own controls, and nothing else.
 
-        The restore action has to write the recorded source phrase somewhere, and
-        the prompt box is where a source phrase lives. Grabbed by the host's own
-        element id rather than by position or by class, so a theme that rebuilds
-        the page around it changes nothing here.
+        The prompt box, because the restore action has to write the recorded
+        source phrase somewhere and that is where a source phrase lives.
+
+        ImageStitch's gallery and the checkpoint dropdown, because §9 asks the
+        Klein block to repaint when either changes and neither is this script's.
+        Both are matched by element id rather than by position or by class, so a
+        theme that rebuilds the page around them changes nothing here -- and the
+        ImageStitch id is matched by :mod:`mc_references`, which is the one
+        module that knows what that id is.
+
+        Every one of them is optional. A page without ImageStitch installed, or
+        a host that renders the checkpoint dropdown somewhere this never sees,
+        loses a live repaint and loses nothing else: the runtime check at
+        generation time is the authoritative one either way.
         """
-        if kwargs.get("elem_id") == PROMPT_ELEM_ID:
+        elem_id = kwargs.get("elem_id") or ""
+
+        if elem_id == PROMPT_ELEM_ID:
             self.prompt_box = component
+        elif elem_id == CHECKPOINT_ELEM_ID:
+            self.checkpoint_box = component
+            self._wire_deferred_klein("checkpoint", component)
+        elif mc_references.is_stitch_gallery(elem_id) and self.stitch_gallery is None:
+            self.stitch_gallery = component
+            self._wire_deferred_klein("gallery", component)
 
     # -- UI ---------------------------------------------------------------- #
 
@@ -1132,6 +1464,7 @@ class ScriptKreaCreative(scripts.Script):
                     choices=[("Smart Spatial Compose", spatial_module.SMART),
                              ("Direct BBOX Merge", spatial_module.DIRECT)],
                     value=spatial["compose_mode"], label="Composition", scale=2,
+                    visible=not _klein_visible(),
                     elem_id=ident("spatial", "compose"))
                 edit = gr.Button("Edit Layout…", size="sm", scale=1,
                                  elem_id=_spatial_id("open"))
@@ -1140,6 +1473,22 @@ class ScriptKreaCreative(scripts.Script):
                                 creative=bool(stored["enabled"]),
                                 mode=spatial["compose_mode"]),
                 elem_id=ident("spatial", "status"))
+
+            # The Klein backend's controls, in the same group and under the same
+            # switch. One canvas, one enabled checkbox, one Edit Layout button --
+            # what changes with the checkpoint is which backend's question is
+            # being asked about the boxes, not whether there are boxes.
+            klein_visible = _klein_visible()
+            klein_live = mc_references.live_source()
+            klein_mode = gr.Radio(
+                choices=_klein_choices(klein_live.usable),
+                value=spatial["klein_mode"], label="Spatial mode",
+                visible=klein_visible, elem_id=ident("spatial", "klein", "mode"),
+                info="how the regions reach FLUX.2 Klein, and what the source "
+                     "image is")
+            klein_status = gr.HTML(
+                _klein_status(klein_live, spatial["klein_mode"]),
+                visible=klein_visible, elem_id=ident("spatial", "klein", "status"))
             # The one component the browser writes to, and the one that travels
             # with the generation. Hidden rather than absent: the editor is a
             # page, the compositor is a hook, and a hidden textbox is the only
@@ -1188,7 +1537,8 @@ class ScriptKreaCreative(scripts.Script):
             "spatial_compose": spatial_compose, "spatial_status": spatial_status,
             "spatial_state": spatial_state, "spatial_edit": edit,
             "spatial_scenes": record_scenes, "spatial_pasted": spatial_pasted,
-            "spatial_restore": restore_spatial}
+            "spatial_restore": restore_spatial,
+            "klein_mode": klein_mode, "klein_status": klein_status}
         if panel is not None:
             self.components.update(panel.components())
 
@@ -1197,6 +1547,7 @@ class ScriptKreaCreative(scripts.Script):
         self._wire_spatial(spatial_enabled, spatial_compose, spatial_status,
                            spatial_state, record_scenes, restore_spatial,
                            enabled)
+        self._wire_klein(klein_mode, klein_status, spatial_enabled, spatial_compose)
         self._register_paste_fields()
 
         # Every control travels to before_process, because that is where the
@@ -1211,7 +1562,8 @@ class ScriptKreaCreative(scripts.Script):
         # one a missing creativity library produces. Spatial does not need the
         # library, so a page that could not build the axis controls still has to
         # be able to send a layout. _split() knows both shapes.
-        spatial_controls = [spatial_enabled, spatial_compose, spatial_state]
+        spatial_controls = [spatial_enabled, spatial_compose, klein_mode,
+                            spatial_state]
         if panel is None:
             self.arguments = [enabled, creativity] + spatial_controls
         else:
@@ -1316,10 +1668,102 @@ class ScriptKreaCreative(scripts.Script):
         # Spatial's own restore, writing only to Spatial's own controls. Nothing
         # in this list is Creative Mode's, which is the whole difference between
         # this button and the one in the other section.
+        # The four outputs this button has always had, then the two the Klein
+        # backend added. Appended rather than interleaved: what the first four
+        # mean is unchanged, so a Krea restore is the same call it was and only
+        # the two new ones are ever ``gr.update()`` no-ops for it.
         restore_spatial.click(
             fn=_restore_spatial,
-            outputs=[spatial_state, spatial_enabled, spatial_compose, spatial_status],
+            outputs=[spatial_state, spatial_enabled, spatial_compose, spatial_status,
+                     self.components["klein_mode"], self.components["klein_status"]],
             queue=False)
+
+    def _wire_klein(self, klein_mode, klein_status, spatial_enabled,
+                    spatial_compose):
+        """The Klein block's handlers, and the ones that have to wait.
+
+        Two of §9's four triggers are this script's own controls and are wired
+        immediately. The other two -- ImageStitch's gallery and the checkpoint
+        dropdown -- belong to other parts of the page and may not exist yet, so
+        the wiring that needs them is held in ``_wire_klein_live`` and run by
+        :meth:`after_component` when they arrive. If they never arrive, the
+        block still works: it repaints on every interaction with a Spatial
+        control, and the generation-time check is authoritative regardless.
+
+        Nothing here selects a mode on the user's behalf. A repaint changes the
+        *labels* and the sentence under them; the value stays where it was put,
+        because §10 gives Auto alone the licence to adapt.
+        """
+        outputs = [klein_mode, klein_status, spatial_compose]
+
+        klein_mode.change(fn=_klein_mode_chosen, inputs=[klein_mode],
+                          outputs=[klein_status], queue=False)
+        # Turning Spatial Layout on is a moment somebody is about to look at
+        # this block, which makes it the cheapest place to re-ask a question
+        # whose answer may have changed since the page was built.
+        spatial_enabled.change(fn=_klein_refresh, inputs=[klein_mode],
+                               outputs=outputs, queue=False)
+
+        def wire(kind, component):
+            """Repaint when ``component`` changes, reading everything reachable.
+
+            The gallery is an *input* wherever it exists, so a repaint driven by
+            the checkpoint still knows what ImageStitch holds. It is never an
+            output: this script reads that gallery and has no business writing to
+            it.
+
+            Which inputs are available depends on what has been built by the time
+            this runs, and the two orderings are both real -- the checkpoint
+            dropdown is a quicksetting that exists before any script's ``ui()``,
+            and ImageStitch sorts after this script so its gallery appears later.
+            So each case gets its own small adapter rather than a placeholder
+            argument, and a handler that cannot see the gallery says the contents
+            are unknown instead of reporting them as empty.
+            """
+            gallery = self.stitch_gallery
+            if gallery is not None and component is not gallery:
+                component.change(
+                    fn=lambda mode, images, name: _klein_refresh(
+                        mode, gallery=images, checkpoint=name),
+                    inputs=[klein_mode, gallery, component], outputs=outputs,
+                    queue=False)
+            elif gallery is not None:
+                component.change(
+                    fn=lambda mode, images: _klein_refresh(mode, gallery=images),
+                    inputs=[klein_mode, gallery], outputs=outputs, queue=False)
+            else:
+                component.change(
+                    fn=lambda mode, name: _klein_refresh(mode, checkpoint=name),
+                    inputs=[klein_mode, component], outputs=outputs, queue=False)
+
+        self._wire_klein_live = wire
+        for kind, component in (("gallery", self.stitch_gallery),
+                                ("checkpoint", self.checkpoint_box)):
+            if component is not None:
+                self._wire_deferred_klein(kind, component)
+
+    def _wire_deferred_klein(self, kind: str, component) -> None:
+        """Wire one of the two components §9 asks the Klein block to watch.
+
+        Each is wired at most once, and independently of the other, because they
+        arrive in either order and sometimes only one arrives at all: the
+        checkpoint dropdown is a quicksetting built before any script's ``ui()``,
+        and ImageStitch sorts after this script so its gallery appears
+        afterwards. A single shared one-shot would have let whichever came first
+        cancel the other.
+
+        Never fatal and never noisy: a failure here costs a repaint, and a
+        repaint is a convenience on top of a server-side rule.
+        """
+        wire = self._wire_klein_live
+        if wire is None or kind in self._klein_wired or component is None:
+            return
+        self._klein_wired.add(kind)
+        try:
+            wire(kind, component)
+        except Exception:
+            errors.report("Model Chain: failed to wire the Klein Spatial status",
+                          exc_info=True)
 
     def _register_paste_fields(self):
         """Make an ordinary paste reproduce the image rather than re-expand it.
@@ -1406,6 +1850,11 @@ class ScriptKreaCreative(scripts.Script):
         self._complaint = ""
         self._spatial_note = ""
         self._composed_without_creative = False
+        # Before anything else: whatever a previous generation left behind.
+        # An exception during sampling never reaches postprocess, so this is the
+        # cleanup §41 actually depends on -- the one that runs whether or not
+        # the last job finished.
+        self._klein_release()
 
         # The negative prompt first, and on its own. No language model in this
         # extension has ever seen it, so there is nothing to protect it from --
@@ -1417,6 +1866,7 @@ class ScriptKreaCreative(scripts.Script):
 
         parsed = literals.parse(getattr(p, "prompt", "") or "")
         layout = self._layout(p, args)
+        layout = self._klein_route(p, args, layout)
         creative = bool(enabled)
         if not creative and not getattr(layout, "regions", ()):
             # Neither feature is on. If the prompt carries literal commands they
@@ -1502,6 +1952,225 @@ class ScriptKreaCreative(scripts.Script):
                          exc_info=True)
         _say_what_ran(outcome, written)
 
+    # -- the Klein backend -------------------------------------------------- #
+
+    def _klein_route(self, p, values, layout):
+        """Decide which backend this generation's canvas belongs to.
+
+        Returns the layout the Krea pipeline should see. For a Krea 2 checkpoint
+        that is the layout unchanged, and every line below is skipped. For a
+        Klein checkpoint it is an *empty* layout, and the boxes go to
+        :mod:`mc_spatial_klein` instead -- because the two backends are not two
+        ways of doing the same thing. Krea's compositor rewrites ``p.prompt``
+        into a structured document; Klein's leaves the prompt exactly as the user
+        typed it and attaches the regions to the conditioning. Running both would
+        hand a Klein model a Krea JSON prompt *and* condition it regionally, and
+        the first half of that is the failure ``mc_krea_pipeline.objection``
+        already exists to prevent.
+
+        Raises when an explicitly chosen image-required mode has lost its source.
+        §10 asks for a clear generation error before sampling rather than a
+        silent fallback, and ``before_process`` is the earliest place it can be
+        raised from -- nothing has been loaded, nothing has been sampled, and the
+        message names the mode the user picked.
+        """
+        from prompt_master import spatial as generic
+        from prompt_master.krea import spatial as spatial_module
+
+        chosen = _spatial_for(values)
+        if not chosen.get("enabled"):
+            return layout
+
+        arch = mc_spatial_klein.intended_architecture(p)
+        if not mc_spatial_klein.is_klein(arch):
+            return layout
+
+        try:
+            request = mc_spatial_klein.request_for(
+                p, chosen.get("layout"),
+                enabled=True, requested_mode=chosen.get("klein_mode"))
+        except generic.ModeUnavailable as exc:
+            # The one place this feature refuses a generation. Everything else in
+            # this hook falls back to "generate what the user typed"; this does
+            # not, because the user did not ask for a picture from noise -- they
+            # asked for their source image edited, and the source is gone.
+            logger.error("Model Chain: %s", exc)
+            raise RuntimeError(str(exc)) from exc
+
+        import contextlib
+
+        self._klein = request
+        self._klein_layout = chosen.get("layout") or ""
+
+        # Whether ImageStitch's own references reach the model, decided here
+        # because ``override_settings`` has to be in place before the host
+        # applies it -- which happens before any script's ``process`` runs, and
+        # so before ImageStitch encodes anything.
+        try:
+            p.override_settings.update(
+                mc_spatial_klein.reference_override(request, arch))
+        except Exception:
+            logger.debug("Model Chain: could not scope the Klein reference toggle",
+                         exc_info=True)
+
+        # Opened here for the same timing reason: after the previous job and
+        # before anything has encoded for this one.
+        self._klein_job = contextlib.ExitStack()
+        self._klein_job.enter_context(mc_spatial_klein.reference_scope(p))
+
+        for note in request.notes:
+            logger.warning("Model Chain: Klein Spatial Layout — %s", note)
+        if request.unreadable:
+            self._spatial_note = " ".join(request.notes)
+
+        # The canvas has gone to the other backend, so the Krea pipeline is told
+        # there is nothing to compose. It still runs for Creative Mode and for
+        # the literal commands, both of which are prompt concerns and neither of
+        # which is a backend's.
+        return spatial_module.Layout(width=layout.width, height=layout.height)
+
+    def _klein_release(self) -> None:
+        """Unwind everything a Klein spatial job installed. Never raises.
+
+        Called at the top of every generation and at the bottom of every one that
+        finishes. Both, deliberately: the second is where it belongs and the
+        first is where it is guaranteed to happen.
+        """
+        for attribute in ("_klein_pass", "_klein_job"):
+            stack = getattr(self, attribute, None)
+            setattr(self, attribute, None)
+            if stack is None:
+                continue
+            try:
+                stack.close()
+            except Exception:
+                logger.warning("Model Chain: a Klein Spatial scope did not unwind "
+                               "cleanly", exc_info=True)
+        self._klein = None
+        self._klein_backend = None
+        self._klein_layout = ""
+        self._klein_note = ""
+
+    def process(self, p, *args, **kwargs):
+        """Settle the Klein spatial job against the model that actually loaded.
+
+        The first hook after the checkpoint is resident, which makes it the first
+        place two questions can be answered honestly: is this really a Klein
+        engine, and does it really expose a regional-conditioning path.
+
+        ``before_process`` guessed the first from a checkpoint header, which is a
+        guess it is allowed to make because it has to redirect the prompt before
+        anything is loaded. If it guessed wrong the boxes are dropped with a note
+        -- not composed as Krea, because the prompt has already been assembled by
+        then, and a second composition here would be a different prompt from the
+        one the plan and the metadata describe.
+
+        Nothing is encoded here. The references are ImageStitch's own and it
+        registers them itself; what this generation decided about them is a
+        scoped setting applied before this hook ran. See
+        :func:`mc_spatial_klein.reference_override`.
+        """
+        request = self._klein
+        if request is None:
+            return
+
+        arch = mc_spatial_klein.loaded_architecture()
+        if not mc_spatial_klein.is_klein(arch):
+            self._klein_note = (
+                f"the layout was not applied because the checkpoint that loaded is "
+                f"{getattr(arch, 'label', 'not a Klein model')}, not the FLUX.2 Klein "
+                f"the Spatial panel was showing")
+            logger.warning("Model Chain: Klein Spatial — %s", self._klein_note)
+            self._klein = None
+            return
+
+        if request.regions:
+            backend = mc_spatial_klein.select_backend()
+            if backend is None:
+                # §34, and the whole reason the backend is probed rather than
+                # assumed. Raised rather than logged: generating globally with
+                # the boxes silently discarded produces a plausible image that is
+                # not the one that was asked for, and nothing about the result
+                # would say so.
+                message = mc_spatial_klein.compatibility_error(arch)
+                logger.error("Model Chain: %s", message)
+                # Released before raising: this hook's exception skips
+                # postprocess entirely, and leaving the reference scope open
+                # would hold a job's worth of state over a generation that never
+                # happened.
+                self._klein_release()
+                raise RuntimeError(message)
+            self._klein_backend = backend
+
+        logger.info("Model Chain: %s",
+                    mc_spatial_klein.describe(request, self._klein_backend))
+        if request.references and not mc_arch.references_available(arch):
+            # A pre-flight check, and the one signal a checkpoint name cannot
+            # fake: the flag is set by the loader from the state dict it actually
+            # read. A repacked build whose header promised a reference path its
+            # engine does not implement fails here rather than silently.
+            self._klein_note = ("the loaded engine does not expose Forge's reference "
+                                "path, so the ImageStitch images did not reach this "
+                                "generation")
+            logger.warning("Model Chain: Klein Spatial — %s", self._klein_note)
+
+        try:
+            p.extra_generation_params.update(
+                mc_spatial_klein.metadata(request, self._klein_backend,
+                                          layout_serialized=self._klein_layout))
+        except Exception:
+            logger.debug("Model Chain: could not record the Klein Spatial metadata",
+                         exc_info=True)
+
+    def process_before_every_sampling(self, p, *args, **kwargs):
+        """Attach the regions to the conditioning for the pass about to run.
+
+        The narrowest hook that has both halves of what §29 needs: the positive
+        conditioning, and the tensor whose shape decides where a normalized box
+        lands. Per *pass* and not per generation, because hires fix samples a
+        second time at a different size and a set compiled against the first grid
+        would place every box against the wrong geometry.
+
+        The previous pass's conditioning is removed before this one's is added.
+        Two passes' worth of regions on one conditioning list would double every
+        condition and halve nothing.
+        """
+        import contextlib
+
+        request = self._klein
+        if request is None or not request.regions:
+            return
+
+        if self._klein_pass is not None:
+            try:
+                self._klein_pass.close()
+            except Exception:
+                logger.warning("Model Chain: the previous Klein Spatial pass did not "
+                               "unwind cleanly", exc_info=True)
+            self._klein_pass = None
+
+        conditioning = kwargs.get("c", kwargs.get("cond"))
+        tensor = kwargs.get("x")
+        if tensor is None:
+            tensor = kwargs.get("noise")
+        if conditioning is None or tensor is None:
+            self._klein_note = ("the layout was not applied because this host did not "
+                                "offer the conditioning and the latent for the "
+                                "sampling pass")
+            logger.warning("Model Chain: Klein Spatial — %s", self._klein_note)
+            return
+
+        stack = contextlib.ExitStack()
+        try:
+            stack.enter_context(mc_spatial_klein.regional_conditioning(
+                request, conditioning, tensor=tensor,
+                backend=self._klein_backend,
+                model=getattr(p, "sd_model", None)))
+        except Exception:
+            stack.close()
+            raise
+        self._klein_pass = stack
+
     def _publish_plan(self, p, layout, creative: bool = True) -> None:
         """Work out what this generation will actually do, before any of it happens.
 
@@ -1560,11 +2229,16 @@ class ScriptKreaCreative(scripts.Script):
         one would send somebody to look at the wrong thing.
         """
         complaint = self._complaint
-        spatial_note = self._spatial_note
+        spatial_note = self._spatial_note or self._klein_note
         composed_raw = self._composed_without_creative
         self._complaint = ""
         self._spatial_note = ""
         self._composed_without_creative = False
+        # The ordinary end of a Klein spatial job: references off the model, the
+        # global reference toggle back where the user left it, the regional
+        # conditioning gone. It runs before the early return below, because a
+        # generation that produced nothing still has to put back what it moved.
+        self._klein_release()
         if processed is None:
             return
         try:
