@@ -1489,10 +1489,12 @@ expanded prompt is not recorded separately — it is already the image's own
 ### Spatial Layout: saying where things go
 
 Creative Mode decides how a picture looks. **Spatial Layout** is where you say
-what goes where — you draw boxes on a canvas the shape of your image, type a
-prompt into each one, and those boxes reach Krea 2 as part of a structured
-prompt. It is off until you turn it on, and it changes nothing at all while it
-is off.
+what goes where — you draw boxes on a canvas the shape of your image and type a
+prompt into each one. What happens to those boxes depends on the checkpoint:
+Krea 2 receives them as part of a structured prompt, and FLUX.2 Klein 9B receives
+them as regional conditioning (see *Spatial Layout on FLUX.2 Klein 9B* below).
+There is one editor and one saved layout either way. It is off until you turn it
+on, and it changes nothing at all while it is off.
 
 ```
 [x] Creative Mode      Creativity [------7----]
@@ -1614,6 +1616,141 @@ same thing to the model in six independent ways at once — a separate element
 entry, numeric coordinates, your own words, a framing hint, an angle hint and a
 plain-English position — and stop the global scene from contradicting any of
 them.
+
+That is the Krea 2 backend, and it is what the section above describes. On a
+FLUX.2 Klein 9B checkpoint the same canvas does something different.
+
+#### Spatial Layout on FLUX.2 Klein 9B
+
+**One editor, one saved layout, two backends.** Draw the boxes once. Which
+backend consumes them is decided by the checkpoint that is loaded, not by a
+setting — load Krea 2 and the boxes become a structured prompt, load Klein 9B
+and they become regional conditioning. The panel swaps its own controls to match
+and says which backend it is showing.
+
+```
+[x] Spatial Layout                                        [Edit Layout…]
+
+    Spatial mode:  (o) Auto
+                   ( ) Regional Generate
+                   ( ) Regional Img2Img       — needs an ImageStitch image
+                   ( ) Reference + Regions    — needs an ImageStitch image
+                   ( ) Strict Regional Edit   — needs an ImageStitch image
+
+    Backend: Flux.2 Klein 9B. Source: No active ImageStitch image.
+    Auto will use Regional Generate.
+```
+
+The difference that matters: **Klein leaves your prompt exactly as you typed
+it.** No language model runs, nothing is rewritten, and the boxes never appear
+in the prompt as text. Each region's own words are conditioned on the part of
+the frame its rectangle covers, beside your global prompt rather than inside it.
+
+```
+global prompt:   photorealistic modern living room
+region:          tall brass floor lamp        bbox [680, 150, 910, 820]
+
+              -> the lamp is biased toward the right-hand third,
+                 and "tall brass floor lamp" never enters the global prompt
+```
+
+It is still guidance rather than geometry. A regional condition biases *where* a
+concept appears; it does not confine it to the rectangle, and nothing here
+promises exact bbox occupancy.
+
+##### ImageStitch is the only source image
+
+For Klein Spatial Layout, "there is a source image" means one thing: **ImageStitch
+Integrated is installed, switched on, and holding at least one readable image.**
+Not the img2img tab, not the output gallery, not a previous generation, not a
+pasted PNG, and not references the model happens to still be holding from an
+earlier job. The panel's reading of that is advisory; the generation reads
+ImageStitch's own arguments for the press you actually made, and that is the one
+that decides.
+
+| Mode | No source | ImageStitch source |
+| --- | --- | --- |
+| **Auto** | yes → Regional Generate | yes → Reference + Regions |
+| **Regional Generate** | yes | yes, and the images are ignored |
+| **Regional Img2Img** | no | yes |
+| **Reference + Regions** | no | yes |
+| **Strict Regional Edit** | no | yes |
+
+**Auto is deterministic and never surprising.** With no source it generates from
+noise; with a source it uses the images as Klein reference conditioning. It will
+never choose Regional Img2Img or Strict Regional Edit for you — those change how
+strongly your source survives, which is a decision about the picture rather than
+about what happens to be available.
+
+**An explicit choice is not adapted.** If you pick a mode that needs an image and
+the gallery is empty when you press Generate, the generation is refused with a
+sentence naming the mode. It is not quietly turned into a fresh txt2img: you
+asked for your image edited, and a different picture from the same button is
+worse than an error.
+
+**Regional Generate ignores a full gallery on purpose.** Choosing it means "start
+from noise", and an unused image sitting elsewhere in the UI must not silently
+change what a mode means.
+
+##### The five modes
+
+| Mode | What it does |
+| --- | --- |
+| **Auto** | Regional Generate when ImageStitch is empty; Reference + Regions when it has an image |
+| **Regional Generate** | starts from noise, ImageStitch ignored, region prompts guide where concepts appear |
+| **Reference + Regions** | starts from noise *and* uses ImageStitch as Klein reference conditioning — this is not "preserve my image except in the box"; the whole scene may change |
+| **Regional Img2Img** | ImageStitch image 1 becomes the starting latent; denoise controls how much the whole image may move |
+| **Strict Regional Edit** | edits image 1 only inside the union of the regions and preserves the source outside it |
+
+Regional Img2Img and Strict Regional Edit are **selectable but not yet
+implemented** in this build: they appear in the panel, the availability rules and
+the mode resolver already treat them correctly, and the sampling behaviour behind
+them lands with the source-preserving work. Strict Regional Edit in particular
+does not ship until it can demonstrably preserve pixels outside its mask — a
+"strict" edit that quietly moved the rest of the picture would be the wrong thing
+wearing the right name.
+
+##### What a Klein spatial image records
+
+`Klein Spatial Layout` and its neighbours, in their own namespace so an old Krea
+record can never be read as a Klein one:
+
+```
+Klein Spatial Mode: Auto
+Klein Spatial Resolved Mode: Reference + Regions
+Klein Spatial Source: ImageStitch
+Klein Spatial Source Count: 2
+Klein Spatial Regional Backend: host-area-conditioning
+Klein Spatial Layout: {"version":1,...}
+```
+
+The recorded layout matters more here than it does for Krea. A Krea spatial
+image's `Prompt:` line *is* its composition, so pasting the PNG back reproduces
+the picture on its own. Klein's regional conditioning leaves no trace in the
+prompt at all, so the layout is the only record of what was drawn — which is why
+an ordinary paste restores the prompt and settings and leaves Spatial Layout
+exactly as you had it, and **Restore Spatial setup** is the explicit action that
+puts the canvas and the mode back.
+
+Reference pixels are never in the file. If the image was made with ImageStitch
+references, the restore says how many and asks you to re-add them; the mode stays
+visible and unavailable until you do.
+
+##### If the checkpoint cannot do it
+
+Regional conditioning is a property of the loaded engine, not of the
+checkpoint's name, so it is *probed* rather than assumed — which matters for
+repacked and GGUF builds whose header can promise a path their engine does not
+implement. If no mechanism is found, the generation fails before sampling with
+the detected architecture and engine in the message.
+
+It does not fall back to appending "lamp on the right side" to your prompt.
+That would produce a perfectly good image with nothing to tell you the feature
+never ran, and a failure that looks like a success is worse than a failure.
+
+Klein 4B is not served yet. It is identical to 9B in everything the
+architecture table records about it, so enabling it is one line — and it waits
+for test coverage of its own rather than being assumed to fall out.
 
 ### Pasting a Creative image back
 
@@ -2377,7 +2514,12 @@ mc_creative_krea.py   Creative Mode: settings, roll history, one roll
 mc_creative_panel.py  the Creative control surface, built once for both surfaces
 mc_creative_profiles.py    named Creative configurations and the chosen default
 mc_llm_progress.py    the Krea roll, reported on the host's progress bar
+mc_krea_pipeline.py   which passes run, in what order, for one press
+mc_spatial.py         Spatial Layout: preferences, the Krea composer pass
+mc_spatial_klein.py   Spatial Layout: the FLUX.2 Klein regional-conditioning backend
 prompt_master/        vendored LTX business logic (see VENDORED_FROM.txt)
+prompt_master/spatial.py          the layout as a backend-agnostic request; no host
+prompt_master/krea/spatial.py     the layout document and the Krea BBOX compositor
 prompt_master/krea/creativity/    the versioned creative vocabulary (data only)
 prompt_master/krea/library.py     loads and validates that package
 prompt_master/krea/director.py    the local Creative Director; no inference
@@ -2419,6 +2561,26 @@ installation that never loads the LLM half. What it has instead is one optional
 hook, installed by `mc_broker` at import, which it calls when Forge's own
 eviction has fallen short. It never decides *whether* another workload should
 give ground — that is the broker's to hold.
+
+Spatial Layout stacks in one direction too, and the direction is what keeps one
+canvas serving two models:
+
+```
+javascript/model_chain_spatial_krea.js     the editor; one document, no backend
+              |
+prompt_master/krea/spatial.py              parse / validate / serialize
+              |
+prompt_master/spatial.py                   modes, availability, Auto, coordinates
+         |                 |
+mc_spatial.py         mc_spatial_klein.py
+  (Krea 2 prompt)       (Klein conditioning)
+```
+
+Neither backend imports the other, and neither is imported by the document
+layer. `prompt_master/spatial.py` performs no inference, touches no network and
+imports no part of the WebUI, which is what lets the availability matrix and the
+Auto resolver — the two rules a browser must never be trusted with — be tested
+without a host, a checkpoint or a card.
 
 `mc_lora.py` deliberately depends on nothing else in the extension. It is a
 description of two host mechanisms — the extra-network tag syntax and the LoRA
@@ -2563,6 +2725,46 @@ hidden roll button the old gate pressed has to go unpressed. Those are the
 properties that make a generation survive a hidden tab and a closed one. It
 skips where node is absent, as `tests/test_llm_studio_js.py` does.
 
+`tests/test_klein_spatial.py` covers the other backend, and it is written
+around one division: what a card decides is measured by the spike script, and
+what code decides is all in this file. The mode-resolution table is exhaustive —
+no ImageStitch script at all, a disabled one with images in it, an enabled one
+with nothing in it, a gallery of entries nothing can resolve to an image, and a
+good one — and each of the five is checked for the same two things: what Auto
+resolves to and which modes are offered. Auto is asserted never to choose a
+source-preserving mode in any reachable combination, an explicitly chosen
+image-required mode is asserted to *fail before sampling* rather than fall back,
+and Regional Generate is asserted to ignore a full gallery.
+
+The rest of the file is about failures that produce a perfectly good image. A
+normalized box is compiled against the shape of the tensor actually being
+sampled, so two pass sizes are asserted to produce two different grids; the near
+corner floors and the far corner ceils, so a box never loses the cells it
+visually touches. Image 1 is asserted to stay out of the supplemental reference
+set in the source-preserving modes, because Klein inserts the init latent ahead
+of `ref_latents` itself and registering it twice would hand the model the same
+picture as reference 1 and reference 2. Nothing survives the job: references are
+cleared at both ends, the referencing flag comes back down after an exception,
+and the reference toggle is asserted never to be assigned at all — it travels as
+a `p.override_settings` fragment, so there is no global setting for a failed
+generation to leak.
+
+Two of those tests assert against the module's own source, which is unusual and
+deliberate. One checks that no natural-language position hint exists anywhere in
+the Klein backend: a fallback that appended "lamp on the right side" to the
+global prompt would generate a plausible image with nothing to say the feature
+never ran, and a failure that looks like a success is the one this whole design
+is arranged against. The other checks that the backend never encodes a reference
+itself, because ImageStitch already encodes its own for Stage 1 and a second
+encode beside it would double-register every image — with which of the two ran
+first decided by the order Forge happens to run two always-on scripts in.
+
+The last section is a regression suite for Krea 2, which shares the editor, the
+document and the panel with all of the above: a Krea checkpoint still rewrites
+the prompt into a structured document, a Klein checkpoint leaves it byte-for-byte
+as typed, the Klein modes appear for no other architecture, and Spatial Layout
+switched off reaches none of it.
+
 `tests/test_krea_progress.py` covers the other half of the same change: that the
 roll reports itself on the bar the generation already has without ever starting
 or finishing that task, and — driven on a thread with a deadline, because a
@@ -2600,6 +2802,27 @@ The criteria that need real hardware — that an SDXL → Flux.2-Klein chain
 produces coherent output, that a Krea 2 Edit refine responds to its Edit LoRA,
 that a LoRA visibly affects the refined image, that a warm switch is measurably
 faster than a cold disk load, that a preserved LoRA state survives 20–50
-alternating jobs without drift, and that multiple Stage 2 references visibly
-condition a Flux.2 Klein or Krea 2 + Edit LoRA refine — are left to manual
+alternating jobs without drift, that multiple Stage 2 references visibly
+condition a Flux.2 Klein or Krea 2 + Edit LoRA refine, and that Klein regional
+conditioning demonstrably moves an object toward its box — are left to manual
 verification.
+
+That last one has a script rather than a checklist. `tools/klein_regional_spike.py`
+runs inside the WebUI environment against a loaded Klein 9B checkpoint:
+
+```
+python tools/klein_regional_spike.py --probe
+python tools/klein_regional_spike.py --generate --out spike/
+```
+
+`--probe` is cheap and needs no card — it reports which regional-conditioning
+mechanisms this Forge build actually exposes, and prints the real shape of a
+conditioning entry, which is the thing hardest to guess right from outside.
+`--generate` is the half that decides anything: three seeds, one large box on
+the left and the same box on the right, and a brightness-weighted measurement of
+where the object went. The acceptance is that measurement and not the absence of
+an exception, for the same reason the source assertions above exist.
+
+If it reports that nothing moved, the answer is to stop and reassess the host
+integration — not to reach for a broader patch, and not to ship a prompt hint
+wearing the name of regional conditioning.

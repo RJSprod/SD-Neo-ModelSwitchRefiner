@@ -54,13 +54,21 @@ ENABLED = "krea_spatial_enabled"
 COMPOSE_MODE = "krea_spatial_compose_mode"
 LAYOUT = "krea_spatial_layout"
 RECORD_SCENES = "krea_spatial_record_scenes"
-"""The preferences this feature owns. All four are its own keys.
+KLEIN_MODE = "klein_spatial_mode"
+"""The preferences this feature owns. All five are its own keys.
 
 The layout is persisted, and that is deliberate rather than incidental: boxes
 are minutes of work with a mouse, and a WebUI restart that quietly emptied the
 canvas would be exactly the silent loss of layout state the design intent
 forbids. It is *not* part of a Creative profile -- a profile describes how art
 direction behaves, and a composition is about one picture.
+
+``KLEIN_MODE`` is the odd one out and is named for its backend rather than for
+Krea, because it is the only preference here that means nothing to Krea 2. There
+is one canvas and one enabled switch; what differs between the two backends is
+what they *do* with the canvas, so the compose mode is Krea's question and the
+spatial mode is Klein's, and both are remembered so that switching checkpoints
+back and forth does not lose either answer.
 """
 
 
@@ -72,6 +80,7 @@ def settings() -> dict:
     an empty canvas makes no request, because there is nothing for pass 2 to
     reconcile the scene with.
     """
+    from prompt_master import spatial as generic
     from prompt_master.krea import spatial
 
     try:
@@ -87,6 +96,10 @@ def settings() -> dict:
         "compose_mode": mode if mode in spatial.COMPOSE_MODES else spatial.SMART,
         "layout": str(stored.get(LAYOUT) or ""),
         "record_scenes": bool(stored.get(RECORD_SCENES, True)),
+        # Normalised on the way out rather than trusted: a preference file
+        # written by a build that offered a mode this one does not must land on
+        # Auto rather than reach the resolver as a string nothing matches.
+        "klein_mode": generic.normalise_mode(stored.get(KLEIN_MODE), generic.AUTO),
     }
 
 

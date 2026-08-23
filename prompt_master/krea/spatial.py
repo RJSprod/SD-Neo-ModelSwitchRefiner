@@ -99,6 +99,13 @@ COMPOSE_MODES = (SMART, DIRECT)
 SCALE = 1000
 """Normalized coordinate space: 0..1000 on both axes, as §4 specifies."""
 
+DEFAULT_STRENGTH = 1.0
+MIN_STRENGTH = 0.0
+MAX_STRENGTH = 2.0
+"""What a region's regional-conditioning weight may be, and what it is when the
+document does not say. 0 contributes nothing, 1 is normal, above 1 is a stronger
+bias and is still not a hard mask."""
+
 MAX_REGIONS = 24
 """How many regions one layout may carry.
 
@@ -183,6 +190,23 @@ def clamp(value) -> int:
     except (TypeError, ValueError):
         return 0
     return max(0, min(SCALE, number))
+
+
+def clamp_strength(value) -> float:
+    """One region's strength, inside its bounds, defaulting when it is not a number.
+
+    Clamped rather than refused for the same reason a coordinate is: a strength
+    of 5 is somebody asking for more, and the honest answer to that is the most
+    this build will give rather than a skipped region. A missing value is not an
+    error at all -- it is every version-1 layout ever saved.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_STRENGTH
+    if number != number:  # NaN compares false against both bounds below.
+        return DEFAULT_STRENGTH
+    return max(MIN_STRENGTH, min(MAX_STRENGTH, number))
 
 
 def normalise_bbox(values) -> list[int] | None:
@@ -296,6 +320,22 @@ class Region:
     framing: str = ""
     angle: str = ""
     z: int = 0
+    strength: float = DEFAULT_STRENGTH
+    """How strongly a regional-conditioning backend should weight this region.
+
+    Read by the Klein backend and ignored entirely by the Krea prompt composer,
+    which has nowhere to put a scalar: a structured prompt says *what* is in a
+    box, not how loudly. It is on the shared Region rather than on a Klein-only
+    one because it is a property of what the user drew, and there is one
+    document.
+
+    Version 1 documents do not carry it and do not need to: absent means
+    :data:`DEFAULT_STRENGTH`, which is the value that makes a regional condition
+    behave exactly as it did before the field existed. :meth:`state` writes it
+    back only when it is not the default, so a layout drawn before this build
+    round-trips byte-identical through it.
+    """
+
     index: int = 0
     """Draw order. Not user intent and not in the prompt -- it is the tie-break
     that keeps two regions at the same z from swapping places between runs."""
@@ -430,6 +470,8 @@ class Region:
         if self.kind == TEXT:
             found["text"] = self.text
         found.update({"framing": self.framing, "angle": self.angle, "z": self.z})
+        if self.strength != DEFAULT_STRENGTH:
+            found["strength"] = self.strength
         return found
 
 
@@ -668,9 +710,11 @@ def _region(entry, position: int) -> tuple[Region | None, str]:
     except (TypeError, ValueError):
         z = position
 
+    strength = clamp_strength(entry.get("strength", DEFAULT_STRENGTH))
+
     return (Region(identifier=identifier, name=name, kind=kind, bbox=tuple(bbox),
                    prompt=prompt, text=text, framing=framing, angle=angle, z=z,
-                   index=position,
+                   strength=strength, index=position,
                    raw_prompt=raw_prompt if raw_prompt != prompt else "",
                    prefix_literals=parsed.prefixes,
                    suffix_literals=parsed.suffixes),
