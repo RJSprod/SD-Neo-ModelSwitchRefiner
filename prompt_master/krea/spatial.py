@@ -96,8 +96,56 @@ SMART = "smart"
 DIRECT = "direct"
 COMPOSE_MODES = (SMART, DIRECT)
 
+KREA2 = "krea2"
+"""Krea 2's structured document, and the only shape this module used to build."""
+
+FLUX2 = "flux2"
+"""Black Forest Labs' documented FLUX.2 JSON prompt schema.
+
+Added because Creative Mode and Spatial Layout were asked to work on Flux.2
+Klein, and the honest way to do that was not to hand Klein a document written in
+another model's key names. BFL's own guide says FLUX.2 reads a JSON prompt
+directly *or* flattened into prose, and names the schema's top-level keys --
+``scene``, ``subjects``, ``style``, ``color_palette``, ``lighting``, ``mood``,
+``background``, ``composition``, ``camera``. Four of those are keys this module
+has content for, and the other five are not emitted: an empty ``lighting`` is a
+claim about the lighting, and the writer's own sentence about it is already
+inside ``scene``.
+"""
+
+DIALECTS = (KREA2, FLUX2)
+DEFAULT_DIALECT = KREA2
+"""What a caller that does not say gets. Krea 2, because that is what every
+caller meant before there was anything to say."""
+
 SCALE = 1000
 """Normalized coordinate space: 0..1000 on both axes, as §4 specifies."""
+
+CHARS_PER_TOKEN = 4.0
+"""Characters per token, for warning about a text encoder's cap.
+
+An estimate and labelled as one everywhere it is used. There is no tokenizer in
+this module and there should not be: importing one would make a pure, offline,
+dependency-free compositor depend on a model's vocabulary in order to print a
+warning. Four is the usual figure for English prose, and this document is mostly
+English prose with punctuation -- which errs slightly *low* on token count, so a
+prompt this function calls safe is not necessarily safe. That is the right
+direction for the error to run only because the alternative -- a warning on
+every prompt -- is one nobody reads.
+"""
+
+
+def estimated_tokens(text) -> int:
+    """Roughly how many tokens ``text`` will cost a text encoder.
+
+    Used for one thing: saying that a composition is probably longer than the
+    selected checkpoint can read. FLUX.2's reference implementation caps the
+    tokenized sequence at 512 and truncates from the end, which means the last
+    subjects in a composition quietly stop being in the prompt -- the failure
+    looks like the model ignoring the boxes at the bottom of the list, and
+    nothing anywhere says otherwise.
+    """
+    return int(len(str(text or "")) / CHARS_PER_TOKEN + 0.5)
 
 MAX_REGIONS = 24
 """How many regions one layout may carry.
@@ -683,8 +731,9 @@ def _region(entry, position: int) -> tuple[Region | None, str]:
 
 
 def compose(layout: Layout, scene: str, background: str = "",
-            ratio: str = "", literals: bool = True) -> str:
-    """The final model-facing prompt: one compact structured Krea 2 prompt.
+            ratio: str = "", literals: bool = True,
+            dialect: str = DEFAULT_DIALECT) -> str:
+    """The final model-facing prompt: one compact structured document.
 
     This is the function the whole feature is arranged around, and it is worth
     saying what it is *not*: it is not a template a model fills in, and it is not
@@ -704,7 +753,22 @@ def compose(layout: Layout, scene: str, background: str = "",
     finding the payloads in the finished prompt and deleting them -- cannot tell
     a user's ``[[red hat]]`` from a red hat the Creative Writer thought of by
     itself, and would delete both.
+
+    ``dialect`` selects the key vocabulary. Both dialects carry the *same*
+    content -- the same validated boxes, the same descriptions built by the same
+    :meth:`Region.describe`, the same order -- and differ only in what the keys
+    around it are called. An unknown dialect falls back to Krea 2's document
+    rather than raising: a checkpoint this build has never heard of is not a
+    reason to lose somebody's composition.
     """
+    if str(dialect or "").strip().casefold() == FLUX2:
+        return _flux2_document(layout, scene, background, ratio, literals)
+    return _krea2_document(layout, scene, background, ratio, literals)
+
+
+def _krea2_document(layout: Layout, scene: str, background: str, ratio: str,
+                    literals: bool) -> str:
+    """Krea 2's structured prompt, exactly as §4 of the design intent gives it."""
     elements = [region.element(layout.auto_position_hint, literals)
                 for region in layout.ordered]
     payload = {
@@ -719,6 +783,64 @@ def compose(layout: Layout, scene: str, background: str = "",
         # Absent rather than empty. An empty ratio is a claim about the frame,
         # and this module would be making it up.
         payload.pop("aspect_ratio")
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+COORDINATE_SPACE = "normalized 0-1000, origin top-left, [x0,y0,x1,y1]"
+"""What ``bounding_box`` means, said out loud in the FLUX.2 document.
+
+Krea 2's format does not carry this and does not need it: the numbers are part
+of a document that model was trained to read, and a sentence explaining them
+would be tokens spent telling it something it knows. FLUX.2 has no such prior --
+it is being shown a schema, not recognising one -- so the one thing worth
+spending eleven tokens on is what the four numbers are. Without it, 0..1000 is
+as readable as pixels, percent, or nothing at all.
+"""
+
+
+def _flux2_document(layout: Layout, scene: str, background: str, ratio: str,
+                    literals: bool) -> str:
+    """The same composition in Black Forest Labs' documented FLUX.2 schema.
+
+    Three differences from the Krea 2 document, and all three are deliberate:
+
+    - **The keys are BFL's.** ``scene``, ``subjects``, ``background``,
+      ``composition`` -- from the FLUX.2 prompting guide's own JSON schema.
+      Its other five top-level keys (``style``, ``color_palette``, ``lighting``,
+      ``mood``, ``camera``) are not emitted, because this module has no content
+      for them: the Creative Writer's sentence about the lighting is already
+      inside ``scene``, and an empty ``lighting`` key would be a claim that
+      there is nothing to say about it.
+    - **The elements are ``subjects``, and each one names its own box.** Same
+      ``desc`` string, under BFL's ``description``; same normalized coordinates,
+      under ``bounding_box`` rather than ``bbox``.
+    - **The coordinate space is stated.** See :data:`COORDINATE_SPACE`.
+
+    ``aspect_ratio`` moves inside ``composition``, which is where BFL's schema
+    puts a statement about the frame, and it is still absent rather than empty
+    when nothing knows it.
+    """
+    subjects = []
+    for region in layout.ordered:
+        element = region.element(layout.auto_position_hint, literals)
+        subject = {"description": element.get("desc", "")}
+        if element.get("type") == TEXT:
+            # Kept apart for the reason Region.element keeps it apart: only
+            # this is meant to become visible writing.
+            subject["renders_text"] = element.get("text", "")
+        subject["bounding_box"] = list(element.get("bbox") or ())
+        subjects.append(subject)
+
+    composition = {"coordinate_space": COORDINATE_SPACE}
+    if str(ratio or ""):
+        composition["aspect_ratio"] = str(ratio)
+
+    payload = {
+        "scene": str(scene or "").strip(),
+        "subjects": subjects,
+        "background": str(background or "").strip(),
+        "composition": composition,
+    }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 

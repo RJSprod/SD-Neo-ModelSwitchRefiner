@@ -1552,6 +1552,40 @@ class TestTheCheckpointGuard:
         monkeypatch.setattr(mc_arch, "detect_loaded_engine", lambda: mc_arch.by_key("sdxl"))
         assert "SDXL" in mc_creative_krea.checkpoint_objection()
 
+    def test_flux_2_klein_is_allowed(self, monkeypatch, host):
+        """Asked for directly: Creative Mode and Spatial Layout were not designed
+        for Klein, and trying it is a decision the user is entitled to make. Both
+        Klein sizes, because they are one architecture with one text encoder and
+        gating on the parameter count would be a distinction with nothing behind
+        it."""
+        import mc_arch
+
+        for key in ("flux2_9b", "flux2_4b"):
+            monkeypatch.setattr(mc_arch, "detect_loaded_engine",
+                                lambda key=key: mc_arch.by_key(key))
+            assert mc_creative_krea.checkpoint_objection() == ""
+
+    def test_the_refusal_names_every_checkpoint_that_would_work(self, monkeypatch, host):
+        """It used to name Krea 2, because Krea 2 was the whole list. A refusal
+        that names one of three answers is a refusal that sends somebody looking
+        for a checkpoint they may not need."""
+        import mc_arch
+
+        monkeypatch.setattr(mc_arch, "detect_loaded_engine", lambda: mc_arch.by_key("sd15"))
+        said = mc_creative_krea.checkpoint_objection()
+
+        assert "Krea 2" in said
+        assert "Flux.2 Klein 9B" in said and "Flux.2 Klein 4B" in said
+
+    def test_the_guard_reads_the_architecture_table(self, host):
+        """The list is a column in mc_arch, not a name spelled out in the guard.
+        A fourth architecture is a row, not an edit to the objection."""
+        import mc_arch
+
+        allowed = {a.key for a in mc_arch.architectures() if a.takes_structured_prompts}
+        assert allowed == {"krea2", "flux2_4b", "flux2_9b"}
+        assert not mc_arch.UNKNOWN.takes_structured_prompts
+
     def test_a_checkpoint_nobody_can_identify_is_not_refused(self, monkeypatch, host):
         """Detection reads a header and cannot see inside every GGUF or repacked
         build. A guard that blocked real Krea 2 checkpoints would be worse than
@@ -1569,6 +1603,45 @@ class TestTheCheckpointGuard:
 
         assert events[-1].kind == sessions.FAILED
         assert client.calls == []
+
+    def test_the_dialect_follows_the_checkpoint(self, monkeypatch, host):
+        import mc_arch
+
+        from prompt_master.krea import spatial
+
+        monkeypatch.setattr(mc_arch, "detect_loaded_engine",
+                            lambda: mc_arch.by_key("flux2_9b"))
+        assert mc_creative_krea.prompt_dialect() == spatial.FLUX2
+
+        monkeypatch.setattr(mc_arch, "detect_loaded_engine",
+                            lambda: mc_arch.by_key("krea2"))
+        assert mc_creative_krea.prompt_dialect() == spatial.KREA2
+
+    def test_an_unidentified_checkpoint_gets_the_krea_document(self, monkeypatch, host):
+        """The same reasoning as letting it through the guard: an unrecognised
+        checkpoint is far more likely to be a repacked Krea 2 than a Klein, and
+        guessing the other way would hand a real Krea 2 somebody else's keys."""
+        import mc_arch
+
+        from prompt_master.krea import spatial
+
+        monkeypatch.setattr(mc_arch, "detect_loaded_engine", lambda: mc_arch.UNKNOWN)
+        monkeypatch.setattr(mc_arch, "detect_from_checkpoint_name",
+                            lambda name: mc_arch.UNKNOWN)
+        assert mc_creative_krea.prompt_dialect() == spatial.KREA2
+
+    def test_only_a_checkpoint_that_changes_something_is_mentioned(self, monkeypatch, host):
+        """Krea 2 is what this has always built and is not news; Klein is."""
+        import mc_arch
+
+        monkeypatch.setattr(mc_arch, "detect_loaded_engine",
+                            lambda: mc_arch.by_key("krea2"))
+        assert mc_creative_krea.dialect_note() == ""
+
+        monkeypatch.setattr(mc_arch, "detect_loaded_engine",
+                            lambda: mc_arch.by_key("flux2_9b"))
+        said = mc_creative_krea.dialect_note()
+        assert "FLUX.2" in said and "Flux.2 Klein 9B" in said and "512" in said
 
     def test_llm_studio_does_not_consult_it(self, client, monkeypatch):
         """Writing a prompt settles nothing about which checkpoint draws it."""

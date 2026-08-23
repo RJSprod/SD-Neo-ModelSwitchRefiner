@@ -52,6 +52,19 @@ REF_VALIDATED = "validated"
 REF_EXPERIMENTAL = "experimental"
 """Forge exposes a reference path here, but Model Chain has not validated it."""
 
+DIALECT_KREA2 = "krea2"
+"""Krea 2's own structured document: ``high_level_description`` and
+``compositional_deconstruction``. The format Creative Mode and Spatial Layout
+were designed against, and the one Krea 2 was trained to read."""
+
+DIALECT_FLUX2 = "flux2"
+"""Black Forest Labs' documented FLUX.2 JSON prompt schema: ``scene``,
+``subjects``, ``background``, ``composition``.
+
+FLUX.2 reads a JSON prompt directly or flattened into prose, but it has never
+seen Krea's key names. Same boxes, same words, keys the model has a prior for.
+"""
+
 
 @dataclass(frozen=True)
 class Architecture:
@@ -107,6 +120,37 @@ class Architecture:
     which is why detection here does not stop at the checkpoint name.
     """
 
+    # -- structured prompts (Creative Mode and Spatial Layout) ------------- #
+    #
+    # Both features hand the image model a long, structured, natural-language
+    # document. That is a claim about what the *text encoder* can read, so it
+    # belongs to the architecture rather than to either feature -- and it is
+    # the whole of the guard that used to be spelled ``key == "krea2"`` inside
+    # Creative Mode.
+    prompt_dialect: str | None = None
+    """Which structured prompt document this architecture is given, or None.
+
+    None means "do not hand this one a paragraph": Creative Mode and Spatial
+    Layout both refuse to arm, because a structured document fed to a model
+    with 77 tokens of room does not look like a smaller version of the feature,
+    it looks like a bug.
+    """
+    prompt_tokens: int | None = None
+    """The text encoder's token cap, when the architecture states one.
+
+    None is not "unlimited", it is "not stated here" -- Krea 2 has room for the
+    documents this extension builds and no figure worth writing down. FLUX.2
+    does state one, its reference implementation caps the tokenized sequence at
+    512, and a structured prompt that runs past it is silently truncated from
+    the end. Silently is the problem: the last element of a composition simply
+    stops being in the prompt, and nothing anywhere says so.
+    """
+
+    @property
+    def takes_structured_prompts(self) -> bool:
+        """Whether Creative Mode and Spatial Layout may arm against this."""
+        return self.prompt_dialect is not None
+
     @property
     def supports_edit(self) -> bool:
         return self.edit_option is not None
@@ -146,12 +190,14 @@ _ARCHITECTURES: tuple[Architecture, ...] = (
         edit_option="klein_no_reference", edit_on_value=False, edit_needs_lora=False,
         edit_is_default=True,
         reference_support=REF_VALIDATED, reference_flag="klein",
+        prompt_dialect=DIALECT_FLUX2, prompt_tokens=512,
     ),
     Architecture(
         "flux2_9b", "Flux.2 Klein 9B", 16, 1.0,
         edit_option="klein_no_reference", edit_on_value=False, edit_needs_lora=False,
         edit_is_default=True,
         reference_support=REF_VALIDATED, reference_flag="klein",
+        prompt_dialect=DIALECT_FLUX2, prompt_tokens=512,
     ),
     Architecture("chroma", "Chroma", 16, 1.0),
     Architecture("lumina2", "Lumina 2", 16, 4.0),
@@ -176,6 +222,7 @@ _ARCHITECTURES: tuple[Architecture, ...] = (
         "krea2", "Krea 2", 16, 1.0,
         edit_option="krea2_do_reference", edit_on_value=True, edit_needs_lora=True,
         reference_support=REF_VALIDATED, reference_flag="krea2",
+        prompt_dialect=DIALECT_KREA2,
     ),
     Architecture("ernie", "ERNIE-Image", 16, 1.0),
     Architecture("pid", "PiD", 8, 7.0),
@@ -225,6 +272,17 @@ A last resort, for a loaded model that does not carry a recognisable
 def by_key(key: str) -> Architecture:
     """Look an architecture up by its stable key, falling back to UNKNOWN."""
     return _BY_KEY.get(key, UNKNOWN)
+
+
+def architectures() -> tuple[Architecture, ...]:
+    """Every architecture in the table, in table order.
+
+    So that a caller asking "which of these can be handed a structured prompt"
+    reads the table rather than repeating a list of names that will be wrong the
+    next time a row is added. UNKNOWN is not in it: it is the absence of an
+    answer, not an entry.
+    """
+    return _ARCHITECTURES
 
 
 # --------------------------------------------------------------------------- #

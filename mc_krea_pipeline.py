@@ -139,6 +139,26 @@ class Request:
 
     record_scenes: bool = True
 
+    dialect: str = ""
+    """Which structured document to build, or "" for the compositor's default.
+
+    A property of the *checkpoint* rather than of either feature: Krea 2 reads
+    its own schema and Flux.2 Klein reads Black Forest Labs', and the same boxes
+    and the same words go into both. It arrives on the request rather than being
+    detected in here for the reason everything else does -- this module is a
+    pure function of what it is handed, and "which checkpoint is loaded" is the
+    hook's question. See :func:`dialect_for`.
+    """
+
+    prompt_tokens: int = 0
+    """The selected checkpoint's text-encoder cap, or 0 when it states none.
+
+    Only ever used to *warn*. Nothing here shortens a composition to fit: the
+    boxes are the user's, and a pipeline that silently dropped the last two to
+    stay under a limit would be doing the exact thing the warning exists to
+    report the model doing.
+    """
+
     @property
     def regions(self) -> tuple:
         return tuple(getattr(self.layout, "regions", ()) or ())
@@ -225,6 +245,35 @@ def objection() -> str:
     import mc_creative_krea
 
     return mc_creative_krea.checkpoint_objection()
+
+
+def dialect_for() -> str:
+    """The structured-prompt dialect the selected checkpoint should be given.
+
+    Beside :func:`objection` because it answers the other half of the same
+    question. The guard says *whether* this checkpoint may be handed a
+    structured document; this says *which one*, and both are about the image
+    model rather than about Creative Mode or Spatial Layout.
+    """
+    import mc_creative_krea
+
+    return mc_creative_krea.prompt_dialect()
+
+
+def token_budget() -> int:
+    """The selected checkpoint's text-encoder cap, or 0 when it states none.
+
+    The third question about the same checkpoint, and the reason it is asked at
+    all: Flux.2 Klein reads 512 tokens and truncates the rest, which a
+    ten-region composition can pass without anything on screen changing.
+    """
+    import mc_arch
+    import mc_creative_krea
+
+    found = mc_creative_krea.detected_architecture()
+    if found is mc_arch.UNKNOWN:
+        return 0
+    return int(getattr(found, "prompt_tokens", 0) or 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -338,15 +387,17 @@ def run(request: Request, write=None) -> Outcome:
         # the image model reads stays one valid structured prompt rather than a
         # JSON object with tags loose around it. Region literals are already in
         # their own element's desc, put there by the compositor.
+        dialect = request.dialect or spatial_module.DEFAULT_DIALECT
         prompt = spatial_module.compose(
             request.layout, scene=literals_module.restore(scene, request.literals),
-            background=background, ratio=request.ratio)
+            background=background, ratio=request.ratio, dialect=dialect)
         # The same document, built again from the same validated layout with
         # every payload left out. Built rather than edited: see
         # :attr:`mc_creative_krea.Prepared.inheritable`.
         inheritable = spatial_module.compose(request.layout, scene=scene,
                                              background=background,
-                                             ratio=request.ratio, literals=False)
+                                             ratio=request.ratio, literals=False,
+                                             dialect=dialect)
     except Exception as exc:
         from modules import errors
 
@@ -367,6 +418,8 @@ def run(request: Request, write=None) -> Outcome:
             out.prepared = _prepared(request, out, body=scene, settings=settings)
         return out
 
+    _warn_if_truncated(request, out, prompt, spatial_module)
+
     metadata = mc_spatial.metadata(
         request.layout, compose_mode=request.layout.compose_mode, composed=composed,
         input_scene=input_scene, record_scenes=request.record_scenes,
@@ -381,6 +434,35 @@ def run(request: Request, write=None) -> Outcome:
         out.roll, settings, prompt=prompt, spatial=metadata,
         inheritable=inheritable, literals=request.literals)
     return out
+
+
+def _warn_if_truncated(request: Request, out: Outcome, prompt: str,
+                       spatial_module) -> None:
+    """Say so when the finished document is longer than the model can read.
+
+    Truncation is the one failure in this whole pipeline that produces a
+    perfectly good image: the encoder stops reading, the last subjects in the
+    composition are simply not in the prompt, and what the user sees is the
+    boxes at the bottom of their list being ignored. Every other failure in here
+    announces itself; this one has to be predicted.
+
+    It is a note and never a refusal, and nothing is shortened to fit. Which two
+    regions to lose is the user's decision, and the pipeline is not entitled to
+    make it quietly on their behalf.
+    """
+    budget = int(request.prompt_tokens or 0)
+    if budget <= 0:
+        return
+    estimated = spatial_module.estimated_tokens(prompt)
+    if estimated <= budget:
+        return
+
+    note = (f"the structured prompt is roughly {estimated:,} tokens and this "
+            f"checkpoint's text encoder reads about {budget:,}, so the last "
+            "elements of the composition are probably being truncated — fewer "
+            "regions, or shorter region prompts, would fit")
+    logger.warning("Model Chain: %s", note)
+    out.spatial_note = f"{out.spatial_note}; {note}" if out.spatial_note else note
 
 
 def _prepared(request: Request, out: Outcome, body: str, settings: dict):

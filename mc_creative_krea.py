@@ -373,13 +373,95 @@ def writer_identity() -> str:
 # --------------------------------------------------------------------------- #
 
 
+def detected_architecture():
+    """The architecture of the checkpoint txt2img would generate with.
+
+    ``mc_arch.UNKNOWN`` when it cannot be told, including when the host cannot
+    be asked at all. One place, because three callers below want the same
+    answer and a second detection is a second chance to disagree.
+    """
+    import mc_arch
+
+    try:
+        from modules import shared
+
+        found = mc_arch.detect_loaded_engine()
+        if found is mc_arch.UNKNOWN:
+            found = mc_arch.detect_from_checkpoint_name(shared.opts.sd_model_checkpoint)
+        return found
+    except Exception:
+        logger.debug("Model Chain: could not identify the image checkpoint for Creative Mode",
+                     exc_info=True)
+        return mc_arch.UNKNOWN
+
+
+def prompt_dialect() -> str:
+    """Which structured document the selected checkpoint should be given.
+
+    Krea 2's when the architecture is unknown, for the same reason
+    :func:`checkpoint_objection` lets an unknown one through: detection reads a
+    header and cannot see inside every GGUF or repacked build, and Krea 2 is
+    what this feature was built for. Guessing the other way would hand a real
+    Krea 2 checkpoint a document written in somebody else's key names on the
+    strength of not having recognised it.
+    """
+    import mc_arch
+
+    from prompt_master.krea import spatial
+
+    found = detected_architecture()
+    dialect = getattr(found, "prompt_dialect", None)
+    if dialect in spatial.DIALECTS:
+        return dialect
+    return spatial.DEFAULT_DIALECT
+
+
+DIALECT_LABELS = {"krea2": "Krea 2's own structured prompt",
+                  "flux2": "Black Forest Labs' FLUX.2 schema"}
+"""How each dialect is named on screen. Keyed by :mod:`prompt_master.krea.spatial`'s
+constants so a dialect with no label here is simply not mentioned."""
+
+
+def dialect_note() -> str:
+    """One clause naming the document this checkpoint will be handed, or "".
+
+    Empty for Krea 2, which is what the feature has always built and is not
+    news. It is news for anything else: "Creative Mode is on" over a Flux.2
+    Klein checkpoint used to be impossible, and somebody who has just made it
+    possible is owed the detail that the prompt is being written in a different
+    schema and read by an encoder with a stated limit.
+    """
+    import mc_arch
+
+    from prompt_master.krea import spatial
+
+    found = detected_architecture()
+    if found is mc_arch.UNKNOWN or not found.takes_structured_prompts:
+        return ""
+    if found.prompt_dialect == spatial.DEFAULT_DIALECT:
+        return ""
+
+    named = DIALECT_LABELS.get(found.prompt_dialect, "")
+    if not named:
+        return ""
+    budget = int(found.prompt_tokens or 0)
+    capped = (f", which reads about {budget:,} tokens" if budget else "")
+    return f"Prompts are built in {named} for {found.label}{capped}."
+
+
 def checkpoint_objection() -> str:
     """Why Creative Mode must not arm against the selected checkpoint, or "".
 
-    Creative Mode writes Krea 2 prompts: long, natural-language, written to
-    Krea's own guidance. Handing one to SD 1.5 is not a smaller version of the
-    feature, it is a paragraph fed to a model with 77 tokens of room, and the
-    result would look like the extension was broken rather than like a choice.
+    Creative Mode writes long, structured, natural-language prompts. Handing one
+    to SD 1.5 is not a smaller version of the feature, it is a paragraph fed to
+    a model with 77 tokens of room, and the result would look like the extension
+    was broken rather than like a choice.
+
+    Which architectures can read one is a property of the *text encoder*, so the
+    list lives in :mod:`mc_arch` as ``prompt_dialect`` rather than as a name
+    spelled out here. It used to be ``key == "krea2"`` and one sentence naming
+    Krea 2 twice; Flux.2 Klein is the second entry, and the third will be a row
+    in that table rather than an edit to this function.
 
     An architecture that cannot be identified is allowed through without
     complaint. Detection reads a checkpoint header and genuinely cannot see
@@ -391,22 +473,16 @@ def checkpoint_objection() -> str:
     images, so which checkpoint happens to be loaded there is none of its
     business.
     """
-    try:
-        import mc_arch
-        from modules import shared
+    import mc_arch
 
-        found = mc_arch.detect_loaded_engine()
-        if found is mc_arch.UNKNOWN:
-            found = mc_arch.detect_from_checkpoint_name(shared.opts.sd_model_checkpoint)
-    except Exception:
-        logger.debug("Model Chain: could not identify the image checkpoint for Creative Mode",
-                     exc_info=True)
+    found = detected_architecture()
+    if found is mc_arch.UNKNOWN or found.takes_structured_prompts:
         return ""
 
-    if found is mc_arch.UNKNOWN or found.key == "krea2":
-        return ""
-    return (f"Creative Mode writes Krea 2 prompts, and the selected checkpoint is "
-            f"{found.label}. Select a Krea 2 checkpoint, or turn Creative Mode off to "
+    takes = ", ".join(sorted(a.label for a in mc_arch.architectures()
+                             if a.takes_structured_prompts))
+    return (f"Creative Mode writes structured prompts, and the selected checkpoint "
+            f"is {found.label}. Select one of {takes}, or turn Creative Mode off to "
             "generate with the prompt as you typed it.")
 
 

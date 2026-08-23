@@ -110,6 +110,34 @@ def script():
     return creative_script.ScriptKreaCreative()
 
 
+REAL_OBJECTION = mc_creative_krea.checkpoint_objection
+"""The genuine checkpoint guard, captured before any fixture stubs it out.
+
+``client`` replaces it with ``lambda: ""`` so that most of this file can press
+Generate without a checkpoint at all. The handful of tests that are *about* the
+guard need the real one back, and by the time they run the attribute no longer
+holds it."""
+
+
+@pytest.fixture
+def on_checkpoint(monkeypatch):
+    """Generate as though ``key`` were the loaded checkpoint, guard and all.
+
+    Returns a callable rather than a value because the architecture is the
+    parameter: the same three lines otherwise get written out once per test, and
+    the third of them -- putting the real guard back -- is the one that would be
+    quietly forgotten."""
+    def use(key):
+        import mc_arch
+
+        monkeypatch.setattr(mc_arch, "detect_loaded_engine",
+                            lambda: mc_arch.by_key(key))
+        monkeypatch.setattr(mc_creative_krea, "checkpoint_objection", REAL_OBJECTION)
+        return mc_arch.by_key(key)
+
+    return use
+
+
 FACE = {"id": "r1", "name": "Face", "type": "obj", "bbox": [35, 55, 315, 360],
         "prompt": "elderly Japanese woman, silver hair, gentle expression",
         "framing": "Close-up", "angle": "3/4 left", "z": 0}
@@ -437,6 +465,117 @@ class TestTheCompositor:
 # --------------------------------------------------------------------------- #
 # Versioning (§7, §8.4)
 # --------------------------------------------------------------------------- #
+
+
+class TestTheFluxDialect:
+    """Klein reads the same composition in Black Forest Labs' key names.
+
+    Asked for directly. Creative Mode and Spatial Layout were built for Krea 2
+    and nothing about that changes here: the boxes, the words, the hints and the
+    order are one compositor, and the dialect decides what the keys around them
+    are called. The rule these tests exist to hold is that only the keys move.
+    """
+
+    def klein(self, layout=None, scene="", **kwargs):
+        layout = layout if layout is not None else spatial.parse(document((FACE, SIGN)))
+        return json.loads(spatial.compose(layout, scene=scene,
+                                          dialect=spatial.FLUX2, **kwargs))
+
+    def test_krea_is_still_what_a_caller_that_does_not_ask_gets(self):
+        """Every existing caller meant Krea 2, and a default that changed under
+        them would rewrite the prompt of every Krea 2 user in the release."""
+        layout = spatial.parse(document())
+
+        assert spatial.compose(layout, scene="x") == \
+            spatial.compose(layout, scene="x", dialect=spatial.KREA2)
+        assert spatial.DEFAULT_DIALECT == spatial.KREA2
+
+    def test_it_uses_the_documented_flux_2_keys(self):
+        payload = self.klein(scene="a street", background="wet asphalt", ratio="3:4")
+
+        assert set(payload) == {"scene", "subjects", "background", "composition"}
+        assert payload["scene"] == "a street"
+        assert payload["background"] == "wet asphalt"
+        assert payload["composition"]["aspect_ratio"] == "3:4"
+
+    def test_the_keys_it_has_nothing_for_are_absent_rather_than_empty(self):
+        """BFL's schema also names style, color_palette, lighting, mood and
+        camera. An empty lighting key is a claim about the lighting, and the
+        writer's own sentence about it is already inside the scene."""
+        payload = self.klein(scene="a street")
+
+        for key in ("style", "color_palette", "lighting", "mood", "camera"):
+            assert key not in payload
+
+    def test_the_descriptions_are_the_same_strings_as_krea_gets(self):
+        """One compositor. If these two ever diverge, a Klein user and a Krea 2
+        user drawing the same boxes are running different features."""
+        layout = spatial.parse(document((FACE, SIGN)))
+        krea = json.loads(spatial.compose(layout, scene="a street"))
+        klein = self.klein(layout, scene="a street")
+
+        krea_descs = [e["desc"] for e in
+                      krea["compositional_deconstruction"]["elements"]]
+        assert [s["description"] for s in klein["subjects"]] == krea_descs
+
+    def test_the_boxes_are_the_same_numbers_under_a_named_key(self):
+        layout = spatial.parse(document((FACE, SIGN)))
+        klein = self.klein(layout)
+
+        assert [s["bounding_box"] for s in klein["subjects"]] == \
+            [list(region.bbox) for region in layout.ordered]
+
+    def test_it_says_what_the_four_numbers_mean(self):
+        """Krea 2 was trained on this format and needs no explanation. Klein is
+        being shown a schema rather than recognising one, so 0..1000 is as
+        readable as pixels or percent until something says which."""
+        composition = self.klein()["composition"]
+
+        assert "0-1000" in composition["coordinate_space"]
+        assert "top-left" in composition["coordinate_space"]
+
+    def test_visible_text_stays_apart_from_its_description(self):
+        """The same reason Krea's element keeps them apart: only one of the two
+        is meant to become writing in the picture."""
+        subjects = self.klein()["subjects"]
+        sign = subjects[[s.get("renders_text") for s in subjects].index("MIDNIGHT CAFE")]
+
+        assert sign["renders_text"] == "MIDNIGHT CAFE"
+        assert sign["description"].startswith(SIGN["prompt"])
+        assert "MIDNIGHT CAFE" not in sign["description"]
+
+    def test_an_object_region_carries_no_text_key(self):
+        first = self.klein(spatial.parse(document()))["subjects"][0]
+
+        assert "renders_text" not in first
+
+    def test_a_ratio_nothing_knows_is_absent_rather_than_empty(self):
+        assert "aspect_ratio" not in self.klein()["composition"]
+
+    def test_literals_can_be_left_out_of_it_too(self):
+        """The Stage 2 representation is per-dialect, not Krea-only: a Klein
+        chain inherits a prompt no payload was ever written into."""
+        region = dict(FACE, prompt="a face [[<lora:krea2_edit:1>]]")
+        layout = spatial.parse(document((region,)))
+
+        with_them = self.klein(layout)["subjects"][0]["description"]
+        without = json.loads(spatial.compose(layout, scene="", literals=False,
+                                             dialect=spatial.FLUX2))
+        assert "<lora:krea2_edit:1>" in with_them
+        assert "lora" not in without["subjects"][0]["description"]
+
+    def test_an_unknown_dialect_composes_rather_than_raises(self):
+        """A checkpoint this build has never heard of is not a reason to lose
+        somebody's composition."""
+        layout = spatial.parse(document())
+
+        assert spatial.compose(layout, scene="x", dialect="flux9") == \
+            spatial.compose(layout, scene="x")
+
+    def test_the_token_estimate_is_labelled_an_estimate_and_is_monotonic(self):
+        assert spatial.estimated_tokens("") == 0
+        assert spatial.estimated_tokens("a" * 2048) == 512
+        assert spatial.estimated_tokens("a" * 4096) > spatial.estimated_tokens("a" * 2048)
 
 
 class TestVersioning:
@@ -1109,6 +1248,110 @@ class TestTheCheckpointGuardCoversSpatialToo:
         script.postprocess(p, result)
 
         assert p_said(result, "not Krea 2")
+
+
+class TestAGenerationOnKlein:
+    """The dialect reaching an actual press of Generate, both features at once
+    and each on its own. Asked for in those terms: Creative Mode and Spatial
+    Layout on Flux.2 Klein 9B, together or separately."""
+
+    def test_spatial_alone_composes_in_the_flux_schema(self, script, client, store,
+                                                       on_checkpoint):
+        on_checkpoint("flux2_9b")
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     compose="direct", layout=document())
+
+        assert set(composed(p)) == {"scene", "subjects", "background", "composition"}
+
+    def test_creative_and_spatial_together_compose_in_it_too(self, script, client,
+                                                             store, on_checkpoint):
+        on_checkpoint("flux2_9b")
+        p = generate(script, "a quiet street", enabled=True, spatial_on=True,
+                     compose="direct", layout=document())
+        payload = composed(p)
+
+        assert payload["scene"] == "An expanded Krea prompt."
+        assert payload["subjects"][0]["description"].startswith(FACE["prompt"])
+
+    def test_creative_alone_is_prose_and_no_document_at_all(self, script, client,
+                                                            store, on_checkpoint):
+        """Nothing in the writer's path is dialect-shaped. Creative Mode on its
+        own hands the image model a paragraph, on Klein exactly as on Krea 2."""
+        on_checkpoint("flux2_9b")
+        p = generate(script, "a quiet street", enabled=True, spatial_on=False)
+
+        assert p.prompt == "An expanded Krea prompt."
+
+    def test_the_guard_really_is_the_live_one_in_these_tests(self, script, client,
+                                                             store, on_checkpoint):
+        """Otherwise every test above would pass with the guard stubbed out and
+        prove only that the compositor can be called."""
+        on_checkpoint("sd15")
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     compose="direct", layout=document())
+
+        assert p.prompt == "a quiet street"
+
+    def test_krea_2_still_gets_krea_2_s_document(self, script, client, store,
+                                                 on_checkpoint):
+        on_checkpoint("krea2")
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     compose="direct", layout=document())
+
+        assert "compositional_deconstruction" in composed(p)
+
+
+class TestTheTextEncoderBudget:
+    """Truncation is the one failure here that produces a perfectly good image:
+    the encoder stops reading and the last subjects are simply not in the
+    prompt. Every other failure announces itself; this one is predicted."""
+
+    def wide(self, count=20):
+        """A layout whose document comfortably passes Klein's 512 tokens."""
+        return document(tuple(
+            dict(FACE, id=f"r{index}", name=f"Region {index}",
+                 prompt="an elaborately described subject " * 8,
+                 bbox=[10 + index, 20 + index, 300 + index, 400 + index])
+            for index in range(count)))
+
+    def test_a_long_composition_says_it_will_be_truncated(self, script, client,
+                                                          store, on_checkpoint):
+        on_checkpoint("flux2_9b")
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     compose="direct", layout=self.wide())
+        result = Result()
+        script.postprocess(p, result)
+
+        assert p_said(result, "truncated")
+
+    def test_a_short_one_is_left_alone(self, script, client, store, on_checkpoint):
+        on_checkpoint("flux2_9b")
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     compose="direct", layout=document())
+        result = Result()
+        script.postprocess(p, result)
+
+        assert not p_said(result, "truncated")
+
+    def test_nothing_is_dropped_to_make_it_fit(self, script, client, store,
+                                               on_checkpoint):
+        """Which two regions to lose is the user's decision. A pipeline that
+        made it quietly would be doing the exact thing the warning reports."""
+        on_checkpoint("flux2_9b")
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     compose="direct", layout=self.wide())
+
+        assert len(composed(p)["subjects"]) == 20
+
+    def test_a_checkpoint_that_states_no_cap_is_never_warned_about(
+            self, script, client, store, on_checkpoint):
+        on_checkpoint("krea2")
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     compose="direct", layout=self.wide())
+        result = Result()
+        script.postprocess(p, result)
+
+        assert not p_said(result, "truncated")
 
 
 class TestThePlanNamesTheRealPipeline:

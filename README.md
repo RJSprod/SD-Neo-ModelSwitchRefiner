@@ -1248,6 +1248,24 @@ is asked, so the prompt you get is the prompt you would have got with the box
 unticked. Adding a direction and raising Creativity is what starts changing it,
 in that order.
 
+**Which checkpoints it will arm against.** Krea 2, and Flux.2 Klein (4B and 9B).
+Both features, each on its own or both together. Anything else is refused with a
+sentence naming what would work, because a long structured prompt handed to a
+model with 77 tokens of room does not look like a smaller version of the
+feature, it looks like a bug — and a checkpoint nothing can identify is let
+through rather than refused, since detection reads a file header and cannot see
+inside every GGUF or repacked build.
+
+On Klein the prompt is built in [Black Forest Labs' own documented FLUX.2 JSON
+schema](https://docs.bfl.ml/guides/prompting_guide_flux2) — `scene`, `subjects`,
+`background`, `composition` — rather than Krea 2's; the boxes, your words and
+the hints are identical, only the key names differ, and the toggle says so when
+you turn it on. Klein's text encoder reads about 512 tokens and truncates the
+rest, so a long composition is flagged under the image rather than quietly
+losing its last few regions. It was not designed for Klein and this does not
+claim it was: it is the same feature, handed to Klein in a schema Klein's
+publisher documents.
+
 The same controls are in **LLM Studio → Krea 2**, sharing one settings file, one
 Director and one panel, where they write a prompt and generate no image.
 
@@ -1798,8 +1816,8 @@ already resident is the case that still costs a restart of `llama-server`, and
 the console says so when it happens.
 
 **If the writer cannot run at all** — no model configured, a llama-server that
-will not start, a checkpoint that is not Krea 2 — Creative Mode generates the
-prompt exactly as you typed it and says why under the image. That is deliberate:
+will not start, a checkpoint that takes no structured prompt — Creative Mode
+generates the prompt exactly as you typed it and says why under the image. That is deliberate:
 a language model that will not answer is not a reason to refuse a generation you
 asked for. The console and **LLM Studio → Setup** have the detail.
 

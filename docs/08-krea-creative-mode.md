@@ -2077,3 +2077,110 @@ varies* has.
 Five and not ten: this is the configuration people had before the panel was
 rebuilt, which is what the profile exists to give back. 10 is a different
 request, and the slider is directly above the drawer.
+
+
+## 19. Flux.2 Klein: the same features, a different schema (23 August 2026)
+
+Creative Mode and Spatial Layout were built for Krea 2 and refused to arm
+against anything else. They now arm against Flux.2 Klein as well — both sizes,
+each feature alone or both together — because that was asked for, in those
+terms, by somebody who knows it was not designed for it.
+
+Nothing about the *features* is per-checkpoint. The Director is unchanged, the
+writer's instruction is unchanged, the compositor builds the same boxes from the
+same layout in the same order with the same deterministic hints. What is
+per-checkpoint is one thing: the names of the keys the document is wrapped in.
+
+### 19.1 The guard was never a Creative Mode rule
+
+`checkpoint_objection()` said `found.key == "krea2"` and a sentence naming Krea 2
+twice. That is a claim about what a *text encoder* can read, and §20 had already
+moved the ownership of it to `mc_krea_pipeline` while leaving the implementation
+where it was written.
+
+It is now a column in the architecture table:
+
+```python
+Architecture("krea2", "Krea 2", 16, 1.0, ..., prompt_dialect=DIALECT_KREA2)
+Architecture("flux2_9b", "Flux.2 Klein 9B", 16, 1.0, ...,
+             prompt_dialect=DIALECT_FLUX2, prompt_tokens=512)
+```
+
+`arch.takes_structured_prompts` is `prompt_dialect is not None`, the guard reads
+the table, and the refusal names every checkpoint that would have worked rather
+than the one it happened to be written for. A fourth architecture is a row.
+
+An architecture that cannot be identified is still let through, and still gets
+Krea 2's document. Both halves are the same argument: detection reads a
+safetensors header and cannot see inside every GGUF or repacked build, so an
+unrecognised checkpoint is far likelier to be a repacked Krea 2 than a Klein —
+refusing it would block the thing the guard exists to protect, and handing it
+FLUX.2's key names would be a worse guess than making none.
+
+### 19.2 One compositor, two vocabularies
+
+`spatial.compose()` takes a `dialect`. Krea 2's document is byte-identical to
+what it always built — same function, same key order, same compact separators —
+and `DEFAULT_DIALECT` is Krea 2, because that is what every existing caller
+meant before there was anything to say.
+
+The FLUX.2 document uses Black Forest Labs' own documented JSON prompt schema:
+
+```json
+{"scene":"…","subjects":[{"description":"…","bounding_box":[35,55,315,360]}],
+ "background":"…","composition":{"coordinate_space":"normalized 0-1000, origin top-left, [x0,y0,x1,y1]"}}
+```
+
+Three things about it are worth stating, because all three were decisions:
+
+- **The descriptions are the same strings.** `Region.describe()` is not
+  dialect-aware and must not become so: a Klein user and a Krea 2 user who draw
+  the same boxes are running the same feature, and a test asserts the two
+  `desc`/`description` lists are equal.
+- **The keys BFL's schema names but this module has no content for — `style`,
+  `color_palette`, `lighting`, `mood`, `camera` — are absent, not empty.** Same
+  rule as Natural one layer up (§10.1): an empty `lighting` is a claim about the
+  lighting, and the writer's sentence about it is already inside `scene`.
+- **The coordinate space is spelled out, and only here.** Krea 2 was trained on
+  its format; those eleven tokens would be telling it something it knows. Klein
+  is being shown a schema rather than recognising one, and without a statement
+  `[35,55,315,360]` reads as pixels, percent, or nothing.
+
+Creative Mode alone touches none of this. The writer produces prose, prose is
+what the image model gets, and on Klein that path is identical to Krea 2's —
+which is why "Creative only" needed no code beyond the guard.
+
+### 19.3 Truncation is the one failure that produces a good image
+
+FLUX.2's reference implementation caps the tokenized sequence at 512 and
+truncates the rest. A ten-region composition passes that without anything on
+screen changing: the encoder stops reading, the last subjects are simply not in
+the prompt, and what the user sees is the boxes at the bottom of their list being
+ignored — which looks like the feature not working rather than like a limit.
+
+Every other failure in this pipeline announces itself. This one has to be
+predicted, so `prompt_tokens` travels on the request and the pipeline says:
+
+> *the structured prompt is roughly 900 tokens and this checkpoint's text
+> encoder reads about 512, so the last elements of the composition are probably
+> being truncated — fewer regions, or shorter region prompts, would fit*
+
+It is a note and never a refusal, and **nothing is shortened to fit**. Which two
+regions to lose is the user's decision; a pipeline that made it quietly would be
+doing the exact thing the warning exists to report the model doing.
+
+The estimate is characters ÷ 4 and is labelled an estimate everywhere it
+appears. There is no tokenizer in `prompt_master.krea.spatial` and there should
+not be: importing one would make a pure, offline, dependency-free compositor
+depend on a model's vocabulary in order to print a warning. Four errs slightly
+*low* on real token counts, which is the right direction only because the
+alternative — a warning on every prompt — is one nobody reads.
+
+### 19.4 What is not claimed
+
+This is an experiment with the odds improved, not a validated path. Krea 2 was
+trained on the document Krea 2 is handed. Klein is being handed a schema its
+publisher documents and its text encoder can read, which is a much better
+starting point than another model's key names, and is still not the same thing.
+The Creativity scale, the axis vocabulary and the expression tiers were tuned
+against Krea 2's writer and are not retuned here.

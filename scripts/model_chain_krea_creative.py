@@ -304,10 +304,11 @@ def _toggled(enabled, spatial_enabled, serialized, mode):
         objection = mc_creative_krea.checkpoint_objection()
         stored = mc_creative_krea.settings()
         directions = mc_creative_panel.active_note(stored)
+        dialect = mc_creative_krea.dialect_note()
         told = notice(objection or
                       ("Creative Mode is on. Press Generate: the prompt is directed "
                        f"locally and expanded once, then Forge makes the image. "
-                       f"{directions}"),
+                       f"{directions}{f' {dialect}' if dialect else ''}"),
                       "warn" if objection else "info")
     else:
         told = notice("Creative Mode is off.")
@@ -1428,11 +1429,11 @@ class ScriptKreaCreative(scripts.Script):
         settings = _settings_for(args)
         self._publish_plan(p, layout, creative)
 
-        # The Krea 2 checkpoint guard, asked once for the whole pipeline rather
+        # The checkpoint guard, asked once for the whole pipeline rather
         # than by whichever feature happened to own it. Creative Mode's roll
         # asks the same question again for itself; what changed is that a
         # Spatial-only generation asks it too, because Direct BBOX Merge hands
-        # Krea's structured JSON to the loaded checkpoint without ever calling a
+        # the structured JSON to the loaded checkpoint without ever calling a
         # language model, and that prompt is no more readable by SD 1.5 for
         # having been built deterministically.
         objection = mc_krea_pipeline.objection() if not creative else ""
@@ -1458,7 +1459,12 @@ class ScriptKreaCreative(scripts.Script):
             ratio=spatial_module.aspect_ratio(getattr(p, "width", 0),
                                               getattr(p, "height", 0)),
             image_seed=_image_seed(p),
-            record_scenes=self._record_scenes)
+            record_scenes=self._record_scenes,
+            # Asked here rather than inside the pipeline because "which
+            # checkpoint is loaded" is a host question and the pipeline is a
+            # pure function of what it is handed.
+            dialect=mc_krea_pipeline.dialect_for(),
+            prompt_tokens=mc_krea_pipeline.token_budget())
 
         # Every pass, inside one declaration and under one re-entrancy flag.
         #
