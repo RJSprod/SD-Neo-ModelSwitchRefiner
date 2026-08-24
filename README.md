@@ -1332,10 +1332,14 @@ Under the native Negative Prompt, whenever Creative or Spatial is on:
 ```
 Positive Prompt     portrait of a woman
 Negative Prompt     blurry
-┌──────────────────────────┐ ┌──────────────────────────┐
-│ Positive Literal         │ │ Negative Literal         │
-│ <lora:realfilter:1>      │ │ blue hat                 │
-└──────────────────────────┘ └──────────────────────────┘
+┌───────────────────────────────────────────────────────┐
+│ Positive Literal                                      │
+│ <lora:realfilter:1>                                   │
+└───────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────┐
+│ Negative Literal                                      │
+│ blue hat                                              │
+└───────────────────────────────────────────────────────┘
 
 Stage 1 is given:   <lora:realfilter:1> portrait of a woman blue hat
 ```
@@ -1347,12 +1351,9 @@ Tag Autocomplete, LoRA completion, copy and paste and the caret all behave as
 they do in the two above them, and the Extra Networks browser inserts into
 whichever of the four you used last.
 
-They share the prompt column evenly and stack one above the other when you drag
-Forge's divider far enough left that two boxes would stop being usable, so the
-row never runs into the image column whatever width you work at. With the
-Compact prompt layout the prompt area also stops holding empty space open below
-them — Forge sizes that column to claim whatever height the gallery beside it
-has, and it is asked here to be as tall as the prompts in it instead.
+They sit one above the other at every width, full width of whatever the prompt
+column happens to be, and they ask nothing of that column: no minimum width, no
+share of it, nothing that changes shape as you drag Forge's divider.
 
 **Negative Literal is not Forge's Negative Prompt.** It removes nothing. It is
 the far side of the same protected run of text — the suffix to the positive

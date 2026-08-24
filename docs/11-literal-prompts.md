@@ -218,37 +218,44 @@ the two are the same set today, and a build with a lower minimum then behaves
 sensibly rather than surprisingly.
 
 
-## 9. The row is a flex wrap, not a media query
+## 9. One box above the other, at every width
 
 *Added by the Literal Prompt responsive layout spec (24 August 2026), whose own
-sections 4–8 are the ones referred to here.*
+sections 4–8 are the ones referred to here, and revised once the result was
+seen on a real page.*
 
-Forge Neo's txt2img columns are dragged independently, so the width of the
-window is not the question being asked: a maximised browser can hand this row
-300px, and a media query keeping two boxes side by side in it pushes them into
-the image column. The width that matters is the row's own.
+The spec asked for two boxes side by side while both stayed usable and one per
+line when they did not, decided by the width of the row rather than of the
+window — because Forge Neo's txt2img columns are dragged independently and a
+maximised browser can hand this row 300px. That was built, and it worked:
+`gr.Textbox(scale=1, min_width=240)` on each box, Gradio's Row being a wrapping
+flex container, and measured in Chromium at side by side down to a 560px column
+and stacked from 460px, live under the divider with no resize listener, no
+window query and no theme detection anywhere.
 
-That makes it a flex problem rather than a JavaScript one. A Gradio Row is a
-wrapping flex container, and `min_width` on its children is the width below
-which they stop sharing a line — so the entire responsive behaviour is two
-`gr.Textbox(scale=1, min_width=LITERAL_BOX_MIN_WIDTH)` calls. It follows the
-divider live because layout does, with no `ResizeObserver`, no window listener,
-no theme detection and no knowledge of Forge's column ratio anywhere.
+It is not what the component does now. **The boxes always stack.**
 
-`LITERAL_BOX_MIN_WIDTH` is 240 — roughly a prompt box's worth of usable text —
-and `style.css` states the same number again in `.mc-literal-box`, because a
-theme is free to restyle Row and the guardrail is worth more than the
-duplication. `TestTheRowFitsItsColumn` asserts the two are equal, so tuning one
-fails until the other is tuned with it.
+Two reasons, both from watching it rather than from reading it. The first is
+that a component whose height changes as the divider moves sits inside a prompt
+column that keeps its own leftover space (§10.3), so the empty area below the
+boxes grew and shrank while somebody dragged — the responsive behaviour was
+visible mostly as the gap under it breathing. The second is `min_width` itself:
+a component that states a minimum width is a component the column around it has
+to be at least that wide for. That column belongs to the host and its width
+belongs to the user.
 
-The stylesheet's half is `width`/`max-width: 100%` with `flex-wrap: wrap` on the
-row, `flex: 1 1 240px` with `min-width: min(240px, 100%)` on each box, and
-`min-width: 0` on the wrappers Gradio nests inside them — a flex child's default
-minimum is its content, which is the usual way a prompt box ends up wider than
-the column holding it. `min(240px, 100%)` rather than `240px` so that a column
-narrower than one box takes the box down with it instead of being overflowed.
-Nothing here is given a pixel width, and nothing here can start a horizontal
-scroll bar.
+So there is no `scale`, no `min_width`, no `flex-basis` and no width of any kind
+in this component now. It is a `gr.Column` — Gradio's own word for "stack these"
+— and the stylesheet says `flex-direction: column` and `flex-wrap: nowrap` on
+both the container and the wrapper Gradio nests inside it, as a guardrail
+against a theme with its own rules for Gradio's containers. Each box is
+`width: 100%; min-width: 0`, and the wrappers between the block and the textarea
+are `min-width: 0` too, because a flex child's default minimum is its content
+and that is the usual way a prompt box ends up wider than the column holding it.
+
+The id still says `row`. It is the name Python, `model_chain_literals.js` and
+every test address this element by, and renaming it to match the layout would
+be a rename of the contract to match a stylesheet.
 
 ### 9.1 The labels lost their explanations
 
@@ -310,13 +317,26 @@ mechanism and §8 was satisfied in principle. But that list is walked once, insi
 its own `setup()`, and whether these two boxes are in the document by then is an
 ordering neither extension controls.
 
-So they are handed over explicitly, through `addAutocompleteToArea` — the same
-per-textarea entry point it uses for its own late arrivals, which returns early
-on a textarea it has already claimed. Feature-detected in both directions
-(`typeof addAutocompleteToArea === "function"`, and `TAC_CFG` non-null, since it
-is `var TAC_CFG = null` until that extension's files load), never awaited, and
-retried on the next UI update. A page without Tag Autocomplete is a page where
-this does nothing at all.
+So the two extensions are introduced from both directions, and neither
+introduction needs to go first.
+
+**Handed over.** `addAutocompleteToArea`, the same per-textarea entry point it
+uses for its own late arrivals, which returns early on a textarea it has already
+claimed. Feature-detected (`typeof addAutocompleteToArea === "function"`, and
+`TAC_CFG` non-null, since it is `var TAC_CFG = null` until that extension's files
+load) and retried on the next UI update.
+
+**And asked for.** `getTextAreas` is a top-level function declaration in a
+classic script, so it is a writable property of the global object and the call
+inside that extension's `setup()` resolves through it. It is wrapped once,
+additively: its list comes back with its own contents in its own order and these
+two textareas appended. Whenever its setup runs — before this file, after it, or
+in one of the re-scans it does for accordions that open later — the two boxes are
+in the list it asks for.
+
+That is what makes the ordering stop mattering, and why there is no timer here
+waiting for that extension to finish loading. A page without Tag Autocomplete is
+a page where both halves do nothing at all.
 
 
 ### 10.3 The empty space under the row was never ours
@@ -331,17 +351,27 @@ on that leftover height.
 Measured with no extension on the page at all: a 989px prompt column holding
 168px of prompt. 821px of empty space, in stock Forge Neo.
 
-The Literal Prompt row lands in that column, so it inherits the gap — and being
-shorter side by side than stacked, it changes how much of the gap shows when the
-divider moves, which is how it came to look like something this feature had done.
-It had not. What the feature does now is ask that column to be as tall as its
-contents, which took it to 194px and moved everything below it up.
+The Literal Prompt row lands in that column, so it inherits the gap — and while
+the boxes still shared a line it changed how much of the gap showed as the
+divider moved, which is how it came to look like something this feature had
+done. It had not.
 
-Three guards, because it is somebody else's element: only when the row is
-actually in that column, only when the column's parent stacks vertically (in the
-classic top row that flex-grow is doing real work and zeroing it would squeeze
-the prompt boxes to their content width), and only once. Nothing is read, nothing
-is moved, and a failure leaves the gap exactly as it was.
+For one version this file wrote `flex-grow: 0` onto that column, which took it
+from 989px to 194px and moved everything below it up. That worked, was guarded
+three ways, and is **gone**. Reclaiming it meant reaching out of this component
+and changing how somebody else's page lays out — for space that is the host's,
+on an element the user may have their own theme's opinions about, and while the
+user was asking for the opposite: leave the page's columns alone. The gap is
+Forge's, the decision about it is the user's, and a line in their own `user.css`
+settles it without an extension deciding for them:
+
+```css
+#txt2img_prompt_container.prompt-container-compact { flex-grow: 0 !important; }
+```
+
+`TestItLeavesTheHostsLayoutAlone` is the reason it does not come back: the only
+element of the host's this file writes to is the Negative Prompt, one class, put
+on and taken off again by §8's collapse.
 
 
 ### 10.4 And one thing this extension's CSS had wrong

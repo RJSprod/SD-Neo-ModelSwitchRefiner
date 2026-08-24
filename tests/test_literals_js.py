@@ -810,14 +810,71 @@ class TestTagAutocomplete:
 
         assert found["calls"] == 2
 
+    def test_its_own_list_comes_back_with_both_boxes_in_it(self):
+        """The half that makes the ordering stop mattering.
+
+        That extension decides what to attach to by calling its own
+        `getTextAreas()`, once, inside a setup that runs when its files have
+        loaded. Handing it two textareas only works if this file gets a turn
+        after that; extending the list it asks for works whichever goes first.
+        """
+        found = run("""
+            globalThis.TAC_CFG = {activeIn: {}};
+            globalThis.addAutocompleteToArea = (area) => {
+                area.classList.add("autocomplete");
+            };
+            globalThis.getTextAreas = () => [fieldIn("txt2img_prompt")];
+            mc.extendAutocompleteList();
+            const list = getTextAreas();
+            report({theirs: list[0] === fieldIn("txt2img_prompt"),
+                    ours: list.slice(1).map((field) => field.parentNode.id),
+                    length: list.length});
+        """)
+
+        assert found["theirs"] is True
+        assert found["ours"] == ["mc-krea-creative-literal-positive",
+                                 "mc-krea-creative-literal-negative"]
+
+    def test_the_list_is_wrapped_once_however_often_this_runs(self):
+        found = run("""
+            globalThis.TAC_CFG = {activeIn: {}};
+            globalThis.addAutocompleteToArea = () => {};
+            globalThis.calls = 0;
+            globalThis.getTextAreas = () => { calls += 1; return []; };
+            mc.extendAutocompleteList();
+            mc.extendAutocompleteList();
+            mc.extendAutocompleteList();
+            const list = getTextAreas();
+            report({calls: calls, length: list.length});
+        """)
+
+        assert found["calls"] == 1
+        assert found["length"] == 2
+
+    def test_a_list_that_is_not_an_array_is_handed_back_untouched(self):
+        """Their function, their answer. This adds to a list; it does not
+        decide what one is."""
+        found = run("""
+            globalThis.TAC_CFG = {activeIn: {}};
+            globalThis.addAutocompleteToArea = () => {};
+            globalThis.getTextAreas = () => "not a list";
+            mc.extendAutocompleteList();
+            report({answer: getTextAreas()});
+        """)
+
+        assert found["answer"] == "not a list"
+
     def test_a_page_without_it_is_a_page_where_nothing_happens(self):
         found = run("""
+            globalThis.getTextAreas = () => ["untouched"];
             mc.registerPrompts();
             report({claimed: fieldIn("mc-krea-creative-literal-positive")
-                             ._classes.has("autocomplete")});
+                             ._classes.has("autocomplete"),
+                    list: getTextAreas()});
         """)
 
         assert found["claimed"] is False
+        assert found["list"] == ["untouched"]
 
     def test_a_config_that_has_not_loaded_yet_is_left_alone(self):
         """`var TAC_CFG = null` until its files are read. Calling in before
@@ -835,22 +892,20 @@ class TestTagAutocomplete:
 
 
 # --------------------------------------------------------------------------- #
-# The space the prompt column was holding open
+# The page around the row
 # --------------------------------------------------------------------------- #
 
 
-class TestTheReclaimedSpace:
-    """Forge's prompt column is `gr.Column(scale=6)`.
+class TestItLeavesTheHostsLayoutAlone:
+    """The empty space under this row belongs to Forge.
 
-    In the classic top row that 6 is a width share against the Generate column.
-    In the Compact prompt layout the column is stacked inside the settings
-    column instead, which a CSS grid stretches to the height of the gallery, and
-    the 6 becomes the largest claim on the leftover: hundreds of pixels of empty
-    space under the prompts, measured in a browser at 989px of column holding
-    168px of prompt with no extension on the page at all.
-
-    So it is asked to be as tall as its contents -- but only where that flex-grow
-    is doing nothing, which is the whole of what these tests are about.
+    `ui_toprow.create_prompts()` builds `gr.Column(scale=6)`, and in the Compact
+    prompt layout that column claims the height the gallery beside it has -- so
+    it stands hundreds of pixels taller than the prompts in it, with or without
+    this extension. A version of this file wrote `flex-grow: 0` onto that column
+    to take the space back. It worked, and it was still this component reaching
+    out and changing how somebody else's page lays out, which is not a thing it
+    gets to decide. These tests are the reason it does not come back.
     """
 
     SETUP = """
@@ -858,63 +913,30 @@ class TestTheReclaimedSpace:
         container.appendChild(prompt);
         container.appendChild(negative);
         container.style.flexGrow = "6";
+        container.parentNode.style.flexDirection = "column";
     """
 
-    def test_a_stacked_prompt_column_is_asked_to_fit_its_contents(self):
+    def test_the_prompt_column_is_not_written_to(self):
         found = run(self.SETUP + """
-            container.parentNode.style.flexDirection = "column";
-            mc.place();
-            mc.reclaim();
-            report({grow: container.style.flexGrow});
-        """)
-
-        assert found["grow"] == "0"
-
-    def test_the_classic_top_row_is_left_alone(self):
-        """There the same flex-grow is the prompt column's *width* against the
-        Generate column, and zeroing it squeezes the prompt boxes to their
-        content width. The axis is the whole test."""
-        found = run(self.SETUP + """
-            container.parentNode.style.flexDirection = "row";
-            mc.place();
-            mc.reclaim();
-            report({grow: container.style.flexGrow});
-        """)
-
-        assert found["grow"] == "6"
-
-    def test_a_column_the_row_never_reached_is_left_alone(self):
-        """If the move failed, the gap is not this extension's to reclaim and
-        the page is somebody else's exactly as it was."""
-        found = run(self.SETUP + """
-            container.parentNode.style.flexDirection = "column";
-            row.parentNode.removeChild(row);
-            mc.reclaim();
-            report({grow: container.style.flexGrow});
-        """)
-
-        assert found["grow"] == "6"
-
-    def test_a_column_that_was_already_hugging_is_not_written_to(self):
-        found = run(self.SETUP + """
-            container.style.flexGrow = "0";
-            container.parentNode.style.flexDirection = "column";
-            mc.place();
-            mc.reclaim();
+            mc.wire();
             report({grow: container.style.flexGrow,
-                    flagged: !!container.dataset.mcLiteralHugged});
+                    touched: Object.keys(container.dataset).length});
         """)
 
-        assert found["grow"] == "0"
-        assert found["flagged"] is False
+        assert found["grow"] == "6"
+        assert found["touched"] == 0
 
-    def test_a_page_with_no_prompt_column_is_not_a_crash(self):
-        """Every build that renames that container, and every theme that
-        restructures it."""
-        found = run("""
-            mc.place();
-            mc.reclaim();
-            report({ok: true});
+    def test_the_only_element_of_the_hosts_it_touches_is_the_negative_prompt(self):
+        """One class, put on and taken off again by §9's collapse. Everything
+        else on the page is read and left alone."""
+        found = run(self.SETUP + """
+            const before = JSON.stringify([prompt, negative, container, toprow]
+                .map((el) => [el.className, JSON.stringify(el.style)]));
+            mc.wire();
+            setCfg(7);
+            const after = JSON.stringify([prompt, negative, container, toprow]
+                .map((el) => [el.className, JSON.stringify(el.style)]));
+            report({unchanged: before === after});
         """)
 
-        assert found["ok"] is True
+        assert found["unchanged"] is True
