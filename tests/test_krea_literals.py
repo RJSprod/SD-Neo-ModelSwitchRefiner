@@ -1276,3 +1276,54 @@ class TestPastingOneBack:
                          literal_positive="", literal_negative="")
 
         assert again.prompt == first.prompt
+
+
+class TestWhenTheRowIsOnScreen:
+    """Section 5. Visibility is presentation and never execution.
+
+    The row appears when either prompt-transforming feature is on, because that
+    is when protecting text from one is a thing somebody is thinking about. It
+    is emphatically not a switch, and the tests that matter are the ones showing
+    the values still work while it is hidden.
+    """
+
+    def visible(self, creative, spatial) -> bool:
+        import model_chain_krea_creative as creative_script
+
+        return creative_script._literal_row(creative, spatial)["visible"]
+
+    def test_creative_alone_shows_it(self):
+        assert self.visible(True, False) is True
+
+    def test_spatial_alone_shows_it(self):
+        """Either feature, not both. Spatial composes a structured prompt around
+        the user's words with no writer involved at all, and a LoRA tag needs
+        protecting from the compositor just the same."""
+        assert self.visible(False, True) is True
+
+    def test_both_off_hides_it(self):
+        assert self.visible(False, False) is False
+
+    def test_both_on_shows_it(self):
+        assert self.visible(True, True) is True
+
+    def test_hiding_it_does_not_stop_it_working(self, script, store, host):
+        """The whole of section 3.3 in one assertion: the row is hidden exactly
+        when both features are off, which is exactly the generation this proves
+        still applies the fields."""
+        assert self.visible(False, False) is False
+
+        p = generate(script, "a quiet street", enabled=False,
+                     literal_positive="<lora:still:1>")
+
+        assert p.prompt == "<lora:still:1> a quiet street"
+
+    def test_the_note_counts_fields_rather_than_words(self):
+        """One field is one command however much text is in it, so the number
+        somebody reads has to be the number of things that will be inserted."""
+        import mc_literal_prompts
+
+        assert mc_literal_prompts.active_note("a, b, c", "") == "1 literal active"
+        assert mc_literal_prompts.active_note("a", "b") == "2 literals active"
+        assert mc_literal_prompts.active_note("", "") == ""
+        assert mc_literal_prompts.active_note("   ", "") == ""
