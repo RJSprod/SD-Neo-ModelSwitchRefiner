@@ -649,7 +649,7 @@ decisions the user has made, not every decision the software knows how to make.*
 
 Natural was always defined as *no line in the brief*. The panel now says the same
 thing about itself: a Natural axis has no row, no dropdown and no space. Adding a
-direction adds a line; returning it to Natural removes the line. The Active
+direction adds a line; removing it takes the line away. The Active
 directions list is therefore the shortest true description of what Creative Mode
 is doing, and it is short precisely when the configuration is simple.
 
@@ -693,9 +693,18 @@ pool *before* it weighs anything. Two consequences worth stating:
   `CreativeRecipe.notes` exists for that: the two wrong answers here are both
   silent, and one of them is choosing the value the user forbade.
 
-The panel shows exclusions as `gr.Dropdown(multiselect=True)` over the axis's own
-variants, storing ids and displaying labels — ids are stable by the package's
-contract, labels are display text a package update may rewrite.
+The panel showed exclusions as `gr.Dropdown(multiselect=True)` over the axis's
+own variants, storing ids and displaying labels — ids are stable by the
+package's contract, labels are display text a package update may rewrite.
+
+> **Superseded on the surface, unchanged underneath.** The Image Pipeline
+> refactor replaced the mode radio, the pinned-value dropdown and the exclusion
+> list with one multi-select Treatment picker per direction: none selected is
+> Natural, one is Fixed, two or more is Vary with everything unselected
+> excluded. The three values described in this section are still what the
+> Director reads, what a profile stores and what an image records — they are
+> written by a render now rather than by hand, and are no longer shown. See
+> `docs/10-image-pipeline.md` §4.
 
 ### 10.4 One panel, two surfaces; one profile store, its own file
 
