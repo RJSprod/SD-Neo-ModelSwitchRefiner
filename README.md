@@ -1349,7 +1349,10 @@ whichever of the four you used last.
 
 They share the prompt column evenly and stack one above the other when you drag
 Forge's divider far enough left that two boxes would stop being usable, so the
-row never runs into the image column whatever width you work at.
+row never runs into the image column whatever width you work at. With the
+Compact prompt layout the prompt area also stops holding empty space open below
+them — Forge sizes that column to claim whatever height the gallery beside it
+has, and it is asked here to be as tall as the prompts in it instead.
 
 **Negative Literal is not Forge's Negative Prompt.** It removes nothing. It is
 the far side of the same protected run of text — the suffix to the positive

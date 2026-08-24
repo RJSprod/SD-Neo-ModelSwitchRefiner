@@ -2777,6 +2777,18 @@
     flex-wrap: wrap;
 }
 
+/* Gradio groups adjacent form components into a wrapper of its own, so the two
+   boxes are the row's *grandchildren*: the row holds one `div.form`, and that
+   wrapper is the flex container they actually wrap inside. Both levels are told
+   to shrink and to wrap, which is why this addresses the row's children by `*`
+   -- naming Gradio's wrapper class would be naming something Gradio is free to
+   rename, and the row has no other children to catch. */
+.mc-literal-row > * {
+    min-width: 0;
+    max-width: 100%;
+    flex-wrap: wrap;
+}
+
 /* Two boxes while both are wide enough to type into, one per line below that.
    The decision is `flex-basis`, so it is made against the width of *this row*
    and not the width of the window -- Forge's two txt2img columns are dragged
@@ -2787,7 +2799,7 @@
 
    `min-width: min(240px, 100%)` and not `240px`: below that the box follows the
    column down rather than overflowing it. */
-.mc-literal-row > .mc-literal-box {
+.mc-literal-row .mc-literal-box {
     flex: 1 1 240px;
     min-width: min(240px, 100%);
     max-width: 100%;
