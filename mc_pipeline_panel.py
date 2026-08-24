@@ -126,6 +126,17 @@ EDITOR_LABELS = {
 }
 """What an owned stage's disclosure says. The stage name is already above it."""
 
+PROMPT_ECHO = f"{PREFIX}-prompt-echo"
+"""The one element the browser writes the live prompt into.
+
+An id of this extension's own, inside a stock ``gr.HTML``, because the Prompt
+row has to follow every keystroke and a Gradio round trip per keystroke is not
+a thing to do to somebody's typing. Writing into a Markdown component would
+mean reaching for a Gradio-generated class, which is the one thing every
+selector in this extension avoids -- a theme is allowed to rearrange Gradio's
+internals, and this has to keep working when it does.
+"""
+
 PLACEHOLDERS = {
     "prompt": "*whatever is in the prompt box above*",
     "creative": "Off — the prompt is expanded as written.",
@@ -250,9 +261,15 @@ def _row(pipeline: Pipeline, stage: str) -> None:
                                elem_classes=classes("switch")) as head:
                     pipeline.heads[stage] = head
 
-        pipeline.summaries[stage] = gr.Markdown(
-            PLACEHOLDERS.get(stage, ""), elem_id=ident("summary", stage),
-            elem_classes=classes("summary"))
+        if stage == "prompt":
+            # Written by the browser on every keystroke and by nothing else.
+            pipeline.summaries[stage] = gr.HTML(
+                f'<span id="{PROMPT_ECHO}" class="{PREFIX}-echo"></span>',
+                elem_id=ident("summary", stage), elem_classes=classes("summary"))
+        else:
+            pipeline.summaries[stage] = gr.Markdown(
+                PLACEHOLDERS.get(stage, ""), elem_id=ident("summary", stage),
+                elem_classes=classes("summary"))
 
         if owned:
             with gr.Accordion(EDITOR_LABELS[stage], open=False,

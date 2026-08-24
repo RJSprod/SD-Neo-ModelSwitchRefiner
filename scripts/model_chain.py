@@ -598,14 +598,16 @@ def _short_checkpoint(name: str) -> str:
     if not name:
         return ""
     name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    # The hash first. Forge appends it in square brackets *after* the extension,
+    # so stripping the extension first finds nothing to strip and leaves
+    # "krea2.safetensors" where "krea2" was wanted.
+    if "[" in name:
+        name = name.split("[", 1)[0]
+    name = name.strip()
     for suffix in (".safetensors", ".ckpt", ".gguf", ".sft"):
         if name.casefold().endswith(suffix):
             name = name[: -len(suffix)]
             break
-    # Forge appends the hash in square brackets; it identifies the file, not the
-    # model, and it is the half nobody reads.
-    if "[" in name:
-        name = name.split("[", 1)[0]
     return name.strip() or str(name)
 
 
@@ -1941,8 +1943,6 @@ class ScriptModelChain(scripts.Script):
             self._wire_pipeline_context = wire_pipeline_context
         else:
             wire_pipeline_context()
-
-
 
         try:
             self.infotext_fields = mc_infotext.build_paste_fields(components)

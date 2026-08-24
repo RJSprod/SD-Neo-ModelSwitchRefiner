@@ -1505,7 +1505,7 @@ class ScriptKreaCreative(scripts.Script):
         if panel is not None:
             self.components.update(panel.components())
 
-        self._wire(enabled, creativity, status, controls, show, recipe, expanded,
+        self._wire(enabled, creativity, status, show, recipe, expanded,
                    pasted, exactly, restore, disarm)
         self._wire_spatial(spatial_enabled, spatial_compose, spatial_status,
                            spatial_state, record_scenes, restore_spatial,
@@ -1583,7 +1583,7 @@ class ScriptKreaCreative(scripts.Script):
                          outputs=[spatial_status], queue=False,
                          show_progress=False)
 
-    def _wire(self, enabled, creativity, status, controls, show, recipe, expanded,
+    def _wire(self, enabled, creativity, status, show, recipe, expanded,
               pasted, exactly, restore, disarm):
         """Every handler this file owns, in one place. The panel wires its own.
 
