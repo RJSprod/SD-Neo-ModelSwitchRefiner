@@ -2090,3 +2090,123 @@ class TestTheCompactCanvas:
 
         assert found["compactRegions"] == []
         assert found["published"] == 0
+
+
+class TestRegionLiteralFields:
+    """Two boxes per region for text no language model may rewrite.
+
+    The compact canvas has none of this and must not grow any -- section 6 of
+    the Literal Prompts intent puts region literals in the full editor and
+    leaves the compact canvas position-only. What is tested here is that the
+    editor carries them without ever interpreting them: it stores two strings,
+    writes two strings, and merges nothing. Python does the merging, once, at
+    generation time.
+    """
+
+    REGION = {"id": "r1", "name": "Sub", "type": "obj", "bbox": [100, 100, 500, 500],
+              "prompt": "astronaut holding a flower",
+              "literal_prefix": "<lora:a:1>", "literal_suffix": "__grain__", "z": 0}
+
+    def test_the_editor_reads_a_region_s_literal_fields(self):
+        found = run("""
+            ks.open();
+            report({prefix: el("mc-krea-spatial-literal-prefix").value,
+                    suffix: el("mc-krea-spatial-literal-suffix").value});
+        """, initial=document(regions=(self.REGION,)))
+
+        assert found["prefix"] == "<lora:a:1>"
+        assert found["suffix"] == "__grain__"
+
+    def test_typing_in_one_reaches_the_saved_document(self):
+        found = run("""
+            ks.open();
+            const box = el("mc-krea-spatial-literal-prefix");
+            box.value = "<lora:typed:1>";
+            box.dispatchEvent({type: "input", target: box});
+            ks.save();
+            report({});
+        """, initial=document(regions=(self.REGION,)))
+
+        saved = json.loads(found["stateBox"])["regions"][0]
+        assert saved["literal_prefix"] == "<lora:typed:1>"
+
+    def test_a_region_with_no_literals_serializes_as_it_always_did(self):
+        """An absent key and not an empty string, so a layout drawn before
+        these fields existed round-trips to the same bytes."""
+        found = run("""
+            ks.open();
+            ks.save();
+            report({});
+        """, initial=document())
+
+        saved = json.loads(found["stateBox"])["regions"][0]
+        assert "literal_prefix" not in saved
+        assert "literal_suffix" not in saved
+
+    def test_a_new_region_starts_with_both_fields_empty(self):
+        found = run("""
+            ks.open();
+            ks.add();
+            ks.save();
+            report({});
+        """, initial=document())
+
+        saved = json.loads(found["stateBox"])["regions"]
+        assert all("literal_prefix" not in entry for entry in saved)
+
+    def test_duplicating_a_region_copies_its_literals(self):
+        found = run("""
+            ks.open();
+            ks.select("r1");
+            ks.duplicate();
+            ks.save();
+            report({});
+        """, initial=document(regions=(self.REGION,)))
+
+        saved = json.loads(found["stateBox"])["regions"]
+        assert len(saved) == 2
+        assert all(entry["literal_prefix"] == "<lora:a:1>" for entry in saved)
+
+    def test_selecting_another_region_redraws_both_fields(self):
+        """The inspector is one set of controls for whichever region is
+        selected, so a field left showing the previous region's text would be
+        the fastest way to put a LoRA in the wrong box."""
+        plain = {"id": "r2", "name": "Plain", "type": "obj",
+                 "bbox": [600, 600, 900, 900], "prompt": "a lamp", "z": 1}
+        found = run("""
+            ks.open();
+            ks.select("r1");
+            ks.select("r2");
+            report({prefix: el("mc-krea-spatial-literal-prefix").value,
+                    suffix: el("mc-krea-spatial-literal-suffix").value});
+        """, initial=document(regions=(self.REGION, plain)))
+
+        assert found["prefix"] == ""
+        assert found["suffix"] == ""
+
+    def test_the_editor_never_parses_a_bracket_out_of_a_field(self):
+        """It stores what was typed. Every decision about what a payload is,
+        which side it goes and how it merges with the region prompt belongs to
+        Python, and a browser that got a vote would be the second parser the
+        design intent forbids."""
+        found = run("""
+            ks.open();
+            const box = el("mc-krea-spatial-literal-prefix");
+            box.value = "+[[not parsed here]]";
+            box.dispatchEvent({type: "input", target: box});
+            ks.save();
+            report({});
+        """, initial=document(regions=(self.REGION,)))
+
+        saved = json.loads(found["stateBox"])["regions"][0]
+        assert saved["literal_prefix"] == "+[[not parsed here]]"
+        assert saved["prompt"] == "astronaut holding a flower"
+
+    def test_the_compact_canvas_offers_no_literal_control(self):
+        """Section 6 again, asserted against the markup: the compact canvas
+        stays position-only."""
+        import model_chain_krea_creative as creative_script
+
+        markup = creative_script.spatial_compact()
+
+        assert "literal" not in markup.casefold()

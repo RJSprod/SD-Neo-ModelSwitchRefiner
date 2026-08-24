@@ -310,6 +310,18 @@ class Region:
     which is the one failure §6.4 of the layout design calls unforgivable.
     """
 
+    literal_prefix: str = ""
+    literal_suffix: str = ""
+    """This region's two Literal Prompt fields, exactly as typed.
+
+    Kept beside the payloads below rather than only inside them, for the same
+    reason :attr:`raw_prompt` is kept beside :attr:`prompt`: the editor has to
+    be able to draw the boxes again with what somebody put in them, and a round
+    trip that returned only the merged payloads could not tell a field apart
+    from a ``[[...]]`` typed in the prompt -- so reopening the editor would move
+    a command out of the prompt box and into a field, silently, once.
+    """
+
     prefix_literals: tuple[str, ...] = ()
     suffix_literals: tuple[str, ...] = ()
     """This region's literal payloads, in source order, split by direction.
@@ -429,6 +441,14 @@ class Region:
                  "bbox": list(self.bbox), "prompt": self.source_prompt}
         if self.kind == TEXT:
             found["text"] = self.text
+        # Written only when they carry something, so a layout drawn before the
+        # region literal fields existed round-trips to the same bytes it always
+        # did and a document this build writes stays readable by one that
+        # predates them.
+        if self.literal_prefix:
+            found["literal_prefix"] = self.literal_prefix
+        if self.literal_suffix:
+            found["literal_suffix"] = self.literal_suffix
         found.update({"framing": self.framing, "angle": self.angle, "z": self.z})
         return found
 
@@ -641,6 +661,15 @@ def _region(entry, position: int) -> tuple[Region | None, str]:
     for warning in parsed.warnings:
         notes.append(f"{label}: {warning}")
 
+    # This region's own Literal Prompt fields, folded in by the same function
+    # the global ones use and at the same priority: what the user typed with
+    # brackets sits further from the description than what they typed in a
+    # field, on both sides. One merge, one ordering rule, two scopes.
+    literal_prefix = str(entry.get("literal_prefix") or "").strip()
+    literal_suffix = str(entry.get("literal_suffix") or "").strip()
+    parsed = literals.merge(parsed, literal_prefix, literal_suffix,
+                            scope=literals.REGION, region_id=identifier)
+
     text = str(entry.get("text") or "").strip()
     if kind == TEXT and not text:
         return None, (f"{label} is a text region with no text to render and was "
@@ -672,6 +701,7 @@ def _region(entry, position: int) -> tuple[Region | None, str]:
                    prompt=prompt, text=text, framing=framing, angle=angle, z=z,
                    index=position,
                    raw_prompt=raw_prompt if raw_prompt != prompt else "",
+                   literal_prefix=literal_prefix, literal_suffix=literal_suffix,
                    prefix_literals=parsed.prefixes,
                    suffix_literals=parsed.suffixes),
             " ".join(notes))

@@ -694,6 +694,132 @@ class TestARegionKeepsItsOwn:
         assert any("never closed" in note for note in layout.notes)
 
 
+class TestARegionsOwnLiteralFields:
+    """Section 6: the same two boxes, per region, in the full editor only.
+
+    A region's literals have always been the sideways-leakage risk -- a command
+    written inside Region 1 that turns up in the global scene or in Region 2
+    produces a plausible picture that is wrong, and the elements array is the
+    only place you could see it. Adding a second way to author them adds a
+    second way for that to happen, so these ask the same questions the
+    bracketed ones are asked.
+    """
+
+    def region(self, prompt="astronaut holding a flower", prefix="", suffix=""):
+        found = {"id": "r1", "name": "Sub", "type": "obj",
+                 "bbox": [120, 250, 470, 720], "prompt": prompt, "z": 0}
+        if prefix:
+            found["literal_prefix"] = prefix
+        if suffix:
+            found["literal_suffix"] = suffix
+        return found
+
+    def test_a_region_field_wraps_that_region_s_description(self, script, store,
+                                                            host):
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     layout=document(regions=[
+                         self.region(prefix="<lora:a:1>", suffix="__grain__")],
+                         auto=False))
+        said = descriptions(p)
+
+        assert said == "<lora:a:1>, astronaut holding a flower, __grain__"
+
+    def test_typed_syntax_outranks_a_region_field_on_both_sides(self, script,
+                                                                store, host):
+        """The ordering rule is the global one, applied to a region."""
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     layout=document(regions=[
+                         self.region(prompt="+[[A]] astronaut -[[D]]",
+                                     prefix="B", suffix="C")],
+                         auto=False))
+
+        assert descriptions(p) == "A, B, astronaut, C, D"
+
+    def test_a_region_field_stays_out_of_the_global_scene(self, script, store,
+                                                          host):
+        """Sideways leakage, asked of the new authoring path."""
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     layout=document(regions=[
+                         self.region(prefix="<lora:region_only:1>")], auto=False))
+        payload = json.loads(p.prompt)
+
+        assert "region_only" not in str(payload.get("high_level_description", ""))
+        assert "region_only" in descriptions(p)
+
+    def test_a_region_field_stays_out_of_the_other_region(self, script, store,
+                                                          host):
+        other = {"id": "r2", "name": "Lamp", "type": "obj",
+                 "bbox": [600, 100, 900, 380], "prompt": "a lamp", "z": 1}
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     layout=document(regions=[
+                         self.region(prefix="<lora:mine:1>"), other], auto=False))
+        found = {entry["desc"] for entry in elements(p)}
+
+        assert any("mine" in entry for entry in found)
+        assert any("a lamp" in entry and "mine" not in entry for entry in found)
+
+    def test_a_region_field_never_reaches_the_composer(self, script, client,
+                                                       store, host):
+        """The Spatial Composer is a language model like any other, and a
+        region literal is no more visible to it for having been typed in a box
+        without brackets."""
+        generate(script, "a quiet street", spatial_on=True, compose="smart",
+                 layout=document(regions=[
+                     self.region(prefix="<lora:unseen:1>")], mode="smart"))
+
+        assert "unseen" not in client.everything
+
+    def test_a_region_that_is_only_a_literal_field_survives(self, script, store,
+                                                            host):
+        """A box holding nothing but protected text is a box whose content was
+        deliberately kept away from the language models, not an empty one.
+        Skipping it would delete the region for saying exactly what the feature
+        was built to carry."""
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     layout=document(regions=[
+                         self.region(prompt="", prefix="[[Her shirt from image 1]]")],
+                         auto=False))
+
+        assert len(elements(p)) == 1
+        assert "Her shirt from image 1" in descriptions(p)
+
+    def test_stage_two_inherits_no_region_field(self, script, store, host):
+        """A Stage 1 reference instruction is meaningless to a Stage 2 model
+        with no reference behind it, and the only way to be sure none travels
+        is a representation none was ever put into."""
+        from prompt_master.krea import spatial as spatial_module
+
+        layout = spatial_module.parse(document(regions=[
+            self.region(prefix="<lora:stage_one:1>", suffix="__grain__")],
+            auto=False))
+
+        assert "stage_one" not in layout.regions[0].describe(False, literals=False)
+        assert "__grain__" not in layout.regions[0].describe(False, literals=False)
+
+    def test_the_fields_round_trip_back_into_the_editor(self, script, store, host):
+        """Separately from the prompt box, so reopening the editor cannot move
+        a command out of one and into the other."""
+        from prompt_master.krea import spatial as spatial_module
+
+        layout = spatial_module.parse(document(regions=[
+            self.region(prompt="+[[A]] astronaut", prefix="B", suffix="C")]))
+        state = layout.regions[0].state()
+
+        assert state["prompt"] == "+[[A]] astronaut"
+        assert state["literal_prefix"] == "B"
+        assert state["literal_suffix"] == "C"
+
+    def test_a_region_without_them_serializes_as_it_always_did(self, script, store,
+                                                               host):
+        from prompt_master.krea import spatial as spatial_module
+
+        layout = spatial_module.parse(document(regions=[self.region()]))
+        state = layout.regions[0].state()
+
+        assert "literal_prefix" not in state
+        assert "literal_suffix" not in state
+
+
 class TestGlobalLiteralsInASpatialPrompt:
     """§7.5. The document stays one valid structured prompt.
 

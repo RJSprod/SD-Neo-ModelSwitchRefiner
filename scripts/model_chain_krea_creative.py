@@ -635,6 +635,19 @@ def spatial_editor() -> str:
                     placeholder="what is in this box, in your own words &#10;&#10;[[her shirt from image 1]] is passed straight to the image model"></textarea>
         </label>
         <div class="{SPATIAL_PREFIX}-pair">
+          <label class="{SPATIAL_PREFIX}-field">
+            <span>Literal Positive</span>
+            <input type="text" id="{_spatial_id("literal-prefix")}"
+                   placeholder="kept from every language model, first in this box" />
+          </label>
+          <label class="{SPATIAL_PREFIX}-field">
+            <span>Literal Negative</span>
+            <input type="text" id="{_spatial_id("literal-suffix")}"
+                   placeholder="the same, last in this box" />
+          </label>
+        </div>
+
+        <div class="{SPATIAL_PREFIX}-pair">
           <label class="{SPATIAL_PREFIX}-field" id="{_spatial_id("framing-field")}">
             <span>Framing</span>
             <select id="{_spatial_id("framing")}">{_options(spatial.FRAMINGS, "Automatic")}</select>
