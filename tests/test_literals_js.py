@@ -805,6 +805,84 @@ class TestTagAutocomplete:
         assert found["claimed"] == ["mc-krea-creative-literal-positive",
                                     "mc-krea-creative-literal-negative"]
 
+    def test_the_third_party_switch_being_off_is_not_the_end_of_it(self):
+        """The one thing that was actually standing in the way, from a user's
+        log: `[config loaded, third-party boxes no, list extended True, boxes in
+        the list True]` -- everything on this side done, and that extension
+        refusing the boxes because its "Active in third party textboxes" switch
+        gates every textarea it does not recognise as one of the four core
+        prompt boxes.
+
+        It is read in exactly one place, the gate inside the call below. So it
+        is lifted for the length of that call and put back.
+        """
+        found = run("""
+            globalThis.TAC_CFG = {activeIn: {thirdParty: false}};
+            globalThis.addAutocompleteToArea = (area) => {
+                // The gate, verbatim in shape: it refuses anything it does not
+                // recognise while the switch is off.
+                if (!TAC_CFG.activeIn.thirdParty) return;
+                area.classList.add("autocomplete");
+            };
+            mc.registerPrompts();
+            report({claimed: mc.claimed(),
+                    switchAfter: TAC_CFG.activeIn.thirdParty,
+                    said: mc.report().liftedThirdParty});
+        """)
+
+        assert found["claimed"] is True
+        assert found["switchAfter"] is False
+        assert found["said"] is True
+
+    def test_a_switch_that_was_already_on_is_never_written_to(self):
+        """Nothing to lift, nothing to restore, and nothing to say about it."""
+        found = run("""
+            globalThis.writes = 0;
+            const activeIn = {};
+            Object.defineProperty(activeIn, "thirdParty", {
+                get() { return true; },
+                set() { writes += 1; },
+            });
+            globalThis.TAC_CFG = {activeIn: activeIn};
+            globalThis.addAutocompleteToArea = (area) => {
+                area.classList.add("autocomplete");
+            };
+            mc.registerPrompts();
+            report({writes: writes, said: mc.report().liftedThirdParty});
+        """)
+
+        assert found["writes"] == 0
+        assert found["said"] is False
+
+    def test_an_option_that_does_not_exist_is_put_back_as_it_was(self):
+        """A build of that extension without the setting at all. `undefined`
+        goes back, not `false`: putting it back means putting it back."""
+        found = run("""
+            globalThis.TAC_CFG = {activeIn: {}};
+            globalThis.addAutocompleteToArea = (area) => {
+                area.classList.add("autocomplete");
+            };
+            mc.registerPrompts();
+            report({present: "thirdParty" in TAC_CFG.activeIn,
+                    value: TAC_CFG.activeIn.thirdParty === undefined});
+        """)
+
+        assert found["present"] is True
+        assert found["value"] is True
+
+    def test_a_call_that_throws_still_puts_the_switch_back(self):
+        """Their function, their exception -- but not their setting left
+        changed because of it."""
+        found = run("""
+            globalThis.TAC_CFG = {activeIn: {thirdParty: false}};
+            globalThis.addAutocompleteToArea = () => { throw new Error("no"); };
+            let raised = false;
+            try { mc.registerPrompts(); } catch (error) { raised = true; }
+            report({switchAfter: TAC_CFG.activeIn.thirdParty, raised: raised});
+        """)
+
+        assert found["switchAfter"] is False
+
     def test_a_box_it_already_claimed_is_not_offered_again(self):
         """It runs on every UI update, and that extension's own setup may go
         first. Handing it a textarea it already owns has to be a no-op."""
@@ -997,7 +1075,8 @@ class TestTheReport:
         assert found["sent"] == {
             "boxesFound": True, "claimed": True, "autocompleteInstalled": True,
             "listWrapped": True, "inTheirList": True, "config": "loaded",
-            "thirdPartyBoxes": True, "promptFamily": True, "placed": True}
+            "thirdPartyBoxes": True, "liftedThirdParty": False,
+            "promptFamily": True, "placed": True}
 
     def test_it_says_when_tag_autocomplete_is_not_there(self):
         found = run("""

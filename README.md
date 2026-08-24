@@ -1359,12 +1359,16 @@ share of it, nothing that changes shape as you drag Forge's divider.
 the far side of the same protected run of text — the suffix to the positive
 prompt, where `-[[…]]` has always put things.
 
-**If they are not completing tags.** The boxes report themselves once per page
-load, into `<LLM data root>/logs/model_chain.log` — the same folder as the
-managed LLM's own log — and the line names the cause: Tag Autocomplete not
-installed, its settings still loading, or its **Active in third party
-textboxes** setting being off (which needs a full restart, not a UI reload).
-Nothing to open the browser's developer tools for.
+**Tag completion works in them whatever your Tag Autocomplete settings say.**
+That extension treats any box it does not recognise as one of the four core
+prompt boxes as a third-party textbox, and its **Active in third party
+textboxes** switch gates them — so with that switch off these two completed
+nothing. They are now handed over as the prompt boxes they are, with the switch
+lifted for that one call and put straight back; every other textbox it covers
+still answers to the setting. The boxes also report themselves once per page
+load into `<LLM data root>/logs/model_chain.log`, beside the managed LLM's own
+log, so if completion is missing the reason is a line in a file rather than
+something to go looking for in the browser's developer tools.
 
 **Hidden does not mean inactive.** The row appears when Creative or Spatial is
 on and is hidden when neither is, because that is when protecting text from a

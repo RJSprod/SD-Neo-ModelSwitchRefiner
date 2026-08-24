@@ -338,6 +338,39 @@ That is what makes the ordering stop mattering, and why there is no timer here
 waiting for that extension to finish loading. A page without Tag Autocomplete is
 a page where both halves do nothing at all.
 
+**And then neither half was the problem.** A user's log, once §10.5 existed to
+produce one:
+
+```
+[config loaded, third-party boxes no, list extended True, boxes in the list True,
+ row placed True]
+```
+
+Everything on this side done, and that extension refusing the boxes anyway. Its
+**Active in third party textboxes** switch gates every textarea it does not
+recognise as one of the four core prompt boxes — `getTextAreaIdentifier()`
+compares against those four by identity and calls everything else
+`.thirdParty.taN` — and these two are not four of them, however much they look
+and behave like it. With that switch off there is nothing further to try: it is
+the last thing between these boxes and tag completion.
+
+It is also read in exactly one place. `grep activeIn` across that extension
+finds `thirdParty` at one line: the gate at the top of `addAutocompleteToArea`.
+Nothing re-checks it afterwards, so a textarea that gets past it once has
+completion for the life of the page.
+
+So the switch is lifted for the length of that one call, on these two
+textareas, and put back exactly as it was — including `undefined`, on a build
+where the option does not exist, because putting it back means putting it back.
+Every other textbox that switch covers still answers to it, nothing else in that
+extension's config is touched, and the line these boxes report says it happened:
+a setting reading "off" that is not off for two boxes is not a thing to leave
+somebody to discover.
+
+Verified in a browser against that extension's real gate and real
+classification, with the switch off: both boxes claimed, the switch still
+`false` afterwards.
+
 
 ### 10.3 The empty space under the row was never ours
 
