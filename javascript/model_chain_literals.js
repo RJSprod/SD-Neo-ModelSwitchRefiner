@@ -1,14 +1,15 @@
 // Model Chain -- the Literal Prompt boxes, browser side.
 //
-// Three jobs, all of them presentation, none of them able to change what a
+// Four jobs, all of them presentation, none of them able to change what a
 // generation produces:
 //
 //   1. Move the Literal Prompt row up under the native Negative Prompt.
 //   2. Put its two boxes into Forge's own "last prompt box you used" family,
 //      so the Extra Networks browser inserts into whichever of the four you
-//      touched last.
+//      touched last -- and offer them to Tag Autocomplete, if it is installed.
 //   3. Hide the native Negative Prompt row while CFG is 1, and give its space
 //      back.
+//   4. Ask the prompt column to be as tall as the prompts in it.
 //
 // If every line of this file fails: the row is still on the page, lower down,
 // with two working prompt boxes whose values still travel with every press;
@@ -118,10 +119,32 @@
     // prompt get.
     //
     // The family is Forge's `activePromptTextarea`, a plain global keyed by tab.
-    // Reached through `window` and guarded, because a build that does not have
-    // it is a build where this feature simply does not apply.
+    //
+    // Read as a bare identifier *and* off `window`, because those are two
+    // different places and this host uses the one that is not `window`.
+    // Forge Neo's javascript/extraNetworks.js declares it
+    //
+    //     let activePromptTextarea = {};
+    //
+    // at the top level of a classic script, and a top-level `let` goes into the
+    // global *lexical* environment: shared with every other classic script on
+    // the page -- this file included -- and absent from `window`. Reading only
+    // `window.activePromptTextarea` therefore found nothing on the very build
+    // this extension targets, declined to register, and left every Extra
+    // Networks card going to the native positive prompt no matter which box was
+    // last used. Older `var` builds put it on `window`; both are read here, and
+    // a build with neither is a build where this feature does not apply.
 
     function family() {
+        try {
+            // Not `window.` -- see above. `typeof` on an undeclared name is the
+            // one way to ask without throwing.
+            if (typeof activePromptTextarea !== "undefined" && activePromptTextarea) {
+                return activePromptTextarea;
+            }
+        } catch (error) {
+            // A build where the name exists but is not readable from here.
+        }
         try {
             if (typeof window === "undefined") return null;
             return window.activePromptTextarea || null;
@@ -137,16 +160,50 @@
     }
 
     function registerPrompts() {
-        if (!family()) return;
+        const known = family();
         [IDS.positive, IDS.negative].forEach(function (id) {
             const field = fieldIn(id);
             if (!field) return;
-            // Focus only, which is exactly how the host registers its own two.
-            // The Extra Networks browser is not a prompt box, so opening it
-            // fires no focus event here and the remembered target survives --
-            // which is the half of §7 that is about *not* doing something.
-            once(field, "focus", function () { remember(field); }, "Family");
+            if (known) {
+                // Focus only, which is exactly how the host registers its own
+                // two. The Extra Networks browser is not a prompt box, so
+                // opening it fires no focus event here and the remembered
+                // target survives -- which is the half of §7 that is about
+                // *not* doing something.
+                once(field, "focus", function () { remember(field); }, "Family");
+            }
+            joinAutocomplete(field);
         });
+    }
+
+    // ------------------------------------------------------------------ //
+    // 2b. Tag Autocomplete, if it is installed
+    // ------------------------------------------------------------------ //
+    //
+    // §8 asked for tag completion in these two boxes and got it by carrying the
+    // host's `prompt` class, which is what that extension's own selector list
+    // matches (`.prompt > label > textarea`, and Gradio builds these two with
+    // exactly the label/textarea shape Forge's prompt boxes have). That list is
+    // walked once, during its setup, so whether these two are in it depends on
+    // an ordering neither extension controls -- and when they are not, the
+    // boxes look like prompt boxes and complete nothing.
+    //
+    // So they are offered again, through the same per-textarea entry point that
+    // extension uses for its own late arrivals. It is idempotent: it returns on
+    // a textarea it has already claimed, and marks the ones it takes, so this
+    // can run on every UI update and either extension may go first.
+    //
+    // Feature-detected in both directions and never awaited. No Tag
+    // Autocomplete, a version without that entry point, or one whose config has
+    // not loaded yet is a page where this does nothing -- and the boxes are
+    // still ordinary prompt boxes, which is where they started.
+
+    function joinAutocomplete(field) {
+        if (!field || !field.classList) return;
+        if (field.classList.contains("autocomplete")) return;
+        if (typeof addAutocompleteToArea !== "function") return;
+        if (typeof TAC_CFG === "undefined" || !TAC_CFG) return;
+        addAutocompleteToArea(field);
     }
 
     // ------------------------------------------------------------------ //
@@ -197,6 +254,47 @@
     }
 
     // ------------------------------------------------------------------ //
+    // 4. The space the prompt column was holding open
+    // ------------------------------------------------------------------ //
+    //
+    // Forge's prompt container is `gr.Column(..., scale=6)`. In the classic top
+    // row that 6 is a *width* share against the Generate column, which is what
+    // it was written to be. In the Compact prompt layout the same column is
+    // stacked inside the settings column instead, the settings column is a grid
+    // item stretched to the height of the gallery beside it, and the 6 becomes
+    // the largest claim on that leftover height: the container ends up hundreds
+    // of pixels taller than the prompts in it, with the difference showing as
+    // empty space underneath them. Measured in a browser at 989px of container
+    // holding 168px of prompt, with no extension on the page at all.
+    //
+    // The Literal Prompt row lands in that container, so it inherits the gap and
+    // -- being shorter side by side than stacked -- changes how much of it shows
+    // when the divider moves. Hence this: the container is told to take its
+    // content's height, which is the height it appeared to have anyway.
+    //
+    // Guarded three ways, because this is somebody else's element. Only when the
+    // row is actually in it, only when its parent stacks vertically (in the
+    // classic top row that flex-grow is doing real work and zeroing it would
+    // squeeze the prompt boxes to their content width), and only once. It reads
+    // no value, moves nothing, and a failure leaves the gap that was there
+    // before.
+
+    function reclaim() {
+        const row = byId(IDS.row);
+        const negative = byId(IDS.negativePrompt);
+        if (!row || !negative || typeof negative.closest !== "function") return;
+        const container = negative.closest('[id$="_prompt_container"]');
+        if (!container || !container.parentElement || !container.dataset) return;
+        if (container.dataset.mcLiteralHugged) return;
+        if (typeof container.contains !== "function" || !container.contains(row)) return;
+        if (typeof getComputedStyle !== "function") return;
+        if (getComputedStyle(container.parentElement).flexDirection !== "column") return;
+        if (!(parseFloat(getComputedStyle(container).flexGrow) > 0)) return;
+        container.style.flexGrow = "0";
+        container.dataset.mcLiteralHugged = "1";
+    }
+
+    // ------------------------------------------------------------------ //
     // Wiring
     // ------------------------------------------------------------------ //
 
@@ -217,6 +315,12 @@
         } catch (error) {
             console.error("Model Chain: the CFG negative-prompt collapse failed", error);
         }
+        try {
+            reclaim();
+        } catch (error) {
+            console.error("Model Chain: the prompt column could not be asked to fit "
+                          + "its contents", error);
+        }
     }
 
     if (typeof onUiLoaded === "function") onUiLoaded(wire);
@@ -235,6 +339,8 @@
         registerPrompts: registerPrompts,
         applyCfg: applyCfg,
         cfg: cfg,
+        family: family,
+        reclaim: reclaim,
         ids: IDS,
         collapsedClass: COLLAPSED,
     };

@@ -1334,6 +1334,34 @@ class TestWhenTheRowIsOnScreen:
 # --------------------------------------------------------------------------- #
 
 
+class TestKeepingAValueCostsNoUiUpdate:
+    """Two blur handlers that answer with nothing.
+
+    A handler with an output makes the browser apply a component update, and a
+    component update runs every `onAfterUiUpdate` handler on the page -- this
+    extension's and every other one's. For a write nothing is waiting on, in the
+    box somebody just finished typing in, that is a cost with no purchase.
+    """
+
+    def test_neither_handler_has_an_output(self, built):
+        for name in ("literal_positive", "literal_negative"):
+            box = built.components[name]
+            blurs = [kwargs for kind, kwargs in box._callbacks if kind == "blur"]
+
+            assert blurs, name
+            for kwargs in blurs:
+                assert not kwargs.get("outputs"), name
+
+    def test_they_are_still_the_thing_that_persists_the_value(self, built, store):
+        import mc_literal_prompts
+
+        box = built.components["literal_positive"]
+        handler = [kwargs for kind, kwargs in box._callbacks if kind == "blur"][0]
+        handler["fn"]("<lora:still:1>")
+
+        assert mc_literal_prompts.settings()["positive"] == "<lora:still:1>"
+
+
 class TestTheRowFitsItsColumn:
     """The two boxes are a child of Forge's prompt column, not of the window.
 
@@ -1422,6 +1450,20 @@ class TestTheRowFitsItsColumn:
             if not re.match(r"^(min-|max-)?width\s*:", stripped):
                 continue
             assert "min(" in stripped or not re.search(r"\d+px", stripped), stripped
+
+    def test_the_wrapper_gradio_builds_between_them_can_shrink(self, css):
+        """The row does not hold the two boxes directly.
+
+        Gradio groups adjacent form components into a `div.form` of its own, so
+        the boxes are the row's *grandchildren* -- which a `>` selector on the
+        box quietly matches none of. Measured in a browser: the row has one
+        child, and that child is the flex container the boxes wrap inside. Both
+        levels are addressed, the wrapper by `*` because naming Gradio's class
+        for it would be naming something Gradio may rename.
+        """
+        assert ".mc-literal-row > *" in css
+        assert ".mc-literal-row .mc-literal-box" in css
+        assert ".mc-literal-row > .mc-literal-box" not in css
 
     def test_it_decides_nothing_from_the_window(self, css):
         """No media query, because the browser's width is not the question

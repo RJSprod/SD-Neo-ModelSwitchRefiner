@@ -1760,20 +1760,25 @@ class ScriptKreaCreative(scripts.Script):
         generation is whatever the component holds when Generate is pressed, so
         a press before the box has been left still uses what is on screen. This
         is only what makes it survive a restart.
+
+        And no outputs, for the same reason one level down: a handler that
+        answers is a handler the browser has to apply an update for.
         """
         def keep_positive(value):
             mc_literal_prompts.remember(**{mc_literal_prompts.POSITIVE:
                                            str(value or "")})
-            return gr.update()
 
         def keep_negative(value):
             mc_literal_prompts.remember(**{mc_literal_prompts.NEGATIVE:
                                            str(value or "")})
-            return gr.update()
 
-        positive.blur(fn=keep_positive, inputs=[positive], outputs=[positive],
+        # No outputs. Answering with a `gr.update()` sent the box a value it
+        # already had, and every component update the browser applies is a UI
+        # update every `onAfterUiUpdate` handler on the page then runs -- ours
+        # and every other extension's -- for a write nothing was waiting on.
+        positive.blur(fn=keep_positive, inputs=[positive], outputs=[],
                       queue=False, show_progress=False)
-        negative.blur(fn=keep_negative, inputs=[negative], outputs=[negative],
+        negative.blur(fn=keep_negative, inputs=[negative], outputs=[],
                       queue=False, show_progress=False)
 
     def _wire_layouts(self, profile, refresh, state_line, name, save, delete,

@@ -91,6 +91,23 @@ class El {
         else this.children.splice(at, 0, child);
         return child;
     }
+    get parentElement() { return this.parentNode; }
+    closest(selector) {
+        let at = this;
+        while (at) {
+            if (matches(at, selector)) return at;
+            at = at.parentNode;
+        }
+        return null;
+    }
+    contains(other) {
+        let at = other;
+        while (at) {
+            if (at === this) return true;
+            at = at.parentNode;
+        }
+        return false;
+    }
     get previousElementSibling() {
         if (!this.parentNode) return null;
         const at = this.parentNode.children.indexOf(this);
@@ -130,6 +147,9 @@ function matches(element, selector) {
             if (part.includes("[")) {
                 const tag = part.slice(0, part.indexOf("["));
                 const want = part.slice(part.indexOf("=") + 1).replace(/[\\]"']/g, "");
+                // `[id$="_prompt_container"]`: how the file finds Forge's
+                // prompt column without knowing which tab it is on.
+                if (part.includes("id$=")) return element.id.endsWith(want);
                 return element.tagName === tag.toUpperCase() && element.type === want;
             }
             return element.tagName === part.toUpperCase();
@@ -190,6 +210,12 @@ globalThis.Event = function (type) { this.type = type; };
 globalThis.MutationObserver = function () {
     return {observe() {}, disconnect() {}};
 };
+// Nothing here lays anything out, so a computed style is whatever was set
+// inline -- which is all the file asks about: an axis and a flex-grow.
+globalThis.getComputedStyle = (element) => ({
+    flexDirection: (element.style || {}).flexDirection || "row",
+    flexGrow: String((element.style || {}).flexGrow || "0"),
+});
 globalThis.requestAnimationFrame = (fn) => fn();
 globalThis.setTimeout = () => 0;
 globalThis.clearTimeout = () => {};
@@ -256,9 +282,20 @@ def run_pipeline(script: str) -> dict:
     return json.loads(lines[-1])
 
 
-def run(script: str, family: bool = True) -> dict:
-    setup = ("globalThis.activePromptTextarea = {};" if family
-             else "// no activePromptTextarea on this build")
+def run(script: str, family=True) -> dict:
+    """``family`` picks how the host declares ``activePromptTextarea``.
+
+    ``True`` is the old ``var`` form, which lands on ``window``. ``"lexical"``
+    is what Forge Neo actually writes -- a top-level ``let``, which goes into
+    the global lexical environment and is *not* on ``window``. ``False`` is a
+    build that has neither.
+    """
+    if family == "lexical":
+        setup = "let activePromptTextarea = {};"
+    elif family:
+        setup = "globalThis.activePromptTextarea = {};"
+    else:
+        setup = "// no activePromptTextarea on this build"
     harness = (HARNESS
                .replace("SOURCE", SCRIPT.read_text(encoding="utf-8"))
                .replace("FAMILY", setup)
@@ -388,6 +425,29 @@ class TestThePromptFamily:
         """, family=False)
 
         assert found["ok"] is True
+
+    def test_a_host_that_declares_the_family_with_let_is_still_joined(self):
+        """The bug this was written for, and the reason no LoRA ever reached
+        these boxes.
+
+        Forge Neo's extraNetworks.js says `let activePromptTextarea = {}` at the
+        top level of a classic script. A top-level `let` goes into the global
+        *lexical* environment -- shared with every other classic script on the
+        page, and absent from `window` -- so a file reading
+        `window.activePromptTextarea` finds nothing on the one host this
+        extension targets, registers nothing, and leaves every Extra Networks
+        card going to the native positive prompt however many literal boxes were
+        focused first.
+        """
+        found = run("""
+            focus("mc-krea-creative-literal-positive");
+            report({onWindow: typeof window.activePromptTextarea,
+                    target: activePromptTextarea.txt2img
+                            === fieldIn("mc-krea-creative-literal-positive")});
+        """, family="lexical")
+
+        assert found["onWindow"] == "undefined"
+        assert found["target"] is True
 
     def test_registering_twice_adds_one_listener(self):
         found = run("""
@@ -697,3 +757,164 @@ class TestTheIdContract:
         found = self.ids_in(SCRIPT)
 
         assert {"txt2img_prompt", "txt2img_neg_prompt", "txt2img_cfg_scale"} <= found
+
+
+# --------------------------------------------------------------------------- #
+# Tag Autocomplete
+# --------------------------------------------------------------------------- #
+
+
+class TestTagAutocomplete:
+    """§8, offered rather than assumed.
+
+    These two carry the host's `prompt` class, which is the selector that
+    extension matches on -- but its list is walked once during its own setup,
+    and whether these boxes were in the document by then is an ordering neither
+    extension controls. So they are offered again through the same per-textarea
+    entry point it uses for its own late arrivals, and everything about that is
+    conditional: no Tag Autocomplete, an older one, or one whose config has not
+    loaded yet is a page where this does nothing.
+    """
+
+    def test_both_boxes_are_offered_to_it(self):
+        found = run("""
+            globalThis.TAC_CFG = {activeIn: {thirdParty: true}};
+            globalThis.claimed = [];
+            globalThis.addAutocompleteToArea = (area) => {
+                if (area.classList.contains("autocomplete")) return;
+                area.classList.add("autocomplete");
+                claimed.push(area.parentNode.id);
+            };
+            mc.registerPrompts();
+            report({claimed: claimed});
+        """)
+
+        assert found["claimed"] == ["mc-krea-creative-literal-positive",
+                                    "mc-krea-creative-literal-negative"]
+
+    def test_a_box_it_already_claimed_is_not_offered_again(self):
+        """It runs on every UI update, and that extension's own setup may go
+        first. Handing it a textarea it already owns has to be a no-op."""
+        found = run("""
+            globalThis.TAC_CFG = {activeIn: {}};
+            globalThis.calls = 0;
+            globalThis.addAutocompleteToArea = (area) => {
+                calls += 1;
+                area.classList.add("autocomplete");
+            };
+            mc.registerPrompts();
+            mc.registerPrompts();
+            mc.registerPrompts();
+            report({calls: calls});
+        """)
+
+        assert found["calls"] == 2
+
+    def test_a_page_without_it_is_a_page_where_nothing_happens(self):
+        found = run("""
+            mc.registerPrompts();
+            report({claimed: fieldIn("mc-krea-creative-literal-positive")
+                             ._classes.has("autocomplete")});
+        """)
+
+        assert found["claimed"] is False
+
+    def test_a_config_that_has_not_loaded_yet_is_left_alone(self):
+        """`var TAC_CFG = null` until its files are read. Calling in before
+        that is calling into a half-built extension; the next UI update tries
+        again, and there is always another UI update."""
+        found = run("""
+            globalThis.TAC_CFG = null;
+            globalThis.calls = 0;
+            globalThis.addAutocompleteToArea = () => { calls += 1; };
+            mc.registerPrompts();
+            report({calls: calls});
+        """)
+
+        assert found["calls"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# The space the prompt column was holding open
+# --------------------------------------------------------------------------- #
+
+
+class TestTheReclaimedSpace:
+    """Forge's prompt column is `gr.Column(scale=6)`.
+
+    In the classic top row that 6 is a width share against the Generate column.
+    In the Compact prompt layout the column is stacked inside the settings
+    column instead, which a CSS grid stretches to the height of the gallery, and
+    the 6 becomes the largest claim on the leftover: hundreds of pixels of empty
+    space under the prompts, measured in a browser at 989px of column holding
+    168px of prompt with no extension on the page at all.
+
+    So it is asked to be as tall as its contents -- but only where that flex-grow
+    is doing nothing, which is the whole of what these tests are about.
+    """
+
+    SETUP = """
+        const container = make("div", "txt2img_prompt_container");
+        container.appendChild(prompt);
+        container.appendChild(negative);
+        container.style.flexGrow = "6";
+    """
+
+    def test_a_stacked_prompt_column_is_asked_to_fit_its_contents(self):
+        found = run(self.SETUP + """
+            container.parentNode.style.flexDirection = "column";
+            mc.place();
+            mc.reclaim();
+            report({grow: container.style.flexGrow});
+        """)
+
+        assert found["grow"] == "0"
+
+    def test_the_classic_top_row_is_left_alone(self):
+        """There the same flex-grow is the prompt column's *width* against the
+        Generate column, and zeroing it squeezes the prompt boxes to their
+        content width. The axis is the whole test."""
+        found = run(self.SETUP + """
+            container.parentNode.style.flexDirection = "row";
+            mc.place();
+            mc.reclaim();
+            report({grow: container.style.flexGrow});
+        """)
+
+        assert found["grow"] == "6"
+
+    def test_a_column_the_row_never_reached_is_left_alone(self):
+        """If the move failed, the gap is not this extension's to reclaim and
+        the page is somebody else's exactly as it was."""
+        found = run(self.SETUP + """
+            container.parentNode.style.flexDirection = "column";
+            row.parentNode.removeChild(row);
+            mc.reclaim();
+            report({grow: container.style.flexGrow});
+        """)
+
+        assert found["grow"] == "6"
+
+    def test_a_column_that_was_already_hugging_is_not_written_to(self):
+        found = run(self.SETUP + """
+            container.style.flexGrow = "0";
+            container.parentNode.style.flexDirection = "column";
+            mc.place();
+            mc.reclaim();
+            report({grow: container.style.flexGrow,
+                    flagged: !!container.dataset.mcLiteralHugged});
+        """)
+
+        assert found["grow"] == "0"
+        assert found["flagged"] is False
+
+    def test_a_page_with_no_prompt_column_is_not_a_crash(self):
+        """Every build that renames that container, and every theme that
+        restructures it."""
+        found = run("""
+            mc.place();
+            mc.reclaim();
+            report({ok: true});
+        """)
+
+        assert found["ok"] is True

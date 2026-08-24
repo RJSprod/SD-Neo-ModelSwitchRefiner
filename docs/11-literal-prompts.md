@@ -194,12 +194,11 @@ resetting the target is satisfied by doing nothing: the Extra Networks browser
 is not a prompt box, so opening it fires no focus event and the remembered
 target survives.
 
-**The one thing not verified here.** §8 asks for Tag Autocomplete and LoRA
-autocomplete in the two new fields. They carry the host's own `prompt` class,
-which is the pattern those extensions match on, and they are stock Textboxes
-with nothing custom about their text entry — but no test in this repository
-runs Tag Autocomplete, so this is a well-founded expectation rather than a
-checked one.
+**§8, Tag Autocomplete and LoRA autocomplete.** They carry the host's own
+`prompt` class, which is the pattern that extension matches on
+(`.prompt > label > textarea`, in its `_textAreas.js`), and they are stock
+Textboxes with nothing custom about their text entry. That was written here as a
+well-founded expectation; §10.2 below is what happened when it was checked.
 
 
 ## 8. §9 — the CFG collapse touches nothing
@@ -266,7 +265,97 @@ The infotext keys and the settings keys keep the older wording —
 Relabelling a box is presentation; renaming a key is a migration.
 
 
-## 10. Where the design intent was followed differently
+## 10. What a browser said that reading the code could not
+
+Rendered in Chromium against a repro of Forge Neo's own `ui_toprow.py` (Compact
+prompt layout, Gradio 4.40, the host's `style.css` and this extension's loaded
+together), with the host's real `extraNetworks.js` handlers on the page. Every
+number below was measured there rather than reasoned about — which is the point,
+because three of the four turned out to be the opposite of what reading the code
+suggested.
+
+
+### 10.1 The prompt family is not on `window`
+
+`javascript/extraNetworks.js` says:
+
+```js
+let activePromptTextarea = {};
+```
+
+A top-level `let` in a classic script goes into the global **lexical**
+environment. Every other classic script on the page shares it — so a bare
+`activePromptTextarea` resolves from this extension's file — and it is *not* a
+property of `window`. This file read `window.activePromptTextarea`, found
+`undefined`, and quietly declined to register: no focus listeners, no membership
+of the family, and every Extra Networks card going to the native positive prompt
+however many literal boxes had been clicked into first.
+
+Both forms are read now, bare first. The test that matters
+(`test_a_host_that_declares_the_family_with_let_is_still_joined`) asserts the
+`window` lookup is still `undefined` while the registration works, because the
+two together are the whole of the bug.
+
+The rest of §7 was right, which is what makes this worth recording: Forge Neo's
+LoRA page sets `allow_negative_prompt = True`, and that is exactly the flag its
+`cardClicked` reads to decide between the remembered box and the native prompt.
+The feature was one identifier away from working.
+
+
+### 10.2 Tag Autocomplete is offered, not assumed
+
+Its `core` selector list does include `.prompt > label > textarea`, and in the
+browser that selector matches both literal boxes — so the class was the right
+mechanism and §8 was satisfied in principle. But that list is walked once, inside
+its own `setup()`, and whether these two boxes are in the document by then is an
+ordering neither extension controls.
+
+So they are handed over explicitly, through `addAutocompleteToArea` — the same
+per-textarea entry point it uses for its own late arrivals, which returns early
+on a textarea it has already claimed. Feature-detected in both directions
+(`typeof addAutocompleteToArea === "function"`, and `TAC_CFG` non-null, since it
+is `var TAC_CFG = null` until that extension's files load), never awaited, and
+retried on the next UI update. A page without Tag Autocomplete is a page where
+this does nothing at all.
+
+
+### 10.3 The empty space under the row was never ours
+
+`ui_toprow.create_prompts()` builds `gr.Column(..., scale=6)`. In the classic top
+row that 6 is a *width* share against the Generate column. In the Compact prompt
+layout the same column is stacked inside the settings column, `ResizeHandleRow`
+makes the settings and gallery columns items of a CSS **grid** — so the settings
+column is stretched to the gallery's height — and the 6 becomes the largest claim
+on that leftover height.
+
+Measured with no extension on the page at all: a 989px prompt column holding
+168px of prompt. 821px of empty space, in stock Forge Neo.
+
+The Literal Prompt row lands in that column, so it inherits the gap — and being
+shorter side by side than stacked, it changes how much of the gap shows when the
+divider moves, which is how it came to look like something this feature had done.
+It had not. What the feature does now is ask that column to be as tall as its
+contents, which took it to 194px and moved everything below it up.
+
+Three guards, because it is somebody else's element: only when the row is
+actually in that column, only when the column's parent stacks vertically (in the
+classic top row that flex-grow is doing real work and zeroing it would squeeze
+the prompt boxes to their content width), and only once. Nothing is read, nothing
+is moved, and a failure leaves the gap exactly as it was.
+
+
+### 10.4 And one thing this extension's CSS had wrong
+
+Gradio groups adjacent form components into a `div.form` of its own, so the two
+boxes are the row's **grandchildren**: `.mc-literal-row > .mc-literal-box` matched
+nothing. The wrapping worked anyway — Gradio writes `min_width` as an inline
+`min(240px, 100%)` on each box, and inline styles are what actually decided the
+layout — but the defensive rule that was supposed to survive a theme overriding
+that was inert. Both levels are addressed now, the wrapper by `*` rather than by
+Gradio's name for it.
+
+
+## 11. Where the design intent was followed differently
 
 **§10, reconstructing the fields on paste.** It does not happen automatically;
 see §5 above. The intent's own word is *may*, and its own requirement that
