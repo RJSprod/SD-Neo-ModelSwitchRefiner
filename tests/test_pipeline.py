@@ -540,3 +540,68 @@ class TestEveryPhaseLightsARow:
         order = re.findall(r'"([^"]+)"', found.group(1))
 
         assert tuple(order) == mc_pipeline_panel.ORDER
+
+
+class TestTheBrowserFileCannotAffectAGeneration:
+    """The property the whole Creative Mode browser story turns on, defended
+    one file further out.
+
+    This file reflects two things and decides nothing. The way that could stop
+    being true is the way it stopped being true before: something in the page
+    that a generation has to wait for. So the two shapes of that are asserted
+    against the source rather than argued about in a comment.
+    """
+
+    def source(self) -> str:
+        return PIPELINE_JS.read_text(encoding="utf-8")
+
+    def code(self) -> str:
+        """The file with its comments removed.
+
+        These tests are about what the file *does*, and the file explains
+        itself at length -- including by naming the things it is careful not to
+        use. Asserting over the prose would make a comment saying "never
+        innerHTML" fail a test that innerHTML is never used.
+        """
+        return "\n".join(re.sub(r"//.*$", "", line)
+                          for line in self.source().splitlines())
+
+    def test_it_never_names_the_generate_button(self):
+        """The old Creative gate swallowed the Generate click, polled a hidden
+        textbox, and clicked Generate again once the server answered -- so a
+        hidden tab made an image late and a closed one made it never arrive.
+        Nothing here may go near that button."""
+        assert "txt2img_generate" not in self.code()
+        assert "img2img_generate" not in self.code()
+
+    def test_it_arms_no_repeating_timer(self):
+        """A one-shot that clears a finished state is a cosmetic settle. An
+        interval is a poll, and a poll is the shape of something waiting."""
+        assert "setInterval" not in self.code()
+
+    def test_it_writes_no_gradio_component_value(self):
+        """It reads the prompt box and the progress bar's text. Writing to a
+        Gradio input from here would put a second author on a value the server
+        believes it owns."""
+        code = self.code()
+
+        assert "updateInput" not in code
+        assert ".dispatchEvent" not in code
+
+    def test_the_prompt_is_echoed_as_text_and_never_as_markup(self):
+        """A prompt is the string on the page most likely to contain angle
+        brackets, and the echo is written straight into the panel."""
+        code = self.code()
+
+        assert "innerHTML" not in code
+        assert "target.textContent = said" in code
+
+    def test_no_gradio_generated_class_is_used_to_find_anything(self):
+        """Every hook is an id this extension put in the page, or one of the
+        host's own progress-bar classes. A theme is allowed to rearrange
+        Gradio's internals; this has to keep working when it does."""
+        code = self.code()
+
+        for generated in ("gradio-", "svelte-", "label-wrap", "gr-button",
+                          "block-label"):
+            assert generated not in code
