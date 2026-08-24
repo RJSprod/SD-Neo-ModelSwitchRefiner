@@ -219,7 +219,54 @@ the two are the same set today, and a build with a lower minimum then behaves
 sensibly rather than surprisingly.
 
 
-## 9. Where the design intent was followed differently
+## 9. The row is a flex wrap, not a media query
+
+*Added by the Literal Prompt responsive layout spec (24 August 2026), whose own
+sections 4–8 are the ones referred to here.*
+
+Forge Neo's txt2img columns are dragged independently, so the width of the
+window is not the question being asked: a maximised browser can hand this row
+300px, and a media query keeping two boxes side by side in it pushes them into
+the image column. The width that matters is the row's own.
+
+That makes it a flex problem rather than a JavaScript one. A Gradio Row is a
+wrapping flex container, and `min_width` on its children is the width below
+which they stop sharing a line — so the entire responsive behaviour is two
+`gr.Textbox(scale=1, min_width=LITERAL_BOX_MIN_WIDTH)` calls. It follows the
+divider live because layout does, with no `ResizeObserver`, no window listener,
+no theme detection and no knowledge of Forge's column ratio anywhere.
+
+`LITERAL_BOX_MIN_WIDTH` is 240 — roughly a prompt box's worth of usable text —
+and `style.css` states the same number again in `.mc-literal-box`, because a
+theme is free to restyle Row and the guardrail is worth more than the
+duplication. `TestTheRowFitsItsColumn` asserts the two are equal, so tuning one
+fails until the other is tuned with it.
+
+The stylesheet's half is `width`/`max-width: 100%` with `flex-wrap: wrap` on the
+row, `flex: 1 1 240px` with `min-width: min(240px, 100%)` on each box, and
+`min-width: 0` on the wrappers Gradio nests inside them — a flex child's default
+minimum is its content, which is the usual way a prompt box ends up wider than
+the column holding it. `min(240px, 100%)` rather than `240px` so that a column
+narrower than one box takes the box down with it instead of being overflowed.
+Nothing here is given a pixel width, and nothing here can start a horizontal
+scroll bar.
+
+### 9.1 The labels lost their explanations
+
+`Positive Literal` and `Negative Literal`, with no `info=` copy and no
+placeholder. The longer labels and the two paragraphs under them were written
+for a component being met for the first time, and they read that way once:
+after that they are two paragraphs of prose sitting between the native Negative
+Prompt and the generation controls, in the one part of the UI that is other
+people's. The explanation lives in the README, where it can be as long as it
+likes.
+
+The infotext keys and the settings keys keep the older wording —
+`Model Chain Literal Positive` and friends — because those are a file format.
+Relabelling a box is presentation; renaming a key is a migration.
+
+
+## 10. Where the design intent was followed differently
 
 **§10, reconstructing the fields on paste.** It does not happen automatically;
 see §5 above. The intent's own word is *may*, and its own requirement that

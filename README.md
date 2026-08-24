@@ -1333,7 +1333,7 @@ Under the native Negative Prompt, whenever Creative or Spatial is on:
 Positive Prompt     portrait of a woman
 Negative Prompt     blurry
 ┌──────────────────────────┐ ┌──────────────────────────┐
-│ Literal Positive         │ │ Literal Negative         │
+│ Positive Literal         │ │ Negative Literal         │
 │ <lora:realfilter:1>      │ │ blue hat                 │
 └──────────────────────────┘ └──────────────────────────┘
 
@@ -1341,13 +1341,17 @@ Stage 1 is given:   <lora:realfilter:1> portrait of a woman blue hat
 ```
 
 Whatever you type in them is protected from every language model in this
-extension and put back around the finished prompt — **Literal Positive** in
-front of it, **Literal Negative** after it. They are ordinary prompt boxes:
+extension and put back around the finished prompt — **Positive Literal** in
+front of it, **Negative Literal** after it. They are ordinary prompt boxes:
 Tag Autocomplete, LoRA completion, copy and paste and the caret all behave as
 they do in the two above them, and the Extra Networks browser inserts into
 whichever of the four you used last.
 
-**Literal Negative is not Forge's Negative Prompt.** It removes nothing. It is
+They share the prompt column evenly and stack one above the other when you drag
+Forge's divider far enough left that two boxes would stop being usable, so the
+row never runs into the image column whatever width you work at.
+
+**Negative Literal is not Forge's Negative Prompt.** It removes nothing. It is
 the far side of the same protected run of text — the suffix to the positive
 prompt, where `-[[…]]` has always put things.
 
@@ -1392,17 +1396,17 @@ command sits further from the prompt than a field on the same side:
 ```
 explicit  +[[…]]  and  [[…]]
     ↓
-Literal Positive
+Positive Literal
     ↓
 the finished prompt
     ↓
-Literal Negative
+Negative Literal
     ↓
 explicit  -[[…]]
 ```
 
-So with `+[[A]] scene description -[[D]]` in the prompt, `B` in Literal Positive
-and `C` in Literal Negative, you get `A B <scene> C D`. Adding something to a
+So with `+[[A]] scene description -[[D]]` in the prompt, `B` in Positive Literal
+and `C` in Negative Literal, you get `A B <scene> C D`. Adding something to a
 field can never move something you placed by hand.
 
 **The payload is never interpreted.** Model Chain does not know or care whether
@@ -1438,7 +1442,8 @@ A few details worth knowing:
 Both forms are recorded in the image. The brackets are already there twice — in
 the restored `Prompt:` line and in the recorded source with their brackets still
 on — so only the boxes get keys of their own, `Model Chain Literal Positive` and
-`Model Chain Literal Negative`.
+`Model Chain Literal Negative` — the keys keep that older wording so images and
+saved settings written before the boxes were relabelled still read back.
 
 **Pasting one of your images empties the two boxes**, for the same reason it
 switches Creative Mode off: the recorded prompt already has those payloads in
