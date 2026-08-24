@@ -1363,15 +1363,17 @@ class TestKeepingAValueCostsNoUiUpdate:
 
 
 class TestTheRowFitsItsColumn:
-    """The two boxes are a child of Forge's prompt column, not of the window.
+    """One box above the other, at every width, asking nothing of the column.
 
-    Forge Neo's txt2img columns are dragged independently, so a maximised
-    browser says nothing about how much room this row was given: a media query
-    would keep two boxes side by side in a 300px column and push them into the
-    image column. The mechanism is therefore a wrapping flex Row with a minimum
-    width per box -- Gradio's own, stated once in Python and repeated
-    defensively in the stylesheet -- which reacts to the divider as it is
-    dragged, with no resize listener and no theme detection anywhere.
+    Two boxes that shared a line while they fitted was the first answer, and it
+    worked -- measured stacking at a 460px column and sharing at 560px. What it
+    also did was change the row's height as somebody dragged the divider, inside
+    a prompt column that holds its own leftover space, so the empty area below
+    the boxes grew and shrank while they dragged. A stack has one shape.
+
+    What matters now is the second half: this component states no width, no
+    minimum and no scale, so there is no width at which it asks the column
+    around it to be wider than the column wants to be.
     """
 
     @pytest.fixture
@@ -1407,37 +1409,32 @@ class TestTheRowFitsItsColumn:
             assert getattr(box, "info", None) is None
             assert not getattr(box, "placeholder", None)
 
-    def test_the_two_boxes_share_the_row_evenly(self, built):
-        """Equal `scale`, so the space left over after the minimums is split
-        down the middle rather than by whichever box holds more text."""
-        positive = built.components["literal_positive"]
-        negative = built.components["literal_negative"]
+    def test_neither_box_states_a_width_of_any_kind(self, built):
+        """No `scale`, no `min_width`.
 
-        assert positive.scale == negative.scale == 1
+        A component that states a minimum width is a component the column around
+        it has to be at least that wide for, and this one is a guest in a column
+        whose width somebody else drags. Gradio writes `min_width` as an inline
+        `min(Npx, 100%)`, which is why it never actually overflowed -- but the
+        right number of widths for this component to have an opinion about is
+        none.
+        """
+        for name in ("literal_positive", "literal_negative"):
+            box = built.components[name]
 
-    def test_each_box_tells_gradio_when_to_stop_sharing_a_line(self, built):
-        """`min_width` is the whole responsive mechanism: a Gradio Row wraps
-        when its children can no longer have it. Same number on both, or the
-        two would stack at different widths and the row would spend an
-        intermediate width half-wrapped."""
-        import model_chain_krea_creative as creative_script
+            assert getattr(box, "scale", None) is None, name
+            assert getattr(box, "min_width", None) is None, name
 
-        positive = built.components["literal_positive"]
-        negative = built.components["literal_negative"]
+    def test_the_container_is_a_column(self, built):
+        """Gradio's own word for "stack these", rather than a Row talked out of
+        laying out sideways. The stylesheet still says so as a guardrail, for a
+        theme with its own rules for Gradio's containers."""
+        assert type(built.components["literal_row"]).__name__ == "Column"
 
-        assert positive.min_width == negative.min_width
-        assert positive.min_width == creative_script.LITERAL_BOX_MIN_WIDTH
-
-    def test_the_stylesheet_repeats_the_same_number(self, css):
-        """A theme is free to restyle Row, so the wrap is stated twice. The two
-        numbers are meant to stay in step; if this fails because one of them was
-        tuned, tune the other."""
-        import model_chain_krea_creative as creative_script
-
-        assert f"{creative_script.LITERAL_BOX_MIN_WIDTH}px" in css
-
-    def test_the_row_wraps(self, css):
-        assert "flex-wrap: wrap" in css
+    def test_the_boxes_never_share_a_line(self, css):
+        assert "flex-direction: column" in css
+        assert "flex-wrap: nowrap" in css
+        assert "flex-wrap: wrap" not in css
 
     def test_nothing_is_given_a_fixed_width(self, css):
         """`width: 100%` and `max-width: 100%` take whatever the column offers;
@@ -1451,15 +1448,15 @@ class TestTheRowFitsItsColumn:
                 continue
             assert "min(" in stripped or not re.search(r"\d+px", stripped), stripped
 
-    def test_the_wrapper_gradio_builds_between_them_can_shrink(self, css):
+    def test_the_wrapper_gradio_builds_between_them_is_told_the_same_thing(self, css):
         """The row does not hold the two boxes directly.
 
         Gradio groups adjacent form components into a `div.form` of its own, so
         the boxes are the row's *grandchildren* -- which a `>` selector on the
-        box quietly matches none of. Measured in a browser: the row has one
-        child, and that child is the flex container the boxes wrap inside. Both
-        levels are addressed, the wrapper by `*` because naming Gradio's class
-        for it would be naming something Gradio may rename.
+        box quietly matches none of. Measured in a browser: the container has
+        one child, and that child is the flex container the boxes are laid out
+        in. Both levels are addressed, the wrapper by `*` because naming
+        Gradio's class for it would be naming something Gradio may rename.
         """
         assert ".mc-literal-row > *" in css
         assert ".mc-literal-row .mc-literal-box" in css

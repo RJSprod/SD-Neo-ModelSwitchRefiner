@@ -2756,53 +2756,59 @@
    native Negative Prompt because that is where they read as prompt boxes
    rather than as settings. They are ordinary Gradio Textboxes carrying the
    host's own `prompt` class, so everything below is spacing, the rules that
-   let the row wrap inside a narrow column, and one collapse rule -- a theme
-   styles them as it styles the two above them, which is the entire reason they
-   carry that class.
+   keep them stacked and inside whatever column they were given, and one
+   collapse rule -- a theme styles them as it styles the two above them, which
+   is the entire reason they carry that class.
 */
 
 .mc-literal-row {
     gap: 0.5em;
-    align-items: stretch;
     margin-top: 0.25em;
 
-    /* A well-behaved child of whatever column the browser dropped this row
-       into: it takes the width it is given and never asks for more, which is
-       what keeps it out of the image column when Forge's divider is dragged
-       left. No fixed width anywhere, and nothing that can start a horizontal
-       scroll bar. */
+    /* One box above the other, at every width. Nothing here decides anything
+       from a width any more: the boxes shared a line while they fitted at
+       first, and what that produced was a component whose height changed as
+       the divider moved, inside a prompt column that keeps its own leftover
+       space -- so the empty space below it grew and shrank while somebody was
+       dragging. A stack has one shape.
+
+       The element is a `gr.Column` now, so this is a guardrail rather than the
+       mechanism: a theme with its own rules for Gradio's containers cannot
+       turn it back into a row. */
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+
+    /* A well-behaved child of whatever column the browser dropped it into: it
+       takes the width it is given and never asks for more. No fixed width
+       anywhere, nothing that can raise the minimum width of the column around
+       it, and nothing that can start a horizontal scroll bar. */
     width: 100%;
     max-width: 100%;
     min-width: 0;
-    flex-wrap: wrap;
 }
 
 /* Gradio groups adjacent form components into a wrapper of its own, so the two
-   boxes are the row's *grandchildren*: the row holds one `div.form`, and that
-   wrapper is the flex container they actually wrap inside. Both levels are told
-   to shrink and to wrap, which is why this addresses the row's children by `*`
-   -- naming Gradio's wrapper class would be naming something Gradio is free to
-   rename, and the row has no other children to catch. */
+   boxes are this element's *grandchildren*: it holds one `div.form`, and that
+   wrapper is the flex container they are actually laid out in. Addressed by `*`
+   because naming Gradio's class for it would be naming something Gradio is free
+   to rename, and there are no other children to catch. */
 .mc-literal-row > * {
+    flex-direction: column;
+    flex-wrap: nowrap;
     min-width: 0;
     max-width: 100%;
-    flex-wrap: wrap;
 }
 
-/* Two boxes while both are wide enough to type into, one per line below that.
-   The decision is `flex-basis`, so it is made against the width of *this row*
-   and not the width of the window -- Forge's two txt2img columns are dragged
-   independently, and a media query cannot see the difference. 240px matches
-   `LITERAL_BOX_MIN_WIDTH` in scripts/model_chain_krea_creative.py, which is
-   where Gradio is told the same thing; this states it again for a theme that
-   has its own rules for Row children.
-
-   `min-width: min(240px, 100%)` and not `240px`: below that the box follows the
-   column down rather than overflowing it. */
+/* Full width, natural height, and no minimum of its own -- a box that states a
+   minimum width is a box the column around it has to be at least that wide
+   for, which is not a thing this component gets to ask of somebody else's
+   layout. */
 .mc-literal-row .mc-literal-box {
-    flex: 1 1 240px;
-    min-width: min(240px, 100%);
+    flex: 0 0 auto;
+    width: 100%;
     max-width: 100%;
+    min-width: 0;
 }
 
 /* A flex child's minimum is its content by default, and Gradio nests a wrapper

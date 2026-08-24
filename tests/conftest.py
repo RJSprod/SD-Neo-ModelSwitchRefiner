@@ -537,11 +537,14 @@ def _install_modules() -> None:
     # the rest of it loading -- which means a misnamed host function would
     # otherwise be swallowed and never noticed until somebody looked for a tab
     # that was not there.
-    script_callbacks.registered = {"script_unloaded": [], "ui_tabs": []}
+    script_callbacks.registered = {"script_unloaded": [], "ui_tabs": [],
+                                  "app_started": []}
     script_callbacks.on_script_unloaded = lambda cb, **k: (
         script_callbacks.registered["script_unloaded"].append(cb))
     script_callbacks.on_ui_tabs = lambda cb, **k: (
         script_callbacks.registered["ui_tabs"].append(cb))
+    script_callbacks.on_app_started = lambda cb, **k: (
+        script_callbacks.registered["app_started"].append(cb))
 
     modules.errors = errors
     modules.images = images

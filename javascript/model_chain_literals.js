@@ -1,6 +1,6 @@
 // Model Chain -- the Literal Prompt boxes, browser side.
 //
-// Four jobs, all of them presentation, none of them able to change what a
+// Three jobs, all of them presentation, none of them able to change what a
 // generation produces:
 //
 //   1. Move the Literal Prompt row up under the native Negative Prompt.
@@ -9,7 +9,18 @@
 //      touched last -- and offer them to Tag Autocomplete, if it is installed.
 //   3. Hide the native Negative Prompt row while CFG is 1, and give its space
 //      back.
-//   4. Ask the prompt column to be as tall as the prompts in it.
+//
+// ...and one line in the log saying whether 1 and 2 worked, because every fact
+// about that lives in the browser and the alternative is asking somebody to
+// open the developer tools.
+//
+// Nothing here styles, sizes or moves anything the host owns. The one exception
+// is job 3, which puts a class on Forge's own Negative Prompt and takes it off
+// again -- and an earlier version of this file also set `flex-grow: 0` on
+// Forge's prompt column to reclaim the empty space it holds open. That space is
+// the host's (`gr.Column(scale=6)` claiming the gallery's height), and so is the
+// decision about it: writing to that element changed how somebody else's page
+// lays out, which is not this component's business. It is gone.
 //
 // If every line of this file fails: the row is still on the page, lower down,
 // with two working prompt boxes whose values still travel with every press;
@@ -160,6 +171,7 @@
     }
 
     function registerPrompts() {
+        extendAutocompleteList();
         const known = family();
         [IDS.positive, IDS.negative].forEach(function (id) {
             const field = fieldIn(id);
@@ -173,6 +185,10 @@
                 once(field, "focus", function () { remember(field); }, "Family");
             }
             joinAutocomplete(field);
+            // The same event, for the report: the first time somebody puts the
+            // caret in one of these boxes, everything that was going to load
+            // has loaded.
+            once(field, "focus", sendReport, "Report");
         });
     }
 
@@ -198,12 +214,161 @@
     // not loaded yet is a page where this does nothing -- and the boxes are
     // still ordinary prompt boxes, which is where they started.
 
+    function autocompleteInstalled() {
+        return typeof addAutocompleteToArea === "function";
+    }
+
     function joinAutocomplete(field) {
         if (!field || !field.classList) return;
         if (field.classList.contains("autocomplete")) return;
-        if (typeof addAutocompleteToArea !== "function") return;
+        if (!autocompleteInstalled()) return;
+        // `var TAC_CFG = null` until it has read its tag files. Calling in
+        // before that is calling into a half-built extension; there is always
+        // another attempt.
         if (typeof TAC_CFG === "undefined" || !TAC_CFG) return;
         addAutocompleteToArea(field);
+    }
+
+    // ...and the other half of the same job, from the other direction, which is
+    // what makes the ordering between the two extensions stop mattering: no
+    // timer waits for that extension to finish loading, because its own setup
+    // asks for the list below whenever it gets there.
+    //
+    // That extension decides what to attach to by calling its own
+    // `getTextAreas()`, once, inside a setup that runs when its files have
+    // loaded. Handing it two textareas afterwards (above) only works if this
+    // file gets a turn after that setup; extending the list it asks for works
+    // whichever of the two goes first, and also covers the re-scans it does for
+    // accordions that open later.
+    //
+    // `getTextAreas` is a top-level function declaration in a classic script,
+    // so it is a writable property of the global object and the call inside
+    // that extension resolves through it. Wrapped once, additive only: its list
+    // comes back with its own contents in its own order, and if it ever throws
+    // that is its business and the error is its own.
+
+    function extendAutocompleteList() {
+        if (!autocompleteInstalled()) return;
+        if (typeof getTextAreas !== "function" || getTextAreas.mcLiteral) return;
+        const original = getTextAreas;
+        const extended = function () {
+            const found = original.apply(this, arguments);
+            try {
+                if (Array.isArray(found)) {
+                    [IDS.positive, IDS.negative].forEach(function (id) {
+                        const field = fieldIn(id);
+                        if (field && found.indexOf(field) < 0) found.push(field);
+                    });
+                }
+            } catch (error) {
+                // Their list, unchanged, is a perfectly good answer.
+            }
+            return found;
+        };
+        extended.mcLiteral = true;
+        window.getTextAreas = extended;
+    }
+
+    // ------------------------------------------------------------------ //
+    // 2c. Saying so, once, in the log everything else is in
+    // ------------------------------------------------------------------ //
+    //
+    // Everything above depends on two other extensions' cooperation, and every
+    // fact about whether it worked lives in the browser. "Tag completion does
+    // not work in these boxes" was answered, twice, by asking somebody to open
+    // the developer tools and paste a snippet -- which is a fine thing to ask
+    // of the person who wrote the snippet and a poor thing to ask of anybody
+    // else.
+    //
+    // So the page says it. On the first focus of a literal box -- which is
+    // exactly when tag completion is the thing somebody is expecting to happen
+    // -- a small fixed-shape report goes to the extension's own route and
+    // becomes one line in the WebUI's log, beside every other message this
+    // extension writes. Once per page load.
+    //
+    // Booleans and one word, and no way for text to get in: mc_literal_report
+    // reads a fixed set of keys and coerces every one of them. A diagnostic
+    // that could carry what somebody typed into a prompt box would be a
+    // diagnostic nobody should install.
+
+    const REPORT_ROUTE = "/model-chain/literal-prompts/report";
+    let reported = false;
+
+    function autocompleteConfig() {
+        if (typeof TAC_CFG === "undefined") return "missing";
+        return TAC_CFG ? "loaded" : "null";
+    }
+
+    function thirdPartyBoxes() {
+        try {
+            if (typeof TAC_CFG === "undefined" || !TAC_CFG || !TAC_CFG.activeIn) {
+                return null;
+            }
+            return !!TAC_CFG.activeIn.thirdParty;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function inTheirList() {
+        try {
+            if (typeof getTextAreas !== "function") return false;
+            const list = getTextAreas();
+            if (!Array.isArray(list)) return false;
+            return [IDS.positive, IDS.negative].every(function (id) {
+                const field = fieldIn(id);
+                return !!field && list.indexOf(field) >= 0;
+            });
+        } catch (error) {
+            return false;
+        }
+    }
+
+    function report() {
+        if (reported) return null;
+        const positive = fieldIn(IDS.positive);
+        const negative = fieldIn(IDS.negative);
+        const row = byId(IDS.row);
+        return {
+            boxesFound: !!positive && !!negative,
+            claimed: claimed(),
+            autocompleteInstalled: autocompleteInstalled(),
+            listWrapped: typeof getTextAreas === "function" && !!getTextAreas.mcLiteral,
+            inTheirList: inTheirList(),
+            config: autocompleteConfig(),
+            thirdPartyBoxes: thirdPartyBoxes(),
+            promptFamily: !!family(),
+            placed: !!row && !!byId(IDS.negativePrompt)
+                    && row.previousElementSibling === byId(IDS.negativePrompt),
+        };
+    }
+
+    function claimed() {
+        return [IDS.positive, IDS.negative].every(function (id) {
+            const field = fieldIn(id);
+            return !!field && !!field.classList
+                && field.classList.contains("autocomplete");
+        });
+    }
+
+    // Posted and forgotten. No await, no retry, no reading of the answer: if
+    // the route is not there, or the fetch fails, or this is a build without
+    // `fetch` at all, the boxes carry on being boxes.
+    function sendReport() {
+        if (reported) return;
+        const found = report();
+        if (!found) return;
+        reported = true;
+        if (typeof fetch !== "function") return;
+        try {
+            fetch(REPORT_ROUTE, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(found),
+            }).catch(function () { /* a log line, not a feature */ });
+        } catch (error) {
+            /* a log line, not a feature */
+        }
     }
 
     // ------------------------------------------------------------------ //
@@ -254,47 +419,6 @@
     }
 
     // ------------------------------------------------------------------ //
-    // 4. The space the prompt column was holding open
-    // ------------------------------------------------------------------ //
-    //
-    // Forge's prompt container is `gr.Column(..., scale=6)`. In the classic top
-    // row that 6 is a *width* share against the Generate column, which is what
-    // it was written to be. In the Compact prompt layout the same column is
-    // stacked inside the settings column instead, the settings column is a grid
-    // item stretched to the height of the gallery beside it, and the 6 becomes
-    // the largest claim on that leftover height: the container ends up hundreds
-    // of pixels taller than the prompts in it, with the difference showing as
-    // empty space underneath them. Measured in a browser at 989px of container
-    // holding 168px of prompt, with no extension on the page at all.
-    //
-    // The Literal Prompt row lands in that container, so it inherits the gap and
-    // -- being shorter side by side than stacked -- changes how much of it shows
-    // when the divider moves. Hence this: the container is told to take its
-    // content's height, which is the height it appeared to have anyway.
-    //
-    // Guarded three ways, because this is somebody else's element. Only when the
-    // row is actually in it, only when its parent stacks vertically (in the
-    // classic top row that flex-grow is doing real work and zeroing it would
-    // squeeze the prompt boxes to their content width), and only once. It reads
-    // no value, moves nothing, and a failure leaves the gap that was there
-    // before.
-
-    function reclaim() {
-        const row = byId(IDS.row);
-        const negative = byId(IDS.negativePrompt);
-        if (!row || !negative || typeof negative.closest !== "function") return;
-        const container = negative.closest('[id$="_prompt_container"]');
-        if (!container || !container.parentElement || !container.dataset) return;
-        if (container.dataset.mcLiteralHugged) return;
-        if (typeof container.contains !== "function" || !container.contains(row)) return;
-        if (typeof getComputedStyle !== "function") return;
-        if (getComputedStyle(container.parentElement).flexDirection !== "column") return;
-        if (!(parseFloat(getComputedStyle(container).flexGrow) > 0)) return;
-        container.style.flexGrow = "0";
-        container.dataset.mcLiteralHugged = "1";
-    }
-
-    // ------------------------------------------------------------------ //
     // Wiring
     // ------------------------------------------------------------------ //
 
@@ -315,12 +439,6 @@
         } catch (error) {
             console.error("Model Chain: the CFG negative-prompt collapse failed", error);
         }
-        try {
-            reclaim();
-        } catch (error) {
-            console.error("Model Chain: the prompt column could not be asked to fit "
-                          + "its contents", error);
-        }
     }
 
     if (typeof onUiLoaded === "function") onUiLoaded(wire);
@@ -340,7 +458,11 @@
         applyCfg: applyCfg,
         cfg: cfg,
         family: family,
-        reclaim: reclaim,
+        joinAutocomplete: joinAutocomplete,
+        report: report,
+        sendReport: sendReport,
+        claimed: claimed,
+        extendAutocompleteList: extendAutocompleteList,
         ids: IDS,
         collapsedClass: COLLAPSED,
     };

@@ -216,6 +216,11 @@ globalThis.getComputedStyle = (element) => ({
     flexDirection: (element.style || {}).flexDirection || "row",
     flexGrow: String((element.style || {}).flexGrow || "0"),
 });
+globalThis.posted = [];
+globalThis.fetch = (url, options) => {
+    posted.push({url: url, body: JSON.parse((options || {}).body || "null")});
+    return {catch() {}};
+};
 globalThis.requestAnimationFrame = (fn) => fn();
 globalThis.setTimeout = () => 0;
 globalThis.clearTimeout = () => {};
@@ -449,15 +454,23 @@ class TestThePromptFamily:
         assert found["onWindow"] == "undefined"
         assert found["target"] is True
 
-    def test_registering_twice_adds_one_listener(self):
+    def test_registering_again_never_binds_a_second_time(self):
+        """`onAfterUiUpdate` fires often, so this runs many times per session.
+
+        Two focus listeners per box, both added once: one remembers the box as
+        the insertion target, one sends the diagnostic line the first time
+        somebody puts the caret in it. What this guards is that neither number
+        grows.
+        """
         found = run("""
+            mc.registerPrompts();
             mc.registerPrompts();
             mc.registerPrompts();
             const field = fieldIn("mc-krea-creative-literal-positive");
             report({listeners: (field._listeners.focus || []).length});
         """)
 
-        assert found["listeners"] == 1
+        assert found["listeners"] == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -810,14 +823,71 @@ class TestTagAutocomplete:
 
         assert found["calls"] == 2
 
+    def test_its_own_list_comes_back_with_both_boxes_in_it(self):
+        """The half that makes the ordering stop mattering.
+
+        That extension decides what to attach to by calling its own
+        `getTextAreas()`, once, inside a setup that runs when its files have
+        loaded. Handing it two textareas only works if this file gets a turn
+        after that; extending the list it asks for works whichever goes first.
+        """
+        found = run("""
+            globalThis.TAC_CFG = {activeIn: {}};
+            globalThis.addAutocompleteToArea = (area) => {
+                area.classList.add("autocomplete");
+            };
+            globalThis.getTextAreas = () => [fieldIn("txt2img_prompt")];
+            mc.extendAutocompleteList();
+            const list = getTextAreas();
+            report({theirs: list[0] === fieldIn("txt2img_prompt"),
+                    ours: list.slice(1).map((field) => field.parentNode.id),
+                    length: list.length});
+        """)
+
+        assert found["theirs"] is True
+        assert found["ours"] == ["mc-krea-creative-literal-positive",
+                                 "mc-krea-creative-literal-negative"]
+
+    def test_the_list_is_wrapped_once_however_often_this_runs(self):
+        found = run("""
+            globalThis.TAC_CFG = {activeIn: {}};
+            globalThis.addAutocompleteToArea = () => {};
+            globalThis.calls = 0;
+            globalThis.getTextAreas = () => { calls += 1; return []; };
+            mc.extendAutocompleteList();
+            mc.extendAutocompleteList();
+            mc.extendAutocompleteList();
+            const list = getTextAreas();
+            report({calls: calls, length: list.length});
+        """)
+
+        assert found["calls"] == 1
+        assert found["length"] == 2
+
+    def test_a_list_that_is_not_an_array_is_handed_back_untouched(self):
+        """Their function, their answer. This adds to a list; it does not
+        decide what one is."""
+        found = run("""
+            globalThis.TAC_CFG = {activeIn: {}};
+            globalThis.addAutocompleteToArea = () => {};
+            globalThis.getTextAreas = () => "not a list";
+            mc.extendAutocompleteList();
+            report({answer: getTextAreas()});
+        """)
+
+        assert found["answer"] == "not a list"
+
     def test_a_page_without_it_is_a_page_where_nothing_happens(self):
         found = run("""
+            globalThis.getTextAreas = () => ["untouched"];
             mc.registerPrompts();
             report({claimed: fieldIn("mc-krea-creative-literal-positive")
-                             ._classes.has("autocomplete")});
+                             ._classes.has("autocomplete"),
+                    list: getTextAreas()});
         """)
 
         assert found["claimed"] is False
+        assert found["list"] == ["untouched"]
 
     def test_a_config_that_has_not_loaded_yet_is_left_alone(self):
         """`var TAC_CFG = null` until its files are read. Calling in before
@@ -835,22 +905,20 @@ class TestTagAutocomplete:
 
 
 # --------------------------------------------------------------------------- #
-# The space the prompt column was holding open
+# The page around the row
 # --------------------------------------------------------------------------- #
 
 
-class TestTheReclaimedSpace:
-    """Forge's prompt column is `gr.Column(scale=6)`.
+class TestItLeavesTheHostsLayoutAlone:
+    """The empty space under this row belongs to Forge.
 
-    In the classic top row that 6 is a width share against the Generate column.
-    In the Compact prompt layout the column is stacked inside the settings
-    column instead, which a CSS grid stretches to the height of the gallery, and
-    the 6 becomes the largest claim on the leftover: hundreds of pixels of empty
-    space under the prompts, measured in a browser at 989px of column holding
-    168px of prompt with no extension on the page at all.
-
-    So it is asked to be as tall as its contents -- but only where that flex-grow
-    is doing nothing, which is the whole of what these tests are about.
+    `ui_toprow.create_prompts()` builds `gr.Column(scale=6)`, and in the Compact
+    prompt layout that column claims the height the gallery beside it has -- so
+    it stands hundreds of pixels taller than the prompts in it, with or without
+    this extension. A version of this file wrote `flex-grow: 0` onto that column
+    to take the space back. It worked, and it was still this component reaching
+    out and changing how somebody else's page lays out, which is not a thing it
+    gets to decide. These tests are the reason it does not come back.
     """
 
     SETUP = """
@@ -858,62 +926,121 @@ class TestTheReclaimedSpace:
         container.appendChild(prompt);
         container.appendChild(negative);
         container.style.flexGrow = "6";
+        container.parentNode.style.flexDirection = "column";
     """
 
-    def test_a_stacked_prompt_column_is_asked_to_fit_its_contents(self):
+    def test_the_prompt_column_is_not_written_to(self):
         found = run(self.SETUP + """
-            container.parentNode.style.flexDirection = "column";
-            mc.place();
-            mc.reclaim();
-            report({grow: container.style.flexGrow});
-        """)
-
-        assert found["grow"] == "0"
-
-    def test_the_classic_top_row_is_left_alone(self):
-        """There the same flex-grow is the prompt column's *width* against the
-        Generate column, and zeroing it squeezes the prompt boxes to their
-        content width. The axis is the whole test."""
-        found = run(self.SETUP + """
-            container.parentNode.style.flexDirection = "row";
-            mc.place();
-            mc.reclaim();
-            report({grow: container.style.flexGrow});
-        """)
-
-        assert found["grow"] == "6"
-
-    def test_a_column_the_row_never_reached_is_left_alone(self):
-        """If the move failed, the gap is not this extension's to reclaim and
-        the page is somebody else's exactly as it was."""
-        found = run(self.SETUP + """
-            container.parentNode.style.flexDirection = "column";
-            row.parentNode.removeChild(row);
-            mc.reclaim();
-            report({grow: container.style.flexGrow});
-        """)
-
-        assert found["grow"] == "6"
-
-    def test_a_column_that_was_already_hugging_is_not_written_to(self):
-        found = run(self.SETUP + """
-            container.style.flexGrow = "0";
-            container.parentNode.style.flexDirection = "column";
-            mc.place();
-            mc.reclaim();
+            mc.wire();
             report({grow: container.style.flexGrow,
-                    flagged: !!container.dataset.mcLiteralHugged});
+                    touched: Object.keys(container.dataset).length});
         """)
 
-        assert found["grow"] == "0"
-        assert found["flagged"] is False
+        assert found["grow"] == "6"
+        assert found["touched"] == 0
 
-    def test_a_page_with_no_prompt_column_is_not_a_crash(self):
-        """Every build that renames that container, and every theme that
-        restructures it."""
+    def test_the_only_element_of_the_hosts_it_touches_is_the_negative_prompt(self):
+        """One class, put on and taken off again by §9's collapse. Everything
+        else on the page is read and left alone."""
+        found = run(self.SETUP + """
+            const before = JSON.stringify([prompt, negative, container, toprow]
+                .map((el) => [el.className, JSON.stringify(el.style)]));
+            mc.wire();
+            setCfg(7);
+            const after = JSON.stringify([prompt, negative, container, toprow]
+                .map((el) => [el.className, JSON.stringify(el.style)]));
+            report({unchanged: before === after});
+        """)
+
+        assert found["unchanged"] is True
+
+
+# --------------------------------------------------------------------------- #
+# The line in the log
+# --------------------------------------------------------------------------- #
+
+
+class TestTheReport:
+    """Everything above depends on two other extensions, and every fact about
+    whether it worked lives in the browser.
+
+    Twice now the answer to "tag completion does not work in these boxes" has
+    been a console snippet somebody has to open the developer tools to paste.
+    So the page says it instead, once, on the first focus of a literal box --
+    which is exactly when tag completion is the thing being expected -- into the
+    log every other message from this extension goes to.
+    """
+
+    def test_focusing_a_box_reports_once(self):
         found = run("""
-            mc.place();
-            mc.reclaim();
+            focus("mc-krea-creative-literal-positive");
+            focus("mc-krea-creative-literal-negative");
+            focus("mc-krea-creative-literal-positive");
+            report({posts: posted.length, url: (posted[0] || {}).url});
+        """)
+
+        assert found["posts"] == 1
+        assert found["url"] == "/model-chain/literal-prompts/report"
+
+    def test_it_says_what_was_found(self):
+        found = run("""
+            globalThis.TAC_CFG = {activeIn: {thirdParty: true}};
+            globalThis.addAutocompleteToArea = (area) => {
+                area.classList.add("autocomplete");
+            };
+            globalThis.getTextAreas = () => [];
+            mc.wire();
+            focus("mc-krea-creative-literal-positive");
+            report({sent: posted[0].body});
+        """)
+
+        assert found["sent"] == {
+            "boxesFound": True, "claimed": True, "autocompleteInstalled": True,
+            "listWrapped": True, "inTheirList": True, "config": "loaded",
+            "thirdPartyBoxes": True, "promptFamily": True, "placed": True}
+
+    def test_it_says_when_tag_autocomplete_is_not_there(self):
+        found = run("""
+            focus("mc-krea-creative-literal-positive");
+            report({sent: posted[0].body});
+        """, family=False)
+
+        assert found["sent"]["autocompleteInstalled"] is False
+        assert found["sent"]["claimed"] is False
+        assert found["sent"]["config"] == "missing"
+        assert found["sent"]["promptFamily"] is False
+
+    def test_it_carries_no_text_from_any_prompt_box(self):
+        """The whole payload is booleans and one word out of three. A
+        diagnostic that could carry what somebody typed would be a diagnostic
+        nobody should install -- and this one posts to the extension's own
+        route, so "could" is the only word that matters."""
+        found = run("""
+            fieldIn("mc-krea-creative-literal-positive").value = "a secret";
+            fieldIn("txt2img_prompt").value = "another secret";
+            focus("mc-krea-creative-literal-positive");
+            report({sent: JSON.stringify(posted[0].body)});
+        """)
+
+        assert "secret" not in found["sent"]
+        for value in json.loads(found["sent"]).values():
+            assert isinstance(value, bool) or value in ("missing", "null", "loaded") \
+                or value is None
+
+    def test_a_build_without_fetch_is_not_a_crash(self):
+        found = run("""
+            globalThis.fetch = undefined;
+            focus("mc-krea-creative-literal-positive");
+            report({ok: true});
+        """)
+
+        assert found["ok"] is True
+
+    def test_a_route_that_is_not_there_is_not_a_crash(self):
+        """It is a log line, not a feature."""
+        found = run("""
+            globalThis.fetch = () => { throw new Error("404"); };
+            focus("mc-krea-creative-literal-positive");
             report({ok: true});
         """)
 
