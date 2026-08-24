@@ -1002,13 +1002,21 @@ def _auto_save_changed(value):
 def _pasted_view() -> str:
     """What the last paste said about Creative Mode, as one short block."""
     setup = mc_creative_krea.pasted.setup
-    if setup is None or not setup.present:
+    if setup is None or not setup.recorded:
         return ("Nothing yet. Paste an image made with Creative Mode — PNG Info, the "
                 "arrow under the gallery, or a dropped file — and what it records "
                 "appears here.")
 
-    lines = [f"Source prompt: {setup.source}" if setup.source else
-             "Source prompt: (not recorded)"]
+    # An image can record Literal Prompt fields and nothing else: two boxes
+    # filled in with both features switched off is an ordinary way to use this
+    # extension. Its record is worth showing -- the paste emptied those boxes so
+    # the picture would reproduce, and this is where somebody finds out what was
+    # in them.
+    if not setup.present:
+        lines = ["This image recorded no Creative Mode setup."]
+    else:
+        lines = [f"Source prompt: {setup.source}" if setup.source else
+                 "Source prompt: (not recorded)"]
     if setup.creativity is not None:
         lines.append(f"Creativity: {setup.creativity}")
     if setup.seed is not None:
@@ -1026,6 +1034,14 @@ def _pasted_view() -> str:
         # back as literal commands, where they belong.
         lines.append(f"Pinned LoRAs (this build has no such field — type them into "
                      f"the prompt as [[{setup.loras}]]): {setup.loras}")
+    if setup.literal_positive:
+        lines.append(f"Literal Positive: {setup.literal_positive}")
+    if setup.literal_negative:
+        lines.append(f"Literal Negative: {setup.literal_negative}")
+    if setup.literals:
+        lines.append("The Literal Prompt boxes were emptied by the paste so this "
+                     "picture reproduces exactly. Restore Creative setup puts them "
+                     "back.")
     if setup.spatial:
         from prompt_master.krea import spatial as spatial_module
 
@@ -1058,11 +1074,27 @@ def _restore_setup(replay_exactly):
     history the original roll saw.
     """
     setup = mc_creative_krea.pasted.setup
-    if setup is None or not setup.present:
+    if setup is None or not setup.recorded:
         return (gr.update(), gr.update(),
                 notice("There is no Creative setup from a pasted image to restore.",
                        "warn"),
-                gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+                gr.update(), gr.update(), gr.update())
+
+    # Two Literal Prompt boxes and nothing else is a whole restorable setup, so
+    # it is handled before the Creative half rather than as a footnote to it.
+    # These are put back rather than merely shown -- unlike the Pinned LoRAs
+    # field above, the controls they came from still exist.
+    fields = (gr.update(value=setup.literal_positive),
+              gr.update(value=setup.literal_negative)) if setup.literals \
+        else (gr.update(), gr.update())
+    if not setup.present:
+        mc_literal_prompts.remember(**{
+            mc_literal_prompts.POSITIVE: setup.literal_positive,
+            mc_literal_prompts.NEGATIVE: setup.literal_negative})
+        return (gr.update(), gr.update(),
+                notice("The Literal Prompt boxes are back as this image had them. "
+                       "It recorded no Creative Mode setup, so nothing else changed."),
+                gr.update(value=_pasted_view()), *fields)
 
     stored = mc_creative_krea.settings()
     remembered = {}
@@ -1116,11 +1148,17 @@ def _restore_setup(replay_exactly):
         said.append("This image also recorded a spatial layout — Spatial Layout → "
                     "Continue from a pasted image restores the canvas.")
 
+    if setup.literals:
+        mc_literal_prompts.remember(**{
+            mc_literal_prompts.POSITIVE: setup.literal_positive,
+            mc_literal_prompts.NEGATIVE: setup.literal_negative})
+        said.append("The Literal Prompt boxes are back as this image had them.")
+
     kind = "warn" if setup.warnings() or (replay_exactly and not setup.replayable) \
         else "info"
     told = notice(" ".join(said), kind)
     return (gr.update(value=setup.source) if setup.source else gr.update(),
-            gr.update(value=True), told, gr.update(value=_pasted_view()))
+            gr.update(value=True), told, gr.update(value=_pasted_view()), *fields)
 
 
 def _spatial_pasted_view() -> str:
@@ -1794,15 +1832,19 @@ class ScriptKreaCreative(scripts.Script):
         # prompt, or a test with no page at all -- the restore still restores the
         # settings and still says so; only the phrase has nowhere to go, and it
         # is in the record above for copying.
+        literal_boxes = [self.components["literal_positive"],
+                         self.components["literal_negative"]]
         if self.prompt_box is not None:
             restore.click(fn=_restore_setup, inputs=[exactly],
-                          outputs=[self.prompt_box, enabled, status, pasted],
+                          outputs=[self.prompt_box, enabled, status, pasted,
+                                   *literal_boxes],
                           queue=False)
         else:
             logger.debug("Model Chain: the txt2img prompt box was not offered to "
                          "Creative Mode; Restore Creative setup will not fill it in")
             restore.click(fn=lambda exactly: _restore_setup(exactly)[1:],
-                          inputs=[exactly], outputs=[enabled, status, pasted],
+                          inputs=[exactly],
+                          outputs=[enabled, status, pasted, *literal_boxes],
                           queue=False)
         disarm.click(fn=_disarm_replay, outputs=[status], queue=False)
 
@@ -1966,6 +2008,7 @@ class ScriptKreaCreative(scripts.Script):
         before, after = _literals_for(args)
         parsed = literals.merge(
             literals.parse(getattr(p, "prompt", "") or ""), before, after)
+        self._record_literal_fields(p, before, after)
         layout = self._layout(p, args)
         creative = bool(enabled)
         if not creative and not getattr(layout, "regions", ()):
@@ -2137,6 +2180,36 @@ class ScriptKreaCreative(scripts.Script):
         except Exception:
             logger.debug("Model Chain: could not put the Creative Mode notice on the "
                          "result", exc_info=True)
+
+    def _record_literal_fields(self, p, before, after) -> None:
+        """Write what the two Literal Prompt boxes held into this image.
+
+        Before anything can return, because every path out of ``before_process``
+        applies them and every one of those images should be able to say so.
+
+        The one place a literal payload is recorded under a key of its own, and
+        the exception that proves the rule: a bracketed command is in the
+        ``Prompt:`` line and in the recorded source with its brackets still on,
+        so a third copy would repeat the file. A field's text is in neither --
+        the prompt line has it restored and unbracketed, indistinguishable from
+        the words around it, and the source line never had it. Without these two
+        keys the authoring setup could not be reconstructed from an image.
+
+        Absent entirely when the boxes are empty, like every other optional key:
+        an ordinary image should say nothing about a feature it did not use.
+        """
+        recorded = {}
+        if str(before or "").strip():
+            recorded[mc_infotext.LITERAL_POSITIVE] = str(before).strip()
+        if str(after or "").strip():
+            recorded[mc_infotext.LITERAL_NEGATIVE] = str(after).strip()
+        if not recorded:
+            return
+        try:
+            p.extra_generation_params.update(recorded)
+        except Exception:
+            logger.debug("Model Chain: could not record the Literal Prompt fields",
+                         exc_info=True)
 
     def _restore_negative(self, p) -> None:
         """Take the brackets off the negative prompt, if it has any.

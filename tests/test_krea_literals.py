@@ -1084,3 +1084,195 @@ class TestTheFeatureCostsNothing:
 
         assert layout.regions[0].prefix_literals == ("<lora:shirt_style:1>",)
         assert not hasattr(layout.regions[0], "loras")
+
+
+# --------------------------------------------------------------------------- #
+# What an image records about its Literal Prompt boxes
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def built(store, host):
+    """A script with its UI assembled, so its paste fields are registered."""
+    import model_chain_krea_creative as creative_script
+
+    instance = creative_script.ScriptKreaCreative()
+    instance.ui(False)
+    return instance
+
+
+def pasted_value(script, name, params):
+    """What the paste field for ``name`` answers for this infotext."""
+    component = script.components[name]
+    for entry in script.infotext_fields:
+        if entry.component is not component:
+            continue
+        if entry.function is not None:
+            return entry.function(params)
+        return params.get(entry.label)
+    raise AssertionError(f"no paste field for {name}")
+
+
+class TestTheFieldsAreRecorded:
+    """Section 10. The one place a literal payload gets a key of its own.
+
+    A bracketed command is already in the image twice -- restored into the
+    ``Prompt:`` line, and with its brackets still on in the recorded source --
+    so a third copy would repeat the file. A field's text is in neither: the
+    prompt line has it unbracketed and indistinguishable from the words around
+    it, and the source line never had it. Without these keys the authoring
+    setup could not be reconstructed, which is exactly what section 10 asks
+    for.
+    """
+
+    def test_both_fields_reach_the_metadata(self, script, store, host):
+        p = generate(script, "a quiet street", enabled=False,
+                     literal_positive="<lora:realfilter:1>",
+                     literal_negative="blue hat")
+
+        assert p.extra_generation_params[mc_infotext.LITERAL_POSITIVE] == \
+            "<lora:realfilter:1>"
+        assert p.extra_generation_params[mc_infotext.LITERAL_NEGATIVE] == "blue hat"
+
+    def test_an_empty_box_records_nothing(self, script, store, host):
+        """An ordinary image should say nothing about a feature it did not
+        use."""
+        p = generate(script, "a quiet street", enabled=False,
+                     literal_positive="", literal_negative="")
+
+        assert mc_infotext.LITERAL_POSITIVE not in p.extra_generation_params
+        assert mc_infotext.LITERAL_NEGATIVE not in p.extra_generation_params
+
+    def test_only_the_box_that_was_used_is_recorded(self, script, store, host):
+        p = generate(script, "a quiet street", enabled=False,
+                     literal_positive="<lora:x:1>")
+
+        assert mc_infotext.LITERAL_POSITIVE in p.extra_generation_params
+        assert mc_infotext.LITERAL_NEGATIVE not in p.extra_generation_params
+
+    def test_the_prompt_line_still_describes_what_stage_one_was_given(
+            self, script, store, host):
+        """Section 10 again: the recorded Prompt keeps meaning the prompt that
+        was actually delivered, keys or no keys."""
+        p = generate(script, "a quiet street", enabled=False,
+                     literal_positive="<lora:x:1>")
+
+        assert p.prompt == "<lora:x:1> a quiet street"
+
+    def test_a_field_that_ran_with_no_feature_on_still_records(self, script, store,
+                                                               host):
+        """The path with no language model in it records the fields the same
+        way, because the fields did the same thing on it."""
+        p = generate(script, "a quiet street", enabled=False,
+                     literal_positive="<lora:x:1>")
+
+        assert p.extra_generation_params[mc_infotext.LITERAL_POSITIVE] == "<lora:x:1>"
+
+
+class TestPastingOneBack:
+    """The rule that outranks convenience: exact reproduction.
+
+    A pasted image's ``Prompt:`` already has these payloads restored into it.
+    Refilling the boxes as well would insert them a second time and the picture
+    would not reproduce -- so a paste *empties* them, for the same reason and by
+    the same mechanism that switches Creative Mode off.
+    """
+
+    def test_a_paste_of_one_of_our_images_empties_both_boxes(self, built):
+        params = {mc_infotext.LITERAL_POSITIVE: "<lora:x:1>"}
+
+        assert pasted_value(built, "literal_positive", params) == ""
+        assert pasted_value(built, "literal_negative", params) == ""
+
+    def test_an_image_of_ours_with_empty_boxes_still_empties_them(self, built):
+        """It records no literal key at all, and leaving somebody's current
+        boxes in place would add text that image never had."""
+        params = {mc_infotext.CREATIVE_MODE: "on"}
+
+        assert pasted_value(built, "literal_positive", params) == ""
+
+    def test_a_legacy_image_leaves_them_exactly_as_they_are(self, built):
+        """``None`` is how the host is told to leave a control alone. An
+        ordinary image should not be able to empty a control any more than it
+        can switch a feature off."""
+        params = {"Steps": "20", "CFG scale": "7"}
+
+        assert pasted_value(built, "literal_positive", params) is None
+        assert pasted_value(built, "literal_negative", params) is None
+
+    def test_the_recorded_values_are_read_back_off_the_infotext(self):
+        setup = mc_infotext.creative_setup({
+            mc_infotext.LITERAL_POSITIVE: "<lora:x:1>",
+            mc_infotext.LITERAL_NEGATIVE: "blue hat"})
+
+        assert setup.literal_positive == "<lora:x:1>"
+        assert setup.literal_negative == "blue hat"
+        assert setup.literals is True
+
+    def test_literal_fields_alone_are_not_a_creative_record(self):
+        """Saying "Creative image restored" over an image that never ran the
+        writer would be describing a feature that did not happen."""
+        setup = mc_infotext.creative_setup({mc_infotext.LITERAL_POSITIVE: "x"})
+
+        assert setup.literals is True
+        assert setup.present is False
+
+    def test_the_keys_are_forwarded_by_send_to_txt2img(self):
+        """The buttons forward by exact name, so a key that is not listed
+        simply does not arrive and the restore finds half a record."""
+        declared = set(mc_infotext.creative_paste_field_names())
+
+        assert mc_infotext.LITERAL_POSITIVE in declared
+        assert mc_infotext.LITERAL_NEGATIVE in declared
+
+    def test_restoring_the_setup_puts_the_boxes_back(self, built, store):
+        """The explicit action, which is allowed to do what the paste refused
+        to: these controls still exist, unlike the Pinned LoRAs field an older
+        image records, so they are restored rather than merely shown."""
+        import model_chain_krea_creative as creative_script
+
+        mc_creative_krea.pasted.remember(mc_infotext.creative_setup({
+            mc_infotext.LITERAL_POSITIVE: "<lora:x:1>",
+            mc_infotext.LITERAL_NEGATIVE: "blue hat"}))
+        returned = creative_script._restore_setup(False)
+
+        assert returned[-2]["value"] == "<lora:x:1>"
+        assert returned[-1]["value"] == "blue hat"
+
+    def test_a_literal_only_restore_changes_nothing_else(self, built, store):
+        """No Creative record means no prompt overwrite and no switching
+        Creative Mode on -- an image that never used it is not a reason to."""
+        import model_chain_krea_creative as creative_script
+
+        mc_creative_krea.pasted.remember(mc_infotext.creative_setup({
+            mc_infotext.LITERAL_POSITIVE: "<lora:x:1>"}))
+        prompt, enabled, status, _view, positive, _negative = \
+            creative_script._restore_setup(False)
+
+        assert positive["value"] == "<lora:x:1>"
+        assert prompt == {} or "value" not in prompt
+        assert enabled == {} or "value" not in enabled
+        assert "no Creative Mode setup" in status
+
+    def test_the_pasted_view_says_what_the_boxes_held(self, built, store):
+        import model_chain_krea_creative as creative_script
+
+        mc_creative_krea.pasted.remember(mc_infotext.creative_setup({
+            mc_infotext.LITERAL_POSITIVE: "<lora:x:1>"}))
+        said = creative_script._pasted_view()
+
+        assert "<lora:x:1>" in said
+        assert "reproduces exactly" in said
+
+    def test_a_pasted_image_reproduces_with_the_boxes_emptied(self, script, built,
+                                                              store, host):
+        """The property all of the above is for, end to end: generate with
+        fields, take the recorded prompt, paste it back, and press Generate
+        again with the boxes as the paste left them."""
+        first = generate(script, "a quiet street", enabled=False,
+                         literal_positive="<lora:x:1>", literal_negative="grain")
+
+        again = generate(script, first.prompt, enabled=False,
+                         literal_positive="", literal_negative="")
+
+        assert again.prompt == first.prompt
