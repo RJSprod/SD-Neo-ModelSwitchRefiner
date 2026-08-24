@@ -56,6 +56,7 @@ import gradio as gr
 
 import mc_creative_krea
 import mc_creative_profiles as profiles
+import mc_profile_state
 
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
@@ -84,30 +85,94 @@ def classes(*names: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
-def summarise(axis, setting) -> str:
-    """One axis's whole configuration as one short line.
+def selection(axis, setting) -> list[str]:
+    """The treatments an axis is willing to use, as the picker shows them.
 
-    ``Medium · Fixed: Fashion editorial``. ``Texture · Vary · excludes glossy
-    plastic, heavy impasto``. Labels rather than ids, because this is the line
-    somebody reads to check they configured what they meant; the ids are in the
-    diagnostics view and in the PNG metadata, where they are what matters.
+    The other half of :func:`apply_treatments`, and the reason the two are
+    written next to each other: they are one mapping read in two directions,
+    and a mapping whose halves disagree is a panel that forgets what somebody
+    chose the moment they reload the tab.
+
+    Vary with nothing excluded is *every* treatment selected, which is exactly
+    what it has always meant -- "the director may choose anything" -- now said
+    in the vocabulary of the picker rather than in the vocabulary of exclusion.
     """
     from prompt_master.krea import director
 
-    label = getattr(axis, "label", "")
     mode = setting.get("mode", director.NATURAL)
     if mode == director.FIXED:
         pinned = setting.get("fixed")
-        chosen = axis.variant(pinned) if pinned else None
-        if chosen is None:
-            return f"**{label}** · Fixed · *no treatment chosen yet*"
-        return f"**{label}** · Fixed: {chosen.label}"
+        return [str(pinned)] if pinned else []
+    if mode == director.VARY:
+        excluded = {str(value) for value in (setting.get("excluded") or ())}
+        return [variant.identifier for variant in axis.variants
+                if variant.identifier not in excluded]
+    return []
 
-    excluded = [axis.variant(identifier) for identifier in setting.get("excluded") or ()]
-    named = [variant.label for variant in excluded if variant is not None]
-    if not named:
-        return f"**{label}** · Vary"
-    return f"**{label}** · Vary · excludes {', '.join(named)}"
+
+def apply_treatments(key, axis, chosen) -> dict:
+    """One picker's selection, written back as a mode, a pin and an exclusion list.
+
+    The whole of section 5.3 in nine lines. The user answers one question --
+    *which treatments am I willing to use?* -- and the three things the Director
+    has always read are derived from the answer:
+
+    ===========  =========================================================
+    0 selected   Natural. The direction has a row and no effect; the axis is
+                 left out of the brief entirely, exactly as an axis nobody
+                 added would be.
+    1 selected   Fixed to it. Repeated every roll.
+    2+ selected  Vary, with everything *not* selected excluded. The Creative
+                 seed chooses from the pool, which is what it has always done.
+    ===========  =========================================================
+
+    Nothing downstream changes. Stable treatment ids, creativity eligibility,
+    compatibility, anti-repetition, user-prompt precedence and the written
+    expression tiers all read the same three keys they read before, and cannot
+    tell that the control above them was replaced.
+    """
+    from prompt_master.krea import director
+
+    known = [variant.identifier for variant in axis.variants]
+    wanted = [str(value) for value in (chosen or ()) if str(value) in known]
+    # Deduplicated in the library's own order, so two selections that differ
+    # only in the order they were clicked produce the same settings and the
+    # same brief.
+    picked = [identifier for identifier in known if identifier in set(wanted)]
+
+    if not picked:
+        return set_axis(key, mode=director.NATURAL, fixed=None, excluded=None)
+    if len(picked) == 1:
+        return set_axis(key, mode=director.FIXED, fixed=picked[0], excluded=None)
+    return set_axis(key, mode=director.VARY, fixed=None,
+                    excluded=[identifier for identifier in known
+                              if identifier not in set(picked)])
+
+
+def summarise(axis, setting) -> str:
+    """One axis's whole configuration as one short line.
+
+    ``Medium · Fashion editorial``. ``Lighting · 4 treatments, chosen by the
+    Creative seed``. Labels rather than ids, because this is the line somebody
+    reads to check they configured what they meant; the ids are in the
+    diagnostics view and in the PNG metadata, where they are what matters.
+
+    A row with nothing chosen says so plainly. It is the one state that looks
+    like a mistake and is not -- it is a direction somebody has started and not
+    finished, and the panel's job is to make the difference between "started"
+    and "doing nothing" impossible to miss.
+    """
+    label = getattr(axis, "label", "")
+    chosen = selection(axis, setting)
+
+    if not chosen:
+        return f"**{label}** · *no treatments chosen — not directed*"
+    if len(chosen) == 1:
+        variant = axis.variant(chosen[0])
+        named = variant.label if variant is not None else chosen[0]
+        return f"**{label}** · {named}"
+    return (f"**{label}** · {len(chosen)} treatments, chosen by the Creative "
+            "seed")
 
 
 def _axis_setting(stored, key) -> dict:
@@ -234,6 +299,34 @@ def active_note(stored=None) -> str:
     return f"{counted} set."
 
 
+def profile_state(name, stored=None) -> str:
+    """``Loaded: Editorial · Modified · not saved``, or nothing.
+
+    Section 8, in the vocabulary :mod:`mc_profile_state` settles for all three
+    kinds of named configuration. Computed rather than tracked: every handler
+    on this panel ends in a full render, so "does the screen still match the
+    profile it came from" can be answered by comparing the two, and a dirty
+    flag that is derived cannot drift out of step with the thing it describes.
+
+    The sentence beside it is not decoration. "Not saved" is one word away from
+    "not applied", and the two readings are opposite in consequence -- these
+    settings are the ones the next Generate uses, saved or not.
+    """
+    name = str(name or "").strip()
+    if not name:
+        return ""
+    saved = profiles.get(name)
+    if saved is None:
+        return ""
+
+    stored = stored or mc_creative_krea.settings()
+    modified = mc_profile_state.changed(profiles.from_settings(stored),
+                                        mc_profile_state.snapshot(saved))
+    line = mc_profile_state.describe(name, modified)
+    explained = mc_profile_state.explain(modified)
+    return f"{line}  \n{explained}" if explained else line
+
+
 def describe_cost(stored=None) -> str:
     """The line under the directions: what they cost, in this machine's seconds.
 
@@ -352,6 +445,44 @@ def set_axis(key, *, mode=None, fixed=..., excluded=...) -> dict:
     return mc_creative_krea.settings()
 
 
+def add_direction(key) -> dict:
+    """Give an axis a row, with no treatments chosen yet.
+
+    Deliberately not "make it vary". Adding a direction is opening a question,
+    not answering it: the row appears, the picker is empty, and until something
+    is chosen the axis is Natural and the brief is exactly what it would have
+    been. Section 5.1 -- Natural is represented by omission, and a row nobody
+    has filled in omits just as thoroughly as a row that is not there.
+    """
+    stored = mc_creative_krea.settings()
+    directions = [str(name) for name in (stored.get("directions") or ())]
+    if str(key) not in directions:
+        directions.append(str(key))
+    mc_creative_krea.remember(**{mc_creative_krea.DIRECTIONS: directions})
+    return mc_creative_krea.settings()
+
+
+def remove_direction(key) -> dict:
+    """Take an axis's row away, and its treatments with it.
+
+    One action, because on screen they are one thing. A row removed but still
+    pinned to a treatment would keep directing the brief from somewhere the
+    user can no longer see, which is the exact failure the visible-row rule
+    exists to prevent.
+    """
+    stored = set_axis(str(key), mode=_natural(), fixed=None, excluded=None)
+    directions = [str(name) for name in (stored.get("directions") or ())
+                  if str(name) != str(key)]
+    mc_creative_krea.remember(**{mc_creative_krea.DIRECTIONS: directions})
+    return mc_creative_krea.settings()
+
+
+def _natural() -> str:
+    from prompt_master.krea import director
+
+    return director.NATURAL
+
+
 # --------------------------------------------------------------------------- #
 # The panel
 # --------------------------------------------------------------------------- #
@@ -376,6 +507,7 @@ class Panel:
 
         # Filled in by build(), in the order the page is assembled.
         self.profile = None
+        self.profile_state = None
         self.name_row = None
         self.profile_name = None
         self.summary = None
@@ -385,6 +517,13 @@ class Panel:
         self.anti = None
         self.rows: dict = {}
         self.labels: dict = {}
+        self.treatments: dict = {}
+        self.removes: dict = {}
+        # The three machine-facing controls per axis. Never visible any more:
+        # the treatment picker is the only thing a user touches, and these are
+        # what it writes. They stay components rather than becoming plain
+        # values because they are the list that travels to the generation --
+        # see `axis_controls`, whose shape and order are unchanged.
         self.editors: dict = {}
         self.modes: dict = {}
         self.fixed: dict = {}
@@ -419,41 +558,44 @@ class Panel:
 
     def outputs(self) -> list:
         """Every component :meth:`render` returns an update for, in order."""
-        found = [self.status, self.creativity, self.profile, self.name_row,
-                 self.profile_name, self.summary, self.cost, self.add, self.seed,
-                 self.anti]
+        found = [self.status, self.creativity, self.profile, self.profile_state,
+                 self.name_row, self.profile_name, self.summary, self.cost,
+                 self.add, self.seed, self.anti]
         for key in self.keys:
-            found.extend([self.rows[key], self.labels[key], self.editors[key],
+            found.extend([self.rows[key], self.labels[key], self.treatments[key],
                           self.modes[key], self.fixed[key], self.excluded[key]])
         return found
 
     def components(self) -> dict:
         """Everything this panel owns, for a surface to expose and a test to read."""
         found = {"profile": self.profile, "profile_name": self.profile_name,
+                 "profile_state": self.profile_state,
                  "name_row": self.name_row, "summary": self.summary, "cost": self.cost,
                  "add": self.add,
                  "seed": self.seed, "anti": self.anti,
                  "axes": self.axis_controls,
                  "rows": [self.rows[key] for key in self.keys],
                  "labels": [self.labels[key] for key in self.keys],
+                 "treatments": [self.treatments[key] for key in self.keys],
                  "editors": [self.editors[key] for key in self.keys],
                  "buttons": list(self.buttons)}
         return found
 
-    def render(self, stored=None, editing=None, told=None, kind="info",
+    def render(self, stored=None, told=None, kind="info",
                profile=None, naming=False) -> list:
         """An update for every component this panel owns.
 
-        ``editing`` is the one axis whose editor is open, or ``None`` for none.
-        ``told`` is a sentence for the status line, or ``None`` to leave whatever
-        is there. ``naming`` opens the Save As name box.
-        """
-        from prompt_master.krea import director
+        ``told`` is a sentence for the status line, or ``None`` to leave
+        whatever is there. ``naming`` opens the Save As name box.
 
+        There is no longer an ``editing`` argument, because there is no longer
+        an editor to open. An axis is configured by the picker on its own row,
+        so the panel has one fewer state to be in and one fewer way for that
+        state to be wrong.
+        """
         stored = stored or mc_creative_krea.settings()
-        modes = stored.get("axis_modes") or {}
         active = [key for key in self.keys
-                  if modes.get(key) in (director.VARY, director.FIXED)]
+                  if key in set(stored.get("directions") or ())]
         natural = [key for key in self.keys if key not in active]
 
         updates = [
@@ -462,6 +604,8 @@ class Panel:
             gr.update(choices=profiles.choices(),
                       value=profile) if profile is not None
             else gr.update(choices=profiles.choices()),
+            gr.update(value=profile_state(profile if profile is not None
+                                          else profiles.selected(), stored)),
             gr.update(visible=bool(naming)),
             gr.update(value="") if not naming else gr.update(),
             gr.update(value=DIRECTIONS_HEADING if active else NO_DIRECTIONS),
@@ -474,17 +618,17 @@ class Panel:
 
         for key in self.keys:
             setting = _axis_setting(stored, key)
-            mode = setting["mode"]
-            open_here = editing == key
             updates.extend([
                 gr.update(visible=key in active),
                 gr.update(value=summarise(self.axes[key], setting)),
-                gr.update(visible=open_here),
-                gr.update(value=mode),
-                gr.update(value=setting["fixed"],
-                          visible=open_here and mode == director.FIXED),
-                gr.update(value=setting["excluded"],
-                          visible=open_here and mode == director.VARY),
+                gr.update(value=selection(self.axes[key], setting)),
+                # The three that travel to the generation. Rewritten from the
+                # settings on every render, never touched by hand, and never
+                # shown -- which is what keeps the picker and the brief from
+                # being two opinions about the same axis.
+                gr.update(value=setting["mode"]),
+                gr.update(value=setting["fixed"]),
+                gr.update(value=setting["excluded"]),
             ])
         return updates
 
@@ -530,12 +674,16 @@ def build(ident, notice, status, creativity, *, stored=None) -> Panel | None:
     # discard whatever the last tab adjusted.
     current = profiles.selected()
     complaint = profiles.default_profile()[2]
+
     with gr.Group(elem_id=ident("profiles"), elem_classes=classes("profiles")):
         with gr.Row(elem_classes=classes("profile-bar")):
             panel.profile = gr.Dropdown(
                 label="Profile", choices=profiles.choices(), value=current, scale=3,
                 elem_id=ident("profile"), filterable=False,
                 info="a named set of Creative settings; Factory is the neutral one")
+        panel.profile_state = gr.Markdown(
+            profile_state(current, stored), elem_id=ident("profile", "state"),
+            elem_classes=classes("profile-state"))
         with gr.Row(elem_classes=classes("profile-actions")):
             save = button("Save", "profile", "save")
             save_as = button("Save As", "profile", "save-as")
@@ -550,61 +698,72 @@ def build(ident, notice, status, creativity, *, stored=None) -> Panel | None:
             create = button("Create", "profile", "create", variant="primary")
 
     # -- the active directions --------------------------------------------- #
-    active_now = [key for key in keys
-                  if _axis_setting(stored, key)["mode"] in (director.VARY, director.FIXED)]
+    active_now = list(stored.get("directions") or ())
     panel.summary = gr.Markdown(DIRECTIONS_HEADING if active_now else NO_DIRECTIONS,
                                 elem_id=ident("summary"),
                                 elem_classes=classes("summary"))
 
-    editor_buttons: list = []
+    axis_rows: list = []
 
     for key in keys:
         axis = lib.axis(key)
         setting = _axis_setting(stored, key)
-        active = setting["mode"] in (director.VARY, director.FIXED)
+        active = key in active_now
 
-        with gr.Row(visible=active, elem_id=ident("row", key),
-                    elem_classes=classes("direction")) as row:
+        # One row, one question. The picker is a stock multiselect Dropdown --
+        # a compact closed field that opens a scrollable, filterable popup and
+        # closes on an outside click -- which is section 5.4 exactly, and is
+        # the host's own component rather than an imitation of it. A theme
+        # restyles it along with every other dropdown on the page.
+        with gr.Group(visible=active, elem_id=ident("row", key),
+                      elem_classes=classes("direction")) as row:
             panel.rows[key] = row
+            with gr.Row(elem_classes=classes("direction-bar")):
+                panel.treatments[key] = gr.Dropdown(
+                    label=axis.label, multiselect=True, filterable=True,
+                    value=selection(axis, setting), scale=5,
+                    choices=[(variant.label, variant.identifier)
+                             for variant in axis.variants],
+                    elem_id=ident("treatments", key),
+                    elem_classes=classes("treatments"),
+                    info="one treatment repeats it; two or more let the "
+                         "Creative seed choose between them")
+                panel.removes[key] = button("Remove", "row", key, "remove")
             panel.labels[key] = gr.Markdown(
                 summarise(axis, setting), elem_id=ident("row", key, "summary"),
                 elem_classes=classes("direction-summary"))
-            edit = button("Edit", "row", key, "edit")
 
+        # The machine-facing triple, built and never shown. `visible=False` in
+        # Gradio removes an element from the layout but keeps its value in the
+        # payload, which is exactly what is wanted: these are what travel to
+        # the generation, and `axis_controls` -- mode, fixed, excluded, three
+        # per axis, in the library's own order -- is the contract the hook,
+        # the profiles and `axes_from` all still read unchanged.
         with gr.Group(visible=False, elem_id=ident("editor", key),
                       elem_classes=classes("editor")) as editor:
             panel.editors[key] = editor
-            gr.Markdown(f"### {axis.label}", elem_classes=classes("editor-title"))
             panel.modes[key] = gr.Radio(
                 label="How this axis behaves",
                 choices=[("Natural", director.NATURAL), ("Vary", director.VARY),
                          ("Fixed", director.FIXED)],
-                value=setting["mode"], elem_id=ident("editor", key, "mode"),
-                info="Natural leaves it out of the brief entirely")
+                value=setting["mode"], elem_id=ident("editor", key, "mode"))
             panel.fixed[key] = gr.Dropdown(
                 label="Always use", value=setting["fixed"],
                 choices=[(variant.label, variant.identifier) for variant in axis.variants],
-                visible=False, elem_id=ident("editor", key, "fixed"),
-                info="repeated every roll, unless your own words say otherwise")
+                elem_id=ident("editor", key, "fixed"))
             panel.excluded[key] = gr.Dropdown(
                 label="Exclude choices", value=setting["excluded"], multiselect=True,
                 choices=[(variant.label, variant.identifier) for variant in axis.variants],
-                visible=False, elem_id=ident("editor", key, "excluded"),
-                info="the director may choose anything except these")
-            with gr.Row(elem_classes=classes("editor-actions")):
-                done = button("Done", "editor", key, "done", variant="primary")
-                natural = button("Return to Natural", "editor", key, "natural")
+                elem_id=ident("editor", key, "excluded"))
 
         # Wired at the end, not here: every handler answers with an update for
         # every component the panel owns, and half of them do not exist yet.
-        editor_buttons.append((key, edit, done, natural))
+        axis_rows.append((key, panel.treatments[key], panel.removes[key]))
 
     panel.cost = gr.Markdown(describe_cost(stored), elem_id=ident("cost"),
                              elem_classes=classes("cost"))
 
-    natural_now = [key for key in keys
-                   if _axis_setting(stored, key)["mode"] not in (director.VARY,
-                                                                 director.FIXED)]
+    natural_now = [key for key in keys if key not in set(active_now)]
     panel.add = gr.Dropdown(
         label=ADD_LABEL, value=None, elem_id=ident("add"),
         choices=[(lib.axis(key).label, key) for key in natural_now],
@@ -625,8 +784,8 @@ def build(ident, notice, status, creativity, *, stored=None) -> Panel | None:
             info="pushes the last few rolls' choices away at high Creativity")
         forget = button("Clear recent memory", "forget")
 
-    for key, edit, done, natural in editor_buttons:
-        _wire_axis(panel, key, edit, done, natural)
+    for key, picker, remove in axis_rows:
+        _wire_axis(panel, key, picker, remove)
     _wire_profiles(panel, save, save_as, create, drop, make_default, reset)
     _wire_settings(panel, forget)
 
@@ -640,72 +799,49 @@ def build(ident, notice, status, creativity, *, stored=None) -> Panel | None:
 # --------------------------------------------------------------------------- #
 
 
-def _wire_axis(panel, key, edit, done, natural) -> None:
-    """The five ways one axis changes, all ending in one full render.
+def _wire_axis(panel, key, picker, remove) -> None:
+    """The two ways one axis changes, both ending in one full render.
 
-    ``queue=False`` throughout: none of these does work worth queueing, and none
-    of them starts, stops or waits for a generation. They read a settings file,
-    write a settings file and redraw a drawer.
+    Two, and it used to be five. Choosing treatments and taking the row away
+    are the only actions a direction has now -- the mode radio, the pinned
+    value and the exclusion list were three controls asking three versions of
+    the same question, and the picker asks it once.
+
+    ``queue=False`` throughout: neither does work worth queueing, and neither
+    starts, stops or waits for a generation. They read a settings file, write a
+    settings file and redraw a drawer.
     """
-    from prompt_master.krea import director
-
     label = panel.axes[key].label
+    axis = panel.axes[key]
 
-    def open_editor():
-        return panel.render(editing=key)
-
-    def change_mode(mode):
-        mode = str(mode or director.NATURAL).casefold()
-        if mode not in director.MODES:
-            mode = director.NATURAL
-        stored = set_axis(key, mode=mode)
-        if mode == director.NATURAL:
-            told = f"{label} is Natural again — it is left out of the brief entirely."
-        elif mode == director.FIXED:
-            told = f"{label} is Fixed. Choose the treatment to repeat."
+    def choose(values):
+        stored = apply_treatments(key, axis, values)
+        chosen = selection(axis, _axis_setting(stored, key))
+        if not chosen:
+            told = (f"{label} has no treatments chosen, so it is left out of the "
+                    "brief entirely — exactly as it would be with no row at all.")
+        elif len(chosen) == 1:
+            variant = axis.variant(chosen[0])
+            named = variant.label if variant is not None else chosen[0]
+            told = f"{label} is always {named}."
         else:
-            told = f"{label} varies. Exclude any treatments you never want."
-        return panel.render(stored, editing=key, told=told)
+            told = (f"{label} may be any of {len(chosen)} treatments; the Creative "
+                    "seed picks one each roll.")
+        return panel.render(stored, told=told)
 
-    def change_fixed(value):
-        stored = set_axis(key, fixed=value or None)
-        chosen = panel.axes[key].variant(str(value)) if value else None
-        told = (f"{label} is fixed to {chosen.label}." if chosen is not None
-                else f"{label} has no treatment chosen yet.")
-        return panel.render(stored, editing=key, told=told)
-
-    def change_excluded(values):
-        chosen = list(values or ())
-        stored = set_axis(key, excluded=chosen)
-        counted = len(chosen)
-        told = (f"{label} may choose anything: nothing is excluded." if not counted
-                else f"{label} will never choose {counted} "
-                     f"{'treatment' if counted == 1 else 'treatments'}.")
-        return panel.render(stored, editing=key, told=told)
-
-    def close_editor():
-        return panel.render()
-
-    def to_natural():
-        stored = set_axis(key, mode=director.NATURAL)
+    def drop_row():
+        stored = remove_direction(key)
         return panel.render(stored, told=f"{label} is Natural again and has left the "
                                          "active directions.")
 
     outputs = panel.outputs()
-    edit.click(fn=open_editor, outputs=outputs, queue=False)
-    # ``input`` and not ``change`` throughout, and it is not a detail: every one
-    # of these handlers answers by rewriting the whole panel, including the very
-    # control that fired it. ``change`` fires when the server sets a value, so
-    # this would be a loop -- one that terminates only because the value it
-    # writes back is the value it just read.
-    panel.modes[key].input(fn=change_mode, inputs=[panel.modes[key]], outputs=outputs,
-                           queue=False)
-    panel.fixed[key].input(fn=change_fixed, inputs=[panel.fixed[key]], outputs=outputs,
-                           queue=False)
-    panel.excluded[key].input(fn=change_excluded, inputs=[panel.excluded[key]],
-                              outputs=outputs, queue=False)
-    done.click(fn=close_editor, outputs=outputs, queue=False)
-    natural.click(fn=to_natural, outputs=outputs, queue=False)
+    # ``input`` and not ``change``, and it is not a detail: this handler answers
+    # by rewriting the whole panel, including the very control that fired it.
+    # ``change`` fires when the server sets a value, so this would be a loop --
+    # one that terminates only because the value it writes back is the value it
+    # just read.
+    picker.input(fn=choose, inputs=[picker], outputs=outputs, queue=False)
+    remove.click(fn=drop_row, outputs=outputs, queue=False)
 
 
 def _wire_profiles(panel, save, save_as, create, drop, make_default, reset) -> None:
@@ -784,14 +920,15 @@ def _wire_settings(panel, forget) -> None:
     """The add-a-direction dropdown and the secondary settings."""
     from prompt_master.krea import director
 
-    def add_direction(key):
+    def add(key):
         if not key:
             return panel.render()
-        stored = set_axis(str(key), mode=director.VARY)
+        stored = add_direction(str(key))
         label = panel.axes[str(key)].label if str(key) in panel.axes else str(key)
-        return panel.render(stored, editing=str(key),
-                            told=f"{label} now varies. Exclude anything you never want, "
-                                 "or pin one treatment.")
+        return panel.render(stored,
+                            told=f"{label} has a row. Choose the treatments you are "
+                                 "willing to use — one repeats it, several let the "
+                                 "Creative seed choose.")
 
     def remember_seed(value):
         mc_creative_krea.remember(**{mc_creative_krea.SEED: mc_creative_krea._seed(value)})
@@ -806,7 +943,7 @@ def _wire_settings(panel, forget) -> None:
         return panel.notice("Recent-roll memory cleared; every treatment is available "
                             "again.")
 
-    panel.add.input(fn=add_direction, inputs=[panel.add], outputs=panel.outputs(),
+    panel.add.input(fn=add, inputs=[panel.add], outputs=panel.outputs(),
                     queue=False)
     panel.seed.input(fn=remember_seed, inputs=[panel.seed], outputs=[panel.seed],
                      queue=False)

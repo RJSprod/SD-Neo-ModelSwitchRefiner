@@ -421,6 +421,19 @@ ANTI_REPETITION = "krea_creative_anti_repetition"
 AXIS_MODES = "krea_creative_axis_modes"
 FIXED_VALUES = "krea_creative_fixed"
 EXCLUDED_VALUES = "krea_creative_excluded"
+DIRECTIONS = "krea_creative_directions"
+"""The axes the user has added a direction for, complete or not.
+
+Natural is the absence of a decision, which the three keys above express
+perfectly and cannot express *twice*: an axis nobody has directed and an axis
+somebody added a moment ago and has not yet chosen treatments for are both
+``natural`` underneath, and must stay that way -- the Director has to ignore
+both, and the second one is not a half-configured direction it should guess at.
+
+They differ only on screen, where the second one is a row waiting to be filled
+in. That is a fact about the panel, so the panel keeps it here rather than
+encoding it as a mode the generation would then have to know about.
+"""
 HISTORY = "krea_creative_history"
 PROFILE = "krea_creative_profile"
 """Which named profile the settings above were last loaded from, or "".
@@ -432,7 +445,7 @@ whatever was adjusted in the last one.
 """
 
 CONFIGURATION = (CREATIVITY, SEED, ANTI_REPETITION, AXIS_MODES, FIXED_VALUES,
-                 EXCLUDED_VALUES)
+                 EXCLUDED_VALUES, DIRECTIONS)
 """The keys a Creative profile describes, and the ones it deliberately does not.
 
 :data:`ENABLED` is absent and stays absent. A profile says *how* Creative Mode
@@ -494,7 +507,25 @@ def settings() -> dict:
         "axis_modes": {key: modes.get(key, director.NATURAL) for key in axis_keys},
         "fixed_values": known_fixed(fixed),
         "excluded_values": known_excluded(excluded),
+        "directions": known_directions(stored.get(DIRECTIONS), modes, axis_keys),
     }
+
+
+def known_directions(chosen, modes, axis_keys) -> list[str]:
+    """The axes with a row on the panel, in the library's own order.
+
+    Every axis that is actually directing has a row whether or not this key
+    mentions it. That is what makes the key additive rather than a second
+    source of truth: a settings file or a profile written before the treatment
+    picker existed has modes and no list, and its directions still appear.
+    """
+    from prompt_master.krea import director
+
+    keys = list(axis_keys)
+    named = {str(key) for key in (chosen or ()) if str(key) in keys}
+    directing = {key for key in keys
+                 if modes.get(key) in (director.VARY, director.FIXED)}
+    return [key for key in keys if key in named or key in directing]
 
 
 def known_fixed(fixed) -> dict:
