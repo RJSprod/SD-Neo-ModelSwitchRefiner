@@ -10,6 +10,10 @@
 //   3. Hide the native Negative Prompt row while CFG is 1, and give its space
 //      back.
 //
+// ...and one line in the log saying whether 1 and 2 worked, because every fact
+// about that lives in the browser and the alternative is asking somebody to
+// open the developer tools.
+//
 // Nothing here styles, sizes or moves anything the host owns. The one exception
 // is job 3, which puts a class on Forge's own Negative Prompt and takes it off
 // again -- and an earlier version of this file also set `flex-grow: 0` on
@@ -181,6 +185,10 @@
                 once(field, "focus", function () { remember(field); }, "Family");
             }
             joinAutocomplete(field);
+            // The same event, for the report: the first time somebody puts the
+            // caret in one of these boxes, everything that was going to load
+            // has loaded.
+            once(field, "focus", sendReport, "Report");
         });
     }
 
@@ -259,6 +267,108 @@
         };
         extended.mcLiteral = true;
         window.getTextAreas = extended;
+    }
+
+    // ------------------------------------------------------------------ //
+    // 2c. Saying so, once, in the log everything else is in
+    // ------------------------------------------------------------------ //
+    //
+    // Everything above depends on two other extensions' cooperation, and every
+    // fact about whether it worked lives in the browser. "Tag completion does
+    // not work in these boxes" was answered, twice, by asking somebody to open
+    // the developer tools and paste a snippet -- which is a fine thing to ask
+    // of the person who wrote the snippet and a poor thing to ask of anybody
+    // else.
+    //
+    // So the page says it. On the first focus of a literal box -- which is
+    // exactly when tag completion is the thing somebody is expecting to happen
+    // -- a small fixed-shape report goes to the extension's own route and
+    // becomes one line in the WebUI's log, beside every other message this
+    // extension writes. Once per page load.
+    //
+    // Booleans and one word, and no way for text to get in: mc_literal_report
+    // reads a fixed set of keys and coerces every one of them. A diagnostic
+    // that could carry what somebody typed into a prompt box would be a
+    // diagnostic nobody should install.
+
+    const REPORT_ROUTE = "/model-chain/literal-prompts/report";
+    let reported = false;
+
+    function autocompleteConfig() {
+        if (typeof TAC_CFG === "undefined") return "missing";
+        return TAC_CFG ? "loaded" : "null";
+    }
+
+    function thirdPartyBoxes() {
+        try {
+            if (typeof TAC_CFG === "undefined" || !TAC_CFG || !TAC_CFG.activeIn) {
+                return null;
+            }
+            return !!TAC_CFG.activeIn.thirdParty;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function inTheirList() {
+        try {
+            if (typeof getTextAreas !== "function") return false;
+            const list = getTextAreas();
+            if (!Array.isArray(list)) return false;
+            return [IDS.positive, IDS.negative].every(function (id) {
+                const field = fieldIn(id);
+                return !!field && list.indexOf(field) >= 0;
+            });
+        } catch (error) {
+            return false;
+        }
+    }
+
+    function report() {
+        if (reported) return null;
+        const positive = fieldIn(IDS.positive);
+        const negative = fieldIn(IDS.negative);
+        const row = byId(IDS.row);
+        return {
+            boxesFound: !!positive && !!negative,
+            claimed: claimed(),
+            autocompleteInstalled: autocompleteInstalled(),
+            listWrapped: typeof getTextAreas === "function" && !!getTextAreas.mcLiteral,
+            inTheirList: inTheirList(),
+            config: autocompleteConfig(),
+            thirdPartyBoxes: thirdPartyBoxes(),
+            promptFamily: !!family(),
+            placed: !!row && !!byId(IDS.negativePrompt)
+                    && row.previousElementSibling === byId(IDS.negativePrompt),
+        };
+    }
+
+    function claimed() {
+        return [IDS.positive, IDS.negative].every(function (id) {
+            const field = fieldIn(id);
+            return !!field && !!field.classList
+                && field.classList.contains("autocomplete");
+        });
+    }
+
+    // Posted and forgotten. No await, no retry, no reading of the answer: if
+    // the route is not there, or the fetch fails, or this is a build without
+    // `fetch` at all, the boxes carry on being boxes.
+    function sendReport() {
+        if (reported) return;
+        const found = report();
+        if (!found) return;
+        reported = true;
+        if (typeof fetch !== "function") return;
+        try {
+            fetch(REPORT_ROUTE, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(found),
+            }).catch(function () { /* a log line, not a feature */ });
+        } catch (error) {
+            /* a log line, not a feature */
+        }
     }
 
     // ------------------------------------------------------------------ //
@@ -349,6 +459,9 @@
         cfg: cfg,
         family: family,
         joinAutocomplete: joinAutocomplete,
+        report: report,
+        sendReport: sendReport,
+        claimed: claimed,
         extendAutocompleteList: extendAutocompleteList,
         ids: IDS,
         collapsedClass: COLLAPSED,

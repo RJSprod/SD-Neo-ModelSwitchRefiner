@@ -216,6 +216,11 @@ globalThis.getComputedStyle = (element) => ({
     flexDirection: (element.style || {}).flexDirection || "row",
     flexGrow: String((element.style || {}).flexGrow || "0"),
 });
+globalThis.posted = [];
+globalThis.fetch = (url, options) => {
+    posted.push({url: url, body: JSON.parse((options || {}).body || "null")});
+    return {catch() {}};
+};
 globalThis.requestAnimationFrame = (fn) => fn();
 globalThis.setTimeout = () => 0;
 globalThis.clearTimeout = () => {};
@@ -449,15 +454,23 @@ class TestThePromptFamily:
         assert found["onWindow"] == "undefined"
         assert found["target"] is True
 
-    def test_registering_twice_adds_one_listener(self):
+    def test_registering_again_never_binds_a_second_time(self):
+        """`onAfterUiUpdate` fires often, so this runs many times per session.
+
+        Two focus listeners per box, both added once: one remembers the box as
+        the insertion target, one sends the diagnostic line the first time
+        somebody puts the caret in it. What this guards is that neither number
+        grows.
+        """
         found = run("""
+            mc.registerPrompts();
             mc.registerPrompts();
             mc.registerPrompts();
             const field = fieldIn("mc-krea-creative-literal-positive");
             report({listeners: (field._listeners.focus || []).length});
         """)
 
-        assert found["listeners"] == 1
+        assert found["listeners"] == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -940,3 +953,95 @@ class TestItLeavesTheHostsLayoutAlone:
         """)
 
         assert found["unchanged"] is True
+
+
+# --------------------------------------------------------------------------- #
+# The line in the log
+# --------------------------------------------------------------------------- #
+
+
+class TestTheReport:
+    """Everything above depends on two other extensions, and every fact about
+    whether it worked lives in the browser.
+
+    Twice now the answer to "tag completion does not work in these boxes" has
+    been a console snippet somebody has to open the developer tools to paste.
+    So the page says it instead, once, on the first focus of a literal box --
+    which is exactly when tag completion is the thing being expected -- into the
+    log every other message from this extension goes to.
+    """
+
+    def test_focusing_a_box_reports_once(self):
+        found = run("""
+            focus("mc-krea-creative-literal-positive");
+            focus("mc-krea-creative-literal-negative");
+            focus("mc-krea-creative-literal-positive");
+            report({posts: posted.length, url: (posted[0] || {}).url});
+        """)
+
+        assert found["posts"] == 1
+        assert found["url"] == "/model-chain/literal-prompts/report"
+
+    def test_it_says_what_was_found(self):
+        found = run("""
+            globalThis.TAC_CFG = {activeIn: {thirdParty: true}};
+            globalThis.addAutocompleteToArea = (area) => {
+                area.classList.add("autocomplete");
+            };
+            globalThis.getTextAreas = () => [];
+            mc.wire();
+            focus("mc-krea-creative-literal-positive");
+            report({sent: posted[0].body});
+        """)
+
+        assert found["sent"] == {
+            "boxesFound": True, "claimed": True, "autocompleteInstalled": True,
+            "listWrapped": True, "inTheirList": True, "config": "loaded",
+            "thirdPartyBoxes": True, "promptFamily": True, "placed": True}
+
+    def test_it_says_when_tag_autocomplete_is_not_there(self):
+        found = run("""
+            focus("mc-krea-creative-literal-positive");
+            report({sent: posted[0].body});
+        """, family=False)
+
+        assert found["sent"]["autocompleteInstalled"] is False
+        assert found["sent"]["claimed"] is False
+        assert found["sent"]["config"] == "missing"
+        assert found["sent"]["promptFamily"] is False
+
+    def test_it_carries_no_text_from_any_prompt_box(self):
+        """The whole payload is booleans and one word out of three. A
+        diagnostic that could carry what somebody typed would be a diagnostic
+        nobody should install -- and this one posts to the extension's own
+        route, so "could" is the only word that matters."""
+        found = run("""
+            fieldIn("mc-krea-creative-literal-positive").value = "a secret";
+            fieldIn("txt2img_prompt").value = "another secret";
+            focus("mc-krea-creative-literal-positive");
+            report({sent: JSON.stringify(posted[0].body)});
+        """)
+
+        assert "secret" not in found["sent"]
+        for value in json.loads(found["sent"]).values():
+            assert isinstance(value, bool) or value in ("missing", "null", "loaded") \
+                or value is None
+
+    def test_a_build_without_fetch_is_not_a_crash(self):
+        found = run("""
+            globalThis.fetch = undefined;
+            focus("mc-krea-creative-literal-positive");
+            report({ok: true});
+        """)
+
+        assert found["ok"] is True
+
+    def test_a_route_that_is_not_there_is_not_a_crash(self):
+        """It is a log line, not a feature."""
+        found = run("""
+            globalThis.fetch = () => { throw new Error("404"); };
+            focus("mc-krea-creative-literal-positive");
+            report({ok: true});
+        """)
+
+        assert found["ok"] is True

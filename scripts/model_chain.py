@@ -22,6 +22,7 @@ import gradio as gr
 import mc_arch
 import mc_broker
 import mc_infotext
+import mc_literal_report
 import mc_llm_paths
 import mc_llm_runtime
 import mc_llm_state
@@ -3403,5 +3404,9 @@ try:
 
     script_callbacks.on_script_unloaded(_on_script_unloaded)
     script_callbacks.on_ui_tabs(mc_llm_studio.on_ui_tabs)
+    # One route, one log line: what the Literal Prompt boxes found on the page.
+    # See mc_literal_report -- it is how "tag completion does not work in these
+    # boxes" gets answered without asking somebody to open the developer tools.
+    script_callbacks.on_app_started(mc_literal_report.install)
 except Exception:
     errors.report("Model Chain: failed to register the extension callbacks", exc_info=True)

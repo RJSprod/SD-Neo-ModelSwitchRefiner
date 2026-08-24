@@ -385,6 +385,36 @@ that was inert. Both levels are addressed now, the wrapper by `*` rather than by
 Gradio's name for it.
 
 
+### 10.5 How the next one of these gets answered
+
+Twice the answer to "tag completion does not work in these boxes" was a console
+snippet somebody had to open the developer tools to paste. That is a fine thing
+to ask of whoever wrote the snippet and a poor thing to ask of anybody else, and
+it is the reason `mc_literal_report` exists.
+
+The browser file builds a nine-field report the first time somebody puts the
+caret in a literal box — which is exactly when tag completion is the thing being
+expected — and posts it once to `/model-chain/literal-prompts/report`, where it
+becomes one line in the WebUI's log beside everything else this extension
+writes. A page where both boxes were claimed says so at debug level and is
+silent by default; a page where they were not is a warning that names the cause:
+
+```
+WARNING Model Chain: Tag Autocomplete is installed but has not claimed the
+Literal Prompt boxes -- its "Active in third party textboxes" setting is off
+(changing it needs a full restart, not a UI reload) [config loaded, third-party
+boxes no, list extended True, boxes in the list True, row placed True]
+```
+
+Booleans and one word out of three, and no way for text to get in: `describe()`
+reads a fixed set of keys, coerces every one of them, and ignores the rest of the
+payload. The first version interpolated the payload's own `thirdPartyBoxes` value
+into that line, which is how a string from the page reached the log —
+`test_no_value_from_the_payload_reaches_the_line` caught it, and now every word
+in the line is this module's own. A diagnostic that could carry what somebody
+typed into a prompt box would be a diagnostic nobody should install.
+
+
 ## 11. Where the design intent was followed differently
 
 **§10, reconstructing the fields on paste.** It does not happen automatically;
