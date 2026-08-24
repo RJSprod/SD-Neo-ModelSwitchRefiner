@@ -82,11 +82,18 @@ class _Tree(HTMLParser):
 
 
 def _markup() -> str:
+    """Both canvases, because both are one file's responsibility.
+
+    The compact canvas in the pipeline and the full workspace behind Edit
+    Layout… are two views of one document written by one browser file, so the
+    fake page carries both -- a test that moved a box on one and asserted about
+    the other would otherwise be asserting about a page that does not exist.
+    """
     sys.path.insert(0, str(ROOT))
     sys.path.insert(0, str(ROOT / "scripts"))
     import model_chain_krea_creative as creative_script
 
-    return creative_script.spatial_editor()
+    return creative_script.spatial_editor() + creative_script.spatial_compact()
 
 
 def editor_tree() -> list:
@@ -99,6 +106,11 @@ def editor_tree() -> list:
 def editor_elements() -> list[tuple[str, str]]:
     """``(tag, id)`` for everything the Python-built editor markup carries."""
     return re.findall(r"<(\w+)[^>]*\bid=\"([^\"]+)\"", _markup())
+
+
+def editor_elements_ids() -> list[str]:
+    """Just the ids, for a test that only asks whether a control still exists."""
+    return [found for _tag, found in editor_elements()]
 
 
 HARNESS = """
@@ -282,6 +294,8 @@ function buildWorkspace(into) {
     // 1000 units of layout across, so a normalized coordinate and a client
     // coordinate are the same number and a test can say what it means.
     if (frame) frame._rect = {left: 0, top: 0, width: 1000, height: 1000};
+    const small = (into || page).querySelector("#mc-krea-spatial-compact-frame");
+    if (small) small._rect = {left: 0, top: 0, width: 1000, height: 1000};
     return frame;
 }
 
@@ -301,6 +315,15 @@ const stateHolder = make("div", "mc-krea-spatial-state");
 stateHolder.appendChild(stateBox);
 
 const openButton = make("button", "mc-krea-spatial-open");
+
+// The compact canvas's own Gradio controls: a checkbox in a holder, the way
+// Gradio renders one, and two buttons.
+const autoSaveBox = new El("input");
+autoSaveBox.type = "checkbox";
+autoSaveBox.checked = true;
+make("div", "mc-krea-spatial-autosave").appendChild(autoSaveBox);
+const compactUndoButton = make("button", "mc-krea-spatial-compact-undo");
+const compactCommitButton = make("button", "mc-krea-spatial-compact-commit");
 
 const width = new El("input");
 width.value = "1024";
@@ -391,6 +414,28 @@ function draw(from, to) {
 
 function proxy() { return el("mc-krea-spatial-proxy"); }
 
+function small() { return el("mc-krea-spatial-compact-frame"); }
+
+function compactRegion(id) {
+    return body.querySelectorAll(".mc-krea-spatial-compact-region")
+        .filter((entry) => entry.dataset.regionId === id)[0] || null;
+}
+
+// A drag on the compact canvas, delivered the way a bubbling pointerdown on one
+// of its regions actually looks: the file listens on the frame and works out
+// what was under the contact from event.target.closest.
+function compactDrag(from, to, target, kind) {
+    const frame = small();
+    frame.dispatchEvent({type: "pointerdown", target: target || frame, pointerId: 1,
+                         isPrimary: true, button: 0,
+                         clientX: from[0], clientY: from[1], preventDefault() {}});
+    frame.dispatchEvent({type: "pointermove", target: target || frame, pointerId: 1,
+                         clientX: to[0], clientY: to[1], preventDefault() {}});
+    frame.dispatchEvent({type: kind || "pointerup", target: target || frame,
+                         pointerId: 1, clientX: to[0], clientY: to[1],
+                         preventDefault() {}});
+}
+
 // A workspace whose requestFullscreen answers the way `answer` says: "yes"
 // resolves and promotes it, "no" rejects so the fallback has to take over.
 function fullscreenAnswers(answer) {
@@ -466,6 +511,14 @@ const report = (extra) => console.log(JSON.stringify(Object.assign({
     confirming: ks.state.confirming,
     published: published.length,
     stateBox: stateBox.value,
+    compactRegions: ks.compactRegions().map(function (region) {
+        return {id: region.id, bbox: region.bbox, name: region.name};
+    }),
+    compactPast: ks.compact.past.length,
+    compactDirty: ks.compact.dirty,
+    compactNote: (el("mc-krea-spatial-compact-note") || {}).textContent || "",
+    compactDrawn: body.querySelectorAll(".mc-krea-spatial-compact-region")
+        .map((entry) => entry.dataset.regionId),
 }, extra || {})));
 
 BODY
@@ -1761,3 +1814,279 @@ class TestTheMarkupAndTheFileAgree:
         }
 
         assert {"mc-krea-spatial-" + name for name in expected} <= emitted
+
+
+# --------------------------------------------------------------------------- #
+# The compact canvas
+# --------------------------------------------------------------------------- #
+
+
+BACKDROP = {"id": "r2", "name": "Backdrop", "type": "obj", "bbox": [0, 0, 1000, 1000],
+            "prompt": "paper sweep", "framing": "", "angle": "", "z": -1}
+SIGN = {"id": "r3", "name": "Sign", "type": "text", "bbox": [200, 200, 600, 400],
+        "prompt": "a shop sign", "text": "OPEN", "framing": "", "angle": "", "z": 5}
+
+
+class TestTheCompactCanvas:
+    """Position correction in the pipeline, and nothing else.
+
+    Section 6.2 gives this canvas one verb. The tests that matter are therefore
+    of two kinds: that the verb works by mouse, pen and finger over whichever
+    box is actually on top, and that none of the other verbs is reachable from
+    here. The second kind is the one that keeps a shortcut from turning into a
+    second editor.
+    """
+
+    def test_it_draws_the_regions_the_document_holds(self):
+        found = run("report({});", initial=document(regions=(FACE, SIGN)))
+
+        assert found["compactDrawn"] == ["r1", "r3"]
+
+    def test_it_draws_them_in_paint_order_so_the_top_one_is_last(self):
+        """Hit testing follows paint order, so the order these are appended in
+        *is* the answer to "which box does a pointer land on"."""
+        found = run("report({});", initial=document(regions=(SIGN, BACKDROP, FACE)))
+
+        assert found["compactDrawn"] == ["r2", "r1", "r3"]
+
+    def test_dragging_a_region_moves_it(self):
+        found = run("""
+            compactDrag([100, 100], [200, 250], compactRegion("r1"));
+            report({});
+        """, initial=document())
+
+        assert found["compactRegions"][0]["bbox"] == [135, 205, 415, 510]
+
+    def test_a_drag_moves_and_never_resizes(self):
+        """The size is the one thing a position correction must not change."""
+        found = run("""
+            compactDrag([100, 100], [400, 90], compactRegion("r1"));
+            report({});
+        """, initial=document())
+
+        x0, y0, x1, y1 = found["compactRegions"][0]["bbox"]
+        assert (x1 - x0, y1 - y0) == (315 - 35, 360 - 55)
+
+    def test_the_topmost_region_under_the_pointer_is_the_one_that_moves(self):
+        """Two boxes overlap; the one in front wins, however far back the other
+        one's coordinates would also contain the contact point."""
+        found = run("""
+            compactDrag([300, 300], [350, 300], compactRegion("r3"));
+            report({});
+        """, initial=document(regions=(BACKDROP, SIGN)))
+
+        moved = {entry["id"]: entry["bbox"] for entry in found["compactRegions"]}
+        assert moved["r3"] == [250, 200, 650, 400]
+        assert moved["r2"] == [0, 0, 1000, 1000]
+
+    def test_a_drag_that_starts_on_the_frame_moves_nothing(self):
+        """Empty canvas is not a region, and a stray press must not pick the
+        nearest box and drag it."""
+        found = run("""
+            compactDrag([900, 900], [500, 500]);
+            report({});
+        """, initial=document())
+
+        assert found["compactRegions"][0]["bbox"] == [35, 55, 315, 360]
+
+    def test_a_region_cannot_be_dragged_off_the_frame(self):
+        found = run("""
+            compactDrag([100, 100], [-4000, -4000], compactRegion("r1"));
+            report({});
+        """, initial=document())
+
+        x0, y0, x1, y1 = found["compactRegions"][0]["bbox"]
+        assert (x0, y0) == (0, 0)
+        assert (x1 - x0, y1 - y0) == (315 - 35, 360 - 55)
+
+    def test_a_finger_drives_it_by_the_same_path_as_a_mouse(self):
+        """One pointer path, so a tablet is not a second implementation with
+        its own bugs. The harness runs this one with PointerEvent absent, which
+        is the only case that reaches the fallback at all."""
+        found = run("""
+            compactDrag([100, 100], [200, 250], compactRegion("r1"));
+            report({});
+        """, initial=document(), pointers=False)
+
+        assert found["compactRegions"][0]["bbox"] == [135, 205, 415, 510]
+
+    # -- Auto Save ---------------------------------------------------------- #
+
+    def test_auto_save_commits_when_the_pointer_is_released(self):
+        found = run("""
+            compactDrag([100, 100], [200, 250], compactRegion("r1"));
+            report({});
+        """, initial=document())
+
+        assert found["published"] == 1
+        assert json.loads(found["stateBox"])["regions"][0]["bbox"] == [135, 205, 415, 510]
+        assert found["compactDirty"] is False
+
+    def test_auto_save_off_changes_the_screen_and_says_it_is_unsaved(self):
+        found = run("""
+            autoSaveBox.checked = false;
+            compactDrag([100, 100], [200, 250], compactRegion("r1"));
+            report({});
+        """, initial=document())
+
+        assert found["published"] == 0
+        assert found["compactDirty"] is True
+        assert "Unsaved working layout" in found["compactNote"]
+        # The box has moved on screen regardless: an unsaved layout is a real
+        # layout somebody is looking at, not a preview of one.
+        assert found["compactRegions"][0]["bbox"] == [135, 205, 415, 510]
+
+    def test_save_working_layout_commits_what_is_on_screen(self):
+        found = run("""
+            autoSaveBox.checked = false;
+            compactDrag([100, 100], [200, 250], compactRegion("r1"));
+            press("mc-krea-spatial-compact-commit");
+            report({});
+        """, initial=document())
+
+        assert found["published"] == 1
+        assert found["compactDirty"] is False
+        assert "Unsaved" not in found["compactNote"]
+
+    def test_a_drag_that_moves_nothing_commits_nothing(self):
+        found = run("""
+            compactDrag([100, 100], [100, 100], compactRegion("r1"));
+            report({});
+        """, initial=document())
+
+        assert found["published"] == 0
+        assert found["compactPast"] == 0
+
+    def test_a_cancelled_drag_puts_the_region_back(self):
+        found = run("""
+            compactDrag([100, 100], [400, 400], compactRegion("r1"), "pointercancel");
+            report({});
+        """, initial=document())
+
+        assert found["compactRegions"][0]["bbox"] == [35, 55, 315, 360]
+        assert found["published"] == 0
+
+    # -- Undo --------------------------------------------------------------- #
+
+    def test_undo_reverses_the_last_move(self):
+        found = run("""
+            compactDrag([100, 100], [200, 250], compactRegion("r1"));
+            press("mc-krea-spatial-compact-undo");
+            report({});
+        """, initial=document())
+
+        assert found["compactRegions"][0]["bbox"] == [35, 55, 315, 360]
+
+    def test_undo_commits_too_while_auto_save_is_on(self):
+        """§6.4. Otherwise Undo would leave the screen and the generation
+        disagreeing, which is the one thing Auto Save exists to prevent."""
+        found = run("""
+            compactDrag([100, 100], [200, 250], compactRegion("r1"));
+            press("mc-krea-spatial-compact-undo");
+            report({});
+        """, initial=document())
+
+        assert json.loads(found["stateBox"])["regions"][0]["bbox"] == [35, 55, 315, 360]
+        assert found["compactDirty"] is False
+
+    def test_undo_with_auto_save_off_leaves_it_unsaved(self):
+        found = run("""
+            autoSaveBox.checked = false;
+            compactDrag([100, 100], [200, 250], compactRegion("r1"));
+            press("mc-krea-spatial-compact-undo");
+            report({});
+        """, initial=document())
+
+        assert found["published"] == 0
+        assert found["compactDirty"] is True
+
+    def test_one_history_entry_per_completed_drag(self):
+        found = run("""
+            compactDrag([100, 100], [200, 200], compactRegion("r1"));
+            compactDrag([200, 200], [300, 300], compactRegion("r1"));
+            report({});
+        """, initial=document())
+
+        assert found["compactPast"] == 2
+
+    def test_undo_with_nothing_to_undo_does_nothing(self):
+        found = run("""
+            press("mc-krea-spatial-compact-undo");
+            report({});
+        """, initial=document())
+
+        assert found["compactRegions"][0]["bbox"] == [35, 55, 315, 360]
+        assert found["published"] == 0
+
+    def test_the_history_is_bounded(self):
+        found = run("""
+            for (let at = 0; at < 60; at += 1) {
+                compactDrag([100 + at, 100], [101 + at, 100], compactRegion("r1"));
+            }
+            report({});
+        """, initial=document())
+
+        assert found["compactPast"] == 25
+
+    # -- what it deliberately cannot do ------------------------------------- #
+
+    def test_it_offers_no_way_to_create_or_delete_a_region(self):
+        """Section 6.2 lists what the compact level must not have. Asserted
+        against the markup, because a control that is not in the page cannot be
+        reached by any interaction a test forgot to try."""
+        import model_chain_krea_creative as creative_script
+
+        markup = creative_script.spatial_compact()
+        for forbidden in ("add", "draw", "clear", "delete", "duplicate",
+                          "handle", "framing", "angle", "front", "lower"):
+            assert f'id="mc-krea-spatial-compact-{forbidden}"' not in markup
+
+    def test_the_full_editor_still_owns_every_other_operation(self):
+        """The compact canvas is a shortcut into the same layout state, not a
+        second layout system: the operations it lacks are all still there."""
+        found = dict(editor_elements())
+        ids = set(editor_elements_ids())
+
+        for kept in ("mc-krea-spatial-add", "mc-krea-spatial-draw",
+                     "mc-krea-spatial-delete", "mc-krea-spatial-duplicate",
+                     "mc-krea-spatial-raise", "mc-krea-spatial-lower",
+                     "mc-krea-spatial-framing", "mc-krea-spatial-angle",
+                     "mc-krea-spatial-type", "mc-krea-spatial-save"):
+            assert kept in ids
+        assert found
+
+    # -- staying in step with the other canvas ------------------------------ #
+
+    def test_saving_the_full_editor_refreshes_the_compact_canvas(self):
+        """Two views of one document. The editor writing one must not leave the
+        other showing the layout as it was before."""
+        found = run("""
+            ks.open();
+            draw([500, 500], [800, 800]);
+            ks.save();
+            report({});
+        """, initial=document())
+
+        assert len(found["compactRegions"]) == 2
+
+    def test_a_reload_never_lands_on_an_unsaved_move(self):
+        """`onAfterUiUpdate` fires for reasons that have nothing to do with this
+        canvas. Re-reading the document under somebody's unsaved work would
+        throw it away without saying so."""
+        found = run("""
+            autoSaveBox.checked = false;
+            compactDrag([100, 100], [200, 250], compactRegion("r1"));
+            ks.wireCompact();
+            report({});
+        """, initial=document())
+
+        assert found["compactRegions"][0]["bbox"] == [135, 205, 415, 510]
+        assert found["compactDirty"] is True
+
+    def test_an_unreadable_document_leaves_the_canvas_alone(self):
+        """Refused, not repaired -- the same rule the editor follows. Python
+        says why in words on the panel."""
+        found = run("report({});", initial='{"version": 99}')
+
+        assert found["compactRegions"] == []
+        assert found["published"] == 0

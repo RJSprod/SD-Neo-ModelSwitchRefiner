@@ -304,13 +304,22 @@
         return "r" + state.counter;
     }
 
-    function ordered() {
-        return state.working.regions
+    // Paint order, and therefore hit-test order: the last one drawn is the one
+    // on top and the one a pointer lands on. Taken over a document rather than
+    // over `state.working`, because the compact canvas has a working document
+    // of its own and must order it by the same rule -- two orderings of one
+    // layout is how a box you can see behind another becomes the one that moves.
+    function orderedIn(document_) {
+        return document_.regions
             .map(function (region, index) { return {region: region, index: index}; })
             .sort(function (left, right) {
                 return (left.region.z - right.region.z) || (left.index - right.index);
             })
             .map(function (entry) { return entry.region; });
+    }
+
+    function ordered() {
+        return orderedIn(state.working);
     }
 
     function find(id) {
@@ -320,17 +329,17 @@
         })[0] || null;
     }
 
-    function serialize() {
+    function serializeIn(source) {
         const document_ = {
             version: 1,
             canvas: {
-                width: Number(state.working.canvas.width) || 0,
-                height: Number(state.working.canvas.height) || 0,
-                grid: state.working.canvas.grid || "none",
+                width: Number(source.canvas.width) || 0,
+                height: Number(source.canvas.height) || 0,
+                grid: source.canvas.grid || "none",
             },
-            compose_mode: state.working.compose_mode,
-            auto_position_hint: !!state.working.auto_position_hint,
-            regions: ordered().map(function (region) {
+            compose_mode: source.compose_mode,
+            auto_position_hint: !!source.auto_position_hint,
+            regions: orderedIn(source).map(function (region) {
                 const entry = {
                     id: region.id,
                     name: region.name || region.id,
@@ -346,6 +355,10 @@
             }),
         };
         return JSON.stringify(document_);
+    }
+
+    function serialize() {
+        return serializeIn(state.working);
     }
 
     // ------------------------------------------------------------------ //
@@ -1247,6 +1260,10 @@
         const box = stateBox();
         if (box && state.working) publish(box, serialize());
         close();
+        // The compact canvas is a view of the same document, so it is stale the
+        // moment the editor writes one. Forced, because "somebody just saved a
+        // layout" is exactly the case the ordinary guard refuses.
+        compactLoad(true);
     }
 
     // §14. Unchanged leaves at once; changed asks, in the page, with two
@@ -1267,9 +1284,13 @@
     // `document` has no dataset -- so passing it here would add a fresh listener
     // on every onAfterUiUpdate, which fires often. The one document-level
     // listener is installed once, under its own flag, in wire().
-    function once(element, event, handler) {
+    function once(element, event, handler, tag) {
         if (!element || !element.dataset) return;
-        const flag = "mcKreaSpatial" + event;
+        // `tag` separates two controllers that legitimately listen to the same
+        // event on the same element. The compact canvas and the editor both
+        // follow the txt2img size fields, and without it whichever wired first
+        // would claim the flag and silently take the other's listener away.
+        const flag = "mcKreaSpatial" + (tag || "") + event;
         if (element.dataset[flag]) return;
         element.dataset[flag] = "1";
         element.addEventListener(event, handler);
@@ -1336,6 +1357,17 @@
 
     function wire() {
         try {
+            // Before the editor's own claim, and outside its `state.wired`
+            // guard: the compact canvas lives in the pipeline rather than in
+            // the workspace, so it exists on pages where the workspace has not
+            // been claimed, and it has to be redrawn after every Gradio update
+            // that could have replaced the layout under it.
+            try {
+                wireCompact();
+            } catch (error) {
+                console.error("Model Chain: the compact spatial canvas failed", error);
+            }
+
             if (!claim()) return;
 
             press(IDS.open, open);
@@ -1473,6 +1505,316 @@
         }
     }
 
+    // ------------------------------------------------------------------ //
+    // CompactCanvasController -- position correction, in the pipeline
+    // ------------------------------------------------------------------ //
+    //
+    // Section 6.2. One verb: move a box. No create, no delete, no resize, no
+    // rename, no type change, no stacking, no framing. Every one of those still
+    // exists in the full editor, one button away, and none of them is reachable
+    // from here -- which is what keeps this a shortcut into the same layout
+    // state rather than a second layout system competing for the same document.
+    //
+    // Hit testing is the browser's. Regions are elements appended in paint
+    // order, so `event.target.closest(...)` returns the topmost region under
+    // the pointer by construction: no z-order arithmetic, no proxy, and no way
+    // for the answer to disagree with what somebody can see.
+    //
+    // The full editor's `state` is untouched here. This has a working document
+    // of its own, because the two canvases are open at different times and a
+    // shared one would mean the compact canvas writing into a document the
+    // editor was in the middle of editing.
+
+    const COMPACT_UNDO = 25;   // §6.4 asks for a bounded history; a move is small
+
+    const compact = {
+        working: null,      // the layout on the compact canvas, or null
+        past: [],           // snapshots, newest last
+        dirty: false,       // moved since the last commit, with Auto Save off
+        drag: null,         // {id, from, origin}
+        pointer: null,
+    };
+
+    const COMPACT_IDS = {
+        host: P + "-compact",
+        frame: P + "-compact-frame",
+        regions: P + "-compact-regions",
+        empty: P + "-compact-empty",
+        note: P + "-compact-note",
+        undo: P + "-compact-undo",
+        commit: P + "-compact-commit",
+        autosave: P + "-autosave",
+    };
+
+    function autoSaveOn() {
+        const holder = byId(COMPACT_IDS.autosave);
+        // The attribute selector first because a Gradio Checkbox has a label
+        // and could grow another input beside it; a plain `input` after,
+        // because that is what every other lookup in this file uses and it is
+        // what a stripped-down DOM answers.
+        const box = holder
+            ? (holder.querySelector("input[type=checkbox]")
+               || holder.querySelector("input"))
+            : null;
+        // Default on, which is what the server-side default says too. A missing
+        // control must not silently turn committing off -- that is the setting
+        // whose absence loses work.
+        return box ? !!box.checked : true;
+    }
+
+    function compactLoad(force) {
+        // Never over an unsaved move or a drag in flight. `onAfterUiUpdate`
+        // fires often and for reasons that have nothing to do with this canvas,
+        // and reloading under somebody's finger would undo the move they are
+        // making.
+        if (!force && (compact.drag || compact.dirty)) return;
+        const read = readLayout();
+        if (read === null) return;     // unreadable; Python says so in words
+        compact.working = read;
+        compact.past.length = 0;
+        compact.dirty = false;
+        compactPaint();
+    }
+
+    function compactSnapshot() {
+        return JSON.stringify(compact.working.regions);
+    }
+
+    function compactKeep() {
+        compact.past.push(compactSnapshot());
+        if (compact.past.length > COMPACT_UNDO) compact.past.shift();
+    }
+
+    function compactFind(id) {
+        if (!compact.working) return null;
+        return compact.working.regions.filter(function (region) {
+            return region.id === id;
+        })[0] || null;
+    }
+
+    function compactPaint() {
+        const holder = byId(COMPACT_IDS.regions);
+        const frame = byId(COMPACT_IDS.frame);
+        const empty = byId(COMPACT_IDS.empty);
+        if (!holder || !compact.working) return;
+
+        const size = hostSize();
+        if (frame && size.width > 0 && size.height > 0) {
+            frame.style.aspectRatio = size.width + " / " + size.height;
+            setVar(frame, "--mc-ar-w", String(size.width));
+            setVar(frame, "--mc-ar-h", String(size.height));
+        }
+
+        holder.textContent = "";
+        const regions = orderedIn(compact.working);
+        regions.forEach(function (region) {
+            const element = document.createElement("div");
+            element.className = P + "-compact-region";
+            if (region.type === "text") element.className += " " + P + "-compact-text";
+            element.dataset.regionId = region.id;
+            element.title = region.name || region.id;
+            const [x0, y0, x1, y1] = region.bbox;
+            element.style.left = (x0 / SCALE * 100) + "%";
+            element.style.top = (y0 / SCALE * 100) + "%";
+            element.style.width = ((x1 - x0) / SCALE * 100) + "%";
+            element.style.height = ((y1 - y0) / SCALE * 100) + "%";
+            const label = document.createElement("span");
+            label.className = P + "-compact-label";
+            label.textContent = region.name || region.id;
+            element.appendChild(label);
+            holder.appendChild(element);
+        });
+
+        if (empty) empty.hidden = regions.length > 0;
+        compactNote();
+    }
+
+    function compactNote() {
+        const note = byId(COMPACT_IDS.note);
+        if (!note) return;
+        if (!compact.working || !compact.working.regions.length) {
+            note.textContent = "";
+            note.classList.remove(P + "-unsaved");
+            return;
+        }
+        if (compact.dirty) {
+            // §6.3. Said plainly and in the page, because the state it
+            // describes is one where what is on screen is *not* yet what the
+            // next Generate composes -- the one place in this refactor where
+            // that is true, and therefore the one place it has to be said.
+            note.textContent = "Unsaved working layout — press Save working "
+                + "layout, or switch Auto Save on.";
+            note.classList.add(P + "-unsaved");
+            return;
+        }
+        note.classList.remove(P + "-unsaved");
+        note.textContent = "Drag a box to move it. Edit Layout… for everything else.";
+    }
+
+    function compactCommit() {
+        const box = stateBox();
+        if (!box || !compact.working) return;
+        publish(box, serializeIn(compact.working));
+        compact.dirty = false;
+        compactNote();
+    }
+
+    function compactPoint(event) {
+        const frame = byId(COMPACT_IDS.frame);
+        if (!frame || typeof frame.getBoundingClientRect !== "function") return null;
+        const box = frame.getBoundingClientRect();
+        if (!(box.width > 0 && box.height > 0)) return null;
+        return {
+            x: (event.clientX - box.left) / box.width * SCALE,
+            y: (event.clientY - box.top) / box.height * SCALE,
+        };
+    }
+
+    function compactDown(event) {
+        if (!compact.working) return;
+        if (event.button !== undefined && event.button !== 0) return;
+        const target = event.target || {};
+        const element = target.closest
+            ? target.closest("." + P + "-compact-region") : null;
+        if (!element) return;                 // the frame itself does nothing
+
+        const region = compactFind(element.dataset.regionId);
+        const at = compactPoint(event);
+        if (!region || !at) return;
+
+        prevent(event);
+        compact.drag = {id: region.id, from: at, origin: region.bbox.slice()};
+        compact.pointer = event.pointerId;
+        // Keeps the drag attached to the finger that started it even when the
+        // finger leaves the frame, which is what makes document-level listeners
+        // unnecessary rather than merely unfashionable.
+        if (typeof event.target.setPointerCapture === "function"
+            && event.pointerId !== undefined) {
+            try { event.target.setPointerCapture(event.pointerId); } catch (error) { /* not fatal */ }
+        }
+    }
+
+    function compactMove(event) {
+        if (!compact.drag) return;
+        const at = compactPoint(event);
+        if (!at) return;
+        const region = compactFind(compact.drag.id);
+        if (!region) return;
+
+        prevent(event);
+        const [x0, y0, x1, y1] = compact.drag.origin;
+        const width = x1 - x0;
+        const height = y1 - y0;
+        // Clamped to the frame rather than allowed off it, and clamped by
+        // *offset* so the box keeps its size: a drag that resized what it was
+        // moving would be changing something nobody asked to change.
+        const left = clamp(Math.round(x0 + (at.x - compact.drag.from.x)), 0, SCALE - width);
+        const top = clamp(Math.round(y0 + (at.y - compact.drag.from.y)), 0, SCALE - height);
+        region.bbox = [left, top, left + width, top + height];
+        compactPaint();
+    }
+
+    function compactUp(event) {
+        if (!compact.drag) return;
+        const region = compactFind(compact.drag.id);
+        const moved = region
+            && JSON.stringify(region.bbox) !== JSON.stringify(compact.drag.origin);
+        const origin = compact.drag.origin;
+        const id = compact.drag.id;
+
+        compact.drag = null;
+        compact.pointer = null;
+        if (event && event.target
+            && typeof event.target.releasePointerCapture === "function"
+            && event.pointerId !== undefined) {
+            try { event.target.releasePointerCapture(event.pointerId); } catch (error) { /* not fatal */ }
+        }
+
+        // One history entry per completed drag, and a drag that moved nothing
+        // is not a completed anything.
+        if (!moved) return;
+        compact.past.push(JSON.stringify(
+            compact.working.regions.map(function (entry) {
+                return entry.id === id
+                    ? Object.assign({}, entry, {bbox: origin})
+                    : entry;
+            })));
+        if (compact.past.length > COMPACT_UNDO) compact.past.shift();
+
+        if (autoSaveOn()) {
+            compactCommit();
+        } else {
+            compact.dirty = true;
+            compactNote();
+        }
+    }
+
+    function compactCancel() {
+        if (!compact.drag) return;
+        const region = compactFind(compact.drag.id);
+        if (region) region.bbox = compact.drag.origin.slice();
+        compact.drag = null;
+        compact.pointer = null;
+        compactPaint();
+    }
+
+    function compactUndo() {
+        if (!compact.working || !compact.past.length) return;
+        let read;
+        try {
+            read = JSON.parse(compact.past.pop());
+        } catch (error) {
+            return;
+        }
+        compact.working.regions = (read || []).map(normalise).filter(Boolean);
+        compactPaint();
+        // §6.4: with Auto Save on, the undone position is committed too --
+        // otherwise Undo would leave the screen and the generation disagreeing,
+        // which is the one thing Auto Save exists to prevent.
+        if (autoSaveOn()) {
+            compactCommit();
+        } else {
+            compact.dirty = true;
+            compactNote();
+        }
+    }
+
+    function wireCompact() {
+        const frame = byId(COMPACT_IDS.frame);
+        if (!frame) return;
+
+        once(frame, "pointerdown", compactDown, "Compact");
+        once(frame, "pointermove", compactMove, "Compact");
+        once(frame, "pointerup", compactUp, "Compact");
+        once(frame, "pointercancel", compactCancel, "Compact");
+        // Only where Pointer Events are missing entirely; deliberately the old
+        // path and not a second maintained one.
+        if (typeof window !== "undefined" && !("PointerEvent" in window)) {
+            once(frame, "mousedown", compactDown, "Compact");
+            once(frame, "mousemove", compactMove, "Compact");
+            once(frame, "mouseup", compactUp, "Compact");
+        }
+
+        once(clickable(COMPACT_IDS.undo), "click", function (event) {
+            prevent(event);
+            compactUndo();
+        }, "Compact");
+        once(clickable(COMPACT_IDS.commit), "click", function (event) {
+            prevent(event);
+            compactCommit();
+        }, "Compact");
+
+        // The frame follows the generation size the way the editor's does.
+        ["txt2img_width", "txt2img_height"].forEach(function (id) {
+            const holder = byId(id);
+            const input = holder ? holder.querySelector("input") : null;
+            once(input, "change", compactPaint, "Compact");
+            once(input, "input", compactPaint, "Compact");
+        });
+
+        compactLoad(compact.working === null);
+    }
+
     function onKey(event) {
         if (!state.open) return;
         const target = event.target || {};
@@ -1569,5 +1911,14 @@
         fullscreenOn: fullscreenOn,
         dimensions: dimensions,
         ordered: function () { return state.working ? ordered() : []; },
+        compact: compact,
+        wireCompact: wireCompact,
+        compactLoad: compactLoad,
+        compactPaint: compactPaint,
+        compactCommit: compactCommit,
+        compactUndo: compactUndo,
+        compactRegions: function () {
+            return compact.working ? orderedIn(compact.working) : [];
+        },
     };
 })();
