@@ -1377,11 +1377,19 @@ class ScriptKreaCreative(scripts.Script):
             with gr.Group(elem_id=ident("spatial", "layout")):
                 gr.Markdown("**Spatial Layout**", elem_id=ident("spatial", "heading"))
 
+                # The remembered name only if it still names something. A layout
+                # deleted in another tab -- or a store replaced wholesale --
+                # would otherwise leave the dropdown claiming a composition is
+                # loaded when the file it came from is gone.
+                layout_choices = mc_spatial_profiles.choices()
+                loaded_layout = (spatial["profile"]
+                                 if spatial["profile"] in layout_choices
+                                 else mc_spatial_profiles.NONE)
+
                 with gr.Row():
                     spatial_profile = gr.Dropdown(
-                        label="Layout", value=(spatial["profile"]
-                                               or mc_spatial_profiles.NONE),
-                        choices=mc_spatial_profiles.choices(), scale=3,
+                        label="Layout", value=loaded_layout,
+                        choices=layout_choices, scale=3,
                         filterable=False, elem_id=ident("spatial", "profile"),
                         info="a saved composition; loading one replaces the boxes "
                              "on the canvas")
@@ -1391,7 +1399,7 @@ class ScriptKreaCreative(scripts.Script):
                         tooltip="Spatial layouts: refresh")
 
                 spatial_profile_state = gr.Markdown(
-                    _layout_state(spatial["profile"], spatial["layout"]),
+                    _layout_state(loaded_layout, spatial["layout"]),
                     elem_id=ident("spatial", "profile", "state"))
 
                 with gr.Row():

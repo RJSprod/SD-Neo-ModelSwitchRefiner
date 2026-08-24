@@ -1576,12 +1576,12 @@
         compactPaint();
     }
 
-    function compactSnapshot() {
-        return JSON.stringify(compact.working.regions);
-    }
-
-    function compactKeep() {
-        compact.past.push(compactSnapshot());
+    // One history entry, and the one place the bound is applied. Takes the
+    // regions to record rather than reading the live ones, because what a drag
+    // has to remember is the layout as it was *before* the drag -- which is no
+    // longer anywhere by the time the pointer comes up.
+    function compactKeep(regions) {
+        compact.past.push(JSON.stringify(regions));
         if (compact.past.length > COMPACT_UNDO) compact.past.shift();
     }
 
@@ -1733,13 +1733,11 @@
         // One history entry per completed drag, and a drag that moved nothing
         // is not a completed anything.
         if (!moved) return;
-        compact.past.push(JSON.stringify(
-            compact.working.regions.map(function (entry) {
-                return entry.id === id
-                    ? Object.assign({}, entry, {bbox: origin})
-                    : entry;
-            })));
-        if (compact.past.length > COMPACT_UNDO) compact.past.shift();
+        compactKeep(compact.working.regions.map(function (entry) {
+            return entry.id === id
+                ? Object.assign({}, entry, {bbox: origin})
+                : entry;
+        }));
 
         if (autoSaveOn()) {
             compactCommit();
