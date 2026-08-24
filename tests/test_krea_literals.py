@@ -1327,3 +1327,117 @@ class TestWhenTheRowIsOnScreen:
         assert mc_literal_prompts.active_note("a", "b") == "2 literals active"
         assert mc_literal_prompts.active_note("", "") == ""
         assert mc_literal_prompts.active_note("   ", "") == ""
+
+
+# --------------------------------------------------------------------------- #
+# The row inside somebody else's column
+# --------------------------------------------------------------------------- #
+
+
+class TestTheRowFitsItsColumn:
+    """The two boxes are a child of Forge's prompt column, not of the window.
+
+    Forge Neo's txt2img columns are dragged independently, so a maximised
+    browser says nothing about how much room this row was given: a media query
+    would keep two boxes side by side in a 300px column and push them into the
+    image column. The mechanism is therefore a wrapping flex Row with a minimum
+    width per box -- Gradio's own, stated once in Python and repeated
+    defensively in the stylesheet -- which reacts to the divider as it is
+    dragged, with no resize listener and no theme detection anywhere.
+    """
+
+    @pytest.fixture
+    def css(self):
+        """This feature's block of the stylesheet, with the prose taken out.
+
+        Comments explain the rules in the same words the rules are asserted in,
+        so a section read whole answers "is there a media query here?" with the
+        sentence saying there is not.
+        """
+        import re
+        from pathlib import Path
+
+        text = (Path(__file__).resolve().parent.parent
+                / "style.css").read_text(encoding="utf-8")
+        section = text.split("The Literal Prompt boxes", 1)[1].split(
+            "mc-literal-cfg-collapsed", 1)[0]
+        return re.sub(r"/\*.*?\*/", "", section, flags=re.DOTALL)
+
+    def test_the_labels_are_the_short_ones(self, built):
+        assert built.components["literal_positive"].label == "Positive Literal"
+        assert built.components["literal_negative"].label == "Negative Literal"
+
+    def test_neither_box_explains_itself(self, built):
+        """Label and field, and nothing else. This sits between the native
+        Negative Prompt and the generation controls, where a paragraph of
+        description under each of two boxes is what pushes everything else off
+        screen -- and where the boxes are the only two of the four that would
+        have one."""
+        for name in ("literal_positive", "literal_negative"):
+            box = built.components[name]
+
+            assert getattr(box, "info", None) is None
+            assert not getattr(box, "placeholder", None)
+
+    def test_the_two_boxes_share_the_row_evenly(self, built):
+        """Equal `scale`, so the space left over after the minimums is split
+        down the middle rather than by whichever box holds more text."""
+        positive = built.components["literal_positive"]
+        negative = built.components["literal_negative"]
+
+        assert positive.scale == negative.scale == 1
+
+    def test_each_box_tells_gradio_when_to_stop_sharing_a_line(self, built):
+        """`min_width` is the whole responsive mechanism: a Gradio Row wraps
+        when its children can no longer have it. Same number on both, or the
+        two would stack at different widths and the row would spend an
+        intermediate width half-wrapped."""
+        import model_chain_krea_creative as creative_script
+
+        positive = built.components["literal_positive"]
+        negative = built.components["literal_negative"]
+
+        assert positive.min_width == negative.min_width
+        assert positive.min_width == creative_script.LITERAL_BOX_MIN_WIDTH
+
+    def test_the_stylesheet_repeats_the_same_number(self, css):
+        """A theme is free to restyle Row, so the wrap is stated twice. The two
+        numbers are meant to stay in step; if this fails because one of them was
+        tuned, tune the other."""
+        import model_chain_krea_creative as creative_script
+
+        assert f"{creative_script.LITERAL_BOX_MIN_WIDTH}px" in css
+
+    def test_the_row_wraps(self, css):
+        assert "flex-wrap: wrap" in css
+
+    def test_nothing_is_given_a_fixed_width(self, css):
+        """`width: 100%` and `max-width: 100%` take whatever the column offers;
+        a pixel width would be this extension deciding how wide Forge's prompt
+        column is."""
+        import re
+
+        for line in css.splitlines():
+            stripped = line.strip()
+            if not re.match(r"^(min-|max-)?width\s*:", stripped):
+                continue
+            assert "min(" in stripped or not re.search(r"\d+px", stripped), stripped
+
+    def test_it_decides_nothing_from_the_window(self, css):
+        """No media query, because the browser's width is not the question
+        being asked."""
+        assert "@media" not in css
+
+    def test_it_never_offers_a_horizontal_scroll_bar(self, css):
+        assert "overflow-x" not in css
+        assert "scroll" not in css
+
+    def test_it_styles_nothing_it_does_not_own(self, css):
+        """Only the extension's own classes: not Forge's prompt row, not the
+        image column, and nothing belonging to a theme."""
+        import re
+
+        selectors = re.findall(r"^([.#][^{]*)\{", css, flags=re.MULTILINE)
+        assert selectors
+        for selector in selectors:
+            assert "mc-literal" in selector, selector

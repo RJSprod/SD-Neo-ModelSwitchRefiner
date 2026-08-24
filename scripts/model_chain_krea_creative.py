@@ -153,6 +153,21 @@ only thing that reads it is :func:`_split`, which knows how long the axis block
 is because it asks the library.
 """
 
+LITERAL_BOX_MIN_WIDTH = 240
+"""Pixels below which the two Literal Prompt boxes stop sharing a line.
+
+Gradio's Row is a wrapping flex container and this is the width at which its
+children give up on each other, so it is the entire mechanism behind the row's
+responsive behaviour: two boxes while both are wide enough to type a LoRA tag
+into, one per line below that. It reacts to the column the row was placed in
+rather than to the window, which is the point -- Forge's two txt2img columns are
+dragged independently, and a maximised browser can still hand this row 300px.
+
+Roughly a prompt box's worth of usable text. style.css repeats the number in
+``.mc-literal-box`` so that a theme with its own opinion about Row still wraps;
+the two are meant to stay in step.
+"""
+
 
 def _split(values) -> tuple[tuple, tuple, tuple, tuple]:
     """``before_process``'s tuple, cut into its four parts.
@@ -1626,25 +1641,34 @@ class ScriptKreaCreative(scripts.Script):
         # Real Textboxes with the host's own `prompt` class, so Tag
         # Autocomplete, LoRA completion and anything else that looks for a
         # prompt box finds two more of them rather than two impostors.
+        #
+        # Two boxes side by side while both are usable and one per line when
+        # they are not, decided by `min_width` rather than by a media query:
+        # Forge's two txt2img columns are dragged independently, so a wide
+        # window says nothing about how much room this row was given. A Gradio
+        # Row is a wrapping flex container and `min_width` is the width below
+        # which its children stop sharing a line -- which is the whole of the
+        # responsive behaviour, live under the divider and with no resize
+        # listener anywhere. style.css repeats the same number defensively,
+        # for a theme with its own opinion about Row.
+        #
+        # Label and field, and nothing else: no `info=` copy and no
+        # instructional placeholder. This sits in the prompt area, where four
+        # boxes of explanatory prose is three too many.
         literal = mc_literal_prompts.settings()
         with gr.Row(elem_id=ident("literal", "row"),
                     visible=bool(stored["enabled"]) or bool(spatial["enabled"]),
                     elem_classes=["mc-literal-row"]) as literal_row:
             literal_positive = gr.Textbox(
-                label="Literal Positive — Before", lines=2, max_lines=4,
+                label="Positive Literal", lines=2, max_lines=4,
                 value=literal["positive"], elem_id=ident("literal", "positive"),
                 elem_classes=["prompt", "mc-literal-box"],
-                placeholder="kept out of every language model and placed before "
-                            "the finished prompt",
-                info="LoRA tags, wildcards, another extension's syntax, "
-                     "instructions about your reference images")
+                scale=1, min_width=LITERAL_BOX_MIN_WIDTH)
             literal_negative = gr.Textbox(
-                label="Literal Negative — After", lines=2, max_lines=4,
+                label="Negative Literal", lines=2, max_lines=4,
                 value=literal["negative"], elem_id=ident("literal", "negative"),
                 elem_classes=["prompt", "mc-literal-box"],
-                placeholder="the same protection, placed after the finished prompt",
-                info="the far side of the positive prompt — not Forge's Negative "
-                     "Prompt, and it removes nothing")
+                scale=1, min_width=LITERAL_BOX_MIN_WIDTH)
 
         self.panel = panel
         self.components = {
