@@ -1315,7 +1315,7 @@ the PNG metadata and the gallery.
 The same controls are in **LLM Studio → Krea 2**, sharing one settings file, one
 Director and one panel, where they write a prompt and generate no image.
 
-### Literal commands: `[[keep this exactly]]`
+### Literal prompts: text no model may rewrite
 
 Some of what goes in a prompt box is not language for a model to improve. A LoRA
 tag, a wildcard, a `$style`, another extension's macro, an instruction about one
@@ -1323,9 +1323,46 @@ of your ImageStitch reference images — all of those are meant for something
 *downstream* of the writer, and a prompt-writing LLM handed one will reword it,
 move it or drop it, one roll in twenty, silently.
 
-So anything you put inside **double square brackets** is lifted out of the prompt
-before any language model sees it and put back at the end, on its way into
-Forge's own prompt processing:
+There are two ways to say so, and they do exactly the same thing.
+
+#### The boxes
+
+Under the native Negative Prompt, whenever Creative or Spatial is on:
+
+```
+Positive Prompt     portrait of a woman
+Negative Prompt     blurry
+┌──────────────────────────┐ ┌──────────────────────────┐
+│ Literal Positive         │ │ Literal Negative         │
+│ <lora:realfilter:1>      │ │ blue hat                 │
+└──────────────────────────┘ └──────────────────────────┘
+
+Stage 1 is given:   <lora:realfilter:1> portrait of a woman blue hat
+```
+
+Whatever you type in them is protected from every language model in this
+extension and put back around the finished prompt — **Literal Positive** in
+front of it, **Literal Negative** after it. They are ordinary prompt boxes:
+Tag Autocomplete, LoRA completion, copy and paste and the caret all behave as
+they do in the two above them, and the Extra Networks browser inserts into
+whichever of the four you used last.
+
+**Literal Negative is not Forge's Negative Prompt.** It removes nothing. It is
+the far side of the same protected run of text — the suffix to the positive
+prompt, where `-[[…]]` has always put things.
+
+**Hidden does not mean inactive.** The row appears when Creative or Spatial is
+on and is hidden when neither is, because that is when protecting text from a
+rewriter is a thing anyone is thinking about. The values keep working while it
+is hidden, and the Prompt row of the Image Pipeline says `2 literals active` so
+that never comes as a surprise.
+
+#### The brackets
+
+The original syntax, still fully supported and still the way to get positional
+control the boxes do not offer. Anything you put inside **double square
+brackets** is lifted out of the prompt before any language model sees it and
+put back at the end, on its way into Forge's own prompt processing:
 
 ```
 [[<lora:krea2_edit:1>]]
@@ -1347,6 +1384,27 @@ Krea 2 is given:   <lora:krea2_edit:1> A richly written scene … __lighting_wil
 Several commands keep the order you wrote them in within each group, so
 `-[[D]] +[[A]] [[B]] -[[E]] +[[C]] scene` becomes `A B C <written scene> D E`.
 
+#### Which goes where
+
+Brackets outrank the boxes, and they outrank them *outwards* — an explicit
+command sits further from the prompt than a field on the same side:
+
+```
+explicit  +[[…]]  and  [[…]]
+    ↓
+Literal Positive
+    ↓
+the finished prompt
+    ↓
+Literal Negative
+    ↓
+explicit  -[[…]]
+```
+
+So with `+[[A]] scene description -[[D]]` in the prompt, `B` in Literal Positive
+and `C` in Literal Negative, you get `A B <scene> C D`. Adding something to a
+field can never move something you placed by hand.
+
 **The payload is never interpreted.** Model Chain does not know or care whether
 what you bracketed is a LoRA tag, a wildcard, a style, prose, or the syntax of an
 extension released next year — it is a run of characters that gets delivered
@@ -1364,8 +1422,10 @@ A few details worth knowing:
   reaching Krea; the actual image comes from Forge Neo's own **ImageStitch**
   gallery, which Creative Mode does not touch, caption, re-encode or reorder.
   Nothing here needs a vision projector.
-* **Region prompts take commands too** — see *Spatial Layout* below — and a
-  command written in a box stays in that box.
+* **Region prompts take both** — see *Spatial Layout* below. Each region in the
+  full editor has its own pair of Literal Positive / Literal Negative boxes, and
+  a literal written in a region stays in that region whichever way it was
+  written.
 * **Stage 1 commands never reach Stage 2.** A Model Chain second stage inherits
   a version of the prompt the payloads were never written into, so a Krea edit
   LoRA does not follow your image into a Flux or SDXL pass. Put Stage 2 syntax
@@ -1375,11 +1435,31 @@ A few details worth knowing:
 * `[[]]` carries nothing and is ignored. There is no nesting and no escape
   syntax: the first `]]` closes the command.
 
+Both forms are recorded in the image. The brackets are already there twice — in
+the restored `Prompt:` line and in the recorded source with their brackets still
+on — so only the boxes get keys of their own, `Model Chain Literal Positive` and
+`Model Chain Literal Negative`.
+
+**Pasting one of your images empties the two boxes**, for the same reason it
+switches Creative Mode off: the recorded prompt already has those payloads in
+it, and refilling the boxes would insert them a second time. What they held is
+shown under *Continue from a pasted image*, and **Restore Creative setup** puts
+them back when you ask for it.
+
 This replaced the old **Pinned LoRAs** box. That field accepted one kind of
-syntax and lived next to the prompt rather than in it; `[[<lora:name:0.8>]]`
-does the same job for every kind of syntax, in the place you would have typed
-the tag anyway. Images made with the old field still show what they used, under
-*Continue from a pasted image* — nothing applies it any more.
+syntax and lived next to the prompt rather than in it; the Literal Prompt boxes
+and `[[<lora:name:0.8>]]` do the same job for every kind of syntax. Images made
+with the old field still show what they used, under *Continue from a pasted
+image* — nothing applies it any more.
+
+### The Negative Prompt at CFG 1
+
+Forge already stops the native Negative Prompt doing anything at CFG 1, which is
+where distilled models run. The row now collapses and gives its space back while
+that is true, and comes straight back when CFG rises above 1.
+
+Presentation only. The text is never read, rewritten or cleared — drop to 1,
+come back up, and your negative prompt is exactly as you left it.
 
 ### The drawer shows what you decided
 
@@ -1699,6 +1779,7 @@ compact canvas cannot do is here, unchanged.
 | **Duplicate**, **Delete**, **Forward**, **Back** | the obvious things; Delete and Backspace work on the canvas too |
 | **Escape** | abandons a drag in progress; press it again to close without saving |
 | **Object** / **Text** | a subject, or words you want rendered — a text region carries the exact string separately from its description, so only the words get drawn |
+| **Literal Positive** / **Literal Negative** | this region's own protected text, kept from every language model and placed first and last in the region's description |
 | **Save & Close** / **Cancel** | Cancel changes nothing |
 
 Boxes are stored as fractions of the frame (0–1000), not pixels, so **changing
@@ -2492,6 +2573,7 @@ Settings toggle removes the tab entirely.
 ```
 mc_arch.py            architecture detection + per-architecture geometry
 mc_pipeline_panel.py  the Image Pipeline shell: six rows, and the slots they offer
+mc_literal_prompts.py the two Literal Prompt boxes, and the note when they hide
 mc_profile_state.py   loaded / modified / not saved, said one way for all three
 mc_memory.py          image model residency / cache management
 mc_plan.py            the generation's execution plan and the VRAM budget from it

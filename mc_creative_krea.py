@@ -690,6 +690,17 @@ class Setup:
     used and type them back where they now belong.
     """
 
+    literal_positive: str = ""
+    literal_negative: str = ""
+    """What the two Literal Prompt boxes held when this image was made.
+
+    Read and shown like everything else here, and -- unlike :attr:`loras` --
+    restorable, because the controls they came from still exist. The explicit
+    "Restore Creative setup" button puts them back; an ordinary paste clears
+    them instead, because the recorded prompt already contains these payloads
+    and a paste that refilled the boxes would insert them a second time.
+    """
+
     writer: str = ""
 
     spatial_layout: str = ""
@@ -714,6 +725,31 @@ class Setup:
     def spatial(self) -> bool:
         """Whether this image recorded a spatial layout worth restoring."""
         return bool(self.spatial_layout)
+
+    @property
+    def literals(self) -> bool:
+        """Whether this image recorded Literal Prompt fields worth restoring.
+
+        Deliberately not folded into :attr:`present`. An image whose only
+        Model Chain record is two literal fields is not a Creative image, and
+        saying "Creative image restored" over it would be describing a feature
+        that never ran.
+        """
+        return bool(self.literal_positive or self.literal_negative)
+
+    @property
+    def recorded(self) -> bool:
+        """Whether this image recorded anything worth offering to restore.
+
+        Wider than :attr:`present`, and the two are wanted apart. ``present``
+        answers "is this a Creative image", which is what decides whether a
+        paste says so and whether restoring turns the writer back on. This
+        answers "is there anything here at all", which is what decides whether
+        the record is kept -- and a pair of Literal Prompt boxes with both
+        features switched off is a whole restorable setup that is not a
+        Creative one.
+        """
+        return bool(self.present or self.literals)
 
     @property
     def replayable(self) -> bool:
@@ -783,7 +819,7 @@ class Pasted:
 
     def remember(self, setup: Setup | None) -> None:
         with self._lock:
-            self._setup = setup if setup is not None and setup.present else None
+            self._setup = setup if setup is not None and setup.recorded else None
 
     @property
     def setup(self) -> Setup | None:

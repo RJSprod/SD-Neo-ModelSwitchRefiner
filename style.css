@@ -2747,3 +2747,39 @@
         animation: none;
     }
 }
+
+/* ==========================================================================
+   The Literal Prompt boxes
+   ==========================================================================
+
+   Two prompt boxes for text no language model may rewrite, sitting under the
+   native Negative Prompt because that is where they read as prompt boxes
+   rather than as settings. They are ordinary Gradio Textboxes carrying the
+   host's own `prompt` class, so everything below is spacing and one
+   collapse rule -- a theme styles them as it styles the two above them,
+   which is the entire reason they carry that class.
+*/
+
+.mc-literal-row {
+    gap: 0.5em;
+    align-items: stretch;
+    margin-top: 0.25em;
+}
+
+/* Equal width, side by side, and about as tall as a prompt box. The Row gives
+   the two children equal flex by default; this only stops a long placeholder
+   from winning the negotiation on a narrow column. */
+.mc-literal-row > * {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+/* §9. The native Negative Prompt at CFG 1: gone, and its space with it.
+   `display: none` and not `visibility: hidden`, because reclaiming the
+   vertical space is the point -- and on the element Gradio owns rather than on
+   a wrapper of ours, because there is no wrapper of ours: this class is put on
+   Forge's own component by javascript/model_chain_literals.js and taken off
+   again the moment CFG rises. Nothing here reads or writes the value. */
+.mc-literal-cfg-collapsed {
+    display: none !important;
+}

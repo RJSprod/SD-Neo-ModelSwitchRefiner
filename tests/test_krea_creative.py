@@ -1410,8 +1410,18 @@ class TestTheTxt2imgSurface:
                 # the difference between it and the token box the old gate had.
                 # tests/test_krea_spatial_js.py is where that is checked rather
                 # than asserted.
+                #
+                # "literal_row" is the third kind again, and the one worth
+                # naming carefully: it is hidden when neither Creative nor
+                # Spatial is on, and its two boxes still reach the next
+                # generation while it is. That is deliberate -- section 3.3 of
+                # the Literal Prompts intent, where hidden explicitly does not
+                # mean inactive -- so what makes it acceptable is not that it is
+                # reachable but that it is *reported*: the Image Pipeline's
+                # Prompt row says how many literals are active whenever this row
+                # is off screen and its boxes are not empty.
                 assert (name in ("creativity", "status", "controls", "name_row",
-                                 "spatial_group", "spatial_state")
+                                 "spatial_group", "spatial_state", "literal_row")
                         or id(component) in disclosure), name
 
     def test_what_ui_returns_is_what_before_process_reads(self, store, host, client):
@@ -2219,14 +2229,19 @@ class TestTheCompactPanel:
         spatial = [built.components["spatial_enabled"],
                    built.components["spatial_compose"],
                    built.components["spatial_state"]]
+        literal = [built.components["literal_positive"],
+                   built.components["literal_negative"]]
 
         assert built.arguments[:2] == [built.components["enabled"],
                                        built.components["creativity"]]
         assert built.arguments[2:4] == list(panel.settings_controls)
-        assert built.arguments[4:-3] == list(panel.axis_controls)
-        # The Spatial block goes last and stays last. The axis block is the only
-        # variable-length part of this tuple, so the two fixed ends are the two
-        # that can be found without counting -- which is what _split does.
+        assert built.arguments[4:-5] == list(panel.axis_controls)
+        # The Spatial block goes last and stays last, and that is load-bearing
+        # rather than tidy: mc_plan reads it off the *end* of this tuple,
+        # because the axis block in the middle is a variable length and the two
+        # ends are the two that can be found without counting. The Literal
+        # Prompt boxes therefore go in the middle, immediately before it.
+        assert built.arguments[-5:-3] == literal
         assert built.arguments[-3:] == spatial
 
     def test_it_says_what_the_directions_cost_before_the_image_starts(self, built,
@@ -2407,10 +2422,13 @@ class TestTheCompactPanel:
 
         assert instance.panel is None
         # The Creative toggle and slider, and nothing of Creative's after them --
-        # but the three Spatial controls are still there. Spatial Layout needs no
-        # vocabulary to place a box, so a library that will not load takes
-        # Creative Mode down and leaves Spatial standing.
-        assert len(returned) == 2 + creative_script.SPATIAL_CONTROLS
+        # but the Literal Prompt boxes and the three Spatial controls are still
+        # there. Neither needs a vocabulary: Spatial Layout places a box without
+        # one, and a literal payload is protected from language models that were
+        # never going to run. A library that will not load takes Creative Mode
+        # down and leaves both standing.
+        assert len(returned) == (2 + creative_script.LITERAL_CONTROLS
+                                 + creative_script.SPATIAL_CONTROLS)
 
     def test_both_surfaces_build_the_same_panel(self, built):
         """One implementation. Two would disagree within a release, and the

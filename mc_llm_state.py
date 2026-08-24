@@ -182,6 +182,15 @@ DEFAULTS: dict = {
     # as the pointer is released. On by default: a position correction is not a
     # decision worth a dialog, and the working layout is not a named one.
     "krea_spatial_auto_save": True,
+    # The two Literal Prompt boxes: text protected from every language model in
+    # this extension, restored around the finished prompt. Persisted for the
+    # same reason the spatial canvas is -- a filter LoRA somebody always wants
+    # is configured once, and a restart that emptied it would change what the
+    # next generation produces without saying so. The Image Pipeline's Prompt
+    # row says how many are active whenever the boxes are off screen, which is
+    # the price of persisting them rather than a nicety on top of it.
+    "krea_literal_positive": "",
+    "krea_literal_negative": "",
 }
 
 

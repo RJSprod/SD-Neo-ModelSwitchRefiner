@@ -206,7 +206,36 @@ present to switch anything.
 
 LITERAL_VERSION = "Krea Literal Syntax Version"
 LITERAL_COUNT = "Krea Literal Command Count"
-LITERAL_KEYS = (LITERAL_VERSION, LITERAL_COUNT)
+LITERAL_POSITIVE = "Model Chain Literal Positive"
+LITERAL_NEGATIVE = "Model Chain Literal Negative"
+"""What the two Literal Prompt boxes held, when they held anything.
+
+The one place a payload *is* recorded under a key of its own, and the exception
+proves the rule below: a bracketed command is already in the ``Prompt:`` line
+with its brackets on in :data:`CREATIVE_SOURCE`, so a third copy would repeat
+the file. A field's text is in neither -- the prompt line has it restored and
+unbracketed, indistinguishable from the words around it, and the source line
+never had it at all. Without these two keys the authoring setup could not be
+reconstructed from an image, which is what section 10 asks for.
+
+Recorded, never re-applied by an ordinary paste. See
+:func:`build_creative_paste_fields`, where the boxes are *cleared* on a paste
+for the same reason Creative Mode is switched off: the recorded prompt already
+has these payloads in it, and putting them back in the boxes as well would
+insert them twice.
+"""
+
+LITERAL_KEYS = (LITERAL_VERSION, LITERAL_COUNT, LITERAL_POSITIVE, LITERAL_NEGATIVE)
+
+RESTORED_BY_PASTE = (CREATIVE_MODE, SPATIAL_MODE, LITERAL_VERSION, LITERAL_COUNT,
+                     LITERAL_POSITIVE, LITERAL_NEGATIVE)
+"""The keys that mark an image as one this extension transformed the prompt of.
+
+Any one of them means the recorded ``Prompt:`` is a *finished* prompt -- written,
+composed, or with literal payloads already restored into it -- and that pressing
+Generate on the restored state must not transform it a second time. What each
+one switches off is decided below; this is the set that decides whether anything
+is switched off at all."""
 """What a generation records about the ``[[literal commands]]`` in its prompt.
 
 Two numbers, and deliberately not the payloads. The payloads are in the image's
@@ -659,6 +688,8 @@ def creative_setup(params: dict):
         excluded_values=excluded,
         anti_repetition=_flag(params.get(CREATIVE_ANTI)),
         loras=str(params.get(CREATIVE_LORAS) or ""),
+        literal_positive=str(params.get(LITERAL_POSITIVE) or ""),
+        literal_negative=str(params.get(LITERAL_NEGATIVE) or ""),
         writer=str(params.get(CREATIVE_WRITER) or ""),
         spatial_layout=str(params.get(SPATIAL_LAYOUT) or ""),
         spatial_compose_mode=str(params.get(SPATIAL_COMPOSE_MODE) or ""),
@@ -784,7 +815,39 @@ def build_creative_paste_fields(components: dict, notice=None, view=None,
                 "Continue from a pasted image.")
         return notice(said) if notice else said
 
+    def literals_cleared(params):
+        """Empty both Literal Prompt boxes, for the reason Creative Mode goes off.
+
+        The recorded ``Prompt:`` line already has these payloads in it -- they
+        were restored into it before Forge wrote the infotext -- so a paste that
+        also refilled the boxes would insert them a second time and the picture
+        would not reproduce. Section 10 is explicit that the new UI must not
+        break exact reproduction of older generations, and this is the whole of
+        what that costs.
+
+        Keyed off any of this extension's prompt-transforming records rather
+        than off the literal keys alone. An image made by this extension with
+        empty boxes writes no literal key at all, and leaving somebody's current
+        boxes in place would add text that image never had.
+
+        An image carrying none of them -- a legacy PNG, or one from another
+        tool -- returns ``None`` and the boxes are left exactly as they are. An
+        ordinary image should not be able to empty a control any more than it
+        can switch a feature off.
+
+        What was recorded is not lost by this: :func:`creative_setup` has
+        already stashed it, the Creative drawer shows it, and "Restore Creative
+        setup" puts it back on purpose.
+        """
+        if not any(key in params for key in RESTORED_BY_PASTE):
+            return None
+        return ""
+
     fields = [PasteField(components["enabled"], creative_off, api="krea_creative_enabled")]
+    for name, api in (("literal_positive", "krea_literal_positive"),
+                      ("literal_negative", "krea_literal_negative")):
+        if name in components:
+            fields.append(PasteField(components[name], literals_cleared, api=api))
     if "spatial_enabled" in components:
         fields.append(PasteField(components["spatial_enabled"], spatial_off,
                                  api="krea_spatial_enabled"))

@@ -594,7 +594,11 @@ class TestTheBrowserFileCannotAffectAGeneration:
         code = self.code()
 
         assert "innerHTML" not in code
-        assert "target.textContent = said" in code
+        # The echo assigns textContent and nothing else assigns into that
+        # element at all, so the prompt cannot become markup on its way to the
+        # panel however many angle brackets it contains.
+        assert "target.textContent =" in code
+        assert "target.innerHTML" not in code
 
     def test_no_gradio_generated_class_is_used_to_find_anything(self):
         """Every hook is an id this extension put in the page, or one of the

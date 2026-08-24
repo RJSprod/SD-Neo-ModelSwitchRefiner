@@ -98,6 +98,8 @@
         textField: P + "-text-field",
         prompt: P + "-prompt",
         promptLabel: P + "-prompt-label",
+        literalPrefix: P + "-literal-prefix",
+        literalSuffix: P + "-literal-suffix",
         framing: P + "-framing",
         framingField: P + "-framing-field",
         angle: P + "-angle",
@@ -274,6 +276,11 @@
             type: kind,
             bbox: box,
             prompt: String(entry.prompt || ""),
+            // This region's two Literal Prompt fields, carried through the
+            // editor untouched. They are never parsed here and never merged
+            // into the prompt: Python does both, once, at generation time.
+            literalPrefix: String(entry.literal_prefix || ""),
+            literalSuffix: String(entry.literal_suffix || ""),
             text: String(entry.text || ""),
             framing: String(entry.framing || ""),
             angle: String(entry.angle || ""),
@@ -348,6 +355,10 @@
                     prompt: region.prompt,
                 };
                 if (region.type === "text") entry.text = region.text;
+                // Written only when they carry something, so a layout with no
+                // region literals in it serializes to the bytes it always did.
+                if (region.literalPrefix) entry.literal_prefix = region.literalPrefix;
+                if (region.literalSuffix) entry.literal_suffix = region.literalSuffix;
                 entry.framing = region.framing;
                 entry.angle = region.angle;
                 entry.z = region.z;
@@ -759,7 +770,7 @@
         if (!state.working) return;
         const region = find(state.selected);
         const fields = [IDS.name, IDS.type, IDS.text, IDS.prompt, IDS.framing,
-                        IDS.angle];
+                        IDS.angle, IDS.literalPrefix, IDS.literalSuffix];
         fields.forEach(function (id) { enable(id, !!region); });
         enable(IDS.duplicate, !!region);
         enable(IDS.remove, !!region);
@@ -778,7 +789,7 @@
         // is selected.
         if (!region) {
             if (title) title.textContent = "nothing selected";
-            [IDS.name, IDS.text, IDS.prompt]
+            [IDS.name, IDS.text, IDS.prompt, IDS.literalPrefix, IDS.literalSuffix]
                 .forEach(function (id) { set(id, ""); });
             set(IDS.type, "obj");
             set(IDS.framing, "");
@@ -795,6 +806,8 @@
         set(IDS.type, region.type);
         set(IDS.text, region.text);
         set(IDS.prompt, region.prompt);
+        set(IDS.literalPrefix, region.literalPrefix);
+        set(IDS.literalSuffix, region.literalSuffix);
         set(IDS.framing, region.framing);
         set(IDS.angle, region.angle);
         show(IDS.textField, region.type === "text");
@@ -894,6 +907,8 @@
             type: "obj",
             bbox: bbox,
             prompt: "",
+            literalPrefix: "",
+            literalSuffix: "",
             text: "",
             framing: "",
             angle: "",
@@ -1442,6 +1457,12 @@
             }, true);
             field(IDS.text, function (region, value) { region.text = value; });
             field(IDS.prompt, function (region, value) { region.prompt = value; });
+            field(IDS.literalPrefix, function (region, value) {
+                region.literalPrefix = value;
+            });
+            field(IDS.literalSuffix, function (region, value) {
+                region.literalSuffix = value;
+            });
             field(IDS.framing, function (region, value) { region.framing = value; });
             field(IDS.angle, function (region, value) { region.angle = value; });
 

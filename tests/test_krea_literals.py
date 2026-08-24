@@ -119,11 +119,22 @@ def document(regions=(), mode="direct", auto=True) -> str:
 
 
 def panel_values(creativity=10, seed=director.RANDOM_SEED, anti=True,
-                 mode=director.NATURAL, spatial_on=False, compose="direct", layout=""):
-    """What Forge hands ``before_process`` after the enabled flag."""
+                 mode=director.NATURAL, spatial_on=False, compose="direct", layout="",
+                 literal_positive=None, literal_negative=None):
+    """What Forge hands ``before_process`` after the enabled flag.
+
+    The two Literal Prompt boxes sit in the variable middle, immediately before
+    the Spatial tail -- mc_plan reads that tail off the end, so the ends stay
+    the ends. Leaving them at ``None`` sends the shape a caller built before
+    the boxes existed, which is a thing worth being able to do from here: it is
+    what an older API request looks like, and :func:`_split` has to keep cutting
+    it in exactly the places it always did.
+    """
     values = [creativity, seed, anti]
     for _key in library_module.library().axis_keys:
         values.extend([mode, None, []])
+    if literal_positive is not None or literal_negative is not None:
+        values.extend([literal_positive or "", literal_negative or ""])
     values.extend([spatial_on, compose, layout])
     return values
 
@@ -262,6 +273,239 @@ class TestTheGrammar:
 
         assert parsed.clean_text == "2 + 2"
         assert parsed.prefixes == ("x",)
+
+
+# --------------------------------------------------------------------------- #
+# Fields nobody typed brackets for
+# --------------------------------------------------------------------------- #
+
+
+class TestTheConvenienceFields:
+    """Two ordinary text boxes that behave exactly like a bracket.
+
+    The Literal Prompts UX exists so somebody can protect a LoRA tag without
+    learning a syntax for it. The way that could go wrong is by becoming a
+    second implementation -- a parser that reads the field, an assembly step
+    that concatenates it, a rule about where it lands that is *nearly* the rule
+    the brackets follow.
+
+    So the field becomes a LiteralCommand and joins the sidecar the parser
+    already produced, and every test below is a way of asking whether anything
+    downstream can still tell the two apart.
+    """
+
+    def test_a_field_becomes_one_opaque_command(self):
+        """One field, one payload. Not split on commas, newlines or anything
+        else: deciding where to cut it would be interpreting it."""
+        made = literals.command("<lora:test:1>, __face__\nsecond line", literals.PREFIX)
+
+        assert made.payload == "<lora:test:1>, __face__\nsecond line"
+        assert made.placement == literals.PREFIX
+        assert made.scope == literals.GLOBAL
+
+    def test_an_empty_field_is_no_command_at_all(self):
+        assert literals.command("", literals.PREFIX) is None
+        assert literals.command("   \n  ", literals.SUFFIX) is None
+        assert literals.command(None, literals.PREFIX) is None
+
+    def test_the_edges_are_trimmed_and_the_middle_is_not(self):
+        made = literals.command("  foo,   bar  ", literals.PREFIX)
+
+        assert made.payload == "foo,   bar"
+
+    def test_literal_positive_lands_before_the_body(self):
+        """Section 3.1, in the form the acceptance checklist states it."""
+        merged = literals.merge(literals.parse("portrait of a woman"),
+                                before="<lora:realfilter:1>")
+
+        assert literals.restore(merged.clean_text, merged) == (
+            "<lora:realfilter:1> portrait of a woman")
+
+    def test_literal_negative_lands_after_the_body(self):
+        """Section 3.2. It is the suffix side of the protected positive prompt
+        and has nothing to do with Forge's own Negative Prompt."""
+        merged = literals.merge(literals.parse("portrait of a woman"),
+                                after="blue hat")
+
+        assert literals.restore(merged.clean_text, merged) == (
+            "portrait of a woman blue hat")
+
+    def test_typed_syntax_outranks_a_field_on_both_sides(self):
+        """Section 4's worked example, which is the whole priority rule in one
+        line: explicit commands sit further from the body than the fields do,
+        so adding a field cannot move something already placed by hand."""
+        parsed = literals.parse("+[[A]] scene description -[[D]]")
+        merged = literals.merge(parsed, before="B", after="C")
+
+        assert merged.clean_text == "scene description"
+        assert literals.restore("<final body>", merged) == "A B <final body> C D"
+
+    def test_explicit_source_order_survives_the_merge(self):
+        parsed = literals.parse("-[[D]] +[[A]] [[B]] -[[E]] +[[C]] scene")
+        merged = literals.merge(parsed, before="P", after="S")
+
+        assert merged.prefixes == ("A", "B", "C", "P")
+        assert merged.suffixes == ("S", "D", "E")
+
+    def test_two_empty_fields_change_nothing_at_all(self):
+        """Identity, not equality. Almost every generation takes this path, and
+        the parse it was given has to come back out of it untouched."""
+        parsed = literals.parse("a portrait")
+
+        assert literals.merge(parsed, "", "") is parsed
+
+    def test_a_field_works_on_a_prompt_that_has_no_brackets_in_it(self):
+        """The ordinary case the feature was built for: somebody who has never
+        typed a bracket and never will."""
+        merged = literals.merge(literals.parse("just words"), before="X", after="Y")
+
+        assert merged.clean_text == "just words"
+        assert literals.restore(merged.clean_text, merged) == "X just words Y"
+
+    def test_a_field_adds_nothing_to_the_clean_text(self):
+        """The boundary, stated as arithmetic. A field was never in the prompt
+        body, so there is nothing about it for the writer to see."""
+        parsed = literals.parse("+[[A]] scene -[[D]]")
+        merged = literals.merge(parsed, before="secret", after="also secret")
+
+        assert merged.clean_text == parsed.clean_text == "scene"
+        assert "secret" not in merged.clean_text
+
+    def test_a_field_carries_no_warning_of_its_own(self):
+        parsed = literals.parse("[[unclosed")
+        merged = literals.merge(parsed, before="B")
+
+        assert merged.warnings == parsed.warnings
+
+    def test_a_region_field_is_scoped_to_its_region(self):
+        """Section 6. A region's literals reach that element or nothing."""
+        merged = literals.merge(literals.EMPTY, before="prefix", after="suffix",
+                                scope=literals.REGION, region_id="r3")
+
+        assert all(entry.scope == literals.REGION for entry in merged.commands)
+        assert {entry.region_id for entry in merged.commands} == {"r3"}
+
+    def test_merging_onto_nothing_is_allowed(self):
+        """A caller with no parse at hand -- a region whose prompt box is empty
+        and whose literal fields are not."""
+        merged = literals.merge(None, before="X")
+
+        assert merged.prefixes == ("X",)
+        assert merged.clean_text == ""
+
+    def test_a_field_payload_is_as_opaque_as_a_bracketed_one(self):
+        """The fourth kind of leakage this file watches for: the moment a field
+        is treated as a special sort of payload, the two paths have diverged
+        and one of them will grow an opinion about LoRA tags."""
+        source = "text-inversion, <lora:x:1>, __wild__, $style"
+        typed = literals.parse(f"[[{source}]]").commands[0]
+        field = literals.command(source, literals.PREFIX)
+
+        assert typed.payload == field.payload
+        assert typed.placement == field.placement
+
+
+class TestTheFieldsReachTheGeneration:
+    """The two boxes, driven the way Forge drives them.
+
+    :class:`TestTheConvenienceFields` proves the merge is right about text.
+    This proves the hook actually performs it -- that the value in the box on
+    screen is the value that reaches the image model, on every one of the paths
+    a generation can take out of ``before_process``.
+    """
+
+    def test_a_field_reaches_stage_one_with_neither_feature_on(self, script, store,
+                                                               host):
+        """Acceptance: *both fields still affect generation when Creative and
+        Spatial are OFF*. No language model runs on this path at all, which is
+        exactly why it has to work -- protection is about delivery, not about
+        anything having been protected from."""
+        p = generate(script, "portrait of a woman", enabled=False,
+                     literal_positive="<lora:realfilter:1>",
+                     literal_negative="blue hat")
+
+        assert p.prompt == "<lora:realfilter:1> portrait of a woman blue hat"
+
+    def test_the_writer_is_never_shown_a_field(self, script, client, store, host):
+        """The boundary the whole feature rests on, asked of the new fields.
+
+        ``client.everything`` is every byte every pass was sent, which is the
+        assertion worth making here rather than the last user turn alone.
+        """
+        generate(script, "a quiet street",
+                 literal_positive="<lora:secret_prefix:1>",
+                 literal_negative="__secret_suffix__")
+
+        assert "secret_prefix" not in client.everything
+        assert "secret_suffix" not in client.everything
+
+    def test_the_field_wraps_what_the_writer_wrote(self, script, client, store, host):
+        p = generate(script, "a quiet street",
+                     literal_positive="<lora:realfilter:1>",
+                     literal_negative="__grain__")
+
+        assert p.prompt.startswith("<lora:realfilter:1> ")
+        assert p.prompt.endswith(" __grain__")
+        assert "a quiet street" not in p.prompt or p.prompt.count("realfilter") == 1
+
+    def test_typed_syntax_still_outranks_the_fields_end_to_end(self, script, store,
+                                                               host):
+        """Section 4's example, all the way through the hook rather than through
+        the merge alone."""
+        p = generate(script, "+[[A]] scene description -[[D]]", enabled=False,
+                     literal_positive="B", literal_negative="C")
+
+        assert p.prompt == "A B scene description C D"
+
+    def test_a_field_is_restored_exactly_once(self, script, client, store, host):
+        p = generate(script, "a quiet street", literal_positive="ONCE")
+
+        assert p.prompt.count("ONCE") == 1
+
+    def test_stage_two_never_inherits_a_field(self, script, client, store, host):
+        """A Stage 1 filter LoRA is meaningless to a Stage 2 model, and the
+        field is no more inheritable for having been typed without brackets."""
+        p = generate(script, "a quiet street",
+                     literal_positive="<lora:stage_one_only:1>")
+
+        inheritable = (p.extra_generation_params or {}).get("Model Chain Inheritable Prompt", "")
+        assert "stage_one_only" not in str(inheritable)
+
+    def test_an_empty_field_changes_nothing(self, script, store, host):
+        """Off is off. A prompt with no brackets and two empty boxes has to
+        reach the model as the bytes it always did."""
+        p = generate(script, "a quiet street", enabled=False,
+                     literal_positive="", literal_negative="")
+
+        assert p.prompt == "a quiet street"
+
+    def test_a_caller_that_predates_the_fields_is_cut_where_it_always_was(
+            self, script, store, host):
+        """The older argument shape, sent verbatim. Its Spatial block has to be
+        read from the same place, and its absent fields must not be filled in
+        from the end of the tuple."""
+        p = generate(script, "[[<lora:x:1>]] a quiet street", enabled=False)
+
+        assert p.prompt == "<lora:x:1> a quiet street"
+
+    def test_the_saved_values_answer_for_a_caller_that_sends_none(self, script,
+                                                                  store, host):
+        """Section 3.3, in the shape it actually reaches an API request: the
+        fields keep working when nothing on screen sent them."""
+        import mc_literal_prompts
+
+        mc_literal_prompts.remember(**{mc_literal_prompts.POSITIVE: "<lora:kept:1>"})
+        p = generate(script, "a quiet street", enabled=False)
+
+        assert p.prompt == "<lora:kept:1> a quiet street"
+
+    def test_a_field_is_not_split_on_its_commas(self, script, store, host):
+        """One field is one payload. Splitting it would be interpreting it, and
+        the order of the pieces would then be this extension's opinion."""
+        p = generate(script, "a quiet street", enabled=False,
+                     literal_positive="<lora:a:1>, __b__, $c")
+
+        assert p.prompt == "<lora:a:1>, __b__, $c a quiet street"
 
 
 # --------------------------------------------------------------------------- #
@@ -448,6 +692,132 @@ class TestARegionKeepsItsOwn:
         assert len(layout.regions) == 1
         assert layout.regions[0].prompt == "[[unclosed"
         assert any("never closed" in note for note in layout.notes)
+
+
+class TestARegionsOwnLiteralFields:
+    """Section 6: the same two boxes, per region, in the full editor only.
+
+    A region's literals have always been the sideways-leakage risk -- a command
+    written inside Region 1 that turns up in the global scene or in Region 2
+    produces a plausible picture that is wrong, and the elements array is the
+    only place you could see it. Adding a second way to author them adds a
+    second way for that to happen, so these ask the same questions the
+    bracketed ones are asked.
+    """
+
+    def region(self, prompt="astronaut holding a flower", prefix="", suffix=""):
+        found = {"id": "r1", "name": "Sub", "type": "obj",
+                 "bbox": [120, 250, 470, 720], "prompt": prompt, "z": 0}
+        if prefix:
+            found["literal_prefix"] = prefix
+        if suffix:
+            found["literal_suffix"] = suffix
+        return found
+
+    def test_a_region_field_wraps_that_region_s_description(self, script, store,
+                                                            host):
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     layout=document(regions=[
+                         self.region(prefix="<lora:a:1>", suffix="__grain__")],
+                         auto=False))
+        said = descriptions(p)
+
+        assert said == "<lora:a:1>, astronaut holding a flower, __grain__"
+
+    def test_typed_syntax_outranks_a_region_field_on_both_sides(self, script,
+                                                                store, host):
+        """The ordering rule is the global one, applied to a region."""
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     layout=document(regions=[
+                         self.region(prompt="+[[A]] astronaut -[[D]]",
+                                     prefix="B", suffix="C")],
+                         auto=False))
+
+        assert descriptions(p) == "A, B, astronaut, C, D"
+
+    def test_a_region_field_stays_out_of_the_global_scene(self, script, store,
+                                                          host):
+        """Sideways leakage, asked of the new authoring path."""
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     layout=document(regions=[
+                         self.region(prefix="<lora:region_only:1>")], auto=False))
+        payload = json.loads(p.prompt)
+
+        assert "region_only" not in str(payload.get("high_level_description", ""))
+        assert "region_only" in descriptions(p)
+
+    def test_a_region_field_stays_out_of_the_other_region(self, script, store,
+                                                          host):
+        other = {"id": "r2", "name": "Lamp", "type": "obj",
+                 "bbox": [600, 100, 900, 380], "prompt": "a lamp", "z": 1}
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     layout=document(regions=[
+                         self.region(prefix="<lora:mine:1>"), other], auto=False))
+        found = {entry["desc"] for entry in elements(p)}
+
+        assert any("mine" in entry for entry in found)
+        assert any("a lamp" in entry and "mine" not in entry for entry in found)
+
+    def test_a_region_field_never_reaches_the_composer(self, script, client,
+                                                       store, host):
+        """The Spatial Composer is a language model like any other, and a
+        region literal is no more visible to it for having been typed in a box
+        without brackets."""
+        generate(script, "a quiet street", spatial_on=True, compose="smart",
+                 layout=document(regions=[
+                     self.region(prefix="<lora:unseen:1>")], mode="smart"))
+
+        assert "unseen" not in client.everything
+
+    def test_a_region_that_is_only_a_literal_field_survives(self, script, store,
+                                                            host):
+        """A box holding nothing but protected text is a box whose content was
+        deliberately kept away from the language models, not an empty one.
+        Skipping it would delete the region for saying exactly what the feature
+        was built to carry."""
+        p = generate(script, "a quiet street", enabled=False, spatial_on=True,
+                     layout=document(regions=[
+                         self.region(prompt="", prefix="[[Her shirt from image 1]]")],
+                         auto=False))
+
+        assert len(elements(p)) == 1
+        assert "Her shirt from image 1" in descriptions(p)
+
+    def test_stage_two_inherits_no_region_field(self, script, store, host):
+        """A Stage 1 reference instruction is meaningless to a Stage 2 model
+        with no reference behind it, and the only way to be sure none travels
+        is a representation none was ever put into."""
+        from prompt_master.krea import spatial as spatial_module
+
+        layout = spatial_module.parse(document(regions=[
+            self.region(prefix="<lora:stage_one:1>", suffix="__grain__")],
+            auto=False))
+
+        assert "stage_one" not in layout.regions[0].describe(False, literals=False)
+        assert "__grain__" not in layout.regions[0].describe(False, literals=False)
+
+    def test_the_fields_round_trip_back_into_the_editor(self, script, store, host):
+        """Separately from the prompt box, so reopening the editor cannot move
+        a command out of one and into the other."""
+        from prompt_master.krea import spatial as spatial_module
+
+        layout = spatial_module.parse(document(regions=[
+            self.region(prompt="+[[A]] astronaut", prefix="B", suffix="C")]))
+        state = layout.regions[0].state()
+
+        assert state["prompt"] == "+[[A]] astronaut"
+        assert state["literal_prefix"] == "B"
+        assert state["literal_suffix"] == "C"
+
+    def test_a_region_without_them_serializes_as_it_always_did(self, script, store,
+                                                               host):
+        from prompt_master.krea import spatial as spatial_module
+
+        layout = spatial_module.parse(document(regions=[self.region()]))
+        state = layout.regions[0].state()
+
+        assert "literal_prefix" not in state
+        assert "literal_suffix" not in state
 
 
 class TestGlobalLiteralsInASpatialPrompt:
@@ -714,3 +1084,246 @@ class TestTheFeatureCostsNothing:
 
         assert layout.regions[0].prefix_literals == ("<lora:shirt_style:1>",)
         assert not hasattr(layout.regions[0], "loras")
+
+
+# --------------------------------------------------------------------------- #
+# What an image records about its Literal Prompt boxes
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def built(store, host):
+    """A script with its UI assembled, so its paste fields are registered."""
+    import model_chain_krea_creative as creative_script
+
+    instance = creative_script.ScriptKreaCreative()
+    instance.ui(False)
+    return instance
+
+
+def pasted_value(script, name, params):
+    """What the paste field for ``name`` answers for this infotext."""
+    component = script.components[name]
+    for entry in script.infotext_fields:
+        if entry.component is not component:
+            continue
+        if entry.function is not None:
+            return entry.function(params)
+        return params.get(entry.label)
+    raise AssertionError(f"no paste field for {name}")
+
+
+class TestTheFieldsAreRecorded:
+    """Section 10. The one place a literal payload gets a key of its own.
+
+    A bracketed command is already in the image twice -- restored into the
+    ``Prompt:`` line, and with its brackets still on in the recorded source --
+    so a third copy would repeat the file. A field's text is in neither: the
+    prompt line has it unbracketed and indistinguishable from the words around
+    it, and the source line never had it. Without these keys the authoring
+    setup could not be reconstructed, which is exactly what section 10 asks
+    for.
+    """
+
+    def test_both_fields_reach_the_metadata(self, script, store, host):
+        p = generate(script, "a quiet street", enabled=False,
+                     literal_positive="<lora:realfilter:1>",
+                     literal_negative="blue hat")
+
+        assert p.extra_generation_params[mc_infotext.LITERAL_POSITIVE] == \
+            "<lora:realfilter:1>"
+        assert p.extra_generation_params[mc_infotext.LITERAL_NEGATIVE] == "blue hat"
+
+    def test_an_empty_box_records_nothing(self, script, store, host):
+        """An ordinary image should say nothing about a feature it did not
+        use."""
+        p = generate(script, "a quiet street", enabled=False,
+                     literal_positive="", literal_negative="")
+
+        assert mc_infotext.LITERAL_POSITIVE not in p.extra_generation_params
+        assert mc_infotext.LITERAL_NEGATIVE not in p.extra_generation_params
+
+    def test_only_the_box_that_was_used_is_recorded(self, script, store, host):
+        p = generate(script, "a quiet street", enabled=False,
+                     literal_positive="<lora:x:1>")
+
+        assert mc_infotext.LITERAL_POSITIVE in p.extra_generation_params
+        assert mc_infotext.LITERAL_NEGATIVE not in p.extra_generation_params
+
+    def test_the_prompt_line_still_describes_what_stage_one_was_given(
+            self, script, store, host):
+        """Section 10 again: the recorded Prompt keeps meaning the prompt that
+        was actually delivered, keys or no keys."""
+        p = generate(script, "a quiet street", enabled=False,
+                     literal_positive="<lora:x:1>")
+
+        assert p.prompt == "<lora:x:1> a quiet street"
+
+    def test_a_field_that_ran_with_no_feature_on_still_records(self, script, store,
+                                                               host):
+        """The path with no language model in it records the fields the same
+        way, because the fields did the same thing on it."""
+        p = generate(script, "a quiet street", enabled=False,
+                     literal_positive="<lora:x:1>")
+
+        assert p.extra_generation_params[mc_infotext.LITERAL_POSITIVE] == "<lora:x:1>"
+
+
+class TestPastingOneBack:
+    """The rule that outranks convenience: exact reproduction.
+
+    A pasted image's ``Prompt:`` already has these payloads restored into it.
+    Refilling the boxes as well would insert them a second time and the picture
+    would not reproduce -- so a paste *empties* them, for the same reason and by
+    the same mechanism that switches Creative Mode off.
+    """
+
+    def test_a_paste_of_one_of_our_images_empties_both_boxes(self, built):
+        params = {mc_infotext.LITERAL_POSITIVE: "<lora:x:1>"}
+
+        assert pasted_value(built, "literal_positive", params) == ""
+        assert pasted_value(built, "literal_negative", params) == ""
+
+    def test_an_image_of_ours_with_empty_boxes_still_empties_them(self, built):
+        """It records no literal key at all, and leaving somebody's current
+        boxes in place would add text that image never had."""
+        params = {mc_infotext.CREATIVE_MODE: "on"}
+
+        assert pasted_value(built, "literal_positive", params) == ""
+
+    def test_a_legacy_image_leaves_them_exactly_as_they_are(self, built):
+        """``None`` is how the host is told to leave a control alone. An
+        ordinary image should not be able to empty a control any more than it
+        can switch a feature off."""
+        params = {"Steps": "20", "CFG scale": "7"}
+
+        assert pasted_value(built, "literal_positive", params) is None
+        assert pasted_value(built, "literal_negative", params) is None
+
+    def test_the_recorded_values_are_read_back_off_the_infotext(self):
+        setup = mc_infotext.creative_setup({
+            mc_infotext.LITERAL_POSITIVE: "<lora:x:1>",
+            mc_infotext.LITERAL_NEGATIVE: "blue hat"})
+
+        assert setup.literal_positive == "<lora:x:1>"
+        assert setup.literal_negative == "blue hat"
+        assert setup.literals is True
+
+    def test_literal_fields_alone_are_not_a_creative_record(self):
+        """Saying "Creative image restored" over an image that never ran the
+        writer would be describing a feature that did not happen."""
+        setup = mc_infotext.creative_setup({mc_infotext.LITERAL_POSITIVE: "x"})
+
+        assert setup.literals is True
+        assert setup.present is False
+
+    def test_the_keys_are_forwarded_by_send_to_txt2img(self):
+        """The buttons forward by exact name, so a key that is not listed
+        simply does not arrive and the restore finds half a record."""
+        declared = set(mc_infotext.creative_paste_field_names())
+
+        assert mc_infotext.LITERAL_POSITIVE in declared
+        assert mc_infotext.LITERAL_NEGATIVE in declared
+
+    def test_restoring_the_setup_puts_the_boxes_back(self, built, store):
+        """The explicit action, which is allowed to do what the paste refused
+        to: these controls still exist, unlike the Pinned LoRAs field an older
+        image records, so they are restored rather than merely shown."""
+        import model_chain_krea_creative as creative_script
+
+        mc_creative_krea.pasted.remember(mc_infotext.creative_setup({
+            mc_infotext.LITERAL_POSITIVE: "<lora:x:1>",
+            mc_infotext.LITERAL_NEGATIVE: "blue hat"}))
+        returned = creative_script._restore_setup(False)
+
+        assert returned[-2]["value"] == "<lora:x:1>"
+        assert returned[-1]["value"] == "blue hat"
+
+    def test_a_literal_only_restore_changes_nothing_else(self, built, store):
+        """No Creative record means no prompt overwrite and no switching
+        Creative Mode on -- an image that never used it is not a reason to."""
+        import model_chain_krea_creative as creative_script
+
+        mc_creative_krea.pasted.remember(mc_infotext.creative_setup({
+            mc_infotext.LITERAL_POSITIVE: "<lora:x:1>"}))
+        prompt, enabled, status, _view, positive, _negative = \
+            creative_script._restore_setup(False)
+
+        assert positive["value"] == "<lora:x:1>"
+        assert prompt == {} or "value" not in prompt
+        assert enabled == {} or "value" not in enabled
+        assert "no Creative Mode setup" in status
+
+    def test_the_pasted_view_says_what_the_boxes_held(self, built, store):
+        import model_chain_krea_creative as creative_script
+
+        mc_creative_krea.pasted.remember(mc_infotext.creative_setup({
+            mc_infotext.LITERAL_POSITIVE: "<lora:x:1>"}))
+        said = creative_script._pasted_view()
+
+        assert "<lora:x:1>" in said
+        assert "reproduces exactly" in said
+
+    def test_a_pasted_image_reproduces_with_the_boxes_emptied(self, script, built,
+                                                              store, host):
+        """The property all of the above is for, end to end: generate with
+        fields, take the recorded prompt, paste it back, and press Generate
+        again with the boxes as the paste left them."""
+        first = generate(script, "a quiet street", enabled=False,
+                         literal_positive="<lora:x:1>", literal_negative="grain")
+
+        again = generate(script, first.prompt, enabled=False,
+                         literal_positive="", literal_negative="")
+
+        assert again.prompt == first.prompt
+
+
+class TestWhenTheRowIsOnScreen:
+    """Section 5. Visibility is presentation and never execution.
+
+    The row appears when either prompt-transforming feature is on, because that
+    is when protecting text from one is a thing somebody is thinking about. It
+    is emphatically not a switch, and the tests that matter are the ones showing
+    the values still work while it is hidden.
+    """
+
+    def visible(self, creative, spatial) -> bool:
+        import model_chain_krea_creative as creative_script
+
+        return creative_script._literal_row(creative, spatial)["visible"]
+
+    def test_creative_alone_shows_it(self):
+        assert self.visible(True, False) is True
+
+    def test_spatial_alone_shows_it(self):
+        """Either feature, not both. Spatial composes a structured prompt around
+        the user's words with no writer involved at all, and a LoRA tag needs
+        protecting from the compositor just the same."""
+        assert self.visible(False, True) is True
+
+    def test_both_off_hides_it(self):
+        assert self.visible(False, False) is False
+
+    def test_both_on_shows_it(self):
+        assert self.visible(True, True) is True
+
+    def test_hiding_it_does_not_stop_it_working(self, script, store, host):
+        """The whole of section 3.3 in one assertion: the row is hidden exactly
+        when both features are off, which is exactly the generation this proves
+        still applies the fields."""
+        assert self.visible(False, False) is False
+
+        p = generate(script, "a quiet street", enabled=False,
+                     literal_positive="<lora:still:1>")
+
+        assert p.prompt == "<lora:still:1> a quiet street"
+
+    def test_the_note_counts_fields_rather_than_words(self):
+        """One field is one command however much text is in it, so the number
+        somebody reads has to be the number of things that will be inserted."""
+        import mc_literal_prompts
+
+        assert mc_literal_prompts.active_note("a, b, c", "") == "1 literal active"
+        assert mc_literal_prompts.active_note("a", "b") == "2 literals active"
+        assert mc_literal_prompts.active_note("", "") == ""
+        assert mc_literal_prompts.active_note("   ", "") == ""

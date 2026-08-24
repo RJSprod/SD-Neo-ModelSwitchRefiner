@@ -49,6 +49,16 @@
     const ECHO = P + "-prompt-echo";
     const PROMPT = "txt2img_prompt";
 
+    // The Literal Prompt boxes. Read from here rather than reported by them,
+    // because the Prompt row has exactly one writer and this is it -- two
+    // files writing one element is how a line ends up alternating between two
+    // truths depending on which event fired last.
+    const LITERALS = {
+        row: "mc-krea-creative-literal-row",
+        positive: "mc-krea-creative-literal-positive",
+        negative: "mc-krea-creative-literal-negative",
+    };
+
     // How long the rows keep their finished state after the bar goes away.
     // Long enough to be seen, short enough that the next press starts clean.
     const SETTLE = 2500;
@@ -108,24 +118,64 @@
         return said.length > 120 ? said.slice(0, 119) + "…" : said;
     }
 
+    function valueOf(id) {
+        const holder = byId(id);
+        const box = holder ? holder.querySelector("textarea, input") : null;
+        return box ? String(box.value || "").trim() : "";
+    }
+
+    // Whether an element is not currently taking up space. `offsetParent` is
+    // null for anything with `display: none` anywhere above it, which is what
+    // Gradio does to a component it has been told is not visible.
+    function offScreen(element) {
+        if (!element) return true;
+        return element.offsetParent === null;
+    }
+
+    // §3.3: hidden does not mean inactive. The Literal Prompt boxes keep
+    // reaching every generation while their row is off screen, so the row being
+    // off screen is exactly when somebody needs telling that they are in
+    // effect. Said only then -- while the boxes are visible they speak for
+    // themselves, and a count beside them would be furniture.
+    function literalNote() {
+        if (!offScreen(byId(LITERALS.row))) return "";
+        const active = [LITERALS.positive, LITERALS.negative]
+            .filter(function (id) { return valueOf(id) !== ""; }).length;
+        if (!active) return "";
+        return active + " literal" + (active === 1 ? "" : "s") + " active";
+    }
+
     function echo() {
         const target = byId(ECHO);
         if (!target) return;
         const holder = byId(PROMPT);
         const box = holder ? holder.querySelector("textarea, input") : null;
         const said = trim(box ? box.value : "");
+        const note = literalNote();
         // textContent, never innerHTML: this is somebody's prompt, and a prompt
         // is the one string on the page most likely to contain angle brackets.
-        target.textContent = said || "nothing typed yet";
+        target.textContent = [said || "nothing typed yet", note]
+            .filter(Boolean).join(" · ");
     }
 
     function watchPrompt() {
         const holder = byId(PROMPT);
         const box = holder ? holder.querySelector("textarea, input") : null;
-        if (!box || !box.dataset || box.dataset.mcPipelineEcho) return;
-        box.dataset.mcPipelineEcho = "1";
-        box.addEventListener("input", echo);
-        box.addEventListener("change", echo);
+        if (box && box.dataset && !box.dataset.mcPipelineEcho) {
+            box.dataset.mcPipelineEcho = "1";
+            box.addEventListener("input", echo);
+            box.addEventListener("change", echo);
+        }
+        // The literal boxes drive the same line, so they are followed too. The
+        // count changes when one is emptied, not only when the row is hidden.
+        [LITERALS.positive, LITERALS.negative].forEach(function (id) {
+            const owner = byId(id);
+            const field = owner ? owner.querySelector("textarea, input") : null;
+            if (!field || !field.dataset || field.dataset.mcPipelineEcho) return;
+            field.dataset.mcPipelineEcho = "1";
+            field.addEventListener("input", echo);
+            field.addEventListener("change", echo);
+        });
         echo();
     }
 
@@ -287,6 +337,8 @@
     // Exposed for the tests, which drive this file under node against a fake
     // page. Nothing in the extension reads it.
     window.modelChainPipeline = {
+        literalNote: literalNote,
+        echo: echo,
         stageFor: stageFor,
         phases: PHASES,
         order: ORDER,
