@@ -36,8 +36,9 @@ entirely in Settings.
 ## Using it
 
 1. Set up your txt2img generation as usual — that is Stage 1.
-2. Open **Model Chain**, tick the accordion, and pick a **Stage 2 checkpoint**.
-   The detected architecture is shown beside the residency status.
+2. Open **Image Pipeline** and switch **Stage 2** on, then open it and pick a
+   **Stage 2 checkpoint**. The detected architecture is shown beside the
+   residency status.
 3. If the Stage 2 model needs its own VAE / text encoder files, select them in
    **Stage 2 VAE / Text Encoder**. Flux.2 Klein and Krea 2 do.
 4. Set **Denoise strength**. This is the key control: it governs how much
@@ -48,6 +49,60 @@ entirely in Settings.
 The gallery shows only the refined Stage 2 outputs, one per image your batch
 settings would normally have produced.
 
+### The Image Pipeline
+
+Everything this extension adds to txt2img is in one panel, laid out as the path
+your prompt actually takes:
+
+```
+IMAGE PIPELINE
+
+Prompt
+  "astronaut botanist in a Martian greenhouse"
+  │
+Creative                                              [ON]
+  C7 · 2 directions · Editorial
+  │
+Spatial                                               [ON]
+  Smart · 2 regions · Studio thirds
+  │
+Stage 1
+  Krea 2 · 1024×1536 · Hires 1.5× → 1536×2304
+  Euler · 20 steps · CFG 3.5 · ImageStitch · 2 references
+  │ 1536 × 2304 pixel handoff
+Stage 2                                               [ON]
+  Klein 9B · Portrait polish · denoise 0.35
+  │
+Output
+  1536×2304 — refined by Stage 2
+```
+
+**Creative**, **Spatial** and **Stage 2** are this extension's. Each has a
+switch on its own row, so a stage can be armed or bypassed without opening it,
+and an editor behind a disclosure. A bypassed stage stays on the path and reads
+as bypassed rather than disappearing — what is switched off is as much a part of
+"what will happen when I press Generate" as what is switched on.
+
+**Prompt**, **Stage 1** and **Output** are Forge's. They are drawn muted, carry
+no switch, and open nothing. They are read, never written: the checkpoint,
+size, Hires, sampler and steps shown on the Stage 1 row come from Forge's own
+controls, which remain the only place any of them can be changed. There is no
+second width box here and there never will be — two controls holding one value
+is a bug with a delay on it.
+
+The line between Stage 1 and Stage 2 is the one number that used to be nowhere.
+Stage 2 refines **finished Stage 1 pixels**, so a Hires pass changes what it is
+handed; the handoff size follows Hires rather than quoting the width and height
+sliders, and it is shown even with Stage 2 off, because it is what Stage 2
+*would* receive and the number you need in order to decide whether to arm it.
+
+While a generation runs, the row that is currently working is marked — a filled
+node on the rail and a coloured title, nothing that covers a label or a control,
+and nothing that replaces Forge's own progress bar. It follows the extension's
+existing phase list rather than calculating anything of its own, so it cannot
+disagree with the bar: skipped stages are never entered and so never light.
+Reduced-motion settings drop the pulse and keep the colour.
+
 ### Presets
 
 **Preset** saves and recalls a complete Stage 2 configuration — checkpoint, VAE
@@ -57,6 +112,21 @@ edit mode, plus the enable toggle itself.
 Type a name, hit **Save**, and it appears in the dropdown. Selecting a preset
 applies it immediately; **Delete** removes it. The refresh button re-reads the
 file, so presets saved in another tab show up without a restart.
+
+Once a preset is loaded the panel says which one, and says when you have
+changed something:
+
+```
+Loaded: Portrait polish · Modified · not saved
+These edited settings are the ones the next Generate will use.
+Saving only updates the stored copy under this name.
+```
+
+That second line is not decoration. **Modified-but-unsaved settings are the
+active settings** — "not saved" describes the file, never the generation. Save
+clears it by making the stored copy match the screen, not by changing anything
+on it. The same wording is used for Creative profiles and Spatial layouts, so
+the state means one thing everywhere.
 
 Presets live in `model_chain_presets.json` in your WebUI data directory, not in
 the extension folder, so updating or reinstalling the extension keeps them.
@@ -1313,7 +1383,7 @@ the tag anyway. Images made with the old field still show what they used, under
 
 ### The drawer shows what you decided
 
-Open **Creative Controls** on a fresh install and there is nothing in it:
+Open **Creative** on a fresh install and there is nothing in it:
 
 ```
 Profile: Factory     [Save] [Save As] [Delete] [Set as default] [Reset to default]
@@ -1321,19 +1391,21 @@ Active direction: None. Creative Mode is not influencing any axis.
 [ + Add direction ▾ ]
 ```
 
-Add one and it becomes a line. Add two and it becomes two lines:
+Add one and it becomes a row with an empty picker. Add two and it becomes two:
 
 ```
-Medium     · Fixed: Fashion editorial                              [Edit]
-Lighting   · Vary · excludes harsh noon, golden hour               [Edit]
+Medium     [ Fashion editorial ×                      ▾ ]  [Remove]
+           Medium · Fashion editorial
+
+Lighting   [ 4 selected                                ▾ ]  [Remove]
+           Lighting · 4 treatments, chosen by the Creative seed
+
 [ + Add direction ▾ ]
 ```
 
 An axis you have not touched is **Natural**, and Natural is the absence of a
-decision — so it has no row, no dropdown and no space. Returning an axis to
-Natural removes its row. The editor for an axis exists only while you are
-editing that axis, and opening it is the only time you see a mode radio, a
-"Always use" dropdown or an exclusions list.
+decision — so it has no row, no dropdown and no space. **Remove** returns an
+axis to Natural and takes its row away.
 
 That is the whole design rule: *show the decisions the user has made, not every
 decision the software knows how to make.* The panel this replaced drew ten axes
@@ -1345,31 +1417,42 @@ until you opened the drawer and read the table.
 **Settings** accordion below. They are configuration, not everyday art
 direction, and they used to sit in the middle of the axis rows.
 
-### Excluding treatments you never want
+### One picker, one question
 
-Vary takes one modifier: a multiselect of ids the Director must never choose.
+Each active direction has a single **Treatment** field: a filterable
+multiselect that asks *which treatments am I willing to use?* How many you pick
+is the whole of the answer.
 
-```
-Lighting
-( Natural ) ( ● Vary ) ( Fixed )
-Exclude choices: [ harsh noon ×  golden hour × ]
-```
+| Selected | What happens |
+| --- | --- |
+| **none** | the direction has a row and no effect — the axis is left out of the brief entirely, exactly as an axis you never added would be |
+| **one** | that treatment is used every roll |
+| **two or more** | the Creative seed chooses one of them each roll |
 
-It is **not** a fourth mode, and that is deliberate. "Vary the lighting, but
-never harsh noon" is a statement about *how* to vary; a mode would force somebody
-who wants two treatments gone to stop varying altogether.
+There is no separate mode control and no separate randomise switch, because
+they were three controls asking three versions of one question. A row you have
+started and not finished keeps its place on screen and says so — *no treatments
+chosen — not directed* — so "started" and "doing nothing" never look alike.
 
-Excluded ids come out of the pool before anything is weighted, so an excluded
-treatment is never chosen — not at Creativity 10, not when the alternatives run
-short, not ever. If you exclude every treatment an axis has, the axis is left out
-of the brief and says so, in the status line, in the console and in the Last
-creative roll view. It is never quietly given the value you told it not to use,
-and it never eats one of the activation slots the Creativity position allows.
+Underneath, nothing changed. One selection is still a pinned treatment; several
+are still a varying axis with everything unselected excluded. Treatments you did
+not choose come out of the pool before anything is weighted, so they are never
+chosen — not at Creativity 10, not when the alternatives run short, not ever.
+Stable treatment ids, creativity eligibility, compatibility, anti-repetition,
+your own words taking precedence, and the written-expression tiers all read the
+same three values they always read.
 
 ### Profiles
 
 A profile is every Creative setting — the Creativity position, the seed,
-anti-repetition, and each axis's mode, pin and exclusions — under a name.
+anti-repetition, each axis's treatments, and which axes have a row at all —
+under a name. That last one matters: a direction you added and have not chosen
+treatments for is work you did, and a profile that carried the settings but not
+the rows would load as a panel that had quietly forgotten it.
+
+Like Stage 2 presets, the panel names the profile the settings came from and
+says **Modified · not saved** the moment they diverge from it. The edited
+settings are the ones the next Generate uses; saving updates the stored copy.
 
 | Button | What it does |
 | --- | --- |
@@ -1449,13 +1532,19 @@ lighting, framing, palette, texture, mood and detail direction each time.
 
 ### The ten axes
 
-Each axis has three modes, and Vary takes exclusions:
+Underneath the treatment picker each axis is in one of three states, and which
+one it is in is decided entirely by how many treatments you selected:
 
-| Mode | What it does |
-| --- | --- |
-| **Natural** | leaves the axis out of the brief entirely — the model decides as it would without Creative Mode. Not a hedged line: *no* line. No row in the panel either. |
-| **Vary** | lets the Director choose, scaled by Creativity, from everything you have not excluded. |
-| **Fixed** | repeats your chosen value every roll. |
+| State | Reached by | What it does |
+| --- | --- | --- |
+| **Natural** | no row, or a row with nothing selected | leaves the axis out of the brief entirely — the model decides as it would without Creative Mode. Not a hedged line: *no* line. |
+| **Vary** | two or more selected | lets the Director choose between them, scaled by Creativity. |
+| **Fixed** | one selected | repeats it every roll. |
+
+You never set these directly, and there is no control that names them. They are
+here because they are what the Director reads, what a profile stores and what an
+image's metadata records — so this is the table to read when you are looking at
+a PNG's infotext rather than at the panel.
 
 Medium, Style, Lighting, Composition, Viewpoint, Lens / Zoom, Palette, Texture,
 Mood and Detail emphasis. **Every one of them is Natural on a fresh install**, so
@@ -1495,14 +1584,27 @@ prompt. It is off until you turn it on, and it changes nothing at all while it
 is off.
 
 ```
-[x] Creative Mode      Creativity [------7----]
+Spatial                                               [ON]
+  Smart · 2 regions · Studio thirds
+  ▾ Spatial layout
 
-    [x] Spatial Layout    Composition: (o) Smart Spatial Compose
-                                       ( ) Direct BBOX Merge      [Edit Layout…]
-    2 regions. Region prompts are used exactly as typed; the scene around
-    them is written by Creative Mode.
+    Spatial Layout
+    Layout: [ Studio thirds        ▾ ]  ⟳
+    Loaded: Studio thirds · Modified · not saved
+    Layout name: [                 ]  [Save]  [Delete]
 
-    ▸ Creative Controls
+    Composition: (o) Smart Spatial Compose
+                 ( ) Direct BBOX Merge
+
+    ┌──────────────────────┐
+    │  ┌────────┐          │      ← drag a box to move it
+    │  │ Face   │          │
+    │  └────────┘   ┌────┐ │
+    │               │Sign│ │
+    └───────────────┴────┴─┘
+    Drag a box to move it. Edit Layout… for everything else.
+
+    [x] Auto Save   [Undo]  [Save working layout]  [Edit Layout…]
 ```
 
 **Your words in a box are yours.** A region prompt never goes near the Creative
@@ -1541,10 +1643,54 @@ scope decides where text survives the LLM passes, and Forge's extra-network
 system then applies the tag with its own, global, scope. Spatial Layout is not
 regional diffusion.
 
-#### The editor
+#### The compact canvas
+
+The small canvas in the pipeline does exactly one thing: **move a box**. Drag
+whichever region is under your pointer — mouse, pen or finger — and it moves.
+Whatever is on top is what moves, so a box behind another one is never grabbed
+by mistake, and a drag never changes a region's size, contents, kind or stacking
+order.
+
+It deliberately cannot create, delete, rename, resize or restyle a region.
+Those are all in the full editor, one button away. A compact canvas that could
+also delete a region would be a second editor competing with the first over the
+same document; this is a shortcut into that document, not another copy of it.
+
+**Auto Save** decides what a move commits:
+
+| | |
+| --- | --- |
+| **on** (default) | letting go commits the working layout — the boxes that will be composed on the next Generate |
+| **off** | the boxes move on screen, the panel says **Unsaved working layout**, and **Save working layout** commits them |
+
+**Undo** reverses the last move, and with Auto Save on it commits the result
+too — otherwise Undo would leave the screen and the generation disagreeing,
+which is the one thing Auto Save exists to prevent.
+
+#### Named layouts, and the two kinds of save
+
+A **Layout** dropdown saves the current composition under a name and loads it
+back, so trying a different arrangement no longer costs you the one you had.
+Layouts live in `model_chain_spatial_layouts.json` in your WebUI data directory,
+beside the Stage 2 presets, and are written the same way — a temporary file and
+an atomic replace.
+
+The distinction to hold on to is that **Auto Save and Save are not the same
+save**:
+
+* **Auto Save** commits the *working layout*: what the next Generate composes.
+* **Save** updates a *named layout*: a copy you asked for by name.
+
+So `Loaded: Studio thirds · Modified · not saved` is an ordinary state to sit in
+for as long as you like. The boxes you just nudged are the boxes that will be
+composed; *Studio thirds* still holds what it held. Dragging a box never
+silently rewrites a layout you named.
+
+#### The full editor
 
 **Edit Layout…** opens a full-window canvas in the shape of the image you are
-about to make, with a thirds grid and a centre cross on it.
+about to make, with a thirds grid and a centre cross on it. Everything the
+compact canvas cannot do is here, unchanged.
 
 | | |
 | --- | --- |
@@ -2345,12 +2491,15 @@ Settings toggle removes the tab entirely.
 
 ```
 mc_arch.py            architecture detection + per-architecture geometry
+mc_pipeline_panel.py  the Image Pipeline shell: six rows, and the slots they offer
+mc_profile_state.py   loaded / modified / not saved, said one way for all three
 mc_memory.py          image model residency / cache management
 mc_plan.py            the generation's execution plan and the VRAM budget from it
 mc_plan_panel.py      the Generation Memory & Persistent LLM section on txt2img
 mc_lora.py            prepared LoRA state + stage isolation
 mc_infotext.py        infotext write + paste-field registration
 mc_presets.py         named Stage 2 configurations
+mc_spatial_profiles.py     named Spatial layouts
 mc_progress.py        whole-job progress model + measured timings
 mc_references.py      Stage 2 supplemental reference routing
 mc_styles.py          style library integration helpers
@@ -2377,6 +2526,7 @@ mc_creative_krea.py   Creative Mode: settings, roll history, one roll
 mc_creative_panel.py  the Creative control surface, built once for both surfaces
 mc_creative_profiles.py    named Creative configurations and the chosen default
 mc_llm_progress.py    the Krea roll, reported on the host's progress bar
+mc_spatial.py         Spatial Layout preferences and the composer pass
 prompt_master/        vendored LTX business logic (see VENDORED_FROM.txt)
 prompt_master/krea/creativity/    the versioned creative vocabulary (data only)
 prompt_master/krea/library.py     loads and validates that package
@@ -2387,8 +2537,9 @@ prompt_master/models/managed_profiles.py  the hidden per-backbone quality profil
 
 scripts/model_chain.py                Script class, UI, orchestration
 scripts/model_chain_krea_creative.py  the txt2img Creative Mode panel and its hook
-style.css             optional progress-bar appearance + LLM Studio styling
-javascript/           the settings-to-CSS layer, LLM Studio polish, Creative Mode
+style.css             progress-bar appearance, LLM Studio, the Image Pipeline
+javascript/           the settings-to-CSS layer, LLM Studio polish, the pipeline,
+                      the two spatial canvases
 tests/                pytest suite (runs without a WebUI)
 tools/                maintainer scripts; never imported by the extension
 docs/                 revised specifications for the progress and LLM work

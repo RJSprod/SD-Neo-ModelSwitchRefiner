@@ -767,6 +767,21 @@ def rules():
     return out
 
 
+def bar_pseudo_rules():
+    """Pseudo-element rules that land on the host's progress bar.
+
+    Narrower than "every ``::before`` in the file", and the distinction is the
+    same one :func:`styled_bar_rules` draws: the restriction below exists
+    because a WebUI theme already owns ``::before`` and ``::after`` on the
+    *host's* bar. It says nothing about elements this extension creates and
+    owns -- the Image Pipeline draws its rail and its stage nodes with pseudo-
+    elements on its own rows, where there is no theme decoration to replace.
+    """
+    return [(selector, body) for selector, body in rules()
+            if ("::before" in selector or "::after" in selector)
+            and "progress" in selector]
+
+
 def styled_bar_rules():
     """Rules that style the host's *own* bar element.
 
@@ -1068,9 +1083,7 @@ class TestStylesheetConstraints:
         deliberately. The distinction is drawing versus switching off, so the
         test is on what the rule *puts* there rather than on the selector.
         """
-        for selector, body in rules():
-            if "::before" not in selector and "::after" not in selector:
-                continue
+        for selector, body in bar_pseudo_rules():
             declarations = [d.strip() for d in body.split(";") if d.strip()]
             assert declarations, f"{selector} is empty"
             for declaration in declarations:
@@ -1080,9 +1093,8 @@ class TestStylesheetConstraints:
                 assert "none" in declaration, f"{selector} generates content"
 
     def test_only_the_ooze_theme_suppresses_a_themes_own_overlay(self):
-        for selector, _ in rules():
-            if "::before" in selector or "::after" in selector:
-                assert "mc-fx-ooze" in selector, f"{selector} is not scoped to one theme"
+        for selector, _ in bar_pseudo_rules():
+            assert "mc-fx-ooze" in selector, f"{selector} is not scoped to one theme"
 
     def test_it_sets_no_geometry_on_the_bar(self):
         """Themes move this element; Lobe takes it out of the host's overlay.

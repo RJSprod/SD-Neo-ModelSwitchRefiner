@@ -28,9 +28,11 @@ import mc_llm_state
 import mc_llm_studio
 import mc_lora
 import mc_memory
+import mc_pipeline_panel
 import mc_plan
 import mc_plan_panel
 import mc_presets
+import mc_profile_state
 import mc_progress
 import mc_references
 import mc_styles
@@ -42,7 +44,7 @@ from modules.processing import (
 )
 from modules.shared import opts, state
 from modules.ui_common import refresh_symbol
-from modules.ui_components import InputAccordion, ToolButton
+from modules.ui_components import ToolButton
 
 logger = mc_memory.logger
 """Shared with the helper modules; mc_memory attaches the console handler."""
@@ -580,6 +582,191 @@ def _resolution_note(
     return note
 
 
+# --------------------------------------------------------------------------- #
+# The Image Pipeline's context lines
+# --------------------------------------------------------------------------- #
+#
+# Section 7: Stage 1 is Forge's, and this extension only reads it. Every number
+# below comes out of a native control that remains the only place it can be
+# changed -- there is no second width box here, and there never will be, because
+# two controls holding one value is a bug with a delay on it.
+
+
+def _short_checkpoint(name: str) -> str:
+    """A checkpoint filename as something that fits on a summary line."""
+    name = str(name or "").strip()
+    if not name:
+        return ""
+    name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    # The hash first. Forge appends it in square brackets *after* the extension,
+    # so stripping the extension first finds nothing to strip and leaves
+    # "krea2.safetensors" where "krea2" was wanted.
+    if "[" in name:
+        name = name.split("[", 1)[0]
+    name = name.strip()
+    for suffix in (".safetensors", ".ckpt", ".gguf", ".sft"):
+        if name.casefold().endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return name.strip() or str(name)
+
+
+def _stage1_size(width, height, hires=False, hr_scale=2.0, hr_resize_x=0, hr_resize_y=0):
+    """The pixels Stage 1 actually finishes with, Hires included.
+
+    The one calculation on this panel that is worth more than it looks. The
+    width and height sliders describe the *first pass*; with Hires on, what
+    leaves Stage 1 -- and therefore what Stage 2 is handed -- is the upscaled
+    image, and a panel that quoted the sliders would be describing a picture
+    that never exists.
+    """
+    try:
+        width, height = int(width or 0), int(height or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+    if width <= 0 or height <= 0:
+        return 0, 0
+    if not hires:
+        return width, height
+    try:
+        return mc_arch.hires_target_size(
+            width, height, float(hr_scale or 2.0),
+            int(hr_resize_x or 0), int(hr_resize_y or 0))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return width, height
+
+
+def _reference_count(gallery) -> int:
+    try:
+        return len(gallery or ())
+    except TypeError:
+        return 0
+
+
+def _stage1_summary(checkpoint, width, height, hires=False, hr_scale=2.0,
+                    hr_resize_x=0, hr_resize_y=0, sampler="", steps=0, cfg=0.0,
+                    scheduler="", stitch_gallery=None) -> str:
+    """Forge's current txt2img state, as the two lines section 7 asks for.
+
+    Everything is optional. A heavily customised UI that does not expose the
+    Hires controls, or a Forge build that renames the sampler dropdown, loses a
+    clause here and nothing else -- which is the correct failure for a panel
+    whose entire job is to describe controls it does not own.
+    """
+    first = []
+
+    name = _short_checkpoint(checkpoint)
+    if name:
+        first.append(name)
+
+    final_w, final_h = _stage1_size(width, height, hires, hr_scale,
+                                    hr_resize_x, hr_resize_y)
+    try:
+        base_w, base_h = int(width or 0), int(height or 0)
+    except (TypeError, ValueError):
+        base_w = base_h = 0
+
+    if base_w > 0 and base_h > 0:
+        first.append(f"{base_w}×{base_h}")
+    if hires and final_w > 0 and (final_w, final_h) != (base_w, base_h):
+        try:
+            scale = float(hr_scale or 0)
+        except (TypeError, ValueError):
+            scale = 0.0
+        shown = f"Hires {scale:g}×" if scale > 0 and not (hr_resize_x or hr_resize_y) else "Hires"
+        first.append(f"{shown} → {final_w}×{final_h}")
+
+    second = []
+    if sampler:
+        second.append(str(sampler))
+    if scheduler and str(scheduler).strip().casefold() not in ("automatic", "none"):
+        second.append(str(scheduler))
+    try:
+        if int(steps or 0) > 0:
+            second.append(f"{int(steps)} steps")
+    except (TypeError, ValueError):
+        pass
+    try:
+        if float(cfg or 0) > 0:
+            second.append(f"CFG {float(cfg):g}")
+    except (TypeError, ValueError):
+        pass
+
+    references = _reference_count(stitch_gallery)
+    if references:
+        second.append(f"ImageStitch · {references} reference"
+                      f"{'' if references == 1 else 's'}")
+
+    lines = [" · ".join(first)] if first else []
+    if second:
+        lines.append(" · ".join(second))
+    return "  \n".join(lines) if lines else "Forge generates this stage."
+
+
+def _handoff_summary(width, height, hires=False, hr_scale=2.0, hr_resize_x=0,
+                     hr_resize_y=0, enabled=False) -> str:
+    """What crosses the edge between Stage 1 and Stage 2.
+
+    Said even when Stage 2 is off, because it is what Stage 2 *would* be handed
+    and the number a user needs in order to decide whether to arm it.
+    """
+    width, height = _stage1_size(width, height, hires, hr_scale, hr_resize_x, hr_resize_y)
+    note = mc_pipeline_panel.handoff_note(width, height)
+    return note if enabled else f"{note} — Stage 2 is off"
+
+
+def _stage2_summary(enabled, target, denoise, multiplier, loaded="") -> str:
+    """The Stage 2 pipeline row's second line: model, preset, denoise."""
+    if not enabled:
+        return "Off — the Stage 1 image is the final image."
+
+    parts = []
+    name = _short_checkpoint(target)
+    if name and target != _NO_MODEL:
+        parts.append(name)
+    else:
+        parts.append("*no checkpoint chosen*")
+    if loaded:
+        parts.append(str(loaded))
+    try:
+        parts.append(f"denoise {float(denoise):.2f}".rstrip("0").rstrip("."))
+    except (TypeError, ValueError):
+        pass
+    try:
+        if float(multiplier or 1.0) > 1.0:
+            parts.append(f"{float(multiplier):g}× size")
+    except (TypeError, ValueError):
+        pass
+    return " · ".join(parts)
+
+
+def _output_summary(enabled, target, multiplier, width, height, hires=False,
+                    hr_scale=2.0, hr_resize_x=0, hr_resize_y=0) -> str:
+    """The size of the picture that actually arrives.
+
+    The last row of the pipeline and the one a user checks first. With Stage 2
+    off it is the Stage 1 result; with Stage 2 on it is that result scaled and
+    aligned to the Stage 2 architecture's grid, which is the same calculation
+    the Stage 2 size readout makes and is deliberately made from the same two
+    functions rather than a second time by hand.
+    """
+    width, height = _stage1_size(width, height, hires, hr_scale, hr_resize_x, hr_resize_y)
+    if width <= 0 or height <= 0:
+        return ""
+    if not enabled:
+        return f"{width}×{height} — from Stage 1"
+
+    arch = mc_arch.detect_from_checkpoint_name(target)
+    try:
+        out_w, out_h = mc_arch.scaled_size(width, height, float(multiplier or 1.0),
+                                           arch.alignment)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return f"{width}×{height}"
+    return f"{out_w}×{out_h} — refined by Stage 2"
+
+
+
+
 def _edit_notice(target: str, mode: str) -> str:
     """Explain what edit mode will do for the selected Stage 2 model."""
     if not target or target == _NO_MODEL:
@@ -758,6 +945,15 @@ class ScriptModelChain(scripts.Script):
         self._hr_scale_component = None
         self._hr_resize_x_component = None
         self._hr_resize_y_component = None
+        # Native controls the Image Pipeline's Stage 1 row reads. Every one is
+        # optional: a Forge build that renames one costs that clause of the
+        # summary and nothing else, which is the only acceptable failure for a
+        # panel that describes controls it does not own.
+        self._checkpoint_component = None
+        self._sampler_component = None
+        self._scheduler_component = None
+        self._steps_component = None
+        self._cfg_component = None
         # Guards Stage 2's own process_images() call from re-entering this
         # script. Stage 2 runs with p.scripts unset, so this is belt and
         # braces -- but the cost of getting it wrong is an infinite chain.
@@ -785,6 +981,9 @@ class ScriptModelChain(scripts.Script):
         # Set by ui() when the reference status has to wait for that gallery,
         # and consumed the moment it arrives.
         self._wire_reference_notice = None
+        # The same one-shot for the Image Pipeline's context rows, which count
+        # the same gallery.
+        self._wire_pipeline_context = None
         # This generation's supplemental reference set, captured in process()
         # while the Stage 1 script arguments are still live.
         self._references = ()
@@ -815,6 +1014,13 @@ class ScriptModelChain(scripts.Script):
         "txt2img_hr_scale": "_hr_scale_component",
         "txt2img_hr_resize_x": "_hr_resize_x_component",
         "txt2img_hr_resize_y": "_hr_resize_y_component",
+        # Read-only, for the Stage 1 context row. Section 2.5: these stay the
+        # only place their values can be changed.
+        "setting_sd_model_checkpoint": "_checkpoint_component",
+        "txt2img_sampling": "_sampler_component",
+        "txt2img_scheduler": "_scheduler_component",
+        "txt2img_steps": "_steps_component",
+        "txt2img_cfg_scale": "_cfg_component",
     }
 
     def after_component(self, component, **kwargs):
@@ -830,6 +1036,7 @@ class ScriptModelChain(scripts.Script):
         if elem_id.endswith(mc_references.STITCH_GALLERY_SUFFIX) and self._stitch_gallery_component is None:
             self._stitch_gallery_component = component
             self._wire_deferred_reference_notice(component)
+            self._wire_deferred_pipeline_context(component)
 
     def _wire_deferred_reference_notice(self, gallery) -> None:
         """Finish the reference status now ImageStitch's gallery exists.
@@ -846,76 +1053,103 @@ class ScriptModelChain(scripts.Script):
         except Exception:
             errors.report("Model Chain: failed to wire the reference status", exc_info=True)
 
+    def _wire_deferred_pipeline_context(self, gallery) -> None:
+        """Finish the Image Pipeline's context rows, for the same reason.
+
+        A one-shot on the same terms as the reference status above: dropped
+        once used, so a rebuilt UI cannot leave two sets of handlers racing to
+        write the same four lines.
+        """
+        wire, self._wire_pipeline_context = self._wire_pipeline_context, None
+        if wire is None:
+            return
+        try:
+            wire(gallery)
+        except Exception:
+            errors.report("Model Chain: failed to wire the Image Pipeline context",
+                          exc_info=True)
+
     def ui(self, is_img2img):
         checkpoints, module_choices = _model_choices()
         samplers = _sampler_choices()
         schedulers = _scheduler_choices()
         styles = mc_styles.available_styles()
 
-        with InputAccordion(False, label="Model Chain", elem_id=self.elem_id("enable")) as enabled:
+        pipeline = mc_pipeline_panel.host()
+
+        # -- Stage 2's switch, on the pipeline row -------------------------- #
+        #
+        # The same boolean the accordion used to carry, in the place section 3.3
+        # asks for it: on the collapsed row, so arming or bypassing Stage 2
+        # never requires opening it. It is still the first control this script
+        # returns and still the first field of a preset -- an InputAccordion is
+        # a checkbox with a drawer attached, and the drawer moved.
+        with pipeline.head("stage2"):
+            enabled = gr.Checkbox(
+                value=False,
+                label="ON",
+                container=False,
+                elem_id=self.elem_id("enable"),
+                elem_classes=mc_pipeline_panel.classes("toggle"),
+            )
+
+        with pipeline.body("stage2"):
             gr.Markdown(
                 "Finishes Stage 1 on the loaded checkpoint, then re-encodes the "
                 "result and refines it with a second checkpoint. The handoff is in "
                 "**pixel space**, so the two models may use different architectures, "
-                "VAEs and text encoders."
+                "VAEs and text encoders.",
+                elem_id=self.elem_id("intro"),
             )
 
-            # -- presets --------------------------------------------------- #
-            with gr.Row():
-                preset = gr.Dropdown(
-                    value=mc_presets.NONE,
-                    label="Preset",
-                    choices=mc_presets.choices(),
-                    elem_id=self.elem_id("preset"),
-                    info="selecting a preset applies it immediately",
-                )
-                preset_refresh = ToolButton(
-                    value=refresh_symbol,
-                    elem_id=self.elem_id("preset_refresh"),
-                    tooltip="Presets: refresh",
-                )
-            with gr.Row():
-                preset_name = gr.Textbox(
-                    label="Preset name",
-                    placeholder="name to save the current Stage 2 settings under",
-                    elem_id=self.elem_id("preset_name"),
-                    scale=3,
-                )
-                preset_save = gr.Button("Save", elem_id=self.elem_id("preset_save"), scale=1)
-                preset_delete = gr.Button("Delete", elem_id=self.elem_id("preset_delete"), scale=1)
-            preset_status = gr.Markdown("", elem_id=self.elem_id("preset_status"))
+            # -- 9.1 Essential --------------------------------------------- #
+            #
+            # Not in an accordion, and that is the section: the checkpoint, how
+            # far it may move the picture, and how big the result is are the
+            # three decisions somebody makes every time. Everything below this
+            # is a decision made once and then left alone.
+            with gr.Group(elem_classes=mc_pipeline_panel.classes("essential")):
+                with gr.Row():
+                    target = gr.Dropdown(
+                        value=_NO_MODEL,
+                        label="Stage 2 checkpoint",
+                        choices=checkpoints,
+                        elem_id=self.elem_id("target"),
+                    )
+                    target_refresh = ToolButton(
+                        value=refresh_symbol,
+                        elem_id=self.elem_id("target_refresh"),
+                        tooltip="Stage 2 checkpoint and modules: refresh",
+                    )
 
-            with gr.Row():
-                target = gr.Dropdown(
-                    value=_NO_MODEL,
-                    label="Stage 2 checkpoint",
-                    choices=checkpoints,
-                    elem_id=self.elem_id("target"),
-                )
-                target_refresh = ToolButton(
-                    value=refresh_symbol,
-                    elem_id=self.elem_id("target_refresh"),
-                    tooltip="Stage 2 checkpoint and modules: refresh",
-                )
+                with gr.Row():
+                    denoise = gr.Slider(
+                        label="Denoise strength",
+                        minimum=0.0,
+                        maximum=1.0,
+                        step=0.01,
+                        value=DEFAULT_DENOISE,
+                        elem_id=self.elem_id("denoise"),
+                        info="how much Stage 2 may alter the Stage 1 image",
+                    )
+                    size_multiplier = gr.Slider(
+                        label="Output size multiplier",
+                        minimum=1.0,
+                        maximum=2.0,
+                        step=0.05,
+                        value=1.0,
+                        elem_id=self.elem_id("size_multiplier"),
+                    )
 
-            with gr.Row():
-                modules = gr.Dropdown(
-                    value=[mc_memory.INHERIT_MODULES],
-                    label="Stage 2 VAE / Text Encoder",
-                    choices=module_choices,
-                    multiselect=True,
-                    elem_id=self.elem_id("modules"),
-                    info=(
-                        f'"{mc_memory.INHERIT_MODULES}" keeps Stage 1\'s selection; '
-                        "clear it entirely to use the checkpoint's built-in modules"
-                    ),
-                )
+                size_note = gr.Markdown("", elem_id=self.elem_id("size_note"))
+                preset_status = gr.Markdown("", elem_id=self.elem_id("preset_status"))
+                preset_explain = gr.Markdown(
+                    "", elem_id=self.elem_id("preset_explain"),
+                    elem_classes=mc_pipeline_panel.classes("explain"))
 
-            architecture_notice = gr.Markdown("", elem_id=self.elem_id("arch_notice"))
-            residency_status = gr.Markdown("", elem_id=self.elem_id("residency"))
-
-            # -- prompt ---------------------------------------------------- #
-            with gr.Group():
+            # -- 9.2 Prompt & Styles --------------------------------------- #
+            with gr.Accordion("Prompt & Styles", open=False,
+                              elem_id=self.elem_id("section_prompt")):
                 prompt_mode = gr.Radio(
                     choices=list(mc_infotext.PROMPT_MODES),
                     value="Inherit",
@@ -960,29 +1194,9 @@ class ScriptModelChain(scripts.Script):
                         tooltip="Stage 2 styles: refresh",
                     )
 
-            # -- sampling -------------------------------------------------- #
-            with gr.Group():
-                with gr.Row():
-                    denoise = gr.Slider(
-                        label="Denoise strength",
-                        minimum=0.0,
-                        maximum=1.0,
-                        step=0.01,
-                        value=DEFAULT_DENOISE,
-                        elem_id=self.elem_id("denoise"),
-                        info="how much Stage 2 may alter the Stage 1 image",
-                    )
-                    size_multiplier = gr.Slider(
-                        label="Output size multiplier",
-                        minimum=1.0,
-                        maximum=2.0,
-                        step=0.05,
-                        value=1.0,
-                        elem_id=self.elem_id("size_multiplier"),
-                    )
-
-                size_note = gr.Markdown("", elem_id=self.elem_id("size_note"))
-
+            # -- 9.3 Sampling ---------------------------------------------- #
+            with gr.Accordion("Sampling", open=False,
+                              elem_id=self.elem_id("section_sampling")):
                 with gr.Row():
                     steps = gr.Slider(
                         label="Stage 2 steps",
@@ -1015,8 +1229,9 @@ class ScriptModelChain(scripts.Script):
                         elem_id=self.elem_id("scheduler"),
                     )
 
-            # -- edit / reference conditioning ----------------------------- #
-            with gr.Group():
+            # -- 9.4 Edit & References ------------------------------------- #
+            with gr.Accordion("Edit & References", open=False,
+                              elem_id=self.elem_id("section_references")):
                 edit_mode = gr.Radio(
                     choices=list(mc_arch.EDIT_MODES),
                     value=mc_arch.EDIT_AUTO,
@@ -1026,8 +1241,6 @@ class ScriptModelChain(scripts.Script):
                 )
                 edit_notice = gr.Markdown("", elem_id=self.elem_id("edit_notice"))
 
-            # -- supplemental reference images ----------------------------- #
-            with gr.Group():
                 reference_mode = gr.Radio(
                     choices=list(mc_references.MODES),
                     value=mc_references.DISABLED,
@@ -1104,8 +1317,9 @@ class ScriptModelChain(scripts.Script):
                     ),
                 )
 
-            # -- seed ------------------------------------------------------ #
-            with gr.Group():
+            # -- 9.5 Seed --------------------------------------------------- #
+            with gr.Accordion("Seed", open=False,
+                              elem_id=self.elem_id("section_seed")):
                 seed_mode = gr.Radio(
                     choices=list(mc_infotext.SEED_MODES),
                     value="Inherit",
@@ -1128,6 +1342,57 @@ class ScriptModelChain(scripts.Script):
                         visible=False,
                         elem_id=self.elem_id("fixed_seed"),
                     )
+
+            # -- 9.6 Model Components & Status ------------------------------ #
+            with gr.Accordion("Model Components & Status", open=False,
+                              elem_id=self.elem_id("section_modules")):
+                modules = gr.Dropdown(
+                    value=[mc_memory.INHERIT_MODULES],
+                    label="Stage 2 VAE / Text Encoder",
+                    choices=module_choices,
+                    multiselect=True,
+                    elem_id=self.elem_id("modules"),
+                    info=(
+                        f'"{mc_memory.INHERIT_MODULES}" keeps Stage 1\'s selection; '
+                        "clear it entirely to use the checkpoint's built-in modules"
+                    ),
+                )
+                architecture_notice = gr.Markdown("", elem_id=self.elem_id("arch_notice"))
+                residency_status = gr.Markdown("", elem_id=self.elem_id("residency"))
+
+            # -- 9.7 Presets ------------------------------------------------ #
+            with gr.Accordion("Presets", open=False,
+                              elem_id=self.elem_id("section_presets")):
+                with gr.Row():
+                    preset = gr.Dropdown(
+                        value=mc_presets.NONE,
+                        label="Preset",
+                        choices=mc_presets.choices(),
+                        elem_id=self.elem_id("preset"),
+                        info="selecting a preset applies it immediately",
+                    )
+                    preset_refresh = ToolButton(
+                        value=refresh_symbol,
+                        elem_id=self.elem_id("preset_refresh"),
+                        tooltip="Presets: refresh",
+                    )
+                with gr.Row():
+                    preset_name = gr.Textbox(
+                        label="Preset name",
+                        placeholder="name to save the current Stage 2 settings under",
+                        elem_id=self.elem_id("preset_name"),
+                        scale=3,
+                    )
+                    preset_save = gr.Button("Save", elem_id=self.elem_id("preset_save"), scale=1)
+                    preset_delete = gr.Button("Delete", elem_id=self.elem_id("preset_delete"), scale=1)
+
+                # The snapshot the dirty indicator compares against, and the
+                # name it reports. Both are UI-only: a preset is applied to the
+                # controls the moment it is chosen, exactly as before, and this
+                # pair only remembers what those controls held at that moment.
+                preset_baseline = gr.State("")
+                preset_loaded = gr.State("")
+
 
         # -- the memory contract ------------------------------------------- #
         #
@@ -1455,45 +1720,98 @@ class ScriptModelChain(scripts.Script):
         preset_controls = [components[name] for name in mc_presets.FIELDS]
         preset_defaults = {name: components[name].value for name in mc_presets.FIELDS}
 
+        def _preset_state(name, values):
+            """The three things a load or a save leaves behind.
+
+            The status line, the fingerprint later edits are compared against,
+            and the name to report them under. Computed in one place because a
+            baseline that disagrees with the name it was taken for is a dirty
+            flag that reports on the wrong preset.
+            """
+            return (
+                mc_profile_state.describe(name, False),
+                "",
+                mc_profile_state.snapshot(list(values)),
+                name,
+            )
+
         def on_preset_selected(name):
+            skipped = [gr.skip()] * len(preset_controls)
             if not name or name == mc_presets.NONE:
-                return ["", *([gr.skip()] * len(preset_controls))]
+                # Nothing named is loaded, so there is nothing to be modified
+                # from. The controls keep whatever they hold -- deselecting a
+                # preset is not a request to change any setting.
+                return ["", "", "", "", *skipped]
 
             values = mc_presets.get(name)
             if values is None:
                 return [
                     f'⚠️ Preset "{name}" no longer exists — refresh the list.',
-                    *([gr.skip()] * len(preset_controls)),
+                    "", gr.skip(), gr.skip(), *skipped,
                 ]
 
             resolved = mc_presets.apply_defaults(values, preset_defaults)
             logger.info("Model Chain: applied preset %r", name)
+            status, explain, baseline, loaded = _preset_state(
+                name, [resolved[field] for field in mc_presets.FIELDS])
             return [
-                f'Applied preset "{name}".',
+                status, explain, baseline, loaded,
                 *[gr.update(value=resolved[field]) for field in mc_presets.FIELDS],
             ]
 
         preset.change(
             fn=on_preset_selected,
             inputs=[preset],
-            outputs=[preset_status, *preset_controls],
+            outputs=[preset_status, preset_explain, preset_baseline, preset_loaded,
+                     *preset_controls],
             show_progress=False,
         )
+
+        # -- the modified indicator ---------------------------------------- #
+        #
+        # Section 8.2, and section 8.3 is why the sentence beside it is not
+        # optional. A control that differs from the preset it was loaded from
+        # says so on the panel, without a dialog and without being asked --
+        # and says, in the same breath, that the edited value is the one the
+        # next Generate will use. "Not saved" describes the file, never the
+        # generation.
+        #
+        # `change` rather than `input` deliberately: it also fires when the
+        # server writes a value, which is what makes applying a preset settle
+        # back to a clean state instead of reporting the load as an edit.
+        def on_preset_touched(loaded, baseline, *values):
+            if not loaded or not baseline:
+                return gr.skip(), gr.skip()
+            modified = mc_profile_state.changed(list(values), baseline)
+            return (mc_profile_state.describe(loaded, modified),
+                    mc_profile_state.explain(modified))
+
+        for control in preset_controls:
+            control.change(
+                fn=on_preset_touched,
+                inputs=[preset_loaded, preset_baseline, *preset_controls],
+                outputs=[preset_status, preset_explain],
+                show_progress=False,
+            )
 
         def on_preset_save(name, *values):
             try:
                 saved = mc_presets.save(name, dict(zip(mc_presets.FIELDS, values)))
             except mc_presets.PresetError as exc:
-                return f"⚠️ {exc}", gr.skip()
+                return f"⚠️ {exc}", gr.skip(), gr.skip(), gr.skip(), gr.skip()
+            # Saving is what clears Modified, and it clears it by making the
+            # stored copy match the screen -- not by changing anything on it.
+            status, explain, baseline, loaded = _preset_state(name.strip(), values)
             return (
-                f'Saved preset "{name.strip()}".',
+                status, explain, baseline, loaded,
                 gr.update(choices=[mc_presets.NONE] + saved, value=name.strip()),
             )
 
         preset_save.click(
             fn=on_preset_save,
             inputs=[preset_name, *preset_controls],
-            outputs=[preset_status, preset],
+            outputs=[preset_status, preset_explain, preset_baseline, preset_loaded,
+                     preset],
             show_progress=False,
         )
 
@@ -1501,16 +1819,17 @@ class ScriptModelChain(scripts.Script):
             try:
                 remaining = mc_presets.delete(name)
             except mc_presets.PresetError as exc:
-                return f"⚠️ {exc}", gr.skip()
+                return f"⚠️ {exc}", gr.skip(), gr.skip(), gr.skip(), gr.skip()
             return (
-                f'Deleted preset "{name}".',
+                f'Deleted preset "{name}".', "", "", "",
                 gr.update(choices=[mc_presets.NONE] + remaining, value=mc_presets.NONE),
             )
 
         preset_delete.click(
             fn=on_preset_delete,
             inputs=[preset],
-            outputs=[preset_status, preset],
+            outputs=[preset_status, preset_explain, preset_baseline, preset_loaded,
+                     preset],
             show_progress=False,
         )
 
@@ -1525,6 +1844,105 @@ class ScriptModelChain(scripts.Script):
             outputs=[preset],
             show_progress=False,
         )
+
+        # -- the pipeline's context rows ------------------------------------ #
+        #
+        # Section 7. Stage 1 belongs to Forge and is read here, never written:
+        # every value below arrives from a native control that stays the only
+        # place it can be changed. The Output row and the handoff line are
+        # derived from the same reads, so the three of them cannot disagree
+        # about the size of the same picture.
+        #
+        # Optional throughout. A control this build of Forge does not expose is
+        # simply absent from the inputs list, its clause is left out of the
+        # sentence, and everything else still updates.
+        _OBSERVED = ("checkpoint", "width", "height", "hires", "hr_scale",
+                     "hr_resize_x", "hr_resize_y", "sampler", "scheduler",
+                     "steps", "cfg")
+
+        def _context_lines(read, is_on, target_name, denoise_value, multiplier,
+                           loaded, gallery):
+            """The four live lines, from one set of reads."""
+            geometry = (read.get("width", 0), read.get("height", 0),
+                        bool(read.get("hires", False)), read.get("hr_scale", 2.0),
+                        read.get("hr_resize_x", 0), read.get("hr_resize_y", 0))
+            return (
+                _stage1_summary(read.get("checkpoint", ""), *geometry,
+                                sampler=read.get("sampler", ""),
+                                steps=read.get("steps", 0),
+                                cfg=read.get("cfg", 0.0),
+                                scheduler=read.get("scheduler", ""),
+                                stitch_gallery=gallery),
+                _handoff_summary(*geometry, enabled=bool(is_on)),
+                _stage2_summary(bool(is_on), target_name, denoise_value,
+                                multiplier, loaded),
+                _output_summary(bool(is_on), target_name, multiplier, *geometry),
+            )
+
+        def wire_pipeline_context(stitch_gallery=None):
+            """Connect the context rows, once it is settled what they can read.
+
+            Deferred for the same reason the reference status is: ImageStitch
+            sorts below Model Chain, so its gallery does not exist while this
+            panel is being built, and a Gradio event captures its input list at
+            registration.
+            """
+            outputs = [pipeline.summary("stage1"), pipeline.handoff,
+                       pipeline.summary("stage2"), pipeline.summary("output")]
+            if not all(outputs):
+                return
+
+            available = [
+                (name, getattr(self, f"_{name}_component", None))
+                for name in _OBSERVED
+            ]
+            present = [(name, component) for name, component in available
+                       if component is not None]
+
+            owned = [enabled, target, denoise, size_multiplier]
+            inputs = [component for _, component in present] + owned + [preset_loaded]
+            if stitch_gallery is not None:
+                inputs.append(stitch_gallery)
+
+            def refresh(*values):
+                read = dict(zip([name for name, _ in present], values))
+                rest = list(values[len(present):])
+                is_on, target_name, denoise_value, multiplier = rest[:4]
+                loaded = rest[4] if len(rest) > 4 else ""
+                gallery = rest[5] if len(rest) > 5 else None
+                return _context_lines(read, is_on, target_name, denoise_value,
+                                      multiplier, loaded, gallery)
+
+            triggers = [component for _, component in present] + owned
+            if stitch_gallery is not None:
+                triggers.append(stitch_gallery)
+            for trigger in triggers:
+                trigger.change(
+                    fn=refresh,
+                    inputs=inputs,
+                    outputs=outputs,
+                    show_progress=False,
+                )
+
+            # What the rows say before anybody has touched anything. Gradio
+            # fires no event at page load, so the first render has to be written
+            # into the components themselves -- which works because the config
+            # the browser is built from is generated after every ui() has run.
+            try:
+                read = {name: getattr(component, "value", None)
+                        for name, component in present}
+                first = _context_lines(read, enabled.value, target.value,
+                                       denoise.value, size_multiplier.value, "", None)
+                for component, text in zip(outputs, first):
+                    component.value = text
+            except Exception:
+                logger.debug("Model Chain: could not pre-render the pipeline context",
+                             exc_info=True)
+
+        if mc_references.stitch_is_installed():
+            self._wire_pipeline_context = wire_pipeline_context
+        else:
+            wire_pipeline_context()
 
         try:
             self.infotext_fields = mc_infotext.build_paste_fields(components)

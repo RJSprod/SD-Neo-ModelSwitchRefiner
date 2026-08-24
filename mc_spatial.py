@@ -54,6 +54,8 @@ ENABLED = "krea_spatial_enabled"
 COMPOSE_MODE = "krea_spatial_compose_mode"
 LAYOUT = "krea_spatial_layout"
 RECORD_SCENES = "krea_spatial_record_scenes"
+PROFILE = "krea_spatial_profile"
+AUTO_SAVE = "krea_spatial_auto_save"
 """The preferences this feature owns. All four are its own keys.
 
 The layout is persisted, and that is deliberate rather than incidental: boxes
@@ -87,6 +89,8 @@ def settings() -> dict:
         "compose_mode": mode if mode in spatial.COMPOSE_MODES else spatial.SMART,
         "layout": str(stored.get(LAYOUT) or ""),
         "record_scenes": bool(stored.get(RECORD_SCENES, True)),
+        "profile": str(stored.get(PROFILE) or ""),
+        "auto_save": bool(stored.get(AUTO_SAVE, True)),
     }
 
 

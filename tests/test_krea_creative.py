@@ -1307,13 +1307,22 @@ class TestTheTxt2imgSurface:
         assert built.show(False) is scripts.AlwaysVisible
         assert built.show(True) is None
 
-    def test_the_default_surface_is_a_toggle_and_a_slider(self, built):
-        """Simple by default: everything else is behind the accordion, and the
-        accordion is closed."""
+    def test_the_stage_is_off_by_default_and_says_so_on_its_pipeline_row(self,
+                                                                           built):
+        """The switch is on the collapsed pipeline row, and the row says what
+        the stage will do -- section 3.3. The drawer behind it is no longer
+        hidden by the toggle: configuring a stage before arming it is an
+        ordinary thing to want, and a drawer that emptied itself when the stage
+        was off made turning it on the only way to set it up."""
         assert built.components["enabled"].value is False
-        assert built.components["controls"].visible is False
-        assert built.components["controls"].open is False
-        assert built.components["creativity"].visible is False
+        assert "Off" in built.components["creative_line"].value
+
+    def test_the_two_stages_this_script_owns_have_their_own_switches(self, built):
+        """Creative and Spatial are peers. Two rows, two switches, and neither
+        one shows or hides the other."""
+        assert built.components["enabled"].value is False
+        assert built.components["spatial_enabled"].value is False
+        assert built.components["enabled"] is not built.components["spatial_enabled"]
 
     def test_the_slider_offers_the_whole_scale(self, built):
         slider = built.components["creativity"]
@@ -1977,14 +1986,22 @@ class TestTheCompactPanel:
 
         assert offered == list(lib.axis_keys)
 
-    def test_adding_a_direction_shows_that_row_and_opens_its_editor(self, built, lib):
+    def test_adding_a_direction_shows_that_row_and_nothing_else(self, built, lib):
         panel = self.panel(built)
         updates = self.rendered(built, _fire(built, panel.add, "medium"))
 
         assert updates[id(panel.rows["medium"])]["visible"] is True
-        assert updates[id(panel.editors["medium"])]["visible"] is True
         assert updates[id(panel.rows["lighting"])]["visible"] is False
-        assert updates[id(panel.editors["lighting"])]["visible"] is False
+
+    def test_a_new_direction_starts_with_nothing_chosen(self, built):
+        """Section 5.1. Adding an axis opens a question rather than answering
+        one: the row appears, the picker is empty, and the brief is exactly
+        what it would have been until a treatment is chosen."""
+        panel = self.panel(built)
+        updates = self.rendered(built, _fire(built, panel.add, "medium"))
+
+        assert updates[id(panel.treatments["medium"])]["value"] == []
+        assert "no treatments chosen" in updates[id(panel.labels["medium"])]["value"]
 
     def test_an_added_axis_is_no_longer_offered_to_be_added(self, built):
         panel = self.panel(built)
@@ -1993,105 +2010,182 @@ class TestTheCompactPanel:
 
         assert "medium" not in offered
 
-    def test_adding_a_direction_varies_it_rather_than_pinning_it(self, built):
+    def test_an_empty_direction_leaves_the_axis_natural(self, built):
+        """The row is a fact about the panel; the axis underneath is untouched.
+        A half-made decision the Director acted on would be a direction nobody
+        chose."""
         _fire(built, self.panel(built).add, "medium")
 
-        assert mc_creative_krea.settings()["axis_modes"]["medium"] == director.VARY
-
-    def test_vary_offers_exclusions_and_no_pinned_value(self, built):
-        panel = self.panel(built)
-        _fire(built, panel.add, "medium")
-        updates = self.rendered(built, _fire(built, panel.modes["medium"],
-                                             director.VARY))
-
-        assert updates[id(panel.excluded["medium"])]["visible"] is True
-        assert updates[id(panel.fixed["medium"])]["visible"] is False
-
-    def test_fixed_offers_a_pinned_value_and_no_exclusions(self, built):
-        panel = self.panel(built)
-        _fire(built, panel.add, "medium")
-        updates = self.rendered(built, _fire(built, panel.modes["medium"],
-                                             director.FIXED))
-
-        assert updates[id(panel.fixed["medium"])]["visible"] is True
-        assert updates[id(panel.excluded["medium"])]["visible"] is False
-
-    def test_neither_is_shown_for_an_axis_whose_editor_is_closed(self, built):
-        panel = self.panel(built)
-        _fire(built, panel.add, "medium")
-        _fire(built, panel.modes["medium"], director.VARY)
-        updates = self.rendered(built, _click(built, "editor", "medium", "done"))
-
-        assert updates[id(panel.editors["medium"])]["visible"] is False
-        assert updates[id(panel.excluded["medium"])]["visible"] is False
-        assert updates[id(panel.rows["medium"])]["visible"] is True
-
-    def test_returning_to_natural_removes_the_row(self, built):
-        panel = self.panel(built)
-        _fire(built, panel.add, "medium")
-        updates = self.rendered(built, _click(built, "editor", "medium", "natural"))
-
-        assert updates[id(panel.rows["medium"])]["visible"] is False
         assert mc_creative_krea.settings()["axis_modes"]["medium"] == director.NATURAL
+        assert "medium" in mc_creative_krea.settings()["directions"]
+
+    def test_two_treatments_become_a_seeded_pool(self, built, lib):
+        """Section 5.3: 2+ selected is a pool the Creative seed chooses from,
+        which underneath is Vary with everything else excluded."""
+        panel = self.panel(built)
+        chosen = [variant.identifier for variant in lib.axis("medium").variants[:2]]
+        _fire(built, panel.add, "medium")
+        _fire(built, panel.treatments["medium"], chosen)
+
+        stored = mc_creative_krea.settings()
+        assert stored["axis_modes"]["medium"] == director.VARY
+        assert stored["fixed_values"].get("medium") is None
+        allowed = set(chosen)
+        assert not allowed & set(stored["excluded_values"]["medium"])
+
+    def test_one_treatment_is_a_fixed_treatment(self, built, lib):
+        """Section 5.3: 1 selected repeats every roll."""
+        panel = self.panel(built)
+        pinned = lib.axis("medium").variants[0].identifier
+        _fire(built, panel.add, "medium")
+        _fire(built, panel.treatments["medium"], [pinned])
+
+        stored = mc_creative_krea.settings()
+        assert stored["axis_modes"]["medium"] == director.FIXED
+        assert stored["fixed_values"]["medium"] == pinned
+        assert not stored["excluded_values"].get("medium")
+
+    def test_clearing_the_picker_stops_the_axis_directing(self, built, lib):
+        """Section 5.3 again, in the direction that matters: emptying a picker
+        must leave the axis out of the brief entirely, not leave the last
+        treatment pinned where nobody can see it."""
+        panel = self.panel(built)
+        pinned = lib.axis("medium").variants[0].identifier
+        _fire(built, panel.add, "medium")
+        _fire(built, panel.treatments["medium"], [pinned])
+        _fire(built, panel.treatments["medium"], [])
+
+        stored = mc_creative_krea.settings()
+        assert stored["axis_modes"]["medium"] == director.NATURAL
+        assert stored["fixed_values"].get("medium") is None
+        # The row stays, because the user has not taken it away.
+        assert "medium" in stored["directions"]
+
+    def test_a_selection_round_trips_through_the_settings(self, built, lib):
+        """The picker reads what it wrote. Selection and storage are one
+        mapping in two directions, and halves that disagree are a panel that
+        forgets a choice the moment the tab is reloaded."""
+        panel = self.panel(built)
+        chosen = [variant.identifier for variant in lib.axis("style").variants[:3]]
+        _fire(built, panel.add, "style")
+        updates = self.rendered(built, _fire(built, panel.treatments["style"], chosen))
+
+        assert sorted(updates[id(panel.treatments["style"])]["value"]) == sorted(chosen)
+
+    def test_the_machine_facing_controls_are_never_shown(self, built, lib):
+        """Mode, pinned value and exclusions still travel to the generation --
+        that contract is unchanged -- but the picker is the only thing a user
+        touches. Two controls for one decision is how a panel ends up showing
+        an exclusion list for an axis that is no longer varying."""
+        panel = self.panel(built)
+        _fire(built, panel.add, "medium")
+        _fire(built, panel.treatments["medium"],
+              [variant.identifier for variant in lib.axis("medium").variants[:2]])
+
+        assert all(editor.visible is False for editor in built.components["editors"])
+
+    def test_removing_a_row_takes_its_treatments_with_it(self, built, lib):
+        """One action, because on screen they are one thing. A row removed but
+        still pinned would keep directing the brief from somewhere the user can
+        no longer see it."""
+        panel = self.panel(built)
+        _fire(built, panel.add, "medium")
+        _fire(built, panel.treatments["medium"],
+              [lib.axis("medium").variants[0].identifier])
+        updates = self.rendered(built, _click(built, "row", "medium", "remove"))
+
+        stored = mc_creative_krea.settings()
+        assert updates[id(panel.rows["medium"])]["visible"] is False
+        assert stored["axis_modes"]["medium"] == director.NATURAL
+        assert stored["fixed_values"].get("medium") is None
+        assert "medium" not in stored["directions"]
 
     def test_the_row_summarises_the_decision_in_one_line(self, built, lib):
         panel = self.panel(built)
         pinned = lib.axis("medium").variants[0]
         _fire(built, panel.add, "medium")
-        _fire(built, panel.modes["medium"], director.FIXED)
-        updates = self.rendered(built, _fire(built, panel.fixed["medium"],
-                                             pinned.identifier))
+        updates = self.rendered(built, _fire(built, panel.treatments["medium"],
+                                             [pinned.identifier]))
 
         assert updates[id(panel.labels["medium"])]["value"] == (
-            f"**{lib.axis('medium').label}** · Fixed: {pinned.label}")
+            f"**{lib.axis('medium').label}** · {pinned.label}")
 
-    def test_a_vary_row_says_how_many_it_excludes(self, built, lib):
+    def test_a_pool_row_says_how_many_it_may_choose_between(self, built, lib):
         panel = self.panel(built)
-        banned = lib.axis("lighting").variants[0]
+        chosen = [variant.identifier for variant in lib.axis("lighting").variants[:3]]
         _fire(built, panel.add, "lighting")
-        updates = self.rendered(built, _fire(built, panel.excluded["lighting"],
-                                             [banned.identifier]))
+        updates = self.rendered(built, _fire(built, panel.treatments["lighting"],
+                                             chosen))
         line = updates[id(panel.labels["lighting"])]["value"]
 
-        assert "Vary" in line and banned.label in line
+        assert "3 treatments" in line and "Creative seed" in line
 
-    def test_the_exclusions_reach_the_settings_file(self, built, lib):
+    def test_what_was_not_chosen_reaches_the_settings_file_as_exclusions(self, built,
+                                                                          lib):
+        """The picker asks which treatments to use; the Director has always
+        been told which ones not to. This is that translation, written down."""
         panel = self.panel(built)
-        banned = lib.axis("lighting").variants[0].identifier
+        variants = [variant.identifier for variant in lib.axis("lighting").variants]
         _fire(built, panel.add, "lighting")
-        _fire(built, panel.excluded["lighting"], [banned])
+        _fire(built, panel.treatments["lighting"], variants[:2])
 
-        assert mc_creative_krea.settings()["excluded_values"] == {"lighting": [banned]}
+        assert (mc_creative_krea.settings()["excluded_values"]["lighting"]
+                == variants[2:])
 
-    def test_every_axis_control_answers_on_input_rather_than_on_change(self, built):
+    def test_every_treatment_picker_answers_on_input_rather_than_on_change(self,
+                                                                            built):
         """Every handler here rewrites the whole panel, including the control
         that fired it. ``change`` fires when the server sets a value, so wiring
         these to it would be a feedback loop."""
         panel = self.panel(built)
         for key in panel.keys:
+            kinds = {kind for kind, _kwargs in panel.treatments[key]._callbacks}
+            assert kinds == {"input"}
+
+    def test_the_machine_facing_controls_are_written_only_by_a_render(self, built):
+        """They are outputs, never inputs. A handler on one of them would be a
+        second writer for a value the picker already owns."""
+        panel = self.panel(built)
+        for key in panel.keys:
             for control in (panel.modes[key], panel.fixed[key], panel.excluded[key]):
-                kinds = {kind for kind, _kwargs in control._callbacks}
-                assert kinds == {"input"}
+                assert control._callbacks == []
 
     def test_saving_a_profile_from_the_panel_stores_what_is_on_screen(self, built,
-                                                                      data):
+                                                                      data, lib):
         panel = self.panel(built)
+        pinned = lib.axis("medium").variants[0].identifier
         _fire(built, panel.add, "medium")
+        _fire(built, panel.treatments["medium"], [pinned])
         panel.profile_name.value = "Editorial"
         _click(built, "profile", "create")
 
-        assert profiles.get("Editorial")["axis_modes"]["medium"] == director.VARY
+        assert profiles.get("Editorial")["axis_modes"]["medium"] == director.FIXED
+        assert profiles.get("Editorial")["fixed_values"]["medium"] == pinned
 
-    def test_loading_a_profile_redraws_every_control(self, built, data):
+    def test_a_profile_remembers_a_row_that_has_no_treatments_yet(self, built, data):
+        """An unfinished direction is still work somebody did. A profile that
+        carried the settings but not the rows would load as a panel that had
+        silently forgotten it."""
         panel = self.panel(built)
         _fire(built, panel.add, "medium")
+        panel.profile_name.value = "Half done"
+        _click(built, "profile", "create")
+
+        assert profiles.get("Half done")["directions"] == ["medium"]
+
+    def test_loading_a_profile_redraws_every_control(self, built, data, lib):
+        panel = self.panel(built)
+        pinned = lib.axis("medium").variants[0].identifier
+        _fire(built, panel.add, "medium")
+        _fire(built, panel.treatments["medium"], [pinned])
         panel.profile_name.value = "Editorial"
         _click(built, "profile", "create")
-        _click(built, "editor", "medium", "natural")
+        _click(built, "row", "medium", "remove")
 
         updates = self.rendered(built, _fire(built, panel.profile, "Editorial"))
         assert updates[id(panel.rows["medium"])]["visible"] is True
-        assert updates[id(panel.modes["medium"])]["value"] == director.VARY
+        assert updates[id(panel.treatments["medium"])]["value"] == [pinned]
+        assert updates[id(panel.modes["medium"])]["value"] == director.FIXED
 
     def test_a_choice_made_in_the_panel_reaches_the_writer(self, built, client, lib):
         """The whole point of the panel, end to end, driven the way a browser
@@ -2104,8 +2198,7 @@ class TestTheCompactPanel:
         panel = self.panel(built)
         pinned = lib.axis("style").variants[0]
         _fire(built, panel.add, "style")
-        _fire(built, panel.modes["style"], director.FIXED)
-        _fire(built, panel.fixed["style"], pinned.identifier)
+        _apply(built, _fire(built, panel.treatments["style"], [pinned.identifier]))
 
         # The values Forge sends: whatever the panel's own controls hold.
         values = [getattr(control, "value", None) for control in built.arguments]
@@ -2146,11 +2239,24 @@ class TestTheCompactPanel:
         they can act on it."""
         panel = self.panel(built)
         _fire(built, panel.add, "medium")
-        updates = self.rendered(built, _fire(built, panel.add, "lighting"))
+        _fire(built, panel.treatments["medium"],
+              [variant.identifier for variant in lib.axis("medium").variants[:2]])
+        _fire(built, panel.add, "lighting")
+        updates = self.rendered(built, _fire(
+            built, panel.treatments["lighting"],
+            [variant.identifier for variant in lib.axis("lighting").variants[:2]]))
         said = updates[id(panel.cost)]["value"]
 
         assert "characters of brief" in said
         assert "of reading" in said
+
+    def test_a_row_with_no_treatments_costs_nothing(self, built):
+        """It directs nothing, so it adds nothing to the brief -- and the cost
+        line has to agree with the axis mode, or one of them is lying."""
+        panel = self.panel(built)
+        updates = self.rendered(built, _fire(built, panel.add, "medium"))
+
+        assert "No directions" in updates[id(panel.cost)]["value"]
 
     def test_a_configuration_that_directs_nothing_costs_nothing(self, built):
         assert "No directions" in built.components["cost"].value
@@ -2282,7 +2388,7 @@ class TestTheCompactPanel:
         panel = self.panel(built)
 
         assert len(panel.render()) == len(panel.outputs())
-        assert len(panel.render(editing="medium", told="hello")) == len(panel.outputs())
+        assert len(panel.render(told="hello")) == len(panel.outputs())
 
     def test_a_library_that_will_not_load_leaves_a_sentence_and_no_panel(self, store,
                                                                         monkeypatch):
@@ -2332,6 +2438,21 @@ def _fire(script, component, value):
         return kwargs["fn"](*[value if entry is component
                               else getattr(entry, "value", None) for entry in inputs])
     raise AssertionError("that component has no input handler")
+
+
+def _apply(script, updates):
+    """Write one render's updates back onto the components, as Gradio does.
+
+    The panel's mode, pinned-value and exclusion controls are outputs now: the
+    treatment picker writes the settings, and a render is what carries the
+    result back to the three controls that travel to the generation. A test
+    that read those controls without applying the render would be reading the
+    page as it was before the click.
+    """
+    for component, update in zip(script.panel.outputs(), updates):
+        if isinstance(update, dict) and "value" in update:
+            component.value = update["value"]
+    return updates
 
 
 def _click(script, *parts):

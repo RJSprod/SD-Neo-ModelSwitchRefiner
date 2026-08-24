@@ -1426,19 +1426,12 @@
    one of the host's custom properties, so a theme decides what a warning looks
    like here exactly as it does everywhere else.
 
-   The surface is deliberately quiet when Creative Mode is off -- one checkbox,
-   no border, no panel. What is drawn below only applies once the row has been
-   revealed, which is the one moment the positive prompt has changed meaning and
-   the interface owes somebody a visible sign of it. */
-
-#mc-krea-creative-group {
-    margin-top: 0.25em;
-}
-
-#mc-krea-creative-bar {
-    align-items: center;
-    gap: 0.75em;
-}
+   The surface is deliberately quiet. Creative Mode is a row on the Image
+   Pipeline now -- a title, a switch and one live line -- and everything below
+   applies inside the drawer behind it, which is the one place the positive
+   prompt has changed meaning and the interface owes somebody a visible sign of
+   it. The group and bar this section used to position are gone with the two
+   free-standing panels; the pipeline row does their job. */
 
 #mc-krea-creative-status .mc-krea-creative-notice {
     padding: 0.35em 0.6em;
@@ -1603,13 +1596,16 @@
    a light theme is a composition editor nobody can aim in.
    -------------------------------------------------------------------------- */
 
-#mc-krea-creative-spatial {
-    margin-top: 0.4em;
+#mc-krea-creative-spatial-layout {
+    margin-top: 0.3em;
 }
 
-#mc-krea-creative-spatial-bar {
+/* Auto Save, Undo, Save working layout and Edit Layout…, on one line where the
+   column is wide enough for it and wrapped where it is not. Four controls, and
+   the last of them is the way out to everything the compact canvas cannot do. */
+#mc-krea-creative-spatial-actions {
     align-items: center;
-    gap: 0.6em;
+    gap: 0.5em;
     flex-wrap: wrap;
 }
 
@@ -2432,4 +2428,322 @@
     display: inline-flex;
     align-items: center;
     gap: 0.4em;
+}
+
+/* ==========================================================================
+   The Image Pipeline
+   ==========================================================================
+
+   One path, six rows, three of them ours. Everything below is colour, spacing
+   and one thin animation over stock Gradio components -- there is not a single
+   control in this section, because there is not a single control in the panel
+   that this extension drew itself. That is what lets a theme extension restyle
+   the pipeline along with the rest of the page.
+
+   Three rules, and all three come from having to survive somebody else's
+   theme:
+
+   1. Every colour is a theme variable with a literal fallback. Lobe and the
+      stock Gradio themes both define --body-text-color, --border-color-primary
+      and --background-fill-*, in light and dark alike, so the panel follows the
+      page rather than fighting it.
+
+   2. No Gradio-generated class appears in any selector. Every hook is an id or
+      a class this extension put in the page itself, so a theme that rebuilds
+      Gradio's internals changes how this looks and cannot stop it working.
+
+   3. Nothing here sets a font size in pixels or a fixed width. The panel lives
+      in Forge Neo's narrow generation column, and the column's width is the
+      theme's decision.
+*/
+
+:root {
+    --mc-pipe-rail: var(--border-color-primary, #d0d0d0);
+    --mc-pipe-node: var(--background-fill-primary, #fff);
+    --mc-pipe-accent: var(--primary-500, #0060df);
+    --mc-pipe-muted: var(--body-text-color-subdued, #808080);
+    /* The compact canvas's height budget. aspect-ratio supplies the rest, so
+       this is the only number that decides how much of the column it takes. */
+    --mc-compact-h: 210px;
+}
+
+/* -- the rail ------------------------------------------------------------ */
+/*
+   A vertical timeline, because the panel's whole claim is that these things
+   happen in this order. A stack of boxes would show the same six stages and
+   say nothing about the sequence.
+*/
+
+.mc-pipeline-stage,
+.mc-pipeline-handoff {
+    position: relative;
+    padding-left: 1.5em;
+}
+
+.mc-pipeline-stage {
+    padding-top: 0.35em;
+    padding-bottom: 0.35em;
+}
+
+/* The line. It runs past the bottom of its own row to meet the next node,
+   which is what makes six separate elements read as one path. */
+.mc-pipeline-stage::before,
+.mc-pipeline-handoff::before {
+    content: "";
+    position: absolute;
+    left: 0.42em;
+    top: 0;
+    bottom: -0.5em;
+    width: 2px;
+    background: var(--mc-pipe-rail);
+}
+
+/* The last node ends the path rather than trailing off it. */
+.mc-pipeline-stage-output::before {
+    bottom: auto;
+    height: 0.9em;
+}
+
+.mc-pipeline-stage::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0.5em;
+    width: 0.86em;
+    height: 0.86em;
+    box-sizing: border-box;
+    border-radius: 50%;
+    border: 2px solid var(--mc-pipe-rail);
+    background: var(--mc-pipe-node);
+}
+
+/* -- ownership ----------------------------------------------------------- */
+/*
+   Section 2.4. Creative, Spatial and Stage 2 are Model Chain's: emphasised,
+   switchable, expandable. Prompt, Stage 1 and Output are Forge's and are here
+   only because a path with holes in it teaches nobody the path -- so they are
+   muted rather than disabled. A control that is present and refuses to work is
+   worse than no control.
+*/
+
+.mc-pipeline-stage-owned::after {
+    border-color: var(--mc-pipe-accent);
+}
+
+.mc-pipeline-stage-context .mc-pipeline-title,
+.mc-pipeline-stage-context .mc-pipeline-summary,
+.mc-pipeline-handoff {
+    color: var(--mc-pipe-muted);
+}
+
+.mc-pipeline-stage-context::after {
+    border-style: dashed;
+}
+
+.mc-pipeline-title {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+}
+
+.mc-pipeline-summary {
+    font-size: var(--text-sm, 0.86em);
+    line-height: 1.35;
+    opacity: 0.92;
+}
+
+.mc-pipeline-handoff {
+    font-size: var(--text-xs, 0.78em);
+    font-style: italic;
+    padding-top: 0.1em;
+    padding-bottom: 0.1em;
+}
+
+.mc-pipeline-explain {
+    font-size: var(--text-xs, 0.78em);
+    color: var(--mc-pipe-muted);
+}
+
+/* The ON switch sits on the collapsed row -- §3.3 -- so it has to be small
+   enough not to become the row. `container=False` on the Checkbox takes the
+   Gradio wrapper away; this takes the leftover margins. */
+.mc-pipeline-switch {
+    flex: 0 0 auto;
+    align-self: center;
+}
+
+.mc-pipeline-head {
+    align-items: center;
+    gap: 0.5em;
+}
+
+/* -- the running row ----------------------------------------------------- */
+/*
+   Section 4: subtle, and never over the top of anything. The node pulses and
+   the rail segment beside it brightens; no bar, no overlay, nothing that
+   covers a label, a summary, a control or a warning, and nothing that competes
+   with Forge's own progress bar -- which remains the thing that says how far
+   along the generation is. This only says *where*.
+*/
+
+.mc-pipeline-stage.mc-pipeline-running::after {
+    border-color: var(--mc-pipe-accent);
+    background: var(--mc-pipe-accent);
+    animation: mc-pipeline-pulse 1.6s ease-in-out infinite;
+}
+
+.mc-pipeline-stage.mc-pipeline-running::before {
+    background: linear-gradient(
+        to bottom,
+        var(--mc-pipe-accent),
+        var(--mc-pipe-rail)
+    );
+}
+
+.mc-pipeline-stage.mc-pipeline-running .mc-pipeline-title {
+    color: var(--mc-pipe-accent);
+}
+
+/* Finished, and restrained about it: a filled node and nothing moving. */
+.mc-pipeline-stage.mc-pipeline-done::after {
+    border-color: var(--mc-pipe-accent);
+    background: color-mix(in srgb, var(--mc-pipe-accent) 45%, transparent);
+}
+
+@keyframes mc-pipeline-pulse {
+    0%, 100% {
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--mc-pipe-accent) 55%, transparent);
+    }
+    50% {
+        box-shadow: 0 0 0 0.35em color-mix(in srgb, var(--mc-pipe-accent) 0%, transparent);
+    }
+}
+
+/* -- the treatment rows -------------------------------------------------- */
+
+.mc-creative-direction {
+    padding: 0.3em 0.4em;
+}
+
+.mc-creative-direction-bar {
+    align-items: flex-end;
+    gap: 0.4em;
+}
+
+.mc-creative-direction-summary {
+    font-size: var(--text-xs, 0.78em);
+    color: var(--mc-pipe-muted);
+    padding-top: 0.15em;
+}
+
+.mc-creative-profile-state {
+    font-size: var(--text-sm, 0.86em);
+}
+
+/* ==========================================================================
+   The compact spatial canvas
+   ==========================================================================
+
+   Section 6.2: position correction, in the pipeline, without opening the
+   workspace. It is small on purpose -- it is a place to nudge a box, not a
+   place to compose -- and the height budget below is the only number that
+   decides how much of the narrow column it takes. aspect-ratio supplies the
+   rest from the txt2img width and height, so what is dragged on is the shape
+   of what will be generated.
+*/
+
+.mc-krea-spatial-compact {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+    margin: 0.4em 0;
+}
+
+.mc-krea-spatial-compact-frame {
+    position: relative;
+    margin: 0 auto;
+    aspect-ratio: var(--mc-ar-w, 1) / var(--mc-ar-h, 1);
+    width: min(100%, var(--mc-compact-h) * var(--mc-ar-w, 1) / var(--mc-ar-h, 1));
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-sm, 4px);
+    background: var(--background-fill-secondary);
+    overflow: hidden;
+    /* The frame itself scrolls the page like any other block; only the boxes
+       being dragged opt out, below. */
+    touch-action: pan-x pan-y;
+}
+
+.mc-krea-spatial-compact-regions {
+    position: absolute;
+    inset: 0;
+}
+
+.mc-krea-spatial-compact-region {
+    position: absolute;
+    box-sizing: border-box;
+    border: 2px solid var(--mc-pipe-accent);
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--mc-pipe-accent) 14%, transparent);
+    cursor: grab;
+    overflow: hidden;
+    /* §10: pointer drags, by mouse, pen and finger alike. Without this a touch
+       drag scrolls the page instead of moving the box. */
+    touch-action: none;
+    /* Comfortably tappable even when the region itself is small. */
+    min-width: 12px;
+    min-height: 12px;
+}
+
+.mc-krea-spatial-compact-region:active {
+    cursor: grabbing;
+}
+
+.mc-krea-spatial-compact-text {
+    border-style: dashed;
+}
+
+.mc-krea-spatial-compact-label {
+    display: block;
+    padding: 1px 3px;
+    font-size: var(--text-xs, 0.72em);
+    line-height: 1.2;
+    color: var(--body-text-color);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+}
+
+.mc-krea-spatial-compact-empty,
+.mc-krea-spatial-compact-note {
+    margin: 0;
+    font-size: var(--text-xs, 0.78em);
+    color: var(--body-text-color-subdued);
+    text-align: center;
+}
+
+.mc-krea-spatial-compact-empty {
+    position: absolute;
+    inset: auto 0 auto 0;
+    top: 50%;
+    transform: translateY(-50%);
+    padding: 0 0.6em;
+}
+
+/* §6.3. The one state in this panel where what is on screen is not yet what
+   the next Generate will compose, so it is the one that gets a colour. */
+.mc-krea-spatial-compact-note.mc-krea-spatial-unsaved {
+    color: var(--error-text-color, #b00020);
+    font-weight: 600;
+}
+
+/* -- accessibility ------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+    /* The node still fills and the title still changes colour, so which stage
+       is running is said exactly as clearly -- the pulse was never carrying the
+       information, only drawing the eye. */
+    .mc-pipeline-stage.mc-pipeline-running::after {
+        animation: none;
+    }
 }

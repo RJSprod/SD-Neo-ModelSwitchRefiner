@@ -75,14 +75,20 @@ import gradio as gr
 
 import mc_creative_krea
 import mc_creative_panel
+import mc_creative_profiles
 import mc_infotext
 import mc_llm_sessions as sessions
 import mc_lora
 import mc_memory
+import mc_pipeline_panel
 import mc_plan
 import mc_krea_pipeline
+import mc_profile_state
 import mc_spatial
+import mc_spatial_profiles
 from modules import errors, scripts
+from modules.ui_common import refresh_symbol
+from modules.ui_components import ToolButton
 
 logger = mc_memory.logger
 """Shared with the helper modules; mc_memory attaches the console handler."""
@@ -284,22 +290,22 @@ def _recipe_view(recipe) -> str:
 
 
 def _toggled(enabled, spatial_enabled, serialized, mode):
-    """Show or hide Creative's own controls, and re-describe the pipeline.
+    """Arm or bypass Creative Mode, and re-describe the pipeline it sits in.
 
-    Three of the four outputs are Creative's: the slider and the drawer appear
-    and disappear with the feature, because neither does anything while it is
-    off, and the status line says what the feature is now doing.
+    Nothing appears or disappears any more. The slider and the drawer used to
+    hide with the feature, which meant the only way to configure Creative Mode
+    was to turn it on first; the stage is a row with a switch on it now, and a
+    bypassed stage stays visible and reads as bypassed -- section 3.3.
 
-    The fourth is Spatial's status, and it is here for the reason this whole
-    refactor exists. Spatial no longer appears or disappears with Creative Mode
-    -- it is a peer feature and stays exactly where it is -- but what its
-    pipeline *is* depends on both toggles: the same Direct merge composes around
-    a written scene with Creative on and around the typed prompt with it off.
-    One of the two sentences would be wrong if this handler did not send the
-    other section's line as well.
+    Two of the four outputs belong to the other stage, and they are here for the
+    reason this whole refactor exists. Spatial no longer appears or disappears
+    with Creative Mode -- it is a peer feature -- but what its pipeline *is*
+    depends on both switches: the same Direct merge composes around a written
+    scene with Creative on and around the typed prompt with it off. One of the
+    two sentences would be wrong if this handler did not send the other stage's
+    lines as well.
     """
     mc_creative_krea.remember(**{mc_creative_krea.ENABLED: bool(enabled)})
-    shown = gr.update(visible=bool(enabled))
     if enabled:
         objection = mc_creative_krea.checkpoint_objection()
         stored = mc_creative_krea.settings()
@@ -311,9 +317,11 @@ def _toggled(enabled, spatial_enabled, serialized, mode):
                       "warn" if objection else "info")
     else:
         told = notice("Creative Mode is off.")
-    return (shown, shown, gr.update(value=told, visible=bool(enabled)),
-            gr.update(value=spatial_summary(serialized, bool(spatial_enabled),
-                                            creative=bool(enabled), mode=mode)))
+    return (told,
+            spatial_summary(serialized, bool(spatial_enabled),
+                            creative=bool(enabled), mode=mode),
+            _creative_line(bool(enabled)),
+            _spatial_line(serialized, bool(spatial_enabled), mode))
 
 
 def _remember_creativity(value):
@@ -602,6 +610,40 @@ def spatial_editor() -> str:
 </div>'''
 
 
+def spatial_compact() -> str:
+    """The compact canvas: a frame, the regions in it, and one live line.
+
+    Section 6.2 -- *position correction only*. There is no create, no delete,
+    no resize, no rename, no Object/Text switch, no framing or angle, and no
+    stacking control. Every one of those still exists, in the full editor, one
+    button away.
+
+    That restraint is the feature. The compact canvas answers the question
+    somebody has while looking at the pipeline -- "that subject is slightly too
+    far left" -- without opening a workspace, and a compact canvas that could
+    also delete a region would be a second editor competing with the first over
+    the same document.
+
+    Empty of behaviour, like :func:`spatial_editor`: the browser file draws the
+    regions into it, moves them, and writes the result back into the same
+    hidden state box the full editor writes to. Stable ids and nothing a theme
+    can rearrange.
+    """
+    return f'''
+<div id="{_spatial_id("compact")}" class="{SPATIAL_PREFIX}-compact">
+  <div id="{_spatial_id("compact", "frame")}" class="{SPATIAL_PREFIX}-compact-frame"
+       role="application" tabindex="0"
+       aria-label="Compact spatial layout — drag a region to move it">
+    <div id="{_spatial_id("compact", "regions")}"
+         class="{SPATIAL_PREFIX}-compact-regions"></div>
+    <p id="{_spatial_id("compact", "empty")}" class="{SPATIAL_PREFIX}-compact-empty">
+      No regions yet. Press Edit Layout… to draw one.</p>
+  </div>
+  <p id="{_spatial_id("compact", "note")}" class="{SPATIAL_PREFIX}-compact-note"
+     role="status" aria-live="polite"></p>
+</div>'''
+
+
 def spatial_summary(serialized, enabled: bool = True, creative=None,
                     mode=None) -> str:
     """The one line under Spatial Layout: what is drawn, and what will happen.
@@ -645,8 +687,9 @@ def spatial_summary(serialized, enabled: bool = True, creative=None,
 def _spatial_toggled(enabled, serialized, creative, mode):
     """Remember the Spatial toggle, and say what it now does."""
     mc_spatial.remember(**{mc_spatial.ENABLED: bool(enabled)})
-    return spatial_summary(serialized, bool(enabled), creative=bool(creative),
-                           mode=mode)
+    return (spatial_summary(serialized, bool(enabled), creative=bool(creative),
+                            mode=mode),
+            _spatial_line(serialized, bool(enabled), mode))
 
 
 def _spatial_mode(mode, serialized, enabled, creative):
@@ -664,15 +707,24 @@ def _spatial_mode(mode, serialized, enabled, creative):
     if mode not in spatial.COMPOSE_MODES:
         mode = spatial.SMART
     mc_spatial.remember(**{mc_spatial.COMPOSE_MODE: mode})
-    return spatial_summary(serialized, bool(enabled), creative=bool(creative),
-                           mode=mode)
+    return (spatial_summary(serialized, bool(enabled), creative=bool(creative),
+                            mode=mode),
+            _spatial_line(serialized, bool(enabled), mode))
 
 
 def _spatial_saved(serialized, enabled, creative, mode):
-    """The browser saved a layout. Keep it, and repaint the summary."""
+    """The browser committed a layout. Keep it, and repaint what describes it.
+
+    The *working* layout, and only that. A named layout is never written here,
+    which is section 8.5: dragging a box with Auto Save on commits what the next
+    Generate composes and leaves ``Studio thirds`` holding exactly what it held.
+    The dirty line is how that is made visible rather than surprising.
+    """
     mc_spatial.remember(**{mc_spatial.LAYOUT: str(serialized or "")})
-    return spatial_summary(serialized, bool(enabled), creative=bool(creative),
-                           mode=mode)
+    return (spatial_summary(serialized, bool(enabled), creative=bool(creative),
+                            mode=mode),
+            _spatial_line(serialized, bool(enabled), mode),
+            _layout_state(None, serialized))
 
 
 def _spatial_scenes(record):
@@ -683,6 +735,184 @@ def _spatial_scenes(record):
                   "The intermediate scenes will not be recorded. Smart and Direct "
                   "images can still be told apart by Krea Spatial Compose Mode, but "
                   "what the composer changed will not be recoverable afterwards.")
+
+
+# --------------------------------------------------------------------------- #
+# The two pipeline rows this script owns
+# --------------------------------------------------------------------------- #
+
+
+def _creative_line(enabled=None, stored=None) -> str:
+    """Creative's second line on the pipeline: ``C7 · 2 directions · Editorial``.
+
+    Short by design. It is read at a glance while the stage is collapsed, and
+    the three things worth a glance are how strongly the prompt is being
+    directed, how many axes are being directed at all, and which named profile
+    that came from.
+    """
+    stored = stored or mc_creative_krea.settings()
+    if enabled is None:
+        enabled = bool(stored.get("enabled"))
+    if not enabled:
+        return "Off — the prompt is expanded as written."
+
+    parts = [f"C{int(stored.get('creativity', 5))}"]
+    directing = mc_creative_krea.active_axes(stored)
+    rows = list(stored.get("directions") or ())
+    if directing:
+        parts.append(f"{len(directing)} direction"
+                     f"{'' if len(directing) == 1 else 's'}")
+    elif rows:
+        # A row with an empty picker is a decision somebody started. Saying
+        # "no directions" about it would be true of the brief and misleading
+        # about the panel.
+        parts.append(f"{len(rows)} direction"
+                     f"{'' if len(rows) == 1 else 's'} with no treatments chosen")
+    else:
+        parts.append("nothing directed")
+
+    try:
+        profile = mc_creative_profiles.selected()
+    except Exception:
+        profile = ""
+    if profile:
+        parts.append(profile)
+    return " · ".join(parts)
+
+
+def _spatial_line(serialized=None, enabled=None, mode=None) -> str:
+    """Spatial's second line: ``Smart · 2 regions · Studio thirds``."""
+    from prompt_master.krea import spatial
+
+    settings = mc_spatial.settings()
+    if serialized is None:
+        serialized = settings.get("layout", "")
+    if enabled is None:
+        enabled = bool(settings.get("enabled"))
+    if mode is None:
+        mode = settings.get("compose_mode", spatial.SMART)
+
+    layout = spatial.parse(serialized)
+    if layout.unreadable:
+        return "⚠️ the saved layout could not be read"
+
+    count = len(layout.regions)
+    regions = f"{count} region{'' if count == 1 else 's'}" if count else "no regions"
+    if not enabled:
+        return f"Off — {regions} drawn, not applied."
+
+    named = "Smart" if str(mode or "").strip().casefold() == spatial.SMART else "Direct"
+    parts = [named, regions]
+    loaded = settings.get("profile") or ""
+    if loaded:
+        parts.append(loaded)
+    return " · ".join(parts)
+
+
+# --------------------------------------------------------------------------- #
+# Named spatial layouts
+# --------------------------------------------------------------------------- #
+#
+# Section 8.5, which is the one place the loaded/modified contract needs saying
+# twice. Two saves live next to each other here: Auto Save commits the *working
+# layout*, which is what the next Generate composes, and Save updates a *named
+# layout*, which is a copy somebody asked for. "Loaded: Studio thirds ·
+# Modified · not saved" is an ordinary state to sit in -- the boxes just moved
+# are the boxes that will be composed, and Studio thirds still holds what it
+# held.
+
+
+def _layout_state(name=None, serialized=None) -> str:
+    """``Loaded: Studio thirds · Modified · not saved``, or nothing."""
+    settings = mc_spatial.settings()
+    if name is None:
+        name = settings.get("profile") or ""
+    if serialized is None:
+        serialized = settings.get("layout", "")
+
+    name = str(name or "").strip()
+    if not name or name == mc_spatial_profiles.NONE:
+        return ""
+    if mc_spatial_profiles.get(name) is None:
+        return ""
+
+    modified = not mc_spatial_profiles.matches(name, serialized)
+    line = mc_profile_state.describe(name, modified)
+    explained = mc_profile_state.explain(modified)
+    return f"{line}  \n{explained}" if explained else line
+
+
+def _layout_chosen(name, enabled, creative, mode):
+    """Load a named layout into the working canvas.
+
+    The working layout is replaced, because that is what loading one means, and
+    it is persisted at once so that closing the tab does not lose it. What is
+    *not* touched is any other named layout: this reads the store and writes the
+    canvas, never the other way round.
+    """
+    name = str(name or "").strip()
+    if not name or name == mc_spatial_profiles.NONE:
+        mc_spatial.remember(**{mc_spatial.PROFILE: ""})
+        return gr.skip(), gr.skip(), "", gr.skip()
+
+    serialized = mc_spatial_profiles.get(name)
+    if serialized is None:
+        return (gr.skip(), notice(f'There is no spatial layout called "{name}" any '
+                                  "more — refresh the list.", "warn"),
+                "", gr.skip())
+
+    mc_spatial.remember(**{mc_spatial.LAYOUT: serialized, mc_spatial.PROFILE: name})
+    return (gr.update(value=serialized),
+            spatial_summary(serialized, bool(enabled), creative=bool(creative),
+                            mode=mode),
+            _layout_state(name, serialized),
+            gr.update(value=_spatial_line(serialized, bool(enabled), mode)))
+
+
+def _layout_saved(name, serialized):
+    """Create or overwrite a named layout from the working canvas."""
+    try:
+        remaining = mc_spatial_profiles.save(name, serialized)
+    except mc_spatial_profiles.LayoutError as exc:
+        return notice(str(exc), "warn"), gr.skip(), gr.skip()
+
+    kept = str(name or "").strip()
+    mc_spatial.remember(**{mc_spatial.PROFILE: kept})
+    return (notice(f'Saved the spatial layout "{kept}".'),
+            gr.update(choices=[mc_spatial_profiles.NONE] + remaining, value=kept),
+            _layout_state(kept, serialized))
+
+
+def _layout_deleted(name, serialized):
+    """Remove a named layout. The working canvas is left exactly as it is."""
+    try:
+        remaining = mc_spatial_profiles.delete(name)
+    except mc_spatial_profiles.LayoutError as exc:
+        return notice(str(exc), "warn"), gr.skip(), gr.skip()
+
+    mc_spatial.remember(**{mc_spatial.PROFILE: ""})
+    return (notice(f'Deleted the spatial layout "{name}". The boxes on screen are '
+                   "unchanged."),
+            gr.update(choices=[mc_spatial_profiles.NONE] + remaining,
+                      value=mc_spatial_profiles.NONE),
+            "")
+
+
+def _layout_refreshed(current):
+    available = mc_spatial_profiles.names()
+    keep = current if current in available else mc_spatial_profiles.NONE
+    return gr.update(choices=[mc_spatial_profiles.NONE] + available, value=keep)
+
+
+def _auto_save_changed(value):
+    """Remember whether a drag commits on release, and say what that means."""
+    mc_spatial.remember(**{mc_spatial.AUTO_SAVE: bool(value)})
+    if value:
+        return notice("Moving a box on the compact canvas commits the working "
+                      "layout as soon as you let go. It does not overwrite a named "
+                      "layout — Save does that.")
+    return notice("Moving a box changes the layout on screen only. Press Save "
+                  "working layout to commit it, or switch Auto Save back on.")
 
 
 # --------------------------------------------------------------------------- #
@@ -1024,24 +1254,34 @@ class ScriptKreaCreative(scripts.Script):
         stored = mc_creative_krea.settings()
         spatial = mc_spatial.settings()
 
-        with gr.Group(elem_id=ident("group")):
-            with gr.Row(elem_id=ident("bar")):
-                enabled = gr.Checkbox(
-                    value=bool(stored["enabled"]), label="Creative Mode", scale=1,
-                    elem_id=ident("toggle"),
-                    info="direct the prompt locally, then expand it with Krea 2")
-                creativity = gr.Slider(
-                    label=variation.LABEL, minimum=variation.MINIMUM,
-                    maximum=variation.MAXIMUM, step=1, value=stored["creativity"],
-                    scale=3, visible=bool(stored["enabled"]), info=variation.HELP,
-                    elem_id=ident("creativity"))
+        # The shared shell. Whichever of the two feature scripts Forge builds
+        # first creates it; this one fills the two stages it owns, wherever it
+        # came in the order. See mc_pipeline_panel.
+        pipeline = mc_pipeline_panel.host()
+
+        # -- Creative ------------------------------------------------------- #
+
+        with pipeline.head("creative"):
+            enabled = gr.Checkbox(
+                value=bool(stored["enabled"]), label="ON", container=False,
+                elem_id=ident("toggle"),
+                elem_classes=mc_pipeline_panel.classes("toggle"))
+
+        with pipeline.body("creative"):
+            creativity = gr.Slider(
+                label=variation.LABEL, minimum=variation.MINIMUM,
+                maximum=variation.MAXIMUM, step=1, value=stored["creativity"],
+                info=variation.HELP, elem_id=ident("creativity"))
 
             status = gr.HTML(notice("Creative Mode is off."),
-                             visible=bool(stored["enabled"]), elem_id=ident("status"))
+                             elem_id=ident("status"))
 
-            with gr.Accordion("Creative Controls", open=False,
-                              visible=bool(stored["enabled"]),
-                              elem_id=ident("controls")) as controls:
+            # A Group and no longer an Accordion, and always visible. The
+            # disclosure is the pipeline row's now, and the switch is on it --
+            # so the drawer is already open by the time anybody is looking at
+            # this, and hiding its contents when the stage is off would mean
+            # the only way to configure Creative Mode was to turn it on first.
+            with gr.Group(elem_id=ident("controls")) as controls:
                 panel = mc_creative_panel.build(ident, notice, status, creativity,
                                                 stored=stored)
 
@@ -1087,59 +1327,123 @@ class ScriptKreaCreative(scripts.Script):
                         interactive=False, show_copy_button=True,
                         elem_id=ident("expanded"))
 
-                gr.Markdown(
-                    "**Literal commands.** Anything you write inside `[[double "
-                    "brackets]]` is lifted out of the prompt before any language "
-                    "model sees it and put back at the end, on its way to Forge's "
-                    "own prompt processing — so LoRA tags, wildcards, `$styles`, "
-                    "another extension's syntax and instructions about your "
-                    "ImageStitch reference images all arrive exactly as you typed "
-                    "them. `[[<lora:krea2_edit:1>]]` goes in front of the written "
-                    "prompt; `-[[__grain__]]` goes after it. Written inside a "
-                    "region's prompt on the Spatial canvas, a command stays with "
-                    "that region and reaches that element of the composition.\n\n"
-                    "**Natural** leaves the axis out of the brief entirely — the model "
-                    "decides as it would without Creative Mode, and a Natural axis has "
-                    "no row above. **Vary** lets the local director choose, and the "
-                    "Creativity slider decides whether the axis activates at all, how "
-                    "strongly it is expressed, and how hard recent choices are pushed "
-                    "away; exclude any treatments you never want. **Fixed** repeats one "
-                    "chosen value every roll.\n\n"
-                    "Your own words always win. Type *oil painting of a car* and Medium "
-                    "stays oil painting however Medium is set.\n\n"
-                    "Creative Mode changes the positive prompt only. The negative prompt, "
-                    "the checkpoint, the sampler, the size, Steps, the image seed and "
-                    "every other setting stay exactly where Forge puts them, and the "
-                    "image itself is generated by Forge.")
+                with gr.Accordion("How Creative Mode reads your prompt", open=False,
+                                  elem_id=ident("help")):
+                    gr.Markdown(
+                        "**Literal commands.** Anything you write inside `[[double "
+                        "brackets]]` is lifted out of the prompt before any language "
+                        "model sees it and put back at the end, on its way to Forge's "
+                        "own prompt processing — so LoRA tags, wildcards, `$styles`, "
+                        "another extension's syntax and instructions about your "
+                        "ImageStitch reference images all arrive exactly as you typed "
+                        "them. `[[<lora:krea2_edit:1>]]` goes in front of the written "
+                        "prompt; `-[[__grain__]]` goes after it. Written inside a "
+                        "region's prompt on the Spatial canvas, a command stays with "
+                        "that region and reaches that element of the composition.\n\n"
+                        "**Directions.** An axis with no row is left out of the brief "
+                        "entirely — the model decides as it would without Creative "
+                        "Mode. Add a direction and choose the treatments you are "
+                        "willing to use: **one** treatment repeats every roll, "
+                        "**several** let the Creative seed choose between them, and "
+                        "the Creativity slider decides how strongly the choice is "
+                        "expressed and how hard recent ones are pushed away. A row "
+                        "with nothing chosen directs nothing.\n\n"
+                        "Your own words always win. Type *oil painting of a car* and "
+                        "Medium stays oil painting however Medium is set.\n\n"
+                        "Creative Mode changes the positive prompt only. The negative "
+                        "prompt, the checkpoint, the sampler, the size, Steps, the "
+                        "image seed and every other setting stay exactly where Forge "
+                        "puts them, and the image itself is generated by Forge.")
 
-        # Spatial Layout, a peer and not a child.
+        # -- Spatial -------------------------------------------------------- #
         #
-        # It used to live inside the group above, visible only while Creative
-        # Mode was on, which made it a mode of Creative rather than a feature of
-        # its own. Two things follow from moving it out, and both are the point:
-        # it is visible and usable with Creative Mode off, and it is built
-        # whether or not the creativity library loaded. That second one is not
-        # tidiness -- the deterministic compositor needs no vocabulary at all,
-        # so an installation whose Creative Mode cannot run can still place
-        # boxes around the prompt somebody typed.
-        with gr.Group(elem_id=ident("spatial")) as spatial_group:
-            with gr.Row(elem_id=ident("spatial", "bar")):
-                spatial_enabled = gr.Checkbox(
-                    value=bool(spatial["enabled"]), label="Spatial Layout", scale=1,
-                    elem_id=ident("spatial", "toggle"),
-                    info="place subjects with bounding boxes")
+        # A peer of Creative Mode and not a child of it. It used to live inside
+        # Creative's group, visible only while Creative Mode was on, which made
+        # it a mode of Creative rather than a feature of its own. Two things
+        # follow from it being its own stage, and both are the point: it is
+        # usable with Creative Mode off, and it is built whether or not the
+        # creativity library loaded. That second one is not tidiness -- the
+        # deterministic compositor needs no vocabulary at all, so an
+        # installation whose Creative Mode cannot run can still place boxes
+        # around the prompt somebody typed.
+
+        with pipeline.head("spatial"):
+            spatial_enabled = gr.Checkbox(
+                value=bool(spatial["enabled"]), label="ON", container=False,
+                elem_id=ident("spatial", "toggle"),
+                elem_classes=mc_pipeline_panel.classes("toggle"))
+
+        with pipeline.body("spatial"):
+            with gr.Group(elem_id=ident("spatial", "layout")):
+                gr.Markdown("**Spatial Layout**", elem_id=ident("spatial", "heading"))
+
+                # The remembered name only if it still names something. A layout
+                # deleted in another tab -- or a store replaced wholesale --
+                # would otherwise leave the dropdown claiming a composition is
+                # loaded when the file it came from is gone.
+                layout_choices = mc_spatial_profiles.choices()
+                loaded_layout = (spatial["profile"]
+                                 if spatial["profile"] in layout_choices
+                                 else mc_spatial_profiles.NONE)
+
+                with gr.Row():
+                    spatial_profile = gr.Dropdown(
+                        label="Layout", value=loaded_layout,
+                        choices=layout_choices, scale=3,
+                        filterable=False, elem_id=ident("spatial", "profile"),
+                        info="a saved composition; loading one replaces the boxes "
+                             "on the canvas")
+                    spatial_profile_refresh = ToolButton(
+                        value=refresh_symbol,
+                        elem_id=ident("spatial", "profile", "refresh"),
+                        tooltip="Spatial layouts: refresh")
+
+                spatial_profile_state = gr.Markdown(
+                    _layout_state(loaded_layout, spatial["layout"]),
+                    elem_id=ident("spatial", "profile", "state"))
+
+                with gr.Row():
+                    spatial_profile_name = gr.Textbox(
+                        label="Layout name", scale=3, max_lines=1,
+                        placeholder="Studio thirds",
+                        elem_id=ident("spatial", "profile", "name"))
+                    spatial_profile_save = gr.Button(
+                        "Save", size="sm", scale=1,
+                        elem_id=ident("spatial", "profile", "save"))
+                    spatial_profile_delete = gr.Button(
+                        "Delete", size="sm", scale=1, variant="stop",
+                        elem_id=ident("spatial", "profile", "delete"))
+
                 spatial_compose = gr.Radio(
                     choices=[("Smart Spatial Compose", spatial_module.SMART),
                              ("Direct BBOX Merge", spatial_module.DIRECT)],
-                    value=spatial["compose_mode"], label="Composition", scale=2,
+                    value=spatial["compose_mode"], label="Composition",
                     elem_id=ident("spatial", "compose"))
-                edit = gr.Button("Edit Layout…", size="sm", scale=1,
-                                 elem_id=_spatial_id("open"))
+
+                # Position correction, in the pipeline, without opening a
+                # workspace. Section 6.2: drag the topmost box under the
+                # pointer and nothing else.
+                gr.HTML(spatial_compact(), elem_id=_spatial_id("compact", "host"))
+
+                with gr.Row(elem_id=ident("spatial", "actions")):
+                    spatial_auto_save = gr.Checkbox(
+                        value=bool(spatial["auto_save"]), label="Auto Save",
+                        elem_id=_spatial_id("autosave"), scale=1,
+                        info="commit a move as soon as you let go")
+                    spatial_undo = gr.Button("Undo", size="sm", scale=1,
+                                             elem_id=_spatial_id("compact", "undo"))
+                    spatial_commit = gr.Button("Save working layout", size="sm",
+                                               scale=1,
+                                               elem_id=_spatial_id("compact", "commit"))
+                    edit = gr.Button("Edit Layout…", size="sm", scale=1,
+                                     variant="primary", elem_id=_spatial_id("open"))
+
             spatial_status = gr.HTML(
                 spatial_summary(spatial["layout"], bool(spatial["enabled"]),
                                 creative=bool(stored["enabled"]),
                                 mode=spatial["compose_mode"]),
                 elem_id=ident("spatial", "status"))
+
             # The one component the browser writes to, and the one that travels
             # with the generation. Hidden rather than absent: the editor is a
             # page, the compositor is a hook, and a hidden textbox is the only
@@ -1147,7 +1451,6 @@ class ScriptKreaCreative(scripts.Script):
             spatial_state = gr.Textbox(
                 value=spatial["layout"], visible=False, lines=1,
                 elem_id=_spatial_id("state"))
-            gr.HTML(spatial_editor(), elem_id=_spatial_id("editor"))
 
             with gr.Accordion("Spatial options", open=False,
                               elem_id=ident("spatial", "options")):
@@ -1179,25 +1482,64 @@ class ScriptKreaCreative(scripts.Script):
                         "Restore Spatial setup", size="sm",
                         elem_id=ident("spatial", "restore", "apply"))
 
+        # -- the full editor, deliberately outside the pipeline -------------- #
+        #
+        # Section 6.5 and section 10: the full BBOX workspace keeps its
+        # dedicated large area. It is a block in ordinary document flow that
+        # Edit Layout reveals and Back hides, and it belongs at the top level
+        # rather than nested three containers deep inside an accordion -- a
+        # workspace inside a drawer is one `overflow: hidden` away from being a
+        # window nobody can see. It is hidden until opened, so it costs no
+        # space in the pipeline and competes with nothing.
+        gr.HTML(spatial_editor(), elem_id=_spatial_id("editor"))
+
         self.panel = panel
         self.components = {
             "enabled": enabled, "creativity": creativity, "status": status,
             "controls": controls, "show": show, "recipe": recipe, "expanded": expanded,
             "pasted": pasted, "replay": exactly, "restore": restore, "disarm": disarm,
-            "spatial_group": spatial_group, "spatial_enabled": spatial_enabled,
+            "spatial_enabled": spatial_enabled,
             "spatial_compose": spatial_compose, "spatial_status": spatial_status,
             "spatial_state": spatial_state, "spatial_edit": edit,
             "spatial_scenes": record_scenes, "spatial_pasted": spatial_pasted,
-            "spatial_restore": restore_spatial}
+            "spatial_restore": restore_spatial,
+            "spatial_profile": spatial_profile,
+            "spatial_profile_state": spatial_profile_state,
+            "spatial_profile_name": spatial_profile_name,
+            "spatial_auto_save": spatial_auto_save,
+            "spatial_undo": spatial_undo, "spatial_commit": spatial_commit,
+            "creative_line": pipeline.summary("creative"),
+            "spatial_line": pipeline.summary("spatial")}
         if panel is not None:
             self.components.update(panel.components())
 
-        self._wire(enabled, creativity, status, controls, show, recipe, expanded,
+        self._wire(enabled, creativity, status, show, recipe, expanded,
                    pasted, exactly, restore, disarm)
         self._wire_spatial(spatial_enabled, spatial_compose, spatial_status,
                            spatial_state, record_scenes, restore_spatial,
                            enabled)
+        self._wire_layouts(spatial_profile, spatial_profile_refresh,
+                           spatial_profile_state, spatial_profile_name,
+                           spatial_profile_save, spatial_profile_delete,
+                           spatial_auto_save, spatial_state, spatial_enabled,
+                           spatial_compose, spatial_status, enabled)
         self._register_paste_fields()
+
+        # What the two pipeline rows say before anybody has touched anything.
+        # Gradio fires no event at page load, so the first render is written
+        # into the components themselves, which works because the config the
+        # browser is built from is generated after every ui() has run.
+        try:
+            if pipeline.summary("creative") is not None:
+                pipeline.summary("creative").value = _creative_line(
+                    bool(stored["enabled"]), stored)
+            if pipeline.summary("spatial") is not None:
+                pipeline.summary("spatial").value = _spatial_line(
+                    spatial["layout"], bool(spatial["enabled"]),
+                    spatial["compose_mode"])
+        except Exception:
+            logger.debug("Model Chain: could not pre-render the pipeline rows",
+                         exc_info=True)
 
         # Every control travels to before_process, because that is where the
         # roll happens and the panel is what the user is looking at. They are
@@ -1219,7 +1561,37 @@ class ScriptKreaCreative(scripts.Script):
                               + list(panel.axis_controls) + spatial_controls)
         return list(self.arguments)
 
-    def _wire(self, enabled, creativity, status, controls, show, recipe, expanded,
+    def _wire_layouts(self, profile, refresh, state_line, name, save, delete,
+                      auto_save, spatial_state, spatial_enabled, spatial_compose,
+                      spatial_status, creative_enabled) -> None:
+        """Named layouts, and the Auto Save switch. Six handlers, none of them
+        touching a layout the user did not name.
+
+        The dirty line is recomputed from the two documents rather than tracked,
+        for the same reason the Creative panel recomputes its own: a flag that
+        is derived cannot drift out of step with the thing it describes, and the
+        thing it describes here is written by a browser file that this side does
+        not hear from between presses.
+        """
+        profile.change(
+            fn=_layout_chosen,
+            inputs=[profile, spatial_enabled, creative_enabled, spatial_compose],
+            outputs=[spatial_state, spatial_status, state_line,
+                     self.components["spatial_line"]],
+            queue=False, show_progress=False)
+        refresh.click(fn=_layout_refreshed, inputs=[profile], outputs=[profile],
+                      queue=False, show_progress=False)
+        save.click(fn=_layout_saved, inputs=[name, spatial_state],
+                   outputs=[spatial_status, profile, state_line],
+                   queue=False, show_progress=False)
+        delete.click(fn=_layout_deleted, inputs=[profile, spatial_state],
+                     outputs=[spatial_status, profile, state_line],
+                     queue=False, show_progress=False)
+        auto_save.change(fn=_auto_save_changed, inputs=[auto_save],
+                         outputs=[spatial_status], queue=False,
+                         show_progress=False)
+
+    def _wire(self, enabled, creativity, status, show, recipe, expanded,
               pasted, exactly, restore, disarm):
         """Every handler this file owns, in one place. The panel wires its own.
 
@@ -1236,8 +1608,9 @@ class ScriptKreaCreative(scripts.Script):
                        inputs=[enabled, self.components["spatial_enabled"],
                                self.components["spatial_state"],
                                self.components["spatial_compose"]],
-                       outputs=[creativity, controls, status,
-                                self.components["spatial_status"]],
+                       outputs=[status, self.components["spatial_status"],
+                                self.components["creative_line"],
+                                self.components["spatial_line"]],
                        queue=False)
 
         # The slider moves what the brief costs as well as what it says, and the
@@ -1246,11 +1619,17 @@ class ScriptKreaCreative(scripts.Script):
         if self.panel is not None:
             creativity.release(
                 fn=lambda value: (_remember_creativity(value),
-                                  gr.update(value=mc_creative_panel.describe_cost())),
-                inputs=[creativity], outputs=[status, self.panel.cost], queue=False)
+                                  gr.update(value=mc_creative_panel.describe_cost()),
+                                  gr.update(value=_creative_line())),
+                inputs=[creativity],
+                outputs=[status, self.panel.cost, self.components["creative_line"]],
+                queue=False)
         else:
-            creativity.release(fn=_remember_creativity, inputs=[creativity],
-                               outputs=[status], queue=False)
+            creativity.release(
+                fn=lambda value: (_remember_creativity(value),
+                                  gr.update(value=_creative_line())),
+                inputs=[creativity],
+                outputs=[status, self.components["creative_line"]], queue=False)
         show.click(fn=_last_roll, outputs=[recipe, expanded], queue=False)
 
         # The one handler in this extension that writes to a native control, and
@@ -1299,18 +1678,20 @@ class ScriptKreaCreative(scripts.Script):
         it -- and the server *does* write to it, on a workflow restore, where
         having the restored layout persist itself is exactly right.
         """
+        line = self.components["spatial_line"]
         spatial_enabled.change(
             fn=_spatial_toggled,
             inputs=[spatial_enabled, spatial_state, creative_enabled, spatial_compose],
-            outputs=[spatial_status], queue=False)
+            outputs=[spatial_status, line], queue=False)
         spatial_compose.change(
             fn=_spatial_mode,
             inputs=[spatial_compose, spatial_state, spatial_enabled, creative_enabled],
-            outputs=[spatial_status], queue=False)
+            outputs=[spatial_status, line], queue=False)
         spatial_state.change(
             fn=_spatial_saved,
             inputs=[spatial_state, spatial_enabled, creative_enabled, spatial_compose],
-            outputs=[spatial_status], queue=False)
+            outputs=[spatial_status, line,
+                     self.components["spatial_profile_state"]], queue=False)
         record_scenes.change(fn=_spatial_scenes, inputs=[record_scenes],
                              outputs=[spatial_status], queue=False)
         # Spatial's own restore, writing only to Spatial's own controls. Nothing

@@ -144,6 +144,14 @@ DEFAULTS: dict = {
     # about how to vary, and making it a mode would force somebody who wants two
     # treatments gone to stop varying altogether.
     "krea_creative_excluded": {},
+    # The axes with a row on the panel, complete or not. Not a fourth mode and
+    # not a duplicate of one: an axis somebody added a moment ago and has not
+    # chosen treatments for is Natural underneath -- the Director must ignore
+    # it exactly as it ignores an axis nobody touched -- and differs only in
+    # having somewhere on screen to be filled in. That is a fact about the
+    # panel, so the panel stores it rather than teaching the generation a
+    # state it would have to ignore.
+    "krea_creative_directions": [],
     # The named profile the settings above were last loaded from, for the panel
     # to open showing. A label on the settings rather than a source of them.
     "krea_creative_profile": "",
@@ -165,6 +173,15 @@ DEFAULTS: dict = {
     "krea_spatial_compose_mode": "smart",
     "krea_spatial_layout": "",
     "krea_spatial_record_scenes": True,
+    # The named layout the working canvas was last loaded from, or "". A label
+    # on the working layout rather than a source of it: nothing loads a layout
+    # because this says so, which is what keeps opening a tab from silently
+    # replacing whatever the last one was in the middle of arranging.
+    "krea_spatial_profile": "",
+    # Whether a drag on the compact canvas commits the working layout as soon
+    # as the pointer is released. On by default: a position correction is not a
+    # decision worth a dialog, and the working layout is not a named one.
+    "krea_spatial_auto_save": True,
 }
 
 

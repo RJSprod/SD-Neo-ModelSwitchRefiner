@@ -80,7 +80,7 @@ BUILT_IN = (FACTORY, SPREAD)
 """The profiles that are computed rather than stored. Never deletable."""
 
 FIELDS = ("creativity", "seed", "anti_repetition", "axis_modes", "fixed_values",
-          "excluded_values")
+          "excluded_values", "directions")
 """Every field a profile carries, by the name :func:`mc_creative_krea.settings`
 uses for it, so a profile reads like the settings it restores.
 
@@ -215,6 +215,13 @@ def factory() -> dict:
         "fixed_values": dict(defaults.get("fixed_values") or {}),
         "excluded_values": {key: list(values) for key, values
                             in (defaults.get("excluded_values") or {}).items()},
+        # Whatever the package itself directs gets a row, and nothing else
+        # does. Factory is the neutral profile, so on a stock library this is
+        # empty -- which is the panel saying "no directions" rather than the
+        # panel having forgotten some.
+        "directions": [key for key in keys
+                       if str(modes.get(key, director.NATURAL)).casefold()
+                       in (director.VARY, director.FIXED)],
     }
 
 
@@ -224,6 +231,10 @@ def spread() -> dict:
 
     values = factory()
     values["axis_modes"] = {key: director.VARY for key in values["axis_modes"]}
+    # Every axis varying is every axis with a row: the rows are what "varies"
+    # looks like on the panel, and a profile that set the modes without them
+    # would restore a configuration the user could not see.
+    values["directions"] = list(values["axis_modes"])
     return values
 
 
@@ -261,6 +272,13 @@ def normalise(values) -> dict:
         "axis_modes": modes,
         "fixed_values": mc_creative_krea.known_fixed(values.get("fixed_values")),
         "excluded_values": mc_creative_krea.known_excluded(values.get("excluded_values")),
+        # Which axes have a row, including the ones that have a row and no
+        # treatments yet. A profile that carried the settings but not the rows
+        # would load as a panel that had silently forgotten half the directions
+        # somebody was in the middle of making.
+        "directions": mc_creative_krea.known_directions(
+            values.get("directions"), modes,
+            mc_creative_krea._axes() or tuple(modes)),
     }
 
 
@@ -437,5 +455,6 @@ def apply(name: str) -> tuple[dict, str]:
         mc_creative_krea.AXIS_MODES: values["axis_modes"],
         mc_creative_krea.FIXED_VALUES: values["fixed_values"],
         mc_creative_krea.EXCLUDED_VALUES: values["excluded_values"],
+        mc_creative_krea.DIRECTIONS: values["directions"],
     })
     return mc_creative_krea.settings(), complaint
