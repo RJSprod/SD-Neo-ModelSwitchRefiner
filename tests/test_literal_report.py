@@ -127,11 +127,13 @@ class TestTheLogLine:
 
         assert [r.levelno for r in caplog.records] == [logging.WARNING]
 
-    def test_a_working_page_is_quiet(self, caplog):
+    def test_a_working_page_says_so_too(self, caplog):
+        """"It works here" is the other half of the answer, and one line per
+        page load is not a log to hide from."""
         with caplog.at_level(logging.DEBUG, logger="model_chain"):
             mc_literal_report.note(report())
 
-        assert [r.levelno for r in caplog.records] == [logging.DEBUG]
+        assert [r.levelno for r in caplog.records] == [logging.INFO]
 
 
 class TestTheRoute:
