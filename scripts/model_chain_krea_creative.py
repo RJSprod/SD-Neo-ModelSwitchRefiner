@@ -78,6 +78,7 @@ import mc_creative_panel
 import mc_creative_profiles
 import mc_infotext
 import mc_llm_sessions as sessions
+import mc_literal_prompts
 import mc_lora
 import mc_memory
 import mc_pipeline_panel
@@ -137,9 +138,24 @@ def notice(text: str, kind: str = "info") -> str:
 SPATIAL_CONTROLS = 3
 """How many controls the Spatial block contributes: enabled, mode, layout."""
 
+LITERAL_CONTROLS = 2
+"""How many the Literal Prompt block contributes: the positive and negative box.
 
-def _split(values) -> tuple[tuple, tuple, tuple]:
-    """``before_process``'s tuple, cut into its three parts.
+Inserted *before* the Spatial tail and not after it, which looks backwards and
+is the only placement that works. :mod:`mc_plan` reads the Spatial controls off
+the end of this tuple -- ``args[-SPATIAL_TAIL:]`` -- because the middle is a
+variable number of axis controls and the two ends are the two that can be read
+without counting. Appending here would have moved the end out from under it and
+described every Spatial generation's plan wrongly.
+
+So the ends stay the ends. The new block goes in the variable middle, where the
+only thing that reads it is :func:`_split`, which knows how long the axis block
+is because it asks the library.
+"""
+
+
+def _split(values) -> tuple[tuple, tuple, tuple, tuple]:
+    """``before_process``'s tuple, cut into its four parts.
 
     ``ui()`` returns, after the enabled flag: three scalars, then three controls
     per axis, then the three Spatial controls. Two of those three lengths are
@@ -176,18 +192,49 @@ def _split(values) -> tuple[tuple, tuple, tuple]:
 
     if axes is not None:
         expected = 3 + axes
-        if len(values) >= expected + SPATIAL_CONTROLS:
+        if len(values) >= expected + LITERAL_CONTROLS + SPATIAL_CONTROLS:
+            after = expected + LITERAL_CONTROLS
             return (values[:3], values[3:expected],
-                    values[expected:expected + SPATIAL_CONTROLS])
+                    values[after:after + SPATIAL_CONTROLS],
+                    values[expected:after])
+        if len(values) >= expected + SPATIAL_CONTROLS:
+            # The shape sent before the Literal Prompt boxes existed. Cut
+            # exactly where it always was, and contributing no fields.
+            return (values[:3], values[3:expected],
+                    values[expected:expected + SPATIAL_CONTROLS], ())
         if len(values) >= expected:
-            return values[:3], values[3:expected], ()
+            return values[:3], values[3:expected], (), ()
 
+    # The no-panel shapes: creativity, then -- for a caller new enough to send
+    # them -- the two Literal Prompt boxes, then the Spatial tail.
+    if len(values) == 1 + LITERAL_CONTROLS + SPATIAL_CONTROLS:
+        return ((), (), values[-SPATIAL_CONTROLS:],
+                values[1:1 + LITERAL_CONTROLS])
     if len(values) == 1 + SPATIAL_CONTROLS:
-        # The no-panel shape: creativity, then the Spatial tail.
-        return (), (), values[-SPATIAL_CONTROLS:]
+        return (), (), values[-SPATIAL_CONTROLS:], ()
     if len(values) >= 3:
-        return values[:3], (), ()
-    return (), (), ()
+        return values[:3], (), (), ()
+    return (), (), (), ()
+
+
+def _literals_for(values) -> tuple[str, str]:
+    """``(Literal Positive, Literal Negative)``, from the panel or the settings.
+
+    Read off the panel when it sent them, for the reason every other control on
+    this hook is: the box somebody just typed into is what they are looking at,
+    and a generation that used the last *saved* value would silently ignore it.
+
+    A caller with no panel -- the API, or a build whose UI could not be
+    assembled -- gets the saved values, which is also what makes section 3.3
+    work: the fields keep affecting generations while their row is off screen,
+    and they are off screen precisely when this extension's features are off.
+    """
+    _, _, _, fields = _split(values)
+    stored = mc_literal_prompts.settings()
+    if len(fields) < LITERAL_CONTROLS:
+        return stored["positive"], stored["negative"]
+    positive, negative = fields
+    return str(positive or ""), str(negative or "")
 
 
 def _settings_for(values) -> dict:
@@ -199,7 +246,7 @@ def _settings_for(values) -> dict:
     checked rather than assumed and the saved preferences answer for anything
     absent.
     """
-    scalars, axes, _ = _split(values)
+    scalars, axes, _, _ = _split(values)
     if not scalars:
         return mc_creative_krea.settings()
     creativity, seed, anti_repetition = scalars
@@ -216,7 +263,7 @@ def _spatial_for(values) -> dict:
     gets a layout at all: the serialized canvas is persisted, so a script that
     sends only the Creative flag still composes the boxes the user last drew.
     """
-    _, _, spatial = _split(values)
+    _, _, spatial, _ = _split(values)
     stored = mc_spatial.settings()
     if len(spatial) < SPATIAL_CONTROLS:
         return stored
@@ -1493,6 +1540,42 @@ class ScriptKreaCreative(scripts.Script):
         # space in the pipeline and competes with nothing.
         gr.HTML(spatial_editor(), elem_id=_spatial_id("editor"))
 
+        # -- the Literal Prompt row ------------------------------------------ #
+        #
+        # Two ordinary prompt boxes for text no language model may rewrite, and
+        # the whole of the feature that used to require typing [[...]].
+        #
+        # Built here and *moved* by the browser to sit under the native Negative
+        # Prompt, because Forge offers an extension no way to build a component
+        # into the prompt area: `ui()` runs inside the script accordion, which
+        # is several hundred pixels below the box these two belong beside. The
+        # move is presentation only and is allowed to fail -- see
+        # javascript/model_chain_literals.js. If it does, the row stays where
+        # Gradio put it and every one of these controls still works.
+        #
+        # Real Textboxes with the host's own `prompt` class, so Tag
+        # Autocomplete, LoRA completion and anything else that looks for a
+        # prompt box finds two more of them rather than two impostors.
+        literal = mc_literal_prompts.settings()
+        with gr.Row(elem_id=ident("literal", "row"),
+                    visible=bool(stored["enabled"]) or bool(spatial["enabled"]),
+                    elem_classes=["mc-literal-row"]) as literal_row:
+            literal_positive = gr.Textbox(
+                label="Literal Positive — Before", lines=2, max_lines=4,
+                value=literal["positive"], elem_id=ident("literal", "positive"),
+                elem_classes=["prompt", "mc-literal-box"],
+                placeholder="kept out of every language model and placed before "
+                            "the finished prompt",
+                info="LoRA tags, wildcards, another extension's syntax, "
+                     "instructions about your reference images")
+            literal_negative = gr.Textbox(
+                label="Literal Negative — After", lines=2, max_lines=4,
+                value=literal["negative"], elem_id=ident("literal", "negative"),
+                elem_classes=["prompt", "mc-literal-box"],
+                placeholder="the same protection, placed after the finished prompt",
+                info="the far side of the positive prompt — not Forge's Negative "
+                     "Prompt, and it removes nothing")
+
         self.panel = panel
         self.components = {
             "enabled": enabled, "creativity": creativity, "status": status,
@@ -1509,7 +1592,10 @@ class ScriptKreaCreative(scripts.Script):
             "spatial_auto_save": spatial_auto_save,
             "spatial_undo": spatial_undo, "spatial_commit": spatial_commit,
             "creative_line": pipeline.summary("creative"),
-            "spatial_line": pipeline.summary("spatial")}
+            "spatial_line": pipeline.summary("spatial"),
+            "literal_row": literal_row,
+            "literal_positive": literal_positive,
+            "literal_negative": literal_negative}
         if panel is not None:
             self.components.update(panel.components())
 
@@ -1518,6 +1604,7 @@ class ScriptKreaCreative(scripts.Script):
         self._wire_spatial(spatial_enabled, spatial_compose, spatial_status,
                            spatial_state, record_scenes, restore_spatial,
                            enabled)
+        self._wire_literals(literal_positive, literal_negative)
         self._wire_layouts(spatial_profile, spatial_profile_refresh,
                            spatial_profile_state, spatial_profile_name,
                            spatial_profile_save, spatial_profile_delete,
@@ -1553,13 +1640,47 @@ class ScriptKreaCreative(scripts.Script):
         # one a missing creativity library produces. Spatial does not need the
         # library, so a page that could not build the axis controls still has to
         # be able to send a layout. _split() knows both shapes.
+        # The Literal Prompt boxes go in the middle, before the Spatial tail.
+        # That looks backwards and is the only placement that works: mc_plan
+        # reads the Spatial controls off the *end* of this tuple, so appending
+        # would have moved the end out from under it. The two ends stay the two
+        # ends, and the new block joins the variable middle that only _split()
+        # reads -- which knows how long the axis block is because it asks.
         spatial_controls = [spatial_enabled, spatial_compose, spatial_state]
+        literal_controls = [literal_positive, literal_negative]
         if panel is None:
-            self.arguments = [enabled, creativity] + spatial_controls
+            self.arguments = ([enabled, creativity] + literal_controls
+                              + spatial_controls)
         else:
             self.arguments = ([enabled, creativity] + list(panel.settings_controls)
-                              + list(panel.axis_controls) + spatial_controls)
+                              + list(panel.axis_controls) + literal_controls
+                              + spatial_controls)
         return list(self.arguments)
+
+    def _wire_literals(self, positive, negative) -> None:
+        """Keep what the two Literal Prompt boxes hold. Two handlers, no more.
+
+        ``blur`` and not ``change``: a Textbox's change event fires as somebody
+        types, and a round trip per keystroke is not a thing to do to a prompt
+        box. Nothing is waiting on this write -- the value that travels with a
+        generation is whatever the component holds when Generate is pressed, so
+        a press before the box has been left still uses what is on screen. This
+        is only what makes it survive a restart.
+        """
+        def keep_positive(value):
+            mc_literal_prompts.remember(**{mc_literal_prompts.POSITIVE:
+                                           str(value or "")})
+            return gr.update()
+
+        def keep_negative(value):
+            mc_literal_prompts.remember(**{mc_literal_prompts.NEGATIVE:
+                                           str(value or "")})
+            return gr.update()
+
+        positive.blur(fn=keep_positive, inputs=[positive], outputs=[positive],
+                      queue=False, show_progress=False)
+        negative.blur(fn=keep_negative, inputs=[negative], outputs=[negative],
+                      queue=False, show_progress=False)
 
     def _wire_layouts(self, profile, refresh, state_line, name, save, delete,
                       auto_save, spatial_state, spatial_enabled, spatial_compose,
@@ -1796,7 +1917,21 @@ class ScriptKreaCreative(scripts.Script):
         # pipeline is about the positive prompt and should stay that way.
         self._restore_negative(p)
 
-        parsed = literals.parse(getattr(p, "prompt", "") or "")
+        # One parse, one merge, and every path below reads the result. The two
+        # Literal Prompt boxes become commands here and nowhere else -- section
+        # 11 of the Literal Prompts intent, and the reason the fields cannot
+        # develop a second prompt path of their own: by the time anything
+        # downstream sees them they are LiteralCommands in the sidecar the
+        # parser already produced, indistinguishable from a [[...]] somebody
+        # typed and restored by the same single assembly step.
+        #
+        # Before the "neither feature is on" check, deliberately. A field that
+        # only worked while Creative or Spatial was running would be a field
+        # whose row is hidden exactly when it stops working, which is the
+        # opposite of section 3.3.
+        before, after = _literals_for(args)
+        parsed = literals.merge(
+            literals.parse(getattr(p, "prompt", "") or ""), before, after)
         layout = self._layout(p, args)
         creative = bool(enabled)
         if not creative and not getattr(layout, "regions", ()):

@@ -373,3 +373,106 @@ def describe(parsed) -> str:
         parts.append(f"{len(suffixes)} after")
     return (f"{total} literal command{'' if total == 1 else 's'} "
             f"({', '.join(parts)})")
+
+
+# --------------------------------------------------------------------------- #
+# Commands nobody typed brackets for
+# --------------------------------------------------------------------------- #
+#
+# A prompt box can protect text without the user spelling the protection out.
+# "Literal Positive" and "Literal Negative" are two ordinary text fields whose
+# whole contents are a prefix and a suffix command respectively, and everything
+# below exists so that the rest of this module -- and everything downstream of
+# it -- cannot tell the difference between one of those and a `[[...]]` somebody
+# typed.
+#
+# That is the whole design. There is no second parser, no generated bracket
+# string, and no second assembly step: a field becomes a LiteralCommand, the
+# command joins the sidecar the parser already produced, and `restore` puts it
+# back exactly as it puts back everything else. A payload from a field is as
+# opaque as a payload from a bracket, for the same reason -- this module still
+# does not know what a LoRA tag is.
+
+
+def command(text, placement: str = PREFIX, *, scope: str = GLOBAL,
+            region_id: str = "", source_order: int = 0) -> LiteralCommand | None:
+    """One field's whole contents as one command, or ``None`` when it is empty.
+
+    The entire field is a single payload. It is deliberately not split on
+    commas, newlines or anything else: a field is one protected run of text, and
+    a module that decided where to cut it would be interpreting the payload --
+    which is the one thing this file must never start doing.
+
+    Trimmed at the edges only, exactly as a bracketed payload is, so that a
+    field somebody left a trailing newline in behaves like a bracket somebody
+    lined up.
+    """
+    payload = str(text or "").strip()
+    if not payload:
+        return None
+    if placement not in PLACEMENTS:
+        placement = PREFIX
+    return LiteralCommand(payload=payload, placement=placement,
+                          source_order=int(source_order), scope=str(scope),
+                          region_id=str(region_id or ""))
+
+
+def merge(parsed, before="", after="", *, scope: str = GLOBAL,
+          region_id: str = "") -> LiteralParse:
+    """A parse with two field commands folded in, at the priority the UX defines.
+
+    The ordering rule, and the reason it is one line of tuple construction
+    rather than a sort::
+
+        explicit +[[...]] and bare [[...]]     (source order)
+            -> Literal Positive field
+            -> the transformed prompt body
+            -> Literal Negative field
+            -> explicit -[[...]]               (source order)
+
+    Typed syntax outranks a field on both sides, and it outranks it *outwards*:
+    an explicit prefix is further from the body than the field prefix, an
+    explicit suffix further than the field suffix. That is the arrangement a
+    user is asking for by reaching for the syntax at all -- positional control
+    the fields do not offer -- and it is the only arrangement in which adding a
+    field to an existing prompt cannot move something the user had already
+    placed.
+
+    :func:`split` reads placement groups in tuple order, so putting the commands
+    in this order in one tuple *is* the priority. Nothing sorts, nothing
+    compares, and ``source_order`` is untouched: it records where a command was
+    in the text it came from, and a field did not come from any text.
+
+    ``clean_text`` and ``warnings`` are carried through unchanged. A field
+    contributes neither -- it was never in the prompt body, so there is nothing
+    to remove from it and nothing about it to warn about.
+
+    Returns ``parsed`` itself when both fields are empty, which is the case this
+    is called in almost every time.
+    """
+    prefix = command(before, PREFIX, scope=scope, region_id=region_id)
+    suffix = command(after, SUFFIX, scope=scope, region_id=region_id)
+    if prefix is None and suffix is None:
+        return parsed if isinstance(parsed, LiteralParse) else _as_parse(parsed)
+
+    found = _as_parse(parsed)
+    merged = (*found.prefix_commands,
+              *([prefix] if prefix is not None else ()),
+              *([suffix] if suffix is not None else ()),
+              *found.suffix_commands)
+    return LiteralParse(clean_text=found.clean_text, commands=merged,
+                        warnings=found.warnings)
+
+
+def _as_parse(parsed) -> LiteralParse:
+    """Whatever a caller has, as a :class:`LiteralParse`.
+
+    Callers hold one of three things -- a parse, a bare command sequence, or
+    nothing at all, the last being an ordinary prompt with no brackets in it
+    that a field now has something to say about. All three merge the same way.
+    """
+    if isinstance(parsed, LiteralParse):
+        return parsed
+    if parsed is None:
+        return EMPTY
+    return LiteralParse(clean_text="", commands=tuple(parsed or ()))
