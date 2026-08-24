@@ -614,3 +614,86 @@ class TestTheActiveLiteralsNote:
         """)
 
         assert found["echo"] == "a quiet street"
+
+
+# --------------------------------------------------------------------------- #
+# The ids the two sides agree on
+# --------------------------------------------------------------------------- #
+
+
+class TestTheIdContract:
+    """Python names these elements; JavaScript finds them by name.
+
+    Nothing enforces that at run time and nothing complains when it breaks: a
+    renamed id makes `byId` return null, every guard in the browser file does
+    what it is supposed to do with a missing element, and the feature quietly
+    stops moving the row, joining the family or collapsing anything. Silence is
+    the whole problem, so the agreement is a test.
+    """
+
+    def ids_in(self, path: Path) -> set[str]:
+        import re
+
+        return set(re.findall(r'"(mc-krea-[a-z-]+|txt2img_[a-z_]+|mc-pipeline-[a-z-]+)"',
+                              path.read_text(encoding="utf-8")))
+
+    def python_ids(self) -> set[str]:
+        import model_chain_krea_creative as creative_script
+
+        return {
+            creative_script.ident("literal", "row"),
+            creative_script.ident("literal", "positive"),
+            creative_script.ident("literal", "negative"),
+            creative_script._spatial_id("literal-prefix"),
+            creative_script._spatial_id("literal-suffix"),
+        }
+
+    def test_the_global_row_and_boxes_are_named_the_same_on_both_sides(self, host):
+        wanted = self.python_ids()
+        found = self.ids_in(SCRIPT)
+
+        for name in ("mc-krea-creative-literal-row",
+                     "mc-krea-creative-literal-positive",
+                     "mc-krea-creative-literal-negative"):
+            assert name in wanted, f"Python no longer builds {name}"
+            assert name in found, f"the browser file no longer looks for {name}"
+
+    def test_the_pipeline_file_looks_for_the_same_boxes(self, host):
+        found = self.ids_in(PIPELINE)
+
+        for name in ("mc-krea-creative-literal-row",
+                     "mc-krea-creative-literal-positive",
+                     "mc-krea-creative-literal-negative"):
+            assert name in found, f"the pipeline file no longer looks for {name}"
+
+    def test_the_region_fields_are_named_the_same_on_both_sides(self, host):
+        wanted = self.python_ids()
+        editor = ROOT / "javascript" / "model_chain_spatial_krea.js"
+        source = editor.read_text(encoding="utf-8")
+
+        for name in ("mc-krea-spatial-literal-prefix",
+                     "mc-krea-spatial-literal-suffix"):
+            assert name in wanted, f"Python no longer builds {name}"
+            # The editor composes its ids from its prefix constant, so what
+            # appears in the file is the tail. Asserted in that form rather than
+            # with a fallback, because a fallback that also accepted the whole
+            # id would pass whichever way the file was written and catch
+            # neither rename.
+            tail = 'P + "' + name[len("mc-krea-spatial"):] + '"'
+            assert tail in source, f"the editor no longer looks for {name}"
+
+    def test_the_region_inputs_are_actually_in_the_markup(self, host):
+        import model_chain_krea_creative as creative_script
+
+        markup = creative_script.spatial_editor()
+
+        assert 'id="mc-krea-spatial-literal-prefix"' in markup
+        assert 'id="mc-krea-spatial-literal-suffix"' in markup
+
+    def test_the_native_controls_it_reaches_for_are_named(self):
+        """Three of Forge's own, and the only three. Each is optional at run
+        time -- a build that renames one costs that job and nothing else -- but
+        a typo here would cost it silently on every build."""
+        found = self.ids_in(SCRIPT)
+
+        assert {"txt2img_prompt", "txt2img_neg_prompt", "txt2img_cfg_scale"} <= found
