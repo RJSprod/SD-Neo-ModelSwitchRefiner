@@ -38,7 +38,7 @@ ROUTE = "/model-chain/literal-prompts/report"
 it is a report rather than a page."""
 
 FLAGS = ("boxesFound", "claimed", "autocompleteInstalled", "listWrapped",
-         "inTheirList", "promptFamily", "placed")
+         "inTheirList", "promptFamily", "placed", "liftedThirdParty")
 """The booleans the browser may answer with. Anything else in the payload is
 ignored -- see the module docstring."""
 
@@ -79,9 +79,18 @@ def describe(report) -> tuple[str, bool]:
                 "finding themselves on the page", True)
 
     if found["claimed"]:
-        return ("Model Chain: the Literal Prompt boxes have tag completion, and "
-                f"the prompt family {'was' if found['promptFamily'] else 'was not'} "
-                "there to join", not found["promptFamily"])
+        # The switch that used to stop this. Said out loud rather than left for
+        # somebody to discover that a setting reading "off" is not off for two
+        # boxes: it is lifted for the length of one call, on these two
+        # textareas, and every other textbox it covers still answers to it.
+        aside = (" (Tag Autocomplete's \"Active in third party textboxes\" switch"
+                 " is off; these two were handed over anyway, as the prompt boxes"
+                 " they are -- nothing else that switch covers is affected)"
+                 if found["liftedThirdParty"] else "")
+        return ("Model Chain: the Literal Prompt boxes have tag completion"
+                + aside + ", and the prompt family "
+                + ("was" if found["promptFamily"] else "was not")
+                + " there to join", not found["promptFamily"])
 
     if not found["autocompleteInstalled"]:
         return ("Model Chain: no Tag Autocomplete on this page, so the Literal "

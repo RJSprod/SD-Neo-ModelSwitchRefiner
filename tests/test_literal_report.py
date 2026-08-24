@@ -26,7 +26,8 @@ def report(**overrides) -> dict:
     """A page where everything worked, unless a test says otherwise."""
     found = {"boxesFound": True, "claimed": True, "autocompleteInstalled": True,
              "listWrapped": True, "inTheirList": True, "config": "loaded",
-             "thirdPartyBoxes": True, "promptFamily": True, "placed": True}
+             "thirdPartyBoxes": True, "liftedThirdParty": False,
+             "promptFamily": True, "placed": True}
     found.update(overrides)
     return found
 
@@ -46,6 +47,23 @@ class TestWhatItSays:
 
         assert wrong is True
         assert "was not" in line
+
+    def test_a_lifted_switch_is_said_out_loud(self):
+        """The switch that was actually standing in the way. A setting reading
+        "off" that is not off for two boxes is not a thing to leave somebody to
+        discover, so the line that says the boxes work says this too."""
+        line, wrong = mc_literal_report.describe(
+            report(thirdPartyBoxes=False, liftedThirdParty=True))
+
+        assert wrong is False
+        assert "have tag completion" in line
+        assert "third party textboxes" in line
+        assert "nothing else that switch covers is affected" in line
+
+    def test_a_switch_that_was_never_touched_is_not_mentioned(self):
+        line, _ = mc_literal_report.describe(report())
+
+        assert "third party textboxes" not in line
 
     def test_no_tag_autocomplete_is_reported_but_is_not_a_fault(self):
         """Not installing an extension is not a bug in this one."""

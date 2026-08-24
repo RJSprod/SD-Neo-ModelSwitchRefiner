@@ -218,6 +218,8 @@
         return typeof addAutocompleteToArea === "function";
     }
 
+    let lifted = false;
+
     function joinAutocomplete(field) {
         if (!field || !field.classList) return;
         if (field.classList.contains("autocomplete")) return;
@@ -226,7 +228,34 @@
         // before that is calling into a half-built extension; there is always
         // another attempt.
         if (typeof TAC_CFG === "undefined" || !TAC_CFG) return;
-        addAutocompleteToArea(field);
+
+        // "Active in third party textboxes", off.
+        //
+        // That switch gates every textarea that extension does not recognise as
+        // one of the four core prompt boxes -- and these two are not four of
+        // them, however much they look and behave like it. With it off the
+        // hand-over below is refused and there is nothing else to try: the
+        // switch is the only thing standing between these boxes and tag
+        // completion, and it is read in exactly one place, the gate inside the
+        // call being made here.
+        //
+        // So it is lifted for the length of that one call, on these two
+        // textareas, and put back exactly as it was -- including `undefined`,
+        // on a build where the option does not exist. Every other textbox that
+        // switch covers still answers to it, nothing else in that extension's
+        // config is touched, and the line these boxes report to the log says
+        // this happened rather than leaving somebody to find out that their
+        // setting appears not to be doing what it says.
+        const gate = TAC_CFG.activeIn;
+        const was = gate ? gate.thirdParty : undefined;
+        const lifting = !!gate && !was;
+        try {
+            if (lifting) gate.thirdParty = true;
+            addAutocompleteToArea(field);
+        } finally {
+            if (lifting) gate.thirdParty = was;
+        }
+        if (lifting && field.classList.contains("autocomplete")) lifted = true;
     }
 
     // ...and the other half of the same job, from the other direction, which is
@@ -337,6 +366,7 @@
             inTheirList: inTheirList(),
             config: autocompleteConfig(),
             thirdPartyBoxes: thirdPartyBoxes(),
+            liftedThirdParty: lifted,
             promptFamily: !!family(),
             placed: !!row && !!byId(IDS.negativePrompt)
                     && row.previousElementSibling === byId(IDS.negativePrompt),
