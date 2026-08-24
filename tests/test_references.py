@@ -1260,7 +1260,17 @@ class TestStatusWiring:
     STITCH_GALLERY_ID = "script_txt2img_imagestitch_integrated_ref_latent"
 
     def changes(self, component):
-        return [kwargs for name, kwargs in component._callbacks if name == "change"]
+        """The reference-status handlers on a control, and only those.
+
+        The reference mode is also a preset field, so the Image Pipeline's
+        modified indicator watches it too -- a second, unrelated ``change``
+        handler on the same component. Counting every handler would make these
+        tests fail the next time anything else legitimately listens to this
+        control, which is a test about the wrong subject.
+        """
+        return [kwargs for name, kwargs in component._callbacks
+                if name == "change"
+                and getattr(kwargs.get("fn"), "__name__", "") == "on_reference_change"]
 
     def mode_control(self, returned):
         return returned[UI_ORDER.index("reference_mode")]
