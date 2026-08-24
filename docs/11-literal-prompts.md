@@ -394,10 +394,15 @@ it is the reason `mc_literal_report` exists.
 
 The browser file builds a nine-field report the first time somebody puts the
 caret in a literal box — which is exactly when tag completion is the thing being
-expected — and posts it once to `/model-chain/literal-prompts/report`, where it
-becomes one line in the WebUI's log beside everything else this extension
-writes. A page where both boxes were claimed says so at debug level and is
-silent by default; a page where they were not is a warning that names the cause:
+expected — and posts it once to `/model-chain/literal-prompts/report`. That is
+an endpoint inside the running WebUI and not a file: what it produces is one
+line, in the console and in `<LLM data root>/logs/model_chain.log`, which
+`mc_logfile` opens beside the `llama-server.log` the managed runtime writes.
+(There was no such file before this: every line this extension logged existed
+only in the terminal Forge was started from, which is no help to somebody
+running it as a service or reading it the next morning.) A page where both boxes
+were claimed says so; a page where they were not is a warning that names the
+cause:
 
 ```
 WARNING Model Chain: Tag Autocomplete is installed but has not claimed the

@@ -1359,6 +1359,13 @@ share of it, nothing that changes shape as you drag Forge's divider.
 the far side of the same protected run of text — the suffix to the positive
 prompt, where `-[[…]]` has always put things.
 
+**If they are not completing tags.** The boxes report themselves once per page
+load, into `<LLM data root>/logs/model_chain.log` — the same folder as the
+managed LLM's own log — and the line names the cause: Tag Autocomplete not
+installed, its settings still loading, or its **Active in third party
+textboxes** setting being off (which needs a full restart, not a UI reload).
+Nothing to open the browser's developer tools for.
+
 **Hidden does not mean inactive.** The row appears when Creative or Spatial is
 on and is hidden when neither is, because that is when protecting text from a
 rewriter is a thing anyone is thinking about. The values keep working while it

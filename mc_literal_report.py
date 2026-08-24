@@ -21,8 +21,9 @@ known words, and ignores everything else in the payload. There is nowhere for
 free text to get in, which is deliberate -- a diagnostic that could carry what
 somebody typed would be a diagnostic nobody should install.
 
-One line, once per page load, and only when there is something to say: a page
-where both boxes were claimed reports at debug level and is silent by default.
+One line, once per page load: a warning when something is wrong, an ordinary
+line when nothing is. It lands in the console and -- see :mod:`mc_logfile` -- in
+``<LLM data root>/logs/model_chain.log`` beside the LLM's own.
 """
 
 from __future__ import annotations
@@ -108,12 +109,17 @@ def describe(report) -> tuple[str, bool]:
 
 
 def note(report) -> str:
-    """Log what the browser found, and hand the line back for the tests."""
+    """Log what the browser found, and hand the line back for the tests.
+
+    A warning when something is wrong, and an ordinary line when nothing is:
+    "this works here" is the other half of the answer somebody needs, and one
+    line per page load is not a log to hide from.
+    """
     line, wrong = describe(report)
     if wrong:
         logger.warning(line)
     else:
-        logger.debug(line)
+        logger.info(line)
     return line
 
 

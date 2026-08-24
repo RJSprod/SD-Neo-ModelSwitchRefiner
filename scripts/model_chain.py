@@ -27,6 +27,7 @@ import mc_llm_paths
 import mc_llm_runtime
 import mc_llm_state
 import mc_llm_studio
+import mc_logfile
 import mc_lora
 import mc_memory
 import mc_pipeline_panel
@@ -3404,9 +3405,13 @@ try:
 
     script_callbacks.on_script_unloaded(_on_script_unloaded)
     script_callbacks.on_ui_tabs(mc_llm_studio.on_ui_tabs)
-    # One route, one log line: what the Literal Prompt boxes found on the page.
-    # See mc_literal_report -- it is how "tag completion does not work in these
-    # boxes" gets answered without asking somebody to open the developer tools.
+    # Both of these need the settings loaded, which is what on_app_started is:
+    # the log file so that everything this extension says survives the terminal
+    # window, and the route the Literal Prompt boxes report themselves over --
+    # which is how "tag completion does not work in these boxes" gets answered
+    # without asking somebody to open the developer tools. The file first, so
+    # the report lands in it.
+    script_callbacks.on_app_started(mc_logfile.attach)
     script_callbacks.on_app_started(mc_literal_report.install)
 except Exception:
     errors.report("Model Chain: failed to register the extension callbacks", exc_info=True)
