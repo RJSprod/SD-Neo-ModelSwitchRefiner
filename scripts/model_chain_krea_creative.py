@@ -368,7 +368,8 @@ def _toggled(enabled, spatial_enabled, serialized, mode):
             spatial_summary(serialized, bool(spatial_enabled),
                             creative=bool(enabled), mode=mode),
             _creative_line(bool(enabled)),
-            _spatial_line(serialized, bool(spatial_enabled), mode))
+            _spatial_line(serialized, bool(spatial_enabled), mode),
+            _literal_row(enabled, spatial_enabled))
 
 
 def _remember_creativity(value):
@@ -736,7 +737,8 @@ def _spatial_toggled(enabled, serialized, creative, mode):
     mc_spatial.remember(**{mc_spatial.ENABLED: bool(enabled)})
     return (spatial_summary(serialized, bool(enabled), creative=bool(creative),
                             mode=mode),
-            _spatial_line(serialized, bool(enabled), mode))
+            _spatial_line(serialized, bool(enabled), mode),
+            _literal_row(creative, enabled))
 
 
 def _spatial_mode(mode, serialized, enabled, creative):
@@ -787,6 +789,23 @@ def _spatial_scenes(record):
 # --------------------------------------------------------------------------- #
 # The two pipeline rows this script owns
 # --------------------------------------------------------------------------- #
+
+
+def _literal_row(creative, spatial):
+    """Whether the Literal Prompt row is on screen. Section 5, and only that.
+
+    Visible when either owned prompt-transforming feature is on, hidden when
+    neither is. It is a statement about *relevance*, not about execution: the
+    boxes are the place you go when a language model is about to rewrite your
+    prompt, and the row would otherwise be two more things to scroll past on a
+    tab where nothing is rewriting anything.
+
+    What it is emphatically not is a switch. The values keep travelling with
+    every generation while the row is hidden -- see :func:`_literals_for` --
+    which is why :func:`mc_literal_prompts.active_note` exists and why the
+    Prompt row of the Image Pipeline says how many are in effect.
+    """
+    return gr.update(visible=bool(creative) or bool(spatial))
 
 
 def _creative_line(enabled=None, stored=None) -> str:
@@ -1731,7 +1750,8 @@ class ScriptKreaCreative(scripts.Script):
                                self.components["spatial_compose"]],
                        outputs=[status, self.components["spatial_status"],
                                 self.components["creative_line"],
-                                self.components["spatial_line"]],
+                                self.components["spatial_line"],
+                                self.components["literal_row"]],
                        queue=False)
 
         # The slider moves what the brief costs as well as what it says, and the
@@ -1803,7 +1823,8 @@ class ScriptKreaCreative(scripts.Script):
         spatial_enabled.change(
             fn=_spatial_toggled,
             inputs=[spatial_enabled, spatial_state, creative_enabled, spatial_compose],
-            outputs=[spatial_status, line], queue=False)
+            outputs=[spatial_status, line, self.components["literal_row"]],
+            queue=False)
         spatial_compose.change(
             fn=_spatial_mode,
             inputs=[spatial_compose, spatial_state, spatial_enabled, creative_enabled],
