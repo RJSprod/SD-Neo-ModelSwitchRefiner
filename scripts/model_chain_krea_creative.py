@@ -1502,34 +1502,6 @@ class ScriptKreaCreative(scripts.Script):
                                  if spatial["profile"] in layout_choices
                                  else mc_spatial_profiles.NONE)
 
-                with gr.Row():
-                    spatial_profile = gr.Dropdown(
-                        label="Layout", value=loaded_layout,
-                        choices=layout_choices, scale=3,
-                        filterable=False, elem_id=ident("spatial", "profile"),
-                        info="a saved composition; loading one replaces the boxes "
-                             "on the canvas")
-                    spatial_profile_refresh = ToolButton(
-                        value=refresh_symbol,
-                        elem_id=ident("spatial", "profile", "refresh"),
-                        tooltip="Spatial layouts: refresh")
-
-                spatial_profile_state = gr.Markdown(
-                    _layout_state(loaded_layout, spatial["layout"]),
-                    elem_id=ident("spatial", "profile", "state"))
-
-                with gr.Row():
-                    spatial_profile_name = gr.Textbox(
-                        label="Layout name", scale=3, max_lines=1,
-                        placeholder="Studio thirds",
-                        elem_id=ident("spatial", "profile", "name"))
-                    spatial_profile_save = gr.Button(
-                        "Save", size="sm", scale=1,
-                        elem_id=ident("spatial", "profile", "save"))
-                    spatial_profile_delete = gr.Button(
-                        "Delete", size="sm", scale=1, variant="stop",
-                        elem_id=ident("spatial", "profile", "delete"))
-
                 spatial_compose = gr.Radio(
                     choices=[("Smart Spatial Compose", spatial_module.SMART),
                              ("Direct BBOX Merge", spatial_module.DIRECT)],
@@ -1567,6 +1539,42 @@ class ScriptKreaCreative(scripts.Script):
             spatial_state = gr.Textbox(
                 value=spatial["layout"], visible=False, lines=1,
                 elem_id=_spatial_id("state"))
+
+            # Saved compositions, one drawer down. They were the first thing
+            # in this panel, above the canvas -- which had the same shape of
+            # mistake Stage 2's checkpoint did: a layout is loaded once at the
+            # start of a session and then left alone, while the canvas under it
+            # is what somebody actually works in. The canvas keeps the top of
+            # the panel; this is where you go to keep what is on it.
+            with gr.Accordion("Saved layouts", open=False,
+                              elem_id=ident("spatial", "profiles")):
+                with gr.Row():
+                    spatial_profile = gr.Dropdown(
+                        label="Layout", value=loaded_layout,
+                        choices=layout_choices, scale=3,
+                        filterable=False, elem_id=ident("spatial", "profile"),
+                        info="a saved composition; loading one replaces the boxes "
+                             "on the canvas")
+                    spatial_profile_refresh = ToolButton(
+                        value=refresh_symbol,
+                        elem_id=ident("spatial", "profile", "refresh"),
+                        tooltip="Spatial layouts: refresh")
+
+                spatial_profile_state = gr.Markdown(
+                    _layout_state(loaded_layout, spatial["layout"]),
+                    elem_id=ident("spatial", "profile", "state"))
+
+                with gr.Row():
+                    spatial_profile_name = gr.Textbox(
+                        label="Layout name", scale=3, max_lines=1,
+                        placeholder="Studio thirds",
+                        elem_id=ident("spatial", "profile", "name"))
+                    spatial_profile_save = gr.Button(
+                        "Save", size="sm", scale=1,
+                        elem_id=ident("spatial", "profile", "save"))
+                    spatial_profile_delete = gr.Button(
+                        "Delete", size="sm", scale=1, variant="stop",
+                        elem_id=ident("spatial", "profile", "delete"))
 
             with gr.Accordion("Spatial options", open=False,
                               elem_id=ident("spatial", "options")):
