@@ -145,6 +145,9 @@
         wired: false,
         listening: false,   // the one document-level listener, installed once
         dragging: "",       // the region id a list drag is carrying, if any
+        pendingSave: false, // an edit finished and not yet committed
+        typing: false,      // a keystroke is in flight; see settle()
+        committed: "",      // what was last written to the state box
         workspace: null,    // the element that is live, once claimed
         open: false,
         drawing: false,
@@ -415,6 +418,7 @@
 
     function mark(token) {
         if (!state.working) return;
+        state.pendingSave = true;
         if (token && token === state.editing) return;
         state.editing = token || "";
         keep(snapshot());
@@ -426,11 +430,17 @@
     function record(before) {
         if (!before || before === snapshot()) return;
         state.editing = "";
+        state.pendingSave = true;
         keep(before);
     }
 
     function undo() {
         if (!state.working || !state.past.length) return;
+        // Undo is an edit like any other as far as committing goes: §6.4 asks
+        // for the undone position to be saved too, or the screen and the
+        // generation disagree -- which is the one thing Auto Save exists to
+        // prevent. The compact canvas has said so since it was written.
+        state.pendingSave = true;
         const now = snapshot();
         restore(state.past.pop());
         state.future.push(now);
@@ -440,6 +450,7 @@
 
     function redo() {
         if (!state.working || !state.future.length) return;
+        state.pendingSave = true;
         const now = snapshot();
         restore(state.future.pop());
         state.past.push(now);
@@ -639,6 +650,44 @@
         paintList();
         paintInspector();
         paintChrome();
+        settle();
+    }
+
+    // §6.4, carried through from the compact canvas: with Auto Save on, an edit
+    // is committed the moment it is finished, in both editors, because a switch
+    // called Auto Save that only one of the two canvases obeyed is a switch that
+    // means different things in two places on one panel.
+    //
+    // Every edit here already brackets itself: `mark()` before it, `paint()`
+    // after. So this is one funnel rather than a call at the end of a dozen
+    // actions -- reorder, delete, duplicate, nudge, orient, undo, the grid, the
+    // position hint -- and the two things it must not do are stated where they
+    // are known:
+    //
+    //   `state.drag`    a gesture in flight paints on every pointermove, and
+    //                   committing on each of them would be a round trip per
+    //                   pixel. The pointerup repaints, and that one commits.
+    //   `state.typing`  a keystroke in a text field is not a finished edit.
+    //                   §"save when the cursor leaves the field": the change
+    //                   event, which the browser fires on blur, paints and
+    //                   commits like everything else.
+    function settle() {
+        if (!state.pendingSave) return;
+        if (state.drag || state.dragging || state.typing) return;
+        state.pendingSave = false;
+        if (!autoSaveOn()) return;
+        const box = stateBox();
+        if (!box || !state.working) return;
+        const said = serialize();
+        // Nothing new to say is nothing to send. Gradio treats every publish as
+        // an input event and a round trip, and a repaint that changed only which
+        // row is selected must not cost one.
+        if (said === state.committed) return;
+        state.committed = said;
+        publish(box, said);
+        // The compact canvas is a view of the same document, so it is stale the
+        // moment this writes one.
+        compactLoad(true);
     }
 
     function place(element, bbox) {
@@ -1305,6 +1354,12 @@
         state.drawing = false;
         state.confirming = false;
         state.editing = "";
+        state.pendingSave = false;
+        state.typing = false;
+        // What the document already holds. Opening the editor commits nothing:
+        // an Auto Save that fired on open would put a "changed" mark against a
+        // layout somebody only looked at.
+        state.committed = serialize();
         state.past.length = 0;
         state.future.length = 0;
         state.open = true;
@@ -1337,7 +1392,10 @@
 
     function save() {
         const box = stateBox();
-        if (box && state.working) publish(box, serialize());
+        if (box && state.working) {
+            state.committed = serialize();
+            publish(box, state.committed);
+        }
         close();
         // The compact canvas is a view of the same document, so it is stale the
         // moment the editor writes one. Forced, because "somebody just saved a
@@ -1412,10 +1470,19 @@
         once(element, "input", function () {
             const region = find(state.selected);
             if (!region) return;
-            mark(id + ":" + region.id);
-            apply(region, element.value);
-            if (repaint) paint();
-            else paintChrome();
+            // Typing is not a finished edit. The commit happens on `change`,
+            // which the browser fires when the cursor leaves the field -- one
+            // round trip per field rather than one per keystroke, and the same
+            // moment somebody would expect a text box to have taken.
+            state.typing = true;
+            try {
+                mark(id + ":" + region.id);
+                apply(region, element.value);
+                if (repaint) paint();
+                else paintChrome();
+            } finally {
+                state.typing = false;
+            }
         });
         once(element, "change", function () {
             const region = find(state.selected);
@@ -2075,6 +2142,7 @@
         duplicate: duplicate,
         restack: restack,
         reorder: reorder,
+        settle: settle,
         undo: undo,
         redo: redo,
         zoomTo: zoomTo,

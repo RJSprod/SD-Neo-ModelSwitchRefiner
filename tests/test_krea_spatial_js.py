@@ -2293,3 +2293,101 @@ class TestRegionLiteralFields:
         markup = creative_script.spatial_compact()
 
         assert "literal" not in markup.casefold()
+
+
+# --------------------------------------------------------------------------- #
+# Auto Save, in both editors
+# --------------------------------------------------------------------------- #
+
+
+class TestAutoSaveInTheFullEditor:
+    """One switch on the panel, and until now only one of the two canvases
+    obeyed it.
+
+    Auto Save committed a move on the compact canvas the moment the pointer came
+    up, and did nothing at all in the full editor, where every edit waited for
+    the Save button. A switch that means different things in two places on the
+    same panel is a switch nobody can trust, and the one it is easiest to lose
+    work to.
+    """
+
+    def test_a_finished_edit_is_committed(self):
+        found = run("""
+            ks.open();
+            ks.reorder("b", "a", true);
+            report({published: published.length,
+                    ids: JSON.parse(published[published.length - 1] || "{}")
+                         .regions.map((region) => region.id)});
+        """, initial=document(BURIED))
+
+        assert found["published"] == 1
+        assert found["ids"] == ["b", "a"]
+
+    def test_with_the_switch_off_nothing_is_written_until_save(self):
+        found = run("""
+            autoSaveBox.checked = false;
+            ks.open();
+            ks.reorder("b", "a", true);
+            const during = published.length;
+            ks.save();
+            report({during: during, after: published.length});
+        """, initial=document(BURIED))
+
+        assert found["during"] == 0
+        assert found["after"] == 1
+
+    def test_opening_the_editor_commits_nothing(self):
+        """An Auto Save that fired on open would put a "changed" mark against a
+        layout somebody only looked at."""
+        found = run("""
+            ks.open();
+            report({published: published.length});
+        """, initial=document(BURIED))
+
+        assert found["published"] == 0
+
+    def test_a_repaint_that_changed_nothing_costs_no_round_trip(self):
+        """Selecting a row repaints the whole editor. Gradio treats every
+        publish as an input event and a round trip, and "which row is
+        highlighted" is not worth one."""
+        found = run("""
+            ks.open();
+            ks.reorder("b", "a", true);
+            const after = published.length;
+            ks.select("a");
+            ks.select("b");
+            report({after: after, now: published.length});
+        """, initial=document(BURIED))
+
+        assert found["after"] == 1
+        assert found["now"] == 1
+
+    def test_typing_does_not_commit_and_leaving_the_field_does(self):
+        """§"save when the cursor exits the field": one round trip per field
+        rather than one per keystroke."""
+        found = run("""
+            ks.open();
+            ks.select("a");
+            field("mc-krea-spatial-prompt", "a lighthouse");
+            const typing = published.length;
+            commit("mc-krea-spatial-prompt", "a lighthouse");
+            report({typing: typing, left: published.length,
+                    saved: saved().regions.find((region) => region.id === "a").prompt});
+        """, initial=document(BURIED))
+
+        assert found["typing"] == 0
+        assert found["left"] == 1
+        assert found["saved"] == "a lighthouse"
+
+    def test_an_undo_is_committed_too(self):
+        """Otherwise Undo would leave the screen and the generation disagreeing,
+        which is the one thing Auto Save exists to prevent."""
+        found = run("""
+            ks.open();
+            ks.reorder("b", "a", true);
+            ks.undo();
+            report({ids: JSON.parse(published[published.length - 1] || "{}")
+                         .regions.map((region) => region.id)});
+        """, initial=document(BURIED))
+
+        assert found["ids"] == ["a", "b"]

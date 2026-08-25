@@ -1544,7 +1544,16 @@ class ScriptKreaCreative(scripts.Script):
                     spatial_auto_save = gr.Checkbox(
                         value=bool(spatial["auto_save"]), label="Auto Save",
                         elem_id=_spatial_id("autosave"), scale=1,
-                        info="commit a move as soon as you let go")
+                        info="saves every finished edit")
+                    mc_hint.control(
+                        "One switch for both canvases: this one and the full "
+                        "Edit Layout editor. On, every finished edit is saved "
+                        "as it happens -- a box let go of after a move or a "
+                        "resize, a region added, deleted or reordered, an undo. "
+                        "A text field saves when the cursor leaves it, not on "
+                        "every keystroke. Off, nothing is written until Save "
+                        "working layout.",
+                        label="Auto Save", elem_id=_spatial_id("autosave", "hint"))
                     spatial_undo = gr.Button("Undo", size="sm", scale=1,
                                              elem_id=_spatial_id("compact", "undo"))
                     spatial_commit = gr.Button("Save working layout", size="sm",
