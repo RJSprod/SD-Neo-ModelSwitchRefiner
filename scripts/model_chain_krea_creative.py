@@ -537,11 +537,18 @@ def _palette(shapes, kind: str) -> str:
     found = []
     for shape in shapes:
         label = html.escape(_label_for(shape), quote=True)
+        # Two classes doing two jobs. ``-shape-`` is the silhouette, and it
+        # belongs to the art layer *inside* the button rather than to the
+        # button -- a clip-path on the button would cut the label off with it.
+        # ``-part-`` is where the button sits, which only the Person outline
+        # has an opinion about, so only the Person outline is given one.
+        where = f" {SPATIAL_PREFIX}-part-{shape}" if kind == "person" else ""
         found.append(
-            f'<button type="button" class="{SPATIAL_PREFIX}-shape-button'
-            f' {SPATIAL_PREFIX}-shape-{shape}" data-shape="{shape}"'
+            f'<button type="button" class="{SPATIAL_PREFIX}-shape-button{where}"'
+            f' data-shape="{shape}"'
             f' data-palette="{kind}" aria-label="{label}">'
-            f'<span class="{SPATIAL_PREFIX}-shape-art" aria-hidden="true"></span>'
+            f'<span class="{SPATIAL_PREFIX}-shape-art {SPATIAL_PREFIX}-shape-{shape}"'
+            f' aria-hidden="true"></span>'
             f'<span class="{SPATIAL_PREFIX}-shape-name">{label}</span></button>')
     return "".join(found)
 
@@ -560,7 +567,7 @@ def _panel_switches() -> str:
         said = html.escape(label, quote=True)
         found.append(
             f'<label class="{SPATIAL_PREFIX}-switch-row">'
-            f'<input type="checkbox" class="{SPATIAL_PREFIX}-panel-switch"'
+            f'<input type="checkbox"'
             f' id="{_spatial_id("show", key)}" data-panel="{key}" checked />'
             f'<span>{said}</span></label>')
     return "".join(found)

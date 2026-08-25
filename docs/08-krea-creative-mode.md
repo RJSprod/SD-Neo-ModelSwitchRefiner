@@ -1435,10 +1435,10 @@ more: two copies of every id whenever Gradio rebuilt the tab, which the file
 handled with a deduplicating `adopt()`, and a modal whose scrolling was its own
 business on exactly the devices with the least room.
 
-The editor is now a block in ordinary document flow that Edit Layout unhides and
-Back hides. It scrolls the way the page scrolls, it inherits the theme it is
-standing in, and it cannot be clipped out of existence by a container it is no
-longer trying to escape. `claim()` is what is left of `adopt()`: no move, just the
+The editor is now a block in ordinary document flow that Full Screen unhides and
+Close hides (it was Edit Layout and Back until §20). It scrolls the way the page
+scrolls, it inherits the theme it is standing in, and it cannot be clipped out of
+existence by a container it is no longer trying to escape. `claim()` is what is left of `adopt()`: no move, just the
 duplicate guard, keeping the newest copy because that is the one Gradio is
 managing. A rebuild under an open editor re-shows and repaints it, which the
 overlay never had to do because it was not where Gradio could rebuild it.
@@ -1505,8 +1505,9 @@ refusal to open a document this build cannot read.
 that quietly dropped Framing would pass every behavioural test by never
 exercising it.
 
-Removed on purpose: the numeric X/Y/W/H fields and the `Box (0–1000)` readout
-that §8.3 asks for. They were built and then taken out, which is worth recording
+Removed on purpose (and the fields, though not the readout, asked for again in
+§20): the numeric X/Y/W/H fields and the `Box (0–1000)` readout that §8.3 asks
+for. They were built and then taken out, which is worth recording
 rather than quietly reverting. The editor is pointer-first — finger, mouse, pen —
 and a normalized coordinate is an implementation detail of the storage format
 rather than something anybody composes in. Four number boxes and a coordinate
@@ -2042,3 +2043,239 @@ exists to prevent. Opening the editor commits nothing — an Auto Save that fire
 on open would put a "changed" mark against a layout somebody only looked at —
 and a repaint that changed only which row is selected costs no round trip,
 because what was last written is remembered and compared against.
+
+
+## 20. The canvas gets the tab (25 August 2026)
+
+Section 15 rebuilt the layout editor for a finger and left it a form with a
+picture in it. Two rows of chrome above the frame, a frame whose height came out
+of `--mc-frame-h` and therefore shared the workspace with whatever the panels
+underneath happened to need, a sentence under the canvas explaining the pipeline
+to somebody who had already chosen it, and a *Full screen* button that asked the
+browser for the display because the block itself could not get any taller.
+
+The design intent this section implements says the shape out loud:
+
+    CANVAS = the main work surface
+    PANELS = optional supporting tools
+    TOP BAR = compact actions only
+    INFORMATION = secondary and collapsible
+
+Everything below follows from taking that literally.
+
+### 20.1 "Full Screen" is a takeover, not an API call
+
+The Fullscreen API was the right answer to the wrong question. It was asked
+because the editor needed to be taller than the column it was standing in, and
+what it delivered was an element promoted out of the page: nothing can clip it,
+nothing can out-stack it — and the browser's own chrome, its Back button and its
+address bar go with it, on the devices with the least room to spare. §29 lists
+requiring it as a non-goal, and §3.1 asks for a txt2img takeover instead.
+
+So opening the workspace now marks the workspace and every ancestor between it
+and `#tab_txt2img` with `data-mc-spatial-path`, and puts one class on the tab.
+Two CSS rules are the whole mechanism:
+
+    .mc-krea-spatial-taken [data-mc-spatial-path]:not(.mc-krea-spatial-workspace)
+        > *:not([data-mc-spatial-path]) { display: none !important; }
+
+    .mc-krea-spatial-taken [data-mc-spatial-path]:not(.mc-krea-spatial-workspace)
+        { display: block !important; padding: 0 !important; ... }
+
+A child of a path element that is not itself on the path is hidden; a path
+element gives up its own padding, border and background so that the workspace is
+standing in the tab rather than in three nested containers inside it. The
+`:not()` on both is load-bearing and has a test of its own: the workspace *is* on
+the path — it has to be, or it would be hidden as a sibling of the things being
+hidden — and without the exclusion the first rule would hide the workspace's own
+contents.
+
+Nothing is moved. That is §22.4, and it is the difference between this and the
+`document.body` overlay §15.5 removed: no id exists twice, Gradio still owns the
+element it built, and `Close` removes the marks and the class. The one thing a
+takeover cannot survive is a container that clips *the tab itself*, and nothing
+does, because the tab is the thing Forge scrolls.
+
+The `fullscreenchange` listener went with the API, which leaves exactly one
+document-level listener in the file — the keystroke — and the test that counts
+them now says one.
+
+### 20.2 The canvas stops sharing its height
+
+The old frame was `--mc-frame-h`, a `clamp()` that guessed at how much room was
+reasonable, and the sidebar was a sibling that added its own height to the page.
+Open enough panels and the frame went off the bottom of the screen.
+
+The workspace is now a fixed-height flex column: the action bar, then a body that
+takes what is left, split into a canvas column and a rail. Both carry
+`min-height: 0`, which is the whole of §12.1 in one declaration — a flex child's
+minimum is its content size unless it is told otherwise, and a rail full of
+panels is exactly the content that pushes a frame down a page. The rail scrolls;
+the canvas does not, ever, because of anything in the rail.
+
+The frame itself is three declarations and no arithmetic about the window:
+
+    aspect-ratio: var(--mc-ar-w) / var(--mc-ar-h);
+    height: calc(100% * var(--mc-zoom));
+    width: auto;
+    max-width: calc(100% * var(--mc-zoom));
+
+Take the height of the box, let the ratio decide the width, and let `max-width`
+pull both back when the frame is wider than the box; zoom lifts all three
+together, so above 100% the frame overflows and the scroll box scrolls. There is
+still no measuring pass and no resize observer.
+
+The obvious-looking version of that used `100cqh`, and it was wrong in a way
+worth recording: `container-type: inline-size` contains the inline axis only, so
+`cqh` has no container to resolve against and falls back to the viewport. A frame
+sized by the window rather than by the box it is in, silently. A test asserts
+that no viewport or container-height unit appears in the frame's rule.
+
+### 20.3 One bar, and one rail
+
+The action bar is §4's ten controls in one row: Spatial, Direct/Smart, Quick Add,
+Draw, Clear All, Panels, Undo, Redo, Save, Close. Draw and Clear All are in it
+because they are frequent composition operations and §4.4 and §4.5 both say, in
+the same words, that they must not be buried in a panel.
+
+The Spatial switch and the composition mode are the *panel's* controls shown in
+the bar. Pressing either presses the Gradio component the panel is bound to, so
+the setting is remembered exactly as it would have been and the summary line
+under the panel repaints itself. That is the same rule §20.6 applies to the
+prompt: the workspace shows the canonical value, it never keeps a copy.
+
+The rail holds six widgets — Prompts, Person, Layers, Inspector, Gallery,
+Session — each collapsible from its own header and hideable from the Panels
+popup. Both flags are session UI preferences under §20 of the intent: not
+serialized, not history, and hiding a panel cannot mark a layout as changed. The
+one place that rule bends is §15.2's: a new blank rectangle wants the cursor in
+its prompt, so creating one opens the Inspector first. Focusing a field inside a
+collapsed panel is a cursor nobody can see.
+
+### 20.4 Two menus and no dialogs
+
+Quick Add and Panels are anchored popups inside the bar — `position: absolute`,
+not `fixed`, nothing torn out of the document to make a menu. One is open at a
+time, a press outside either closes it, and Escape closes the innermost thing
+first: menu, then gesture, then the confirmation bar, then the workspace.
+
+Opening a menu also cancels Draw, which is §11.4's "switching to another
+high-level action" and the reason Draw is a one-shot rather than a mode: it
+arms, one region is drawn, it disarms.
+
+### 20.5 A silhouette is a clip-path, and the box underneath is unchanged
+
+§9 asks for a segmented person whose parts can each be dragged onto the canvas,
+and §2.5 asks for the model to be handed exactly what it was handed before. Both
+are satisfied by keeping the drawing entirely in CSS.
+
+A region is three elements: the body carrying the bbox, a shape layer carrying
+`clip-path` and `transform: rotate()`, and the label. Twelve clip-paths in the
+stylesheet are the whole shape vocabulary, and they are reused at four sizes —
+the region on the canvas, the palette button's art, the layer row's type marker,
+and the drag ghost. There is no SVG, no path data, no `createElementNS`, and
+nothing for a bitmap to redraw.
+
+The clip-path is on the art layer *inside* the button rather than on the button,
+which sounds like a detail and is a bug: on the button it would take the Quick
+Add label off with it. Positioning in the Person outline is a second class,
+`-part-`, on the button. Two classes, two jobs, and a test that reads the markup
+for both.
+
+`ui_shape` and `ui_rotation` are written into the layout only when they say
+something. A rectangle layout serializes to the bytes it always did, a layout
+drawn before either field existed loads as rectangles at 0°, and a shape a later
+build knows and this one does not is drawn as a rectangle rather than refused.
+`prompt_master/krea/spatial.py` carries both through `parse` and `state()` and
+reads neither: an unknown shape is kept verbatim there, because refusing it would
+delete somebody's drawing on the way past. The tests assert the negative
+directly — the composed prompt for a rotated left arm contains no shape name, no
+angle, and the same bbox as the unrotated one.
+
+Rotation is a CSS transform and nothing else. There is no arithmetic anywhere in
+the file by which it could reach a coordinate, which is a stronger guarantee than
+a test, and there is a test as well.
+
+### 20.6 Tap and drag are one gesture
+
+Quick Add's four chips and the Person outline's eleven parts run through one
+implementation: press, and if the contact moves more than a couple of dozen
+pixels it carries a ghost and drops a region where it is let go; if it does not,
+it is a tap and the region lands centred. §10.2 and §10.3 differ in one
+coordinate and nothing else, so they are not two code paths.
+
+The pointer capture is taken on the *workspace* rather than on the button,
+because the Quick Add popup closes after a successful add and a capture held by
+a hidden element is a drag that has stopped reporting. A drop outside the frame
+creates nothing, which is §10.3 and is also the only sensible reading of letting
+go over the rail.
+
+### 20.7 The prompt is shown twice and stored once
+
+§13.2 asks for live synchronisation and no polling, and the honest way to get
+both is to not have a second value. The Prompts widget's three boxes read and
+write the txt2img Prompt and the two Literal Prompt components directly: reading
+is a query, writing is the event Gradio is already bound to, and a `syncing` flag
+keeps the two `input` handlers from echoing each other. Nothing is saved on
+close, because there is nothing to save.
+
+The Creative first switch is the same: it toggles Creative Mode's own checkbox.
+An independent local Creative value is exactly the failure §13.3 names.
+
+### 20.8 Generate, and the rule that survived it
+
+The header of `model_chain_spatial_krea.js` has said since it was written that
+the file must never name the Generate button — that was the guarantee that the
+Creative Mode browser gate could not come back. §16.4 asks for a Generate button
+in the Gallery widget.
+
+The rule was about the *gate*, not the name, so it is now written where it
+actually lives: the file installs no listener on Generate. There is no click to
+swallow, hold, queue or replay. Pressing the workspace's Generate presses the
+host's button, once, synchronously, inside the click the user made — and the
+test that used to assert the file did not know the id now asserts that opening,
+editing and saving press it zero times and pressing it presses it once, with no
+timer armed afterwards.
+
+The gallery and the progress bar are read through a `MutationObserver`, which is
+being told a change happened rather than asking sixty times a minute in a tab
+nobody is looking at. The observer remembers *which element* it is watching, so a
+gallery Gradio rebuilt is re-observed by the same `wire()` pass that re-binds
+everything else.
+
+### 20.9 The bug the Gallery found
+
+Writing the test for "generate without saving first" turned up an old one:
+drawing a region had never been committed with Auto Save on.
+
+`create()` marks the edit through `mark()`, and a drawn region skips `mark()`
+because the gesture has already recorded its own history entry — the state the
+drag started from, pushed on `pointerup`. Recording a history entry and saying an
+edit finished are two different things, and only the second one sets the flag
+`settle()` acts on. So a drawn box was on screen, in the layers list, and not in
+the state box: the next Generate composed without it, until some later edit
+happened to commit.
+
+One line, and the test that found it. It is in this section rather than a fix
+commit of its own because the feature that exposed it is the reason anybody would
+notice: with the Gallery widget you can now generate without leaving the
+workspace, which means you can now generate immediately after drawing.
+
+### 20.10 Nothing explains itself any more
+
+§2.2 and §25 ask for the instructional copy to go, and this is the section where
+the editor stops describing itself: no `title=` anywhere in the workspace or the
+compact canvas, no helper paragraph under the frame, no "No regions yet, add one
+or draw one on the frame", no pipeline sentence in the stage bar, no
+frame-changed paragraph across the top.
+
+What replaced them is either a control or a fact. The frame-changed notice is one
+line in the Session widget. The region count is a number beside the Layers
+header. The pipeline is a line in Session. The dimension string that used to sit
+in the top bar is in Session too, and the bar keeps the ratio on its own —
+`2:3`, which is §18.2.
+
+One sentence survives, and it is worth saying why: the 24-region cap, which is a
+fact about something that just failed to happen rather than a description of a
+control somebody is looking at. Clear All lost its sentence, because Undo is
+right there and enabled.

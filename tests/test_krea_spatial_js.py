@@ -1459,17 +1459,23 @@ class TestTheInspector:
         assert region["framing"] == "Wide shot"
         assert region["angle"] == "Low angle"
 
-    def test_the_editor_offers_no_coordinates_anywhere(self):
-        """Boxes are placed with a finger, a mouse or a pen. A normalized
-        coordinate is an implementation detail of the format, and typing one
-        into a field is not an interaction this editor has."""
-        emitted = {identifier for _tag, identifier in editor_elements()}
-        gone = {"mc-krea-spatial-" + name for name in ("x", "y", "w", "h", "bbox")}
+    def test_the_coordinates_are_four_labelled_fields_and_no_readout(self):
+        """The numeric BBOX was built, taken out, and asked for again.
+
+        It was removed because four number boxes and a `Box (0-1000)` readout
+        invited people to think in a unit the picture does not have, and were
+        the two widest things in a sidebar whose job was the prompt. §8.3 asks
+        for it back, and the rail is why the objection no longer holds: the
+        four fields are in a widget that collapses, in a column that scrolls,
+        neither of them costing the canvas anything. What has not come back is
+        the readout -- a line of coordinates nobody typed into.
+        """
         markup = _markup()
 
-        assert emitted & gone == set()
         assert "0\u20131000" not in markup
         assert "0-1000" not in markup
+        for name in ("bbox-x", "bbox-y", "bbox-w", "bbox-h"):
+            assert f'id="mc-krea-spatial-{name}"' in markup
 
     def test_the_inspector_empties_when_the_selection_goes(self):
         """An inspector still saying "Text" and describing a text region after
@@ -2843,6 +2849,19 @@ class TestTheSessionWidget:
         assert found["dirty"] == "Unsaved"
         assert found["clean"] == "Saved"
 
+    def test_an_auto_saved_edit_reads_as_saved_straight_away(self):
+        """The commit and the line describing it happen in one repaint. Painted
+        the other way round, Session says Unsaved about an edit that was
+        committed a line later and stays wrong until something else repaints."""
+        found = run("""
+            ks.open();
+            draw([100, 100], [400, 400]);
+            report({state: el("mc-krea-spatial-fact-state").textContent});
+        """, initial=document())
+
+        assert found["published"] == 1
+        assert found["state"] == "Saved"
+
     def test_spatial_switched_off_is_part_of_the_pipeline_line(self):
         found = run("""
             hostSpatial.checked = false;
@@ -2917,6 +2936,114 @@ class TestTheNumericBbox:
         """, initial=document())
 
         assert found["past"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# The workspace's own stylesheet
+# --------------------------------------------------------------------------- #
+
+
+class TestTheWorkspaceStylesheet:
+    """The layout is CSS, so the questions a fake DOM cannot answer are asked
+    of the stylesheet directly: does every class the markup emits have a rule,
+    does every silhouette have a shape, and is any of it dark-only."""
+
+    @pytest.fixture
+    def css(self):
+        return (ROOT / "style.css").read_text(encoding="utf-8")
+
+    @pytest.fixture
+    def section(self, css):
+        return css.split("The Spatial Layout workspace.", 1)[1].split(
+            "The Image Pipeline", 1)[0]
+
+    def test_every_class_the_markup_emits_has_a_rule(self, section):
+        """Dangling the other way round: a control styled by nothing looks like
+        a control somebody forgot, and on a theme with opinions it looks like a
+        bug."""
+        used = set()
+        for group in re.findall(r'class="([^"]+)"', _markup()):
+            used.update(name for name in group.split()
+                        if name.startswith("mc-krea-spatial-"))
+        # The compact canvas has its own block further down the stylesheet.
+        used = {name for name in used if "-compact" not in name}
+        missing = {name for name in used if "." + name not in section}
+
+        assert missing == set()
+
+    def test_every_shape_the_editor_can_draw_has_a_silhouette(self, section):
+        """A shape with no clip-path is a rectangle with a different name, and
+        the palette would offer eleven identical buttons."""
+        import model_chain_krea_creative as creative_script
+
+        for name, _label in creative_script.SHAPES:
+            if name == "rect":
+                continue          # the one with no silhouette, on purpose
+            assert f".mc-krea-spatial-shape-{name}" in section, name
+            assert f".mc-krea-spatial-part-{name}" in section, name
+
+    def test_the_silhouette_is_clipped_on_the_art_and_not_on_the_button(self):
+        """A clip-path on the Quick Add button would take the label with it."""
+        markup = _markup()
+
+        assert 'class="mc-krea-spatial-shape-button mc-krea-spatial-part-head"' \
+            in markup
+        assert 'class="mc-krea-spatial-shape-art mc-krea-spatial-shape-head"' \
+            in markup
+
+    def test_it_selects_nothing_gradio_generated(self, section):
+        assert ".svelte" not in section
+
+    def test_the_rail_scrolls_and_the_canvas_does_not(self, section):
+        """§12.1, and the failure it names: a rail full of panels pushing the
+        frame down the page. A flex child's minimum is its content size unless
+        it is told otherwise, so both halves of this are load-bearing."""
+        rail = section.split(".mc-krea-spatial-rail {", 1)[1].split("}", 1)[0]
+
+        assert "overflow-y: auto" in rail
+        assert "min-height: 0" in rail
+
+        body = section.split(".mc-krea-spatial-body {", 1)[1].split("}", 1)[0]
+
+        assert "min-height: 0" in body
+
+    def test_the_frame_is_sized_without_a_viewport_unit(self, section):
+        """§5.3. The frame is the shape of the image and the size of the box it
+        is in -- and `cqh` is not available under `container-type: inline-size`,
+        so a stylesheet that used one would silently size the frame from the
+        window instead."""
+        frame = section.split(".mc-krea-spatial-canvas {", 1)[1].split("}", 1)[0]
+
+        assert "cqh" not in frame
+        assert "vh" not in frame
+        assert "aspect-ratio: var(--mc-ar-w" in frame
+
+    def test_a_coarse_pointer_gets_targets_it_can_hit(self, section):
+        """§23.2, and the numbers §8.2 asks for."""
+        coarse = section.split("@media (pointer: coarse)", 1)[1].split("}", 1)[0]
+
+        assert "--mc-grab: 44px" in coarse
+        assert "--mc-touch: 44px" in coarse
+
+    def test_the_takeover_never_hides_the_workspace_s_own_contents(self, section):
+        """The workspace is marked so that it survives as a sibling of the
+        things being hidden. Marked and not excluded, it would hide itself."""
+        selectors = [" ".join(block.split()).rsplit("}", 1)[-1].strip()
+                     for block in section.split("{")][:-1]
+        rules = [found for found in selectors if "[data-mc-spatial-path]" in found]
+
+        assert rules, "the takeover rules could not be found"
+        for found in rules:
+            assert ("mc-krea-spatial-workspace" in found), found
+
+    def test_every_gesture_surface_says_touch_action_none(self, section):
+        """§5.7 and §23.3: the page does not scroll under a finger that is
+        moving a box, resizing one, drawing one or dragging one out."""
+        for surface in (".mc-krea-spatial-canvas {", ".mc-krea-spatial-region {",
+                        ".mc-krea-spatial-proxy {", ".mc-krea-spatial-handle {",
+                        ".mc-krea-spatial-shape-button {"):
+            rule = section.split(surface, 1)[1].split("}", 1)[0]
+            assert "touch-action: none" in rule, surface
 
 
 # --------------------------------------------------------------------------- #

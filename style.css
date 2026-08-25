@@ -1834,7 +1834,7 @@
     border: 1px solid var(--border-color-primary);
     border-radius: var(--radius-lg);
     background: var(--background-fill-primary);
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
+    box-shadow: var(--shadow-drop-lg, 0 6px 20px rgba(0, 0, 0, 0.25));
 }
 
 .mc-krea-spatial-popup[hidden] {
@@ -1967,17 +1967,17 @@
     opacity: 1;
 }
 
-.mc-krea-spatial-person .mc-krea-spatial-shape-head   { left: 40%; top: 1%;  width: 20%; height: 12%; }
-.mc-krea-spatial-person .mc-krea-spatial-shape-chest  { left: 31%; top: 14%; width: 38%; height: 21%; }
-.mc-krea-spatial-person .mc-krea-spatial-shape-waist  { left: 34%; top: 36%; width: 32%; height: 14%; }
-.mc-krea-spatial-person .mc-krea-spatial-shape-left_arm    { left: 17%; top: 15%; width: 13%; height: 25%; }
-.mc-krea-spatial-person .mc-krea-spatial-shape-right_arm   { left: 70%; top: 15%; width: 13%; height: 25%; }
-.mc-krea-spatial-person .mc-krea-spatial-shape-left_hand   { left: 16%; top: 41%; width: 13%; height: 8%; }
-.mc-krea-spatial-person .mc-krea-spatial-shape-right_hand  { left: 71%; top: 41%; width: 13%; height: 8%; }
-.mc-krea-spatial-person .mc-krea-spatial-shape-left_leg    { left: 34%; top: 51%; width: 14%; height: 30%; }
-.mc-krea-spatial-person .mc-krea-spatial-shape-right_leg   { left: 52%; top: 51%; width: 14%; height: 30%; }
-.mc-krea-spatial-person .mc-krea-spatial-shape-left_foot   { left: 32%; top: 82%; width: 16%; height: 7%; }
-.mc-krea-spatial-person .mc-krea-spatial-shape-right_foot  { left: 52%; top: 82%; width: 16%; height: 7%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-head        { left: 40%; top: 1%;  width: 20%; height: 12%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-chest       { left: 31%; top: 14%; width: 38%; height: 21%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-waist       { left: 34%; top: 36%; width: 32%; height: 14%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-left_arm    { left: 17%; top: 15%; width: 13%; height: 25%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-right_arm   { left: 70%; top: 15%; width: 13%; height: 25%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-left_hand   { left: 16%; top: 41%; width: 13%; height: 8%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-right_hand  { left: 71%; top: 41%; width: 13%; height: 8%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-left_leg    { left: 34%; top: 51%; width: 14%; height: 30%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-right_leg   { left: 52%; top: 51%; width: 14%; height: 30%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-left_foot   { left: 32%; top: 82%; width: 16%; height: 7%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-right_foot  { left: 52%; top: 82%; width: 16%; height: 7%; }
 
 /* §9.5. The silhouettes themselves: a clip-path and nothing else, so the shape
    is presentation and the rectangle around it is the data. Every one of these
@@ -2105,9 +2105,14 @@
     position: relative;
     flex: 0 0 auto;
     aspect-ratio: var(--mc-ar-w, 1) / var(--mc-ar-h, 1);
+    /* Fit, in three declarations and no arithmetic about the window: take the
+       height of the box, let the ratio decide the width, and let max-width pull
+       both back when the frame is wider than the box. Zoom lifts all three
+       together, so above 100% the frame overflows and the scroll box scrolls. */
+    height: calc(100% * var(--mc-zoom));
+    width: auto;
     max-width: calc(100% * var(--mc-zoom));
     max-height: calc(100% * var(--mc-zoom));
-    width: calc(min(100%, (100cqh) * var(--mc-ar-w, 1) / var(--mc-ar-h, 1)) * var(--mc-zoom));
     border: 1px solid var(--border-color-primary);
     background: var(--background-fill-primary);
     /* §5.7: inside the frame, a contact edits. The page does not scroll under
@@ -2184,8 +2189,11 @@
     pointer-events: none;
 }
 
-/* A rectangle has no silhouette to draw; the region's own fill is the shape. */
-.mc-krea-spatial-shape-rect {
+/* A rectangle has no silhouette to draw on the canvas -- the region's own fill
+   is the shape. The Quick Add chip and the layer row still draw a square,
+   which is exactly what a rectangle looks like, so this is scoped to the
+   region's own shape layer rather than to the shape class everywhere. */
+.mc-krea-spatial-shape.mc-krea-spatial-shape-rect {
     background: none;
 }
 
@@ -2506,6 +2514,16 @@
     display: none;
 }
 
+/* The prompt boxes: whatever height is left in the widget, rather than a fixed
+   number of rows that is wrong in both directions. */
+.mc-krea-spatial-grow {
+    flex: 1 1 auto;
+}
+
+.mc-krea-spatial-grow textarea {
+    flex: 1 1 auto;
+}
+
 .mc-krea-spatial-field > span {
     color: var(--body-text-color-subdued);
 }
@@ -2729,11 +2747,12 @@
    Forge scrolls.
    --------------------------------------------------------------------------- */
 
-.mc-krea-spatial-taken [data-mc-spatial-path] > *:not([data-mc-spatial-path]) {
+.mc-krea-spatial-taken [data-mc-spatial-path]:not(.mc-krea-spatial-workspace)
+    > *:not([data-mc-spatial-path]) {
     display: none !important;
 }
 
-.mc-krea-spatial-taken [data-mc-spatial-path] {
+.mc-krea-spatial-taken [data-mc-spatial-path]:not(.mc-krea-spatial-workspace) {
     display: block !important;
     flex: 1 1 auto !important;
     width: 100% !important;
@@ -2748,20 +2767,12 @@
     overflow: visible !important;
 }
 
-/* The workspace itself is on the path and must keep everything the rule above
-   takes away. Written after it, and one class more specific. */
+/* The workspace is on the path so that it survives the rule above as a sibling,
+   and is excluded from it so that its own contents survive too. All it takes
+   from the takeover is the height, which is the point of asking for it. */
 .mc-krea-spatial-taken .mc-krea-spatial-workspace[data-mc-spatial-path] {
-    display: flex !important;
-    height: calc(100vh - 5.5rem) !important;
-    padding: 0.5em !important;
-    border: 1px solid var(--border-color-primary) !important;
-    border-radius: var(--radius-lg) !important;
-    background: var(--background-fill-primary) !important;
-    gap: var(--mc-gap) !important;
-}
-
-.mc-krea-spatial-taken .mc-krea-spatial-workspace[data-mc-spatial-path] * {
-    display: revert;
+    height: calc(100vh - 5.5rem);
+    margin: 0;
 }
 
 /* Undo and Redo are one control in two halves. Left to the bar's own wrapping

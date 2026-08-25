@@ -473,6 +473,93 @@ class TestVersioning:
 
 
 # --------------------------------------------------------------------------- #
+# Editor metadata: carried, and never read
+# --------------------------------------------------------------------------- #
+
+
+class TestTheEditorMetadata:
+    """§2.5 and §21. The layout workspace can lay a region out as a head, an
+    arm or a foot, and can turn a silhouette so a raised arm looks raised. None
+    of that is a fact about the picture the model is asked for: the compositor
+    is handed the same axis-aligned rectangle it has always been handed.
+
+    So the property has two halves and both are worth a test. The metadata must
+    survive a round trip through here -- otherwise reopening a restored layout
+    would silently return every silhouette as a rectangle -- and it must reach
+    the prompt nowhere at all."""
+
+    ARM = dict(FACE, id="r9", name="9", prompt="left arm", framing="", angle="",
+               ui_shape="left_arm", ui_rotation=-20)
+
+    def test_a_shape_and_a_rotation_survive_the_round_trip(self):
+        layout = spatial.parse(document([self.ARM]))
+        entry = layout.regions[0].state()
+
+        assert entry["ui_shape"] == "left_arm"
+        assert entry["ui_rotation"] == -20
+        assert entry["bbox"] == [35, 55, 315, 360]
+
+    def test_neither_of_them_reaches_the_model(self):
+        """§21.3: no anatomy data in the model-facing prompt, and no rotation
+        applied to a coordinate."""
+        layout = spatial.parse(document([self.ARM]))
+        written = spatial.compose(layout, "a studio portrait")
+
+        assert "ui_shape" not in written
+        assert "ui_rotation" not in written
+        assert "left_arm" not in written
+        assert "-20" not in written
+        assert "[35, 55, 315, 360]" in json.dumps(layout.regions[0].element())
+
+    def test_rotation_does_not_rotate_the_box(self):
+        """Acceptance test F, from the other side: the bbox of a region turned
+        35° is the bbox of the same region turned 0°."""
+        straight = spatial.parse(document([dict(self.ARM, ui_rotation=0)]))
+        turned = spatial.parse(document([dict(self.ARM, ui_rotation=35)]))
+
+        assert straight.regions[0].bbox == turned.regions[0].bbox
+        assert straight.regions[0].element() == turned.regions[0].element()
+
+    def test_a_rectangle_layout_serializes_to_the_bytes_it_always_did(self):
+        """§2.6. A document written before either field existed must round-trip
+        unchanged, or every saved layout in the wild changes the first time it
+        is opened."""
+        layout = spatial.parse(document())
+        entry = layout.regions[0].state()
+
+        assert "ui_shape" not in entry
+        assert "ui_rotation" not in entry
+
+    def test_a_layout_with_neither_field_loads_as_rectangles(self):
+        """Acceptance test P."""
+        layout = spatial.parse(document())
+
+        assert layout.regions[0].ui_shape == "rect"
+        assert layout.regions[0].ui_rotation == 0
+
+    def test_a_shape_this_build_has_never_heard_of_is_kept(self):
+        """Refusing it would delete somebody's drawing on the way past: an
+        older Forge opening an image made by a newer one must hand the layout
+        back the way it found it. The editor draws what it cannot name as a
+        rectangle; this module does not name shapes at all."""
+        layout = spatial.parse(document([dict(FACE, ui_shape="tail")]))
+
+        assert layout.regions[0].ui_shape == "tail"
+        assert layout.regions[0].state()["ui_shape"] == "tail"
+        assert layout.notes == ()
+
+    def test_a_rotation_out_of_range_is_clamped_rather_than_refused(self):
+        layout = spatial.parse(document([dict(FACE, ui_rotation=900)]))
+
+        assert layout.regions[0].ui_rotation == 180
+
+    def test_a_rotation_that_is_not_a_number_is_none(self):
+        layout = spatial.parse(document([dict(FACE, ui_rotation="sideways")]))
+
+        assert layout.regions[0].ui_rotation == 0
+
+
+# --------------------------------------------------------------------------- #
 # Pass 1 (§11, "Creative + Direct integration")
 # --------------------------------------------------------------------------- #
 

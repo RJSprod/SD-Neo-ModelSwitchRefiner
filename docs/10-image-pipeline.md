@@ -344,5 +344,5 @@ level rather than inside the Spatial stage's drawer. §6.5 and §10 both give it
 a dedicated large area, and a workspace nested three containers deep inside an
 accordion is one `overflow: hidden` or one `transform` away from being a window
 nobody can see — which is the exact bug the workspace was moved out of an
-overlay to fix. It is hidden until Edit Layout reveals it, so it costs no space
+overlay to fix. It is hidden until Full Screen reveals it, so it costs no space
 in the pipeline and competes with nothing.

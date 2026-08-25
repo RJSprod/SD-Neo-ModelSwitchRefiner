@@ -302,7 +302,8 @@
         syncing: false,     // a prompt mirror is writing; do not echo it back
         shots: [],          // the txt2img gallery's images, newest last
         shotAt: -1,         // which one the Gallery widget is showing
-        watching: false,    // the gallery/progress observers are installed
+        watching: false,    // the element the gallery observer is watching
+        watcher: null,      // that observer, so a rebuilt gallery can replace it
     };
 
     function root() {
@@ -913,8 +914,11 @@
         paintList();
         paintInspector();
         paintChrome();
-        paintFacts();
+        // Before the facts, not after: settle() is what makes "Saved" true, and
+        // a Session widget painted first would say "Unsaved" about an edit that
+        // was committed a line later and stay wrong until the next repaint.
         settle();
+        paintFacts();
     }
 
     // §6.4, carried through from the compact canvas: with Auto Save on, an edit
@@ -2061,12 +2065,18 @@
     }
 
     function watchHost() {
-        if (state.watching) return;
         if (typeof MutationObserver !== "function") return;
         const gallery = byId(HOST.gallery);
         const results = byId(HOST.results) || (gallery && gallery.parentNode);
         if (!gallery && !results) return;
-        state.watching = true;
+        // Gradio rebuilds the results column, and an observer still watching
+        // the element it replaced is an observer that has stopped observing.
+        // The element is remembered rather than a boolean, so a rebuild is
+        // noticed by the same `wire()` pass that re-binds everything else.
+        if (state.watching === (gallery || results)) return;
+        if (state.watcher && typeof state.watcher.disconnect === "function") {
+            try { state.watcher.disconnect(); } catch (error) { /* already gone */ }
+        }
         const seen = new MutationObserver(function () {
             if (!state.open) return;
             readShots();
@@ -2081,8 +2091,11 @@
                                        attributes: true,
                                        attributeFilter: ["style", "class"]});
             }
+            state.watching = gallery || results;
+            state.watcher = seen;
         } catch (error) {
             state.watching = false;
+            state.watcher = null;
         }
     }
 
@@ -2101,7 +2114,12 @@
         if (!region) return;
         function read(id, fallback) {
             const field = byId(id);
-            const number = Math.round(Number(field ? field.value : fallback));
+            const said = field ? String(field.value).trim() : "";
+            // A field somebody has just emptied on the way to typing a new
+            // number is not a request for a box of zero width. Number("") is 0
+            // and finite, which is exactly the wrong answer here.
+            if (!said) return fallback;
+            const number = Math.round(Number(said));
             return Number.isFinite(number) ? number : fallback;
         }
         const width = region.bbox[2] - region.bbox[0];
