@@ -638,73 +638,6 @@ def _stage1_size(width, height, hires=False, hr_scale=2.0, hr_resize_x=0, hr_res
         return width, height
 
 
-def _reference_count(gallery) -> int:
-    try:
-        return len(gallery or ())
-    except TypeError:
-        return 0
-
-
-def _stage1_summary(checkpoint, width, height, hires=False, hr_scale=2.0,
-                    hr_resize_x=0, hr_resize_y=0, sampler="", steps=0, cfg=0.0,
-                    scheduler="", stitch_gallery=None) -> str:
-    """Forge's current txt2img state, as the two lines section 7 asks for.
-
-    Everything is optional. A heavily customised UI that does not expose the
-    Hires controls, or a Forge build that renames the sampler dropdown, loses a
-    clause here and nothing else -- which is the correct failure for a panel
-    whose entire job is to describe controls it does not own.
-    """
-    first = []
-
-    name = _short_checkpoint(checkpoint)
-    if name:
-        first.append(name)
-
-    final_w, final_h = _stage1_size(width, height, hires, hr_scale,
-                                    hr_resize_x, hr_resize_y)
-    try:
-        base_w, base_h = int(width or 0), int(height or 0)
-    except (TypeError, ValueError):
-        base_w = base_h = 0
-
-    if base_w > 0 and base_h > 0:
-        first.append(f"{base_w}×{base_h}")
-    if hires and final_w > 0 and (final_w, final_h) != (base_w, base_h):
-        try:
-            scale = float(hr_scale or 0)
-        except (TypeError, ValueError):
-            scale = 0.0
-        shown = f"Hires {scale:g}×" if scale > 0 and not (hr_resize_x or hr_resize_y) else "Hires"
-        first.append(f"{shown} → {final_w}×{final_h}")
-
-    second = []
-    if sampler:
-        second.append(str(sampler))
-    if scheduler and str(scheduler).strip().casefold() not in ("automatic", "none"):
-        second.append(str(scheduler))
-    try:
-        if int(steps or 0) > 0:
-            second.append(f"{int(steps)} steps")
-    except (TypeError, ValueError):
-        pass
-    try:
-        if float(cfg or 0) > 0:
-            second.append(f"CFG {float(cfg):g}")
-    except (TypeError, ValueError):
-        pass
-
-    references = _reference_count(stitch_gallery)
-    if references:
-        second.append(f"ImageStitch · {references} reference"
-                      f"{'' if references == 1 else 's'}")
-
-    lines = [" · ".join(first)] if first else []
-    if second:
-        lines.append(" · ".join(second))
-    return "  \n".join(lines) if lines else "Forge generates this stage."
-
-
 def _handoff_summary(width, height, hires=False, hr_scale=2.0, hr_resize_x=0,
                      hr_resize_y=0, enabled=False) -> str:
     """What crosses the edge between Stage 1 and Stage 2.
@@ -740,33 +673,6 @@ def _stage2_summary(enabled, target, denoise, multiplier, loaded="") -> str:
     except (TypeError, ValueError):
         pass
     return " · ".join(parts)
-
-
-def _output_summary(enabled, target, multiplier, width, height, hires=False,
-                    hr_scale=2.0, hr_resize_x=0, hr_resize_y=0) -> str:
-    """The size of the picture that actually arrives.
-
-    The last row of the pipeline and the one a user checks first. With Stage 2
-    off it is the Stage 1 result; with Stage 2 on it is that result scaled and
-    aligned to the Stage 2 architecture's grid, which is the same calculation
-    the Stage 2 size readout makes and is deliberately made from the same two
-    functions rather than a second time by hand.
-    """
-    width, height = _stage1_size(width, height, hires, hr_scale, hr_resize_x, hr_resize_y)
-    if width <= 0 or height <= 0:
-        return ""
-    if not enabled:
-        return f"{width}×{height} — from Stage 1"
-
-    arch = mc_arch.detect_from_checkpoint_name(target)
-    try:
-        out_w, out_h = mc_arch.scaled_size(width, height, float(multiplier or 1.0),
-                                           arch.alignment)
-    except (TypeError, ValueError, ZeroDivisionError):
-        return f"{width}×{height}"
-    return f"{out_w}×{out_h} — refined by Stage 2"
-
-
 
 
 def _edit_notice(target: str, mode: str) -> str:
@@ -1864,21 +1770,21 @@ class ScriptModelChain(scripts.Script):
 
         def _context_lines(read, is_on, target_name, denoise_value, multiplier,
                            loaded, gallery):
-            """The four live lines, from one set of reads."""
+            """The two live lines, from one set of reads.
+
+            There were four. The Stage 1 and Output rows they filled are gone
+            from the panel -- the sliders and the picture were already saying
+            those things -- and what is left is the pair nothing else on the
+            page states: the size that crosses into Stage 2, and what Stage 2
+            will do with it.
+            """
             geometry = (read.get("width", 0), read.get("height", 0),
                         bool(read.get("hires", False)), read.get("hr_scale", 2.0),
                         read.get("hr_resize_x", 0), read.get("hr_resize_y", 0))
             return (
-                _stage1_summary(read.get("checkpoint", ""), *geometry,
-                                sampler=read.get("sampler", ""),
-                                steps=read.get("steps", 0),
-                                cfg=read.get("cfg", 0.0),
-                                scheduler=read.get("scheduler", ""),
-                                stitch_gallery=gallery),
                 _handoff_summary(*geometry, enabled=bool(is_on)),
                 _stage2_summary(bool(is_on), target_name, denoise_value,
                                 multiplier, loaded),
-                _output_summary(bool(is_on), target_name, multiplier, *geometry),
             )
 
         def wire_pipeline_context(stitch_gallery=None):
@@ -1889,8 +1795,7 @@ class ScriptModelChain(scripts.Script):
             panel is being built, and a Gradio event captures its input list at
             registration.
             """
-            outputs = [pipeline.summary("stage1"), pipeline.handoff,
-                       pipeline.summary("stage2"), pipeline.summary("output")]
+            outputs = [pipeline.handoff, pipeline.summary("stage2")]
             if not all(outputs):
                 return
 

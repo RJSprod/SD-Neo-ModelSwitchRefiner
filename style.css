@@ -2499,7 +2499,7 @@
 }
 
 /* The last node ends the path rather than trailing off it. */
-.mc-pipeline-stage-output::before {
+.mc-pipeline-stage-stage2::before {
     bottom: auto;
     height: 0.9em;
 }
@@ -2519,25 +2519,70 @@
 
 /* -- ownership ----------------------------------------------------------- */
 /*
-   Section 2.4. Creative, Spatial and Stage 2 are Model Chain's: emphasised,
-   switchable, expandable. Prompt, Stage 1 and Output are Forge's and are here
-   only because a path with holes in it teaches nobody the path -- so they are
-   muted rather than disabled. A control that is present and refuses to work is
-   worse than no control.
+   Every row here is one this extension owns and runs. The three that were
+   Forge's -- Prompt, Stage 1, Output -- are gone; what is left of them is the
+   handoff line, which is a number and not a row.
 */
 
 .mc-pipeline-stage-owned::after {
     border-color: var(--mc-pipe-accent);
 }
 
-.mc-pipeline-stage-context .mc-pipeline-title,
-.mc-pipeline-stage-context .mc-pipeline-summary,
 .mc-pipeline-handoff {
     color: var(--mc-pipe-muted);
 }
 
-.mc-pipeline-stage-context::after {
-    border-style: dashed;
+/* -- structure ----------------------------------------------------------- */
+/*
+   On a dark theme the rail and the text were the only two things on the panel,
+   and three stages of unboxed text on a black background read as one paragraph
+   with bold words in it. Each stage is a surface now, with an edge: the rail
+   still says these things happen in order, and the surfaces say where one stage
+   stops and the next begins.
+
+   Colours are the host's own custom properties, so a theme -- Lobe included --
+   decides what "a surface" looks like here exactly as it does everywhere else.
+*/
+
+.mc-pipeline-stage {
+    background: var(--panel-background-fill, var(--background-fill-secondary));
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-md, 0.4em);
+    padding-right: 0.6em;
+    margin-bottom: 0.5em;
+}
+
+/* The rail passes behind the surfaces rather than through them: it is drawn
+   from the gap above each node down to the next, so the segment a surface
+   would have covered is the segment nobody needed to see. */
+.mc-pipeline-stage::before {
+    top: -0.55em;
+    bottom: auto;
+    height: 1.05em;
+}
+
+.mc-pipeline-stage:first-of-type::before {
+    display: none;
+}
+
+/* The one line that is not a surface: it sits on the edge between two of them
+   and describes the edge. */
+.mc-pipeline-handoff {
+    margin: -0.15em 0 0.35em 0;
+}
+
+/* Section 3.3's note, and nothing when there is nothing to say. Gradio gives a
+   component a wrapper of its own, so an empty span inside a rendered HTML block
+   still costs a line -- this takes the line back. */
+.mc-pipeline-notes:not(:has(.mc-pipeline-echo:not(:empty))) {
+    display: none;
+}
+
+.mc-pipeline-notes {
+    font-size: var(--text-xs, 0.78em);
+    color: var(--mc-pipe-muted);
+    padding-left: 1.5em;
+    margin-bottom: 0.35em;
 }
 
 .mc-pipeline-title {

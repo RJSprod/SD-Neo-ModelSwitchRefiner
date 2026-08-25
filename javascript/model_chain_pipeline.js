@@ -47,12 +47,11 @@
     const DONE = P + "-done";
 
     const ECHO = P + "-prompt-echo";
-    const PROMPT = "txt2img_prompt";
 
     // The Literal Prompt boxes. Read from here rather than reported by them,
-    // because the Prompt row has exactly one writer and this is it -- two
-    // files writing one element is how a line ends up alternating between two
-    // truths depending on which event fired last.
+    // because the note has exactly one writer and this is it -- two files
+    // writing one element is how a line ends up alternating between two truths
+    // depending on which event fired last.
     const LITERALS = {
         row: "mc-krea-creative-literal-row",
         positive: "mc-krea-creative-literal-positive",
@@ -66,6 +65,11 @@
     // Label -> stage, in order, first match wins. Order is load-bearing:
     // "Waiting for Stage 1 preload" has to reach the Stage 1 rule before
     // anything more general sees it.
+    //
+    // `stage1` and `output` are still in here and no longer rows on the panel.
+    // Recognising a phase and having nowhere to draw it is the right answer for
+    // those two; not recognising a label at all is the failure this table
+    // exists to prevent, and the two must not be confused for one another.
     const PHASES = [
         {match: "stage 1", stage: "stage1"},
         {match: "stage 2", stage: "stage2"},
@@ -83,7 +87,10 @@
     // wait, so "still that one" is always the right answer after the first.
     const AMBIGUOUS = "waiting for the language model";
 
-    const ORDER = ["prompt", "creative", "spatial", "stage1", "stage2", "output"];
+    // The rows the panel draws. Stage 1 and Output are still phases a run goes
+    // through -- see PHASES -- and no longer rows anybody looks at, so a phase
+    // that names one lights nothing and that is the whole of it.
+    const ORDER = ["creative", "spatial", "stage2"];
 
     const live = {
         stage: "",
@@ -109,14 +116,8 @@
     }
 
     // ------------------------------------------------------------------ //
-    // The Prompt row
+    // What is in effect while its own control is off screen
     // ------------------------------------------------------------------ //
-
-    function trim(text) {
-        const said = String(text || "").replace(/\s+/g, " ").trim();
-        if (!said) return "";
-        return said.length > 120 ? said.slice(0, 119) + "…" : said;
-    }
 
     function valueOf(id) {
         const holder = byId(id);
@@ -148,26 +149,16 @@
     function echo() {
         const target = byId(ECHO);
         if (!target) return;
-        const holder = byId(PROMPT);
-        const box = holder ? holder.querySelector("textarea, input") : null;
-        const said = trim(box ? box.value : "");
-        const note = literalNote();
-        // textContent, never innerHTML: this is somebody's prompt, and a prompt
-        // is the one string on the page most likely to contain angle brackets.
-        target.textContent = [said || "nothing typed yet", note]
-            .filter(Boolean).join(" · ");
+        // textContent, never innerHTML: what this says is counted from what
+        // somebody typed, and a prompt is the string on the page most likely to
+        // contain angle brackets. An empty note is an empty element, which the
+        // stylesheet gives no height at all.
+        target.textContent = literalNote();
     }
 
     function watchPrompt() {
-        const holder = byId(PROMPT);
-        const box = holder ? holder.querySelector("textarea, input") : null;
-        if (box && box.dataset && !box.dataset.mcPipelineEcho) {
-            box.dataset.mcPipelineEcho = "1";
-            box.addEventListener("input", echo);
-            box.addEventListener("change", echo);
-        }
-        // The literal boxes drive the same line, so they are followed too. The
-        // count changes when one is emptied, not only when the row is hidden.
+        // The literal boxes drive the line: the count changes when one is
+        // emptied, not only when the row goes off screen.
         [LITERALS.positive, LITERALS.negative].forEach(function (id) {
             const owner = byId(id);
             const field = owner ? owner.querySelector("textarea, input") : null;
