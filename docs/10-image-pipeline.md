@@ -260,7 +260,69 @@ writer and the composer each announce themselves on the phase either side of
 their wait, so "still that one" is always right after the first.
 
 
-## 8. Where the design intent was followed differently
+## 8. What a first week of using it changed
+
+Four things, all of them from the same complaint: the panel was spending screen
+space on sentences rather than on settings.
+
+### 8.1 Three of the six rows are gone
+
+Prompt, Stage 1 and Output were drawn muted and uneditable so that the path had
+no holes in it (§2.4). What three holeless rows produced in practice was a
+restatement of what the page already said louder — the prompt box is directly
+above the panel, the size sliders directly below it, and the output is the
+picture. The panel is the three stages this extension actually runs.
+
+One number outlived them, because nothing else on the page states it: the pixel
+size that crosses into Stage 2, which a Hires pass changes (§3 above is still
+the reason). It is drawn on the edge above the Stage 2 row and is still true
+when Stage 2 is off.
+
+Section 3.3's note outlived the Prompt row too, and is now the whole of what
+that element says: `2 literals active`, when the Literal Prompt boxes are off
+screen and carrying something. Empty otherwise, and an empty note has no height.
+
+Stage 1 and Output are still *phases*, and `model_chain_pipeline.js` still
+recognises every label the progress bar produces for them — it has no row to
+light, which is a different thing from not knowing the label.
+`PHASES_WITHOUT_A_ROW` is what keeps the tests able to tell those two apart.
+
+### 8.2 Each row is a surface
+
+On a dark theme the rail and the text were the only two things on the panel, and
+three stages of unboxed text read as one paragraph with bold words in it. Each
+stage has a background and an edge now, and the rail is drawn in the gaps
+between them so it still says these things happen in order.
+
+### 8.3 The descriptions went behind an "i"
+
+    Spatial Layout: 7 regions. Region prompts are used exactly as typed.
+    Direct BBOX Merge: your prompt is used exactly as typed as the global scene
+    and your regions are applied deterministically. No language-model request is
+    made — the fastest and most predictable Spatial option.
+
+One number in that. The rest describes a mode that has not changed since it was
+chosen, repeated on every render. `mc_hint` builds a badge — a span with the
+text in an attribute, a pseudo-element for the bubble, no JavaScript and no
+popup library, with the browser's own `title` as the fallback — and the rule it
+applies is: **live data stays on the panel, description goes behind the "i"**.
+
+Paragraphs already inside collapsed drawers were left alone. They cost nothing
+until opened, which is the same bargain.
+
+### 8.4 The two panels opened on the wrong control
+
+Stage 2 opened on its checkpoint chooser with Presets in the last of six
+accordions; Spatial opened on four controls about storage above the canvas they
+are storage for. Both had the decisions in the wrong order — a Stage 2 preset
+*is* the checkpoint, and a saved layout is loaded once while the canvas is
+worked in continuously. Presets are the top of Stage 2 now, with the checkpoint
+in a section beside the modules and residency status that describe the same
+model; the canvas is the top of Spatial, with saved layouts in a drawer above
+Spatial options.
+
+
+## 9. Where the design intent was followed differently
 
 **§3.4, mutual collapse.** "Opening another owned stage *may* collapse the
 previously open stage." It does not. Closing another `gr.Accordion` from
