@@ -1010,26 +1010,61 @@ class ScriptModelChain(scripts.Script):
                 elem_id=self.elem_id("intro"),
             )
 
-            # -- 9.1 Essential --------------------------------------------- #
+            # -- 9.1 Presets ----------------------------------------------- #
             #
-            # Not in an accordion, and that is the section: the checkpoint, how
-            # far it may move the picture, and how big the result is are the
-            # three decisions somebody makes every time. Everything below this
-            # is a decision made once and then left alone.
+            # The first thing, because it is the one control that sets the
+            # others. A preset here is the whole of Stage 2 -- checkpoint,
+            # modules, sampling, seed policy, denoise, the lot -- so somebody
+            # who has saved one makes a single choice and is finished, and the
+            # sections below are where they go when they want to disagree with
+            # part of it.
+            #
+            # It used to be the last accordion, under five others, with the
+            # checkpoint chooser in this spot instead. That had the order of the
+            # decisions backwards: the checkpoint is one of the things a preset
+            # already decided.
             with gr.Group(elem_classes=mc_pipeline_panel.classes("essential")):
                 with gr.Row():
-                    target = gr.Dropdown(
-                        value=_NO_MODEL,
-                        label="Stage 2 checkpoint",
-                        choices=checkpoints,
-                        elem_id=self.elem_id("target"),
+                    preset = gr.Dropdown(
+                        value=mc_presets.NONE,
+                        label="Preset",
+                        choices=mc_presets.choices(),
+                        elem_id=self.elem_id("preset"),
+                        info="selecting a preset applies it immediately",
                     )
-                    target_refresh = ToolButton(
+                    preset_refresh = ToolButton(
                         value=refresh_symbol,
-                        elem_id=self.elem_id("target_refresh"),
-                        tooltip="Stage 2 checkpoint and modules: refresh",
+                        elem_id=self.elem_id("preset_refresh"),
+                        tooltip="Presets: refresh",
                     )
 
+                preset_status = gr.Markdown("", elem_id=self.elem_id("preset_status"))
+                preset_explain = gr.Markdown(
+                    "", elem_id=self.elem_id("preset_explain"),
+                    elem_classes=mc_pipeline_panel.classes("explain"))
+
+                with gr.Accordion("Save or delete a preset", open=False,
+                                  elem_id=self.elem_id("section_presets")):
+                    with gr.Row():
+                        preset_name = gr.Textbox(
+                            label="Preset name",
+                            placeholder="name to save the current Stage 2 settings under",
+                            elem_id=self.elem_id("preset_name"),
+                            scale=3,
+                        )
+                        preset_save = gr.Button("Save", elem_id=self.elem_id("preset_save"), scale=1)
+                        preset_delete = gr.Button("Delete", elem_id=self.elem_id("preset_delete"), scale=1)
+
+                # The snapshot the dirty indicator compares against, and the
+                # name it reports. Both are UI-only: a preset is applied to the
+                # controls the moment it is chosen, exactly as before, and this
+                # pair only remembers what those controls held at that moment.
+                preset_baseline = gr.State("")
+                preset_loaded = gr.State("")
+
+                # The two dials somebody moves after choosing a preset, and the
+                # only two: how far Stage 2 may take the picture, and how big it
+                # comes back. Everything else below is a decision made once.
                 with gr.Row():
                     denoise = gr.Slider(
                         label="Denoise strength",
@@ -1050,12 +1085,43 @@ class ScriptModelChain(scripts.Script):
                     )
 
                 size_note = gr.Markdown("", elem_id=self.elem_id("size_note"))
-                preset_status = gr.Markdown("", elem_id=self.elem_id("preset_status"))
-                preset_explain = gr.Markdown(
-                    "", elem_id=self.elem_id("preset_explain"),
-                    elem_classes=mc_pipeline_panel.classes("explain"))
 
-            # -- 9.2 Prompt & Styles --------------------------------------- #
+            # -- 9.2 Checkpoint & Model Components -------------------------- #
+            #
+            # A section like the others now. The checkpoint is not a thing
+            # somebody picks fresh on every image -- it is part of what a preset
+            # is -- and the modules and the residency status that describe the
+            # same model belong beside it rather than five sections apart.
+            with gr.Accordion("Checkpoint & Model Components", open=False,
+                              elem_id=self.elem_id("section_modules")):
+                with gr.Row():
+                    target = gr.Dropdown(
+                        value=_NO_MODEL,
+                        label="Stage 2 checkpoint",
+                        choices=checkpoints,
+                        elem_id=self.elem_id("target"),
+                    )
+                    target_refresh = ToolButton(
+                        value=refresh_symbol,
+                        elem_id=self.elem_id("target_refresh"),
+                        tooltip="Stage 2 checkpoint and modules: refresh",
+                    )
+
+                modules = gr.Dropdown(
+                    value=[mc_memory.INHERIT_MODULES],
+                    label="Stage 2 VAE / Text Encoder",
+                    choices=module_choices,
+                    multiselect=True,
+                    elem_id=self.elem_id("modules"),
+                    info=(
+                        f'"{mc_memory.INHERIT_MODULES}" keeps Stage 1\'s selection; '
+                        "clear it entirely to use the checkpoint's built-in modules"
+                    ),
+                )
+                architecture_notice = gr.Markdown("", elem_id=self.elem_id("arch_notice"))
+                residency_status = gr.Markdown("", elem_id=self.elem_id("residency"))
+
+            # -- 9.3 Prompt & Styles --------------------------------------- #
             with gr.Accordion("Prompt & Styles", open=False,
                               elem_id=self.elem_id("section_prompt")):
                 prompt_mode = gr.Radio(
@@ -1102,7 +1168,7 @@ class ScriptModelChain(scripts.Script):
                         tooltip="Stage 2 styles: refresh",
                     )
 
-            # -- 9.3 Sampling ---------------------------------------------- #
+            # -- 9.4 Sampling ---------------------------------------------- #
             with gr.Accordion("Sampling", open=False,
                               elem_id=self.elem_id("section_sampling")):
                 with gr.Row():
@@ -1137,7 +1203,7 @@ class ScriptModelChain(scripts.Script):
                         elem_id=self.elem_id("scheduler"),
                     )
 
-            # -- 9.4 Edit & References ------------------------------------- #
+            # -- 9.5 Edit & References ------------------------------------- #
             with gr.Accordion("Edit & References", open=False,
                               elem_id=self.elem_id("section_references")):
                 edit_mode = gr.Radio(
@@ -1225,7 +1291,7 @@ class ScriptModelChain(scripts.Script):
                     ),
                 )
 
-            # -- 9.5 Seed --------------------------------------------------- #
+            # -- 9.6 Seed --------------------------------------------------- #
             with gr.Accordion("Seed", open=False,
                               elem_id=self.elem_id("section_seed")):
                 seed_mode = gr.Radio(
@@ -1250,56 +1316,6 @@ class ScriptModelChain(scripts.Script):
                         visible=False,
                         elem_id=self.elem_id("fixed_seed"),
                     )
-
-            # -- 9.6 Model Components & Status ------------------------------ #
-            with gr.Accordion("Model Components & Status", open=False,
-                              elem_id=self.elem_id("section_modules")):
-                modules = gr.Dropdown(
-                    value=[mc_memory.INHERIT_MODULES],
-                    label="Stage 2 VAE / Text Encoder",
-                    choices=module_choices,
-                    multiselect=True,
-                    elem_id=self.elem_id("modules"),
-                    info=(
-                        f'"{mc_memory.INHERIT_MODULES}" keeps Stage 1\'s selection; '
-                        "clear it entirely to use the checkpoint's built-in modules"
-                    ),
-                )
-                architecture_notice = gr.Markdown("", elem_id=self.elem_id("arch_notice"))
-                residency_status = gr.Markdown("", elem_id=self.elem_id("residency"))
-
-            # -- 9.7 Presets ------------------------------------------------ #
-            with gr.Accordion("Presets", open=False,
-                              elem_id=self.elem_id("section_presets")):
-                with gr.Row():
-                    preset = gr.Dropdown(
-                        value=mc_presets.NONE,
-                        label="Preset",
-                        choices=mc_presets.choices(),
-                        elem_id=self.elem_id("preset"),
-                        info="selecting a preset applies it immediately",
-                    )
-                    preset_refresh = ToolButton(
-                        value=refresh_symbol,
-                        elem_id=self.elem_id("preset_refresh"),
-                        tooltip="Presets: refresh",
-                    )
-                with gr.Row():
-                    preset_name = gr.Textbox(
-                        label="Preset name",
-                        placeholder="name to save the current Stage 2 settings under",
-                        elem_id=self.elem_id("preset_name"),
-                        scale=3,
-                    )
-                    preset_save = gr.Button("Save", elem_id=self.elem_id("preset_save"), scale=1)
-                    preset_delete = gr.Button("Delete", elem_id=self.elem_id("preset_delete"), scale=1)
-
-                # The snapshot the dirty indicator compares against, and the
-                # name it reports. Both are UI-only: a preset is applied to the
-                # controls the moment it is chosen, exactly as before, and this
-                # pair only remembers what those controls held at that moment.
-                preset_baseline = gr.State("")
-                preset_loaded = gr.State("")
 
 
         # -- the memory contract ------------------------------------------- #
