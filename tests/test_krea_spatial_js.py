@@ -2954,8 +2954,30 @@ class TestTheWorkspaceStylesheet:
 
     @pytest.fixture
     def section(self, css):
-        return css.split("The Spatial Layout workspace.", 1)[1].split(
-            "The Image Pipeline", 1)[0]
+        """The workspace's block, with the prose taken out.
+
+        Comments are stripped first, because every question below is about what
+        the browser is told and a paragraph that happens to name a class is not
+        a rule -- reading them together is how a stylesheet passes a test by
+        describing what it does not do.
+        """
+        block = css.split("The Spatial Layout workspace.", 1)[1]
+        # Past the end of the header comment this split landed inside, and up
+        # to the start of the next section's, so that every /* below has its
+        # matching */ and the regex can take the pairs out.
+        block = block.split("*/", 1)[1].split("/* ====", 1)[0]
+        return re.sub(r"/\*.*?\*/", "", block, flags=re.S)
+
+    @pytest.fixture
+    def rules(self, section):
+        """``(selector, body)`` for every rule in the block."""
+        found = []
+        for part in section.split("}"):
+            if "{" not in part:
+                continue
+            selector, body = part.rsplit("{", 1)
+            found.append((" ".join(selector.split()), body))
+        return found
 
     def test_every_class_the_markup_emits_has_a_rule(self, section):
         """Dangling the other way round: a control styled by nothing looks like
@@ -3025,16 +3047,39 @@ class TestTheWorkspaceStylesheet:
         assert "--mc-grab: 44px" in coarse
         assert "--mc-touch: 44px" in coarse
 
-    def test_the_takeover_never_hides_the_workspace_s_own_contents(self, section):
+    def test_the_takeover_never_hides_the_workspace_s_own_contents(self, rules):
         """The workspace is marked so that it survives as a sibling of the
         things being hidden. Marked and not excluded, it would hide itself."""
-        selectors = [" ".join(block.split()).rsplit("}", 1)[-1].strip()
-                     for block in section.split("{")][:-1]
-        rules = [found for found in selectors if "[data-mc-spatial-path]" in found]
+        found = [selector for selector, _body in rules
+                 if "[data-mc-spatial-path]" in selector
+                 and selector.strip().startswith(".mc-krea-spatial-taken [")]
 
-        assert rules, "the takeover rules could not be found"
-        for found in rules:
-            assert ("mc-krea-spatial-workspace" in found), found
+        assert found, "the takeover's descendant rules could not be found"
+        for selector in found:
+            assert ":not(.mc-krea-spatial-workspace)" in selector, selector
+
+    def test_the_tab_s_own_children_are_hidden_by_a_rule_of_their_own(self, rules):
+        """`.mc-krea-spatial-taken [data-mc-spatial-path]` is a descendant
+        selector and the class is on the tab, so it never matches the tab --
+        which means the tab's own children, the whole of txt2img, need saying
+        separately or the takeover hides nothing at all."""
+        wanted = ".mc-krea-spatial-taken > *:not([data-mc-spatial-path])"
+        found = [body for selector, body in rules if selector == wanted]
+
+        assert found, "the tab's own children are not hidden by anything"
+        assert "display: none" in found[0]
+
+    def test_the_takeover_forces_no_display_on_the_tab_itself(self, rules):
+        """Gradio hides an inactive tab by setting `display`, so a
+        `display: ... !important` matching #tab_txt2img would leave txt2img
+        showing on top of img2img the moment somebody changed tab. The class
+        the tab carries is only ever used as an ancestor."""
+        for selector, body in rules:
+            if selector.startswith(".mc-krea-spatial-taken {"):
+                assert False, "the tab is styled directly"
+            if selector == ".mc-krea-spatial-taken":
+                assert "display" not in body, selector
+            assert "#tab_txt2img" not in selector, selector
 
     def test_every_gesture_surface_says_touch_action_none(self, section):
         """§5.7 and §23.3: the page does not scroll under a finger that is

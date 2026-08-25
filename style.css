@@ -2735,17 +2735,30 @@
    §3.1. The takeover.
 
    The browser file marks the workspace and every ancestor between it and
-   #tab_txt2img with data-mc-spatial-path, and puts one class on the tab. These
-   two rules are the whole of it: inside a taken-over tab, a child of a path
-   element that is not itself on the path is hidden, and the path elements
-   themselves give up their own decoration so that the workspace is standing in
-   the tab rather than in three nested containers inside it.
+   #tab_txt2img with data-mc-spatial-path, and puts one class on the tab. Three
+   rules are the whole of it: a child of the tab that is not on the path is
+   hidden, a child of any deeper path element that is not on the path is hidden,
+   and the path elements between give up their own decoration so that the
+   workspace is standing in the tab rather than in three nested containers
+   inside it.
+
+   The tab is deliberately not one of those. It carries the class and the mark,
+   but `.mc-krea-spatial-taken [data-mc-spatial-path]` is a descendant selector
+   and does not match the element the class is on -- which is why its own
+   children need a rule of their own, and why nothing here ever forces a
+   `display` on the tab. Gradio hides an inactive tab by setting exactly that
+   property, and a `display: block !important` on #tab_txt2img would leave
+   txt2img showing on top of img2img.
 
    Nothing is moved, nothing is position: fixed, no id exists twice, and Close
    removes the marks. The one thing it cannot do is escape a container that
    clips *the tab itself* -- and nothing does, because the tab is the thing
    Forge scrolls.
    --------------------------------------------------------------------------- */
+
+.mc-krea-spatial-taken > *:not([data-mc-spatial-path]) {
+    display: none !important;
+}
 
 .mc-krea-spatial-taken [data-mc-spatial-path]:not(.mc-krea-spatial-workspace)
     > *:not([data-mc-spatial-path]) {

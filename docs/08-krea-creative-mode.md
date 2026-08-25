@@ -2074,7 +2074,10 @@ requiring it as a non-goal, and §3.1 asks for a txt2img takeover instead.
 
 So opening the workspace now marks the workspace and every ancestor between it
 and `#tab_txt2img` with `data-mc-spatial-path`, and puts one class on the tab.
-Two CSS rules are the whole mechanism:
+Three CSS rules are the whole mechanism:
+
+    .mc-krea-spatial-taken > *:not([data-mc-spatial-path])
+        { display: none !important; }
 
     .mc-krea-spatial-taken [data-mc-spatial-path]:not(.mc-krea-spatial-workspace)
         > *:not([data-mc-spatial-path]) { display: none !important; }
@@ -2082,13 +2085,25 @@ Two CSS rules are the whole mechanism:
     .mc-krea-spatial-taken [data-mc-spatial-path]:not(.mc-krea-spatial-workspace)
         { display: block !important; padding: 0 !important; ... }
 
-A child of a path element that is not itself on the path is hidden; a path
-element gives up its own padding, border and background so that the workspace is
-standing in the tab rather than in three nested containers inside it. The
-`:not()` on both is load-bearing and has a test of its own: the workspace *is* on
-the path — it has to be, or it would be hidden as a sibling of the things being
-hidden — and without the exclusion the first rule would hide the workspace's own
-contents.
+A child of the tab or of any deeper path element that is not itself on the path
+is hidden; a path element between gives up its own padding, border and
+background so that the workspace is standing in the tab rather than in three
+nested containers inside it.
+
+Two details there are load-bearing and both have tests. The `:not()` excluding
+the workspace: the workspace *is* on the path — it has to be, or it would be
+hidden as a sibling of the things being hidden — and without the exclusion the
+second rule would hide its own contents. And the first rule at all: the class is
+on the tab, `.mc-krea-spatial-taken [data-mc-spatial-path]` is a *descendant*
+selector, and a descendant selector never matches the element the class is on —
+so the tab's own children, which are the whole of txt2img, need saying
+separately or the takeover hides nothing.
+
+The other side of that is why the tab is deliberately not one of the elements
+that gives up its decoration: nothing in the block may force a `display` on
+`#tab_txt2img`, because setting `display` is exactly how Gradio hides an
+inactive tab, and a `!important` there would leave txt2img showing on top of
+img2img the moment somebody changed tab.
 
 Nothing is moved. That is §22.4, and it is the difference between this and the
 `document.body` overlay §15.5 removed: no id exists twice, Gradio still owns the
