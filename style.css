@@ -2129,6 +2129,40 @@
     outline-offset: 1px;
 }
 
+/* -- reordering ---------------------------------------------------------- */
+/*
+   Top to bottom is the order the regions are written into the prompt, so the
+   list is the thing somebody drags to change that order. The grip says a row
+   can be picked up; the line says where it will land.
+*/
+
+.mc-krea-spatial-row-grip {
+    cursor: grab;
+    opacity: 0.45;
+    font-size: 0.9em;
+    line-height: 1;
+    /* A drag starts on the row, not on this: the grip is a sign, and a row
+       that can only be taken by one four-pixel target is a row most people
+       cannot move. */
+    pointer-events: none;
+}
+
+.mc-krea-spatial-row.dragging {
+    opacity: 0.5;
+    cursor: grabbing;
+}
+
+.mc-krea-spatial-row.drop-before,
+.mc-krea-spatial-row.drop-after {
+    /* An inset shadow rather than a border: a border on a row this size moves
+       every other row by a pixel as the pointer passes over it. */
+    box-shadow: inset 0 2px 0 0 var(--mc-accent);
+}
+
+.mc-krea-spatial-row.drop-after {
+    box-shadow: inset 0 -2px 0 0 var(--mc-accent);
+}
+
 .mc-krea-spatial-row-icon {
     flex: 0 0 auto;
     width: 1.2em;

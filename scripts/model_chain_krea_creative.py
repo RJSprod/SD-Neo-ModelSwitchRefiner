@@ -597,10 +597,16 @@ def spatial_editor() -> str:
       <section class="{SPATIAL_PREFIX}-panel {SPATIAL_PREFIX}-regions-panel">
         <header class="{SPATIAL_PREFIX}-panel-head">
           <h4>Regions</h4>
+          {mc_hint.badge(
+              "Top to bottom is the order the regions are written into the "
+              "prompt, and the last one is the one drawn on top where two "
+              "overlap. Drag a row to change it, or hold Alt and press the up "
+              "and down arrows.", "the region order")}
           <span id="{_spatial_id("count")}" class="{SPATIAL_PREFIX}-note"></span>
         </header>
         <div id="{_spatial_id("list")}" class="{SPATIAL_PREFIX}-list" role="listbox"
-             aria-label="Regions, frontmost first" tabindex="0"></div>
+             aria-label="Regions, in the order they are written into the prompt"
+             tabindex="0"></div>
         <p id="{_spatial_id("empty")}" class="{SPATIAL_PREFIX}-empty">
           No regions yet. Add one, or draw one on the frame.</p>
         <div class="{SPATIAL_PREFIX}-layerbar" role="group" aria-label="Stacking order">

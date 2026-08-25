@@ -975,16 +975,26 @@ class TestMovingAndResizing:
 
 
 class TestTheRegionList:
-    def test_the_list_is_frontmost_first(self):
-        """§9: the order a layers panel is read in, and the opposite of the
-        order the compositor writes them in."""
+    def test_the_list_is_in_the_order_the_prompt_is_written_in(self):
+        """It used to be reversed -- frontmost first, the way a layers panel
+        reads -- which meant the list and the composed prompt disagreed about
+        which region came first, on the list that is the thing somebody drags
+        to reorder them."""
         found = run("""
             ks.open();
             report({rows: rows().map((row) => row.dataset.regionId)});
         """, initial=document(BURIED))
 
-        assert found["rows"] == ["b", "a"]
+        assert found["rows"] == ["a", "b"]
         assert [region["id"] for region in found["regions"]] == ["a", "b"]
+
+    def test_every_row_can_be_picked_up(self):
+        found = run("""
+            ks.open();
+            report({draggable: rows().map((row) => row.draggable)});
+        """, initial=document(BURIED))
+
+        assert found["draggable"] == [True, True]
 
     def test_touching_a_row_selects_without_touching_the_frame(self):
         found = run("""
@@ -993,7 +1003,7 @@ class TestTheRegionList:
             report();
         """, initial=document(BURIED))
 
-        assert found["selected"] == "a"
+        assert found["selected"] == "b"
 
     def test_a_row_carries_its_own_delete(self):
         found = run("""
@@ -1002,7 +1012,80 @@ class TestTheRegionList:
             report();
         """, initial=document(BURIED))
 
-        assert [region["id"] for region in found["regions"]] == ["a"]
+        assert [region["id"] for region in found["regions"]] == ["b"]
+
+    def test_a_row_dropped_higher_moves_earlier_in_the_prompt(self):
+        """The whole feature in one assertion: the list is prompt order, so a
+        row moved up is a region written earlier."""
+        found = run("""
+            ks.open();
+            ks.reorder("b", "a", true);
+            report({rows: rows().map((row) => row.dataset.regionId)});
+        """, initial=document(BURIED))
+
+        assert found["rows"] == ["b", "a"]
+        assert [region["id"] for region in found["regions"]] == ["b", "a"]
+
+    def test_a_row_dropped_below_the_last_one_goes_last(self):
+        found = run("""
+            ks.open();
+            ks.reorder("a", "b", false);
+            report({rows: rows().map((row) => row.dataset.regionId)});
+        """, initial=document(BURIED))
+
+        assert found["rows"] == ["b", "a"]
+
+    def test_the_move_renumbers_rather_than_adjusts(self):
+        """A layout hand-edited elsewhere can arrive with every region claiming
+        z 0, and "one place later" has to mean one place later in what somebody
+        is looking at rather than in arithmetic nobody can see."""
+        flat = [dict(FACE, id="a", name="A", z=0, bbox=[10, 10, 200, 200]),
+                dict(FACE, id="b", name="B", z=0, bbox=[10, 10, 200, 200]),
+                dict(FACE, id="c", name="C", z=0, bbox=[10, 10, 200, 200])]
+        found = run("""
+            ks.open();
+            ks.reorder("c", "a", true);
+            report({z: ks.ordered().map((region) => region.z)});
+        """, initial=document(flat))
+
+        assert found["z"] == [0, 1, 2]
+        assert [region["id"] for region in found["regions"]] == ["c", "a", "b"]
+
+    def test_dropping_a_row_on_itself_changes_nothing(self):
+        found = run("""
+            ks.open();
+            const before = ks.serialize();
+            const moved = ks.reorder("a", "a", true);
+            report({moved: moved, same: before === ks.serialize()});
+        """, initial=document(BURIED))
+
+        assert found["moved"] is False
+        assert found["same"] is True
+
+    def test_a_move_can_be_undone(self):
+        """It goes through the same history every other edit does."""
+        found = run("""
+            ks.open();
+            ks.reorder("b", "a", true);
+            ks.undo();
+            report({rows: rows().map((row) => row.dataset.regionId)});
+        """, initial=document(BURIED))
+
+        assert found["rows"] == ["a", "b"]
+
+    def test_the_order_is_what_the_composed_prompt_sees(self):
+        """`serialize()` is what travels with the generation, and the elements
+        array is built from the same ordering the list draws."""
+        found = run("""
+            ks.open();
+            ks.reorder("b", "a", true);
+            report({saved: ks.serialize()});
+        """, initial=document(BURIED))
+
+        import json as _json
+
+        regions = _json.loads(found["saved"])["regions"]
+        assert [region["id"] for region in regions] == ["b", "a"]
 
     def test_delete_removes_the_selected_region(self):
         """Acceptance test E: from the list, with no canvas hit-testing at

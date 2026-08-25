@@ -144,6 +144,7 @@
     const state = {
         wired: false,
         listening: false,   // the one document-level listener, installed once
+        dragging: "",       // the region id a list drag is carrying, if any
         workspace: null,    // the element that is live, once claimed
         open: false,
         drawing: false,
@@ -715,21 +716,40 @@
         if (label) label.textContent = region.name || region.id;
     }
 
-    // RegionListController. Frontmost first, which is the order a layers panel
-    // is read in and the opposite of the order the compositor writes them.
+    // RegionListController. Prompt order, top to bottom: the first row is the
+    // first element in the composed prompt and the last row is the one drawn on
+    // top of the others. It used to be reversed -- frontmost first, the way a
+    // layers panel reads -- which meant the list and the prompt disagreed about
+    // what "first" was, and the list is the thing somebody drags.
+    //
+    // One number does both jobs. `z` decides the order the compositor writes
+    // the elements array in *and* which box is on top where two overlap, so a
+    // drag that changes one changes the other, and the "i" on the panel header
+    // says so.
     function paintList() {
         const list = byId(IDS.list);
         if (!list || !state.working) return;
-        const rows = ordered().slice().reverse();
+        const rows = ordered();
         list.textContent = "";
         rows.forEach(function (region) {
             const row = document.createElement("div");
             row.className = P + "-row" + (region.id === state.selected ? " selected" : "");
             row.dataset.regionId = region.id;
+            // Reordering by pointer. The rows are rebuilt on every paint, so
+            // the listeners for this are delegated to the container -- see
+            // wire() -- and all a row carries is the flag that makes it a drag
+            // source.
+            row.draggable = true;
             row.setAttribute && row.setAttribute("role", "option");
             row.setAttribute && row.setAttribute("aria-selected",
                                                  region.id === state.selected ? "true" : "false");
             row.tabIndex = 0;
+
+            const grip = document.createElement("span");
+            grip.className = P + "-row-grip";
+            grip.textContent = "⠿";
+            grip.setAttribute && grip.setAttribute("aria-hidden", "true");
+            row.appendChild(grip);
 
             const icon = document.createElement("span");
             icon.className = P + "-row-icon";
@@ -997,6 +1017,50 @@
         moved.splice(to, 0, moved.splice(at, 1)[0]);
         moved.forEach(function (region, index) { region.z = index; });
         paint();
+    }
+
+    // Drop `moved` next to `target`, and renumber z from the order that leaves.
+    //
+    // Renumbered rather than adjusted, for the same reason restack() renumbers:
+    // a layout hand-edited elsewhere can arrive with three regions all claiming
+    // z 0, and "one place later" has to mean one place later in what somebody
+    // is looking at rather than in arithmetic nobody can see.
+    function reorder(movedId, targetId, before) {
+        if (!state.working) return false;
+        const list = ordered();
+        const from = list.findIndex(function (region) { return region.id === movedId; });
+        if (from < 0) return false;
+        const region = list[from];
+
+        let to;
+        if (targetId === null || targetId === undefined || targetId === "") {
+            to = before ? 0 : list.length - 1;
+        } else {
+            const at = list.findIndex(function (entry) { return entry.id === targetId; });
+            if (at < 0 || targetId === movedId) return false;
+            to = before ? at : at + 1;
+            if (from < to) to -= 1;
+        }
+        if (to === from) return false;
+
+        mark("");
+        const moved = list.slice();
+        moved.splice(from, 1);
+        moved.splice(to, 0, region);
+        moved.forEach(function (entry, index) { entry.z = index; });
+        paint();
+        return true;
+    }
+
+    // Above the middle of the row it is over, or below it. The only geometry
+    // this needs: everything else about the drop is list order.
+    function dropBefore(event, row) {
+        try {
+            const box = row.getBoundingClientRect();
+            return (event.clientY - box.top) < (box.height / 2);
+        } catch (error) {
+            return false;
+        }
     }
 
     function nudge(dx, dy) {
@@ -1435,7 +1499,94 @@
                 if (event.key === "Enter" || event.key === " ") {
                     prevent(event);
                     select(row.dataset.regionId);
+                    return;
                 }
+                // The same move, without a pointer. Dragging is not something
+                // every hand or every input device can do, and a reorder that
+                // only a mouse can reach is a reorder half the people using
+                // this cannot make.
+                if (!event.altKey) return;
+                const step = event.key === "ArrowUp" ? -1
+                    : event.key === "ArrowDown" ? 1 : 0;
+                if (!step) return;
+                prevent(event);
+                const list = ordered();
+                const at = list.findIndex(function (entry) {
+                    return entry.id === row.dataset.regionId;
+                });
+                const next = list[at + step];
+                if (!next) return;
+                reorder(row.dataset.regionId, next.id, step < 0);
+                const moved = byId(IDS.list) &&
+                    byId(IDS.list).querySelector('[data-region-id="'
+                                                + row.dataset.regionId + '"]');
+                if (moved && moved.focus) moved.focus();
+            });
+
+            // Reordering by pointer. Four delegated listeners on the container,
+            // because the rows are rebuilt on every paint and a listener per row
+            // would be a listener per row per repaint.
+            //
+            // `dataTransfer` is set because Firefox refuses to start a drag
+            // without it; nothing reads it back. The id being moved is held here
+            // instead, where it cannot be replaced by a drag that started
+            // somewhere else on the page.
+            once(byId(IDS.list), "dragstart", function (event) {
+                const row = event.target && event.target.closest
+                    ? event.target.closest("." + P + "-row") : null;
+                if (!row) return;
+                state.dragging = row.dataset.regionId;
+                row.classList.add("dragging");
+                if (event.dataTransfer) {
+                    event.dataTransfer.effectAllowed = "move";
+                    try {
+                        event.dataTransfer.setData("text/plain", row.dataset.regionId);
+                    } catch (error) {
+                        // Some browsers refuse this outside a user gesture. The
+                        // drag still works; only the payload nobody reads is
+                        // missing.
+                    }
+                }
+            });
+
+            once(byId(IDS.list), "dragover", function (event) {
+                if (!state.dragging) return;
+                prevent(event);
+                if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+                const row = event.target && event.target.closest
+                    ? event.target.closest("." + P + "-row") : null;
+                const list = byId(IDS.list);
+                if (!list) return;
+                list.querySelectorAll("." + P + "-row").forEach(function (entry) {
+                    entry.classList.remove("drop-before", "drop-after");
+                });
+                if (!row || row.dataset.regionId === state.dragging) return;
+                row.classList.add(dropBefore(event, row) ? "drop-before" : "drop-after");
+            });
+
+            once(byId(IDS.list), "drop", function (event) {
+                if (!state.dragging) return;
+                prevent(event);
+                const row = event.target && event.target.closest
+                    ? event.target.closest("." + P + "-row") : null;
+                const moving = state.dragging;
+                state.dragging = "";
+                if (!row) {
+                    // Dropped on the empty space under the last row: the end of
+                    // the list is the answer somebody means by that.
+                    reorder(moving, "", false);
+                    return;
+                }
+                reorder(moving, row.dataset.regionId, dropBefore(event, row));
+            });
+
+            once(byId(IDS.list), "dragend", function () {
+                state.dragging = "";
+                const list = byId(IDS.list);
+                if (!list) return;
+                list.querySelectorAll("." + P + "-row").forEach(function (entry) {
+                    entry.classList.remove("dragging", "drop-before", "drop-after");
+                });
             });
 
             once(byId(IDS.autoHint), "change", function (event) {
@@ -1923,6 +2074,7 @@
         clear: clear,
         duplicate: duplicate,
         restack: restack,
+        reorder: reorder,
         undo: undo,
         redo: redo,
         zoomTo: zoomTo,
