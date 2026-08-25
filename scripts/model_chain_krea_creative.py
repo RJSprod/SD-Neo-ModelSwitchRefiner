@@ -76,6 +76,7 @@ import gradio as gr
 import mc_creative_krea
 import mc_creative_panel
 import mc_creative_profiles
+import mc_hint
 import mc_infotext
 import mc_llm_sessions as sessions
 import mc_literal_prompts
@@ -117,17 +118,26 @@ def ident(*parts: str) -> str:
     return "-".join((PREFIX,) + tuple(str(part) for part in parts if part))
 
 
-def notice(text: str, kind: str = "info") -> str:
+def notice(text: str, kind: str = "info", hint: str = "") -> str:
     """One line of Creative Mode status, as scoped HTML.
 
     Its own classes rather than LLM Studio's, because ``style.css`` scopes those
     under ``#mc-llm-studio`` and this line is in txt2img. Same idea, same
     reliance on the host's custom properties for colour, different neighbourhood.
+
+    ``hint`` is the half of the old line that never changed: what a mode *means*,
+    as against what is true right now. It becomes an "i" at the end of the line
+    -- see :mod:`mc_hint` -- so the line says "Spatial Layout: 7 regions" and
+    keeps the paragraph that used to follow it a hover away.
+
+    The text is escaped and the badge is not, which is the right way round: the
+    text can contain a layout name somebody typed, and the badge is built here
+    out of this extension's own words.
     """
     import html
 
     return (f'<div class="{PREFIX}-notice {PREFIX}-notice-{kind}">'
-            f'{html.escape(str(text or ""))}</div>')
+            f'{html.escape(str(text or ""))}{mc_hint.badge(hint)}</div>')
 
 
 # --------------------------------------------------------------------------- #
@@ -587,10 +597,16 @@ def spatial_editor() -> str:
       <section class="{SPATIAL_PREFIX}-panel {SPATIAL_PREFIX}-regions-panel">
         <header class="{SPATIAL_PREFIX}-panel-head">
           <h4>Regions</h4>
+          {mc_hint.badge(
+              "Top to bottom is the order the regions are written into the "
+              "prompt, and the last one is the one drawn on top where two "
+              "overlap. Drag a row to change it, or hold Alt and press the up "
+              "and down arrows.", "the region order")}
           <span id="{_spatial_id("count")}" class="{SPATIAL_PREFIX}-note"></span>
         </header>
         <div id="{_spatial_id("list")}" class="{SPATIAL_PREFIX}-list" role="listbox"
-             aria-label="Regions, frontmost first" tabindex="0"></div>
+             aria-label="Regions, in the order they are written into the prompt"
+             tabindex="0"></div>
         <p id="{_spatial_id("empty")}" class="{SPATIAL_PREFIX}-empty">
           No regions yet. Add one, or draw one on the frame.</p>
         <div class="{SPATIAL_PREFIX}-layerbar" role="group" aria-label="Stacking order">
@@ -737,11 +753,14 @@ def spatial_summary(serialized, enabled: bool = True, creative=None,
     pipeline = mc_krea_pipeline.described(creative=bool(creative),
                                           spatial=bool(enabled), mode=mode)
     if not layout.regions:
-        return notice("No regions yet. Press Edit Layout to draw one. " + pipeline)
+        return notice("No regions yet. Press Edit Layout to draw one.", hint=pipeline)
     said = spatial.summarise(layout)
     if not enabled:
-        return notice(f"{said} — Spatial Layout is off, so they are not applied.")
-    return notice(f"{said}. Region prompts are used exactly as typed. {pipeline}")
+        return notice(f"{said} — Spatial Layout is off, so they are not applied.",
+                      hint=pipeline)
+    # The count is what changed since the last render; the rest of what this
+    # line used to say is what the selected mode has meant since it was written.
+    return notice(said, hint="Region prompts are used exactly as typed. " + pipeline)
 
 
 def _spatial_toggled(enabled, serialized, creative, mode):
@@ -1241,7 +1260,7 @@ def _restore_spatial():
         said.append("Creative Mode was left off — your regions will be composed "
                     "around the prompt exactly as typed.")
     return (gr.update(value=setup.spatial_layout), gr.update(value=True), mode_update,
-            notice(" ".join(said) + " " + mc_krea_pipeline.described(
+            notice(" ".join(said), hint=mc_krea_pipeline.described(
                 creative=creative, spatial=True,
                 mode=mode or mc_spatial.settings()["compose_mode"])))
 
@@ -1491,7 +1510,15 @@ class ScriptKreaCreative(scripts.Script):
 
         with pipeline.body("spatial"):
             with gr.Group(elem_id=ident("spatial", "layout")):
-                gr.Markdown("**Spatial Layout**", elem_id=ident("spatial", "heading"))
+                gr.Markdown(
+                    mc_hint.beside(
+                        "**Spatial Layout**",
+                        "Draw regions on the canvas and each one's prompt is "
+                        "placed where you drew it. Smart Spatial Compose sends the "
+                        "scene to the composer first; Direct BBOX Merge applies "
+                        "your regions deterministically with no language-model "
+                        "request."),
+                    elem_id=ident("spatial", "heading"))
 
                 # The remembered name only if it still names something. A layout
                 # deleted in another tab -- or a store replaced wholesale --
@@ -1502,6 +1529,61 @@ class ScriptKreaCreative(scripts.Script):
                                  if spatial["profile"] in layout_choices
                                  else mc_spatial_profiles.NONE)
 
+                spatial_compose = gr.Radio(
+                    choices=[("Smart Spatial Compose", spatial_module.SMART),
+                             ("Direct BBOX Merge", spatial_module.DIRECT)],
+                    value=spatial["compose_mode"], label="Composition",
+                    elem_id=ident("spatial", "compose"))
+
+                # Position correction, in the pipeline, without opening a
+                # workspace. Section 6.2: drag the topmost box under the
+                # pointer and nothing else.
+                gr.HTML(spatial_compact(), elem_id=_spatial_id("compact", "host"))
+
+                with gr.Row(elem_id=ident("spatial", "actions")):
+                    spatial_auto_save = gr.Checkbox(
+                        value=bool(spatial["auto_save"]), label="Auto Save",
+                        elem_id=_spatial_id("autosave"), scale=1,
+                        info="saves every finished edit")
+                    mc_hint.control(
+                        "One switch for both canvases: this one and the full "
+                        "Edit Layout editor. On, every finished edit is saved "
+                        "as it happens -- a box let go of after a move or a "
+                        "resize, a region added, deleted or reordered, an undo. "
+                        "A text field saves when the cursor leaves it, not on "
+                        "every keystroke. Off, nothing is written until Save "
+                        "working layout.",
+                        label="Auto Save", elem_id=_spatial_id("autosave", "hint"))
+                    spatial_undo = gr.Button("Undo", size="sm", scale=1,
+                                             elem_id=_spatial_id("compact", "undo"))
+                    spatial_commit = gr.Button("Save working layout", size="sm",
+                                               scale=1,
+                                               elem_id=_spatial_id("compact", "commit"))
+                    edit = gr.Button("Edit Layout…", size="sm", scale=1,
+                                     variant="primary", elem_id=_spatial_id("open"))
+
+            spatial_status = gr.HTML(
+                spatial_summary(spatial["layout"], bool(spatial["enabled"]),
+                                creative=bool(stored["enabled"]),
+                                mode=spatial["compose_mode"]),
+                elem_id=ident("spatial", "status"))
+
+            # The one component the browser writes to, and the one that travels
+            # with the generation. Hidden rather than absent: the editor is a
+            # page, the compositor is a hook, and a hidden textbox is the only
+            # thing Gradio offers that is both.
+            spatial_state = gr.Textbox(
+                value=spatial["layout"], visible=False, lines=1,
+                elem_id=_spatial_id("state"))
+
+            # Saved compositions, one drawer down. They were the first thing
+            # in this panel, above the canvas -- which had the same shape of
+            # mistake Stage 2's checkpoint did: a layout is loaded once at the
+            # start of a session and then left alone, while the canvas under it
+            # is what somebody actually works in. The canvas keeps the top of
+            # the panel; this is where you go to keep what is on it.
+            with gr.Accordion("Saved layouts", open=False,
+                              elem_id=ident("spatial", "profiles")):
                 with gr.Row():
                     spatial_profile = gr.Dropdown(
                         label="Layout", value=loaded_layout,
@@ -1529,44 +1611,6 @@ class ScriptKreaCreative(scripts.Script):
                     spatial_profile_delete = gr.Button(
                         "Delete", size="sm", scale=1, variant="stop",
                         elem_id=ident("spatial", "profile", "delete"))
-
-                spatial_compose = gr.Radio(
-                    choices=[("Smart Spatial Compose", spatial_module.SMART),
-                             ("Direct BBOX Merge", spatial_module.DIRECT)],
-                    value=spatial["compose_mode"], label="Composition",
-                    elem_id=ident("spatial", "compose"))
-
-                # Position correction, in the pipeline, without opening a
-                # workspace. Section 6.2: drag the topmost box under the
-                # pointer and nothing else.
-                gr.HTML(spatial_compact(), elem_id=_spatial_id("compact", "host"))
-
-                with gr.Row(elem_id=ident("spatial", "actions")):
-                    spatial_auto_save = gr.Checkbox(
-                        value=bool(spatial["auto_save"]), label="Auto Save",
-                        elem_id=_spatial_id("autosave"), scale=1,
-                        info="commit a move as soon as you let go")
-                    spatial_undo = gr.Button("Undo", size="sm", scale=1,
-                                             elem_id=_spatial_id("compact", "undo"))
-                    spatial_commit = gr.Button("Save working layout", size="sm",
-                                               scale=1,
-                                               elem_id=_spatial_id("compact", "commit"))
-                    edit = gr.Button("Edit Layout…", size="sm", scale=1,
-                                     variant="primary", elem_id=_spatial_id("open"))
-
-            spatial_status = gr.HTML(
-                spatial_summary(spatial["layout"], bool(spatial["enabled"]),
-                                creative=bool(stored["enabled"]),
-                                mode=spatial["compose_mode"]),
-                elem_id=ident("spatial", "status"))
-
-            # The one component the browser writes to, and the one that travels
-            # with the generation. Hidden rather than absent: the editor is a
-            # page, the compositor is a hook, and a hidden textbox is the only
-            # thing Gradio offers that is both.
-            spatial_state = gr.Textbox(
-                value=spatial["layout"], visible=False, lines=1,
-                elem_id=_spatial_id("state"))
 
             with gr.Accordion("Spatial options", open=False,
                               elem_id=ident("spatial", "options")):

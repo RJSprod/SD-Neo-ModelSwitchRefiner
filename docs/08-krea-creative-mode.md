@@ -1980,3 +1980,65 @@ as well as the text — a watcher on `mc_lora.RE_EXTRA_NET` that fails if anythi
 on the Stage 1 literal path consults it, because the day it does,
 `[[<custom-extension:foo>]]` starts being something this extension has an
 opinion about.
+
+
+## 18. The region list decides the prompt, so it is the thing you drag (25 August 2026)
+
+The composed prompt's elements array has always been written in one order:
+`(region.z, region.index)` — see `Layout.ordered`. Stated, stable, and for a
+good reason: an elements array that reordered itself between two generations of
+the same layout would make an A/B comparison meaningless and a replay a coin
+toss.
+
+What there was no way to do was *choose* that order. Four buttons moved the
+selected region through `z` — To front, Forward, Back, To back — and every one
+of those words is about what is drawn on top, which is the other job `z` does.
+Nothing said the same number decided what the model reads first.
+
+Two changes, and the second one only makes sense because of the first.
+
+**The list is drawn in prompt order.** It used to be reversed — frontmost first,
+the way a layers panel reads — which meant the list and the composed prompt
+disagreed about which region came first, on the very list somebody would reach
+for to reorder them. Top to bottom is now the order the regions are written
+into the prompt, and the last row is also the one drawn on top where two
+overlap. One number, both jobs, and the "i" on the panel header says so.
+
+**Rows can be dragged.** Four delegated listeners on the container rather than
+listeners per row, because the rows are rebuilt on every paint. The drop point
+is the only geometry involved: above the middle of the row it is over, or below
+it. Alt with the up and down arrows makes the same move from the keyboard —
+dragging is not something every hand or every input device can do, and a reorder
+only a mouse can reach is a reorder half the people using this cannot make.
+
+The move renumbers `z` from the resulting order rather than adjusting it, the
+way `restack()` already did. A layout hand-edited elsewhere can arrive with
+every region claiming `z` 0, and "one place later" has to mean one place later
+in what somebody is looking at rather than in arithmetic nobody can see. It goes
+through the same undo history as every other edit.
+
+
+## 19. Auto Save meant two things (25 August 2026)
+
+It committed a move on the compact canvas the moment the pointer came up (§6.4),
+and did nothing at all in the full editor, where every edit waited for the Save
+button. One switch, on one panel, meaning different things depending on which
+canvas somebody was looking at — and the one it is easiest to lose work to.
+
+Every edit in the editor already brackets itself: `mark()` before it, `paint()`
+after. So the commit is one funnel rather than a call at the end of a dozen
+actions, and the two things it must not do are stated where they are known:
+
+* **A gesture in flight** paints on every `pointermove`, and committing on each
+  of them would be a round trip per pixel. The `pointerup` repaints, and that
+  one commits.
+* **A keystroke** is not a finished edit. A text field commits on `change` —
+  which the browser fires when the cursor leaves it — so it is one round trip
+  per field rather than one per keystroke.
+
+Undo commits too, as it already did on the compact canvas: otherwise Undo leaves
+the screen and the generation disagreeing, which is the one thing Auto Save
+exists to prevent. Opening the editor commits nothing — an Auto Save that fired
+on open would put a "changed" mark against a layout somebody only looked at —
+and a repaint that changed only which row is selected costs no round trip,
+because what was last written is remembered and compared against.

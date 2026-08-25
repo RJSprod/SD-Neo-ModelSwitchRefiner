@@ -201,3 +201,55 @@ class TestForwardCompatibility:
         defaults = {field: None for field in mc_presets.FIELDS}
         resolved = mc_presets.apply_defaults({"from_the_future": 1}, defaults)
         assert "from_the_future" not in resolved
+
+
+class TestWhereThePresetControlsSit:
+    """A preset is the whole of Stage 2, so it is the first thing in Stage 2.
+
+    Checkpoint, modules, sampling, seed policy, denoise -- one saved choice
+    decides all of them. The panel used to open on the checkpoint chooser with
+    presets in the last of six accordions, which put the decisions in the wrong
+    order: the checkpoint is one of the things a preset has already decided.
+
+    Read from the source rather than from a built page because the fake Gradio
+    these tests run against records components, not the containers they were
+    built inside -- and what is being asserted here is an ordering of the
+    building, which the source is the honest record of.
+    """
+
+    def source(self) -> str:
+        from pathlib import Path
+
+        return (Path(__file__).resolve().parent.parent
+                / "scripts" / "model_chain.py").read_text(encoding="utf-8")
+
+    def stage2(self) -> str:
+        text = self.source()
+        return text[text.index("# -- 9.1 "):text.index("# -- the memory contract")]
+
+    def test_the_preset_chooser_comes_before_the_checkpoint(self):
+        block = self.stage2()
+
+        assert block.index('elem_id=self.elem_id("preset")') < \
+            block.index('elem_id=self.elem_id("target")')
+
+    def test_the_preset_chooser_is_not_behind_an_accordion(self):
+        """The first section of Stage 2 is not a section anybody has to open."""
+        block = self.stage2()
+        before = block[:block.index('elem_id=self.elem_id("preset")')]
+
+        assert "gr.Accordion" not in before
+
+    def test_the_checkpoint_is_behind_one(self):
+        block = self.stage2()
+        opened = block[:block.index('elem_id=self.elem_id("target")')]
+
+        assert opened.rindex("gr.Accordion") > opened.rindex("gr.Group")
+
+    def test_the_modules_are_beside_the_checkpoint_they_describe(self):
+        """They used to be five sections apart, describing the same model."""
+        block = self.stage2()
+        between = block[block.index('elem_id=self.elem_id("target")'):
+                        block.index('elem_id=self.elem_id("modules")')]
+
+        assert "gr.Accordion" not in between

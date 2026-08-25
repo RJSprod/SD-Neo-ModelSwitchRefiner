@@ -62,17 +62,16 @@ class TestTheShell:
         """The one ordering in the extension a user can see. A panel that drew
         Spatial above Creative while the code ran them the other way round
         would be a diagram of a different program."""
-        assert mc_pipeline_panel.ORDER == (
-            "prompt", "creative", "spatial", "stage1", "stage2", "output")
+        assert mc_pipeline_panel.ORDER == ("creative", "spatial", "stage2")
 
-    def test_exactly_three_stages_are_ours(self):
-        """Section 2.4. Everything else is context, and context is not
-        editable from here."""
-        assert set(mc_pipeline_panel.OWNED) == {"creative", "spatial", "stage2"}
-        assert set(mc_pipeline_panel.CONTEXT) == {"prompt", "stage1", "output"}
-        assert not set(mc_pipeline_panel.OWNED) & set(mc_pipeline_panel.CONTEXT)
-        assert (set(mc_pipeline_panel.OWNED) | set(mc_pipeline_panel.CONTEXT)
-                == set(mc_pipeline_panel.ORDER))
+    def test_every_row_is_one_this_extension_runs(self):
+        """The panel used to draw Prompt, Stage 1 and Output as well: Forge's
+        own, muted and uneditable, so that the path had no holes in it. What
+        that produced was three rows restating what the page already said --
+        the prompt box is directly above, the sliders directly below, and the
+        output is the picture."""
+        assert set(mc_pipeline_panel.ORDER) == set(mc_pipeline_panel.OWNED)
+        assert not hasattr(mc_pipeline_panel, "CONTEXT")
 
     def test_it_builds_one_shell_and_hands_the_same_one_back(self, host):
         """The whole mechanism. The second script to call host() must get the
@@ -90,17 +89,18 @@ class TestTheShell:
             assert pipeline.head(stage) is not None
             assert pipeline.body(stage) is not None
 
-    def test_no_context_stage_offers_a_switch(self, host):
-        """Section 2.4 again: Prompt, Stage 1 and Output carry no Model Chain
-        control, because Model Chain does not control them."""
+    def test_the_rows_forge_owned_are_not_built_at_all(self, host):
+        """Not hidden, not muted: absent. A row that is present and refuses to
+        work is worse than no row."""
         pipeline = mc_pipeline_panel.host()
 
-        for stage in mc_pipeline_panel.CONTEXT:
+        for stage in ("prompt", "stage1", "output"):
+            assert stage not in pipeline.rows
             assert stage not in pipeline.heads
+            assert stage not in pipeline.summaries
 
     def test_every_stage_has_a_live_second_line(self, host):
-        """Including the ones this extension does not own -- a muted row that
-        said only its own name would be decoration."""
+        """A row that said only its own name would be decoration."""
         pipeline = mc_pipeline_panel.host()
 
         for stage in mc_pipeline_panel.ORDER:
@@ -187,12 +187,12 @@ class TestBothScriptsFillOneShell:
 # --------------------------------------------------------------------------- #
 
 
-class TestTheStage1Row:
-    """Section 7: read, never written, and right about Hires.
+class TestTheHandoffLine:
+    """Section 7, and all that is left of the Stage 1 row: right about Hires.
 
-    The number that matters is the last one: Stage 2 refines *finished Stage 1
-    pixels*, so a Hires pass changes what it is handed. A panel that quoted the
-    width and height sliders would be describing a picture that never exists.
+    Stage 2 refines *finished Stage 1 pixels*, so a Hires pass changes what it
+    is handed, and nothing else on the page states that number -- which is the
+    whole reason this line outlived the row it used to sit under.
     """
 
     def helpers(self):
@@ -210,37 +210,10 @@ class TestTheStage1Row:
 
         assert mc._stage1_size(1024, 1536, True, 1.5) == (1536, 2304)
 
-    def test_the_row_names_the_upscale_and_where_it_lands(self):
-        mc = self.helpers()
-
-        said = mc._stage1_summary("krea2.safetensors", 1024, 1536, True, 1.5)
-
-        assert "1024×1536" in said
-        assert "Hires 1.5×" in said
-        assert "1536×2304" in said
-
     def test_a_checkpoint_is_named_without_its_path_or_its_hash(self):
         mc = self.helpers()
 
         assert mc._short_checkpoint("SD/krea2.safetensors [abc123]") == "krea2"
-
-    def test_the_sampler_line_is_left_out_when_forge_does_not_offer_it(self):
-        """A heavily customised UI loses a clause and nothing else -- the only
-        acceptable failure for a panel describing controls it does not own."""
-        mc = self.helpers()
-
-        said = mc._stage1_summary("krea2.safetensors", 1024, 1536)
-
-        assert "krea2" in said
-        assert "steps" not in said
-
-    def test_references_are_reported_when_imagestitch_has_any(self):
-        mc = self.helpers()
-
-        said = mc._stage1_summary("krea2.safetensors", 1024, 1536,
-                                  stitch_gallery=[object(), object()])
-
-        assert "ImageStitch · 2 references" in said
 
     def test_the_handoff_line_says_the_size_even_with_stage_2_off(self):
         """It is what Stage 2 *would* be handed, and the number somebody needs
@@ -252,25 +225,18 @@ class TestTheStage1Row:
         assert "1536 × 2304 pixel handoff" in said
         assert "Stage 2 is off" in said
 
-    def test_the_output_row_is_the_stage_1_size_when_stage_2_is_off(self):
-        mc = self.helpers()
-
-        said = mc._output_summary(False, "", 1.0, 1024, 1536, True, 1.5)
-
-        assert said == "1536×2304 — from Stage 1"
-
-    def test_the_output_row_follows_stage_2_when_it_is_on(self):
-        mc = self.helpers()
-
-        said = mc._output_summary(True, "flux1-klein.safetensors", 1.0,
-                                  1024, 1536, True, 1.5)
-
-        assert "refined by Stage 2" in said
-
     def test_a_size_nobody_has_set_yet_says_nothing_rather_than_zero(self):
         mc = self.helpers()
 
-        assert mc._output_summary(False, "", 1.0, 0, 0) == ""
+        assert "pixel handoff" in mc._handoff_summary(0, 0)
+
+    def test_the_rows_that_described_forges_own_work_are_gone(self):
+        """Deleted rather than left unused: a builder nothing calls is a
+        builder somebody wires back up by accident."""
+        mc = self.helpers()
+
+        assert not hasattr(mc, "_stage1_summary")
+        assert not hasattr(mc, "_output_summary")
 
 
 # --------------------------------------------------------------------------- #
@@ -529,9 +495,21 @@ class TestEveryPhaseLightsARow:
         assert stage_for("Doing something else entirely") == ""
         assert stage_for("") == ""
 
-    def test_every_stage_the_table_names_is_a_real_stage(self):
+    def test_every_stage_the_table_names_is_one_this_file_knows(self):
+        """A row, or one of the two phases that no longer has a row. What must
+        never happen is a third answer: a stage name in the table that the
+        panel has never heard of is a table that has gone stale."""
+        known = set(mc_pipeline_panel.ORDER) | set(mc_pipeline_panel.PHASES_WITHOUT_A_ROW)
+
         for _match, stage in _phase_table():
-            assert stage in mc_pipeline_panel.ORDER
+            assert stage in known
+
+    def test_a_phase_with_no_row_lights_nothing_and_is_still_recognised(self):
+        """Stage 1 still runs; the panel simply has nothing to light for it.
+        Recognised-and-silent and never-heard-of are different failures, and
+        only the second one means the table needs updating."""
+        assert stage_for("Stage 1 sampling") == "stage1"
+        assert "stage1" not in mc_pipeline_panel.ORDER
 
     def test_the_browser_knows_the_same_six_stages_in_the_same_order(self):
         source = PIPELINE_JS.read_text(encoding="utf-8")

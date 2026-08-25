@@ -611,9 +611,14 @@ class TestTheActiveLiteralsNote:
 
     Their values keep reaching every generation while the row is off screen,
     which is exactly the invisible active state this extension keeps warning
-    itself about. So the Prompt row of the Image Pipeline says how many are in
-    effect -- and says it only then, because while the boxes are visible they
-    speak for themselves and a count beside them would be furniture.
+    itself about. So the Image Pipeline says how many are in effect -- and says
+    it only then, because while the boxes are visible they speak for themselves
+    and a count beside them would be furniture.
+
+    It used to share a line with an echo of the prompt, on a Prompt row that no
+    longer exists. What is left is the note alone, and *empty* the rest of the
+    time: an empty note is an empty element, and the stylesheet gives an empty
+    element no height.
     """
 
     def test_nothing_is_said_while_the_row_is_on_screen(self):
@@ -665,7 +670,7 @@ class TestTheActiveLiteralsNote:
 
         assert found["note"] == ""
 
-    def test_the_note_reaches_the_prompt_row(self):
+    def test_the_note_reaches_the_panel(self):
         found = run_pipeline("""
             row.offsetParent = null;
             fieldIn("txt2img_prompt").value = "a quiet street";
@@ -674,9 +679,22 @@ class TestTheActiveLiteralsNote:
             report({echo: echo.textContent});
         """)
 
-        assert found["echo"] == "a quiet street · 1 literal active"
+        assert found["echo"] == "1 literal active"
 
-    def test_the_prompt_row_still_works_with_no_literals_on_the_page(self):
+    def test_the_prompt_itself_is_not_echoed_any_more(self):
+        """The prompt box is directly above the panel. Repeating the first 120
+        characters of it underneath was a row of screen space spent on
+        something the user could already read."""
+        found = run_pipeline("""
+            row.offsetParent = null;
+            fieldIn("txt2img_prompt").value = "a quiet street";
+            mc.echo();
+            report({echo: echo.textContent});
+        """)
+
+        assert found["echo"] == ""
+
+    def test_the_note_still_works_with_no_literals_on_the_page(self):
         """The two files are loaded independently and either may be absent from
         a page a theme rebuilt."""
         found = run_pipeline("""
@@ -686,7 +704,7 @@ class TestTheActiveLiteralsNote:
             report({echo: echo.textContent});
         """)
 
-        assert found["echo"] == "a quiet street"
+        assert found["echo"] == ""
 
 
 # --------------------------------------------------------------------------- #

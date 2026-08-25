@@ -2,24 +2,15 @@
 
     IMAGE PIPELINE
 
-    Prompt
-      "astronaut botanist in a Martian greenhouse"
-      |
     Creative                         ON
       C7 - 2 directions - Editorial
       |
     Spatial                          ON
       Smart - 2 regions - Studio thirds
       |
-    Stage 1
-      Krea 2 - 1024x1536 - Hires 1.5x -> 1536x2304
-      ImageStitch - 2 references
-      | 1536x2304 pixel handoff
+      1536x2304 pixel handoff
     Stage 2                          ON
       Klein 9B - Portrait polish - denoise .35
-      |
-    Output
-      1536x2304
 
 Three panels became one path. Creative Mode, Spatial Layout and the Stage 2
 accordion were three independent top-level surfaces on txt2img, each one
@@ -31,7 +22,7 @@ described was the *order*.
 What this module is
 -------------------
 A presentation shell and nothing else. It owns no setting, reads no
-preference, and runs no part of a generation. It builds six rows and hands out
+preference, and runs no part of a generation. It builds three rows and hands out
 the empty containers -- two per row -- that the feature scripts fill with their
 own existing controls. Every control on the finished panel is the same Gradio
 component, wired to the same handler, writing to the same state as before this
@@ -45,7 +36,7 @@ lives in ``scripts/model_chain.py``. Forge builds each ``alwayson`` script's
 choose, so neither script can contain the other.
 
 So neither does. Whichever script's ``ui()`` runs first calls :func:`host`,
-which builds the whole shell -- all six rows, in pipeline order, with empty
+which builds the whole shell -- all three rows, in pipeline order, with empty
 slots -- and remembers it against the Blocks currently being assembled. The
 second script calls :func:`host`, gets the same object back, and fills its
 slots by re-entering them:
@@ -55,25 +46,28 @@ slots by re-entering them:
 
 Gradio appends to a container that is re-entered, and renders each container's
 children in the order they were added. The slots are created in pipeline order
-at build time, so the finished panel reads Prompt -> Creative -> Spatial ->
-Stage 1 -> Stage 2 -> Output whichever script got there first. Nothing here
+at build time, so the finished panel reads Creative -> Spatial -> Stage 2
+whichever script got there first. Nothing here
 depends on script order, which is the property that makes it safe: a host that
 sorts its scripts differently tomorrow rearranges nothing.
 
-Ownership is a visual fact, not a new rule
-------------------------------------------
-Creative, Spatial and Stage 2 are this extension's. Prompt, Stage 1 and Output
-belong to Forge, and appear here only because a path with holes in it does not
-teach anybody the path. They are drawn muted, they carry no switch, and they
-open nothing -- section 2.4 of the design intent, expressed as three CSS
-classes rather than as three disabled controls, because a control that is
-present and refuses to work is worse than no control.
+Only what this extension owns
+-----------------------------
+Three rows, and they are the three stages Model Chain runs. The panel used to
+draw Prompt, Stage 1 and Output as well -- Forge's own, muted and uneditable, so
+that the path had no holes in it. What that produced in practice was three rows
+restating things the page already said louder: the prompt box is directly above,
+the size sliders are directly below, and the output is the picture. They are
+gone.
 
-Stage 1 in particular is *read*. Forge's own width, height, Hires and
-checkpoint controls stay the only place those values can be changed, and this
-panel summarises what they currently say. Section 2.5: no duplicate
-source-of-truth, ever, because two controls holding one value is a bug with a
-delay on it.
+One number survives them, because nothing else on the page states it: the pixel
+size that crosses into Stage 2. Stage 1's Hires pass changes it, so a user who
+has read the width and height sliders has read the wrong number -- see
+:func:`handoff_note`, drawn on the edge above the Stage 2 row and true whether
+Stage 2 is armed or not.
+
+Section 2.5 still holds for everything else: no duplicate source-of-truth,
+because two controls holding one value is a bug with a delay on it.
 
 Everything is a stock component
 -------------------------------
@@ -98,25 +92,39 @@ PREFIX = "mc-pipeline"
 OWNED = ("creative", "spatial", "stage2")
 """The stages Model Chain controls: switchable, expandable, emphasised."""
 
-CONTEXT = ("prompt", "stage1", "output")
-"""The stages Forge owns. Shown so the path is whole; never editable here."""
-
-ORDER = ("prompt", "creative", "spatial", "stage1", "stage2", "output")
+ORDER = OWNED
 """Top to bottom, and the order a generation actually runs in.
 
 The one ordering in the extension that a user can see. It matches
 :mod:`mc_krea_pipeline`'s, which is the ordering that actually happens, and the
 two are meant to be compared: a panel that drew Spatial above Creative while the
 code ran them the other way round would be a diagram of a different program.
+
+It used to run Prompt -> Creative -> Spatial -> Stage 1 -> Stage 2 -> Output.
+Those three extra rows were Forge's own, drawn muted and uneditable so that the
+path had no holes in it -- and a path with no holes in it turned out to be three
+rows of things somebody already knew, above the prompt box that already says the
+prompt and beside the sliders that already say the size. The panel is the three
+stages this extension actually owns; what crosses the edge into Stage 2 is still
+said, because that is a number nothing else on the page states.
+"""
+
+PHASES_WITHOUT_A_ROW = ("stage1", "output")
+"""Phases a generation still runs through, and the panel no longer draws.
+
+The progress bar's labels are the host's and did not change when three rows
+left: "Stage 1", "Finishing" and the rest still arrive, and
+``javascript/model_chain_pipeline.js`` still recognises every one of them. What
+it does with the two named here is light nothing, which is the answer a phase
+with no row on the panel should get -- and a very different thing from a label
+this extension has never heard of, which is the case that would mean the table
+had gone stale.
 """
 
 TITLES = {
-    "prompt": "Prompt",
     "creative": "Creative",
     "spatial": "Spatial",
-    "stage1": "Stage 1",
     "stage2": "Stage 2",
-    "output": "Output",
 }
 
 EDITOR_LABELS = {
@@ -127,23 +135,26 @@ EDITOR_LABELS = {
 """What an owned stage's disclosure says. The stage name is already above it."""
 
 PROMPT_ECHO = f"{PREFIX}-prompt-echo"
-"""The one element the browser writes the live prompt into.
+"""The one element the browser writes the hidden-but-active note into.
 
-An id of this extension's own, inside a stock ``gr.HTML``, because the Prompt
-row has to follow every keystroke and a Gradio round trip per keystroke is not
-a thing to do to somebody's typing. Writing into a Markdown component would
-mean reaching for a Gradio-generated class, which is the one thing every
-selector in this extension avoids -- a theme is allowed to rearrange Gradio's
-internals, and this has to keep working when it does.
+An id of this extension's own, inside a stock ``gr.HTML``, because what it says
+follows a keystroke and a Gradio round trip per keystroke is not a thing to do
+to somebody's typing. Writing into a Markdown component would mean reaching for
+a Gradio-generated class, which is the one thing every selector in this
+extension avoids -- a theme is allowed to rearrange Gradio's internals, and this
+has to keep working when it does.
+
+It carried an echo of the prompt as well, on a Prompt row that no longer exists.
+What is left is section 3.3 and only that: ``2 literals active``, said when the
+Literal Prompt boxes are off screen and carrying something, and *empty* every
+other second of the day -- ``:empty`` in the stylesheet gives an empty note no
+height at all, so the line costs nothing until there is something to say.
 """
 
 PLACEHOLDERS = {
-    "prompt": "*whatever is in the prompt box above*",
     "creative": "Off — the prompt is expanded as written.",
     "spatial": "Off — nothing is composed onto the scene.",
-    "stage1": "Forge generates this stage.",
     "stage2": "Off — the Stage 1 image is the final image.",
-    "output": "Stage 1 delivers the final image.",
 }
 """The second line before anything has been wired. Replaced on first render."""
 
@@ -172,7 +183,7 @@ def handoff_note(width: int = 0, height: int = 0) -> str:
 
 
 class Pipeline:
-    """The six rows, and the empty containers the feature scripts fill.
+    """The three rows, and the empty containers the feature scripts fill.
 
     Built once per Gradio Blocks by :func:`host`. A script asks for the two
     slots belonging to a stage it owns, re-enters them, and builds whatever it
@@ -233,61 +244,45 @@ class Pipeline:
 
 
 def _row(pipeline: Pipeline, stage: str) -> None:
-    """One pipeline item: a title, a switch slot, a live line, and a drawer.
-
-    Owned and context stages differ in three ways and are otherwise the same
-    element, which is the point -- they are steps of one path, not two kinds of
-    thing that happen to be listed together.
-    """
-    owned = stage in OWNED
-    kind = "owned" if owned else "context"
-
-    with gr.Column(elem_id=ident("stage", stage),
-                   elem_classes=classes("stage", f"stage-{kind}", f"stage-{stage}")) as row:
-        pipeline.rows[stage] = row
-
-        with gr.Row(elem_classes=classes("head")):
-            gr.Markdown(f"**{TITLES[stage]}**" if owned else TITLES[stage],
-                        elem_id=ident("title", stage),
-                        elem_classes=classes("title"))
-            if owned:
-                # Filled by the feature that owns the stage, with the switch it
-                # already had. Nothing is created here: a second checkbox
-                # mirroring the real one is exactly the duplicate
-                # source-of-truth section 2.5 forbids, and it would be the one
-                # the user reached for first.
-                with gr.Column(min_width=96, scale=0,
-                               elem_id=ident("switch", stage),
-                               elem_classes=classes("switch")) as head:
-                    pipeline.heads[stage] = head
-
-        if stage == "prompt":
-            # Written by the browser on every keystroke and by nothing else.
-            pipeline.summaries[stage] = gr.HTML(
-                f'<span id="{PROMPT_ECHO}" class="{PREFIX}-echo"></span>',
-                elem_id=ident("summary", stage), elem_classes=classes("summary"))
-        else:
-            pipeline.summaries[stage] = gr.Markdown(
-                PLACEHOLDERS.get(stage, ""), elem_id=ident("summary", stage),
-                elem_classes=classes("summary"))
-
-        if owned:
-            with gr.Accordion(EDITOR_LABELS[stage], open=False,
-                              elem_id=ident("editor", stage),
-                              elem_classes=classes("editor")) as editor:
-                pipeline.editors[stage] = editor
-                with gr.Column(elem_id=ident("body", stage),
-                               elem_classes=classes("body")) as body:
-                    pipeline.bodies[stage] = body
-
-    if stage == "stage1":
-        # The connector between Stage 1 and Stage 2 says what crosses it.
-        # Written as its own element rather than into Stage 1's summary,
-        # because it describes the *edge* -- it is equally true when Stage 2 is
-        # off, where it says what Stage 2 would have received.
+    """One pipeline item: a title, a switch slot, a live line, and a drawer."""
+    if stage == "stage2":
+        # The edge into Stage 2 says what crosses it: the pixel size Stage 2 is
+        # handed, which is Stage 1's size *after* any Hires pass and so not the
+        # number the width and height sliders show. Its own element and not
+        # Stage 2's summary line, because it is equally true when Stage 2 is
+        # off -- where it says what Stage 2 would have been given.
         pipeline.handoff = gr.Markdown(
             handoff_note(), elem_id=ident("handoff"),
             elem_classes=classes("handoff"))
+
+    with gr.Column(elem_id=ident("stage", stage),
+                   elem_classes=classes("stage", "stage-owned", f"stage-{stage}")) as row:
+        pipeline.rows[stage] = row
+
+        with gr.Row(elem_classes=classes("head")):
+            gr.Markdown(f"**{TITLES[stage]}**",
+                        elem_id=ident("title", stage),
+                        elem_classes=classes("title"))
+            # Filled by the feature that owns the stage, with the switch it
+            # already had. Nothing is created here: a second checkbox mirroring
+            # the real one is exactly the duplicate source-of-truth section 2.5
+            # forbids, and it would be the one the user reached for first.
+            with gr.Column(min_width=96, scale=0,
+                           elem_id=ident("switch", stage),
+                           elem_classes=classes("switch")) as head:
+                pipeline.heads[stage] = head
+
+        pipeline.summaries[stage] = gr.Markdown(
+            PLACEHOLDERS.get(stage, ""), elem_id=ident("summary", stage),
+            elem_classes=classes("summary"))
+
+        with gr.Accordion(EDITOR_LABELS[stage], open=False,
+                          elem_id=ident("editor", stage),
+                          elem_classes=classes("editor")) as editor:
+            pipeline.editors[stage] = editor
+            with gr.Column(elem_id=ident("body", stage),
+                           elem_classes=classes("body")) as body:
+                pipeline.bodies[stage] = body
 
 
 def _build() -> Pipeline:
@@ -297,12 +292,13 @@ def _build() -> Pipeline:
     with gr.Accordion("Image Pipeline", open=True, elem_id=ident("panel"),
                       elem_classes=classes("panel")) as accordion:
         pipeline.accordion = accordion
-        gr.Markdown(
-            "The path from your prompt to the finished image. **Creative**, "
-            "**Spatial** and **Stage 2** are Model Chain's — switch them here, "
-            "open one to edit it. Prompt, Stage 1 and Output are Forge's own and "
-            "are shown for context.",
-            elem_id=ident("intro"), elem_classes=classes("intro"))
+
+        # Section 3.3, and the only thing left of the Prompt row: what is in
+        # effect while its own control is off screen. Empty the rest of the
+        # time, and an empty note has no height -- see `.mc-pipeline-notes` in
+        # style.css.
+        gr.HTML(f'<span id="{PROMPT_ECHO}" class="{PREFIX}-echo"></span>',
+                elem_id=ident("notes"), elem_classes=classes("notes"))
 
         for stage in ORDER:
             _row(pipeline, stage)

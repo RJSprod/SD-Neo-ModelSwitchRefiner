@@ -21,6 +21,7 @@ import gradio as gr
 
 import mc_arch
 import mc_broker
+import mc_hint
 import mc_infotext
 import mc_literal_report
 import mc_llm_paths
@@ -638,73 +639,6 @@ def _stage1_size(width, height, hires=False, hr_scale=2.0, hr_resize_x=0, hr_res
         return width, height
 
 
-def _reference_count(gallery) -> int:
-    try:
-        return len(gallery or ())
-    except TypeError:
-        return 0
-
-
-def _stage1_summary(checkpoint, width, height, hires=False, hr_scale=2.0,
-                    hr_resize_x=0, hr_resize_y=0, sampler="", steps=0, cfg=0.0,
-                    scheduler="", stitch_gallery=None) -> str:
-    """Forge's current txt2img state, as the two lines section 7 asks for.
-
-    Everything is optional. A heavily customised UI that does not expose the
-    Hires controls, or a Forge build that renames the sampler dropdown, loses a
-    clause here and nothing else -- which is the correct failure for a panel
-    whose entire job is to describe controls it does not own.
-    """
-    first = []
-
-    name = _short_checkpoint(checkpoint)
-    if name:
-        first.append(name)
-
-    final_w, final_h = _stage1_size(width, height, hires, hr_scale,
-                                    hr_resize_x, hr_resize_y)
-    try:
-        base_w, base_h = int(width or 0), int(height or 0)
-    except (TypeError, ValueError):
-        base_w = base_h = 0
-
-    if base_w > 0 and base_h > 0:
-        first.append(f"{base_w}×{base_h}")
-    if hires and final_w > 0 and (final_w, final_h) != (base_w, base_h):
-        try:
-            scale = float(hr_scale or 0)
-        except (TypeError, ValueError):
-            scale = 0.0
-        shown = f"Hires {scale:g}×" if scale > 0 and not (hr_resize_x or hr_resize_y) else "Hires"
-        first.append(f"{shown} → {final_w}×{final_h}")
-
-    second = []
-    if sampler:
-        second.append(str(sampler))
-    if scheduler and str(scheduler).strip().casefold() not in ("automatic", "none"):
-        second.append(str(scheduler))
-    try:
-        if int(steps or 0) > 0:
-            second.append(f"{int(steps)} steps")
-    except (TypeError, ValueError):
-        pass
-    try:
-        if float(cfg or 0) > 0:
-            second.append(f"CFG {float(cfg):g}")
-    except (TypeError, ValueError):
-        pass
-
-    references = _reference_count(stitch_gallery)
-    if references:
-        second.append(f"ImageStitch · {references} reference"
-                      f"{'' if references == 1 else 's'}")
-
-    lines = [" · ".join(first)] if first else []
-    if second:
-        lines.append(" · ".join(second))
-    return "  \n".join(lines) if lines else "Forge generates this stage."
-
-
 def _handoff_summary(width, height, hires=False, hr_scale=2.0, hr_resize_x=0,
                      hr_resize_y=0, enabled=False) -> str:
     """What crosses the edge between Stage 1 and Stage 2.
@@ -740,33 +674,6 @@ def _stage2_summary(enabled, target, denoise, multiplier, loaded="") -> str:
     except (TypeError, ValueError):
         pass
     return " · ".join(parts)
-
-
-def _output_summary(enabled, target, multiplier, width, height, hires=False,
-                    hr_scale=2.0, hr_resize_x=0, hr_resize_y=0) -> str:
-    """The size of the picture that actually arrives.
-
-    The last row of the pipeline and the one a user checks first. With Stage 2
-    off it is the Stage 1 result; with Stage 2 on it is that result scaled and
-    aligned to the Stage 2 architecture's grid, which is the same calculation
-    the Stage 2 size readout makes and is deliberately made from the same two
-    functions rather than a second time by hand.
-    """
-    width, height = _stage1_size(width, height, hires, hr_scale, hr_resize_x, hr_resize_y)
-    if width <= 0 or height <= 0:
-        return ""
-    if not enabled:
-        return f"{width}×{height} — from Stage 1"
-
-    arch = mc_arch.detect_from_checkpoint_name(target)
-    try:
-        out_w, out_h = mc_arch.scaled_size(width, height, float(multiplier or 1.0),
-                                           arch.alignment)
-    except (TypeError, ValueError, ZeroDivisionError):
-        return f"{width}×{height}"
-    return f"{out_w}×{out_h} — refined by Stage 2"
-
-
 
 
 def _edit_notice(target: str, mode: str) -> str:
@@ -1096,34 +1003,71 @@ class ScriptModelChain(scripts.Script):
             )
 
         with pipeline.body("stage2"):
-            gr.Markdown(
-                "Finishes Stage 1 on the loaded checkpoint, then re-encodes the "
-                "result and refines it with a second checkpoint. The handoff is in "
-                "**pixel space**, so the two models may use different architectures, "
-                "VAEs and text encoders.",
-                elem_id=self.elem_id("intro"),
-            )
 
-            # -- 9.1 Essential --------------------------------------------- #
+            # -- 9.1 Presets ----------------------------------------------- #
             #
-            # Not in an accordion, and that is the section: the checkpoint, how
-            # far it may move the picture, and how big the result is are the
-            # three decisions somebody makes every time. Everything below this
-            # is a decision made once and then left alone.
+            # The first thing, because it is the one control that sets the
+            # others. A preset here is the whole of Stage 2 -- checkpoint,
+            # modules, sampling, seed policy, denoise, the lot -- so somebody
+            # who has saved one makes a single choice and is finished, and the
+            # sections below are where they go when they want to disagree with
+            # part of it.
+            #
+            # It used to be the last accordion, under five others, with the
+            # checkpoint chooser in this spot instead. That had the order of the
+            # decisions backwards: the checkpoint is one of the things a preset
+            # already decided.
             with gr.Group(elem_classes=mc_pipeline_panel.classes("essential")):
                 with gr.Row():
-                    target = gr.Dropdown(
-                        value=_NO_MODEL,
-                        label="Stage 2 checkpoint",
-                        choices=checkpoints,
-                        elem_id=self.elem_id("target"),
+                    preset = gr.Dropdown(
+                        value=mc_presets.NONE,
+                        label="Preset",
+                        choices=mc_presets.choices(),
+                        elem_id=self.elem_id("preset"),
+                        info="applied the moment it is chosen",
                     )
-                    target_refresh = ToolButton(
+                    preset_refresh = ToolButton(
                         value=refresh_symbol,
-                        elem_id=self.elem_id("target_refresh"),
-                        tooltip="Stage 2 checkpoint and modules: refresh",
+                        elem_id=self.elem_id("preset_refresh"),
+                        tooltip="Presets: refresh",
                     )
+                    # What the paragraph above this panel used to say, on the
+                    # first control anybody reads.
+                    mc_hint.control(
+                        "Stage 2 finishes Stage 1 on the loaded checkpoint, then "
+                        "re-encodes the result and refines it with a second "
+                        "checkpoint. The handoff is in pixel space, so the two "
+                        "models may use different architectures, VAEs and text "
+                        "encoders. A preset carries every setting in this panel.",
+                        label="Stage 2", elem_id=self.elem_id("intro"))
 
+                preset_status = gr.Markdown("", elem_id=self.elem_id("preset_status"))
+                preset_explain = gr.Markdown(
+                    "", elem_id=self.elem_id("preset_explain"),
+                    elem_classes=mc_pipeline_panel.classes("explain"))
+
+                with gr.Accordion("Save or delete a preset", open=False,
+                                  elem_id=self.elem_id("section_presets")):
+                    with gr.Row():
+                        preset_name = gr.Textbox(
+                            label="Preset name",
+                            placeholder="name to save the current Stage 2 settings under",
+                            elem_id=self.elem_id("preset_name"),
+                            scale=3,
+                        )
+                        preset_save = gr.Button("Save", elem_id=self.elem_id("preset_save"), scale=1)
+                        preset_delete = gr.Button("Delete", elem_id=self.elem_id("preset_delete"), scale=1)
+
+                # The snapshot the dirty indicator compares against, and the
+                # name it reports. Both are UI-only: a preset is applied to the
+                # controls the moment it is chosen, exactly as before, and this
+                # pair only remembers what those controls held at that moment.
+                preset_baseline = gr.State("")
+                preset_loaded = gr.State("")
+
+                # The two dials somebody moves after choosing a preset, and the
+                # only two: how far Stage 2 may take the picture, and how big it
+                # comes back. Everything else below is a decision made once.
                 with gr.Row():
                     denoise = gr.Slider(
                         label="Denoise strength",
@@ -1144,28 +1088,60 @@ class ScriptModelChain(scripts.Script):
                     )
 
                 size_note = gr.Markdown("", elem_id=self.elem_id("size_note"))
-                preset_status = gr.Markdown("", elem_id=self.elem_id("preset_status"))
-                preset_explain = gr.Markdown(
-                    "", elem_id=self.elem_id("preset_explain"),
-                    elem_classes=mc_pipeline_panel.classes("explain"))
 
-            # -- 9.2 Prompt & Styles --------------------------------------- #
+            # -- 9.2 Checkpoint & Model Components -------------------------- #
+            #
+            # A section like the others now. The checkpoint is not a thing
+            # somebody picks fresh on every image -- it is part of what a preset
+            # is -- and the modules and the residency status that describe the
+            # same model belong beside it rather than five sections apart.
+            with gr.Accordion("Checkpoint & Model Components", open=False,
+                              elem_id=self.elem_id("section_modules")):
+                with gr.Row():
+                    target = gr.Dropdown(
+                        value=_NO_MODEL,
+                        label="Stage 2 checkpoint",
+                        choices=checkpoints,
+                        elem_id=self.elem_id("target"),
+                    )
+                    target_refresh = ToolButton(
+                        value=refresh_symbol,
+                        elem_id=self.elem_id("target_refresh"),
+                        tooltip="Stage 2 checkpoint and modules: refresh",
+                    )
+
+                modules = gr.Dropdown(
+                    value=[mc_memory.INHERIT_MODULES],
+                    label="Stage 2 VAE / Text Encoder",
+                    choices=module_choices,
+                    multiselect=True,
+                    elem_id=self.elem_id("modules"),
+                    info=(
+                        f'"{mc_memory.INHERIT_MODULES}" keeps Stage 1\'s selection; '
+                        "clear it entirely to use the checkpoint's built-in modules"
+                    ),
+                )
+                architecture_notice = gr.Markdown("", elem_id=self.elem_id("arch_notice"))
+                residency_status = gr.Markdown("", elem_id=self.elem_id("residency"))
+
+            # -- 9.3 Prompt & Styles --------------------------------------- #
             with gr.Accordion("Prompt & Styles", open=False,
                               elem_id=self.elem_id("section_prompt")):
-                prompt_mode = gr.Radio(
-                    choices=list(mc_infotext.PROMPT_MODES),
-                    value="Inherit",
-                    label="Stage 2 prompt",
-                    elem_id=self.elem_id("prompt_mode"),
-                )
-                gr.Markdown(
-                    "Flux-family models respond to natural-language phrasing rather "
-                    "than comma-separated tags, so a Stage 2 prompt often needs "
-                    "different wording than Stage 1. `<lora:name:weight>` tags here "
-                    "are applied against the Stage 2 model.",
-                    elem_id=self.elem_id("prompt_hint"),
-                )
-
+                with gr.Row():
+                    prompt_mode = gr.Radio(
+                        choices=list(mc_infotext.PROMPT_MODES),
+                        value="Inherit",
+                        label="Stage 2 prompt",
+                        elem_id=self.elem_id("prompt_mode"),
+                    )
+                    mc_hint.control(
+                        "Flux-family models respond to natural-language phrasing "
+                        "rather than comma-separated tags, so a Stage 2 prompt "
+                        "often needs different wording than Stage 1. "
+                        "<lora:name:weight> tags here are applied against the "
+                        "Stage 2 model.",
+                        label="the Stage 2 prompt",
+                        elem_id=self.elem_id("prompt_hint"))
                 prompt = gr.Textbox(
                     label="Stage 2 positive",
                     lines=2,
@@ -1196,7 +1172,7 @@ class ScriptModelChain(scripts.Script):
                         tooltip="Stage 2 styles: refresh",
                     )
 
-            # -- 9.3 Sampling ---------------------------------------------- #
+            # -- 9.4 Sampling ---------------------------------------------- #
             with gr.Accordion("Sampling", open=False,
                               elem_id=self.elem_id("section_sampling")):
                 with gr.Row():
@@ -1231,7 +1207,7 @@ class ScriptModelChain(scripts.Script):
                         elem_id=self.elem_id("scheduler"),
                     )
 
-            # -- 9.4 Edit & References ------------------------------------- #
+            # -- 9.5 Edit & References ------------------------------------- #
             with gr.Accordion("Edit & References", open=False,
                               elem_id=self.elem_id("section_references")):
                 edit_mode = gr.Radio(
@@ -1319,7 +1295,7 @@ class ScriptModelChain(scripts.Script):
                     ),
                 )
 
-            # -- 9.5 Seed --------------------------------------------------- #
+            # -- 9.6 Seed --------------------------------------------------- #
             with gr.Accordion("Seed", open=False,
                               elem_id=self.elem_id("section_seed")):
                 seed_mode = gr.Radio(
@@ -1344,56 +1320,6 @@ class ScriptModelChain(scripts.Script):
                         visible=False,
                         elem_id=self.elem_id("fixed_seed"),
                     )
-
-            # -- 9.6 Model Components & Status ------------------------------ #
-            with gr.Accordion("Model Components & Status", open=False,
-                              elem_id=self.elem_id("section_modules")):
-                modules = gr.Dropdown(
-                    value=[mc_memory.INHERIT_MODULES],
-                    label="Stage 2 VAE / Text Encoder",
-                    choices=module_choices,
-                    multiselect=True,
-                    elem_id=self.elem_id("modules"),
-                    info=(
-                        f'"{mc_memory.INHERIT_MODULES}" keeps Stage 1\'s selection; '
-                        "clear it entirely to use the checkpoint's built-in modules"
-                    ),
-                )
-                architecture_notice = gr.Markdown("", elem_id=self.elem_id("arch_notice"))
-                residency_status = gr.Markdown("", elem_id=self.elem_id("residency"))
-
-            # -- 9.7 Presets ------------------------------------------------ #
-            with gr.Accordion("Presets", open=False,
-                              elem_id=self.elem_id("section_presets")):
-                with gr.Row():
-                    preset = gr.Dropdown(
-                        value=mc_presets.NONE,
-                        label="Preset",
-                        choices=mc_presets.choices(),
-                        elem_id=self.elem_id("preset"),
-                        info="selecting a preset applies it immediately",
-                    )
-                    preset_refresh = ToolButton(
-                        value=refresh_symbol,
-                        elem_id=self.elem_id("preset_refresh"),
-                        tooltip="Presets: refresh",
-                    )
-                with gr.Row():
-                    preset_name = gr.Textbox(
-                        label="Preset name",
-                        placeholder="name to save the current Stage 2 settings under",
-                        elem_id=self.elem_id("preset_name"),
-                        scale=3,
-                    )
-                    preset_save = gr.Button("Save", elem_id=self.elem_id("preset_save"), scale=1)
-                    preset_delete = gr.Button("Delete", elem_id=self.elem_id("preset_delete"), scale=1)
-
-                # The snapshot the dirty indicator compares against, and the
-                # name it reports. Both are UI-only: a preset is applied to the
-                # controls the moment it is chosen, exactly as before, and this
-                # pair only remembers what those controls held at that moment.
-                preset_baseline = gr.State("")
-                preset_loaded = gr.State("")
 
 
         # -- the memory contract ------------------------------------------- #
@@ -1864,21 +1790,21 @@ class ScriptModelChain(scripts.Script):
 
         def _context_lines(read, is_on, target_name, denoise_value, multiplier,
                            loaded, gallery):
-            """The four live lines, from one set of reads."""
+            """The two live lines, from one set of reads.
+
+            There were four. The Stage 1 and Output rows they filled are gone
+            from the panel -- the sliders and the picture were already saying
+            those things -- and what is left is the pair nothing else on the
+            page states: the size that crosses into Stage 2, and what Stage 2
+            will do with it.
+            """
             geometry = (read.get("width", 0), read.get("height", 0),
                         bool(read.get("hires", False)), read.get("hr_scale", 2.0),
                         read.get("hr_resize_x", 0), read.get("hr_resize_y", 0))
             return (
-                _stage1_summary(read.get("checkpoint", ""), *geometry,
-                                sampler=read.get("sampler", ""),
-                                steps=read.get("steps", 0),
-                                cfg=read.get("cfg", 0.0),
-                                scheduler=read.get("scheduler", ""),
-                                stitch_gallery=gallery),
                 _handoff_summary(*geometry, enabled=bool(is_on)),
                 _stage2_summary(bool(is_on), target_name, denoise_value,
                                 multiplier, loaded),
-                _output_summary(bool(is_on), target_name, multiplier, *geometry),
             )
 
         def wire_pipeline_context(stitch_gallery=None):
@@ -1889,8 +1815,7 @@ class ScriptModelChain(scripts.Script):
             panel is being built, and a Gradio event captures its input list at
             registration.
             """
-            outputs = [pipeline.summary("stage1"), pipeline.handoff,
-                       pipeline.summary("stage2"), pipeline.summary("output")]
+            outputs = [pipeline.handoff, pipeline.summary("stage2")]
             if not all(outputs):
                 return
 

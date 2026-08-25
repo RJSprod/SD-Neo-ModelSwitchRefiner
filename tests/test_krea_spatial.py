@@ -1491,3 +1491,54 @@ class TestOffChangesNothing:
 
         assert mc_llm_progress.WRITER.reply_key != mc_llm_progress.COMPOSER.reply_key
         assert mc_llm_progress.WRITER.read_key != mc_llm_progress.COMPOSER.read_key
+
+
+class TestWhereTheLayoutControlsSit:
+    """The canvas is what somebody works in; a saved layout is what they load
+    once and leave alone.
+
+    The panel used to open with the Layout dropdown, its name box, Save and
+    Delete -- four controls about storage -- above the canvas they are storage
+    for. Same shape of mistake as Stage 2 opening on its checkpoint chooser,
+    and the same fix: the thing worked in stays at the top, the thing chosen
+    once goes in a drawer.
+
+    Read from the source: the fake Gradio these tests run against records
+    components, not the containers they were built in, and this is an assertion
+    about the building.
+    """
+
+    def panel(self) -> str:
+        from pathlib import Path
+
+        text = (Path(__file__).resolve().parent.parent / "scripts"
+                / "model_chain_krea_creative.py").read_text(encoding="utf-8")
+        return text[text.index('pipeline.body("spatial")'):
+                    text.index('ident("spatial", "restore")')]
+
+    def test_the_canvas_comes_before_the_saved_layouts(self):
+        block = self.panel()
+
+        assert block.index('_spatial_id("compact", "host")') < \
+            block.index('ident("spatial", "profile")')
+
+    def test_the_canvas_is_not_behind_an_accordion(self):
+        block = self.panel()
+        before = block[:block.index('_spatial_id("compact", "host")')]
+
+        assert "gr.Accordion" not in before
+
+    def test_the_saved_layouts_are(self):
+        block = self.panel()
+        opened = block[:block.index('ident("spatial", "profile")')]
+
+        assert 'gr.Accordion("Saved layouts"' in opened
+
+    def test_they_sit_directly_above_the_spatial_options(self):
+        """So the two drawers read as a pair rather than as a control that
+        wandered off on its own."""
+        block = self.panel()
+        between = block[block.index('ident("spatial", "profile", "delete")'):
+                        block.index('gr.Accordion("Spatial options"')]
+
+        assert "gr.Accordion" not in between
