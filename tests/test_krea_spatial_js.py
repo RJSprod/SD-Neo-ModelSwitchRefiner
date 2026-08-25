@@ -2993,6 +2993,31 @@ class TestTheWorkspaceStylesheet:
 
         assert missing == set()
 
+    def test_every_rule_in_it_selects_something_that_exists(self, section):
+        """The other direction, and the one a browser never complains about: a
+        rule for a class nothing emits is dead weight that reads as a control
+        somebody removed and a style somebody forgot."""
+        import model_chain_krea_creative as creative_script
+
+        source = SCRIPT.read_text(encoding="utf-8")
+        emitted = set()
+        for group in re.findall(r'class="([^"]+)"', _markup()):
+            emitted.update(name for name in group.split()
+                           if name.startswith("mc-krea-spatial-"))
+        # The browser file builds the rest, either as a whole name or as the
+        # prefix plus a suffix.
+        for suffix in re.findall(r'P \+ "(-[A-Za-z0-9_-]+) ?"', source):
+            emitted.add("mc-krea-spatial" + suffix)
+        emitted.update(re.findall(r'"(mc-krea-spatial-[A-Za-z0-9_-]+)"', source))
+        # ...and the shapes, from the table both sides share.
+        for shape, _label in creative_script.SHAPES:
+            emitted.add("mc-krea-spatial-shape-" + shape)
+            emitted.add("mc-krea-spatial-part-" + shape)
+
+        styled = set(re.findall(r"\.(mc-krea-spatial-[A-Za-z0-9_-]+)", section))
+
+        assert styled - emitted == set()
+
     def test_every_shape_the_editor_can_draw_has_a_silhouette(self, section):
         """A shape with no clip-path is a rectangle with a different name, and
         the palette would offer eleven identical buttons."""

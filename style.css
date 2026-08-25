@@ -2788,14 +2788,6 @@
     margin: 0;
 }
 
-/* Undo and Redo are one control in two halves. Left to the bar's own wrapping
-   they end up on separate lines on a phone, which reads as two unrelated
-   buttons. */
-.mc-krea-spatial-group {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--mc-gap);
-}
 
 /* ==========================================================================
    The Image Pipeline
