@@ -1,10 +1,10 @@
 // Model Chain -- Krea Creative Mode Spatial Layout, browser side.
 //
-// This file owns one thing: the layout editor. Somebody presses Edit Layout, a
-// workspace opens in the page, they place boxes and type into them, they press
-// Save & Return, and the serialized document goes into a hidden textbox that
-// travels with the next Generate like any other control. That is the whole
-// contract.
+// This file owns one thing: the layout editor. Somebody presses Full Screen, a
+// composition workspace takes over the txt2img work area, they place boxes and
+// silhouettes and type into them, they press Save, and the serialized document
+// goes into a hidden textbox that travels with the next Generate like any other
+// control. That is the whole contract.
 //
 // What this file must never become
 // --------------------------------
@@ -22,10 +22,24 @@
 // composes, in Python, on the thread the host is already running the job on.
 // Press Generate and close the browser and the picture still arrives.
 //
-// So: no click listener on Generate, no timer of any kind, no polling, and
-// nothing here that a generation's completion depends on. If every line of this
-// file fails, the Edit Layout button does nothing and the last saved layout is
-// still the one that gets composed.
+// So: no listener on the Generate button, no timer of any kind, no polling, and
+// nothing here that a generation's completion depends on. The Gallery widget
+// added by §16 does not weaken that rule, it is the reason the rule is written
+// the way it is: its Generate *presses the host's own button*, once, inside the
+// click the user made, and the results and the progress bar are read through
+// MutationObservers -- which is hearing about a change rather than asking sixty
+// times a minute whether one happened. If every line of this file fails, the
+// Full Screen button does nothing and the last saved layout is still the one
+// that gets composed.
+//
+// Why the workspace does not go anywhere
+// --------------------------------------
+// It used to be a fixed overlay moved to document.body, and then a block in
+// flow with a Fullscreen API button on it. §3.1 asks for neither: "Full Screen"
+// means the Spatial workspace has the tab, so opening it marks the ancestors
+// between the workspace and #tab_txt2img and lets the stylesheet hide
+// everything else on the tab. Nothing is moved, no id exists twice, the browser
+// keeps its own chrome and its own Back button, and Close removes the marks.
 //
 // Why the canvas is a div
 // -----------------------
@@ -33,7 +47,9 @@
 // findable by id, and readable by a test that never opens a browser -- and it
 // makes hit-testing, dragging and z-order the browser's job rather than a
 // redraw loop's. A <canvas> would put all of that behind a bitmap in order to
-// draw rectangles with square corners.
+// draw rectangles with square corners. The anatomy silhouettes §9 asks for are
+// the same answer one step on: a clip-path on the region's shape layer, so a
+// head is a head on screen and an axis-aligned rectangle everywhere else.
 //
 // Why one pointer path and not two
 // --------------------------------
@@ -43,6 +59,8 @@
 // finger and pen, and setPointerCapture keeps the drag attached to the finger
 // that started it even when the finger leaves the frame -- which is what makes
 // the document-level listeners unnecessary rather than merely unfashionable.
+// The same is true of the palettes: tapping a shape and dragging one are the
+// same gesture told apart by whether the contact moved.
 //
 // Why the selected region has a proxy
 // -----------------------------------
@@ -55,14 +73,24 @@
 // region's bbox and never touching its z. Selecting changes what you can drag
 // and nothing about what the compositor is told.
 //
+// Why the editor metadata is optional in both directions
+// ------------------------------------------------------
+// ui_shape and ui_rotation are the only fields §21.2 adds to the document, and
+// they are written only when they say something. A rectangle layout serializes
+// to the bytes it always did, a layout written before they existed loads as
+// rectangles at zero degrees, and a shape from a later build draws as a
+// rectangle rather than as an error. Nothing downstream of this file reads
+// either one: whatever is on the canvas, the compositor is handed the same
+// axis-aligned box.
+//
 // Why it is still one file
 // ------------------------
 // Forge loads javascript/*.js as plain scripts in directory order, with no
 // module system and no guaranteed order, so splitting the editor across files
 // buys separate files and a load-order bug. It is split into the controllers
-// the design intent names -- state, history, frame, selection, pointer, list,
-// inspector, serialization -- as sections with no shared scope beyond `state`.
-
+// the design intent names -- state, history, frame, takeover, host bridge,
+// painting, selection, pointer, popups, panels, palette, prompts, gallery,
+// serialization -- as sections with no shared scope beyond `state`.
 (function () {
     "use strict";
 
@@ -70,11 +98,51 @@
     const SCALE = 1000;
     const MIN_SIZE = 8;          // normalized units; smaller than this is a tap
     const MAX_REGIONS = 24;      // matches prompt_master/krea/spatial.MAX_REGIONS
-    const HISTORY_DEPTH = 50;    // §10.3 asks for 25-50; a snapshot is a short string
+    const HISTORY_DEPTH = 50;    // §20 asks for 50; a snapshot is a short string
     const NUDGE = 5;             // normalized units per arrow press
     const NUDGE_BIG = 25;
-    const ADD_SIZE = 340;        // a new region is ~34% of the frame, per §7.1
+    const ADD_SIZE = 340;        // Quick Add's opening reference size, per §10.1
+    const TAP = 24;              // pixels a palette press may wander and stay a tap
     const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+
+    // §6.3 and §9.3. Editor metadata, all of it: what a shape is called, the
+    // proportions it starts at relative to the Quick Add size, and the prompt it
+    // arrives carrying. `rect` is the row with no silhouette and no prompt --
+    // the box this editor has always drawn, named here so that everything else
+    // can be another row rather than a special case.
+    //
+    // Nothing downstream of the canvas reads this. §2.5: whatever is drawn, the
+    // compositor is handed the same axis-aligned rectangle, so a shape added
+    // here changes no branch outside this file and no byte of the prompt.
+    const SHAPES = {
+        rect: {label: "Box", w: 1, h: 1, prompt: ""},
+        head: {label: "Head", w: 0.62, h: 0.74, prompt: "head"},
+        chest: {label: "Chest", w: 1, h: 0.86, prompt: "chest"},
+        waist: {label: "Waist", w: 0.9, h: 0.6, prompt: "waist"},
+        left_arm: {label: "Left arm", w: 0.36, h: 1.02, prompt: "left arm"},
+        right_arm: {label: "Right arm", w: 0.36, h: 1.02, prompt: "right arm"},
+        left_hand: {label: "Left hand", w: 0.34, h: 0.34, prompt: "left hand"},
+        right_hand: {label: "Right hand", w: 0.34, h: 0.34, prompt: "right hand"},
+        left_leg: {label: "Left leg", w: 0.4, h: 1.16, prompt: "left leg"},
+        right_leg: {label: "Right leg", w: 0.4, h: 1.16, prompt: "right leg"},
+        left_foot: {label: "Left foot", w: 0.42, h: 0.28, prompt: "left foot"},
+        right_foot: {label: "Right foot", w: 0.42, h: 0.28, prompt: "right foot"},
+    };
+
+    // §26: an unknown ui_shape is a rectangle rather than an error. A layout
+    // written by a later build arrives with boxes in the right places and one
+    // silhouette this build cannot draw, which is the failure worth having.
+    function shapeOf(name) {
+        return SHAPES[name] || SHAPES.rect;
+    }
+
+    function knownShape(name) {
+        return Object.prototype.hasOwnProperty.call(SHAPES, name) ? name : "rect";
+    }
+
+    // §12.2, in the order the rail builds them. One list, three readers: the
+    // rail, the Panels popup and the collapse/hide state below.
+    const PANELS = ["prompts", "person", "layers", "inspector", "gallery", "session"];
 
     const IDS = {
         // Gradio's, not the workspace's.
@@ -88,11 +156,12 @@
         regions: P + "-regions",
         proxy: P + "-proxy",
         proxyLabel: P + "-proxy-label",
+        rail: P + "-rail",
         list: P + "-list",
-        empty: P + "-empty",
         count: P + "-count",
         selectedName: P + "-selected-name",
         name: P + "-name",
+        shape: P + "-shape",
         type: P + "-type",
         text: P + "-text",
         textField: P + "-text-field",
@@ -104,32 +173,90 @@
         framingField: P + "-framing-field",
         angle: P + "-angle",
         angleField: P + "-angle-field",
+        rotation: P + "-rotation",
+        rotationField: P + "-rotation-field",
+        rotationRead: P + "-rotation-read",
+        bboxX: P + "-bbox-x",
+        bboxY: P + "-bbox-y",
+        bboxW: P + "-bbox-w",
+        bboxH: P + "-bbox-h",
         autoHint: P + "-auto-hint",
         grid: P + "-grid",
-        size: P + "-size",
-        warning: P + "-warning",
+        aspect: P + "-aspect",
         message: P + "-message",
         confirm: P + "-confirm",
         keep: P + "-keep",
         discard: P + "-discard",
-        add: P + "-add",
+        // The action bar.
+        power: P + "-power",
+        modeDirect: P + "-mode-direct",
+        modeSmart: P + "-mode-smart",
+        quick: P + "-quick",
+        quickPopup: P + "-quick-popup",
+        quickSize: P + "-quick-size",
         draw: P + "-draw",
         clear: P + "-clear",
+        panels: P + "-panels",
+        panelsPopup: P + "-panels-popup",
+        collapseAll: P + "-collapse-all",
+        expandVisible: P + "-expand-visible",
         undo: P + "-undo",
         redo: P + "-redo",
+        save: P + "-save",
+        cancel: P + "-cancel",
+        // Layers.
         duplicate: P + "-duplicate",
         remove: P + "-delete",
         front: P + "-front",
-        forward: P + "-raise",
         back: P + "-lower",
-        bottom: P + "-bottom",
+        // The frame toolbar.
         zoomFit: P + "-zoom-fit",
         zoomIn: P + "-zoom-in",
         zoomOut: P + "-zoom-out",
         zoomLevel: P + "-zoom-level",
-        full: P + "-full",
-        save: P + "-save",
-        cancel: P + "-cancel",
+        // Prompts.
+        scene: P + "-scene",
+        literalPlus: P + "-literal-plus",
+        literalMinus: P + "-literal-minus",
+        creative: P + "-creative",
+        // Person.
+        person: P + "-person",
+        // Gallery.
+        shot: P + "-shot",
+        shotAt: P + "-shot-at",
+        shotPrevious: P + "-shot-previous",
+        shotNext: P + "-shot-next",
+        generate: P + "-generate",
+        progress: P + "-progress",
+        progressBar: P + "-progress-bar",
+        progressRead: P + "-progress-read",
+        // Session.
+        factFrame: P + "-fact-frame",
+        factRatio: P + "-fact-ratio",
+        factRegions: P + "-fact-regions",
+        factPipeline: P + "-fact-pipeline",
+        factState: P + "-fact-state",
+        sizeWidth: P + "-size-width",
+        sizeHeight: P + "-size-height",
+    };
+
+    // The host's own controls. Every one of these is a Gradio component or a
+    // Forge element that already exists: §13.2 and §16.2 both say the same
+    // thing in different words -- the workspace shows the canonical value, it
+    // does not keep a second copy of it.
+    const HOST = {
+        tab: "tab_txt2img",
+        prompt: "txt2img_prompt",
+        width: "txt2img_width",
+        height: "txt2img_height",
+        gallery: "txt2img_gallery",
+        results: "txt2img_results",
+        generate: "txt2img_generate",
+        toggle: "mc-krea-creative-spatial-toggle",
+        compose: "mc-krea-creative-spatial-compose",
+        creative: "mc-krea-creative-toggle",
+        literalPlus: "mc-krea-creative-literal-positive",
+        literalMinus: "mc-krea-creative-literal-negative",
     };
 
     // ------------------------------------------------------------------ //
@@ -153,16 +280,29 @@
         drawing: false,
         working: null,      // the layout being edited; null while closed
         savedCanvas: {width: 0, height: 0},  // the frame the layout was drawn on
+        reframed: false,    // the frame's aspect changed under an open layout
         selected: "",       // region id
         drag: null,         // {kind, id, from, origin, before}
         pointer: null,      // the pointerId that owns the drag
         counter: 0,
         zoom: 1,
-        baseline: "",       // serialize() as it was on entry; Back compares to it
+        baseline: "",       // serialize() as it was on entry; Close compares to it
         confirming: false,
         editing: "",        // history coalescing token; see mark()
         past: [],
         future: [],
+        // §20: panel visibility, what is collapsed, which popup is open and the
+        // Quick Add size are session UI preferences. None of them is layout
+        // history and none of them is serialized.
+        popup: "",          // the id of the open popup, or ""
+        hidden: {},         // panel key -> true when switched off in Panels
+        collapsed: {},      // panel key -> true when collapsed
+        quickSize: ADD_SIZE,
+        placing: null,      // a palette press in flight: {shape, from, moved, ghost}
+        syncing: false,     // a prompt mirror is writing; do not echo it back
+        shots: [],          // the txt2img gallery's images, newest last
+        shotAt: -1,         // which one the Gallery widget is showing
+        watching: false,    // the gallery/progress observers are installed
     };
 
     function root() {
@@ -224,6 +364,29 @@
     function enable(id, on) {
         const element = byId(id);
         if (element) element.disabled = !on;
+    }
+
+    function write(id, value) {
+        const element = byId(id);
+        if (element) element.textContent = value === undefined ? "" : String(value);
+    }
+
+    // A Gradio component is a wrapper with the real control somewhere inside it,
+    // and which control depends on the component. Both lookups are here so that
+    // "the host's Prompt box" is one call rather than a query repeated eight
+    // times with eight chances to differ.
+    function hostField(id) {
+        const holder = byId(id);
+        if (!holder) return null;
+        if (holder.tagName === "TEXTAREA" || holder.tagName === "INPUT") return holder;
+        return holder.querySelector("textarea, input");
+    }
+
+    function hostCheck(id) {
+        const holder = byId(id);
+        if (!holder) return null;
+        if (holder.tagName === "INPUT") return holder;
+        return holder.querySelector("input[type=checkbox]") || holder.querySelector("input");
     }
 
     // ------------------------------------------------------------------ //
@@ -289,7 +452,23 @@
             framing: String(entry.framing || ""),
             angle: String(entry.angle || ""),
             z: Number.isFinite(Number(entry.z)) ? Number(entry.z) : 0,
+            // §2.6 and §26. Editor metadata, optional in both directions: a
+            // layout drawn before these existed arrives with no ui_shape and no
+            // ui_rotation and becomes a rectangle at zero degrees, which is
+            // exactly what it was. An unknown shape from a later build becomes
+            // a rectangle rather than an error.
+            shape: knownShape(String(entry.ui_shape || "rect")),
+            rotation: rotate(entry.ui_rotation),
         };
+    }
+
+    // -180..180, rounded, and 0 for anything that is not a number. §9.6: the
+    // one thing rotation may never do is reach the bbox, so it is clamped here
+    // and read nowhere near orient().
+    function rotate(value) {
+        const number = Math.round(Number(value));
+        if (!Number.isFinite(number)) return 0;
+        return clamp(number, -180, 180);
     }
 
     // The canonical box, defined here the same way prompt_master/krea/spatial.py
@@ -366,6 +545,12 @@
                 entry.framing = region.framing;
                 entry.angle = region.angle;
                 entry.z = region.z;
+                // §21.2. Written only when they say something, for the reason
+                // the region literals are: a rectangle layout serializes to the
+                // bytes it always did, and a build that predates the editor
+                // metadata still reads every document this one writes.
+                if (region.shape && region.shape !== "rect") entry.ui_shape = region.shape;
+                if (region.rotation) entry.ui_rotation = region.rotation;
                 return entry;
             }),
         };
@@ -499,8 +684,8 @@
         return width > height ? "Landscape" : "Portrait";
     }
 
-    // "1024 × 1536 · 2:3 · Portrait", and the exact reduced ratio when it is
-    // not a familiar one -- §4.3 wants the number, not a nearest-neighbour lie.
+    // "1024 × 1536 · 2:3 · Portrait", for the Session widget. §18.2 keeps the
+    // long form out of the action bar; the bar gets the ratio on its own.
     function dimensions(width, height) {
         return width + " × " + height + " · " + ratio(width, height)
             + " · " + shape(width, height);
@@ -511,19 +696,16 @@
     }
 
     // Normalized coordinates are fractions of the frame, so a resolution change
-    // moves nothing and a *ratio* change reframes everything. The boxes are left
-    // exactly where they are and the change is reported, which is the design
-    // intent's rule in the strongest terms it uses: never silently delete layout
-    // state. Reprojecting would be this file deciding which of somebody's boxes
-    // deserved to keep its shape.
+    // moves nothing and a *ratio* change reframes everything. §18.3: the boxes
+    // are left exactly where they are, the frame is redrawn around them, and
+    // the Session widget says the frame changed. Reprojecting would be this
+    // file deciding which of somebody's boxes deserved to keep its shape.
     function reframe() {
         if (!state.working) return;
         const size = hostSize();
         const canvas = byId(IDS.canvas);
-        const warning = byId(IDS.warning);
-        const note = byId(IDS.size);
         if (!(size.width > 0 && size.height > 0)) {
-            if (note) note.textContent = "";
+            state.reframed = false;
             return;
         }
         if (canvas) {
@@ -531,32 +713,22 @@
             setVar(canvas, "--mc-ar-w", String(size.width));
             setVar(canvas, "--mc-ar-h", String(size.height));
         }
-        if (note) note.textContent = dimensions(size.width, size.height);
 
         // Compared against the frame the layout was *saved* on rather than
-        // against whatever the last reframe wrote, so the notice survives a
-        // second reframe and still tells the truth if the user changes the
-        // size again while the editor is open.
+        // against whatever the last reframe wrote, so the fact survives a
+        // second reframe and still tells the truth if the size changes again
+        // while the workspace is open.
         const was = state.savedCanvas;
         const now = size.width / size.height;
-        const changed = state.working.regions.length > 0
+        state.reframed = state.working.regions.length > 0
             && Number(was.width) > 0 && Number(was.height) > 0
             && Math.abs((was.width / was.height) - now) / now > 0.02;
-        if (warning) {
-            warning.hidden = !changed;
-            warning.textContent = changed
-                ? "Frame changed from " + brief(was.width, was.height) + " to "
-                  + brief(size.width, size.height) + ". Region coordinates were "
-                  + "preserved — the boxes are unchanged, but they now cover "
-                  + "different parts of the picture. Clear all starts again."
-                : "";
-        }
         state.working.canvas.width = size.width;
         state.working.canvas.height = size.height;
     }
 
     // Zoom is display only and never touches a stored coordinate: it scales the
-    // frame's CSS width and lets the scroll container do the rest. §4.5.
+    // frame's CSS width and lets the scroll container do the rest. §5.5.
     function zoomTo(value) {
         state.zoom = clamp(value, ZOOMS[0], ZOOMS[ZOOMS.length - 1]);
         const workspace = byId(IDS.workspace);
@@ -576,68 +748,159 @@
         zoomTo(direction > 0 ? at[0] : at[at.length - 1]);
     }
 
-    // Full screen: the whole display for the frame, and Back still comes back.
+    // ------------------------------------------------------------------ //
+    // TakeoverController -- the workspace gets the txt2img work area
+    // ------------------------------------------------------------------ //
     //
-    // Two mechanisms, and the order matters. The Fullscreen API is asked first
-    // because it is the only one nothing can clip, overlap or out-stack: the
-    // element is promoted out of the page's layout entirely, so no theme's
-    // `overflow: hidden`, `transform` or z-index is in the argument. It also
-    // takes the browser's own chrome away, which on a tablet is most of the
-    // screen this is asking for.
+    // §3.1. "Full Screen" means the Spatial workspace has the tab, not that the
+    // browser has the screen: the Fullscreen API is a non-goal (§29), and what
+    // it actually bought -- an element nothing can clip -- is bought here more
+    // cheaply and without taking the browser's own chrome away.
     //
-    // A page that refuses it -- an iframe without `allowfullscreen`, a browser
-    // that does not offer it, a user who said no -- falls back to a fixed block
-    // over the page. That is the thing §3.1 told this editor not to be, and it
-    // is fine here for the reason the modal was not: it is somewhere the user
-    // asked to go and can leave, rather than the only way to edit at all.
-    function fullscreenOn() {
-        const workspace = byId(IDS.workspace);
-        if (!workspace) return false;
-        if (typeof document !== "undefined" && document.fullscreenElement === workspace) {
-            return true;
-        }
-        return !!(workspace.classList && workspace.classList.contains("fullpage"));
+    // Nothing is moved. The workspace stays exactly where Gradio put it, and
+    // every element between it and the txt2img tab is marked as being on the
+    // path to it. One class on the tab, one attribute per ancestor, and the
+    // stylesheet hides every child of a path element that is not itself on the
+    // path. Close removes the marks and the tab is as it was.
+    //
+    // That is the whole of §22.4: no DOM teleport, no second copy of any id, no
+    // document.body overlay, and nothing about the page's scrolling changed for
+    // anybody who never opens the editor.
+
+    const PATH = "data-mc-spatial-path";
+
+    function tab() {
+        return byId(HOST.tab);
     }
 
-    function leaveFullscreen() {
+    function takeover() {
         const workspace = byId(IDS.workspace);
-        if (workspace && workspace.classList) workspace.classList.remove("fullpage");
-        if (typeof document === "undefined") return;
-        if (document.fullscreenElement === workspace
-            && typeof document.exitFullscreen === "function") {
-            try {
-                const left = document.exitFullscreen();
-                if (left && typeof left.catch === "function") left.catch(function () {});
-            } catch (error) {
-                // Already out, or refused. The class is off either way.
-            }
+        const host = tab();
+        if (!workspace || !host) return false;
+        let at = workspace;
+        // The workspace itself is on the path, and so is everything up to and
+        // including the tab. `contains` is not used: a detached ancestor chain
+        // walks to null and marks nothing, which is the safe answer.
+        let guard = 0;
+        while (at && guard < 64) {
+            if (at.setAttribute) at.setAttribute(PATH, "1");
+            if (at === host) break;
+            at = at.parentNode;
+            guard += 1;
         }
+        if (host.classList) host.classList.add(P + "-taken");
+        return true;
     }
 
-    function toggleFullscreen() {
-        const workspace = byId(IDS.workspace);
-        if (!workspace) return;
-        if (fullscreenOn()) {
-            leaveFullscreen();
-            paintChrome();
-            return;
-        }
-        function fallback() {
-            if (workspace.classList) workspace.classList.add("fullpage");
-            paintChrome();
-        }
-        if (typeof workspace.requestFullscreen !== "function") {
-            fallback();
-            return;
-        }
+    function surrender() {
+        const host = tab();
+        if (host && host.classList) host.classList.remove(P + "-taken");
+        let found = [];
         try {
-            const asked = workspace.requestFullscreen();
-            if (asked && typeof asked.catch === "function") asked.catch(fallback);
+            found = Array.prototype.slice.call(
+                root().querySelectorAll("[" + PATH + "]"));
         } catch (error) {
-            fallback();
-            return;
+            found = [];
         }
-        paintChrome();
+        found.forEach(function (element) {
+            if (element.removeAttribute) element.removeAttribute(PATH);
+        });
+    }
+
+
+    // ------------------------------------------------------------------ //
+    // HostBridge -- the workspace shows the host's values, never a copy
+    // ------------------------------------------------------------------ //
+    //
+    // §13.2 and §16.2 say the same thing about different controls: the Spatial
+    // switch, the composition mode, the prompt, the two Literal boxes, the
+    // frame size and the result gallery all already exist on the txt2img tab,
+    // and the workspace shows *those*. Nothing below stores a value of its own,
+    // so there is no second copy to drift, no save step between the two, and
+    // nothing to reconcile when the workspace closes.
+    //
+    // Reading is a query. Writing is the event the host is already listening
+    // for -- `updateInput` where Forge offers it, `input` and `change` where it
+    // does not. §13.2's other half: no polling, no interval, nothing here that
+    // runs when nobody has touched anything.
+
+    function fireOn(element, type) {
+        if (!element || typeof element.dispatchEvent !== "function") return;
+        element.dispatchEvent(new Event(type, {bubbles: true}));
+    }
+
+    // A checkbox is not a textbox: Gradio binds it to `change` and its `value`
+    // means nothing. `publish` is for the boxes that carry text.
+    function toggleHost(box, on) {
+        if (!box) return;
+        if (!!box.checked === !!on) return;
+        box.checked = !!on;
+        fireOn(box, "input");
+        fireOn(box, "change");
+    }
+
+    function spatialOn() {
+        const box = hostCheck(HOST.toggle);
+        return box ? !!box.checked : true;
+    }
+
+    function creativeOn() {
+        const box = hostCheck(HOST.creative);
+        return box ? !!box.checked : false;
+    }
+
+    // Gradio renders a Radio as a group of inputs, and which of `value` and the
+    // label text carries the choice has moved between versions. Both are read,
+    // in that order, and the answer is normalized to the two words the
+    // compositor knows -- so a version that labels them differently still gets
+    // "smart" or "direct" out of this rather than a string nothing matches.
+    function radioInputs() {
+        const holder = byId(HOST.compose);
+        if (!holder || !holder.querySelectorAll) return [];
+        return Array.prototype.slice.call(holder.querySelectorAll("input"));
+    }
+
+    function radioMode(input) {
+        const said = String((input && input.value) || "").toLowerCase();
+        if (said.indexOf("direct") >= 0) return "direct";
+        if (said.indexOf("smart") >= 0) return "smart";
+        const label = input && input.closest ? input.closest("label") : null;
+        const text = label ? String(label.textContent || "").toLowerCase() : "";
+        if (text.indexOf("direct") >= 0) return "direct";
+        if (text.indexOf("smart") >= 0) return "smart";
+        return "";
+    }
+
+    // The host's radio when there is one, the working document when there is
+    // not. Both are true answers: the layout carries the mode it was saved with
+    // and the panel carries the one that is set now, and they agree except in
+    // the moment between the two.
+    function composeMode() {
+        const found = radioInputs().filter(function (input) { return input.checked; })
+            .map(radioMode).filter(Boolean);
+        if (found.length) return found[0];
+        if (state.working) return state.working.compose_mode === "direct" ? "direct" : "smart";
+        return "smart";
+    }
+
+    function setComposeMode(mode) {
+        const wanted = mode === "direct" ? "direct" : "smart";
+        if (state.working) state.working.compose_mode = wanted;
+        const inputs = radioInputs();
+        const input = inputs.filter(function (entry) {
+            return radioMode(entry) === wanted;
+        })[0];
+        if (!input || input.checked) return;
+        // Written rather than left to the browser: a radio group only clears
+        // its siblings when they share a `name`, and what Gradio puts there has
+        // moved between versions. Two of them checked would make composeMode()
+        // answer with whichever came first in the markup.
+        inputs.forEach(function (entry) {
+            if (entry !== input) entry.checked = false;
+        });
+        input.checked = true;
+        fireOn(input, "input");
+        fireOn(input, "change");
     }
 
     // ------------------------------------------------------------------ //
@@ -650,6 +913,7 @@
         paintList();
         paintInspector();
         paintChrome();
+        paintFacts();
         settle();
     }
 
@@ -697,10 +961,18 @@
         element.style.height = ((bbox[3] - bbox[1]) / SCALE * 100) + "%";
     }
 
+    // A region is three elements: the body that carries the bbox, the shape
+    // layer that carries the silhouette and the rotation, and the label. §6.2
+    // centres the label inside both rectangles and silhouettes, which is a CSS
+    // job -- what matters here is that there is exactly one element to centre
+    // it in whichever the region turns out to be.
     function body(region) {
         const element = document.createElement("div");
         element.className = P + "-region";
         element.dataset.regionId = region.id;
+        const art = document.createElement("div");
+        art.className = P + "-shape";
+        element.appendChild(art);
         const label = document.createElement("span");
         label.className = P + "-label";
         element.appendChild(label);
@@ -730,9 +1002,20 @@
             if (!node) return;
             place(node, region.bbox);
             node.style.zIndex = String(depth + 1);
-            node.title = region.name || region.id;
+            node.dataset.shape = region.shape;
             node.classList.toggle("selected", region.id === state.selected);
             node.classList.toggle("text", region.type === "text");
+            node.classList.toggle("figure", region.shape !== "rect");
+            const art = node.querySelector("." + P + "-shape");
+            if (art) {
+                art.className = P + "-shape " + P + "-shape-" + region.shape;
+                // §9.6: the silhouette turns and the bbox does not. This is the
+                // only place rotation is applied and it is a CSS transform, so
+                // there is no arithmetic anywhere that could leak it into a
+                // coordinate.
+                art.style.transform = region.rotation
+                    ? "rotate(" + region.rotation + "deg)" : "";
+            }
             const label = node.querySelector("." + P + "-label");
             if (label) label.textContent = region.name || region.id;
         });
@@ -740,12 +1023,18 @@
         const guides = byId(IDS.guides);
         if (guides) guides.className = P + "-guides "
             + (state.working.canvas.grid || "none");
+        const aspect = byId(IDS.aspect);
+        if (aspect) {
+            const size = state.working.canvas;
+            aspect.textContent = size.width > 0 && size.height > 0
+                ? ratio(size.width, size.height) : "";
+        }
     }
 
     // SelectionController's visible half: one element, above every region body,
     // carrying the outline, the label, the move surface and the eight handles
     // of whatever is selected. It reads and writes that region's bbox and never
-    // touches its z -- which is the entire answer to "the box I selected is
+    // touches its z -- §7, which is the entire answer to "the box I selected is
     // buried and I cannot grab it".
     function paintProxy() {
         const proxy = byId(IDS.proxy);
@@ -765,16 +1054,11 @@
         if (label) label.textContent = region.name || region.id;
     }
 
-    // RegionListController. Prompt order, top to bottom: the first row is the
-    // first element in the composed prompt and the last row is the one drawn on
-    // top of the others. It used to be reversed -- frontmost first, the way a
-    // layers panel reads -- which meant the list and the prompt disagreed about
-    // what "first" was, and the list is the thing somebody drags.
-    //
-    // One number does both jobs. `z` decides the order the compositor writes
-    // the elements array in *and* which box is on top where two overlap, so a
-    // drag that changes one changes the other, and the "i" on the panel header
-    // says so.
+    // LayersController. Prompt order, top to bottom: the first row is the first
+    // element in the composed prompt and the last row is the one drawn on top
+    // of the others. §14.1 recommends frontmost first; this list is the thing
+    // somebody drags to change the *prompt* order, and the two orders are one
+    // number, so it reads in prompt order and says so by being draggable.
     function paintList() {
         const list = byId(IDS.list);
         if (!list || !state.working) return;
@@ -800,9 +1084,16 @@
             grip.setAttribute && grip.setAttribute("aria-hidden", "true");
             row.appendChild(grip);
 
+            // §14.1's type marker: the silhouette itself for an object region,
+            // drawn by the same clip-path the canvas uses, and a letter for a
+            // text region because text has no shape.
             const icon = document.createElement("span");
-            icon.className = P + "-row-icon";
-            icon.textContent = region.type === "text" ? "T" : "□";
+            icon.className = P + "-row-icon " + P + "-shape-" + region.shape;
+            icon.dataset.shape = region.shape;
+            if (region.type === "text") {
+                icon.className = P + "-row-icon " + P + "-row-icon-text";
+                icon.textContent = "T";
+            }
             row.appendChild(icon);
 
             const name = document.createElement("span");
@@ -810,11 +1101,16 @@
             name.textContent = region.name || region.id;
             row.appendChild(name);
 
+            const size = document.createElement("span");
+            size.className = P + "-row-size";
+            size.textContent = (region.bbox[2] - region.bbox[0]) + "×"
+                + (region.bbox[3] - region.bbox[1]);
+            row.appendChild(size);
+
             const trash = document.createElement("button");
             trash.className = P + "-row-trash";
             trash.type = "button";
             trash.dataset.regionId = region.id;
-            trash.title = "Delete this region";
             trash.setAttribute && trash.setAttribute("aria-label",
                                                      "Delete " + (region.name || region.id));
             trash.textContent = "✕";
@@ -822,30 +1118,21 @@
 
             list.appendChild(row);
         });
-        const empty = byId(IDS.empty);
-        if (empty) empty.hidden = rows.length > 0;
         const count = byId(IDS.count);
-        if (count) {
-            count.textContent = rows.length
-                ? rows.length + " of " + MAX_REGIONS
-                : "";
-        }
+        if (count) count.textContent = rows.length ? String(rows.length) : "";
     }
 
-    // InspectorController. Every field the editor has ever had, plus the four
-    // numbers §8.3 asks for, and the selected region's name at the top so the
-    // panel says what it is about before it says anything else.
+    // InspectorController. §15.1's fields, and the four numbers §8.3 asks for.
     function paintInspector() {
         if (!state.working) return;
         const region = find(state.selected);
         const fields = [IDS.name, IDS.type, IDS.text, IDS.prompt, IDS.framing,
-                        IDS.angle, IDS.literalPrefix, IDS.literalSuffix];
+                        IDS.angle, IDS.literalPrefix, IDS.literalSuffix,
+                        IDS.rotation, IDS.bboxX, IDS.bboxY, IDS.bboxW, IDS.bboxH];
         fields.forEach(function (id) { enable(id, !!region); });
         enable(IDS.duplicate, !!region);
         enable(IDS.remove, !!region);
-        [IDS.front, IDS.forward, IDS.back, IDS.bottom].forEach(function (id) {
-            enable(id, !!region);
-        });
+        [IDS.front, IDS.back].forEach(function (id) { enable(id, !!region); });
 
         const auto = byId(IDS.autoHint);
         const grid = byId(IDS.grid);
@@ -853,25 +1140,29 @@
         if (auto) auto.checked = !!state.working.auto_position_hint;
         if (grid) grid.value = state.working.canvas.grid || "none";
         // Emptied rather than left showing the last region's answers: an
-        // inspector still saying "Text" and "How the text should look" after
-        // the text region it described was deleted is a panel lying about what
-        // is selected.
+        // inspector still saying "Text" after the text region it described was
+        // deleted is a panel lying about what is selected.
         if (!region) {
-            if (title) title.textContent = "nothing selected";
-            [IDS.name, IDS.text, IDS.prompt, IDS.literalPrefix, IDS.literalSuffix]
+            if (title) title.textContent = "";
+            [IDS.name, IDS.text, IDS.prompt, IDS.literalPrefix, IDS.literalSuffix,
+             IDS.shape, IDS.bboxX, IDS.bboxY, IDS.bboxW, IDS.bboxH]
                 .forEach(function (id) { set(id, ""); });
             set(IDS.type, "obj");
             set(IDS.framing, "");
             set(IDS.angle, "");
+            set(IDS.rotation, "0");
+            write(IDS.rotationRead, "0°");
             const blank = byId(IDS.promptLabel);
-            if (blank) blank.textContent = "Region prompt";
+            if (blank) blank.textContent = "Prompt";
             show(IDS.textField, false);
             show(IDS.framingField, true);
             show(IDS.angleField, true);
+            show(IDS.rotationField, false);
             return;
         }
         if (title) title.textContent = region.name || region.id;
         set(IDS.name, region.name);
+        set(IDS.shape, shapeOf(region.shape).label);
         set(IDS.type, region.type);
         set(IDS.text, region.text);
         set(IDS.prompt, region.prompt);
@@ -879,14 +1170,49 @@
         set(IDS.literalSuffix, region.literalSuffix);
         set(IDS.framing, region.framing);
         set(IDS.angle, region.angle);
+        set(IDS.rotation, String(region.rotation));
+        write(IDS.rotationRead, region.rotation + "°");
+        set(IDS.bboxX, String(region.bbox[0]));
+        set(IDS.bboxY, String(region.bbox[1]));
+        set(IDS.bboxW, String(region.bbox[2] - region.bbox[0]));
+        set(IDS.bboxH, String(region.bbox[3] - region.bbox[1]));
         show(IDS.textField, region.type === "text");
         show(IDS.framingField, region.type !== "text");
         show(IDS.angleField, region.type !== "text");
+        // §9.6: rotation belongs to the silhouettes. A rectangle has nothing to
+        // turn, and offering the slider anyway would imply the bbox rotates.
+        show(IDS.rotationField, region.shape !== "rect");
         const label = byId(IDS.promptLabel);
-        if (label) {
-            label.textContent = region.type === "text"
-                ? "How the text should look (not rendered as words)"
-                : "Region prompt";
+        if (label) label.textContent = region.type === "text" ? "Appearance" : "Prompt";
+    }
+
+    // §12.2. Hidden is a panel switched off in the Panels popup; collapsed is a
+    // panel whose header was pressed. Both are session preferences (§20) and
+    // neither is history, so this is the only place either one is read.
+    function paintPanels() {
+        PANELS.forEach(function (key) {
+            const section = byId(P + "-panel-" + key);
+            const shown = !state.hidden[key];
+            const open = !state.collapsed[key];
+            if (section) {
+                section.hidden = !shown;
+                section.classList && section.classList.toggle("collapsed", !open);
+            }
+            const inner = byId(P + "-panel-" + key + "-body");
+            if (inner) inner.hidden = !open;
+            const head = section
+                ? section.querySelector("." + P + "-widget-head") : null;
+            if (head && head.setAttribute) {
+                head.setAttribute("aria-expanded", open ? "true" : "false");
+            }
+            const check = byId(P + "-show-" + key);
+            if (check) check.checked = shown;
+        });
+        const rail = byId(IDS.rail);
+        if (rail && rail.classList) {
+            rail.classList.toggle("empty", PANELS.every(function (key) {
+                return state.hidden[key];
+            }));
         }
     }
 
@@ -895,11 +1221,12 @@
         enable(IDS.undo, state.past.length > 0);
         enable(IDS.redo, state.future.length > 0);
         enable(IDS.clear, state.working.regions.length > 0);
-        enable(IDS.add, state.working.regions.length < MAX_REGIONS);
+        const room = state.working.regions.length < MAX_REGIONS;
+        enable(IDS.quick, room);
+        enable(IDS.draw, room);
         const draw = byId(IDS.draw);
         if (draw) {
             draw.classList.toggle("active", state.drawing);
-            draw.textContent = state.drawing ? "Drawing — cancel" : "Draw region";
             draw.setAttribute && draw.setAttribute("aria-pressed",
                                                    state.drawing ? "true" : "false");
         }
@@ -907,12 +1234,53 @@
         if (canvas && canvas.classList) canvas.classList.toggle("drawing", state.drawing);
         const confirm = byId(IDS.confirm);
         if (confirm) confirm.hidden = !state.confirming;
-        const full = byId(IDS.full);
-        if (full) {
-            const on = fullscreenOn();
-            full.textContent = on ? "Exit full screen" : "Full screen";
-            full.classList.toggle("active", on);
-            full.setAttribute && full.setAttribute("aria-pressed", on ? "true" : "false");
+        [[IDS.quick, IDS.quickPopup], [IDS.panels, IDS.panelsPopup]]
+            .forEach(function (pair) {
+                const open = state.popup === pair[1];
+                const popup = byId(pair[1]);
+                if (popup) popup.hidden = !open;
+                const button = byId(pair[0]);
+                if (button) {
+                    button.classList && button.classList.toggle("active", open);
+                    button.setAttribute && button.setAttribute("aria-expanded",
+                                                               open ? "true" : "false");
+                }
+            });
+        const power = byId(IDS.power);
+        if (power) power.checked = spatialOn();
+        const mode = composeMode();
+        [[IDS.modeDirect, "direct"], [IDS.modeSmart, "smart"]].forEach(function (pair) {
+            const button = byId(pair[0]);
+            if (!button) return;
+            const on = mode === pair[1];
+            button.classList && button.classList.toggle("active", on);
+            button.setAttribute && button.setAttribute("aria-pressed", on ? "true" : "false");
+        });
+        paintPanels();
+    }
+
+    // §17. Everything that used to be a permanent strip across the top, in the
+    // one widget somebody can collapse or switch off.
+    function paintFacts() {
+        if (!state.working) return;
+        const size = state.working.canvas;
+        const known = Number(size.width) > 0 && Number(size.height) > 0;
+        write(IDS.factFrame, known ? size.width + " × " + size.height : "—");
+        write(IDS.factRatio, known
+            ? ratio(size.width, size.height) + " · " + shape(size.width, size.height)
+            : "—");
+        write(IDS.factRegions, state.working.regions.length + " of " + MAX_REGIONS);
+        write(IDS.factPipeline, (composeMode() === "direct" ? "Direct BBOX" : "Smart Spatial")
+            + (spatialOn() ? "" : " · off") + (creativeOn() ? " · Creative first" : ""));
+        const dirty = serialize() !== state.committed;
+        write(IDS.factState, state.reframed
+            ? "Reframed from " + brief(state.savedCanvas.width, state.savedCanvas.height)
+            : dirty ? "Unsaved" : "Saved");
+        const field = byId(IDS.factState);
+        if (field && field.classList) field.classList.toggle("warn", dirty || state.reframed);
+        if (known) {
+            set(IDS.sizeWidth, String(size.width));
+            set(IDS.sizeHeight, String(size.height));
         }
     }
 
@@ -926,9 +1294,11 @@
         if (field) field.hidden = !visible;
     }
 
-    // The one transient line: a region cap reached, a Clear All that can be
-    // undone. Non-blocking by construction -- there is nothing to dismiss, so
-    // there is nothing that can eat somebody's layout while they dismiss it.
+    // The one transient line, and the only sentence the workspace has left:
+    // §26's region cap, which is a fact about what just failed to happen rather
+    // than a description of a control. Non-blocking by construction -- there is
+    // nothing to dismiss, so there is nothing that can eat somebody's layout
+    // while they dismiss it.
     function say(text) {
         const element = byId(IDS.message);
         if (!element) return;
@@ -961,43 +1331,103 @@
     // Editing
     // ------------------------------------------------------------------ //
 
-    function create(bbox, history) {
+    // §6.1: the default name is the number and nothing else. "Region 4" is the
+    // word "region" repeated on every row of a panel called Layers, and the
+    // number is the half somebody actually reads.
+    function nextName() {
+        const taken = {};
+        state.working.regions.forEach(function (region) { taken[region.name] = true; });
+        let at = state.working.regions.length + 1;
+        while (taken[String(at)]) at += 1;
+        return String(at);
+    }
+
+    // §15.2. A field that is switched off in Panels or collapsed cannot be
+    // typed into, so the panel it lives in is opened before the focus is asked
+    // for -- otherwise a new rectangle's prompt goes to a box nobody can see.
+    function focusPrompt() {
+        state.hidden.inspector = false;
+        state.collapsed.inspector = false;
+        paintPanels();
+        const field = byId(IDS.prompt);
+        if (field && typeof field.focus === "function") field.focus();
+    }
+
+    function create(bbox, options) {
+        const chosen = options || {};
         if (state.working.regions.length >= MAX_REGIONS) {
-            say("That is as many regions as one layout carries (" + MAX_REGIONS + ").");
+            say(MAX_REGIONS + " regions is the limit");
             return null;
         }
-        if (history !== false) mark("");
+        // A drawn region records its own history entry before the gesture
+        // started, so it asks for no second one -- but it is still a finished
+        // edit, and Auto Save exists so that a finished edit is what the next
+        // Generate composes. Marking it here rather than only in mark() is the
+        // difference between drawing a box and having drawn one.
+        if (chosen.history !== false) mark("");
+        else state.pendingSave = true;
+        const shape = knownShape(chosen.shape || "rect");
         const highest = state.working.regions.reduce(function (top, region) {
             return Math.max(top, region.z);
         }, -1);
         const region = {
             id: nextId(),
-            name: "Region " + (state.working.regions.length + 1),
+            name: nextName(),
             type: "obj",
             bbox: bbox,
-            prompt: "",
+            // §9.3: a person part arrives with the words for itself already in
+            // it. A rectangle arrives blank, because only the user knows what
+            // they drew it around.
+            prompt: shapeOf(shape).prompt,
             literalPrefix: "",
             literalSuffix: "",
             text: "",
             framing: "",
             angle: "",
             z: highest + 1,
+            shape: shape,
+            rotation: 0,
         };
         state.working.regions.push(region);
         say("");
         select(region.id);
-        const field = byId(IDS.prompt);
-        if (field && typeof field.focus === "function") field.focus();
+        // §10.2 and §11.3. A blank rectangle needs its prompt typed and the
+        // cursor is put there; a silhouette does not, and taking the focus away
+        // from the canvas after every dropped limb would make placing a figure
+        // a fight with a text box.
+        if (shape === "rect") focusPrompt();
         return region;
     }
 
-    // §7.1: a touch user does not have to perform a precision drag merely to
-    // get a box. Centred, a third of the frame, and cascaded a little so that
-    // pressing it twice does not hide the first one exactly underneath.
+    // §10.1: the Quick Add size is a reference length, and each shape is a
+    // proportion of it. A head is not square and a leg is not a head.
+    function sized(shape, size) {
+        const spec = shapeOf(shape);
+        return {
+            width: clamp(Math.round(size * spec.w), MIN_SIZE, SCALE),
+            height: clamp(Math.round(size * spec.h), MIN_SIZE, SCALE),
+        };
+    }
+
+    // Centred on `at`, or on the frame when there is no `at` -- §10.2's tap and
+    // §10.3's drop, which differ in one coordinate and nothing else. A tap
+    // cascades a little so that pressing Head twice does not hide the first one
+    // exactly underneath the second.
+    function placeShape(name, at) {
+        if (!state.working) return null;
+        const shape = knownShape(name);
+        const box = sized(shape, state.quickSize);
+        const drift = at ? 0 : (state.working.regions.length % 5) * 24 - 48;
+        const centre = at || {x: SCALE / 2, y: SCALE / 2};
+        const x0 = clamp(Math.round(centre.x - box.width / 2) + drift, 0, SCALE - box.width);
+        const y0 = clamp(Math.round(centre.y - box.height / 2) + drift, 0, SCALE - box.height);
+        const made = orient([x0, y0, x0 + box.width, y0 + box.height]);
+        if (!made) return null;
+        return create(made, {shape: shape});
+    }
+
     function add() {
-        const drift = (state.working.regions.length % 5) * 28 - 56;
-        const low = clamp((SCALE - ADD_SIZE) / 2 + drift, 0, SCALE - ADD_SIZE);
-        return create(orient([low, low, low + ADD_SIZE, low + ADD_SIZE]));
+        return placeShape("rect", null);
     }
 
     function remove(id) {
@@ -1011,23 +1441,22 @@
         select(next);
     }
 
-    // §10.2. One action, and Undo brings all of them back -- which is what
-    // makes it safe to offer without a confirmation dialog in the way.
+    // §4.5. One action, one history item, and Undo brings all of them back --
+    // which is what makes it safe to offer without a confirmation dialog in the
+    // way. It touches the regions and nothing else: not the prompt, not the
+    // gallery, not the Spatial switch.
     function clear() {
         if (!state.working.regions.length) return;
-        const many = state.working.regions.length;
         mark("");
         state.working.regions = [];
         select("");
-        say("Cleared " + many + (many === 1 ? " region" : " regions") + ". Undo brings "
-            + (many === 1 ? "it" : "them") + " back.");
     }
 
     function duplicate() {
         const region = find(state.selected);
         if (!region) return;
         if (state.working.regions.length >= MAX_REGIONS) {
-            say("That is as many regions as one layout carries (" + MAX_REGIONS + ").");
+            say(MAX_REGIONS + " regions is the limit");
             return;
         }
         mark("");
@@ -1040,7 +1469,7 @@
         ]) || region.bbox.slice();
         const copy = Object.assign({}, region, {
             id: nextId(),
-            name: (region.name || region.id) + " copy",
+            name: nextName(),
             bbox: moved,
             z: region.z + 1,
         });
@@ -1279,7 +1708,7 @@
             if (made && (made[2] - made[0]) >= MIN_SIZE && (made[3] - made[1]) >= MIN_SIZE) {
                 keep(drag.before);
                 state.editing = "";
-                create(made, false);
+                create(made, {history: false});
                 return;
             }
             paint();
@@ -1328,6 +1757,373 @@
     }
 
     // ------------------------------------------------------------------ //
+    // PopupController -- two menus, one at a time
+    // ------------------------------------------------------------------ //
+    //
+    // §4.3 and §4.6. Both popups are anchored elements inside the action bar,
+    // not overlays: they are in the bar's own stacking context, they close on
+    // Escape, on a press outside them and on each other, and neither of them
+    // can be left open behind a workspace that has been closed.
+
+    function popupOpen(id) {
+        // §11.4: opening a menu is switching to another high-level action, and
+        // Draw does not stay armed across one.
+        if (state.drawing) { state.drawing = false; clearGhost(); }
+        state.popup = state.popup === id ? "" : id;
+        paintChrome();
+    }
+
+    function popupsShut() {
+        if (!state.popup) return;
+        state.popup = "";
+        paintChrome();
+    }
+
+    // ------------------------------------------------------------------ //
+    // PanelController -- what is in the rail, and what is open
+    // ------------------------------------------------------------------ //
+    //
+    // §12.2 and §20. Two flags per widget, both session preferences: hidden is
+    // the Panels switch, collapsed is the header. Neither is layout history and
+    // neither is serialized, so hiding a panel cannot mark a layout as changed
+    // and Undo cannot bring a panel back.
+
+    function panelShow(key, on) {
+        state.hidden[key] = !on;
+        paintPanels();
+    }
+
+    function panelCollapse(key, on) {
+        state.collapsed[key] = !!on;
+        paintPanels();
+    }
+
+    function collapseAll() {
+        PANELS.forEach(function (key) { state.collapsed[key] = true; });
+        paintPanels();
+    }
+
+    function expandVisible() {
+        PANELS.forEach(function (key) {
+            if (!state.hidden[key]) state.collapsed[key] = false;
+        });
+        paintPanels();
+    }
+
+    // ------------------------------------------------------------------ //
+    // PaletteController -- tap to place, drag to place where dropped
+    // ------------------------------------------------------------------ //
+    //
+    // §10.2, §10.3 and §9.4. Quick Add and the Person outline are the same
+    // gesture on two sets of buttons, so they are one implementation: press,
+    // and if the contact moves it carries a ghost and drops a region where it
+    // is let go; if it does not move it is a tap and the region lands centred.
+    //
+    // The capture is taken on the workspace rather than on the button, because
+    // the Quick Add popup may close while a contact is still down and a capture
+    // held by a hidden element is a drag that stops reporting. Pointer Events
+    // throughout: §2.3, one path for mouse, finger and pen.
+
+    function pointIn(clientX, clientY) {
+        const canvas = byId(IDS.canvas);
+        if (!canvas || typeof canvas.getBoundingClientRect !== "function") return null;
+        const rect = canvas.getBoundingClientRect();
+        if (!(rect.width > 0 && rect.height > 0)) return null;
+        const x = (clientX - rect.left) / rect.width * SCALE;
+        const y = (clientY - rect.top) / rect.height * SCALE;
+        // §10.3: an invalid drop creates nothing. Outside the frame is outside.
+        if (x < 0 || y < 0 || x > SCALE || y > SCALE) return null;
+        return {x: Math.round(x), y: Math.round(y)};
+    }
+
+    function dropGhostAt(shape, clientX, clientY) {
+        const workspace = byId(IDS.workspace);
+        if (!workspace) return;
+        let ghost = workspace.querySelector("." + P + "-drop-ghost");
+        if (!ghost) {
+            ghost = document.createElement("div");
+            ghost.className = P + "-drop-ghost " + P + "-shape-" + shape;
+            workspace.appendChild(ghost);
+        }
+        ghost.style.left = clientX + "px";
+        ghost.style.top = clientY + "px";
+    }
+
+    function dropGhost() {
+        const workspace = byId(IDS.workspace);
+        const ghost = workspace && workspace.querySelector
+            ? workspace.querySelector("." + P + "-drop-ghost") : null;
+        if (ghost && ghost.parentNode) ghost.parentNode.removeChild(ghost);
+    }
+
+    function paletteDown(event, button) {
+        if (!state.open || !state.working) return;
+        if (typeof event.button === "number" && event.button > 0) return;
+        prevent(event);
+        state.placing = {
+            shape: knownShape(button.dataset.shape),
+            from: {x: event.clientX, y: event.clientY},
+            moved: false,
+        };
+        const workspace = byId(IDS.workspace);
+        if (workspace && typeof workspace.setPointerCapture === "function"
+            && event.pointerId !== undefined) {
+            try {
+                workspace.setPointerCapture(event.pointerId);
+                state.placing.pointer = event.pointerId;
+            } catch (error) {
+                // A synthetic pointer, or one already released. The gesture
+                // still works; it just stops following a contact that leaves.
+            }
+        }
+    }
+
+    function paletteMove(event) {
+        if (!state.placing) return;
+        const from = state.placing.from;
+        const far = Math.abs(event.clientX - from.x) + Math.abs(event.clientY - from.y);
+        if (!state.placing.moved && far < TAP) return;
+        state.placing.moved = true;
+        prevent(event);
+        dropGhostAt(state.placing.shape, event.clientX, event.clientY);
+    }
+
+    function paletteUp(event) {
+        const placing = state.placing;
+        state.placing = null;
+        dropGhost();
+        if (!placing) return;
+        const workspace = byId(IDS.workspace);
+        if (workspace && typeof workspace.releasePointerCapture === "function"
+            && placing.pointer !== undefined) {
+            try { workspace.releasePointerCapture(placing.pointer); } catch (error) { /* gone */ }
+        }
+        if (!state.open || !state.working) return;
+        if (!placing.moved) {
+            placeShape(placing.shape, null);
+        } else {
+            const at = pointIn(event.clientX, event.clientY);
+            if (!at) { paint(); return; }
+            placeShape(placing.shape, at);
+        }
+        // §4.3: the popup may close after a successful add, and does. The
+        // Person panel is a palette rather than a menu and stays where it is.
+        popupsShut();
+        paint();
+    }
+
+    function paletteCancel() {
+        if (!state.placing) return;
+        state.placing = null;
+        dropGhost();
+    }
+
+    // ------------------------------------------------------------------ //
+    // PromptMirror -- one prompt, shown twice
+    // ------------------------------------------------------------------ //
+    //
+    // §13.1 and §13.2. These three boxes are not saved copies: each one is a
+    // second view of a component that already exists on the tab, and editing
+    // either view writes the other. The write is the event the host is already
+    // bound to, so there is no polling, no interval and no reconciliation step.
+
+    const MIRRORS = [
+        {here: IDS.scene, there: HOST.prompt},
+        {here: IDS.literalPlus, there: HOST.literalPlus},
+        {here: IDS.literalMinus, there: HOST.literalMinus},
+    ];
+
+    function syncFromHost() {
+        state.syncing = true;
+        try {
+            MIRRORS.forEach(function (pair) {
+                const mine = byId(pair.here);
+                const theirs = hostField(pair.there);
+                if (!mine || !theirs) return;
+                if (mine.value !== theirs.value) mine.value = theirs.value;
+            });
+            const creative = byId(IDS.creative);
+            if (creative) creative.checked = creativeOn();
+        } finally {
+            state.syncing = false;
+        }
+    }
+
+    function syncToHost(pair) {
+        if (state.syncing) return;
+        const mine = byId(pair.here);
+        const theirs = hostField(pair.there);
+        if (!mine || !theirs || theirs.value === mine.value) return;
+        publish(theirs, mine.value);
+    }
+
+    // ------------------------------------------------------------------ //
+    // GalleryController -- the tab's own results, beside the canvas
+    // ------------------------------------------------------------------ //
+    //
+    // §16.2: the same result gallery as txt2img, read rather than duplicated.
+    // §16.4: Generate is the host's button, pressed on the click the user made
+    // -- no second endpoint, no queued click, no timer, and nothing here that a
+    // generation's completion waits for. §16.5: the progress the host is
+    // already drawing, mirrored.
+    //
+    // The observers are MutationObservers and not intervals, which is the
+    // difference between hearing about a change and asking whether one happened
+    // sixty times a minute in a tab nobody is looking at.
+
+    function shotImages() {
+        const gallery = byId(HOST.gallery);
+        if (!gallery || !gallery.querySelectorAll) return [];
+        const seen = {};
+        const found = [];
+        Array.prototype.slice.call(gallery.querySelectorAll("img")).forEach(function (image) {
+            const src = String(image.src
+                || (image.getAttribute ? image.getAttribute("src") : "") || "");
+            if (!src || seen[src]) return;
+            seen[src] = true;
+            found.push(src);
+        });
+        return found;
+    }
+
+    function readShots() {
+        const found = shotImages();
+        const same = found.length === state.shots.length
+            && found.every(function (src, at) { return src === state.shots[at]; });
+        state.shots = found;
+        // A new set of results shows the newest of them; anything else leaves
+        // the carousel where the user put it.
+        if (!same) state.shotAt = found.length ? found.length - 1 : -1;
+        if (state.shotAt >= found.length) state.shotAt = found.length - 1;
+        paintShot();
+    }
+
+    // §16.3: first ← previous → last, last → next → first.
+    function stepShot(direction) {
+        const many = state.shots.length;
+        if (!many) return;
+        const at = state.shotAt < 0 ? 0 : state.shotAt;
+        state.shotAt = ((at + direction) % many + many) % many;
+        paintShot();
+    }
+
+    function paintShot() {
+        const holder = byId(IDS.shot);
+        if (!holder) return;
+        const src = state.shotAt >= 0 ? state.shots[state.shotAt] : "";
+        let image = holder.querySelector("img");
+        if (!src) {
+            holder.textContent = "";
+        } else {
+            if (!image) {
+                image = document.createElement("img");
+                image.className = P + "-shot-image";
+                image.alt = "";
+                holder.appendChild(image);
+            }
+            if (image.src !== src) image.src = src;
+        }
+        write(IDS.shotAt, state.shots.length
+            ? (state.shotAt + 1) + " / " + state.shots.length : "");
+        enable(IDS.shotPrevious, state.shots.length > 1);
+        enable(IDS.shotNext, state.shots.length > 1);
+    }
+
+    function paintProgress() {
+        const holder = byId(IDS.progress);
+        if (!holder) return;
+        const results = byId(HOST.results) || byId(HOST.gallery);
+        // Two lookups rather than one descendant selector, because the host
+        // rebuilds .progressDiv on every generation and the bar inside it is
+        // the only thing worth finding when it is there.
+        const holder_ = results && results.querySelector
+            ? results.querySelector(".progressDiv") : null;
+        const bar = holder_ && holder_.querySelector
+            ? holder_.querySelector(".progress") : null;
+        if (!bar) {
+            holder.hidden = true;
+            write(IDS.progressRead, "");
+            return;
+        }
+        holder.hidden = false;
+        const mine = byId(IDS.progressBar);
+        if (mine && mine.style) mine.style.width = (bar.style && bar.style.width) || "0%";
+        write(IDS.progressRead, String(bar.textContent || "").trim());
+    }
+
+    // §16.4's last line, and the one this whole file exists to keep true: the
+    // host's Generate button, clicked, in the user's own gesture. Nothing is
+    // swallowed, nothing is deferred and nothing is polled -- press it and
+    // close the browser and the picture still arrives.
+    function generate() {
+        const button = clickable(HOST.generate);
+        if (button && typeof button.click === "function") button.click();
+    }
+
+    function watchHost() {
+        if (state.watching) return;
+        if (typeof MutationObserver !== "function") return;
+        const gallery = byId(HOST.gallery);
+        const results = byId(HOST.results) || (gallery && gallery.parentNode);
+        if (!gallery && !results) return;
+        state.watching = true;
+        const seen = new MutationObserver(function () {
+            if (!state.open) return;
+            readShots();
+            paintProgress();
+        });
+        try {
+            if (gallery) seen.observe(gallery, {childList: true, subtree: true,
+                                                attributes: true,
+                                                attributeFilter: ["src"]});
+            if (results && results !== gallery) {
+                seen.observe(results, {childList: true, subtree: true,
+                                       attributes: true,
+                                       attributeFilter: ["style", "class"]});
+            }
+        } catch (error) {
+            state.watching = false;
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    // Numeric geometry -- the inspector's four boxes
+    // ------------------------------------------------------------------ //
+    //
+    // §8.3: the canvas writes these and these write the canvas, in the one
+    // coordinate system the whole document is in. §26: an edit that cannot make
+    // a valid box is refused rather than applied halfway, and the field is
+    // repainted from the region so the screen never shows a number the layout
+    // does not hold.
+
+    function applyBbox(settled) {
+        const region = find(state.selected);
+        if (!region) return;
+        function read(id, fallback) {
+            const field = byId(id);
+            const number = Math.round(Number(field ? field.value : fallback));
+            return Number.isFinite(number) ? number : fallback;
+        }
+        const width = region.bbox[2] - region.bbox[0];
+        const height = region.bbox[3] - region.bbox[1];
+        const w = clamp(read(IDS.bboxW, width), MIN_SIZE, SCALE);
+        const h = clamp(read(IDS.bboxH, height), MIN_SIZE, SCALE);
+        const x = clamp(read(IDS.bboxX, region.bbox[0]), 0, SCALE - w);
+        const y = clamp(read(IDS.bboxY, region.bbox[1]), 0, SCALE - h);
+        const made = orient([x, y, x + w, y + h]);
+        if (!made) { paintInspector(); return; }
+        mark("bbox:" + region.id);
+        region.bbox = made;
+        // Repainting the inspector while somebody is mid-number would rewrite
+        // the field under the cursor, so a live edit moves the frame and leaves
+        // the four boxes alone until the cursor leaves them.
+        if (settled) { paint(); return; }
+        paintFrame();
+        paintChrome();
+        paintFacts();
+    }
+
+    // ------------------------------------------------------------------ //
     // Opening, saving, leaving
     // ------------------------------------------------------------------ //
 
@@ -1356,56 +2152,73 @@
         state.editing = "";
         state.pendingSave = false;
         state.typing = false;
-        // What the document already holds. Opening the editor commits nothing:
-        // an Auto Save that fired on open would put a "changed" mark against a
-        // layout somebody only looked at.
-        state.committed = serialize();
+        state.popup = "";
+        state.placing = null;
         state.past.length = 0;
         state.future.length = 0;
         state.open = true;
         workspace.hidden = false;
+        // §3.1: the workspace takes the txt2img work area rather than escaping
+        // to document.body or asking the browser for the screen.
+        takeover();
         say("");
         zoomTo(1);
         reframe();
-        // Taken after reframe, so that opening an editor and leaving it alone
-        // is not "changed" merely because the frame is a different size than
-        // the day the layout was drawn.
-        state.baseline = serialize();
+        // Both taken after reframe, so that opening a workspace and leaving it
+        // alone is not "changed" merely because the frame is a different size
+        // than the day the layout was drawn. Opening commits nothing: an Auto
+        // Save that fired on open would write a round trip for a layout
+        // somebody only looked at, and the Session widget would call a
+        // untouched layout unsaved.
+        state.committed = serialize();
+        state.baseline = state.committed;
+        watchHost();
+        syncFromHost();
+        readShots();
         paint();
         const canvas = byId(IDS.canvas);
         if (canvas && typeof canvas.focus === "function") canvas.focus();
     }
 
     function close() {
-        leaveFullscreen();
+        surrender();
         const workspace = byId(IDS.workspace);
         if (workspace) workspace.hidden = true;
         state.open = false;
         state.drawing = false;
         state.confirming = false;
+        state.popup = "";
+        state.placing = null;
         state.drag = null;
         state.working = null;
         state.past.length = 0;
         state.future.length = 0;
+        clearGhost();
+        dropGhost();
         release();
     }
 
+    // §3.2. Save commits and stays: the whole point of §3.3 is that somebody
+    // can save a layout, generate from it, change it and save again without
+    // the workspace closing under them once.
     function save() {
         const box = stateBox();
         if (box && state.working) {
             state.committed = serialize();
+            state.baseline = state.committed;
+            state.pendingSave = false;
             publish(box, state.committed);
         }
-        close();
         // The compact canvas is a view of the same document, so it is stale the
-        // moment the editor writes one. Forced, because "somebody just saved a
+        // moment this writes one. Forced, because "somebody just saved a
         // layout" is exactly the case the ordinary guard refuses.
         compactLoad(true);
+        if (state.working) paint();
     }
 
-    // §14. Unchanged leaves at once; changed asks, in the page, with two
-    // buttons. A browser confirm() would be a modal dialog reintroduced into an
-    // editor whose whole point was to stop being one.
+    // §3.2. Unchanged leaves at once; changed asks, in the page, with two
+    // buttons and no silent save. A browser confirm() would be a modal dialog
+    // reintroduced into a workspace whose whole point was to stop being one.
     function leave() {
         if (!state.working) { close(); return; }
         if (serialize() === state.baseline) { close(); return; }
@@ -1517,9 +2330,11 @@
             if (!claim()) return;
 
             press(IDS.open, open);
-            press(IDS.add, function () { add(); });
             press(IDS.draw, function () {
                 if (!state.open) return;
+                // §11.4: pressing Draw again cancels. One shot, and the mode
+                // exits itself the moment a region is made -- see onUp().
+                popupsShut();
                 state.drawing = !state.drawing;
                 if (!state.drawing) { state.drag = null; clearGhost(); }
                 paintChrome();
@@ -1530,13 +2345,10 @@
             press(IDS.duplicate, duplicate);
             press(IDS.remove, function () { remove(); });
             press(IDS.front, function () { restack(Infinity); });
-            press(IDS.forward, function () { restack(1); });
-            press(IDS.back, function () { restack(-1); });
-            press(IDS.bottom, function () { restack(-Infinity); });
+            press(IDS.back, function () { restack(-Infinity); });
             press(IDS.zoomFit, function () { zoomTo(1); });
             press(IDS.zoomIn, function () { zoomStep(1); });
             press(IDS.zoomOut, function () { zoomStep(-1); });
-            press(IDS.full, toggleFullscreen);
             press(IDS.save, save);
             press(IDS.cancel, leave);
             press(IDS.discard, close);
@@ -1544,6 +2356,127 @@
                 state.confirming = false;
                 paintChrome();
             });
+
+            // §4.1 and §4.2. Both of these are the panel's own controls shown
+            // in the bar, so pressing one presses the component Gradio is bound
+            // to and the setting is remembered exactly as it would have been.
+            once(byId(IDS.power), "change", function (event) {
+                toggleHost(hostCheck(HOST.toggle), !!event.target.checked);
+                paintChrome();
+                paintFacts();
+            });
+            [[IDS.modeDirect, "direct"], [IDS.modeSmart, "smart"]].forEach(function (pair) {
+                press(pair[0], function () {
+                    setComposeMode(pair[1]);
+                    if (state.working) { mark(""); paint(); }
+                    else paintChrome();
+                });
+            });
+
+            // §4.3 and §4.6.
+            press(IDS.quick, function () { popupOpen(IDS.quickPopup); });
+            press(IDS.panels, function () { popupOpen(IDS.panelsPopup); });
+            press(IDS.collapseAll, collapseAll);
+            press(IDS.expandVisible, expandVisible);
+            once(byId(IDS.quickSize), "input", function (event) {
+                const size = Math.round(Number(event.target.value));
+                if (Number.isFinite(size)) state.quickSize = clamp(size, MIN_SIZE, SCALE);
+            });
+            PANELS.forEach(function (key) {
+                once(byId(P + "-show-" + key), "change", function (event) {
+                    panelShow(key, !!event.target.checked);
+                });
+            });
+
+            // §12.2's collapse, delegated: the rail's widget headers are static
+            // markup, but one listener on the rail is one listener however many
+            // widgets the rail grows.
+            once(byId(IDS.rail), "click", function (event) {
+                const target = event.target || {};
+                const head = target.closest
+                    ? target.closest("." + P + "-widget-head") : null;
+                if (!head) return;
+                prevent(event);
+                const key = head.dataset.panel;
+                panelCollapse(key, !state.collapsed[key]);
+            });
+
+            // §10 and §9: one gesture, both palettes. Delegated from the
+            // workspace because the Quick Add buttons live in a popup that
+            // opens and closes and the Person buttons do not.
+            const workspace = byId(IDS.workspace);
+            once(workspace, "pointerdown", function (event) {
+                const target = event.target || {};
+                const button = target.closest
+                    ? target.closest("." + P + "-shape-button") : null;
+                if (!button) return;
+                paletteDown(event, button);
+            }, "Palette");
+            once(workspace, "pointermove", paletteMove, "Palette");
+            once(workspace, "pointerup", paletteUp, "Palette");
+            once(workspace, "pointercancel", paletteCancel, "Palette");
+            // A press outside either popup closes it, and a press inside one
+            // does not. The same listener, because "outside" is what closest()
+            // answers.
+            once(workspace, "click", function (event) {
+                if (!state.popup) return;
+                const target = event.target || {};
+                const inside = target.closest
+                    ? target.closest("." + P + "-menu") : null;
+                if (inside) return;
+                popupsShut();
+            }, "Popups");
+
+            // §13.2, both directions, and neither of them a copy: each box
+            // writes the component the other reads.
+            MIRRORS.forEach(function (pair) {
+                once(byId(pair.here), "input", function () { syncToHost(pair); });
+                once(byId(pair.here), "change", function () { syncToHost(pair); });
+                const theirs = hostField(pair.there);
+                once(theirs, "input", function () {
+                    if (state.syncing) return;
+                    syncFromHost();
+                }, "Mirror");
+                once(theirs, "change", function () {
+                    if (state.syncing) return;
+                    syncFromHost();
+                }, "Mirror");
+            });
+            // §13.3: the same Creative Mode state as txt2img, never a second
+            // local value.
+            once(byId(IDS.creative), "change", function (event) {
+                toggleHost(hostCheck(HOST.creative), !!event.target.checked);
+                paintFacts();
+            });
+            once(hostCheck(HOST.creative), "change", function () {
+                if (!state.open) return;
+                syncFromHost();
+                paintFacts();
+            }, "Mirror");
+            once(hostCheck(HOST.toggle), "change", function () {
+                if (!state.open) return;
+                paintChrome();
+                paintFacts();
+            }, "Mirror");
+
+            // §16.
+            press(IDS.shotPrevious, function () { stepShot(-1); });
+            press(IDS.shotNext, function () { stepShot(1); });
+            press(IDS.generate, generate);
+
+            // §17's optional half: the frame's dimensions, edited from the
+            // workspace, written into the host's own number fields so that the
+            // change is the same change the sliders make.
+            [[IDS.sizeWidth, HOST.width], [IDS.sizeHeight, HOST.height]]
+                .forEach(function (pair) {
+                    once(byId(pair[0]), "change", function (event) {
+                        const number = Math.round(Number(event.target.value));
+                        if (!Number.isFinite(number) || number <= 0) return;
+                        const field = hostField(pair[1]);
+                        if (!field || Number(field.value) === number) return;
+                        publish(field, String(number));
+                    });
+                });
 
             // The region list is rebuilt on every paint, so its rows cannot
             // carry their own listeners without leaking one per repaint. One
@@ -1684,6 +2617,29 @@
             field(IDS.framing, function (region, value) { region.framing = value; });
             field(IDS.angle, function (region, value) { region.angle = value; });
 
+            // §9.6. Rotation is editor state and only that: it changes the
+            // silhouette and the restoration document, and it is applied here
+            // rather than anywhere near orient() so that there is no arithmetic
+            // in this file by which it could reach a coordinate.
+            field(IDS.rotation, function (region, value) {
+                region.rotation = rotate(value);
+            }, true);
+
+            // §8.3. Live while a number is being typed -- the frame follows the
+            // field -- and normalized when the cursor leaves, which is the one
+            // moment the field may be rewritten under somebody's hands.
+            [IDS.bboxX, IDS.bboxY, IDS.bboxW, IDS.bboxH].forEach(function (id) {
+                once(byId(id), "input", function () {
+                    state.typing = true;
+                    try { applyBbox(false); } finally { state.typing = false; }
+                });
+                once(byId(id), "change", function () {
+                    applyBbox(true);
+                    state.editing = "";
+                    paint();
+                });
+            });
+
             // §5.1/§5.2: one pointer path, captured on the frame, so a drag
             // that leaves the frame is still this drag and a finger is not a
             // second implementation.
@@ -1721,20 +2677,25 @@
             if (!state.listening) {
                 state.listening = true;
                 document.addEventListener("keydown", onKey);
-                // The browser owns Escape while the Fullscreen API is in
-                // charge, so the only way to know it was pressed is to be told.
-                document.addEventListener("fullscreenchange", function () {
-                    if (state.open) paintChrome();
-                });
             }
 
-            // Gradio rebuilding the tab under an open editor would otherwise
-            // leave it open in `state` and hidden on screen.
+            // §16.2 and §16.5, hooked up whether or not the workspace is open:
+            // observers cost nothing while nothing changes, and installing them
+            // on open would miss a generation started before it.
+            watchHost();
+
+            // Gradio rebuilding the tab under an open workspace would otherwise
+            // leave it open in `state` and hidden on screen -- and, since §3.1's
+            // takeover is marks on the ancestors Gradio just replaced, leave the
+            // rest of txt2img showing through underneath it.
             if (state.open && state.working) {
                 const live = byId(IDS.workspace);
                 if (live) live.hidden = false;
+                takeover();
                 zoomTo(state.zoom);
                 reframe();
+                syncFromHost();
+                readShots();
                 paint();
             }
 
@@ -1851,7 +2812,6 @@
             element.className = P + "-compact-region";
             if (region.type === "text") element.className += " " + P + "-compact-text";
             element.dataset.regionId = region.id;
-            element.title = region.name || region.id;
             const [x0, y0, x1, y1] = region.bbox;
             element.style.left = (x0 / SCALE * 100) + "%";
             element.style.top = (y0 / SCALE * 100) + "%";
@@ -1887,7 +2847,7 @@
             return;
         }
         note.classList.remove(P + "-unsaved");
-        note.textContent = "Drag a box to move it. Edit Layout… for everything else.";
+        note.textContent = "Drag a box to move it. Full Screen for everything else.";
     }
 
     function compactCommit() {
@@ -2060,6 +3020,12 @@
 
         if (event.key === "Escape") {
             prevent(event);
+            // §11.4 and §4.3, innermost first: a menu, then a gesture, then the
+            // confirmation, then the workspace itself. Escape never skips a
+            // level, so it is never the key that closed something the user was
+            // still looking at.
+            if (state.popup) { popupsShut(); return; }
+            if (state.placing) { paletteCancel(); return; }
             if (state.drag || state.drawing) {
                 state.drag = null;
                 state.drawing = false;
@@ -2146,9 +3112,26 @@
         undo: undo,
         redo: redo,
         zoomTo: zoomTo,
-        toggleFullscreen: toggleFullscreen,
-        fullscreenOn: fullscreenOn,
         dimensions: dimensions,
+        placeShape: placeShape,
+        popupOpen: popupOpen,
+        popupsShut: popupsShut,
+        panelShow: panelShow,
+        panelCollapse: panelCollapse,
+        collapseAll: collapseAll,
+        expandVisible: expandVisible,
+        composeMode: composeMode,
+        setComposeMode: setComposeMode,
+        spatialOn: spatialOn,
+        syncFromHost: syncFromHost,
+        readShots: readShots,
+        stepShot: stepShot,
+        paintProgress: paintProgress,
+        generate: generate,
+        takeover: takeover,
+        surrender: surrender,
+        shapes: SHAPES,
+        panels: PANELS,
         ordered: function () { return state.working ? ordered() : []; },
         compact: compact,
         wireCompact: wireCompact,

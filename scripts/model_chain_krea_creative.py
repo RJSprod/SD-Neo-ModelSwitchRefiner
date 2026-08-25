@@ -460,7 +460,7 @@ def _options(vocabulary, blank: str) -> str:
 def _handles() -> str:
     """The eight resize knobs, drawn once into the selection proxy.
 
-    They belong to the proxy and not to a region, which is the whole of §6:
+    They belong to the proxy and not to a region, which is the whole of §7:
     handles that lived on the region body would be buried with it the moment
     something overlapped it.
     """
@@ -468,6 +468,126 @@ def _handles() -> str:
         f'<span class="{SPATIAL_PREFIX}-handle {SPATIAL_PREFIX}-handle-{corner}"'
         f' data-corner="{corner}" aria-hidden="true"></span>'
         for corner in HANDLES)
+
+
+SHAPES = (
+    ("rect", "Box"),
+    ("head", "Head"),
+    ("chest", "Chest"),
+    ("waist", "Waist"),
+    ("left_arm", "Left arm"),
+    ("right_arm", "Right arm"),
+    ("left_hand", "Left hand"),
+    ("right_hand", "Right hand"),
+    ("left_leg", "Left leg"),
+    ("right_leg", "Right leg"),
+    ("left_foot", "Left foot"),
+    ("right_foot", "Right foot"),
+)
+"""Every ``ui_shape`` the editor can draw, and what it is called on screen.
+
+Editor metadata and nothing else. §2.5: whatever silhouette is on the canvas,
+the compositor is handed the same axis-aligned rectangle it has always been
+handed, so this list can grow without a single downstream branch changing. The
+proportions each shape starts at and the prompt it arrives with live in
+``javascript/model_chain_spatial_krea.js``, next to the code that applies them;
+a test asserts the two lists still name the same shapes.
+"""
+
+QUICK_SHAPES = ("rect", "head", "chest", "waist")
+"""§10: the high-frequency four, reachable without opening the rail."""
+
+PERSON_SHAPES = tuple(name for name, _label in SHAPES if name != "rect")
+"""§9.2: the segmented outline, every part of it grabbable on its own."""
+
+PANELS = (
+    ("prompts", "Prompts"),
+    ("person", "Person"),
+    ("layers", "Layers"),
+    ("inspector", "Inspector"),
+    ("gallery", "Gallery"),
+    ("session", "Session"),
+)
+"""The right rail, in the order §12.2 lists it.
+
+One tuple, three readers: the rail builds a widget per row, the Panels popup
+builds a visibility switch per row, and the browser file collapses and hides
+them by the same key. A widget added here appears in all three.
+"""
+
+
+def _label_for(shape: str) -> str:
+    for name, label in SHAPES:
+        if name == shape:
+            return label
+    return shape
+
+
+def _palette(shapes, kind: str) -> str:
+    """One row of shape buttons: tap to place centred, drag to place where dropped.
+
+    Buttons rather than decorated ``<div>``s because both interactions are on
+    the same control -- §10.2 and §10.3 -- and a tap that does something is a
+    button whatever else it can also do. The silhouette is a ``clip-path`` in
+    the stylesheet keyed off ``data-shape``, so this markup carries the shape
+    name once and no geometry at all.
+    """
+    import html
+
+    found = []
+    for shape in shapes:
+        label = html.escape(_label_for(shape), quote=True)
+        found.append(
+            f'<button type="button" class="{SPATIAL_PREFIX}-shape-button'
+            f' {SPATIAL_PREFIX}-shape-{shape}" data-shape="{shape}"'
+            f' data-palette="{kind}" aria-label="{label}">'
+            f'<span class="{SPATIAL_PREFIX}-shape-art" aria-hidden="true"></span>'
+            f'<span class="{SPATIAL_PREFIX}-shape-name">{label}</span></button>')
+    return "".join(found)
+
+
+def _panel_switches() -> str:
+    """The Panels popup's contents: one switch per widget, and nothing else.
+
+    §4.6 -- this popup exists to control workspace layout. It carries no
+    editing action, so nothing in it can be pressed by mistake while reaching
+    for one.
+    """
+    import html
+
+    found = []
+    for key, label in PANELS:
+        said = html.escape(label, quote=True)
+        found.append(
+            f'<label class="{SPATIAL_PREFIX}-switch-row">'
+            f'<input type="checkbox" class="{SPATIAL_PREFIX}-panel-switch"'
+            f' id="{_spatial_id("show", key)}" data-panel="{key}" checked />'
+            f'<span>{said}</span></label>')
+    return "".join(found)
+
+
+def _widget(key: str, label: str, head_extra: str, body: str) -> str:
+    """One collapsible rail widget.
+
+    The header is a ``<button>``: §12.2 asks for every widget to be
+    collapsible, and a header somebody can collapse is a control rather than a
+    heading with a listener bolted to it. Whatever live number belongs beside
+    the name -- a region count, an image position -- rides in ``head_extra``,
+    which is the only thing §2.2 lets a header say beyond its own name.
+    """
+    return f'''
+      <section class="{SPATIAL_PREFIX}-widget" data-panel="{key}"
+               id="{_spatial_id("panel", key)}">
+        <button type="button" class="{SPATIAL_PREFIX}-widget-head"
+                data-panel="{key}" aria-expanded="true"
+                aria-controls="{_spatial_id("panel", key, "body")}">
+          <span class="{SPATIAL_PREFIX}-caret" aria-hidden="true"></span>
+          <span class="{SPATIAL_PREFIX}-widget-name">{label}</span>
+          {head_extra}
+        </button>
+        <div class="{SPATIAL_PREFIX}-widget-body"
+             id="{_spatial_id("panel", key, "body")}">{body}</div>
+      </section>'''
 
 
 def spatial_editor() -> str:
@@ -480,6 +600,16 @@ def spatial_editor() -> str:
     stable ids, so the browser file finds what it needs by id and by nothing
     else -- no Gradio class, no DOM shape, nothing a theme can rearrange.
 
+    Canvas first
+    ------------
+    §2.1. The composition frame is the work, and everything else is a tool
+    beside it, so the shape of this markup is one bar, one canvas column and
+    one rail -- not a stack of panels of equal weight with a picture somewhere
+    in it. The canvas column is as tall as the workspace and does not move; the
+    rail beside it scrolls on its own and every widget in it can be collapsed
+    or switched off entirely, so no amount of panel content can push the frame
+    off screen.
+
     A workspace, not a modal
     ------------------------
     This used to be a ``position: fixed`` overlay that JavaScript moved to
@@ -489,69 +619,133 @@ def spatial_editor() -> str:
     id whenever Gradio rebuilt the tab, and a page whose scrolling belonged to
     the overlay rather than to the browser.
 
-    It is now a block in ordinary document flow that Edit Layout reveals and
-    Back hides. It scrolls the way the page scrolls, it inherits the theme it is
-    standing in, it cannot be clipped out of existence by a container it is no
-    longer escaping, and on a phone it is a page rather than a window over one.
+    It is now a block in ordinary document flow that Full Screen reveals and
+    Close hides -- and when it is revealed, §3.1's takeover hides the rest of
+    txt2img around it rather than this element escaping anywhere. It inherits
+    the theme it is standing in, it cannot be clipped out of existence by a
+    container it is no longer escaping, and on a phone it is a page rather than
+    a window over one.
+
+    Nothing here explains itself
+    ----------------------------
+    §2.2 and §25. There is no helper paragraph, no ``title=`` hover text, no
+    instructional footer and no badge describing a control that is already
+    labelled. What is left is control labels, field labels, button names, live
+    state and the selected region's own data.
 
     The canvas is a ``<div>``, not a ``<canvas>``. Regions are elements, so a
-    region can carry a title, be found by id, be focused, be styled by a theme
-    and be read by a test; a bitmap canvas would put all of that behind a
-    redraw loop in order to draw rectangles.
+    region can be found by id, be focused, be styled by a theme and be read by
+    a test; a bitmap canvas would put all of that behind a redraw loop in order
+    to draw rectangles.
     """
     from prompt_master.krea import spatial
 
     return f'''
 <div id="{_spatial_id("workspace")}" class="{SPATIAL_PREFIX}-workspace"
-     role="region" aria-label="Spatial Layout editor" hidden>
+     role="region" aria-label="Spatial Layout" hidden>
 
-  <div class="{SPATIAL_PREFIX}-topbar">
-    <button type="button" id="{_spatial_id("cancel")}"
-            class="{SPATIAL_PREFIX}-tool {SPATIAL_PREFIX}-back">&#8249;&nbsp;Back</button>
-    <span class="{SPATIAL_PREFIX}-title">Spatial Layout</span>
-    <span id="{_spatial_id("size")}" class="{SPATIAL_PREFIX}-dims"></span>
-    <span class="{SPATIAL_PREFIX}-spacer"></span>
-    <button type="button" id="{_spatial_id("full")}"
-            class="{SPATIAL_PREFIX}-tool" aria-pressed="false">Full screen</button>
-    <button type="button" id="{_spatial_id("save")}"
-            class="{SPATIAL_PREFIX}-tool {SPATIAL_PREFIX}-primary">Save &amp; Return</button>
-  </div>
+  <div class="{SPATIAL_PREFIX}-bar" role="toolbar" aria-label="Spatial Layout">
+    <label class="{SPATIAL_PREFIX}-power">
+      <input type="checkbox" id="{_spatial_id("power")}" />
+      <span>Spatial</span>
+    </label>
 
-  <div class="{SPATIAL_PREFIX}-toolbar" role="toolbar" aria-label="Region actions">
-    <button type="button" id="{_spatial_id("add")}"
-            class="{SPATIAL_PREFIX}-tool">+&nbsp;Add region</button>
-    <button type="button" id="{_spatial_id("draw")}"
-            class="{SPATIAL_PREFIX}-tool">Draw region</button>
-    <button type="button" id="{_spatial_id("clear")}"
-            class="{SPATIAL_PREFIX}-tool">Clear all</button>
-    <span class="{SPATIAL_PREFIX}-spacer"></span>
-    <span class="{SPATIAL_PREFIX}-group">
-      <button type="button" id="{_spatial_id("undo")}"
-              class="{SPATIAL_PREFIX}-tool" title="Undo (Ctrl+Z)">Undo</button>
-      <button type="button" id="{_spatial_id("redo")}"
-              class="{SPATIAL_PREFIX}-tool" title="Redo (Ctrl+Shift+Z)">Redo</button>
+    <span class="{SPATIAL_PREFIX}-segmented" role="group" aria-label="Composition">
+      <button type="button" id="{_spatial_id("mode", spatial.DIRECT)}"
+              class="{SPATIAL_PREFIX}-segment" data-mode="{spatial.DIRECT}"
+              aria-pressed="false">Direct BBOX</button>
+      <button type="button" id="{_spatial_id("mode", spatial.SMART)}"
+              class="{SPATIAL_PREFIX}-segment" data-mode="{spatial.SMART}"
+              aria-pressed="false">Smart Spatial</button>
     </span>
-  </div>
 
-  <p id="{_spatial_id("warning")}" class="{SPATIAL_PREFIX}-warning" hidden></p>
-  <p id="{_spatial_id("message")}" class="{SPATIAL_PREFIX}-message" hidden></p>
+    <span class="{SPATIAL_PREFIX}-divider" aria-hidden="true"></span>
+
+    <span class="{SPATIAL_PREFIX}-menu">
+      <button type="button" id="{_spatial_id("quick")}"
+              class="{SPATIAL_PREFIX}-tool" aria-haspopup="true"
+              aria-expanded="false"
+              aria-controls="{_spatial_id("quick", "popup")}">Quick Add ▾</button>
+      <div id="{_spatial_id("quick", "popup")}" class="{SPATIAL_PREFIX}-popup" hidden>
+        <div class="{SPATIAL_PREFIX}-palette">{_palette(QUICK_SHAPES, "quick")}</div>
+        <label class="{SPATIAL_PREFIX}-slider">
+          <span>Size</span>
+          <input type="range" id="{_spatial_id("quick", "size")}"
+                 min="60" max="900" step="10" value="340" />
+        </label>
+      </div>
+    </span>
+
+    <button type="button" id="{_spatial_id("draw")}"
+            class="{SPATIAL_PREFIX}-tool" aria-pressed="false">Draw</button>
+    <button type="button" id="{_spatial_id("clear")}"
+            class="{SPATIAL_PREFIX}-tool">Clear All</button>
+
+    <span class="{SPATIAL_PREFIX}-menu">
+      <button type="button" id="{_spatial_id("panels")}"
+              class="{SPATIAL_PREFIX}-tool" aria-haspopup="true"
+              aria-expanded="false"
+              aria-controls="{_spatial_id("panels", "popup")}">Panels ▾</button>
+      <div id="{_spatial_id("panels", "popup")}" class="{SPATIAL_PREFIX}-popup" hidden>
+        {_panel_switches()}
+        <div class="{SPATIAL_PREFIX}-popup-actions">
+          <button type="button" id="{_spatial_id("collapse", "all")}"
+                  class="{SPATIAL_PREFIX}-tool">Collapse All</button>
+          <button type="button" id="{_spatial_id("expand", "visible")}"
+                  class="{SPATIAL_PREFIX}-tool">Expand Visible</button>
+        </div>
+      </div>
+    </span>
+
+    <span class="{SPATIAL_PREFIX}-spacer"></span>
+
+    <button type="button" id="{_spatial_id("undo")}"
+            class="{SPATIAL_PREFIX}-tool">Undo</button>
+    <button type="button" id="{_spatial_id("redo")}"
+            class="{SPATIAL_PREFIX}-tool">Redo</button>
+    <button type="button" id="{_spatial_id("save")}"
+            class="{SPATIAL_PREFIX}-tool {SPATIAL_PREFIX}-primary">Save</button>
+    <button type="button" id="{_spatial_id("cancel")}"
+            class="{SPATIAL_PREFIX}-tool">Close</button>
+  </div>
 
   <div id="{_spatial_id("confirm")}" class="{SPATIAL_PREFIX}-confirm" hidden>
-    <span>This layout has unsaved changes.</span>
+    <span>Unsaved changes</span>
     <span class="{SPATIAL_PREFIX}-spacer"></span>
     <button type="button" id="{_spatial_id("keep")}"
-            class="{SPATIAL_PREFIX}-tool">Keep editing</button>
+            class="{SPATIAL_PREFIX}-tool">Cancel</button>
     <button type="button" id="{_spatial_id("discard")}"
-            class="{SPATIAL_PREFIX}-tool {SPATIAL_PREFIX}-danger">Discard changes</button>
+            class="{SPATIAL_PREFIX}-tool {SPATIAL_PREFIX}-danger">Discard</button>
   </div>
+
+  <p id="{_spatial_id("message")}" class="{SPATIAL_PREFIX}-message"
+     role="status" aria-live="polite" hidden></p>
 
   <div class="{SPATIAL_PREFIX}-body">
 
     <div class="{SPATIAL_PREFIX}-stage">
+      <div class="{SPATIAL_PREFIX}-stagebar">
+        <span id="{_spatial_id("aspect")}" class="{SPATIAL_PREFIX}-aspect"></span>
+        <span class="{SPATIAL_PREFIX}-spacer"></span>
+        <button type="button" id="{_spatial_id("zoom-fit")}"
+                class="{SPATIAL_PREFIX}-tool">Fit</button>
+        <button type="button" id="{_spatial_id("zoom-out")}"
+                class="{SPATIAL_PREFIX}-tool" aria-label="Zoom out">&#8722;</button>
+        <span id="{_spatial_id("zoom-level")}"
+              class="{SPATIAL_PREFIX}-zoom-level">100%</span>
+        <button type="button" id="{_spatial_id("zoom-in")}"
+                class="{SPATIAL_PREFIX}-tool" aria-label="Zoom in">+</button>
+        <select id="{_spatial_id("grid")}" aria-label="Grid">
+          <option value="none" selected>None</option>
+          <option value="thirds">Thirds</option>
+          <option value="center">Centre</option>
+          <option value="both">Both</option>
+        </select>
+      </div>
       <div id="{_spatial_id("scroll")}" class="{SPATIAL_PREFIX}-scroll">
         <div id="{_spatial_id("canvas")}" class="{SPATIAL_PREFIX}-canvas" tabindex="0"
              role="application" aria-label="Composition frame">
-          <div id="{_spatial_id("guides")}" class="{SPATIAL_PREFIX}-guides thirds"
+          <div id="{_spatial_id("guides")}" class="{SPATIAL_PREFIX}-guides none"
                aria-hidden="true"></div>
           <div id="{_spatial_id("regions")}" class="{SPATIAL_PREFIX}-regions"></div>
           <div id="{_spatial_id("proxy")}" class="{SPATIAL_PREFIX}-proxy" hidden>
@@ -561,77 +755,62 @@ def spatial_editor() -> str:
           </div>
         </div>
       </div>
-
-      <div class="{SPATIAL_PREFIX}-stagebar">
-        <label class="{SPATIAL_PREFIX}-inline">
-          <span>Grid</span>
-          <select id="{_spatial_id("grid")}">
-            <option value="none" selected>None</option>
-            <option value="thirds">Thirds</option>
-            <option value="center">Centre</option>
-            <option value="both">Thirds + centre</option>
-          </select>
-        </label>
-        <span class="{SPATIAL_PREFIX}-zoom" role="group" aria-label="Zoom">
-          <button type="button" id="{_spatial_id("zoom-fit")}"
-                  class="{SPATIAL_PREFIX}-tool">Fit</button>
-          <button type="button" id="{_spatial_id("zoom-out")}"
-                  class="{SPATIAL_PREFIX}-tool" aria-label="Zoom out">&#8722;</button>
-          <span id="{_spatial_id("zoom-level")}"
-                class="{SPATIAL_PREFIX}-zoom-level">100%</span>
-          <button type="button" id="{_spatial_id("zoom-in")}"
-                  class="{SPATIAL_PREFIX}-tool" aria-label="Zoom in">+</button>
-        </span>
-        <label class="{SPATIAL_PREFIX}-check">
-          <input type="checkbox" id="{_spatial_id("auto-hint")}" checked />
-          <span>Auto position hints</span>
-        </label>
-        <span class="{SPATIAL_PREFIX}-note">Scene prompt goes through the Creative
-          LLM · region prompts bypass it · [[double brackets]] bypass every
-          language model and stay in this box</span>
-      </div>
     </div>
 
-    <div class="{SPATIAL_PREFIX}-side">
-
-      <section class="{SPATIAL_PREFIX}-panel {SPATIAL_PREFIX}-regions-panel">
-        <header class="{SPATIAL_PREFIX}-panel-head">
-          <h4>Regions</h4>
-          {mc_hint.badge(
-              "Top to bottom is the order the regions are written into the "
-              "prompt, and the last one is the one drawn on top where two "
-              "overlap. Drag a row to change it, or hold Alt and press the up "
-              "and down arrows.", "the region order")}
-          <span id="{_spatial_id("count")}" class="{SPATIAL_PREFIX}-note"></span>
-        </header>
-        <div id="{_spatial_id("list")}" class="{SPATIAL_PREFIX}-list" role="listbox"
-             aria-label="Regions, in the order they are written into the prompt"
-             tabindex="0"></div>
-        <p id="{_spatial_id("empty")}" class="{SPATIAL_PREFIX}-empty">
-          No regions yet. Add one, or draw one on the frame.</p>
-        <div class="{SPATIAL_PREFIX}-layerbar" role="group" aria-label="Stacking order">
-          <button type="button" id="{_spatial_id("front")}"
-                  class="{SPATIAL_PREFIX}-tool" title="Bring to front">To front</button>
-          <button type="button" id="{_spatial_id("raise")}"
-                  class="{SPATIAL_PREFIX}-tool" title="Bring forward">Forward</button>
-          <button type="button" id="{_spatial_id("lower")}"
-                  class="{SPATIAL_PREFIX}-tool" title="Send backward">Back</button>
-          <button type="button" id="{_spatial_id("bottom")}"
-                  class="{SPATIAL_PREFIX}-tool" title="Send to back">To back</button>
-        </div>
-      </section>
-
-      <section class="{SPATIAL_PREFIX}-panel {SPATIAL_PREFIX}-inspector">
-        <header class="{SPATIAL_PREFIX}-panel-head">
-          <h4>Selected region</h4>
-          <span id="{_spatial_id("selected-name")}"
-                class="{SPATIAL_PREFIX}-note">nothing selected</span>
-        </header>
-
-        <label class="{SPATIAL_PREFIX}-field">
-          <span>Name</span>
-          <input type="text" id="{_spatial_id("name")}" />
+    <div id="{_spatial_id("rail")}" class="{SPATIAL_PREFIX}-rail">
+      {_widget("prompts", "Prompts", "", f"""
+        <label class="{SPATIAL_PREFIX}-field {SPATIAL_PREFIX}-grow">
+          <span>Prompt</span>
+          <textarea id="{_spatial_id("scene")}" rows="4"></textarea>
         </label>
+        <label class="{SPATIAL_PREFIX}-field">
+          <span>Literal +</span>
+          <textarea id="{_spatial_id("literal", "plus")}" rows="2"></textarea>
+        </label>
+        <label class="{SPATIAL_PREFIX}-field">
+          <span>Literal &#8722;</span>
+          <textarea id="{_spatial_id("literal", "minus")}" rows="2"></textarea>
+        </label>
+        <label class="{SPATIAL_PREFIX}-check">
+          <input type="checkbox" id="{_spatial_id("creative")}" />
+          <span>Creative first</span>
+        </label>""")}
+
+      {_widget("person", "Person", "", f"""
+        <div id="{_spatial_id("person")}" class="{SPATIAL_PREFIX}-person">
+          {_palette(PERSON_SHAPES, "person")}
+        </div>""")}
+
+      {_widget("layers", "Layers",
+               f'<span id="{_spatial_id("count")}" class="{SPATIAL_PREFIX}-tally"></span>',
+               f"""
+        <div id="{_spatial_id("list")}" class="{SPATIAL_PREFIX}-list" role="listbox"
+             aria-label="Layers" tabindex="0"></div>
+        <div class="{SPATIAL_PREFIX}-rowbar" role="group" aria-label="Layer actions">
+          <button type="button" id="{_spatial_id("duplicate")}"
+                  class="{SPATIAL_PREFIX}-tool">Duplicate</button>
+          <button type="button" id="{_spatial_id("lower")}"
+                  class="{SPATIAL_PREFIX}-tool">Back</button>
+          <button type="button" id="{_spatial_id("front")}"
+                  class="{SPATIAL_PREFIX}-tool">Front</button>
+          <button type="button" id="{_spatial_id("delete")}"
+                  class="{SPATIAL_PREFIX}-tool {SPATIAL_PREFIX}-danger">Delete</button>
+        </div>""")}
+
+      {_widget("inspector", "Inspector",
+               f'<span id="{_spatial_id("selected-name")}"'
+               f' class="{SPATIAL_PREFIX}-tally"></span>',
+               f"""
+        <div class="{SPATIAL_PREFIX}-pair">
+          <label class="{SPATIAL_PREFIX}-field">
+            <span>Name</span>
+            <input type="text" id="{_spatial_id("name")}" />
+          </label>
+          <label class="{SPATIAL_PREFIX}-field">
+            <span>Shape</span>
+            <input type="text" id="{_spatial_id("shape")}" readonly />
+          </label>
+        </div>
         <label class="{SPATIAL_PREFIX}-field">
           <span>Type</span>
           <select id="{_spatial_id("type")}">
@@ -640,28 +819,23 @@ def spatial_editor() -> str:
           </select>
         </label>
         <label class="{SPATIAL_PREFIX}-field" id="{_spatial_id("text-field")}" hidden>
-          <span>Visible text</span>
-          <input type="text" id="{_spatial_id("text")}"
-                 placeholder="the exact words to render" />
+          <span>Text</span>
+          <input type="text" id="{_spatial_id("text")}" />
         </label>
         <label class="{SPATIAL_PREFIX}-field {SPATIAL_PREFIX}-grow">
-          <span id="{_spatial_id("prompt-label")}">Region prompt</span>
-          <textarea id="{_spatial_id("prompt")}" rows="5"
-                    placeholder="what is in this box, in your own words &#10;&#10;[[her shirt from image 1]] is passed straight to the image model"></textarea>
+          <span id="{_spatial_id("prompt-label")}">Prompt</span>
+          <textarea id="{_spatial_id("prompt")}" rows="4"></textarea>
         </label>
         <div class="{SPATIAL_PREFIX}-pair">
           <label class="{SPATIAL_PREFIX}-field">
-            <span>Literal Positive</span>
-            <input type="text" id="{_spatial_id("literal-prefix")}"
-                   placeholder="kept from every language model, first in this box" />
+            <span>Literal +</span>
+            <input type="text" id="{_spatial_id("literal-prefix")}" />
           </label>
           <label class="{SPATIAL_PREFIX}-field">
-            <span>Literal Negative</span>
-            <input type="text" id="{_spatial_id("literal-suffix")}"
-                   placeholder="the same, last in this box" />
+            <span>Literal &#8722;</span>
+            <input type="text" id="{_spatial_id("literal-suffix")}" />
           </label>
         </div>
-
         <div class="{SPATIAL_PREFIX}-pair">
           <label class="{SPATIAL_PREFIX}-field" id="{_spatial_id("framing-field")}">
             <span>Framing</span>
@@ -672,15 +846,79 @@ def spatial_editor() -> str:
             <select id="{_spatial_id("angle")}">{_options(spatial.ANGLES, "Automatic")}</select>
           </label>
         </div>
-
-        <div class="{SPATIAL_PREFIX}-destructive">
-          <button type="button" id="{_spatial_id("duplicate")}"
-                  class="{SPATIAL_PREFIX}-tool">Duplicate</button>
-          <button type="button" id="{_spatial_id("delete")}"
-                  class="{SPATIAL_PREFIX}-tool {SPATIAL_PREFIX}-danger">Delete</button>
+        <label class="{SPATIAL_PREFIX}-field {SPATIAL_PREFIX}-range"
+               id="{_spatial_id("rotation-field")}" hidden>
+          <span>Rotation <b id="{_spatial_id("rotation-read")}">0°</b></span>
+          <input type="range" id="{_spatial_id("rotation")}"
+                 min="-180" max="180" step="1" value="0" />
+        </label>
+        <div class="{SPATIAL_PREFIX}-bbox" role="group" aria-label="BBOX">
+          <label class="{SPATIAL_PREFIX}-field">
+            <span>X</span>
+            <input type="number" id="{_spatial_id("bbox", "x")}"
+                   min="0" max="1000" step="1" />
+          </label>
+          <label class="{SPATIAL_PREFIX}-field">
+            <span>Y</span>
+            <input type="number" id="{_spatial_id("bbox", "y")}"
+                   min="0" max="1000" step="1" />
+          </label>
+          <label class="{SPATIAL_PREFIX}-field">
+            <span>W</span>
+            <input type="number" id="{_spatial_id("bbox", "w")}"
+                   min="1" max="1000" step="1" />
+          </label>
+          <label class="{SPATIAL_PREFIX}-field">
+            <span>H</span>
+            <input type="number" id="{_spatial_id("bbox", "h")}"
+                   min="1" max="1000" step="1" />
+          </label>
         </div>
-      </section>
+        <label class="{SPATIAL_PREFIX}-check">
+          <input type="checkbox" id="{_spatial_id("auto-hint")}" checked />
+          <span>Position and size hints</span>
+        </label>""")}
 
+      {_widget("gallery", "Gallery",
+               f'<span id="{_spatial_id("shot", "at")}"'
+               f' class="{SPATIAL_PREFIX}-tally"></span>',
+               f"""
+        <div id="{_spatial_id("shot")}" class="{SPATIAL_PREFIX}-shot"></div>
+        <div class="{SPATIAL_PREFIX}-rowbar" role="group" aria-label="Results">
+          <button type="button" id="{_spatial_id("shot", "previous")}"
+                  class="{SPATIAL_PREFIX}-tool">Previous</button>
+          <button type="button" id="{_spatial_id("shot", "next")}"
+                  class="{SPATIAL_PREFIX}-tool">Next</button>
+          <button type="button" id="{_spatial_id("generate")}"
+                  class="{SPATIAL_PREFIX}-tool {SPATIAL_PREFIX}-primary">Generate</button>
+        </div>
+        <div id="{_spatial_id("progress")}" class="{SPATIAL_PREFIX}-progress" hidden>
+          <span id="{_spatial_id("progress", "bar")}"
+                class="{SPATIAL_PREFIX}-progress-bar"></span>
+          <span id="{_spatial_id("progress", "read")}"
+                class="{SPATIAL_PREFIX}-progress-read"></span>
+        </div>""")}
+
+      {_widget("session", "Session", "", f"""
+        <dl class="{SPATIAL_PREFIX}-facts">
+          <dt>Frame</dt><dd id="{_spatial_id("fact", "frame")}"></dd>
+          <dt>Ratio</dt><dd id="{_spatial_id("fact", "ratio")}"></dd>
+          <dt>Regions</dt><dd id="{_spatial_id("fact", "regions")}"></dd>
+          <dt>Pipeline</dt><dd id="{_spatial_id("fact", "pipeline")}"></dd>
+          <dt>State</dt><dd id="{_spatial_id("fact", "state")}"></dd>
+        </dl>
+        <div class="{SPATIAL_PREFIX}-pair">
+          <label class="{SPATIAL_PREFIX}-field">
+            <span>Width</span>
+            <input type="number" id="{_spatial_id("size", "width")}"
+                   min="64" max="8192" step="8" />
+          </label>
+          <label class="{SPATIAL_PREFIX}-field">
+            <span>Height</span>
+            <input type="number" id="{_spatial_id("size", "height")}"
+                   min="64" max="8192" step="8" />
+          </label>
+        </div>""")}
     </div>
   </div>
 </div>'''
@@ -713,7 +951,7 @@ def spatial_compact() -> str:
     <div id="{_spatial_id("compact", "regions")}"
          class="{SPATIAL_PREFIX}-compact-regions"></div>
     <p id="{_spatial_id("compact", "empty")}" class="{SPATIAL_PREFIX}-compact-empty">
-      No regions yet. Press Edit Layout… to draw one.</p>
+      No regions yet. Press Full Screen to draw one.</p>
   </div>
   <p id="{_spatial_id("compact", "note")}" class="{SPATIAL_PREFIX}-compact-note"
      role="status" aria-live="polite"></p>
@@ -753,7 +991,7 @@ def spatial_summary(serialized, enabled: bool = True, creative=None,
     pipeline = mc_krea_pipeline.described(creative=bool(creative),
                                           spatial=bool(enabled), mode=mode)
     if not layout.regions:
-        return notice("No regions yet. Press Edit Layout to draw one.", hint=pipeline)
+        return notice("No regions yet. Press Full Screen to draw one.", hint=pipeline)
     said = spatial.summarise(layout)
     if not enabled:
         return notice(f"{said} — Spatial Layout is off, so they are not applied.",
@@ -1547,7 +1785,7 @@ class ScriptKreaCreative(scripts.Script):
                         info="saves every finished edit")
                     mc_hint.control(
                         "One switch for both canvases: this one and the full "
-                        "Edit Layout editor. On, every finished edit is saved "
+                        "Full Screen editor. On, every finished edit is saved "
                         "as it happens -- a box let go of after a move or a "
                         "resize, a region added, deleted or reordered, an undo. "
                         "A text field saves when the cursor leaves it, not on "
@@ -1559,7 +1797,7 @@ class ScriptKreaCreative(scripts.Script):
                     spatial_commit = gr.Button("Save working layout", size="sm",
                                                scale=1,
                                                elem_id=_spatial_id("compact", "commit"))
-                    edit = gr.Button("Edit Layout…", size="sm", scale=1,
+                    edit = gr.Button("Full Screen", size="sm", scale=1,
                                      variant="primary", elem_id=_spatial_id("open"))
 
             spatial_status = gr.HTML(
@@ -1646,7 +1884,7 @@ class ScriptKreaCreative(scripts.Script):
         #
         # Section 6.5 and section 10: the full BBOX workspace keeps its
         # dedicated large area. It is a block in ordinary document flow that
-        # Edit Layout reveals and Back hides, and it belongs at the top level
+        # Full Screen reveals and Close hides, and it belongs at the top level
         # rather than nested three containers deep inside an accordion -- a
         # workspace inside a drawer is one `overflow: hidden` away from being a
         # window nobody can see. It is hidden until opened, so it costs no
