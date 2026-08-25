@@ -322,6 +322,30 @@ class Region:
     a command out of the prompt box and into a field, silently, once.
     """
 
+    ui_shape: str = "rect"
+    ui_rotation: int = 0
+    """What the editor drew, and how far round it turned it.
+
+    Editor metadata, carried and never read. The layout workspace lets a region
+    be laid out as a head, an arm or a foot rather than as an unlabelled
+    rectangle, and lets a silhouette be rotated so that a raised arm looks like
+    a raised arm; the *model* is handed the same axis-aligned bounding box it
+    has always been handed, in the same normalized units, whatever silhouette is
+    drawn inside it.
+
+    They exist on the Region for one reason: :meth:`state` has to be able to
+    hand the canvas back the way it was drawn. Without them, a round trip
+    through here -- a restore from an image, a saved layout reloaded -- would
+    silently return every silhouette as a rectangle and every rotation as zero,
+    which is the same class of loss ``raw_prompt`` exists to prevent.
+
+    Nothing in :meth:`describe`, :meth:`element` or :func:`compose` reads
+    either one, and no test of the composed prompt can be made to change by
+    setting them. An unknown shape is kept verbatim rather than rejected: a
+    build that predates a shape must round-trip a document that uses it, or
+    opening an image's layout in an older Forge would delete the drawing.
+    """
+
     prefix_literals: tuple[str, ...] = ()
     suffix_literals: tuple[str, ...] = ()
     """This region's literal payloads, in source order, split by direction.
@@ -450,6 +474,14 @@ class Region:
         if self.literal_suffix:
             found["literal_suffix"] = self.literal_suffix
         found.update({"framing": self.framing, "angle": self.angle, "z": self.z})
+        # The same rule as the region literals above, for the same reason: a
+        # rectangle layout round-trips to the bytes it always did, so a document
+        # this build writes stays readable by one that predates the editor
+        # metadata entirely.
+        if self.ui_shape and self.ui_shape != "rect":
+            found["ui_shape"] = self.ui_shape
+        if self.ui_rotation:
+            found["ui_rotation"] = self.ui_rotation
         return found
 
 
@@ -697,10 +729,22 @@ def _region(entry, position: int) -> tuple[Region | None, str]:
     except (TypeError, ValueError):
         z = position
 
+    # Editor metadata, carried through untouched and never validated against a
+    # list of known shapes. This module has no opinion about what the canvas
+    # draws -- only about the rectangle it is drawn in -- and refusing a shape
+    # it has not heard of would delete somebody's drawing on the way past.
+    ui_shape = str(entry.get("ui_shape") or "rect").strip() or "rect"
+    try:
+        ui_rotation = int(entry.get("ui_rotation") or 0)
+    except (TypeError, ValueError):
+        ui_rotation = 0
+    ui_rotation = max(-180, min(180, ui_rotation))
+
     return (Region(identifier=identifier, name=name, kind=kind, bbox=tuple(bbox),
                    prompt=prompt, text=text, framing=framing, angle=angle, z=z,
                    index=position,
                    raw_prompt=raw_prompt if raw_prompt != prompt else "",
+                   ui_shape=ui_shape, ui_rotation=ui_rotation,
                    literal_prefix=literal_prefix, literal_suffix=literal_suffix,
                    prefix_literals=parsed.prefixes,
                    suffix_literals=parsed.suffixes),

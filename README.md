@@ -1441,10 +1441,9 @@ A few details worth knowing:
   reaching Krea; the actual image comes from Forge Neo's own **ImageStitch**
   gallery, which Creative Mode does not touch, caption, re-encode or reorder.
   Nothing here needs a vision projector.
-* **Region prompts take both** — see *Spatial Layout* below. Each region in the
-  full editor has its own pair of Literal Positive / Literal Negative boxes, and
-  a literal written in a region stays in that region whichever way it was
-  written.
+* **Region prompts take both** — see *Spatial Layout* below. The full workspace
+  gives every region its own pair of Literal + / Literal − boxes, and a literal
+  written in a region stays in that region whichever way it was written.
 * **Stage 1 commands never reach Stage 2.** A Model Chain second stage inherits
   a version of the prompt the payloads were never written into, so a Krea edit
   LoRA does not follow your image into a Flux or SDXL pass. Put Stage 2 syntax
@@ -1702,9 +1701,9 @@ Spatial                                               [ON]
     │  └────────┘   ┌────┐ │
     │               │Sign│ │
     └───────────────┴────┴─┘
-    Drag a box to move it. Edit Layout… for everything else.
+    Drag a box to move it. Full Screen for everything else.
 
-    [x] Auto Save   [Undo]  [Save working layout]  [Edit Layout…]
+    [x] Auto Save   [Undo]  [Save working layout]  [Full Screen]
 ```
 
 **Your words in a box are yours.** A region prompt never goes near the Creative
@@ -1752,7 +1751,7 @@ by mistake, and a drag never changes a region's size, contents, kind or stacking
 order.
 
 It deliberately cannot create, delete, rename, resize or restyle a region.
-Those are all in the full editor, one button away. A compact canvas that could
+Those are all in the full workspace, one button away. A compact canvas that could
 also delete a region would be a second editor competing with the first over the
 same document; this is a shortcut into that document, not another copy of it.
 
@@ -1786,27 +1785,78 @@ for as long as you like. The boxes you just nudged are the boxes that will be
 composed; *Studio thirds* still holds what it held. Dragging a box never
 silently rewrites a layout you named.
 
-#### The full editor
+#### The full workspace
 
-**Edit Layout…** opens a full-window canvas in the shape of the image you are
-about to make, with a thirds grid and a centre cross on it. Everything the
-compact canvas cannot do is here, unchanged.
+**Full Screen** hands the whole txt2img work area to a composition workspace:
+the canvas on the left at the full height of the tab, and one rail of optional
+tools on the right. The rest of the tab is hidden while it is open and comes
+back when you close it — your browser keeps its own chrome, its own Back button
+and its own address bar throughout, and nothing is torn out of the page to
+achieve it.
+
+```
+[ Spatial ]  [Direct BBOX|Smart Spatial]  [Quick Add ▾] [Draw] [Clear All] [Panels ▾]
+                                             [Undo] [Redo] [Save] [Close]
+┌──────────────────────────────────┬─────────────────────────┐
+│ 2:3            Fit − 100% + Grid │ ▾ Prompts               │
+│ ┌──────────────────────────────┐ │ ▾ Person                │
+│ │        ┌────────┐            │ │ ▾ Layers            3   │
+│ │        │   1    │            │ │ ▾ Inspector         2   │
+│ │        └────────┘            │ │ ▾ Gallery         2/5   │
+│ │   ╭──╮        ┌────┐         │ │ ▾ Session               │
+│ │   │2 │        │ 3  │         │ │                         │
+│ │   ╰──╯        └────┘         │ │                         │
+│ └──────────────────────────────┘ │                         │
+└──────────────────────────────────┴─────────────────────────┘
+```
+
+The frame is the shape of the image you are about to make, and follows the
+generation size while you work. The rail scrolls on its own; every widget in it
+collapses from its own header and can be switched off entirely from **Panels**,
+so nothing you open in it ever costs the canvas a pixel.
 
 | | |
 | --- | --- |
-| **Draw region** then drag | a new region, selected, with the cursor already in its prompt box |
-| drag a box / drag a corner | move it / resize it |
-| **Duplicate**, **Delete**, **Forward**, **Back** | the obvious things; Delete and Backspace work on the canvas too |
-| **Escape** | abandons a drag in progress; press it again to close without saving |
-| **Object** / **Text** | a subject, or words you want rendered — a text region carries the exact string separately from its description, so only the words get drawn |
-| **Literal Positive** / **Literal Negative** | this region's own protected text, kept from every language model and placed first and last in the region's description |
-| **Save & Close** / **Cancel** | Cancel changes nothing |
+| **Quick Add ▾** | Box, Head, Chest, Waist and a size slider. Tap one to drop it in the middle, or drag it onto the canvas to drop it where you let go |
+| **Draw** then drag | a region at exactly the bounds you dragged, selected, with the cursor already in its prompt box. One region, then Draw switches itself off |
+| **Clear All** | removes every region in one action — and one **Undo** brings them all back, which is why it does not stop to ask |
+| drag a box / drag a corner | move it / resize it, with eight handles and hit targets that grow on a touch screen |
+| **Panels ▾** | which widgets are in the rail, plus Collapse All and Expand Visible |
+| **Save** / **Close** | Save commits and *stays open*; Close asks before discarding anything unsaved, and never saves silently |
+| **Escape** | closes a menu, then abandons a gesture, then offers to close the workspace |
+| arrows / **Delete** / **Ctrl+Z** | nudge, delete, undo — with the canvas focused |
+
+#### The rail
+
+| Widget | What is in it |
+| --- | --- |
+| **Prompts** | your **Prompt**, **Literal +** and **Literal −** — the same boxes as the ones on the tab, not copies of them. Type in either place and the other follows |
+| **Person** | a segmented figure whose head, chest, waist, arms, hands, legs and feet can each be dragged onto the canvas on their own. Each part arrives with its own words already in its prompt |
+| **Layers** | every region in prompt order, draggable to reorder (or Alt+↑/↓), with Duplicate, Back, Front and Delete |
+| **Inspector** | the selected region: name, shape, type, prompt, Literal + / −, framing, camera angle, rotation, the four BBOX numbers and the position-hint switch |
+| **Gallery** | the tab's own results, with Previous, Next and **Generate**. Generate presses the ordinary txt2img button, so you can generate, look, change a box and generate again without ever leaving |
+| **Session** | frame, ratio, region count, which pipeline is armed, and whether the working layout is saved — plus **Width** and **Height** if you want to change the shape from here |
+
+#### Silhouettes are a drawing, not a mask
+
+A region placed from **Person** or from Quick Add's Head/Chest/Waist looks like
+what it is, and can be rotated from the Inspector so a raised arm looks raised.
+None of that reaches the model. Every region — silhouette or not, rotated or
+not — is still one axis-aligned rectangle in normalized coordinates, and that
+rectangle is what Krea 2 is given. Rotating a shape does not rotate its box, and
+no outline, path or shape name ever appears in the prompt.
+
+The shape and the angle are saved with the layout as `ui_shape` and
+`ui_rotation`, and only when they say something: a layout of plain rectangles
+serializes to exactly the bytes it always did, a layout drawn before this
+existed loads as rectangles at 0°, and a shape from a future build that this one
+cannot draw is drawn as a rectangle rather than refused.
 
 Boxes are stored as fractions of the frame (0–1000), not pixels, so **changing
 the resolution does not move anything**. Change the *aspect ratio* and the boxes
-stay exactly where they are and a line appears at the top of the editor saying
-the frame is now a different shape — your layout is never silently reprojected
-and never silently deleted.
+stay exactly where they are, the frame is redrawn around them, and the Session
+widget says the frame changed — your layout is never silently reprojected and
+never silently deleted.
 
 #### Smart or Direct
 

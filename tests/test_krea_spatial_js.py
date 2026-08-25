@@ -31,6 +31,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
@@ -157,6 +158,10 @@ function matches(element, selector) {
         .some(function (part) {
             if (part.startsWith("#")) return element.id === part.slice(1);
             if (part.startsWith(".")) return element.classList.contains(part.slice(1));
+            // [data-mc-spatial-path] -- how the takeover finds what it marked.
+            if (part.startsWith("[") && part.endsWith("]")) {
+                return element.getAttribute(part.slice(1, -1)) !== null;
+            }
             return element.tagName === part.toUpperCase();
         });
 }
@@ -205,6 +210,7 @@ class El {
     getAttribute(name) {
         return this.attributes[name] === undefined ? null : this.attributes[name];
     }
+    removeAttribute(name) { delete this.attributes[name]; }
     get textContent() {
         return this._text + this.children.map((child) => child.textContent).join("");
     }
@@ -256,7 +262,12 @@ class El {
 let focused = null;
 
 const body = new El("body");
-const page = body.appendChild(new El("div"));
+// The takeover marks every ancestor between the workspace and the txt2img tab,
+// so the fake page has one: without it the walk runs to the top and marks
+// nothing, which is a different thing from the browser does.
+const tab = body.appendChild(new El("div"));
+tab.id = "tab_txt2img";
+const page = tab.appendChild(new El("div"));
 
 function make(tag, id, into) {
     const element = new El(tag);
@@ -335,28 +346,115 @@ make("div", "txt2img_height").appendChild(height);
 const published = [];
 stateBox.addEventListener("input", function () { published.push(stateBox.value); });
 
+// The rest of the txt2img tab the workspace shows rather than copies: the
+// prompt, the two Literal boxes, the two feature toggles, the composition radio
+// and the result gallery. Every one of these is a component that already
+// exists, and the point of the tests below is that the workspace writes *these*
+// rather than keeping a value of its own.
+function hostBox(id, tag, value) {
+    const field = new El(tag || "textarea");
+    field.value = value === undefined ? "" : value;
+    make("div", id).appendChild(field);
+    return field;
+}
+
+const hostPrompt = hostBox("txt2img_prompt", "textarea", "a lighthouse");
+const hostLiteralPlus = hostBox("mc-krea-creative-literal-positive", "textarea", "");
+const hostLiteralMinus = hostBox("mc-krea-creative-literal-negative", "textarea", "");
+
+function hostToggle(id, on) {
+    const box = new El("input");
+    box.type = "checkbox";
+    box.checked = !!on;
+    make("div", id).appendChild(box);
+    return box;
+}
+
+const hostSpatial = hostToggle("mc-krea-creative-spatial-toggle", true);
+const hostCreative = hostToggle("mc-krea-creative-toggle", false);
+
+// Gradio renders a Radio as inputs inside labels; which of `value` and the
+// label text carries the choice has moved between versions, so the fake page
+// carries both and the file under test is free to read either.
+const composeHolder = make("div", "mc-krea-creative-spatial-compose");
+const composeInputs = {};
+["smart", "direct"].forEach(function (mode) {
+    const label = new El("label");
+    const input = new El("input");
+    input.type = "radio";
+    input.value = mode;
+    input.checked = mode === "smart";
+    label.appendChild(input);
+    label._text = mode === "smart" ? "Smart Spatial Compose" : "Direct BBOX Merge";
+    composeHolder.appendChild(label);
+    composeInputs[mode] = input;
+});
+
+// The result gallery and the area the host draws its progress bar into.
+const gallery = make("div", "txt2img_gallery");
+const results = make("div", "txt2img_results");
+results.appendChild(gallery);
+
+function showImages(sources) {
+    gallery.children = [];
+    sources.forEach(function (src) {
+        const image = new El("img");
+        image.src = src;
+        gallery.appendChild(image);
+    });
+    mutate();
+}
+
+// What javascript/progressbar.js builds and tears down around a generation.
+function showProgress(width, said) {
+    const holder = new El("div");
+    holder.className = "progressDiv";
+    const bar = new El("div");
+    bar.className = "progress";
+    bar.style.width = width;
+    bar.textContent = said;
+    holder.appendChild(bar);
+    results.appendChild(holder);
+    mutate();
+}
+
+function clearProgress() {
+    results.querySelectorAll(".progressDiv").forEach(function (entry) {
+        results.removeChild(entry);
+    });
+    mutate();
+}
+
+// A MutationObserver that observes nothing and fires when a test says the page
+// changed. It exists so that the observer path in the file under test is the
+// path the tests exercise -- and so that "no timer was armed" stays a true
+// statement about a gallery that keeps up with the host.
+let observers = [];
+globalThis.MutationObserver = function (fn) {
+    this.observe = function () { observers.push(fn); };
+    this.disconnect = function () {
+        observers = observers.filter((entry) => entry !== fn);
+    };
+};
+
+function mutate() {
+    observers.slice().forEach((fn) => fn([]));
+}
+
 // Present so a file that went looking for it would find it. Nothing here may
-// touch it: a generation that a browser can delay is the arrangement this whole
-// design removed.
+// *listen* to it -- a generation that a browser can delay is the arrangement
+// this whole design removed -- and §16.4 is the one thing allowed to press it:
+// once, inside the click the user made, with nothing waiting on the result.
 const generate = make("button", "txt2img_generate");
 let generateListeners = 0;
+let generatePresses = 0;
 generate.addEventListener = function () { generateListeners += 1; };
-generate.click = function () { throw new Error("the editor pressed Generate"); };
+generate.click = function () { generatePresses += 1; };
 
 globalThis.document = {
     body: body,
     dataset: {},
     readyState: "complete",
-    // Present but empty, the way a browser that offers the Fullscreen API and
-    // is not currently in it looks. A test that wants the API to work installs
-    // requestFullscreen on the workspace itself; one that wants the fallback
-    // simply does not.
-    fullscreenElement: null,
-    exitFullscreen() {
-        globalThis.document.fullscreenElement = null;
-        (docListeners.fullscreenchange || []).forEach((fn) => fn({}));
-        return Promise.resolve();
-    },
     createElement: (tag) => new El(tag),
     querySelector: (selector) => body.querySelector(selector),
     querySelectorAll: (selector) => body.querySelectorAll(selector),
@@ -436,20 +534,51 @@ function compactDrag(from, to, target, kind) {
                          preventDefault() {}});
 }
 
-// A workspace whose requestFullscreen answers the way `answer` says: "yes"
-// resolves and promotes it, "no" rejects so the fallback has to take over.
-function fullscreenAnswers(answer) {
-    const workspace = el("mc-krea-spatial-workspace");
-    workspace.requestFullscreen = function () {
-        if (answer === "no") return Promise.reject(new Error("refused"));
-        globalThis.document.fullscreenElement = workspace;
-        return Promise.resolve();
-    };
-    return workspace;
+// §3.1's takeover, as a test can see it: the class on the tab, and the marks on
+// the chain of ancestors between the tab and the workspace.
+function taken() {
+    return tab.classList.contains("mc-krea-spatial-taken");
 }
 
-function fullpage() {
-    return el("mc-krea-spatial-workspace").classList.contains("fullpage");
+function marked() {
+    return body.querySelectorAll("[data-mc-spatial-path]").length;
+}
+
+// A palette press, and whether it moves before it is let go: a tap places the
+// shape centred, a drag places it where it is dropped. Delivered to the
+// workspace, which is where the file listens and where the capture is taken.
+function palette(shape) {
+    return body.querySelectorAll(".mc-krea-spatial-shape-button")
+        .filter((entry) => entry.dataset.shape === shape)[0] || null;
+}
+
+function place(shape, to, palette_) {
+    const workspace = el("mc-krea-spatial-workspace");
+    const button = palette_ || palette(shape);
+    workspace.dispatchEvent({type: "pointerdown", target: button, pointerId: 3,
+                             isPrimary: true, button: 0, clientX: 0, clientY: 0,
+                             preventDefault() {}});
+    if (to) {
+        workspace.dispatchEvent({type: "pointermove", target: button, pointerId: 3,
+                                 clientX: to[0], clientY: to[1], preventDefault() {}});
+        workspace.dispatchEvent({type: "pointerup", target: button, pointerId: 3,
+                                 clientX: to[0], clientY: to[1], preventDefault() {}});
+        return;
+    }
+    workspace.dispatchEvent({type: "pointerup", target: button, pointerId: 3,
+                             clientX: 0, clientY: 0, preventDefault() {}});
+}
+
+function panelBody(key) {
+    return el("mc-krea-spatial-panel-" + key + "-body");
+}
+
+function panelShown(key) {
+    return !el("mc-krea-spatial-panel-" + key).hidden;
+}
+
+function panelOpen(key) {
+    return !panelBody(key).hidden;
 }
 
 function handle(corner) {
@@ -470,6 +599,14 @@ function inList(target) {
 
 function clickRow(index) {
     inList(rows()[index]);
+}
+
+// The list's own keydown, delegated the same way its clicks are: Alt with an
+// arrow is the reorder a hand that cannot drag still has.
+function rowKey(index, name, extra) {
+    const row = rows()[index];
+    el("mc-krea-spatial-list").dispatchEvent(Object.assign(
+        {type: "keydown", key: name, target: row, preventDefault() {}}, extra || {}));
 }
 
 function key(name, target, extra) {
@@ -500,9 +637,11 @@ const report = (extra) => console.log(JSON.stringify(Object.assign({
     workspaces: body.querySelectorAll("#mc-krea-spatial-workspace").length,
     generateListeners: generateListeners,
     open: ks.state.open,
+    generatePresses: generatePresses,
     regions: ks.ordered().map(function (region) {
         return {id: region.id, bbox: region.bbox, type: region.type,
-                name: region.name, prompt: region.prompt, z: region.z};
+                name: region.name, prompt: region.prompt, z: region.z,
+                shape: region.shape, rotation: region.rotation};
     }),
     selected: ks.state.selected,
     past: ks.state.past.length,
@@ -511,6 +650,21 @@ const report = (extra) => console.log(JSON.stringify(Object.assign({
     confirming: ks.state.confirming,
     published: published.length,
     stateBox: stateBox.value,
+    taken: taken(),
+    marked: marked(),
+    popup: ks.state.popup,
+    hidden: Object.keys(ks.state.hidden).filter((key) => ks.state.hidden[key]),
+    collapsed: Object.keys(ks.state.collapsed).filter((key) => ks.state.collapsed[key]),
+    shots: ks.state.shots,
+    shotAt: ks.state.shotAt,
+    hostPrompt: hostPrompt.value,
+    hostLiteralPlus: hostLiteralPlus.value,
+    hostLiteralMinus: hostLiteralMinus.value,
+    hostSpatial: hostSpatial.checked,
+    hostCreative: hostCreative.checked,
+    hostMode: composeInputs.direct.checked ? "direct" : "smart",
+    hostWidth: width.value,
+    hostHeight: height.value,
     compactRegions: ks.compactRegions().map(function (region) {
         return {id: region.id, bbox: region.bbox, name: region.name};
     }),
@@ -526,6 +680,13 @@ BODY
 
 
 def run(script: str, initial: str = "", pointers: bool = True) -> dict:
+    """The harness plus one test body, executed by node, and its report read back.
+
+    Written to a file rather than passed with ``-e``: the workspace markup and
+    the file under test together are comfortably past the length a command line
+    will carry, and a test suite that fails with "argument list too long" the
+    day the editor grows is a test suite measuring the wrong thing.
+    """
     harness = (
         HARNESS.replace("SOURCE", SCRIPT.read_text(encoding="utf-8"))
         .replace("BODY", script)
@@ -533,8 +694,11 @@ def run(script: str, initial: str = "", pointers: bool = True) -> dict:
         .replace("POINTERS", "true" if pointers else "false")
         .replace("INITIAL", json.dumps(initial))
     )
-    result = subprocess.run(["node", "--input-type=module", "-e", harness],
-                            capture_output=True, text=True, timeout=60)
+    with tempfile.TemporaryDirectory() as room:
+        entry = Path(room) / "harness.mjs"
+        entry.write_text(harness, encoding="utf-8")
+        result = subprocess.run(["node", str(entry)],
+                                capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])
 
@@ -575,17 +739,16 @@ class TestTheGenerationDoesNotWaitForThisFile:
 
         assert found["timers"] == 0
 
-    def test_the_file_never_names_the_generate_button(self):
-        """Read rather than run, because the honest way to ask "could this ever
-        press Generate" is to check that it does not know where Generate is."""
-        source = SCRIPT.read_text(encoding="utf-8")
-        code = "\n".join(line for line in source.splitlines()
-                         if not line.strip().startswith("//"))
-
-        assert "txt2img_generate" not in code
-        assert ".click(" not in code
-
     def test_it_listens_to_nothing_on_the_generate_button(self):
+        """The rule, stated the way it survives §16.
+
+        The file used not to know where Generate was at all, and that was one
+        way of guaranteeing it could never wait for one. §16.4 asks for a
+        Generate button in the Gallery widget, which means the file now knows
+        the id -- so the property is defended where it actually lives: it
+        installs no listener on that button, so there is no click for it to
+        swallow, hold or replay.
+        """
         found = run("""
             ks.open();
             ks.save();
@@ -594,13 +757,49 @@ class TestTheGenerationDoesNotWaitForThisFile:
 
         assert found["generateListeners"] == 0
 
+    def test_it_presses_generate_only_when_somebody_presses_generate(self):
+        """§16.4: the host's own button, once, inside the user's own click.
+
+        Not a second endpoint, not a queued click and not a timer -- and
+        nothing in the editor's own life (opening, editing, saving) touches it.
+        """
+        found = run("""
+            ks.open();
+            draw([100, 100], [400, 400]);
+            ks.save();
+            const before = generatePresses;
+            press("mc-krea-spatial-generate");
+            advance(60 * 60 * 1000);
+            await flush();
+            report({before: before});
+        """, initial=document())
+
+        assert found["before"] == 0
+        assert found["generatePresses"] == 1
+        assert found["timers"] == 0
+
+    def test_the_gallery_hears_about_results_rather_than_asking(self):
+        """§16.5. A MutationObserver, and no interval anywhere near it: the
+        difference between being told the gallery changed and asking sixty
+        times a minute in a tab nobody is looking at."""
+        found = run("""
+            ks.open();
+            showImages(["one.png", "two.png"]);
+            advance(60 * 60 * 1000);
+            await flush();
+            report();
+        """, initial=document())
+
+        assert found["shots"] == ["one.png", "two.png"]
+        assert found["timers"] == 0
+
     def test_re_wiring_does_not_stack_up_document_listeners(self):
         """``onAfterUiUpdate`` fires on most interactions, and ``document`` has
         no dataset for a flag to live on -- so the guard that makes every other
-        listener idempotent cannot cover them. Two are left -- a keystroke, and
-        the browser saying it has left full screen. Pointer capture removed the
-        rest: a drag that leaves the frame is still delivered to the frame, so
-        there is nothing else for the document to hear."""
+        listener idempotent cannot cover them. One is left: a keystroke, which
+        has to be heard with the focus anywhere in the page. Pointer capture
+        removed the rest, and §3.1's takeover removed the fullscreenchange
+        listener that used to be the second."""
         found = run("""
             const first = Object.keys(docListeners)
                 .reduce((total, kind) => total + docListeners[kind].length, 0);
@@ -608,8 +807,8 @@ class TestTheGenerationDoesNotWaitForThisFile:
             report({first: first});
         """, initial=document())
 
-        assert found["first"] == 2
-        assert found["documentListeners"] == 2
+        assert found["first"] == 1
+        assert found["documentListeners"] == 1
 
     def test_there_is_no_polling_of_any_kind(self):
         found = run("""
@@ -768,12 +967,14 @@ class TestDrawing:
         assert found["drawing"] is False
         assert found["regions"] == []
 
-    def test_add_region_makes_one_without_a_precision_gesture(self):
-        """§7.1. The whole point of the button: a touch user does not have to
-        drag accurately to get a box at all."""
+    def test_quick_add_makes_a_box_without_a_precision_gesture(self):
+        """§10.2, acceptance test C's rectangle half. The whole point of the
+        palette: a touch user does not have to drag accurately to get a box at
+        all, and the one they get is selected with the cursor in its prompt."""
         found = run("""
             ks.open();
-            press("mc-krea-spatial-add");
+            press("mc-krea-spatial-quick");
+            place("rect", null);
             report({focused: !!el("mc-krea-spatial-prompt").focused});
         """)
 
@@ -1136,18 +1337,22 @@ class TestTheRegionList:
         assert found["regions"][1]["prompt"] == found["regions"][0]["prompt"]
 
     def test_z_order_is_renumbered_from_the_visible_order(self):
-        """"Forward" means one place forward however the numbers arrived --
-        including from a hand-edited document where three regions all claim
-        z 0."""
-        two = json.dumps([dict(FACE, id="a", z=0),
-                          dict(FACE, id="b", z=0),
-                          dict(FACE, id="c", z=0)])
+        """One place forward means one place forward however the numbers
+        arrived -- including from a hand-edited document where three regions
+        all claim z 0.
+
+        §14.2 leaves Front and Back on the panel and makes the single step the
+        list's own Alt+Arrow, which is the gesture this drives.
+        """
+        three = json.dumps([dict(FACE, id="a", z=0),
+                            dict(FACE, id="b", z=0),
+                            dict(FACE, id="c", z=0)])
         found = run("""
             ks.open();
             ks.select("a");
-            press("mc-krea-spatial-raise");
+            rowKey(0, "ArrowDown", {altKey: true});
             report();
-        """, initial=document(json.loads(two)))
+        """, initial=document(json.loads(three)))
 
         assert [region["id"] for region in found["regions"]] == ["b", "a", "c"]
 
@@ -1155,8 +1360,8 @@ class TestTheRegionList:
         found = run("""
             ks.open();
             ks.select("r1");
-            press("mc-krea-spatial-raise");
-            press("mc-krea-spatial-raise");
+            press("mc-krea-spatial-front");
+            press("mc-krea-spatial-front");
             report();
         """, initial=document())
 
@@ -1254,22 +1459,27 @@ class TestTheInspector:
         assert region["framing"] == "Wide shot"
         assert region["angle"] == "Low angle"
 
-    def test_the_editor_offers_no_coordinates_anywhere(self):
-        """Boxes are placed with a finger, a mouse or a pen. A normalized
-        coordinate is an implementation detail of the format, and typing one
-        into a field is not an interaction this editor has."""
-        emitted = {identifier for _tag, identifier in editor_elements()}
-        gone = {"mc-krea-spatial-" + name for name in ("x", "y", "w", "h", "bbox")}
+    def test_the_coordinates_are_four_labelled_fields_and_no_readout(self):
+        """The numeric BBOX was built, taken out, and asked for again.
+
+        It was removed because four number boxes and a `Box (0-1000)` readout
+        invited people to think in a unit the picture does not have, and were
+        the two widest things in a sidebar whose job was the prompt. §8.3 asks
+        for it back, and the rail is why the objection no longer holds: the
+        four fields are in a widget that collapses, in a column that scrolls,
+        neither of them costing the canvas anything. What has not come back is
+        the readout -- a line of coordinates nobody typed into.
+        """
         markup = _markup()
 
-        assert emitted & gone == set()
         assert "0\u20131000" not in markup
         assert "0-1000" not in markup
+        for name in ("bbox-x", "bbox-y", "bbox-w", "bbox-h"):
+            assert f'id="mc-krea-spatial-{name}"' in markup
 
     def test_the_inspector_empties_when_the_selection_goes(self):
-        """An inspector still saying "Text" and "How the text should look"
-        after the text region it described was deleted is a panel lying about
-        what is selected."""
+        """An inspector still saying "Text" and describing a text region after
+        that region was deleted is a panel lying about what is selected."""
         found = run("""
             ks.open();
             field("mc-krea-spatial-type", "text");
@@ -1285,8 +1495,8 @@ class TestTheInspector:
 
         assert found["name"] == ""
         assert found["type"] == "obj"
-        assert found["label"] == "Region prompt"
-        assert found["title"] == "nothing selected"
+        assert found["label"] == "Prompt"
+        assert found["title"] == ""
         assert found["textShown"] is False
         assert found["framingShown"] is True
         assert found["promptOff"] is True
@@ -1378,7 +1588,7 @@ class TestHistory:
     def test_undo_of_a_creation_leaves_no_selection_pointing_at_nothing(self):
         found = run("""
             ks.open();
-            press("mc-krea-spatial-add");
+            place("rect", null);
             press("mc-krea-spatial-undo");
             report({proxyHidden: !!proxy().hidden});
         """)
@@ -1390,7 +1600,7 @@ class TestHistory:
     def test_the_keyboard_shortcuts_undo_and_redo(self):
         found = run("""
             ks.open();
-            press("mc-krea-spatial-add");
+            place("rect", null);
             key("z", canvas, {ctrlKey: true});
             const undone = ks.ordered().length;
             key("z", canvas, {ctrlKey: true, shiftKey: true});
@@ -1404,7 +1614,7 @@ class TestHistory:
         """Taking it away is how a mistyped prompt costs somebody a region."""
         found = run("""
             ks.open();
-            press("mc-krea-spatial-add");
+            place("rect", null);
             key("z", el("mc-krea-spatial-prompt"), {ctrlKey: true});
             report();
         """)
@@ -1416,7 +1626,7 @@ class TestHistory:
         outliving the session, and nothing serializes it."""
         found = run("""
             ks.open();
-            press("mc-krea-spatial-add");
+            place("rect", null);
             ks.save();
             ks.open();
             report();
@@ -1437,6 +1647,7 @@ class TestSavingAndLeaving:
         the input event is what carries it, and it is what the state box's
         change handler is wired to."""
         found = run("""
+            autoSaveBox.checked = false;
             ks.open();
             draw([100, 200], [400, 600]);
             field("mc-krea-spatial-prompt", "a lighthouse");
@@ -1445,7 +1656,10 @@ class TestSavingAndLeaving:
         """)
 
         assert found["published"] == 1
-        assert found["open"] is False
+        # §3.2: Save commits and stays. §3.3 is why -- the whole point of the
+        # workspace is that somebody can save, generate, edit and save again
+        # without it closing under them once.
+        assert found["open"] is True
         assert found["document"]["version"] == 1
         assert found["document"]["regions"][0]["prompt"] == "a lighthouse"
         assert found["document"]["regions"][0]["bbox"] == [100, 200, 400, 600]
@@ -1501,6 +1715,7 @@ class TestSavingAndLeaving:
         """§14. A browser confirm() would be a modal dialog put back into an
         editor whose whole point was to stop being one."""
         found = run("""
+            autoSaveBox.checked = false;
             ks.open();
             draw([100, 200], [400, 600]);
             press("mc-krea-spatial-cancel");
@@ -1527,6 +1742,7 @@ class TestSavingAndLeaving:
 
     def test_discard_leaves_without_publishing_anything(self):
         found = run("""
+            autoSaveBox.checked = false;
             ks.open();
             draw([100, 200], [400, 600]);
             press("mc-krea-spatial-cancel");
@@ -1540,6 +1756,7 @@ class TestSavingAndLeaving:
 
     def test_escape_with_nothing_in_progress_asks_the_same_question(self):
         found = run("""
+            autoSaveBox.checked = false;
             ks.open();
             draw([100, 200], [400, 600]);
             key("Escape");
@@ -1635,30 +1852,33 @@ class TestTheFrame:
         assert found["landscape"] == "1536 × 1024 · 3:2 · Landscape"
         assert found["odd"] == "1024 × 1344 · 16:21 · Portrait"
 
-    def test_the_label_is_on_the_page(self):
+    def test_the_bar_carries_the_ratio_and_the_session_widget_the_rest(self):
+        """§18.2. The ratio beside the canvas, where it costs nothing; the
+        long form in the Session widget, which is collapsible and hideable.
+        No large informational string anywhere in the action bar."""
         found = run("""
             ks.open();
-            report({label: el("mc-krea-spatial-size").textContent});
+            report({aspect: el("mc-krea-spatial-aspect").textContent,
+                    frame: el("mc-krea-spatial-fact-frame").textContent,
+                    ratio: el("mc-krea-spatial-fact-ratio").textContent});
         """, initial=document())
 
-        assert found["label"] == "1024 × 1344 · 16:21 · Portrait"
+        assert found["aspect"] == "16:21"
+        assert found["frame"] == "1024 × 1344"
+        assert found["ratio"] == "16:21 · Portrait"
 
-    def test_a_reshaped_frame_warns_and_changes_nothing(self):
-        """§4.4 in the strongest terms it uses: never silently delete layout
-        state. Reprojecting would be this file deciding which of somebody's
-        boxes deserved to keep its shape."""
+    def test_a_reshaped_frame_says_so_in_session_and_changes_nothing(self):
+        """§18.3 in the strongest terms the design uses: never silently delete
+        layout state. Reprojecting would be this file deciding which of
+        somebody's boxes deserved to keep its shape."""
         found = run("""
             width.value = "1536";
             height.value = "1024";
             ks.open();
-            const warning = el("mc-krea-spatial-warning");
-            report({warned: !warning.hidden, text: warning.textContent});
+            report({said: el("mc-krea-spatial-fact-state").textContent});
         """, initial=document())
 
-        assert found["warned"] is True
-        assert "1024 × 1344 (16:21)" in found["text"]
-        assert "1536 × 1024 (3:2)" in found["text"]
-        assert "unchanged" in found["text"]
+        assert "1024 × 1344 (16:21)" in found["said"]
         assert found["regions"][0]["bbox"] == [35, 55, 315, 360]
 
     def test_the_same_shape_at_a_different_size_says_nothing(self):
@@ -1666,23 +1886,42 @@ class TestTheFrame:
             width.value = "1536";
             height.value = "2016";
             ks.open();
-            report({warned: !el("mc-krea-spatial-warning").hidden});
+            report({said: el("mc-krea-spatial-fact-state").textContent});
         """, initial=document())
 
-        assert found["warned"] is False
+        assert found["said"] == "Saved"
 
-    def test_the_frame_follows_a_size_changed_while_the_editor_is_open(self):
+    def test_the_frame_follows_a_size_changed_while_the_workspace_is_open(self):
+        """Acceptance test L: 1:1 to 2:3 while the workspace is open, with the
+        normalized regions untouched."""
+        found = run("""
+            width.value = "1024"; height.value = "1024";
+            ks.open();
+            const before = el("mc-krea-spatial-canvas").style.aspectRatio;
+            width.value = "1024";
+            height.value = "1536";
+            height.dispatchEvent({type: "change", target: height});
+            report({before: before,
+                    ratio: el("mc-krea-spatial-canvas").style.aspectRatio,
+                    aspect: el("mc-krea-spatial-aspect").textContent});
+        """, initial=document())
+
+        assert found["before"] == "1024 / 1024"
+        assert found["ratio"] == "1024 / 1536"
+        assert found["aspect"] == "2:3"
+        assert found["regions"][0]["bbox"] == [35, 55, 315, 360]
+
+    def test_the_session_widget_can_change_the_generation_size(self):
+        """§17's optional half, written into the host's own number fields so
+        that the change is the change the sliders make."""
         found = run("""
             ks.open();
-            width.value = "1536";
-            height.value = "1024";
-            width.dispatchEvent({type: "change", target: width});
-            report({ratio: el("mc-krea-spatial-canvas").style.aspectRatio,
-                    label: el("mc-krea-spatial-size").textContent});
+            commit("mc-krea-spatial-size-height", "1536");
+            report({ratio: el("mc-krea-spatial-canvas").style.aspectRatio});
         """, initial=document())
 
-        assert found["ratio"] == "1536 / 1024"
-        assert found["label"] == "1536 × 1024 · 3:2 · Landscape"
+        assert found["hostHeight"] == "1536"
+        assert found["ratio"] == "1024 / 1536"
 
     def test_zoom_never_touches_a_stored_coordinate(self):
         """§4.5: display only, and the frame's CSS width is the whole of it."""
@@ -1766,95 +2005,91 @@ class TestTheWorkspaceIsNotAModal:
         assert found["rows"] == 1
 
 
-class TestFullScreen:
-    """The frame is the object being worked on, and on a tablet the page around
-    it is most of the screen. Full screen gives the whole display to the editor
-    and Back still comes back to txt2img."""
+class TestTheTakeover:
+    """§3.1. "Full Screen" means the Spatial workspace has the txt2img work
+    area -- not that the browser has the screen. The Fullscreen API is a
+    non-goal (§29), and what it actually bought is bought here without taking
+    the browser's own chrome, Back button or address bar away.
 
-    def test_the_browser_is_asked_first(self):
-        """The Fullscreen API is the only mechanism nothing can clip, overlap or
-        out-stack -- and the only one that takes the browser's own chrome away,
-        which on a tablet is most of what is being asked for."""
+    Nothing is moved (§22.4): the workspace stays exactly where Gradio put it,
+    and the ancestors between it and the tab are *marked* so the stylesheet can
+    hide everything else."""
+
+    def test_opening_marks_the_path_and_claims_the_tab(self):
         found = run("""
             ks.open();
-            fullscreenAnswers("yes");
-            press("mc-krea-spatial-full");
-            await flush();
-            report({promoted: document.fullscreenElement
-                        === el("mc-krea-spatial-workspace"),
-                    fixed: fullpage(),
-                    label: el("mc-krea-spatial-full").textContent});
+            report({onTab: tab.getAttribute("data-mc-spatial-path"),
+                    onWorkspace: el("mc-krea-spatial-workspace")
+                        .getAttribute("data-mc-spatial-path")});
         """, initial=document())
 
-        assert found["promoted"] is True
-        # No fixed-position fallback while the real thing is in force.
-        assert found["fixed"] is False
-        assert found["label"] == "Exit full screen"
+        assert found["taken"] is True
+        assert found["onTab"] == "1"
+        assert found["onWorkspace"] == "1"
+        # The workspace, its wrapper and the tab: a path, not the whole page.
+        assert found["marked"] == 3
 
-    def test_a_refusal_falls_back_to_a_fixed_block(self):
-        """An iframe without allowfullscreen, or a user who said no. §3.1 told
-        this editor not to be a fixed overlay, and this is fine for the reason
-        the modal was not: it is somewhere the user asked to go."""
+    def test_the_workspace_is_never_moved_to_get_there(self):
+        """The overlay days: a fixed block relocated to document.body, and two
+        copies of every id whenever Gradio rebuilt the tab."""
         found = run("""
+            const before = el("mc-krea-spatial-workspace").parentNode;
             ks.open();
-            fullscreenAnswers("no");
-            press("mc-krea-spatial-full");
-            await flush();
-            report({fixed: fullpage(),
-                    label: el("mc-krea-spatial-full").textContent});
+            report({same: el("mc-krea-spatial-workspace").parentNode === before,
+                    onBody: body.children.indexOf(
+                        el("mc-krea-spatial-workspace")) >= 0});
         """, initial=document())
 
-        assert found["fixed"] is True
-        assert found["label"] == "Exit full screen"
+        assert found["same"] is True
+        assert found["onBody"] is False
 
-    def test_a_browser_without_the_api_at_all_gets_the_same_fallback(self):
+    def test_closing_gives_the_tab_back(self):
         found = run("""
             ks.open();
-            press("mc-krea-spatial-full");
-            report({fixed: fullpage()});
-        """, initial=document())
-
-        assert found["fixed"] is True
-
-    def test_pressing_it_again_comes_back(self):
-        found = run("""
-            ks.open();
-            fullscreenAnswers("yes");
-            press("mc-krea-spatial-full");
-            await flush();
-            press("mc-krea-spatial-full");
-            await flush();
-            report({promoted: !!document.fullscreenElement,
-                    fixed: fullpage(),
-                    label: el("mc-krea-spatial-full").textContent});
-        """, initial=document())
-
-        assert found["promoted"] is False
-        assert found["fixed"] is False
-        assert found["label"] == "Full screen"
-
-    def test_leaving_the_editor_leaves_full_screen_with_it(self):
-        """Save & Return returns to txt2img, and a txt2img tab still filling the
-        screen with a hidden editor would be a tab nobody could use."""
-        found = run("""
-            ks.open();
-            fullscreenAnswers("yes");
-            press("mc-krea-spatial-full");
-            await flush();
-            press("mc-krea-spatial-save");
-            await flush();
-            report({promoted: !!document.fullscreenElement, fixed: fullpage()});
+            press("mc-krea-spatial-cancel");
+            report();
         """, initial=document())
 
         assert found["open"] is False
-        assert found["promoted"] is False
-        assert found["fixed"] is False
+        assert found["taken"] is False
+        assert found["marked"] == 0
 
-    def test_going_full_screen_changes_no_layout_state(self):
+    def test_saving_keeps_the_tab_because_saving_does_not_close(self):
+        """§3.2 and §3.3: Save commits and stays, so the takeover stays too --
+        the whole point is generating without leaving the workspace."""
+        found = run("""
+            autoSaveBox.checked = false;
+            ks.open();
+            draw([100, 100], [400, 400]);
+            press("mc-krea-spatial-save");
+            report();
+        """, initial=document())
+
+        assert found["open"] is True
+        assert found["taken"] is True
+        assert found["published"] == 1
+
+    def test_a_rebuilt_tab_is_taken_over_again(self):
+        """Gradio rebuilding the tab replaces the very ancestors the marks were
+        on. Leaving it there would show the rest of txt2img through a workspace
+        that still believes it is open."""
+        found = run("""
+            ks.open();
+            tab.removeAttribute("data-mc-spatial-path");
+            tab.classList.remove("mc-krea-spatial-taken");
+            ks.wire();
+            report();
+        """, initial=document())
+
+        assert found["open"] is True
+        assert found["taken"] is True
+
+    def test_the_takeover_changes_no_layout_state(self):
         found = run("""
             ks.open();
             const before = ks.serialize();
-            press("mc-krea-spatial-full");
+            ks.surrender();
+            ks.takeover();
             report({same: ks.serialize() === before, past: ks.state.past.length});
         """, initial=document())
 
@@ -1886,17 +2121,999 @@ class TestTheMarkupAndTheFileAgree:
         exercising it."""
         emitted = {identifier for _tag, identifier in editor_elements()}
         expected = {
+            # Everything the editor has always had.
             "name", "type", "text", "text-field", "prompt", "prompt-label",
             "framing", "framing-field", "angle", "angle-field", "auto-hint",
-            "list", "draw", "duplicate", "delete", "raise", "lower",
-            "save", "cancel", "size", "warning", "canvas", "regions",
-            # and everything the refactor added
-            "workspace", "proxy", "add", "clear", "undo", "redo", "front",
-            "bottom", "grid", "zoom-fit", "zoom-in", "zoom-out", "confirm",
-            "keep", "discard", "full",
+            "list", "draw", "duplicate", "delete", "lower", "front",
+            "save", "cancel", "canvas", "regions", "workspace", "proxy",
+            "clear", "undo", "redo", "grid", "zoom-fit", "zoom-in", "zoom-out",
+            "confirm", "keep", "discard", "literal-prefix", "literal-suffix",
+            # §4: the action bar.
+            "power", "mode-direct", "mode-smart", "quick", "quick-popup",
+            "quick-size", "panels", "panels-popup", "collapse-all",
+            "expand-visible",
+            # §12: the rail, and one id per widget.
+            "rail", "panel-prompts", "panel-person", "panel-layers",
+            "panel-inspector", "panel-gallery", "panel-session",
+            "show-prompts", "show-person", "show-layers", "show-inspector",
+            "show-gallery", "show-session",
+            # §13, §9, §15, §16 and §17.
+            "scene", "literal-plus", "literal-minus", "creative", "person",
+            "shape", "rotation", "rotation-field", "bbox-x", "bbox-y",
+            "bbox-w", "bbox-h", "shot", "shot-previous", "shot-next",
+            "generate", "progress", "fact-frame", "fact-ratio", "fact-regions",
+            "fact-pipeline", "fact-state", "size-width", "size-height",
         }
 
         assert {"mc-krea-spatial-" + name for name in expected} <= emitted
+
+    def test_the_shape_vocabulary_is_the_same_on_both_sides(self):
+        """Python builds the palettes and JavaScript holds the proportions and
+        the default prompts. Two lists that agree until somebody adds to one of
+        them is how a Quick Add button starts placing a rectangle."""
+        sys.path.insert(0, str(ROOT))
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import model_chain_krea_creative as creative_script
+
+        source = SCRIPT.read_text(encoding="utf-8")
+        table = re.search(r"const SHAPES = \{(.*?)\n    \};", source, re.S)
+        assert table, "the SHAPES table could not be found"
+        known = set(re.findall(r"^\s{8}(\w+):", table.group(1), re.M))
+        named = {name for name, _label in creative_script.SHAPES}
+
+        assert known == named
+        assert set(creative_script.QUICK_SHAPES) <= known
+        assert set(creative_script.PERSON_SHAPES) <= known
+        assert "rect" not in creative_script.PERSON_SHAPES
+
+
+# --------------------------------------------------------------------------- #
+# The action bar
+# --------------------------------------------------------------------------- #
+
+
+class TestTheActionBar:
+    """§4. Ten controls, one row, and every one of them something somebody
+    reaches for while composing rather than something they set once."""
+
+    def test_the_spatial_switch_is_the_panel_s_own(self):
+        """§4.1 and §13.2's rule applied to a checkbox: the bar shows the
+        component Gradio is bound to, so turning Spatial off here is turning it
+        off, remembered, without the workspace closing."""
+        found = run("""
+            ks.open();
+            const box = el("mc-krea-spatial-power");
+            box.checked = false;
+            box.dispatchEvent({type: "change", target: box});
+            report();
+        """, initial=document())
+
+        assert found["hostSpatial"] is False
+        assert found["open"] is True
+
+    def test_the_switch_shows_what_the_panel_already_says(self):
+        found = run("""
+            hostSpatial.checked = false;
+            ks.open();
+            report({shown: el("mc-krea-spatial-power").checked});
+        """, initial=document())
+
+        assert found["shown"] is False
+
+    def test_the_mode_is_two_states_of_one_control(self):
+        """§4.2: a compact segmented control, not several stacked rows. Pressing
+        one presses the radio the panel is bound to."""
+        found = run("""
+            ks.open();
+            press("mc-krea-spatial-mode-direct");
+            report({direct: el("mc-krea-spatial-mode-direct").classList
+                        .contains("active"),
+                    smart: el("mc-krea-spatial-mode-smart").classList
+                        .contains("active"),
+                    pipeline: el("mc-krea-spatial-fact-pipeline").textContent});
+        """, initial=document())
+
+        assert found["hostMode"] == "direct"
+        assert found["direct"] is True
+        assert found["smart"] is False
+        assert "Direct BBOX" in found["pipeline"]
+
+    def test_the_mode_travels_with_the_layout_too(self):
+        found = run("""
+            ks.open();
+            press("mc-krea-spatial-mode-direct");
+            press("mc-krea-spatial-save");
+            report({document: saved()});
+        """, initial=document())
+
+        assert found["document"]["compose_mode"] == "direct"
+
+    def test_the_bar_carries_no_explanation_of_itself(self):
+        """§2.2 and §25. Control labels, field labels, button names, live state
+        and the selected region's data -- and nothing that describes a control
+        somebody is already looking at."""
+        markup = _markup()
+
+        assert "title=" not in markup
+        for banned in ("you can", "This does", "in your own words",
+                       "Press Full Screen to draw one.</p>\\n  <div"):
+            assert banned not in markup
+
+    def test_the_workspace_has_no_hover_tooltips_at_all(self):
+        """A ``title`` set from JavaScript is the same explanation arriving by
+        another route, so the file is read as well as the markup."""
+        source = SCRIPT.read_text(encoding="utf-8")
+        code = "\n".join(line for line in source.splitlines()
+                         if not line.strip().startswith("//"))
+
+        assert ".title =" not in code
+
+
+# --------------------------------------------------------------------------- #
+# Quick Add and the Person palette
+# --------------------------------------------------------------------------- #
+
+
+class TestQuickAdd:
+    """§10. Immediate access to the high-frequency primitives without opening
+    the rail, and the same gesture whether it is tapped or dragged."""
+
+    def test_the_popup_opens_and_closes_from_its_own_button(self):
+        found = run("""
+            ks.open();
+            press("mc-krea-spatial-quick");
+            const opened = !el("mc-krea-spatial-quick-popup").hidden;
+            press("mc-krea-spatial-quick");
+            report({opened: opened,
+                    closed: !!el("mc-krea-spatial-quick-popup").hidden});
+        """, initial=document())
+
+        assert found["opened"] is True
+        assert found["closed"] is True
+
+    def test_one_popup_at_a_time(self):
+        found = run("""
+            ks.open();
+            press("mc-krea-spatial-quick");
+            press("mc-krea-spatial-panels");
+            report({quick: !!el("mc-krea-spatial-quick-popup").hidden,
+                    panels: !el("mc-krea-spatial-panels-popup").hidden});
+        """, initial=document())
+
+        assert found["quick"] is True
+        assert found["panels"] is True
+
+    def test_tapping_head_places_it_centred_with_its_own_prompt(self):
+        """Acceptance test C."""
+        found = run("""
+            ks.open();
+            ks.clear();
+            press("mc-krea-spatial-quick");
+            place("head", null);
+            report();
+        """, initial=document())
+
+        region = found["regions"][0]
+        left, top, right, bottom = region["bbox"]
+
+        assert region["shape"] == "head"
+        assert region["prompt"] == "head"
+        assert region["rotation"] == 0
+        # Centred, and taller than it is wide the way a head is.
+        assert abs((left + right) / 2 - 500) < 60
+        assert abs((top + bottom) / 2 - 500) < 60
+        assert bottom - top > right - left
+
+    def test_a_tap_does_not_take_the_focus_off_the_canvas_for_a_person_part(self):
+        """§10.2: a silhouette arrives with a usable prompt already in it, so
+        the cursor stays where the composing is happening."""
+        found = run("""
+            ks.open();
+            place("chest", null);
+            report({focused: !!el("mc-krea-spatial-prompt").focused});
+        """, initial=document())
+
+        assert found["focused"] is False
+
+    def test_dragging_chest_drops_it_where_it_was_let_go(self):
+        """Acceptance test D: dragged to the upper right, and the bbox says so."""
+        found = run("""
+            ks.open();
+            ks.clear();
+            press("mc-krea-spatial-quick");
+            place("chest", [750, 250]);
+            report();
+        """, initial=document())
+
+        left, top, right, bottom = found["regions"][0]["bbox"]
+
+        assert found["regions"][0]["shape"] == "chest"
+        assert abs((left + right) / 2 - 750) < 40
+        assert abs((top + bottom) / 2 - 250) < 40
+
+    def test_a_drop_outside_the_frame_creates_nothing(self):
+        """§10.3: an invalid drop creates nothing rather than a box clamped to
+        an edge nobody aimed at."""
+        found = run("""
+            ks.open();
+            ks.clear();
+            place("head", [1400, 1400]);
+            report();
+        """, initial=document())
+
+        assert found["regions"] == []
+
+    def test_the_popup_closes_after_a_successful_add(self):
+        found = run("""
+            ks.open();
+            press("mc-krea-spatial-quick");
+            place("head", null);
+            report({popupShut: !!el("mc-krea-spatial-quick-popup").hidden});
+        """, initial=document())
+
+        assert found["popupShut"] is True
+        assert len(found["regions"]) == 2
+
+    def test_the_size_slider_decides_how_big_a_new_shape_is(self):
+        """§10.1: one reference length, and each shape a proportion of it."""
+        found = run("""
+            ks.open();
+            ks.clear();
+            const slider = el("mc-krea-spatial-quick-size");
+            slider.value = "800";
+            slider.dispatchEvent({type: "input", target: slider});
+            place("rect", null);
+            report();
+        """, initial=document())
+
+        left, _top, right, _bottom = found["regions"][0]["bbox"]
+
+        assert right - left > 700
+
+
+class TestThePersonPalette:
+    """§9. The user sees body parts; the engine sees rectangles."""
+
+    def test_every_part_the_design_names_is_grabbable(self):
+        """§9.2's eleven, each one its own control."""
+        found = run("""
+            report({parts: el("mc-krea-spatial-person")
+                        .querySelectorAll(".mc-krea-spatial-shape-button")
+                        .map((entry) => entry.dataset.shape)});
+        """, initial=document())
+
+        assert found["parts"] == ["head", "chest", "waist",
+                                  "left_arm", "right_arm",
+                                  "left_hand", "right_hand",
+                                  "left_leg", "right_leg",
+                                  "left_foot", "right_foot"]
+
+    def test_dragging_a_left_arm_out_makes_a_left_arm(self):
+        """Acceptance test E."""
+        found = run("""
+            ks.open();
+            ks.clear();
+            place("left_arm", [300, 400]);
+            report();
+        """, initial=document())
+
+        region = found["regions"][0]
+
+        assert region["shape"] == "left_arm"
+        assert region["prompt"] == "left arm"
+
+    def test_the_silhouette_is_a_palette_and_not_one_stored_person(self):
+        """§9.4: multiple heads, multiple left arms, multiple complete sets."""
+        found = run("""
+            ks.open();
+            ks.clear();
+            place("head", [200, 200]);
+            place("head", [700, 200]);
+            place("left_hand", [400, 700]);
+            report();
+        """, initial=document())
+
+        assert [region["shape"] for region in found["regions"]] == [
+            "head", "head", "left_hand"]
+        assert len({region["id"] for region in found["regions"]}) == 3
+
+    def test_a_silhouette_is_still_an_axis_aligned_rectangle(self):
+        """§2.5 and §9.5. Whatever is drawn, what is serialized is a box."""
+        found = run("""
+            ks.open();
+            ks.clear();
+            place("left_leg", [500, 500]);
+            press("mc-krea-spatial-save");
+            report({document: saved()});
+        """, initial=document())
+
+        entry = found["document"]["regions"][0]
+
+        assert len(entry["bbox"]) == 4
+        assert entry["bbox"][0] < entry["bbox"][2]
+        assert entry["bbox"][1] < entry["bbox"][3]
+        assert "path" not in json.dumps(entry)
+
+
+class TestRotation:
+    """§9.6. The silhouette turns. The box does not."""
+
+    def test_rotating_an_arm_changes_the_drawing_and_not_the_box(self):
+        """Acceptance test F."""
+        found = run("""
+            ks.open();
+            ks.clear();
+            place("left_arm", [500, 500]);
+            const before = ks.ordered()[0].bbox.slice();
+            commit("mc-krea-spatial-rotation", "35");
+            press("mc-krea-spatial-save");
+            report({before: before, document: saved(),
+                    turned: body.querySelectorAll(".mc-krea-spatial-shape")
+                        .map((entry) => entry.style.transform)
+                        .filter(Boolean)});
+        """, initial=document())
+
+        entry = found["document"]["regions"][0]
+
+        assert entry["ui_rotation"] == 35
+        assert entry["bbox"] == found["before"]
+        assert "rotate(35deg)" in found["turned"]
+
+    def test_the_slider_is_offered_for_silhouettes_and_not_for_boxes(self):
+        found = run("""
+            ks.open();
+            ks.clear();
+            place("rect", null);
+            const forBox = !el("mc-krea-spatial-rotation-field").hidden;
+            place("head", null);
+            report({forBox: forBox,
+                    forHead: !el("mc-krea-spatial-rotation-field").hidden});
+        """, initial=document())
+
+        assert found["forBox"] is False
+        assert found["forHead"] is True
+
+    def test_rotation_is_clamped_to_half_a_turn_each_way(self):
+        found = run("""
+            ks.open();
+            ks.clear();
+            place("head", null);
+            commit("mc-krea-spatial-rotation", "900");
+            report();
+        """, initial=document())
+
+        assert found["regions"][0]["rotation"] == 180
+
+
+# --------------------------------------------------------------------------- #
+# The document the editor writes
+# --------------------------------------------------------------------------- #
+
+
+class TestTheEditorMetadata:
+    """§21.2 and §2.6. Two optional fields, in both directions."""
+
+    def test_a_rectangle_layout_serializes_to_the_bytes_it_always_did(self):
+        found = run("""
+            ks.open();
+            press("mc-krea-spatial-save");
+            report({document: saved()});
+        """, initial=document())
+
+        entry = found["document"]["regions"][0]
+
+        assert "ui_shape" not in entry
+        assert "ui_rotation" not in entry
+
+    def test_a_legacy_layout_loads_as_rectangles_at_zero_degrees(self):
+        """Acceptance test P: old rectangle-only layouts load unchanged."""
+        found = run("""
+            ks.open();
+            report();
+        """, initial=document())
+
+        assert found["regions"][0]["shape"] == "rect"
+        assert found["regions"][0]["rotation"] == 0
+        assert found["regions"][0]["bbox"] == [35, 55, 315, 360]
+
+    def test_a_shape_this_build_cannot_draw_becomes_a_rectangle(self):
+        """§26. A layout from a later build arrives with its boxes in the right
+        places and one silhouette this build does not know."""
+        alien = dict(FACE, ui_shape="tail", ui_rotation=20)
+        found = run("""
+            ks.open();
+            report();
+        """, initial=document([alien]))
+
+        assert found["regions"][0]["shape"] == "rect"
+        assert found["regions"][0]["rotation"] == 20
+        assert found["regions"][0]["bbox"] == [35, 55, 315, 360]
+
+    def test_the_names_are_numbers(self):
+        """§6.1. "Region 4" is the word "region" on every row of a panel called
+        Layers, and the number is the half anybody reads."""
+        found = run("""
+            ks.open();
+            ks.clear();
+            place("rect", null);
+            place("head", null);
+            place("chest", null);
+            report();
+        """, initial=document())
+
+        assert [region["name"] for region in found["regions"]] == ["1", "2", "3"]
+
+    def test_the_label_is_centred_in_whatever_the_region_turned_out_to_be(self):
+        """§6.2, as far as a test without a layout engine can see it: one label
+        element per region, carrying the name, whatever the shape."""
+        found = run("""
+            ks.open();
+            ks.clear();
+            place("head", null);
+            report({labels: body.querySelectorAll(".mc-krea-spatial-label")
+                        .map((entry) => entry.textContent)});
+        """, initial=document())
+
+        assert found["labels"] == ["1"]
+
+
+# --------------------------------------------------------------------------- #
+# The rail
+# --------------------------------------------------------------------------- #
+
+
+class TestThePanels:
+    """§12 and §4.6. The rail is optional furniture: nothing in it may cost the
+    canvas a pixel it was using."""
+
+    def test_every_widget_the_design_names_is_in_the_rail(self):
+        found = run("""
+            report({widgets: el("mc-krea-spatial-rail")
+                        .querySelectorAll(".mc-krea-spatial-widget")
+                        .map((entry) => entry.dataset.panel)});
+        """, initial=document())
+
+        assert found["widgets"] == ["prompts", "person", "layers", "inspector",
+                                    "gallery", "session"]
+
+    def test_hiding_prompts_takes_the_widget_away(self):
+        """Acceptance test N."""
+        found = run("""
+            ks.open();
+            press("mc-krea-spatial-panels");
+            const box = el("mc-krea-spatial-show-prompts");
+            box.checked = false;
+            box.dispatchEvent({type: "change", target: box});
+            report({shown: panelShown("prompts"),
+                    others: panelShown("layers")});
+        """, initial=document())
+
+        assert found["shown"] is False
+        assert found["others"] is True
+        assert found["hidden"] == ["prompts"]
+
+    def test_a_header_collapses_its_own_widget(self):
+        found = run("""
+            ks.open();
+            const head = el("mc-krea-spatial-panel-layers")
+                .querySelector(".mc-krea-spatial-widget-head");
+            el("mc-krea-spatial-rail").dispatchEvent(
+                {type: "click", target: head, preventDefault() {}});
+            report({open: panelOpen("layers"),
+                    others: panelOpen("inspector"),
+                    said: head.getAttribute("aria-expanded")});
+        """, initial=document())
+
+        assert found["open"] is False
+        assert found["others"] is True
+        assert found["said"] == "false"
+
+    def test_collapse_all_and_expand_visible(self):
+        found = run("""
+            ks.open();
+            press("mc-krea-spatial-panels");
+            ks.panelShow("gallery", false);
+            press("mc-krea-spatial-collapse-all");
+            const shut = ks.panels.filter((key) => !panelOpen(key)).length;
+            press("mc-krea-spatial-expand-visible");
+            report({shut: shut,
+                    open: ks.panels.filter((key) => panelOpen(key)),
+                    gallery: panelOpen("gallery")});
+        """, initial=document())
+
+        assert found["shut"] == 6
+        # Expand Visible expands what is visible, and leaves a hidden widget
+        # collapsed rather than quietly bringing it back.
+        assert found["gallery"] is False
+        assert set(found["open"]) == {"prompts", "person", "layers",
+                                      "inspector", "session"}
+
+    def test_panel_state_is_not_layout_history(self):
+        """§20: hiding a panel is a session preference. It may not mark a
+        layout as changed and Undo may not bring a panel back."""
+        found = run("""
+            ks.open();
+            const before = ks.serialize();
+            ks.panelShow("layers", false);
+            ks.panelCollapse("inspector", true);
+            report({same: ks.serialize() === before});
+        """, initial=document())
+
+        assert found["same"] is True
+        assert found["past"] == 0
+        assert found["published"] == 0
+
+    def test_a_new_rectangle_opens_the_inspector_to_type_into(self):
+        """§15.2: a prompt field that is switched off or collapsed cannot be
+        typed into, so the panel it lives in is opened before the focus."""
+        found = run("""
+            ks.open();
+            ks.panelShow("inspector", false);
+            place("rect", null);
+            report({shown: panelShown("inspector"),
+                    focused: !!el("mc-krea-spatial-prompt").focused});
+        """, initial=document())
+
+        assert found["shown"] is True
+        assert found["focused"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Prompts, gallery, session
+# --------------------------------------------------------------------------- #
+
+
+class TestThePromptsWidget:
+    """§13. Three boxes that are second views of components that already exist,
+    and no saved copy of any of them."""
+
+    def test_opening_shows_what_the_tab_already_holds(self):
+        found = run("""
+            hostPrompt.value = "a lighthouse at dusk";
+            hostLiteralPlus.value = "<lora:krea2:1>";
+            ks.open();
+            report({prompt: el("mc-krea-spatial-scene").value,
+                    plus: el("mc-krea-spatial-literal-plus").value});
+        """, initial=document())
+
+        assert found["prompt"] == "a lighthouse at dusk"
+        assert found["plus"] == "<lora:krea2:1>"
+
+    def test_typing_here_reaches_the_canonical_prompt(self):
+        """Acceptance test I."""
+        found = run("""
+            ks.open();
+            field("mc-krea-spatial-scene", "a red bicycle");
+            report();
+        """, initial=document())
+
+        assert found["hostPrompt"] == "a red bicycle"
+
+    def test_typing_there_reaches_this_one(self):
+        found = run("""
+            ks.open();
+            hostPrompt.value = "a green bicycle";
+            hostPrompt.dispatchEvent({type: "input", target: hostPrompt});
+            report({shown: el("mc-krea-spatial-scene").value});
+        """, initial=document())
+
+        assert found["shown"] == "a green bicycle"
+
+    def test_both_literal_boxes_are_the_panel_s_own(self):
+        found = run("""
+            ks.open();
+            field("mc-krea-spatial-literal-plus", "__grain__");
+            field("mc-krea-spatial-literal-minus", "blurry");
+            report();
+        """, initial=document())
+
+        assert found["hostLiteralPlus"] == "__grain__"
+        assert found["hostLiteralMinus"] == "blurry"
+
+    def test_creative_first_is_the_same_state_as_txt2img(self):
+        """§13.3: no independent local Creative value."""
+        found = run("""
+            ks.open();
+            const box = el("mc-krea-spatial-creative");
+            box.checked = true;
+            box.dispatchEvent({type: "change", target: box});
+            report({pipeline: el("mc-krea-spatial-fact-pipeline").textContent});
+        """, initial=document())
+
+        assert found["hostCreative"] is True
+        assert "Creative first" in found["pipeline"]
+
+    def test_the_mirror_writes_nothing_into_the_layout(self):
+        found = run("""
+            ks.open();
+            const before = ks.serialize();
+            field("mc-krea-spatial-scene", "a red bicycle");
+            report({same: ks.serialize() === before});
+        """, initial=document())
+
+        assert found["same"] is True
+        assert found["past"] == 0
+
+
+class TestTheGalleryWidget:
+    """§16. The tab's own results, beside the canvas, so that Generate, look,
+    change, Generate again never leaves the workspace."""
+
+    def test_it_shows_the_tab_s_own_results(self):
+        found = run("""
+            showImages(["one.png", "two.png", "three.png"]);
+            ks.open();
+            report({at: el("mc-krea-spatial-shot-at").textContent,
+                    shown: el("mc-krea-spatial-shot").querySelector("img").src});
+        """, initial=document())
+
+        assert found["shots"] == ["one.png", "two.png", "three.png"]
+        assert found["shown"] == "three.png"
+        assert found["at"] == "3 / 3"
+
+    def test_next_from_the_last_image_is_the_first(self):
+        """Acceptance test J."""
+        found = run("""
+            showImages(["one.png", "two.png", "three.png"]);
+            ks.open();
+            press("mc-krea-spatial-shot-next");
+            report({shown: el("mc-krea-spatial-shot").querySelector("img").src});
+        """, initial=document())
+
+        assert found["shotAt"] == 0
+        assert found["shown"] == "one.png"
+
+    def test_previous_from_the_first_image_is_the_last(self):
+        found = run("""
+            showImages(["one.png", "two.png", "three.png"]);
+            ks.open();
+            press("mc-krea-spatial-shot-next");
+            press("mc-krea-spatial-shot-previous");
+            report();
+        """, initial=document())
+
+        assert found["shotAt"] == 2
+
+    def test_a_new_result_arrives_without_leaving_the_workspace(self):
+        """Acceptance test K, minus the part only a browser can do: the
+        workspace is still open, the takeover is still in force, and the new
+        image is the one on show."""
+        found = run("""
+            ks.open();
+            press("mc-krea-spatial-generate");
+            showProgress("40%", "40%");
+            const during = !el("mc-krea-spatial-progress").hidden;
+            const said = el("mc-krea-spatial-progress-read").textContent;
+            clearProgress();
+            showImages(["fresh.png"]);
+            report({during: during, said: said,
+                    after: !!el("mc-krea-spatial-progress").hidden,
+                    shown: el("mc-krea-spatial-shot").querySelector("img").src});
+        """, initial=document())
+
+        assert found["generatePresses"] == 1
+        assert found["during"] is True
+        assert found["said"] == "40%"
+        assert found["after"] is True
+        assert found["shown"] == "fresh.png"
+        assert found["open"] is True
+        assert found["taken"] is True
+
+    def test_generating_does_not_require_a_save(self):
+        """§26's last paragraph, and the contract that makes it true: what the
+        next Generate composes is whatever is in the state box, and Auto Save
+        put the working layout there when the edit finished."""
+        found = run("""
+            ks.open();
+            draw([100, 100], [400, 400]);
+            press("mc-krea-spatial-generate");
+            report({document: saved()});
+        """, initial=document())
+
+        assert found["published"] == 1
+        assert len(found["document"]["regions"]) == 2
+        assert found["generatePresses"] == 1
+
+
+class TestTheSessionWidget:
+    """§17. Everything that used to be a permanent strip across the top, in one
+    widget that collapses and hides like every other."""
+
+    def test_it_says_what_is_true_right_now(self):
+        found = run("""
+            ks.open();
+            report({frame: el("mc-krea-spatial-fact-frame").textContent,
+                    ratio: el("mc-krea-spatial-fact-ratio").textContent,
+                    regions: el("mc-krea-spatial-fact-regions").textContent,
+                    pipeline: el("mc-krea-spatial-fact-pipeline").textContent,
+                    state: el("mc-krea-spatial-fact-state").textContent});
+        """, initial=document())
+
+        assert found["frame"] == "1024 × 1344"
+        assert found["ratio"] == "16:21 · Portrait"
+        assert found["regions"] == "1 of 24"
+        assert found["pipeline"] == "Smart Spatial"
+        assert found["state"] == "Saved"
+
+    def test_an_unsaved_edit_says_so_and_a_save_clears_it(self):
+        found = run("""
+            autoSaveBox.checked = false;
+            ks.open();
+            draw([100, 100], [400, 400]);
+            const dirty = el("mc-krea-spatial-fact-state").textContent;
+            press("mc-krea-spatial-save");
+            report({dirty: dirty,
+                    clean: el("mc-krea-spatial-fact-state").textContent});
+        """, initial=document())
+
+        assert found["dirty"] == "Unsaved"
+        assert found["clean"] == "Saved"
+
+    def test_an_auto_saved_edit_reads_as_saved_straight_away(self):
+        """The commit and the line describing it happen in one repaint. Painted
+        the other way round, Session says Unsaved about an edit that was
+        committed a line later and stays wrong until something else repaints."""
+        found = run("""
+            ks.open();
+            draw([100, 100], [400, 400]);
+            report({state: el("mc-krea-spatial-fact-state").textContent});
+        """, initial=document())
+
+        assert found["published"] == 1
+        assert found["state"] == "Saved"
+
+    def test_spatial_switched_off_is_part_of_the_pipeline_line(self):
+        found = run("""
+            hostSpatial.checked = false;
+            ks.open();
+            report({pipeline: el("mc-krea-spatial-fact-pipeline").textContent});
+        """, initial=document())
+
+        assert found["pipeline"] == "Smart Spatial · off"
+
+
+# --------------------------------------------------------------------------- #
+# Numeric geometry
+# --------------------------------------------------------------------------- #
+
+
+class TestTheNumericBbox:
+    """§8.3. The canvas writes these and these write the canvas."""
+
+    def test_the_four_boxes_show_the_selected_region(self):
+        found = run("""
+            ks.open();
+            report({x: el("mc-krea-spatial-bbox-x").value,
+                    y: el("mc-krea-spatial-bbox-y").value,
+                    w: el("mc-krea-spatial-bbox-w").value,
+                    h: el("mc-krea-spatial-bbox-h").value});
+        """, initial=document())
+
+        assert [found["x"], found["y"], found["w"], found["h"]] == [
+            "35", "55", "280", "305"]
+
+    def test_typing_a_width_moves_the_edge(self):
+        found = run("""
+            ks.open();
+            commit("mc-krea-spatial-bbox-w", "500");
+            report();
+        """, initial=document())
+
+        assert found["regions"][0]["bbox"] == [35, 55, 535, 360]
+
+    def test_a_drag_writes_the_numbers_back(self):
+        found = run("""
+            ks.open();
+            drag([100, 100], [200, 150], proxy());
+            report({x: el("mc-krea-spatial-bbox-x").value,
+                    y: el("mc-krea-spatial-bbox-y").value});
+        """, initial=document())
+
+        assert [found["x"], found["y"]] == ["135", "105"]
+
+    def test_a_number_that_cannot_make_a_box_is_clamped_rather_than_applied(self):
+        """§26: reject or clamp safely, and never leave the field showing a
+        number the layout does not hold."""
+        found = run("""
+            ks.open();
+            commit("mc-krea-spatial-bbox-w", "0");
+            report({w: el("mc-krea-spatial-bbox-w").value});
+        """, initial=document())
+
+        left, _top, right, _bottom = found["regions"][0]["bbox"]
+
+        assert right - left >= 8
+        assert found["w"] == str(right - left)
+
+    def test_one_history_entry_per_burst_of_numbers(self):
+        found = run("""
+            ks.open();
+            const box = el("mc-krea-spatial-bbox-w");
+            box.value = "300"; box.dispatchEvent({type: "input", target: box});
+            box.value = "320"; box.dispatchEvent({type: "input", target: box});
+            box.value = "340"; box.dispatchEvent({type: "input", target: box});
+            report();
+        """, initial=document())
+
+        assert found["past"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# The workspace's own stylesheet
+# --------------------------------------------------------------------------- #
+
+
+class TestTheWorkspaceStylesheet:
+    """The layout is CSS, so the questions a fake DOM cannot answer are asked
+    of the stylesheet directly: does every class the markup emits have a rule,
+    does every silhouette have a shape, and is any of it dark-only."""
+
+    @pytest.fixture
+    def css(self):
+        return (ROOT / "style.css").read_text(encoding="utf-8")
+
+    @pytest.fixture
+    def section(self, css):
+        """The workspace's block, with the prose taken out.
+
+        Comments are stripped first, because every question below is about what
+        the browser is told and a paragraph that happens to name a class is not
+        a rule -- reading them together is how a stylesheet passes a test by
+        describing what it does not do.
+        """
+        block = css.split("The Spatial Layout workspace.", 1)[1]
+        # Past the end of the header comment this split landed inside, and up
+        # to the start of the next section's, so that every /* below has its
+        # matching */ and the regex can take the pairs out.
+        block = block.split("*/", 1)[1].split("/* ====", 1)[0]
+        return re.sub(r"/\*.*?\*/", "", block, flags=re.S)
+
+    @pytest.fixture
+    def rules(self, section):
+        """``(selector, body)`` for every rule in the block."""
+        found = []
+        for part in section.split("}"):
+            if "{" not in part:
+                continue
+            selector, body = part.rsplit("{", 1)
+            found.append((" ".join(selector.split()), body))
+        return found
+
+    def test_every_class_the_markup_emits_has_a_rule(self, section):
+        """Dangling the other way round: a control styled by nothing looks like
+        a control somebody forgot, and on a theme with opinions it looks like a
+        bug."""
+        used = set()
+        for group in re.findall(r'class="([^"]+)"', _markup()):
+            used.update(name for name in group.split()
+                        if name.startswith("mc-krea-spatial-"))
+        # The compact canvas has its own block further down the stylesheet.
+        used = {name for name in used if "-compact" not in name}
+        missing = {name for name in used if "." + name not in section}
+
+        assert missing == set()
+
+    def test_every_rule_in_it_selects_something_that_exists(self, section):
+        """The other direction, and the one a browser never complains about: a
+        rule for a class nothing emits is dead weight that reads as a control
+        somebody removed and a style somebody forgot."""
+        import model_chain_krea_creative as creative_script
+
+        source = SCRIPT.read_text(encoding="utf-8")
+        emitted = set()
+        for group in re.findall(r'class="([^"]+)"', _markup()):
+            emitted.update(name for name in group.split()
+                           if name.startswith("mc-krea-spatial-"))
+        # The browser file builds the rest, either as a whole name or as the
+        # prefix plus a suffix.
+        for suffix in re.findall(r'P \+ "(-[A-Za-z0-9_-]+) ?"', source):
+            emitted.add("mc-krea-spatial" + suffix)
+        emitted.update(re.findall(r'"(mc-krea-spatial-[A-Za-z0-9_-]+)"', source))
+        # ...and the shapes, from the table both sides share.
+        for shape, _label in creative_script.SHAPES:
+            emitted.add("mc-krea-spatial-shape-" + shape)
+            emitted.add("mc-krea-spatial-part-" + shape)
+
+        styled = set(re.findall(r"\.(mc-krea-spatial-[A-Za-z0-9_-]+)", section))
+
+        assert styled - emitted == set()
+
+    def test_every_shape_the_editor_can_draw_has_a_silhouette(self, section):
+        """A shape with no clip-path is a rectangle with a different name, and
+        the palette would offer eleven identical buttons."""
+        import model_chain_krea_creative as creative_script
+
+        for name, _label in creative_script.SHAPES:
+            if name == "rect":
+                continue          # the one with no silhouette, on purpose
+            assert f".mc-krea-spatial-shape-{name}" in section, name
+            assert f".mc-krea-spatial-part-{name}" in section, name
+
+    def test_the_silhouette_is_clipped_on_the_art_and_not_on_the_button(self):
+        """A clip-path on the Quick Add button would take the label with it."""
+        markup = _markup()
+
+        assert 'class="mc-krea-spatial-shape-button mc-krea-spatial-part-head"' \
+            in markup
+        assert 'class="mc-krea-spatial-shape-art mc-krea-spatial-shape-head"' \
+            in markup
+
+    def test_it_selects_nothing_gradio_generated(self, section):
+        assert ".svelte" not in section
+
+    def test_the_rail_scrolls_and_the_canvas_does_not(self, section):
+        """§12.1, and the failure it names: a rail full of panels pushing the
+        frame down the page. A flex child's minimum is its content size unless
+        it is told otherwise, so both halves of this are load-bearing."""
+        rail = section.split(".mc-krea-spatial-rail {", 1)[1].split("}", 1)[0]
+
+        assert "overflow-y: auto" in rail
+        assert "min-height: 0" in rail
+
+        body = section.split(".mc-krea-spatial-body {", 1)[1].split("}", 1)[0]
+
+        assert "min-height: 0" in body
+
+    def test_the_frame_is_sized_without_a_viewport_unit(self, section):
+        """§5.3. The frame is the shape of the image and the size of the box it
+        is in -- and `cqh` is not available under `container-type: inline-size`,
+        so a stylesheet that used one would silently size the frame from the
+        window instead."""
+        frame = section.split(".mc-krea-spatial-canvas {", 1)[1].split("}", 1)[0]
+
+        assert "cqh" not in frame
+        assert "vh" not in frame
+        assert "aspect-ratio: var(--mc-ar-w" in frame
+
+    def test_a_coarse_pointer_gets_targets_it_can_hit(self, section):
+        """§23.2, and the numbers §8.2 asks for."""
+        coarse = section.split("@media (pointer: coarse)", 1)[1].split("}", 1)[0]
+
+        assert "--mc-grab: 44px" in coarse
+        assert "--mc-touch: 44px" in coarse
+
+    def test_the_takeover_never_hides_the_workspace_s_own_contents(self, rules):
+        """The workspace is marked so that it survives as a sibling of the
+        things being hidden. Marked and not excluded, it would hide itself."""
+        found = [selector for selector, _body in rules
+                 if "[data-mc-spatial-path]" in selector
+                 and selector.strip().startswith(".mc-krea-spatial-taken [")]
+
+        assert found, "the takeover's descendant rules could not be found"
+        for selector in found:
+            assert ":not(.mc-krea-spatial-workspace)" in selector, selector
+
+    def test_the_tab_s_own_children_are_hidden_by_a_rule_of_their_own(self, rules):
+        """`.mc-krea-spatial-taken [data-mc-spatial-path]` is a descendant
+        selector and the class is on the tab, so it never matches the tab --
+        which means the tab's own children, the whole of txt2img, need saying
+        separately or the takeover hides nothing at all."""
+        wanted = ".mc-krea-spatial-taken > *:not([data-mc-spatial-path])"
+        found = [body for selector, body in rules if selector == wanted]
+
+        assert found, "the tab's own children are not hidden by anything"
+        assert "display: none" in found[0]
+
+    def test_the_takeover_forces_no_display_on_the_tab_itself(self, rules):
+        """Gradio hides an inactive tab by setting `display`, so a
+        `display: ... !important` matching #tab_txt2img would leave txt2img
+        showing on top of img2img the moment somebody changed tab. The class
+        the tab carries is only ever used as an ancestor."""
+        for selector, body in rules:
+            if selector.startswith(".mc-krea-spatial-taken {"):
+                assert False, "the tab is styled directly"
+            if selector == ".mc-krea-spatial-taken":
+                assert "display" not in body, selector
+            assert "#tab_txt2img" not in selector, selector
+
+    def test_every_gesture_surface_says_touch_action_none(self, section):
+        """§5.7 and §23.3: the page does not scroll under a finger that is
+        moving a box, resizing one, drawing one or dragging one out."""
+        for surface in (".mc-krea-spatial-canvas {", ".mc-krea-spatial-region {",
+                        ".mc-krea-spatial-proxy {", ".mc-krea-spatial-handle {",
+                        ".mc-krea-spatial-shape-button {"):
+            rule = section.split(surface, 1)[1].split("}", 1)[0]
+            assert "touch-action: none" in rule, surface
 
 
 # --------------------------------------------------------------------------- #
@@ -2130,9 +3347,9 @@ class TestTheCompactCanvas:
         found = dict(editor_elements())
         ids = set(editor_elements_ids())
 
-        for kept in ("mc-krea-spatial-add", "mc-krea-spatial-draw",
+        for kept in ("mc-krea-spatial-quick", "mc-krea-spatial-draw",
                      "mc-krea-spatial-delete", "mc-krea-spatial-duplicate",
-                     "mc-krea-spatial-raise", "mc-krea-spatial-lower",
+                     "mc-krea-spatial-front", "mc-krea-spatial-lower",
                      "mc-krea-spatial-framing", "mc-krea-spatial-angle",
                      "mc-krea-spatial-type", "mc-krea-spatial-save"):
             assert kept in ids
@@ -2378,6 +3595,21 @@ class TestAutoSaveInTheFullEditor:
         assert found["typing"] == 0
         assert found["left"] == 1
         assert found["saved"] == "a lighthouse"
+
+    def test_a_drawn_region_is_a_finished_edit_like_any_other(self):
+        """Drawing one used to be the one edit Auto Save did not hear about:
+        the gesture records its own history entry, and recording one is not the
+        same as saying an edit finished. What it cost was a box on screen that
+        the next Generate did not compose."""
+        found = run("""
+            ks.open();
+            draw([100, 200], [400, 600]);
+            report({document: saved()});
+        """, initial=document())
+
+        assert found["published"] == 1
+        assert len(found["document"]["regions"]) == 2
+        assert found["document"]["regions"][1]["bbox"] == [100, 200, 400, 600]
 
     def test_an_undo_is_committed_too(self):
         """Otherwise Undo would leave the screen and the generation disagreeing,

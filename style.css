@@ -1616,45 +1616,59 @@
 /* ---------------------------------------------------------------------------
    The Spatial Layout workspace.
 
-   Not a modal. This used to be a position: fixed overlay that JavaScript moved
-   to document.body, because a fixed overlay inside an accordion is one
-   overflow: hidden away from being a modal nobody can see. It is now a block in
-   ordinary flow: it scrolls the way the page scrolls, it inherits whatever
-   theme it is standing in, and on a phone it is a page rather than a window
-   over one.
+   Canvas first (§2.1). The composition frame is the work and everything else is
+   a tool beside it, so the geometry below is one bar, one canvas column and one
+   rail -- never a stack of equal-weight panels with a picture somewhere in it.
+   The canvas column is as tall as the workspace and does not move; the rail
+   scrolls on its own, and every widget in it can be collapsed or switched off,
+   so no amount of panel content can push the frame off screen (§12.1).
 
-   Everything below is sized in theme variables and container queries. There is
-   no viewport arithmetic, no fixed page width and no assumption that the
-   surrounding column is any particular size -- the editor is as wide as
-   whatever it is put in, and rearranges itself accordingly.
+   Not a modal, and not a fullscreen element either. "Full Screen" means the
+   workspace has the txt2img work area: the browser file marks the ancestors
+   between the workspace and #tab_txt2img, and the takeover rules at the bottom
+   of this block hide everything else on the tab. Nothing is moved, no id exists
+   twice, and the browser keeps its own chrome.
+
+   Everything is sized in theme variables. There is no hard-coded colour, no
+   dark-only assumption and no fixed page width: the workspace is as wide as
+   whatever it is put in and rearranges itself accordingly (§22.3).
    --------------------------------------------------------------------------- */
 
 .mc-krea-spatial-workspace {
-    /* Its own size decides its layout, not the window's: the editor lives in a
-       Gradio column whose width has nothing to do with the viewport. */
+    /* Its own size decides its layout, not the window's: the workspace lives in
+       a Gradio column whose width has nothing to do with the viewport. */
     container-type: inline-size;
 
     --mc-accent: var(--primary-500, var(--color-accent, #f97316));
     --mc-accent-soft: var(--primary-400, var(--mc-accent));
     /* The visible knob stays small; the thing a finger has to hit does not. */
-    --mc-knob: 12px;
-    --mc-grab: 30px;
-    --mc-touch: 34px;
-    /* How much height the frame may take before Fit starts shrinking it. */
-    --mc-frame-h: clamp(240px, 52vh, 620px);
+    --mc-knob: 11px;
+    --mc-grab: 28px;
+    --mc-touch: 30px;
+    --mc-rail: 22em;
+    /* §5.2: the workspace is the viewport, the canvas is what is left of it
+       after the bar. Bounded rather than absolute so that the block is still
+       usable in the ordinary column it lives in before a takeover. */
+    --mc-shell-h: min(78vh, 900px);
     --mc-zoom: 1;
+    /* §12.3: compact by default, and every one of these is raised again in the
+       coarse-pointer block at the end. */
+    --mc-dense: 0.78rem;
+    --mc-gap: 0.35em;
 
     display: flex;
     flex-direction: column;
-    gap: 0.5em;
+    gap: var(--mc-gap);
     margin-top: 0.5em;
-    padding: 0.6em;
+    padding: 0.5em;
     border: 1px solid var(--border-color-primary);
     border-radius: var(--radius-lg);
     background: var(--background-fill-primary);
     color: var(--body-text-color);
+    font-size: var(--mc-dense);
     min-width: 0;
     width: 100%;
+    height: var(--mc-shell-h);
 }
 
 .mc-krea-spatial-workspace[hidden] {
@@ -1671,98 +1685,99 @@
     background: none;
 }
 
-/* Sticky rather than fixed: Save and Back stay reachable while the page
-   scrolls, and nothing is torn out of the document to achieve it. */
-.mc-krea-spatial-topbar {
-    position: sticky;
-    top: 0;
-    z-index: 4;
+/* ---------------------------------------------------------------------------
+   §4. The action bar: compact, one line where there is room for one.
+   --------------------------------------------------------------------------- */
+
+.mc-krea-spatial-bar {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 0.4em;
-    padding-bottom: 0.4em;
+    gap: var(--mc-gap);
+    flex: 0 0 auto;
+    padding-bottom: var(--mc-gap);
     border-bottom: 1px solid var(--border-color-primary);
-    background: var(--background-fill-primary);
-}
-
-.mc-krea-spatial-toolbar {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 0.4em;
-}
-
-.mc-krea-spatial-title {
-    font-weight: 600;
-}
-
-.mc-krea-spatial-dims {
-    font-size: var(--text-sm);
-    color: var(--body-text-color-subdued);
-    font-variant-numeric: tabular-nums;
 }
 
 .mc-krea-spatial-spacer {
     flex: 1 1 auto;
-    min-width: 0;
 }
 
-.mc-krea-spatial-note {
-    font-size: var(--text-sm);
-    color: var(--body-text-color-subdued);
-    min-width: 0;
+.mc-krea-spatial-divider {
+    width: 1px;
+    align-self: stretch;
+    margin: 0 0.15em;
+    background: var(--border-color-primary);
 }
 
-/* Non-blocking by construction: a line of text, not a dialog. §4.4 asks for a
-   warning that never costs somebody their layout, and the cheapest way to keep
-   that promise is to have nothing to dismiss. */
-.mc-krea-spatial-warning,
-.mc-krea-spatial-message {
-    margin: 0;
-    font-size: var(--text-sm);
-    color: var(--body-text-color);
-    padding: 0.35em 0.6em;
-    border-radius: var(--radius-sm);
-    background: var(--background-fill-secondary);
-    border-left: 3px solid var(--mc-accent);
-}
-
-.mc-krea-spatial-warning[hidden],
-.mc-krea-spatial-message[hidden],
-.mc-krea-spatial-confirm[hidden],
-.mc-krea-spatial-empty[hidden] {
-    display: none;
-}
-
-/* §14: leaving with unsaved changes asks in the page. A browser confirm() would
-   be a modal dialog put back into an editor that just stopped being one. */
-.mc-krea-spatial-confirm {
-    display: flex;
+/* §4.1. Large enough for a finger, compact enough to sit in a toolbar. */
+.mc-krea-spatial-power {
+    display: inline-flex;
     align-items: center;
-    flex-wrap: wrap;
     gap: 0.4em;
-    padding: 0.4em 0.6em;
-    border: 1px solid var(--mc-accent);
-    border-radius: var(--radius-sm);
-    background: var(--background-fill-secondary);
-    font-size: var(--text-sm);
+    padding: 0.15em 0.55em 0.15em 0.35em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 999px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+}
+
+.mc-krea-spatial-power input {
+    width: var(--mc-touch);
+    height: calc(var(--mc-touch) * 0.55);
+    margin: 0;
+    accent-color: var(--mc-accent);
+    cursor: pointer;
+}
+
+.mc-krea-spatial-power:has(input:checked) {
+    border-color: var(--mc-accent);
+    color: var(--mc-accent);
+}
+
+/* §4.2. Two states, one control, one row. */
+.mc-krea-spatial-segmented {
+    display: inline-flex;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+}
+
+.mc-krea-spatial-segment {
+    appearance: none;
+    border: none;
+    border-radius: 0;
+    padding: 0.3em 0.7em;
+    min-height: var(--mc-touch);
+    font: inherit;
+    color: var(--body-text-color);
+    background: var(--background-fill-primary);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.mc-krea-spatial-segment + .mc-krea-spatial-segment {
+    border-left: 1px solid var(--border-color-primary);
+}
+
+.mc-krea-spatial-segment.active {
+    background: var(--mc-accent);
+    color: var(--button-primary-text-color, #fff);
 }
 
 .mc-krea-spatial-tool {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-height: var(--mc-touch);
-    padding: 0.3em 0.8em;
+    appearance: none;
     border: 1px solid var(--border-color-primary);
-    border-radius: var(--radius-sm);
-    background: var(--button-secondary-background-fill);
-    color: var(--button-secondary-text-color);
-    font-size: var(--text-sm);
+    border-radius: var(--radius-lg);
+    padding: 0.3em 0.65em;
+    min-height: var(--mc-touch);
+    font: inherit;
     line-height: 1.2;
-    white-space: nowrap;
+    color: var(--body-text-color);
+    background: var(--background-fill-primary);
     cursor: pointer;
+    white-space: nowrap;
 }
 
 .mc-krea-spatial-tool:hover:not(:disabled) {
@@ -1774,77 +1789,345 @@
     cursor: default;
 }
 
-.mc-krea-spatial-tool:focus-visible {
-    outline: 2px solid var(--mc-accent);
-    outline-offset: 2px;
-}
-
-.mc-krea-spatial-tool.active {
+.mc-krea-spatial-tool:focus-visible,
+.mc-krea-spatial-segment:focus-visible {
     outline: 2px solid var(--mc-accent);
     outline-offset: 1px;
 }
 
+.mc-krea-spatial-tool.active {
+    border-color: var(--mc-accent);
+    color: var(--mc-accent);
+    box-shadow: inset 0 0 0 1px var(--mc-accent);
+}
+
 .mc-krea-spatial-primary {
-    background: var(--button-primary-background-fill);
-    color: var(--button-primary-text-color);
-    border-color: transparent;
+    border-color: var(--mc-accent);
+    background: var(--mc-accent);
+    color: var(--button-primary-text-color, #fff);
 }
 
 .mc-krea-spatial-danger {
-    color: var(--error-text-color, var(--body-text-color));
-    border-color: var(--error-border-color, var(--border-color-primary));
+    border-color: var(--error-text-color, #dc2626);
+    color: var(--error-text-color, #dc2626);
 }
+
+/* §4.3 and §4.6. Anchored popups: they belong to the bar, so they open under
+   the button that owns them and close on Escape, on each other and on a press
+   outside. Absolute rather than fixed -- nothing is torn out of the document
+   to make a menu. */
+.mc-krea-spatial-menu {
+    position: relative;
+    display: inline-flex;
+}
+
+.mc-krea-spatial-popup {
+    position: absolute;
+    top: calc(100% + 0.35em);
+    left: 0;
+    z-index: 6;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45em;
+    min-width: 14em;
+    padding: 0.6em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-lg);
+    background: var(--background-fill-primary);
+    box-shadow: var(--shadow-drop-lg, 0 6px 20px rgba(0, 0, 0, 0.25));
+}
+
+.mc-krea-spatial-popup[hidden] {
+    display: none;
+}
+
+.mc-krea-spatial-popup-actions {
+    display: flex;
+    gap: var(--mc-gap);
+    padding-top: 0.4em;
+    border-top: 1px solid var(--border-color-primary);
+}
+
+.mc-krea-spatial-popup-actions .mc-krea-spatial-tool {
+    flex: 1 1 auto;
+}
+
+.mc-krea-spatial-switch-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    min-height: var(--mc-touch);
+    cursor: pointer;
+}
+
+.mc-krea-spatial-switch-row input {
+    width: 1.1em;
+    height: 1.1em;
+    accent-color: var(--mc-accent);
+    cursor: pointer;
+}
+
+.mc-krea-spatial-slider {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+}
+
+.mc-krea-spatial-slider input,
+.mc-krea-spatial-range input {
+    flex: 1 1 auto;
+    min-width: 0;
+    accent-color: var(--mc-accent);
+    height: var(--mc-touch);
+}
+
+/* §10. The palettes: Quick Add's four and the Person outline's eleven, drawn by
+   the same clip-paths the canvas uses so that what is dragged looks like what
+   lands. */
+.mc-krea-spatial-palette {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: var(--mc-gap);
+}
+
+.mc-krea-spatial-shape-button {
+    appearance: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.2em;
+    padding: 0.35em 0.2em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-lg);
+    background: var(--background-fill-primary);
+    color: var(--body-text-color);
+    font: inherit;
+    font-size: 0.85em;
+    cursor: grab;
+    /* §5.7 and §23.1: a drag out of a palette is a drag, not a scroll. */
+    touch-action: none;
+}
+
+.mc-krea-spatial-shape-button:hover {
+    border-color: var(--mc-accent);
+}
+
+.mc-krea-spatial-shape-art {
+    width: 1.9em;
+    height: 1.9em;
+    background: currentColor;
+    opacity: 0.75;
+}
+
+.mc-krea-spatial-shape-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+/* §9.2. One outline, eleven independently grabbable parts, laid out where the
+   parts of a person are. Absolute positions in per cent so the whole figure
+   scales with the rail. */
+.mc-krea-spatial-person {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 3 / 5;
+    max-height: 16em;
+    margin: 0 auto;
+}
+
+.mc-krea-spatial-person .mc-krea-spatial-shape-button {
+    position: absolute;
+    padding: 0;
+    gap: 0;
+    border: 1px dashed transparent;
+    background: none;
+}
+
+.mc-krea-spatial-person .mc-krea-spatial-shape-name {
+    display: none;
+}
+
+.mc-krea-spatial-person .mc-krea-spatial-shape-art {
+    width: 100%;
+    height: 100%;
+    background: var(--mc-accent);
+    opacity: 0.55;
+}
+
+.mc-krea-spatial-person .mc-krea-spatial-shape-button:hover,
+.mc-krea-spatial-person .mc-krea-spatial-shape-button:focus-visible {
+    border-color: var(--mc-accent);
+    outline: none;
+}
+
+.mc-krea-spatial-person .mc-krea-spatial-shape-button:hover
+    .mc-krea-spatial-shape-art {
+    opacity: 1;
+}
+
+.mc-krea-spatial-person .mc-krea-spatial-part-head        { left: 40%; top: 1%;  width: 20%; height: 12%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-chest       { left: 31%; top: 14%; width: 38%; height: 21%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-waist       { left: 34%; top: 36%; width: 32%; height: 14%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-left_arm    { left: 17%; top: 15%; width: 13%; height: 25%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-right_arm   { left: 70%; top: 15%; width: 13%; height: 25%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-left_hand   { left: 16%; top: 41%; width: 13%; height: 8%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-right_hand  { left: 71%; top: 41%; width: 13%; height: 8%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-left_leg    { left: 34%; top: 51%; width: 14%; height: 30%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-right_leg   { left: 52%; top: 51%; width: 14%; height: 30%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-left_foot   { left: 32%; top: 82%; width: 16%; height: 7%; }
+.mc-krea-spatial-person .mc-krea-spatial-part-right_foot  { left: 52%; top: 82%; width: 16%; height: 7%; }
+
+/* §9.5. The silhouettes themselves: a clip-path and nothing else, so the shape
+   is presentation and the rectangle around it is the data. Every one of these
+   is applied to the region's shape layer, to a palette button's art, to a
+   layer row's marker and to the drag ghost -- one definition, four sizes. */
+.mc-krea-spatial-shape-head       { clip-path: ellipse(38% 48% at 50% 50%); }
+.mc-krea-spatial-shape-chest      { clip-path: polygon(14% 0%, 86% 0%, 96% 22%, 82% 100%, 18% 100%, 4% 22%); }
+.mc-krea-spatial-shape-waist      { clip-path: polygon(6% 0%, 94% 0%, 80% 100%, 20% 100%); }
+.mc-krea-spatial-shape-left_arm   { clip-path: polygon(20% 0%, 80% 0%, 96% 96%, 62% 100%, 34% 100%, 6% 40%); }
+.mc-krea-spatial-shape-right_arm  { clip-path: polygon(20% 0%, 80% 0%, 94% 40%, 66% 100%, 38% 100%, 4% 96%); }
+.mc-krea-spatial-shape-left_hand,
+.mc-krea-spatial-shape-right_hand { clip-path: ellipse(42% 46% at 50% 52%); }
+.mc-krea-spatial-shape-left_leg,
+.mc-krea-spatial-shape-right_leg  { clip-path: polygon(16% 0%, 84% 0%, 74% 100%, 26% 100%); }
+.mc-krea-spatial-shape-left_foot  { clip-path: polygon(0% 34%, 46% 0%, 100% 46%, 100% 100%, 0% 100%); }
+.mc-krea-spatial-shape-right_foot { clip-path: polygon(0% 46%, 54% 0%, 100% 34%, 100% 100%, 0% 100%); }
+
+/* §10.3. The drag ghost: small, under the contact, and out of the way of every
+   hit test the drop needs to make. */
+.mc-krea-spatial-drop-ghost {
+    position: fixed;
+    z-index: 40;
+    width: 40px;
+    height: 40px;
+    margin: -20px 0 0 -20px;
+    background: var(--mc-accent);
+    opacity: 0.7;
+    pointer-events: none;
+}
+
+/* ---------------------------------------------------------------------------
+   §3.2. The unsaved-changes bar. Two buttons, in the page, and no browser
+   dialog: a confirm() would be a modal reintroduced into a workspace whose
+   whole point was to stop being one.
+   --------------------------------------------------------------------------- */
+
+.mc-krea-spatial-confirm {
+    display: flex;
+    align-items: center;
+    gap: var(--mc-gap);
+    flex: 0 0 auto;
+    padding: 0.4em 0.5em;
+    border: 1px solid var(--mc-accent);
+    border-radius: var(--radius-lg);
+    background: var(--background-fill-secondary);
+}
+
+.mc-krea-spatial-message {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 0.3em 0.5em;
+    border-radius: var(--radius-lg);
+    background: var(--background-fill-secondary);
+    color: var(--body-text-color-subdued);
+}
+
+.mc-krea-spatial-confirm[hidden],
+.mc-krea-spatial-message[hidden] {
+    display: none;
+}
+
+/* ---------------------------------------------------------------------------
+   §5 and §12. The body: canvas left, rail right, and the two of them share the
+   height the bar left behind. `min-height: 0` on both, because a flex child
+   defaults to its content's height and a rail full of panels would otherwise
+   push the frame down the page -- which is the exact failure §12.1 names.
+   --------------------------------------------------------------------------- */
 
 .mc-krea-spatial-body {
     display: flex;
     flex-direction: column;
-    gap: 0.7em;
-    min-width: 0;
+    gap: var(--mc-gap);
+    flex: 1 1 auto;
+    min-height: 0;
 }
 
 .mc-krea-spatial-stage {
     display: flex;
     flex-direction: column;
-    gap: 0.4em;
+    gap: var(--mc-gap);
+    flex: 1 1 auto;
+    min-height: 0;
     min-width: 0;
 }
 
-/* Zoom past Fit overflows here rather than growing the page. §4.5 asks for a
-   normal scroll container and explicitly not for a custom pinch gesture. */
+/* §5.4. Compact actions only: the ratio, Fit, the zoom pair and the grid. */
+.mc-krea-spatial-stagebar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--mc-gap);
+    flex: 0 0 auto;
+}
+
+.mc-krea-spatial-aspect {
+    font-variant-numeric: tabular-nums;
+    color: var(--body-text-color-subdued);
+}
+
+.mc-krea-spatial-zoom-level {
+    min-width: 3.4em;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    color: var(--body-text-color-subdued);
+}
+
 .mc-krea-spatial-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     overflow: auto;
-    min-width: 0;
     padding: 0.2em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-lg);
     background: var(--background-fill-secondary);
-    border-radius: var(--radius-sm);
 }
 
-/* The frame, and the reason there is no measuring code anywhere in the browser
-   file: width is min(what the column offers, what the height budget allows at
-   this aspect ratio), times the zoom. aspect-ratio then supplies the height.
-   The two custom properties are written by JavaScript from the txt2img width
-   and height, so what is drawn on is the shape of what will be generated. */
+/* §5.3. The frame is the shape of the image and nothing else decides it: the
+   aspect ratio is written by the browser file from the generation size, and
+   the two max rules are what keep a tall frame inside the column and a wide one
+   inside the row. No fixed square geometry anywhere. */
 .mc-krea-spatial-canvas {
     position: relative;
-    margin: 0 auto;
+    flex: 0 0 auto;
     aspect-ratio: var(--mc-ar-w, 1) / var(--mc-ar-h, 1);
-    width: calc(
-        var(--mc-zoom, 1) *
-        min(100%, var(--mc-frame-h) * var(--mc-ar-w, 1) / var(--mc-ar-h, 1))
-    );
-    border: 2px solid var(--border-color-primary);
-    border-radius: 2px;
+    /* Fit, in three declarations and no arithmetic about the window: take the
+       height of the box, let the ratio decide the width, and let max-width pull
+       both back when the frame is wider than the box. Zoom lifts all three
+       together, so above 100% the frame overflows and the scroll box scrolls. */
+    height: calc(100% * var(--mc-zoom));
+    width: auto;
+    max-width: calc(100% * var(--mc-zoom));
+    max-height: calc(100% * var(--mc-zoom));
+    border: 1px solid var(--border-color-primary);
     background: var(--background-fill-primary);
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--body-text-color) 12%, transparent);
-    overflow: hidden;
-    /* §5.3: the empty frame scrolls the page like any other block. Only the
-       things that are being dragged opt out, below. */
-    touch-action: pan-x pan-y;
+    /* §5.7: inside the frame, a contact edits. The page does not scroll under
+       somebody's finger while they are moving a box. */
+    touch-action: none;
+    overflow: visible;
+}
+
+.mc-krea-spatial-workspace.zoomed .mc-krea-spatial-scroll {
+    align-items: flex-start;
+    justify-content: flex-start;
 }
 
 .mc-krea-spatial-canvas.drawing {
     cursor: crosshair;
-    touch-action: none;
 }
 
 .mc-krea-spatial-canvas:focus-visible {
@@ -1852,29 +2135,24 @@
     outline-offset: 2px;
 }
 
-/* Guides, drawn with gradients rather than elements: they are guides, they
-   never take a pointer, and a background is the one way to say both at once. */
 .mc-krea-spatial-guides {
     position: absolute;
     inset: 0;
     pointer-events: none;
-    --mc-guide: color-mix(in srgb, var(--body-text-color) 25%, transparent);
     --mc-thirds:
-        linear-gradient(to right, transparent 33.2%, var(--mc-guide) 33.2%,
-            var(--mc-guide) 33.5%, transparent 33.5%,
-            transparent 66.4%, var(--mc-guide) 66.4%,
-            var(--mc-guide) 66.7%, transparent 66.7%),
-        linear-gradient(to bottom, transparent 33.2%, var(--mc-guide) 33.2%,
-            var(--mc-guide) 33.5%, transparent 33.5%,
-            transparent 66.4%, var(--mc-guide) 66.4%,
-            var(--mc-guide) 66.7%, transparent 66.7%);
+        linear-gradient(to right, transparent 33.3%, var(--border-color-primary) 33.3%,
+                        var(--border-color-primary) calc(33.3% + 1px), transparent calc(33.3% + 1px),
+                        transparent 66.6%, var(--border-color-primary) 66.6%,
+                        var(--border-color-primary) calc(66.6% + 1px), transparent calc(66.6% + 1px)),
+        linear-gradient(to bottom, transparent 33.3%, var(--border-color-primary) 33.3%,
+                        var(--border-color-primary) calc(33.3% + 1px), transparent calc(33.3% + 1px),
+                        transparent 66.6%, var(--border-color-primary) 66.6%,
+                        var(--border-color-primary) calc(66.6% + 1px), transparent calc(66.6% + 1px));
     --mc-center:
-        linear-gradient(to right, transparent calc(50% - 1px),
-            var(--mc-guide) calc(50% - 1px), var(--mc-guide) calc(50% + 1px),
-            transparent calc(50% + 1px)),
-        linear-gradient(to bottom, transparent calc(50% - 1px),
-            var(--mc-guide) calc(50% - 1px), var(--mc-guide) calc(50% + 1px),
-            transparent calc(50% + 1px));
+        linear-gradient(to right, transparent calc(50% - 1px), var(--border-color-primary) calc(50% - 1px),
+                        var(--border-color-primary) calc(50% + 1px), transparent calc(50% + 1px)),
+        linear-gradient(to bottom, transparent calc(50% - 1px), var(--border-color-primary) calc(50% - 1px),
+                        var(--border-color-primary) calc(50% + 1px), transparent calc(50% + 1px));
 }
 
 .mc-krea-spatial-guides.thirds { background-image: var(--mc-thirds); }
@@ -1887,59 +2165,76 @@
     inset: 0;
 }
 
-/* Region bodies keep their real z-order. Selecting one never changes it -- what
-   changes is which one the proxy above them is standing on. */
 .mc-krea-spatial-region {
     position: absolute;
-    border: 2px solid color-mix(in srgb, var(--body-text-color) 55%, transparent);
-    background: color-mix(in srgb, var(--body-text-color) 8%, transparent);
+    border: 1px solid var(--mc-accent);
+    background: color-mix(in srgb, var(--mc-accent) 12%, transparent);
     cursor: move;
     touch-action: none;
 }
 
-/* A text region is a different kind of thing and says so without a second
-   colour: dashed is a shape, and shapes survive a theme. */
+/* A silhouette region draws its shape and lets the box itself disappear: the
+   rectangle is still the data, and still exactly where it was, but what is on
+   screen is the thing the user placed. */
+.mc-krea-spatial-region.figure {
+    border-style: dashed;
+    border-color: color-mix(in srgb, var(--mc-accent) 45%, transparent);
+    background: none;
+}
+
+.mc-krea-spatial-shape {
+    position: absolute;
+    inset: 0;
+    background: color-mix(in srgb, var(--mc-accent) 34%, transparent);
+    pointer-events: none;
+}
+
+/* A rectangle has no silhouette to draw on the canvas -- the region's own fill
+   is the shape. The Quick Add chip and the layer row still draw a square,
+   which is exactly what a rectangle looks like, so this is scoped to the
+   region's own shape layer rather than to the shape class everywhere. */
+.mc-krea-spatial-shape.mc-krea-spatial-shape-rect {
+    background: none;
+}
+
 .mc-krea-spatial-region.text,
 .mc-krea-spatial-proxy.text {
     border-style: dashed;
 }
 
 .mc-krea-spatial-region.selected {
-    /* The proxy draws the selection. The body only stops competing with it. */
-    border-color: transparent;
-    background: transparent;
+    border-color: var(--mc-accent-soft);
+    background: color-mix(in srgb, var(--mc-accent) 22%, transparent);
 }
 
+/* §6.2. The name, centred in whatever the region turned out to be, truncated
+   rather than allowed to change the size of the thing it is naming. */
 .mc-krea-spatial-label {
     position: absolute;
-    top: 0;
-    left: 0;
-    max-width: 100%;
-    padding: 0 0.3em;
-    background: color-mix(in srgb, var(--background-fill-primary) 80%, transparent);
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 0.2em;
+    font-size: 0.85em;
+    font-weight: 600;
+    line-height: 1;
     color: var(--body-text-color);
-    font-size: var(--text-xs);
-    line-height: 1.6;
+    text-shadow: 0 1px 2px var(--background-fill-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     pointer-events: none;
 }
 
-.mc-krea-spatial-region.selected .mc-krea-spatial-label {
-    display: none;
-}
-
-/* §6.1, the whole of it. One element, above every region body, carrying the
-   selection's outline, label, move surface and handles. It reads and writes the
-   selected region's bbox and never touches its z, so a buried region is
-   draggable the instant it is selected and stays exactly as buried. */
+/* §7. The selection proxy: the same box, drawn again above every region body,
+   carrying the outline, the move surface and the eight handles. It reads and
+   writes the selected region's bbox and never touches its z. */
 .mc-krea-spatial-proxy {
     position: absolute;
-    z-index: 9000;
+    z-index: 900;
     border: 2px solid var(--mc-accent);
-    background: color-mix(in srgb, var(--mc-accent) 14%, transparent);
-    box-shadow: 0 0 0 1px var(--background-fill-primary);
+    background: color-mix(in srgb, var(--mc-accent) 10%, transparent);
     cursor: move;
     touch-action: none;
 }
@@ -1950,67 +2245,44 @@
 
 .mc-krea-spatial-proxy-label {
     position: absolute;
-    top: 0;
-    left: 0;
-    max-width: 100%;
-    padding: 0 0.3em;
-    background: var(--mc-accent);
-    color: var(--button-primary-text-color, #fff);
-    font-size: var(--text-xs);
-    line-height: 1.6;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 0.2em;
+    font-size: 0.85em;
+    font-weight: 600;
+    line-height: 1;
+    color: var(--body-text-color);
+    text-shadow: 0 1px 2px var(--background-fill-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     pointer-events: none;
 }
 
-/* §5.5: the knob a finger aims at is the knob it can see; the knob it actually
-   hits is the whole element, which is several times larger and transparent.
-   The visible knob is two centred background gradients -- an accent square with
-   a page-coloured square on top of it -- rather than a border on a small box
-   with a pseudo-element around it, because this stylesheet does not draw into
-   ::before or ::after anywhere (see tests/test_progress.py: a WebUI theme may
-   already own them). Same result, one element, no pseudo. */
+/* §8.2. The knob is small and the target is not: the visible square is
+   --mc-knob and the invisible one a finger has to land in is --mc-grab, which
+   the coarse-pointer block at the end raises to a full 44px. */
 .mc-krea-spatial-handle {
     position: absolute;
-    margin: 0;
-    transform: translate(-50%, -50%);
-    background-color: transparent;
-    background-image:
-        linear-gradient(var(--background-fill-primary), var(--background-fill-primary)),
-        linear-gradient(var(--mc-accent), var(--mc-accent));
-    background-size:
-        calc(var(--mc-knob) - 4px) calc(var(--mc-knob) - 4px),
-        var(--mc-knob) var(--mc-knob);
-    background-position: center, center;
-    background-repeat: no-repeat, no-repeat;
+    width: var(--mc-knob);
+    height: var(--mc-knob);
+    margin: calc(var(--mc-knob) / -2) 0 0 calc(var(--mc-knob) / -2);
+    border: 1px solid var(--background-fill-primary);
+    background: var(--mc-accent);
+    border-radius: 2px;
     touch-action: none;
 }
 
-/* Corners are square targets and win ties; edge targets are strips that stop
-   short of them, so the eight of them do not fight over the same finger on a
-   small region. */
-.mc-krea-spatial-handle-nw,
-.mc-krea-spatial-handle-ne,
-.mc-krea-spatial-handle-se,
-.mc-krea-spatial-handle-sw {
+.mc-krea-spatial-handle::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
     width: var(--mc-grab);
     height: var(--mc-grab);
-    z-index: 2;
-}
-
-.mc-krea-spatial-handle-n,
-.mc-krea-spatial-handle-s {
-    width: 50%;
-    height: var(--mc-grab);
-    z-index: 1;
-}
-
-.mc-krea-spatial-handle-e,
-.mc-krea-spatial-handle-w {
-    width: var(--mc-grab);
-    height: 50%;
-    z-index: 1;
+    transform: translate(-50%, -50%);
 }
 
 .mc-krea-spatial-handle-nw { top: 0;    left: 0;    cursor: nwse-resize; }
@@ -2024,138 +2296,146 @@
 
 .mc-krea-spatial-ghost {
     position: absolute;
-    z-index: 8000;
-    border: 2px dashed var(--mc-accent);
-    background: color-mix(in srgb, var(--mc-accent) 10%, transparent);
+    z-index: 950;
+    border: 1px dashed var(--mc-accent);
+    background: color-mix(in srgb, var(--mc-accent) 12%, transparent);
     pointer-events: none;
 }
 
-.mc-krea-spatial-stagebar {
+/* ---------------------------------------------------------------------------
+   §12. The rail. One bounded column, scrolling on its own, holding widgets that
+   can each be collapsed or switched off. The canvas never scrolls because of
+   anything below.
+   --------------------------------------------------------------------------- */
+
+.mc-krea-spatial-rail {
+    display: flex;
+    flex-direction: column;
+    gap: var(--mc-gap);
+    flex: 0 0 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.mc-krea-spatial-rail.empty {
+    display: none;
+}
+
+.mc-krea-spatial-widget {
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-lg);
+    background: var(--background-fill-secondary);
+    overflow: hidden;
+}
+
+.mc-krea-spatial-widget[hidden] {
+    display: none;
+}
+
+.mc-krea-spatial-widget-head {
+    appearance: none;
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
-    gap: 0.6em;
-    font-size: var(--text-sm);
+    gap: 0.4em;
+    width: 100%;
+    min-height: var(--mc-touch);
+    padding: 0.25em 0.5em;
+    border: none;
+    background: none;
+    color: var(--body-text-color);
+    font: inherit;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
 }
 
-.mc-krea-spatial-zoom {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25em;
+.mc-krea-spatial-widget-name {
+    flex: 1 1 auto;
 }
 
-.mc-krea-spatial-zoom-level {
-    min-width: 3.4em;
-    text-align: center;
+.mc-krea-spatial-caret {
+    width: 0;
+    height: 0;
+    border-left: 5px solid currentColor;
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    transform: rotate(90deg);
+    transition: transform 0.12s ease;
+}
+
+.mc-krea-spatial-widget.collapsed .mc-krea-spatial-caret {
+    transform: rotate(0deg);
+}
+
+.mc-krea-spatial-tally {
+    font-weight: 400;
     font-variant-numeric: tabular-nums;
     color: var(--body-text-color-subdued);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 9em;
 }
 
-.mc-krea-spatial-inline {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35em;
-}
-
-.mc-krea-spatial-side {
+.mc-krea-spatial-widget-body {
     display: flex;
     flex-direction: column;
-    gap: 0.7em;
-    min-width: 0;
+    gap: var(--mc-gap);
+    padding: 0.5em;
+    border-top: 1px solid var(--border-color-primary);
+    background: var(--background-fill-primary);
 }
 
-.mc-krea-spatial-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 0.45em;
-    min-width: 0;
-    padding: 0.6em;
-    border: 1px solid var(--border-color-primary);
-    border-radius: var(--radius-sm);
-    background: var(--background-fill-secondary);
+.mc-krea-spatial-widget-body[hidden] {
+    display: none;
 }
 
-.mc-krea-spatial-panel-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 0.5em;
-}
-
-.mc-krea-spatial-panel-head h4 {
-    margin: 0;
-    font-size: var(--text-sm);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--body-text-color-subdued);
-}
-
-/* §9: touch-friendly rows, not a <select multiple>. A row is a whole target,
-   the trash is a second one inside it, and reordering is buttons rather than
-   drag-and-drop -- which is the reliable choice on a finger. */
+/* §14. The layer list. */
 .mc-krea-spatial-list {
     display: flex;
     flex-direction: column;
-    gap: 0.2em;
+    gap: 2px;
     max-height: 15em;
     overflow-y: auto;
-    min-width: 0;
 }
 
 .mc-krea-spatial-row {
     display: flex;
     align-items: center;
-    gap: 0.5em;
+    gap: 0.4em;
     min-height: var(--mc-touch);
-    padding: 0.2em 0.4em;
+    padding: 0.15em 0.35em;
     border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    background: var(--background-fill-primary);
+    border-radius: var(--radius-sm, 4px);
     cursor: pointer;
 }
 
 .mc-krea-spatial-row:hover {
-    border-color: var(--border-color-primary);
+    background: var(--background-fill-secondary);
 }
 
 .mc-krea-spatial-row.selected {
     border-color: var(--mc-accent);
-    background: color-mix(in srgb, var(--mc-accent) 16%, var(--background-fill-primary));
+    background: color-mix(in srgb, var(--mc-accent) 14%, transparent);
 }
 
 .mc-krea-spatial-row:focus-visible {
     outline: 2px solid var(--mc-accent);
-    outline-offset: 1px;
+    outline-offset: -2px;
 }
 
-/* -- reordering ---------------------------------------------------------- */
-/*
-   Top to bottom is the order the regions are written into the prompt, so the
-   list is the thing somebody drags to change that order. The grip says a row
-   can be picked up; the line says where it will land.
-*/
-
 .mc-krea-spatial-row-grip {
+    color: var(--body-text-color-subdued);
     cursor: grab;
-    opacity: 0.45;
-    font-size: 0.9em;
-    line-height: 1;
-    /* A drag starts on the row, not on this: the grip is a sign, and a row
-       that can only be taken by one four-pixel target is a row most people
-       cannot move. */
-    pointer-events: none;
+    touch-action: none;
 }
 
 .mc-krea-spatial-row.dragging {
     opacity: 0.5;
-    cursor: grabbing;
 }
 
-.mc-krea-spatial-row.drop-before,
-.mc-krea-spatial-row.drop-after {
-    /* An inset shadow rather than a border: a border on a row this size moves
-       every other row by a pixel as the pointer passes over it. */
+.mc-krea-spatial-row.drop-before {
     box-shadow: inset 0 2px 0 0 var(--mc-accent);
 }
 
@@ -2163,258 +2443,285 @@
     box-shadow: inset 0 -2px 0 0 var(--mc-accent);
 }
 
+/* §14.1's type marker: the silhouette itself, in miniature. */
 .mc-krea-spatial-row-icon {
     flex: 0 0 auto;
-    width: 1.2em;
-    text-align: center;
-    color: var(--body-text-color-subdued);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    width: 1em;
+    height: 1em;
+    background: var(--mc-accent);
+}
+
+.mc-krea-spatial-row-icon-text {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    color: var(--mc-accent);
+    font-weight: 700;
+    font-size: 0.85em;
 }
 
 .mc-krea-spatial-row-name {
     flex: 1 1 auto;
-    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: var(--text-sm);
+}
+
+.mc-krea-spatial-row-size {
+    font-variant-numeric: tabular-nums;
+    color: var(--body-text-color-subdued);
 }
 
 .mc-krea-spatial-row-trash {
+    appearance: none;
     flex: 0 0 auto;
     width: var(--mc-touch);
     height: var(--mc-touch);
     border: none;
-    border-radius: var(--radius-sm);
-    background: transparent;
+    border-radius: var(--radius-sm, 4px);
+    background: none;
     color: var(--body-text-color-subdued);
+    font: inherit;
     cursor: pointer;
-    line-height: 1;
 }
 
 .mc-krea-spatial-row-trash:hover {
-    color: var(--error-text-color, var(--body-text-color));
+    color: var(--error-text-color, #dc2626);
     background: var(--background-fill-secondary);
 }
 
-.mc-krea-spatial-empty {
-    margin: 0;
-    font-size: var(--text-sm);
-    color: var(--body-text-color-subdued);
-}
-
-.mc-krea-spatial-layerbar {
+.mc-krea-spatial-rowbar {
     display: flex;
-    flex-wrap: wrap;
-    gap: 0.3em;
+    gap: var(--mc-gap);
 }
 
-.mc-krea-spatial-inspector {
-    min-width: 0;
+.mc-krea-spatial-rowbar .mc-krea-spatial-tool {
+    flex: 1 1 auto;
+    padding-left: 0.3em;
+    padding-right: 0.3em;
 }
 
+/* §15. The inspector's fields, and every other labelled control in the rail. */
 .mc-krea-spatial-field {
     display: flex;
     flex-direction: column;
-    gap: 0.2em;
+    gap: 0.15em;
     min-width: 0;
-    font-size: var(--text-sm);
 }
 
 .mc-krea-spatial-field[hidden] {
     display: none;
 }
 
-.mc-krea-spatial-field input,
-.mc-krea-spatial-field select,
-.mc-krea-spatial-field textarea,
-.mc-krea-spatial-inline select {
-    width: 100%;
-    min-height: var(--mc-touch);
-    padding: 0.3em 0.4em;
-    border: 1px solid var(--border-color-primary);
-    border-radius: var(--radius-sm);
-    background: var(--input-background-fill);
-    color: var(--body-text-color);
-    font-family: inherit;
-    font-size: inherit;
+/* The prompt boxes: whatever height is left in the widget, rather than a fixed
+   number of rows that is wrong in both directions. */
+.mc-krea-spatial-grow {
+    flex: 1 1 auto;
 }
 
-.mc-krea-spatial-field :disabled {
-    opacity: 0.5;
+.mc-krea-spatial-grow textarea {
+    flex: 1 1 auto;
 }
 
-/* Themed against the panel, at id strength, on our own elements only.
-   Lobe rendered these as white boxes on a dark panel: a bare <input> inside
-   custom DOM is a surface a Gradio theme has no reason to have styled, so
-   whichever rule wins is either the user agent's (a white `field` colour) or a
-   theme rule aimed at something else. Rather than guess which, this states
-   every colour explicitly, ends the fallback chain in the panel's own colour
-   rather than a hard-coded dark, and turns the native widget off so nothing is
-   painted underneath. `#mc-krea-spatial-workspace` rather than !important:
-   an id is enough to win and still leaves a theme able to override us on
-   purpose. */
-#mc-krea-spatial-workspace input[type="text"],
-#mc-krea-spatial-workspace textarea,
-#mc-krea-spatial-workspace select {
-    appearance: none;
-    -webkit-appearance: none;
-    color: var(--input-text-color, var(--body-text-color, inherit));
-    -webkit-text-fill-color: currentColor;
-    border: 1px solid var(--input-border-color,
-                         var(--border-color-primary, currentColor));
-    border-radius: var(--radius-sm);
-    color-scheme: inherit;
-    /* Two layers, because one of them cannot be trusted. The colour is the
-       theme's input fill when there is one; the gradient over it is a tint
-       mixed out of the theme's *text* colour, which every theme sets because
-       it is the one it cannot do without. So a theme that leaves
-       --input-background-fill undefined, or defines it as nothing, gets a
-       field that is faintly lighter than a dark panel and faintly darker than
-       a light one, rather than a white box on either. */
-    background-color: var(--input-background-fill,
-                      var(--background-fill-primary, transparent));
-    background-image:
-        linear-gradient(color-mix(in srgb, var(--body-text-color) 7%, transparent),
-                        color-mix(in srgb, var(--body-text-color) 7%, transparent));
-    background-repeat: no-repeat;
+.mc-krea-spatial-field > span {
+    color: var(--body-text-color-subdued);
 }
 
-#mc-krea-spatial-workspace input[type="text"]:focus,
-#mc-krea-spatial-workspace textarea:focus,
-#mc-krea-spatial-workspace select:focus {
-    outline: 2px solid var(--mc-accent);
-    outline-offset: -1px;
-    border-color: var(--mc-accent);
+.mc-krea-spatial-pair,
+.mc-krea-spatial-bbox {
+    display: grid;
+    gap: var(--mc-gap);
 }
 
-/* appearance: none takes the dropdown marker with it, so it is drawn back on
-   as a gradient chevron -- no pseudo-element, same reason as the handles. */
-#mc-krea-spatial-workspace select {
-    padding-right: 1.6em;
-    background-image:
-        linear-gradient(45deg, transparent 50%, currentColor 50%),
-        linear-gradient(135deg, currentColor 50%, transparent 50%),
-        linear-gradient(color-mix(in srgb, var(--body-text-color) 7%, transparent),
-                        color-mix(in srgb, var(--body-text-color) 7%, transparent));
-    background-size: 5px 5px, 5px 5px, auto;
-    background-position: right 0.85em top 55%, right 0.6em top 55%, center;
-    background-repeat: no-repeat, no-repeat, no-repeat;
-}
+.mc-krea-spatial-pair { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.mc-krea-spatial-bbox { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
-/* §11: the prompt gets the vertical space, because it is the field that is
-   actually written in. */
-.mc-krea-spatial-field textarea {
-    resize: vertical;
-    min-height: 6em;
-}
-
-.mc-krea-spatial-pair {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.4em;
-}
-
-.mc-krea-spatial-pair > .mc-krea-spatial-field {
-    flex: 1 1 9em;
+.mc-krea-spatial-range {
+    gap: 0.25em;
 }
 
 .mc-krea-spatial-check {
     display: flex;
     align-items: center;
-    gap: 0.4em;
-    font-size: var(--text-sm);
+    gap: 0.5em;
+    min-height: var(--mc-touch);
+    cursor: pointer;
 }
 
 .mc-krea-spatial-check input {
     width: 1.1em;
     height: 1.1em;
+    accent-color: var(--mc-accent);
+    cursor: pointer;
 }
 
-/* §11: the destructive controls live together, at the bottom, away from
-   everything that is merely an edit. */
-.mc-krea-spatial-destructive {
+/* Fields the theme has never seen, styled by the theme's own variables. The id
+   rather than !important: this is one selector more specific than a Gradio
+   base rule and nothing here has to shout. */
+#mc-krea-spatial-workspace input[type="text"],
+#mc-krea-spatial-workspace input[type="number"],
+#mc-krea-spatial-workspace textarea,
+#mc-krea-spatial-workspace select {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 0.25em 0.4em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-sm, 4px);
+    background: var(--input-background-fill, var(--background-fill-primary));
+    color: var(--body-text-color);
+    font: inherit;
+}
+
+#mc-krea-spatial-workspace input[type="text"]:focus,
+#mc-krea-spatial-workspace input[type="number"]:focus,
+#mc-krea-spatial-workspace textarea:focus,
+#mc-krea-spatial-workspace select:focus {
+    outline: 2px solid var(--mc-accent);
+    outline-offset: -1px;
+}
+
+#mc-krea-spatial-workspace textarea {
+    resize: vertical;
+    min-height: 3.2em;
+}
+
+#mc-krea-spatial-workspace :disabled {
+    opacity: 0.55;
+}
+
+/* §16. The gallery: the tab's own results, shown beside the canvas. */
+.mc-krea-spatial-shot {
     display: flex;
-    gap: 0.4em;
-    margin-top: 0.2em;
-    padding-top: 0.5em;
-    border-top: 1px solid var(--border-color-primary);
+    align-items: center;
+    justify-content: center;
+    min-height: 6em;
+    max-height: 18em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-sm, 4px);
+    background: var(--background-fill-secondary);
+    overflow: hidden;
 }
 
-.mc-krea-spatial-destructive .mc-krea-spatial-tool {
-    flex: 1 1 auto;
+.mc-krea-spatial-shot-image {
+    max-width: 100%;
+    max-height: 18em;
+    object-fit: contain;
 }
 
-/* §12. Container queries, not viewport ones: the editor sits in a Gradio column
-   whose width the window says nothing about, and a media query would give a
-   phone layout to a wide window and a desktop layout to a narrow column in it.
-
-   Narrow is the default above -- frame, then inspector, then region list, which
-   is the order §3.2 asks for so that the selected box and its prompt stay next
-   to each other on a phone. */
-@container (min-width: 560px) {
-    .mc-krea-spatial-side {
-        flex-direction: row;
-        flex-wrap: wrap;
-    }
-
-    .mc-krea-spatial-side > .mc-krea-spatial-panel {
-        flex: 1 1 16em;
-    }
+.mc-krea-spatial-progress {
+    position: relative;
+    height: var(--mc-touch);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-sm, 4px);
+    background: var(--background-fill-secondary);
+    overflow: hidden;
 }
 
-@container (min-width: 880px) {
-    .mc-krea-spatial-workspace {
-        --mc-frame-h: clamp(320px, 62vh, 760px);
-    }
+.mc-krea-spatial-progress[hidden] {
+    display: none;
+}
 
+.mc-krea-spatial-progress-bar {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 0;
+    background: color-mix(in srgb, var(--mc-accent) 45%, transparent);
+}
+
+.mc-krea-spatial-progress-read {
+    position: relative;
+    font-variant-numeric: tabular-nums;
+}
+
+/* §17. The session facts, in the widget that replaced the permanent strip. */
+.mc-krea-spatial-facts {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.15em 0.6em;
+    margin: 0;
+}
+
+.mc-krea-spatial-facts dt {
+    color: var(--body-text-color-subdued);
+}
+
+.mc-krea-spatial-facts dd {
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mc-krea-spatial-facts dd.warn {
+    color: var(--mc-accent);
+}
+
+/* ---------------------------------------------------------------------------
+   §24. Responsive. Container queries, not viewport ones: the workspace sits in
+   a Gradio column whose width the window says nothing about, and a media query
+   would give a phone layout to a wide window and a desktop layout to a narrow
+   column in it.
+
+   Narrow is the default above -- canvas, then panels below it, which is what
+   §24 calls acceptable for a phone. Wide is the design: canvas left, rail
+   right, both of them full height.
+   --------------------------------------------------------------------------- */
+
+.mc-krea-spatial-rail {
+    max-height: 40vh;
+}
+
+@container (min-width: 760px) {
     .mc-krea-spatial-body {
         flex-direction: row;
-        align-items: flex-start;
+        align-items: stretch;
     }
 
-    .mc-krea-spatial-stage {
-        flex: 1 1 auto;
-    }
-
-    .mc-krea-spatial-side {
-        flex: 0 0 22em;
-        max-width: 22em;
-        flex-direction: column;
-        flex-wrap: nowrap;
-    }
-
-    /* The two-column rule above is still in force at this width, and its
-       flex-basis is a *height* once the direction turns: without this the
-       region list gets a 16em floor and a panel of empty space under it. */
-    .mc-krea-spatial-side > .mc-krea-spatial-panel {
-        flex: 0 0 auto;
+    .mc-krea-spatial-rail {
+        flex: 0 0 var(--mc-rail);
+        width: var(--mc-rail);
+        max-height: none;
     }
 }
 
-/* Narrow: the region list goes below the inspector, so the box that is selected
-   and the prompt that describes it are adjacent. Wide: the list comes first,
-   which is where a layers panel belongs. */
-.mc-krea-spatial-regions-panel { order: 2; }
-.mc-krea-spatial-inspector { order: 1; }
-
-@container (min-width: 880px) {
-    .mc-krea-spatial-regions-panel { order: 1; }
-    .mc-krea-spatial-inspector { order: 2; }
+@container (min-width: 1100px) {
+    .mc-krea-spatial-workspace {
+        --mc-rail: 24em;
+    }
 }
 
-/* §5.5. On a finger there is no hover to aim with and no pixel to aim at, so
-   every target grows -- including the invisible one around each resize knob. */
+/* §5.7 and §23.3. The page does not scroll while a gesture is live, and the
+   rail's own scrolling stays inside the rail. */
+.mc-krea-spatial-workspace.dragging {
+    touch-action: none;
+}
+
+/* §12.3 and §23.2. On a finger there is no hover to aim with and no pixel to
+   aim at, so every target grows -- including the invisible one around each
+   resize knob -- while the desktop stays compact. */
 @media (pointer: coarse), (hover: none) {
     .mc-krea-spatial-workspace {
         --mc-knob: 14px;
         --mc-grab: 44px;
         --mc-touch: 44px;
+        --mc-dense: 0.9rem;
+        --mc-gap: 0.45em;
+    }
+
+    .mc-krea-spatial-shape-button {
+        min-height: 44px;
     }
 }
 
-/* §13.4. Nothing here needs animation to say what state it is in, which makes
-   this a promise rather than a compromise. */
+/* §13.4 of the older design, kept: nothing here needs animation to say what
+   state it is in, which makes this a promise rather than a compromise. */
 @media (prefers-reduced-motion: reduce) {
     .mc-krea-spatial-workspace,
     .mc-krea-spatial-workspace * {
@@ -2424,45 +2731,63 @@
     }
 }
 
-/* Full screen, both ways of getting there. Written as two rules and not one
-   selector list: a browser that does not know :fullscreen would throw away a
-   list containing it, and the .fullpage fallback is exactly the case where
-   that browser needs the rule. */
-.mc-krea-spatial-workspace.fullpage {
-    position: fixed;
-    inset: 0;
-    z-index: 2000;
-    margin: 0;
-    max-width: none;
-    max-height: none;
-    overflow: auto;
-    border: none;
-    border-radius: 0;
-    padding: 0.8em;
-    background: var(--background-fill-primary);
-    --mc-frame-h: clamp(320px, 78vh, 1600px);
+/* ---------------------------------------------------------------------------
+   §3.1. The takeover.
+
+   The browser file marks the workspace and every ancestor between it and
+   #tab_txt2img with data-mc-spatial-path, and puts one class on the tab. Three
+   rules are the whole of it: a child of the tab that is not on the path is
+   hidden, a child of any deeper path element that is not on the path is hidden,
+   and the path elements between give up their own decoration so that the
+   workspace is standing in the tab rather than in three nested containers
+   inside it.
+
+   The tab is deliberately not one of those. It carries the class and the mark,
+   but `.mc-krea-spatial-taken [data-mc-spatial-path]` is a descendant selector
+   and does not match the element the class is on -- which is why its own
+   children need a rule of their own, and why nothing here ever forces a
+   `display` on the tab. Gradio hides an inactive tab by setting exactly that
+   property, and a `display: block !important` on #tab_txt2img would leave
+   txt2img showing on top of img2img.
+
+   Nothing is moved, nothing is position: fixed, no id exists twice, and Close
+   removes the marks. The one thing it cannot do is escape a container that
+   clips *the tab itself* -- and nothing does, because the tab is the thing
+   Forge scrolls.
+   --------------------------------------------------------------------------- */
+
+.mc-krea-spatial-taken > *:not([data-mc-spatial-path]) {
+    display: none !important;
 }
 
-.mc-krea-spatial-workspace:fullscreen {
-    margin: 0;
-    max-width: none;
-    max-height: none;
-    overflow: auto;
-    border: none;
-    border-radius: 0;
-    padding: 0.8em;
-    background: var(--background-fill-primary);
-    --mc-frame-h: clamp(320px, 78vh, 1600px);
+.mc-krea-spatial-taken [data-mc-spatial-path]:not(.mc-krea-spatial-workspace)
+    > *:not([data-mc-spatial-path]) {
+    display: none !important;
 }
 
-/* Undo and Redo are one control in two halves. Left to the toolbar's own
-   wrapping they end up on separate lines on a phone, which reads as two
-   unrelated buttons. */
-.mc-krea-spatial-group {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4em;
+.mc-krea-spatial-taken [data-mc-spatial-path]:not(.mc-krea-spatial-workspace) {
+    display: block !important;
+    flex: 1 1 auto !important;
+    width: 100% !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+    background: none !important;
+    box-shadow: none !important;
+    gap: 0 !important;
+    overflow: visible !important;
 }
+
+/* The workspace is on the path so that it survives the rule above as a sibling,
+   and is excluded from it so that its own contents survive too. All it takes
+   from the takeover is the height, which is the point of asking for it. */
+.mc-krea-spatial-taken .mc-krea-spatial-workspace[data-mc-spatial-path] {
+    height: calc(100vh - 5.5rem);
+    margin: 0;
+}
+
 
 /* ==========================================================================
    The Image Pipeline
