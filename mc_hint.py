@@ -91,3 +91,17 @@ def line(data: str, text: str, label: str = "") -> str:
 def _plain(heading: str) -> str:
     """A Markdown heading as the words in it, for the accessible name."""
     return " ".join(str(heading or "").replace("*", "").replace("#", "").split())
+
+
+def control(text: str, label: str = "", elem_id: str = ""):
+    """The badge as a Gradio component, to sit in a Row beside what it explains.
+
+    For the cases a Markdown heading cannot reach: a dropdown's label is
+    Gradio's own text and takes no HTML, so the "i" goes next to the control
+    instead of inside its label. `flex: 0 0 auto` in the stylesheet keeps it the
+    width of one character rather than a column of its own.
+    """
+    import gradio as gr
+
+    return gr.HTML(badge(text, label), elem_id=elem_id or None,
+                   elem_classes=[f"{PREFIX}-control"])

@@ -21,6 +21,7 @@ import gradio as gr
 
 import mc_arch
 import mc_broker
+import mc_hint
 import mc_infotext
 import mc_literal_report
 import mc_llm_paths
@@ -1002,13 +1003,6 @@ class ScriptModelChain(scripts.Script):
             )
 
         with pipeline.body("stage2"):
-            gr.Markdown(
-                "Finishes Stage 1 on the loaded checkpoint, then re-encodes the "
-                "result and refines it with a second checkpoint. The handoff is in "
-                "**pixel space**, so the two models may use different architectures, "
-                "VAEs and text encoders.",
-                elem_id=self.elem_id("intro"),
-            )
 
             # -- 9.1 Presets ----------------------------------------------- #
             #
@@ -1030,13 +1024,22 @@ class ScriptModelChain(scripts.Script):
                         label="Preset",
                         choices=mc_presets.choices(),
                         elem_id=self.elem_id("preset"),
-                        info="selecting a preset applies it immediately",
+                        info="applied the moment it is chosen",
                     )
                     preset_refresh = ToolButton(
                         value=refresh_symbol,
                         elem_id=self.elem_id("preset_refresh"),
                         tooltip="Presets: refresh",
                     )
+                    # What the paragraph above this panel used to say, on the
+                    # first control anybody reads.
+                    mc_hint.control(
+                        "Stage 2 finishes Stage 1 on the loaded checkpoint, then "
+                        "re-encodes the result and refines it with a second "
+                        "checkpoint. The handoff is in pixel space, so the two "
+                        "models may use different architectures, VAEs and text "
+                        "encoders. A preset carries every setting in this panel.",
+                        label="Stage 2", elem_id=self.elem_id("intro"))
 
                 preset_status = gr.Markdown("", elem_id=self.elem_id("preset_status"))
                 preset_explain = gr.Markdown(
@@ -1124,20 +1127,21 @@ class ScriptModelChain(scripts.Script):
             # -- 9.3 Prompt & Styles --------------------------------------- #
             with gr.Accordion("Prompt & Styles", open=False,
                               elem_id=self.elem_id("section_prompt")):
-                prompt_mode = gr.Radio(
-                    choices=list(mc_infotext.PROMPT_MODES),
-                    value="Inherit",
-                    label="Stage 2 prompt",
-                    elem_id=self.elem_id("prompt_mode"),
-                )
-                gr.Markdown(
-                    "Flux-family models respond to natural-language phrasing rather "
-                    "than comma-separated tags, so a Stage 2 prompt often needs "
-                    "different wording than Stage 1. `<lora:name:weight>` tags here "
-                    "are applied against the Stage 2 model.",
-                    elem_id=self.elem_id("prompt_hint"),
-                )
-
+                with gr.Row():
+                    prompt_mode = gr.Radio(
+                        choices=list(mc_infotext.PROMPT_MODES),
+                        value="Inherit",
+                        label="Stage 2 prompt",
+                        elem_id=self.elem_id("prompt_mode"),
+                    )
+                    mc_hint.control(
+                        "Flux-family models respond to natural-language phrasing "
+                        "rather than comma-separated tags, so a Stage 2 prompt "
+                        "often needs different wording than Stage 1. "
+                        "<lora:name:weight> tags here are applied against the "
+                        "Stage 2 model.",
+                        label="the Stage 2 prompt",
+                        elem_id=self.elem_id("prompt_hint"))
                 prompt = gr.Textbox(
                     label="Stage 2 positive",
                     lines=2,

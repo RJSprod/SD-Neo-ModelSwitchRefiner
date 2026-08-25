@@ -2794,6 +2794,99 @@
 }
 
 /* ==========================================================================
+   The "i"
+   ==========================================================================
+
+   Every panel here used to explain itself in a paragraph, and every paragraph
+   was written for the first time somebody met it -- which is once. After that
+   they stand between a user and the settings they came for. So the rule is
+   live data on the panel, description behind this: see mc_hint.py.
+
+   No JavaScript and no popup library. The text is in an attribute and the
+   bubble is a pseudo-element, which means a theme cannot break it by
+   rearranging Gradio's internals, and a build where this stylesheet failed to
+   load still shows the same words through the browser's own `title` tooltip.
+*/
+
+.mc-hint {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.15em;
+    height: 1.15em;
+    margin-left: 0.4em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 50%;
+    font-size: 0.8em;
+    font-style: italic;
+    font-weight: 600;
+    line-height: 1;
+    cursor: help;
+    opacity: 0.65;
+    vertical-align: middle;
+    position: relative;
+    /* Nothing about it should move the line it sits on. */
+    flex: 0 0 auto;
+}
+
+.mc-hint:hover,
+.mc-hint:focus-visible {
+    opacity: 1;
+    border-color: var(--mc-pipe-accent, var(--border-color-accent, currentColor));
+}
+
+/* The bubble. `white-space: normal` with a width, because these are sentences
+   and a one-line tooltip 400 characters wide is a worse answer than the
+   paragraph it replaced. */
+.mc-hint::after {
+    content: attr(data-mc-hint);
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 0.5em);
+    z-index: 1000;
+    width: max-content;
+    max-width: min(28em, 60vw);
+    transform: translateX(-50%);
+    padding: 0.5em 0.7em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-sm, 0.3em);
+    background: var(--background-fill-primary);
+    color: var(--body-text-color);
+    font-size: 1.05em;
+    font-style: normal;
+    font-weight: 400;
+    line-height: 1.4;
+    text-align: left;
+    white-space: normal;
+    box-shadow: 0 0.4em 1.2em rgba(0, 0, 0, 0.35);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.12s ease;
+}
+
+.mc-hint:hover::after,
+.mc-hint:focus-visible::after {
+    opacity: 1;
+    visibility: visible;
+}
+
+/* A badge Gradio built as a component of its own, rather than one inside a
+   Markdown line: it sits in a Row beside the control it explains, and has no
+   business taking a column's worth of width. */
+.mc-hint-control {
+    flex: 0 0 auto !important;
+    min-width: 0 !important;
+    align-self: center;
+    padding: 0 !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mc-hint::after {
+        transition: none;
+    }
+}
+
+/* ==========================================================================
    The Literal Prompt boxes
    ==========================================================================
 
