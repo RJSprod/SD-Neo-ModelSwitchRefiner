@@ -2972,37 +2972,76 @@
     margin: 0;
 }
 
-.mc-pipeline-editor > :first-child {
+/*
+   Specificity and `!important`, and neither is decoration.
+
+   Gradio's accordion header is a <button class="label-wrap"> that is
+   `display: flex`, and a theme restyles it on top of that. Every rule below
+   used to be `.mc-pipeline-editor > :first-child`, which is (0,2,0) -- the
+   same weight as `.gradio-container .label-wrap`, and a tie is settled by
+   whichever stylesheet was loaded last. An extension does not get to choose
+   that, so the tie was being lost: measured against a theme of that shape,
+   *none* of this applied. The header stayed flex at its own height with the
+   theme's padding, the break came out as a space, and the whole label went
+   through ::first-line as one bold line running under the switch.
+
+   So the card header is addressed through its card -- (0,3,0), which no
+   selector naming only classes can tie -- and the handful of properties that
+   decide the layout rather than the look are marked. This is the one element
+   in the panel that is worth doing that to: the extension put two lines of its
+   own text in there and painted a switch over the right-hand end, so how tall
+   it is, how it wraps and what it keeps clear are this file's to answer. What
+   it is *coloured* is still the theme's, and the tokens are still the host's.
+*/
+
+.mc-pipeline-stage > .mc-pipeline-editor > :first-child {
     position: relative;
     box-sizing: border-box;
-    display: block;
+
+    /* Block, and marked: a flex container has no ::first-line, so the theme
+       leaving this as flex is the difference between two voices and one. */
+    display: block !important;
+
+    /* And the width, because Gradio's header is a <button>. A block-level
+       button still sizes to its contents rather than to its parent, so the
+       header came out narrower than the card it is in -- and every measurement
+       taken from its right edge came out short with it: the lane the padding
+       reserves stopped before the switch, and the caret was drawn on top of
+       it. A block div fills the line and a block button does not, which is why
+       this was invisible until the real header was put in front of it. */
+    width: 100% !important;
+    min-width: 0;
+
     /* Fixed rather than a minimum: the switch is painted into this band from
-       outside it, so how tall it is has to be this file's answer and not the
-       theme's. Two lines and the padding around them, in em, so it scales with
-       whatever type the theme is using. */
-    height: var(--mc-pipe-head);
-    padding: 0.35em calc(var(--mc-pipe-lane) + var(--mc-pipe-caret)) 0.35em 0.7em;
+       outside it, so how tall it is has to be this file's answer. */
+    height: var(--mc-pipe-head) !important;
+
+    /* The lane the switch and the caret sit in. Without this the description
+       runs underneath both of them. */
+    padding: 0.35em calc(var(--mc-pipe-lane) + var(--mc-pipe-caret))
+             0.35em 0.7em !important;
+
     border: none;
     background: none;
     text-align: left;
 
-    /* The description's voice, and the line break that makes it a second line.
-       A description longer than the column is cut in Python first -- see
-       mc_pipeline_panel.SAID -- and ellipsised here when even that is more
-       than the column can show. */
-    white-space: pre;
-    font-size: var(--text-sm, 0.88em);
-    font-weight: 400;
-    line-height: 1.32;
-    color: var(--mc-pipe-muted);
-    overflow: hidden;
+    /* The line break that makes the description a second line, and the voice
+       it is read in. A description longer than the column is cut in Python
+       first -- see mc_pipeline_panel.SAID -- and ellipsised here when even
+       that is more than the column can show. */
+    white-space: pre !important;
+    overflow: hidden !important;
     text-overflow: ellipsis;
+    font-size: var(--text-sm, 0.88em) !important;
+    font-weight: 400 !important;
+    line-height: 1.32 !important;
+    color: var(--mc-pipe-muted) !important;
 }
 
 /* The span Gradio puts the label in, told to have no opinion. Never a value of
    its own here: a value would beat ::first-line and flatten the two lines back
    into one voice. */
-.mc-pipeline-editor > :first-child * {
+.mc-pipeline-stage > .mc-pipeline-editor > :first-child * {
     white-space: inherit !important;
     font: inherit !important;
     color: inherit !important;
@@ -3012,7 +3051,7 @@
     text-overflow: ellipsis;
 }
 
-.mc-pipeline-editor > :first-child::first-line {
+.mc-pipeline-stage > .mc-pipeline-editor > :first-child::first-line {
     font-size: var(--text-lg, 1.2em);
     font-weight: 700;
     color: var(--body-text-color);
@@ -3023,11 +3062,11 @@
    honours the header's padding and under another it is pinned to the edge, so
    it and the switch land on each other. Replaced by a caret of this file's own
    at a position this file chose. */
-.mc-pipeline-editor > :first-child > :last-child:not(:first-child) {
-    display: none;
+.mc-pipeline-stage > .mc-pipeline-editor > :first-child > :last-child:not(:first-child) {
+    display: none !important;
 }
 
-.mc-pipeline-editor > :first-child::after {
+.mc-pipeline-stage > .mc-pipeline-editor > :first-child::after {
     content: "›";
     position: absolute;
     top: 50%;

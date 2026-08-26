@@ -117,6 +117,14 @@ Stage 2 keeps the number and drops the sentence — `1536 × 2304 in · Bypassed
 because a description has one line, and of the two the number is the one you
 cannot read anywhere else on the page.
 
+**Every stage comes up switched off.** Being armed lasts for a session and is
+never inherited from one: whatever you left on last time, a fresh page has
+Creative, Spatial and Stage 2 all bypassed, and pressing Generate does exactly
+what Forge would do without this extension until you say otherwise. It is also
+the only state the card can describe honestly — the switch and the description
+are built at the same moment, and a remembered switch used to come back reading
+**ON** above a line reading **Bypassed**.
+
 **Everything starts closed, and what you open stays open.** Which drawers you
 had open is remembered per browser, so the tab comes back the way you left it.
 Nothing about a generation is stored there.

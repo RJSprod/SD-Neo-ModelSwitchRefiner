@@ -821,3 +821,77 @@ Stage 2 keeps the handoff size when it has one and drops the explanation instead
 because the size is the number somebody reads in order to decide whether to arm
 the stage. Without a size there is room to spell it out: `Bypassed — Stage 1 is
 final`.
+
+## 15. The header is a button, and the tie was being lost (26 August 2026)
+
+> "the description content is not appears on a second line ... Also notice that
+> it has the status of 'bypassed' even though it's on."
+
+Two reports, and they turned out to have nothing to do with each other.
+
+### 15.1 None of the header treatment was applying
+
+§14 was measured against a fixture whose header was a `<div>`. Gradio's real
+accordion header is a `<button class="label-wrap">` that is `display: flex`,
+and rebuilding the fixture around that reproduced the screenshot immediately:
+`display: flex`, `white-space: normal`, the theme's height, the theme's padding.
+Not *some* of the treatment overridden — none of it applied.
+
+`.mc-pipeline-editor > :first-child` is (0,2,0). So is
+`.gradio-container .label-wrap`. A tie is settled by whichever stylesheet was
+loaded last, and an extension does not get to choose that. Everything followed:
+the header stayed flex, so `::first-line` had nothing to apply to and the whole
+label went through it as one bold line; `white-space` stayed `normal`, so the
+break rendered as a space; the padding stayed the theme's, so nothing was kept
+clear and the line ran under the switch.
+
+The card header is now reached through its card —
+`.mc-pipeline-stage > .mc-pipeline-editor > :first-child`, which is (0,3,0) and
+cannot be tied by a selector naming only classes — and the handful of properties
+that decide the *layout* rather than the look are marked `!important`: `display`,
+`width`, `height`, `padding`, `white-space`, `overflow`. This is the one element
+in the panel worth doing that to. The extension put two lines of its own text in
+that header and painted a switch over its right-hand end, so how tall it is, how
+it wraps and what it keeps clear are this file's to answer. What it is
+*coloured* is still the theme's, through the host's own tokens.
+
+### 15.2 A block-level button does not fill its line
+
+With the treatment finally applying, the header came out 324px wide inside a
+400px card. A `<button>` sizes to its contents even at `display: block`, so
+every measurement taken from its right edge came up short with it: the lane the
+padding reserves stopped before the switch, and the caret was drawn on top of
+it. `width: 100% !important` fixes it, and a fixture built from `<div>`s could
+never have shown it.
+
+Measured across four themes — stock Gradio, `.gradio-container` overrides, a
+theme using `!important` at class specificity, and a Lobe-shaped theme that
+styles the label span — all four now render two lines with the text ending at
+304px, the switch at 316–377 and the caret at 377–411.
+
+### 15.3 A stage left on came back as a card that contradicted itself
+
+The second report, and the one change in this round that is not surface. The
+switch was built from the saved preference and the card's description from the
+build-time placeholder, so a Creative Mode left on last week came back as a
+checkbox reading **ON** above a line reading **Bypassed**.
+
+The engine gates on the checkbox — `before_process(self, p, enabled=False, …)`
+takes it as its first argument — so the checkbox was the half that was true, and
+pressing Generate started a language model for a stage the panel had just called
+bypassed.
+
+Off is the half to settle on. `ui()` now puts both stores back to off as it
+builds, so the switch, the description and the engine's gate cannot come apart:
+
+```python
+if stored.get("enabled"):
+    stored["enabled"] = False
+    mc_creative_krea.remember(**{mc_creative_krea.ENABLED: False})
+```
+
+A stage is armed for a session and never inherited from one, which is how Stage
+2's switch has always been built — so all three stages of the pipeline now mean
+the same thing on a fresh page. Arming one is a press somebody makes while
+looking at the panel, rather than one made for them by a preference file they
+last touched days ago.
