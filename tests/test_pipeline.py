@@ -150,8 +150,18 @@ class TestTheShell:
         assert mc_pipeline_panel.host() is not first
 
     def test_the_handoff_says_the_size_when_it_knows_it(self):
-        assert mc_pipeline_panel.handoff_note(1536, 2304) == "1536 × 2304 pixel handoff"
-        assert mc_pipeline_panel.handoff_note(0, 0) == "pixel handoff"
+        assert mc_pipeline_panel.handoff_note(1536, 2304) == "1536 × 2304 in"
+        assert mc_pipeline_panel.handoff_note(0, 0) == ""
+
+    def test_the_handoff_no_longer_has_a_row_of_its_own(self, host):
+        """A pipeline of three stages should be three rows. A fourth thing
+        between two of them that is not a stage, cannot be opened and cannot be
+        switched off is furniture -- and under Lobe it rendered as a stray
+        glyph between Spatial and Stage 2. The number is Stage 2's, so it is in
+        Stage 2's description."""
+        pipeline = mc_pipeline_panel.host()
+
+        assert pipeline.handoff is None
 
 
 # --------------------------------------------------------------------------- #
@@ -173,11 +183,34 @@ class TestTheStageCard:
     opened to reach the settings. Two rows saying the same word, one above the
     other, and only the second one opening anything."""
 
-    def test_the_disclosure_is_the_stage_s_own_name(self, host):
+    def test_the_disclosure_carries_the_name_and_the_description(self, host):
+        """Both, in the accordion's own label, because that is the only place a
+        Gradio disclosure can carry text that is guaranteed to be inside its
+        header. Name on the first line, description on the second."""
         pipeline = mc_pipeline_panel.host()
 
         for stage in mc_pipeline_panel.ORDER:
-            assert pipeline.editors[stage].label == mc_pipeline_panel.TITLES[stage]
+            name, said = pipeline.editors[stage].label.split("\n", 1)
+
+            assert name == mc_pipeline_panel.TITLES[stage]
+            assert said == mc_pipeline_panel.PLACEHOLDERS[stage]
+
+    def test_a_stage_with_nothing_to_say_is_just_its_name(self):
+        assert mc_pipeline_panel.card_label("creative") == "Creative"
+        assert mc_pipeline_panel.card_label("creative", "  ") == "Creative"
+
+    def test_a_description_is_flattened_to_one_line(self):
+        """The newline between the two is structural. A summary that carried
+        one of its own would put its own second half where the name is."""
+        made = mc_pipeline_panel.card_label("spatial", "Direct\n· 4 regions")
+
+        assert made == "Spatial\nDirect · 4 regions"
+
+    def test_repainting_a_description_writes_the_label(self):
+        made = mc_pipeline_panel.card_summary("stage2", "Klein 9B · D0.35")
+
+        assert made["label"] == "Stage 2\nKlein 9B · D0.35"
+        assert "value" not in made
 
     def test_there_is_no_second_open_me_label(self, host):
         """The table of labels the inner accordion used to carry. Checked as an
@@ -525,7 +558,7 @@ class TestThePipelineStylesheet:
     @pytest.fixture
     def section(self):
         css = (ROOT / "style.css").read_text(encoding="utf-8")
-        block = css.split("The semantic token adapter.", 1)[1]
+        block = css.split("The Image Pipeline: three rows, and nothing else.", 1)[1]
         block = block.split("*/", 1)[1].split("/* -- the treatment rows", 1)[0]
         return re.sub(r"/\*.*?\*/", "", block, flags=re.S)
 
@@ -591,23 +624,38 @@ class TestThePipelineStylesheet:
         for generated in ("label-wrap", "svelte-", "gradio-"):
             assert generated not in section
 
-    def test_the_summary_and_the_switch_are_painted_into_the_header_band(self,
-                                                                        section):
-        """Both are siblings of the accordion in the page, so when the card is
-        open the body would otherwise push them below everything it contains."""
-        for name in ("summary", "switch"):
-            rule = section.split(f".mc-pipeline-stage > .mc-pipeline-{name} {{",
-                                 1)[1].split("}", 1)[0]
-            assert "position: absolute" in rule, name
+    def test_the_description_is_in_the_header_and_not_beside_it(self, section):
+        """It is the second line of the accordion's own label, so there is no
+        second element to fall out of the card -- which is what happened under
+        Lobe, whose header is a different height than the one the absolute
+        positioning was measured against."""
+        assert ".mc-pipeline-stage > .mc-pipeline-summary" not in section
 
-    def test_the_band_reserves_room_for_both(self, section):
+        rule = section.split(".mc-pipeline-editor > :first-child {", 1)[1].split(
+            "}", 1)[0]
+
+        assert "white-space: pre-line" in rule
+        assert ".mc-pipeline-editor > :first-child::first-line" in section
+
+    def test_the_header_reserves_a_lane_and_a_caret(self, section):
         """The switch is painted over the header, so the header's own padding is
-        what stops the stage's name running underneath it."""
+        what stops the stage's name running underneath it -- and the caret gets
+        a zone of its own beyond that so the two can never land on each other.
+        """
         rule = section.split(".mc-pipeline-editor > :first-child {", 1)[1].split(
             "}", 1)[0]
 
         assert "--mc-pipe-lane" in rule
-        assert "--mc-pipe-head" in rule
+        assert "--mc-pipe-caret" in rule
+
+    def test_the_chevron_is_this_file_s_own(self, section):
+        """The one thing on the right that could not be placed: under one theme
+        Gradio's chevron honours the header's padding and under another it is
+        pinned to the edge, so it and the switch land on each other. Hidden, and
+        replaced by a caret at a position this file chose."""
+        assert ".mc-pipeline-editor > :first-child > :last-child:not(:first-child)" \
+            in section
+        assert ".mc-pipeline-editor > :first-child::after" in section
 
     def test_the_nesting_rail_has_its_elbow(self, section):
         """§2's fifth invariant, and the half the first pass left out."""
@@ -669,13 +717,11 @@ class TestThePipelineStylesheet:
         over the rest of the band lets presses through to it."""
         switch = section.split(".mc-pipeline-stage > .mc-pipeline-switch {",
                                1)[1].split("}", 1)[0]
-        summary = section.split(".mc-pipeline-stage > .mc-pipeline-summary {",
-                                1)[1].split("}", 1)[0]
         header = section.split(".mc-pipeline-editor > :first-child {",
                                1)[1].split("}", 1)[0]
 
         assert "z-index" in switch
-        assert "pointer-events: none" in summary
+        assert "right: var(--mc-pipe-caret)" in switch
         assert "--mc-pipe-lane" in header
 
     def test_a_coarse_pointer_gets_forty_four_pixels(self, section):
@@ -775,24 +821,14 @@ class TestTheePanelDoesNotFlicker:
         assert creative_script._literal_row(
             False, False, other=False)["visible"] is False
 
-    def test_the_summary_cannot_move_anything_when_it_changes(self):
-        """The line most often repainted is the one in the card header, and it
-        is painted into a band the header's own padding reserved. Its text can
-        change length, wrap, or empty entirely without the card resizing --
-        which is the difference between a value updating and the page jumping.
-        """
-        css = (ROOT / "style.css").read_text(encoding="utf-8")
-        rule = css.split(".mc-pipeline-stage > .mc-pipeline-summary {",
-                         1)[1].split("}", 1)[0]
+    def test_a_description_repaint_is_a_label_and_not_a_component(self):
+        """The line most often repainted is the description in the card header,
+        and it is the accordion's own label. Setting a label replaces text;
+        replacing a Markdown component next to it tears an element out of the
+        page and builds another one, which is the flicker."""
+        made = mc_pipeline_panel.card_summary("creative", "C7 · 2 directions")
 
-        assert "position: absolute" in rule
-        assert "white-space: nowrap" in rule
-        assert "text-overflow: ellipsis" in rule
-
-        header = css.split(".mc-pipeline-editor > :first-child {",
-                           1)[1].split("}", 1)[0]
-
-        assert "min-height: var(--mc-pipe-head)" in header
+        assert set(made) == {"label", "__type__"} or set(made) == {"label"}
 
 
 class TestBothScriptsFillOneShell:
@@ -890,20 +926,24 @@ class TestTheHandoffLine:
 
         assert mc._short_checkpoint("SD/krea2.safetensors [abc123]") == "krea2"
 
-    def test_the_handoff_line_says_the_size_even_with_stage_2_off(self):
+    def test_stage_2_says_what_it_is_handed_even_when_it_is_bypassed(self):
         """It is what Stage 2 *would* be handed, and the number somebody needs
-        in order to decide whether to arm it."""
+        in order to decide whether to arm it. It leads the description for that
+        reason: it is true either way."""
         mc = self.helpers()
 
-        said = mc._handoff_summary(1024, 1536, True, 1.5, enabled=False)
+        said = mc._stage2_summary(False, "", 0.35, 1.0,
+                                  handoff=mc._handoff_note(1024, 1536, True, 1.5))
 
-        assert "1536 × 2304 pixel handoff" in said
-        assert "Stage 2 is bypassed" in said
+        assert said.startswith("1536 × 2304 in · ")
+        assert "Bypassed" in said
 
     def test_a_size_nobody_has_set_yet_says_nothing_rather_than_zero(self):
         mc = self.helpers()
 
-        assert "pixel handoff" in mc._handoff_summary(0, 0)
+        assert mc._handoff_note(0, 0) == ""
+        assert mc._stage2_summary(False, "", 0.35, 1.0,
+                                  handoff="").startswith("Bypassed")
 
     def test_the_rows_that_described_forges_own_work_are_gone(self):
         """Deleted rather than left unused: a builder nothing calls is a

@@ -51,49 +51,61 @@ settings would normally have produced.
 
 ### The Image Pipeline
 
-Everything this extension adds to txt2img is in one panel, laid out as the path
-your prompt actually takes. Every drawer starts closed, so it costs one line
-until you open it:
+Everything this extension adds to txt2img is in one panel: three rows, one per
+stage this extension runs. Every drawer starts closed, so the whole thing costs
+four lines until you open something.
 
 ```
 ▸ IMAGE PIPELINE
 
-  ┌──────────────────────────────────────────────────────────┐
-  ●─┤ ▸ Creative                                    [  ON  ] │
-  │ │   Bypassed — the prompt is expanded as written         │
-  │ └──────────────────────────────────────────────────────────┘
-  │ ┌──────────────────────────────────────────────────────────┐
-  ●─┤ ▾ Spatial                                     [  ON  ] │
-  │ │   Smart · 2 regions · Studio thirds                    │
-  │ ├────────────────────────────────────────────────────────┤
-  │ │  │ Composition   [ Smart Spatial ][ Direct BBOX ]      │
-  │ │  │ ┌──────────────┐                                    │
-  │ │  │ │  the canvas  │   [x] Auto Save  [Undo] [Full Screen]
-  │ │  │ └──────────────┘                                    │
-  │ │  │ ▸ Saved layouts                                     │
-  │ │  │ ▸ Spatial options                                   │
-  │ └──────────────────────────────────────────────────────────┘
-  │   1536 × 2304 pixel handoff
-  │ ┌──────────────────────────────────────────────────────────┐
-  ●─┤ ▸ Stage 2                                     [  ON  ] │
-    │   Klein 9B · Portrait polish · denoise 0.35            │
-    └──────────────────────────────────────────────────────────┘
+  ┌───────────────────────────────────────────────────────────┐
+  │ Creative                                      [✓] ON   ›  │
+  │ Bypassed — the prompt is expanded as written              │
+  └───────────────────────────────────────────────────────────┘
+  ┌───────────────────────────────────────────────────────────┐
+  │ Spatial                                       [✓] ON   ⌄  │
+  │ Smart · 2 regions · Studio thirds                         │
+  ├───────────────────────────────────────────────────────────┤
+  │  ┌─ Composition   [ Smart Spatial ][ Direct BBOX ]        │
+  │  │  ┌──────────────┐                                      │
+  │  │  │  the canvas  │  [x] Auto Save [Undo] [Full Screen]  │
+  │  │  └──────────────┘                                      │
+  │  │  ▸ SAVED LAYOUTS                                       │
+  │  └  ▸ SPATIAL OPTIONS                                     │
+  └───────────────────────────────────────────────────────────┘
+  ┌───────────────────────────────────────────────────────────┐
+  │ Stage 2                                       [ ] ON   ›  │
+  │ 1536 × 2304 in · Klein 9B · Portrait polish · denoise .35 │
+  └───────────────────────────────────────────────────────────┘
 ```
 
-**One card, one disclosure.** A stage card has exactly one thing that opens it:
-its own header, and the whole of that header outside the switch is the target.
-There is no second "open me" row under a title saying the same word, and the
-chevron is an indicator rather than the only place you can press.
+A row is four things and nothing else: a **name**, a one-line **description**, a
+**switch**, and a way to **open it**. Everything the panel grew that was not one
+of those four — a title above the disclosure that restated it, a rail with a
+node beside every card, a handoff line between two of them — read as structure
+under one theme and as debris under another, and is gone.
 
-**The switch is on the header,** separated from the surface that opens the card,
-so a stage can be armed or bypassed without opening it — and arming one never
-also opens it. A bypassed stage stays on the path, stays configurable, and its
-summary begins with **Bypassed**, because what is switched off is as much a part
-of "what will happen when I press Generate" as what is switched on.
+**The name and the description are one label.** They live in the accordion's own
+header, which is the only place a Gradio disclosure can carry text that is
+guaranteed to be *inside* it. So they cannot drift out of the card, land under
+the body when it opens, or sit at the wrong height because a theme has different
+padding.
+
+**The switch and the disclosure share a line and never each other's presses.**
+The switch has a lane of its own on the right, the caret has a zone beyond it,
+and the whole header outside those two opens the card.
 
 **The summary is derived, never typed.** `Smart · 2 regions · Studio thirds` is
 computed from the saved settings on every render — the same settings Generate
-reads — so a collapsed card cannot disagree with the controls behind it.
+reads — so a collapsed card cannot disagree with the controls behind it. A
+bypassed stage says **Bypassed** first, because what is switched off is as much
+a part of "what will happen when I press Generate" as what is switched on.
+
+**Stage 2's description opens with the number that used to be nowhere.** Stage 2
+refines **finished Stage 1 pixels**, so a Hires pass changes what it is handed:
+`1536 × 2304 in` follows Hires rather than quoting the width and height sliders,
+and it is shown even when Stage 2 is bypassed, because it is what Stage 2 *would*
+receive and the number you need in order to decide whether to arm it.
 
 **Everything starts closed, and what you open stays open.** Which drawers you
 had open is remembered per browser, so the tab comes back the way you left it.
@@ -103,12 +115,6 @@ Nothing about a generation is stored there.
 level — *Create a profile*, *Directions*, *Advanced settings*, *Recovery &
 diagnostics* — rather than onto twenty axis rows. The Directions drawer says how
 many are active in its own label.
-
-The line between Spatial and Stage 2 is the one number that used to be nowhere.
-Stage 2 refines **finished Stage 1 pixels**, so a Hires pass changes what it is
-handed; the handoff size follows Hires rather than quoting the width and height
-sliders, and it is shown even with Stage 2 bypassed, because it is what Stage 2
-*would* receive and the number you need in order to decide whether to arm it.
 
 **All three stages ship switched off.** A fresh install generates exactly as
 Forge would without the extension until you say otherwise.
@@ -124,12 +130,12 @@ rail and elbow down nested content.
 Spatial layout are files, and nothing brings one back — so Delete arms on the
 first press, says which one is about to go, and does it on the second.
 
-While a generation runs, the row that is currently working is marked — a filled
-node on the rail and a coloured title, nothing that covers a label or a control,
-and nothing that replaces Forge's own progress bar. It follows the extension's
-existing phase list rather than calculating anything of its own, so it cannot
-disagree with the bar: skipped stages are never entered and so never light.
-Reduced-motion settings drop the pulse and keep the colour.
+While a generation runs, the card that is currently working is marked — its own
+edge and its name pick up the accent, and nothing else. Nothing covers a label
+or a control, and nothing replaces Forge's own progress bar. It follows the
+extension's existing phase list rather than calculating anything of its own, so
+it cannot disagree with the bar: skipped stages are never entered and so never
+light.
 
 ### Presets
 

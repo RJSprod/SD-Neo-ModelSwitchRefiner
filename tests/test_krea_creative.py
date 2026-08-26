@@ -1320,7 +1320,12 @@ class TestTheTxt2imgSurface:
         whether any of them will run.
         """
         assert built.components["enabled"].value is False
-        assert built.components["creative_line"].value.startswith("Bypassed")
+        # The description is the second line of the card's own label: a Gradio
+        # Accordion's label is the only place a disclosure can carry text that
+        # is guaranteed to be inside its header.
+        _name, said = built.components["creative_line"].label.split("\n", 1)
+
+        assert said.startswith("Bypassed")
 
     def test_the_two_stages_this_script_owns_have_their_own_switches(self, built):
         """Creative and Spatial are peers. Two rows, two switches, and neither

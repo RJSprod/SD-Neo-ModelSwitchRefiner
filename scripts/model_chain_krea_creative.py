@@ -376,8 +376,9 @@ def _toggled(enabled, spatial_enabled, serialized, mode):
     return (told,
             spatial_summary(serialized, bool(spatial_enabled),
                             creative=bool(enabled), mode=mode),
-            _creative_line(bool(enabled)),
-            _spatial_line(serialized, bool(spatial_enabled), mode),
+            mc_pipeline_panel.card_summary("creative", _creative_line(bool(enabled))),
+            mc_pipeline_panel.card_summary(
+                "spatial", _spatial_line(serialized, bool(spatial_enabled), mode)),
             _literal_row(enabled, spatial_enabled, other=spatial_enabled))
 
 
@@ -1010,7 +1011,8 @@ def _spatial_toggled(enabled, serialized, creative, mode):
     mc_spatial.remember(**{mc_spatial.ENABLED: bool(enabled)})
     return (spatial_summary(serialized, bool(enabled), creative=bool(creative),
                             mode=mode),
-            _spatial_line(serialized, bool(enabled), mode),
+            mc_pipeline_panel.card_summary(
+                "spatial", _spatial_line(serialized, bool(enabled), mode)),
             _literal_row(creative, enabled, other=creative))
 
 
@@ -1031,7 +1033,8 @@ def _spatial_mode(mode, serialized, enabled, creative):
     mc_spatial.remember(**{mc_spatial.COMPOSE_MODE: mode})
     return (spatial_summary(serialized, bool(enabled), creative=bool(creative),
                             mode=mode),
-            _spatial_line(serialized, bool(enabled), mode))
+            mc_pipeline_panel.card_summary(
+                "spatial", _spatial_line(serialized, bool(enabled), mode)))
 
 
 def _spatial_saved(serialized, enabled, creative, mode):
@@ -1045,7 +1048,8 @@ def _spatial_saved(serialized, enabled, creative, mode):
     mc_spatial.remember(**{mc_spatial.LAYOUT: str(serialized or "")})
     return (spatial_summary(serialized, bool(enabled), creative=bool(creative),
                             mode=mode),
-            _spatial_line(serialized, bool(enabled), mode),
+            mc_pipeline_panel.card_summary(
+                "spatial", _spatial_line(serialized, bool(enabled), mode)),
             _layout_state(None, serialized))
 
 
@@ -1214,7 +1218,8 @@ def _layout_chosen(name, enabled, creative, mode):
             spatial_summary(serialized, bool(enabled), creative=bool(creative),
                             mode=mode),
             _layout_state(name, serialized),
-            gr.update(value=_spatial_line(serialized, bool(enabled), mode)))
+            mc_pipeline_panel.card_summary(
+                "spatial", _spatial_line(serialized, bool(enabled), mode)))
 
 
 def _layout_saved(name, serialized):
@@ -2028,12 +2033,13 @@ class ScriptKreaCreative(scripts.Script):
         # browser is built from is generated after every ui() has run.
         try:
             if pipeline.summary("creative") is not None:
-                pipeline.summary("creative").value = _creative_line(
-                    bool(stored["enabled"]), stored)
+                pipeline.summary("creative").label = mc_pipeline_panel.card_label(
+                    "creative", _creative_line(bool(stored["enabled"]), stored))
             if pipeline.summary("spatial") is not None:
-                pipeline.summary("spatial").value = _spatial_line(
-                    spatial["layout"], bool(spatial["enabled"]),
-                    spatial["compose_mode"])
+                pipeline.summary("spatial").label = mc_pipeline_panel.card_label(
+                    "spatial", _spatial_line(
+                        spatial["layout"], bool(spatial["enabled"]),
+                        spatial["compose_mode"]))
         except Exception:
             logger.debug("Model Chain: could not pre-render the pipeline rows",
                          exc_info=True)
@@ -2159,14 +2165,16 @@ class ScriptKreaCreative(scripts.Script):
             creativity.release(
                 fn=lambda value: (_remember_creativity(value),
                                   gr.update(value=mc_creative_panel.describe_cost()),
-                                  gr.update(value=_creative_line())),
+                                  mc_pipeline_panel.card_summary(
+                                      "creative", _creative_line())),
                 inputs=[creativity],
                 outputs=[status, self.panel.cost, self.components["creative_line"]],
                 queue=False, show_progress=False)
         else:
             creativity.release(
                 fn=lambda value: (_remember_creativity(value),
-                                  gr.update(value=_creative_line())),
+                                  mc_pipeline_panel.card_summary(
+                                      "creative", _creative_line())),
                 inputs=[creativity],
                 outputs=[status, self.components["creative_line"]], queue=False, show_progress=False)
         show.click(fn=_last_roll, outputs=[recipe, expanded], queue=False,
