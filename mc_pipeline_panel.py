@@ -164,9 +164,9 @@ height at all, so the line costs nothing until there is something to say.
 """
 
 PLACEHOLDERS = {
-    "creative": "Bypassed — the prompt is expanded as written.",
-    "spatial": "Bypassed — nothing is composed onto the scene.",
-    "stage2": "Bypassed — the Stage 1 image is the final image.",
+    "creative": "Bypassed — prompt as-is",
+    "spatial": "Bypassed — no regions",
+    "stage2": "Bypassed — Stage 1 is final",
 }
 """The second line before anything has been wired. Replaced on first render.
 
@@ -263,6 +263,22 @@ def handoff_note(width: int = 0, height: int = 0) -> str:
     return ""
 
 
+SAID = 30
+"""How much description a card header carries before it is cut short.
+
+The header is two lines and the second one is a *glance*: what the stage is set
+to, not an explanation of it. Cut here, in Python, rather than left to
+`text-overflow` -- an ellipsis is a promise the CSS has to keep on every theme,
+and this panel has now been broken four separate ways by trusting one to.
+
+Thirty is not a guess. The header keeps a lane clear on its right for the
+switch and the caret, which leaves about 200px of text in Forge Neo's
+generation column -- thirty characters at the size the second line is set in.
+Past that the line wraps, and a wrapped third line is clipped by the band with
+no ellipsis to show for it, which reads as a description that just stops.
+"""
+
+
 def card_label(stage: str, summary: str = "") -> str:
     """A stage card's whole header, as the one string Gradio gives it.
 
@@ -285,6 +301,8 @@ def card_label(stage: str, summary: str = "") -> str:
     layout and still the right information in the right place.
     """
     said = " ".join(str(summary or "").split())
+    if len(said) > SAID:
+        said = said[:SAID - 1].rstrip(" ·,—-") + "…"
     name = TITLES.get(stage, str(stage))
     return f"{name}\n{said}" if said else name
 

@@ -725,3 +725,99 @@ The pulse and the filled node went with the rail. A running card takes the accen
 on its own border and its own name, which is the same information with nothing
 new drawn on the page -- and one fewer animation on a panel whose last round of
 feedback was about flicker.
+
+## 14. Two lines, and what it took to keep them two (26 August 2026)
+
+> "now the title and description live on the same line. please make this two
+> lines for each pipeline step. the description on second line should be styled
+> differently than title, and truncate if too long."
+
+§13.2 put both lines in the accordion's own label, which is the only place a
+Gradio disclosure can carry text that is guaranteed to be inside its header. The
+text went in. The *break* did not survive, and neither did the difference between
+the two lines. This round is four separate reasons why, each found by rendering
+the real stylesheet in a browser rather than by reading it.
+
+### 14.1 The card header was being styled as a generic drawer header
+
+`.mc-pipeline-editor > :first-child` and `.mc-pipeline-drawer > :first-child` are
+both `(0,2,0)`, and the stage card's accordion carries both classes. Equal
+specificity, so the one further down the file won -- and that was the generic
+drawer rule, which sets `padding: 0.4em 0.7em`, `font-weight: 700` and
+`text-transform: uppercase`.
+
+Every visible symptom followed from that one line. The header had no lane
+reserved on its right, so the description ran underneath the switch. It was bold
+and uppercase, so both lines looked like a title. The generic rule is for the
+drawers *inside* a stage body, and it now says so:
+`.mc-pipeline-drawer:not(.mc-pipeline-editor) > :first-child`.
+
+### 14.2 A shared measurement cannot be in `em`
+
+The header and the switch are two elements at two font sizes -- the header is
+`var(--text-sm)`, the switch is whatever the theme gives a checkbox -- and
+`--mc-pipe-head`, `--mc-pipe-lane` and `--mc-pipe-caret` are a bargain *between*
+them: the header keeps its text out of the lane, the switch sits in it. In `em`
+each element resolved the same number against its own font size and got a
+different answer. Measured: a band `3.9em` tall came out 54.9px at the header and
+62.4px at the switch, so the switch was taller than the band it is painted into
+and reserved a wider lane than the header kept clear.
+
+Those three are `rem` now. The two that are genuinely per-element -- the indent
+and the gap -- are still `em`.
+
+### 14.3 `inherit`, and never the value itself
+
+Gradio wraps the label text in a span, and a theme may style that span. Lobe
+gives it `nowrap` and a weight of its own, which beat what the header passed
+down: the break disappeared and the two lines came out as one bold run sliding
+under the switch.
+
+The obvious repair is to restate the header's font on the span. It wins the
+specificity fight and loses the point -- a declaration on the span *also* beats
+what `::first-line` hands down, so the name would come out the same size as the
+description and there would be nothing to tell the two lines apart. What the span
+needs is not a value but an absence of opinion:
+
+```css
+.mc-pipeline-editor > :first-child * {
+    white-space: inherit !important;
+    font: inherit !important;
+    color: inherit !important;
+}
+```
+
+Now the header sets the second line, `::first-line` sets the first, and the span
+carries whichever reaches it. Measured in Chromium against a stylesheet that
+styles the span the way Lobe does: values on the span give one line at one size,
+`inherit` gives two lines at two.
+
+### 14.4 `pre`, not `pre-line`
+
+Both honour the break in the label. Only `pre` refuses to add one of its own.
+Under `pre-line` a description a little wider than the column soft-wrapped to a
+third line, which the fixed band then clipped mid-word -- and because the line had
+wrapped, `text-overflow` had nothing to do, so there was not even an ellipsis to
+show that anything had been cut. `pre` pins the header at two lines whatever the
+column is doing, and makes the ellipsis mean something.
+
+### 14.5 The cut is made twice
+
+`mc_pipeline_panel.SAID` is 30 characters, and the header ellipsises whatever
+still does not fit. Two cuts because they answer different questions: the CSS one
+knows the column width and the Python one survives a theme that flattens the
+break. The number is measured -- about 27 characters fit across Forge Neo's
+generation column at the size the second line is set in -- and the three
+descriptions a fresh install shows are all inside it, because those are the ones
+somebody reads before they have touched anything:
+
+| stage | bypassed description |
+| --- | --- |
+| Creative | `Bypassed — prompt as-is` |
+| Spatial | `Bypassed — 4 regions` |
+| Stage 2 | `1024 × 1024 in · Bypassed` |
+
+Stage 2 keeps the handoff size when it has one and drops the explanation instead,
+because the size is the number somebody reads in order to decide whether to arm
+the stage. Without a size there is room to spell it out: `Bypassed — Stage 1 is
+final`.

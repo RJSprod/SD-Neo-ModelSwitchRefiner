@@ -2878,12 +2878,23 @@
 
     /* The right-hand end of a card header, divided in two. The caret is this
        file's own -- Gradio's is hidden -- so both zones are ours and neither
-       can land on top of the other whatever a theme does with its chevron. */
-    --mc-pipe-caret: 1.8em;
-    --mc-pipe-lane: 4.6em;
+       can land on top of the other whatever a theme does with its chevron.
+
+       These three are rem and the two above are em, and the difference is not
+       cosmetic. A lane is a bargain between two elements -- the header keeps
+       its text out of it, the switch sits in it -- and those two elements are
+       at different font sizes, so an em would have given each of them a
+       different idea of how wide the lane is. It did: the switch came out
+       taller than the band it was painted into. */
+    --mc-pipe-caret: 1.6rem;
+    --mc-pipe-lane: 4.2rem;
 
     /* §1.6: a 44px minimum for anything a finger has to hit. */
     --mc-pipe-tap: 2.6rem;
+
+    /* The card header: a name line, a description line, and the padding around
+       them. Fixed, because the switch is painted into it from outside. */
+    --mc-pipe-head: 3.3rem;
 
     /* The compact canvas's height budget. aspect-ratio supplies the rest, so
        this is the only number that decides how much of the column it takes. */
@@ -2922,11 +2933,34 @@
    press and the thing it shows, so `> :first-child` is the header under every
    theme and every version and names no class of Gradio's.
 
-   The label is two lines in one string -- `Creative\nC7 · 2 directions` -- so
-   `pre-line` is what shows the break and `::first-line` is what makes the name
-   a name. A theme that refuses `pre-line` gets one line reading
-   "Creative C7 · 2 directions", which is a worse layout and still the right
-   text in the right place.
+   Two lines from one string. The label is `Creative\nC7 · 2 directions`, so
+   `white-space: pre` is what shows the break and `::first-line` is what makes
+   the name a name.
+
+   `pre` rather than `pre-line`, and that is the whole difference between two
+   lines and three. `pre-line` honours the break and *also* soft-wraps, so a
+   description a little wider than the column became a third line -- which the
+   band then clipped, so it read as a description that stops mid-word. `pre`
+   honours the break and refuses to wrap, which pins the header at two lines
+   whatever the column is doing and, because the line no longer wraps, is also
+   what makes `text-overflow: ellipsis` mean anything. Runs of spaces are the
+   other thing `pre` preserves, and card_label() has already collapsed them.
+
+   Both of those go on the header, and then have to be defended one level down.
+   Gradio wraps the label text in a span, and a theme is free to style that span
+   -- Lobe gives it `nowrap` and a weight of its own. An inherited value loses to
+   the span's own declaration, so the break disappeared and the two lines came
+   out as one bold run sliding under the switch.
+
+   The defence is `inherit !important`, and it has to be `inherit` rather than
+   the values themselves. Restating the font on the span would win the
+   specificity fight and lose the war: a declaration on the span also beats what
+   `::first-line` hands down, so the name would come out the same size as the
+   description and there would be nothing to tell the two lines apart. Asking
+   the span to inherit takes it out of the argument entirely -- the header's
+   value reaches the second line, `::first-line`'s reaches the first, and this
+   file decides both. Measured in Chromium against a stylesheet that styles the
+   span the way Lobe does; see TestThePipelineStylesheet.
 */
 
 .mc-pipeline-editor {
@@ -2942,20 +2976,44 @@
     position: relative;
     box-sizing: border-box;
     display: block;
-    min-height: var(--mc-pipe-tap);
-    padding: 0.4em calc(var(--mc-pipe-lane) + var(--mc-pipe-caret)) 0.4em 0.7em;
+    /* Fixed rather than a minimum: the switch is painted into this band from
+       outside it, so how tall it is has to be this file's answer and not the
+       theme's. Two lines and the padding around them, in em, so it scales with
+       whatever type the theme is using. */
+    height: var(--mc-pipe-head);
+    padding: 0.35em calc(var(--mc-pipe-lane) + var(--mc-pipe-caret)) 0.35em 0.7em;
     border: none;
     background: none;
-    white-space: pre-line;
+    text-align: left;
+
+    /* The description's voice, and the line break that makes it a second line.
+       A description longer than the column is cut in Python first -- see
+       mc_pipeline_panel.SAID -- and ellipsised here when even that is more
+       than the column can show. */
+    white-space: pre;
     font-size: var(--text-sm, 0.88em);
     font-weight: 400;
-    line-height: 1.35;
+    line-height: 1.32;
     color: var(--mc-pipe-muted);
-    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* The span Gradio puts the label in, told to have no opinion. Never a value of
+   its own here: a value would beat ::first-line and flatten the two lines back
+   into one voice. */
+.mc-pipeline-editor > :first-child * {
+    white-space: inherit !important;
+    font: inherit !important;
+    color: inherit !important;
+    letter-spacing: inherit !important;
+    text-transform: inherit !important;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .mc-pipeline-editor > :first-child::first-line {
-    font-size: var(--text-lg, 1.15em);
+    font-size: var(--text-lg, 1.2em);
     font-weight: 700;
     color: var(--body-text-color);
 }
@@ -3013,6 +3071,10 @@
     width: auto;
     max-width: var(--mc-pipe-lane);
     min-width: 0;
+    /* The name line, not the whole band. A switch as tall as both lines has a
+       hit area reaching down over the description, which is the second half of
+       a header nobody can read. */
+    height: var(--mc-pipe-head);
     z-index: 3;
     padding: 0;
     margin: 0;
@@ -3021,6 +3083,7 @@
 .mc-pipeline-switch label {
     display: inline-flex;
     align-items: center;
+    height: 100%;
     justify-content: flex-end;
     gap: 0.4em;
     width: auto;
@@ -3103,7 +3166,13 @@
     box-shadow: none;
 }
 
-.mc-pipeline-drawer > :first-child {
+/* Not the stage card: its header is a different thing -- two lines, and a lane
+   beside it that this rule's padding does not leave room for. Both selectors
+   used to match it at the same specificity, so the one further down the file
+   won, and the card header came out uppercase, bold, and padded as if nothing
+   were sitting on its right. The description then ran underneath the switch,
+   which is what a screenshot of it looked like. */
+.mc-pipeline-drawer:not(.mc-pipeline-editor) > :first-child {
     box-sizing: border-box;
     min-height: var(--mc-pipe-tap);
     padding: 0.4em 0.7em;
@@ -3218,8 +3287,9 @@
 @media (pointer: coarse), (hover: none) {
     :root {
         --mc-pipe-tap: 44px;
-        --mc-pipe-lane: 5.4em;
-        --mc-pipe-caret: 2.2em;
+        --mc-pipe-head: 3.7rem;
+        --mc-pipe-lane: 4.6rem;
+        --mc-pipe-caret: 2.1rem;
     }
 
     .mc-pipeline-switch input[type="checkbox"],

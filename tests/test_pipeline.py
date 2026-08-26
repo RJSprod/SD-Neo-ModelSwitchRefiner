@@ -247,6 +247,27 @@ class TestTheStageCard:
         assert creative_script._spatial_line("", enabled=False).startswith("Bypassed")
         assert chain_script._stage2_summary(False, "", 0.35, 1.0).startswith("Bypassed")
 
+    def test_the_off_state_lines_fit_the_line_they_are_written_on(self, store):
+        """The three descriptions a fresh install shows, against the room the
+        header actually has for them.
+
+        Measured rather than guessed: in Chromium, at the size the second line
+        is set in, the header's text keeps clear of the switch's lane and about
+        twenty-seven characters of it fit across Forge Neo's generation column.
+        These three are what somebody sees before they have touched anything, so
+        these three are the ones that should not need an ellipsis to be read.
+        """
+        import scripts.model_chain as chain_script
+        import scripts.model_chain_krea_creative as creative_script
+
+        said = [creative_script._creative_line(enabled=False),
+                creative_script._spatial_line("", enabled=False),
+                chain_script._stage2_summary(False, "", 0.35, 1.0)]
+        said += list(mc_pipeline_panel.PLACEHOLDERS.values())
+
+        for line in said:
+            assert len(line) <= 27, (len(line), line)
+
 
 class TestEveryDrawerStartsClosed:
     """The user-facing half of this refactor: a tab that unfolds four levels of
@@ -562,6 +583,23 @@ class TestThePipelineStylesheet:
         block = block.split("*/", 1)[1].split("/* -- the treatment rows", 1)[0]
         return re.sub(r"/\*.*?\*/", "", block, flags=re.S)
 
+    @staticmethod
+    def block(section, selector):
+        """The declarations of the rule whose selector is exactly ``selector``.
+
+        Exact, because the selectors in here differ by a suffix -- the header
+        and its descendants are one ``*`` apart -- and a test that matched a
+        prefix would read the wrong rule and pass on it.
+        """
+        _, brace, rest = section.partition(selector + " {")
+        assert brace, selector
+        return rest.split("}", 1)[0]
+
+    def header(self, section):
+        """The card header's own rule: the one that sets the description's
+        voice, which ``::first-line`` then overrides for the name."""
+        return self.block(section, ".mc-pipeline-editor > :first-child")
+
     @pytest.fixture
     def rules(self, section):
         found = []
@@ -631,11 +669,78 @@ class TestThePipelineStylesheet:
         positioning was measured against."""
         assert ".mc-pipeline-stage > .mc-pipeline-summary" not in section
 
-        rule = section.split(".mc-pipeline-editor > :first-child {", 1)[1].split(
+        rule = self.header(section)
+
+        assert "white-space: pre;" in rule
+        assert ".mc-pipeline-editor > :first-child::first-line" in section
+
+    def test_the_header_never_soft_wraps(self, section):
+        """``pre``, never ``pre-line``. Both honour the line break in the label;
+        only ``pre`` refuses to add one of its own. Under ``pre-line`` a
+        description a little wider than the column became a third line, which
+        the fixed band then clipped mid-word -- and, because the line wrapped,
+        ``text-overflow`` had nothing to do, so there was not even an ellipsis
+        to show that anything had been cut."""
+        rule = self.header(section)
+
+        assert "white-space: pre-line" not in rule
+        assert "text-overflow: ellipsis" in rule
+
+    def test_the_label_span_is_told_to_inherit_and_never_told_a_value(self, section):
+        """The one rule in this file that has to be `inherit` and could not be
+        the values themselves.
+
+        Gradio wraps the label text in a span and a theme may style that span --
+        Lobe gives it `nowrap` and a weight of its own, which beat what the
+        header passed down and flattened the two lines into one bold run.
+        Restating the font on the span wins that fight and loses the point: a
+        declaration on the span also beats what `::first-line` hands down, so
+        the name would come out the same size as the description and there would
+        be nothing to tell the two lines apart. `inherit` takes the span out of
+        the argument, leaving the header to set the second line and
+        `::first-line` the first.
+
+        Measured in Chromium against a stylesheet that styles the span the way
+        Lobe does: values on the span give one line, `inherit` gives two.
+        """
+        rule = self.block(section, ".mc-pipeline-editor > :first-child *")
+
+        for property in ("white-space", "font", "color"):
+            assert f"{property}: inherit !important;" in rule
+
+        for line in rule.splitlines():
+            said = line.strip()
+            if not said or said.startswith("/*") or ":" not in said:
+                continue
+            name, _, value = said.partition(":")
+            if name.strip() in ("overflow", "text-overflow"):
+                continue
+            assert value.strip().startswith("inherit"), said
+
+    def test_the_title_reads_differently_than_the_description(self, section):
+        """Two lines are only two lines if they do not look alike. The label is
+        one run of text, so the split is `::first-line`: the header sets the
+        description's voice and the first line overrides it."""
+        said = self.header(section)
+        name = section.split(
+            ".mc-pipeline-editor > :first-child::first-line", 1)[1].split(
             "}", 1)[0]
 
-        assert "white-space: pre-line" in rule
-        assert ".mc-pipeline-editor > :first-child::first-line" in section
+        for property in ("font-size", "font-weight", "color"):
+            assert property in said
+            assert property in name
+
+    def test_the_shared_band_is_measured_in_rem(self, section):
+        """The header and the switch are two elements at two font sizes, and
+        `em` asked each of them what these mean. It got two answers: the switch
+        came out taller than the band it is painted into, and reserved a wider
+        lane than the header kept clear. A shared measurement cannot be relative
+        to whoever is reading it."""
+        for shared in ("--mc-pipe-head", "--mc-pipe-lane", "--mc-pipe-caret"):
+            for line in section.splitlines():
+                if line.strip().startswith(shared + ":"):
+                    assert "rem" in line, line
+                    assert not re.search(r"\d+(\.\d+)?em\b", line), line
 
     def test_the_header_reserves_a_lane_and_a_caret(self, section):
         """The switch is painted over the header, so the header's own padding is
@@ -936,6 +1041,10 @@ class TestTheHandoffLine:
                                   handoff=mc._handoff_note(1024, 1536, True, 1.5))
 
         assert said.startswith("1536 × 2304 in · ")
+        assert len(said) <= mc_pipeline_panel.SAID
+
+        # Without a size there is room to say what bypassed means.
+        assert "Stage 1" in mc._stage2_summary(False, "", 0.35, 1.0)
         assert "Bypassed" in said
 
     def test_a_size_nobody_has_set_yet_says_nothing_rather_than_zero(self):

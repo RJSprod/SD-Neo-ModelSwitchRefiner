@@ -60,7 +60,7 @@ four lines until you open something.
 
   ┌───────────────────────────────────────────────────────────┐
   │ Creative                                      [✓] ON   ›  │
-  │ Bypassed — the prompt is expanded as written              │
+  │ Bypassed — prompt as-is                                   │
   └───────────────────────────────────────────────────────────┘
   ┌───────────────────────────────────────────────────────────┐
   │ Spatial                                       [✓] ON   ⌄  │
@@ -85,11 +85,18 @@ of those four — a title above the disclosure that restated it, a rail with a
 node beside every card, a handoff line between two of them — read as structure
 under one theme and as debris under another, and is gone.
 
-**The name and the description are one label.** They live in the accordion's own
-header, which is the only place a Gradio disclosure can carry text that is
-guaranteed to be *inside* it. So they cannot drift out of the card, land under
-the body when it opens, or sit at the wrong height because a theme has different
-padding.
+**The name and the description are one label, on two lines.** They live in the
+accordion's own header, which is the only place a Gradio disclosure can carry
+text that is guaranteed to be *inside* it. So they cannot drift out of the card,
+land under the body when it opens, or sit at the wrong height because a theme
+has different padding.
+
+One label and two voices: the name is larger, heavier and at full contrast, the
+description below it is smaller and muted, and the split is `::first-line`. The
+header never soft-wraps, so it is two lines on any column width, and a
+description wider than the column is cut — once in Python, so it survives a theme
+that flattens the break, and again by the header, which knows how wide the column
+actually is.
 
 **The switch and the disclosure share a line and never each other's presses.**
 The switch has a lane of its own on the right, the caret has a zone beyond it,
@@ -105,7 +112,10 @@ a part of "what will happen when I press Generate" as what is switched on.
 refines **finished Stage 1 pixels**, so a Hires pass changes what it is handed:
 `1536 × 2304 in` follows Hires rather than quoting the width and height sliders,
 and it is shown even when Stage 2 is bypassed, because it is what Stage 2 *would*
-receive and the number you need in order to decide whether to arm it.
+receive and the number you need in order to decide whether to arm it. A bypassed
+Stage 2 keeps the number and drops the sentence — `1536 × 2304 in · Bypassed` —
+because a description has one line, and of the two the number is the one you
+cannot read anywhere else on the page.
 
 **Everything starts closed, and what you open stays open.** Which drawers you
 had open is remembered per browser, so the tab comes back the way you left it.
