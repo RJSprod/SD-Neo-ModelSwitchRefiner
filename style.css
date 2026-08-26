@@ -2882,7 +2882,7 @@
        reserved lane on the right that the switch is painted into. Everything
        about the card's geometry is these three. */
     --mc-pipe-head: 3.9em;
-    --mc-pipe-lane: 5.2em;
+    --mc-pipe-lane: 6.4em;
 
     /* §1.6: a 44px minimum for anything a finger has to hit. */
     --mc-pipe-tap: 2.6rem;
@@ -3064,52 +3064,65 @@
 
 /* §2's ninth invariant: the switch is spatially separated from the surface that
    opens the card. It is painted into the lane the header reserved, on top of
-   it, so it takes its own presses -- arming a stage never also opens it. */
+   it, so it takes its own presses -- arming a stage never also opens it.
+
+   `width` is the load-bearing declaration here and it is the one that was
+   missing. An absolutely positioned box with no width takes the width it is
+   given, and Gradio gives every block `width: 100%` -- so the switch spanned
+   the whole card, and a <label> toggles its checkbox wherever it is pressed.
+   The whole header became the switch: tapping the name armed the stage instead
+   of opening it, which is both controls broken by one omitted line.
+
+   So the box is shrink-wrapped and then capped at the lane the header reserved.
+   Bounded twice on purpose: `width: auto` is what makes it shrink-wrap, and
+   `max-width` is what stops a long label or a theme with generous padding from
+   creeping back over the name. */
 .mc-pipeline-stage > .mc-pipeline-switch {
     position: absolute;
+    top: 0.35em;
     right: 0.4em;
-    top: 0.3em;
-    z-index: 3;
+    left: auto;
+    width: auto;
+    /* Inside the lane and never over the chevron, which Gradio puts at the
+       inner edge of the padding the lane is made of. */
+    max-width: calc(var(--mc-pipe-lane) - 0.8em);
     min-width: 0;
+    z-index: 3;
     padding: 0;
+    margin: 0;
 }
 
+/* No box around it. A pill here reads as a second card edge inside the header
+   -- which is exactly what it looked like -- and the tick is already a
+   non-colour signal, so §2's "never state by colour alone" is satisfied without
+   drawing anything. What is left is the hit area, which is the part that has to
+   be big. */
 .mc-pipeline-switch label {
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-end;
     gap: 0.4em;
+    width: auto;
     min-height: var(--mc-pipe-tap);
-    min-width: 4.4em;
-    padding: 0 0.6em;
+    padding: 0 0.15em;
     margin: 0;
-    border: 1px solid var(--mc-pipe-border);
-    border-radius: 999px;
+    border: none;
+    background: none;
     font-size: var(--text-sm, 0.85em);
     font-weight: 700;
     letter-spacing: 0.05em;
+    white-space: nowrap;
     cursor: pointer;
     user-select: none;
-}
-
-.mc-pipeline-switch label:hover {
-    border-color: var(--mc-pipe-accent);
-}
-
-/* An armed stage says so twice: the pill is drawn in the accent, and the box
-   inside it is ticked. §2: never communicate state with colour alone. */
-.mc-pipeline-switch label:has(input:checked) {
-    border-color: var(--mc-pipe-accent);
-    box-shadow: inset 0 0 0 1px var(--mc-pipe-accent);
 }
 
 /* §1.6. The default checkbox is thirteen pixels of target in the corner of a
    card; this is the one control on a collapsed pipeline and it has to be
    hittable with a thumb. */
 .mc-pipeline-switch input[type="checkbox"] {
-    width: 1.25em;
-    height: 1.25em;
-    min-width: 1.25em;
+    width: 1.3em;
+    height: 1.3em;
+    min-width: 1.3em;
     margin: 0;
     accent-color: var(--mc-pipe-accent);
     cursor: pointer;
@@ -3289,7 +3302,7 @@
     :root {
         --mc-pipe-tap: 44px;
         --mc-pipe-head: 4.4em;
-        --mc-pipe-lane: 6em;
+        --mc-pipe-lane: 7em;
     }
 
     .mc-pipeline-switch input[type="checkbox"],
