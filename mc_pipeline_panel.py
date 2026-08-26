@@ -216,6 +216,34 @@ def drawer(label: str, *, elem_id=None, elem_classes=None, **kwargs):
                         elem_classes=found, **kwargs)
 
 
+CONFIRM = "Confirm delete"
+"""What a Delete button says once it is armed.
+
+§3 of the redesign intent: a destructive action should require an explicit
+confirmation where the loss is irreversible. Deleting a saved profile, a Stage 2
+preset or a named Spatial layout removes a file, and nothing brings it back.
+
+The confirmation is the button itself rather than a dialog. A modal would be a
+second thing to dismiss on a tab that has enough of them, and a browser
+``confirm()`` is not styleable, not themeable and not touch-friendly; a button
+that changes what it says is all three, and it is the same in-page idiom the
+layout workspace uses for Discard.
+"""
+
+
+def confirmed(armed, label: str = "Delete"):
+    """One press of a Delete button. ``(go, still_armed, how it now reads)``.
+
+    The first press arms and says so; the second deletes and disarms. Nothing
+    else clears it, deliberately: an arm that expired on the next unrelated
+    click would be a confirmation somebody could miss by being slow, and the
+    only cost of it lingering is a button that has to be read.
+    """
+    if armed:
+        return True, False, gr.update(value=label, variant="stop")
+    return False, True, gr.update(value=CONFIRM, variant="stop")
+
+
 def handoff_note(width: int = 0, height: int = 0) -> str:
     """The line on the connector between Stage 1 and Stage 2.
 

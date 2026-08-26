@@ -493,3 +493,93 @@ them rather than from a control's value. What is missing is the revision guard:
 there is no version number on a mutation, and nothing stops a user moving a
 slider and pressing Generate before the callback lands. That is a real race and
 it is unaddressed.
+## 11. What it looked like on the theme most people use (26 August 2026)
+
+Section 10 shipped and looked right under Lobe and wrong under stock Gradio:
+every stage card painted white with light text on it, the switch and the summary
+stacked underneath the name instead of beside and below it, and a checkbox for a
+touch target. Two separate mistakes, and the second one hid behind the first.
+
+### 11.1 A fill and a text colour are two guesses that have to agree
+
+The token adapter gave the cards `--panel-background-fill`, with
+`--background-fill-secondary` behind it, and took their text from whatever the
+host was already using. On stock Gradio those two came out light-on-light.
+
+The fix is not a better variable. It is that **the panel paints nothing**. Cards,
+drawers, bodies and direction rows are outlines over whatever the host is
+already painting, they inherit its text colour, and there is no pair left to
+disagree. Every fill variable — `--panel-background-fill`,
+`--block-background-fill`, both `--background-fill-*`, `--body-background-fill`,
+`--input-background-fill` — is now absent from the block, and a test says so by
+name because the way this regresses is somebody adding one back to make an edge
+show up.
+
+What still paints a background is the rail, its elbow and the stage node: one or
+two pixels each, in a border colour, with no text on top of them.
+
+This is what §2 of the intent means by "use colour as a secondary signal only",
+read strictly. Structure that survives an arbitrary theme is structure carried by
+geometry, and the strongest form of that is a panel with no palette of its own at
+all.
+
+### 11.2 The header move worked under one theme and found nothing under the other
+
+§10.1 built the switch and the summary beside the accordion and had the browser
+file move them into its header, recognising that header as "a button, or an
+element that says whether it is expanded". Lobe rebuilds the header as a
+`<button>`, so it worked there. Stock Gradio renders a `<span>`, so it found
+nothing, took the documented fallback, and the fallback is what shipped: three
+pieces of a header stacked down the left of the card.
+
+The fallback was correct and the design was wrong. Nothing needs to move.
+
+A Gradio Accordion is two elements — the thing you press and the thing it shows —
+so `.mc-pipeline-editor > :first-child` **is** the header, under every theme and
+every version, and it names no class of Gradio's. The stylesheet reserves a band
+in it: a name line, a summary line under that, and a lane on the right. The
+summary and the switch stay exactly where Gradio put them and are painted into
+that band with `position: absolute`, which is also what keeps them in the header
+when the card is open — as ordinary siblings they would be pushed below
+everything the body contains.
+
+So there is no DOM surgery left in the panel at all. The browser file's only
+remaining interest in a header is pressing one to restore a drawer somebody had
+open, and even that now finds it by counting children rather than by guessing at
+a tag.
+
+### 11.3 Targets
+
+The enable switch was a bare 13px checkbox in the corner of a card, and it is the
+one control a collapsed pipeline has. It is a pill now: outlined, at least 4.4em
+wide and one tap tall, with a 1.25em box inside it, and both the outline and the
+tick say whether the stage is armed — §2 again, never state by colour alone.
+
+Everything in a stage body — buttons, text and number fields, selects — has a
+minimum height in `rem`, and a coarse pointer takes the lot to a literal 44px.
+
+The composition mode is the two large segmented targets §3 asks for rather than
+two radio dots. It is still the same stock `gr.Radio`: same component, same
+handler, same value, wearing the shape.
+
+### 11.4 Two presses before something is gone
+
+§3 asks for an explicit confirmation where the loss is irreversible. Deleting a
+Creative profile, a Stage 2 preset or a named Spatial layout removes a file, and
+nothing brings it back; all three used to go on the first press.
+
+The confirmation is the button. The first press arms it, it changes to *Confirm
+delete*, and the status line says which thing is about to go; the second press
+does it. A modal would be a second thing to dismiss on a tab that has enough of
+them, and a browser `confirm()` is not styleable, not themeable and not
+touch-friendly.
+
+The armed flag is a `gr.State` and not a module variable, because an arm is one
+person's half-finished gesture in one browser and a flag on this process would be
+shared by every tab open on the server. Nothing else clears it, deliberately: an
+arm that expired on the next unrelated click would be a confirmation somebody
+could miss by being slow, and the only cost of it lingering is a button that has
+to be read.
+
+One guard, `mc_pipeline_panel.confirmed()`, in all three places — and a test that
+fails if a fourth delete appears without it.

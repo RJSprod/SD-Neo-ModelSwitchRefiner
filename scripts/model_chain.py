@@ -1055,7 +1055,14 @@ class ScriptModelChain(scripts.Script):
                             scale=3,
                         )
                         preset_save = gr.Button("Save", elem_id=self.elem_id("preset_save"), scale=1)
-                        preset_delete = gr.Button("Delete", elem_id=self.elem_id("preset_delete"), scale=1)
+                        preset_delete = gr.Button("Delete", variant="stop",
+                                                  elem_id=self.elem_id("preset_delete"),
+                                                  scale=1)
+                        # Whether Delete is armed. A gr.State and not a module
+                        # variable: an arm is one person's half-finished gesture
+                        # in one browser, and a flag on this process would be
+                        # shared by every tab open on the server.
+                        arm_preset_delete = gr.State(False)
 
                 # The snapshot the dirty indicator compares against, and the
                 # name it reports. Both are UI-only: a preset is applied to the
@@ -1737,20 +1744,35 @@ class ScriptModelChain(scripts.Script):
             show_progress=False,
         )
 
-        def on_preset_delete(name):
+        def on_preset_delete(name, armed):
+            """Two presses, because deleting a preset removes a file.
+
+            §3 of the pipeline intent asks for an explicit confirmation where
+            the loss is irreversible. The confirmation is the button itself:
+            the first press arms it and says which preset is about to go.
+            """
+            go, now, button = mc_pipeline_panel.confirmed(armed)
+            if not go:
+                return (now, button,
+                        f'Press Delete again to remove the preset "{name}". '
+                        "This cannot be undone.",
+                        gr.skip(), gr.skip(), gr.skip(), gr.skip())
             try:
                 remaining = mc_presets.delete(name)
             except mc_presets.PresetError as exc:
-                return f"⚠️ {exc}", gr.skip(), gr.skip(), gr.skip(), gr.skip()
+                return (now, button, f"⚠️ {exc}",
+                        gr.skip(), gr.skip(), gr.skip(), gr.skip())
             return (
+                now, button,
                 f'Deleted preset "{name}".', "", "", "",
                 gr.update(choices=[mc_presets.NONE] + remaining, value=mc_presets.NONE),
             )
 
         preset_delete.click(
             fn=on_preset_delete,
-            inputs=[preset],
-            outputs=[preset_status, preset_explain, preset_baseline, preset_loaded,
+            inputs=[preset, arm_preset_delete],
+            outputs=[arm_preset_delete, preset_delete,
+                     preset_status, preset_explain, preset_baseline, preset_loaded,
                      preset],
             show_progress=False,
         )

@@ -35,12 +35,46 @@ ROOT = Path(__file__).resolve().parent.parent
 PIPELINE_JS = ROOT / "javascript" / "model_chain_pipeline.js"
 
 
+def _panel():
+    """The Creative panel, built outside any surface, for a handler test.
+
+    Every caller takes the ``store`` fixture first. Without it the profile
+    store writes into the repository, which is how a stray
+    ``krea_creative_profiles.json`` once ended up in a commit.
+    """
+    import mc_creative_panel
+
+    return mc_creative_panel.build(
+        lambda *parts: "test-" + "-".join(str(part) for part in parts),
+        lambda text, kind="info": text, None)
+
+
+def _clicked(panel, marker):
+    """The click handler wired to the button whose elem_id ends with ``marker``."""
+    for button in panel.buttons:
+        if str(button.elem_id or "").endswith(marker):
+            for kind, kwargs in button._callbacks:
+                if kind == "click":
+                    return kwargs["fn"]
+    raise AssertionError(f"no click handler for {marker}")
+
+
 @pytest.fixture
 def store(tmp_path, monkeypatch):
-    """Point every preferences and history file at a throwaway directory."""
+    """Point every preferences and history file at a throwaway directory.
+
+    Both roots, because the extension has two. LLM Studio's files hang off
+    ``mc_llm_paths.data_root``; the Creative profile store and the Spatial
+    layout store hang off the host's own ``paths.data_path``, which falls back
+    to the working directory -- which is how a test that saved a profile once
+    left a ``krea_creative_profiles.json`` in the repository.
+    """
+    from modules import paths
+
     import mc_llm_paths
 
     monkeypatch.setattr(mc_llm_paths, "data_root", lambda: tmp_path)
+    monkeypatch.setattr(paths, "data_path", str(tmp_path), raising=False)
     yield tmp_path
 
 
@@ -400,6 +434,250 @@ class TestTheDrawerMemory:
         block = code.split("function watchDrawers()", 1)[1]
 
         assert "dataset.mcPipelineDrawer" in block
+
+
+# --------------------------------------------------------------------------- #
+# Two presses for something that cannot be undone
+# --------------------------------------------------------------------------- #
+
+
+class TestDeleteAsksFirst:
+    """§3: a destructive action should require an explicit confirmation where
+    the loss is irreversible. Deleting a saved profile, a Stage 2 preset or a
+    named Spatial layout removes a file, and nothing brings it back."""
+
+    def test_the_first_press_arms_and_the_second_deletes(self):
+        go, armed, button = mc_pipeline_panel.confirmed(False)
+
+        assert go is False
+        assert armed is True
+        assert button["value"] == mc_pipeline_panel.CONFIRM
+
+        go, armed, button = mc_pipeline_panel.confirmed(True)
+
+        assert go is True
+        assert armed is False
+        assert button["value"] == "Delete"
+
+    def test_the_confirmation_is_the_button_and_not_a_dialog(self):
+        """A modal would be a second thing to dismiss on a tab that has enough
+        of them, and a browser confirm() is not styleable, not themeable and
+        not touch-friendly."""
+        for name in ("mc_creative_panel.py", "scripts/model_chain.py",
+                     "scripts/model_chain_krea_creative.py"):
+            source = (ROOT / name).read_text(encoding="utf-8")
+
+            assert "window.confirm" not in source
+            assert "gr.Warning" not in source
+
+    def test_a_creative_profile_survives_one_press(self, store, host):
+        import mc_creative_profiles as profiles
+
+        profiles.save("Keep me", profiles.from_settings())
+        panel = _panel()
+        if panel is None:
+            pytest.skip("the creativity library did not load")
+        handler = _clicked(panel, "profile-delete")
+
+        armed, _button, *_rest = handler("Keep me", False)
+
+        assert armed is True
+        assert "Keep me" in profiles.choices()
+
+        armed, _button, *_rest = handler("Keep me", armed)
+
+        assert armed is False
+        assert "Keep me" not in profiles.choices()
+
+    def test_the_armed_flag_is_per_browser_and_not_per_process(self):
+        """A module-level flag would be shared by every tab open on the server,
+        so one person's half-finished gesture would arm somebody else's button."""
+        source = (ROOT / "mc_creative_panel.py").read_text(encoding="utf-8")
+
+        assert "gr.State(False)" in source
+        assert "panel.arm_delete" in source
+
+    def test_every_delete_on_the_tab_goes_through_it(self):
+        """Three files, three delete buttons, one guard. A fourth added without
+        it is a file somebody loses to a mis-tap."""
+        for name in ("mc_creative_panel.py", "scripts/model_chain.py",
+                     "scripts/model_chain_krea_creative.py"):
+            source = (ROOT / name).read_text(encoding="utf-8")
+
+            assert "mc_pipeline_panel.confirmed(" in source, name
+
+
+# --------------------------------------------------------------------------- #
+# The panel under somebody else's theme
+# --------------------------------------------------------------------------- #
+
+
+class TestThePipelineStylesheet:
+    """The bug this class exists for: the first pass gave the stage cards a
+    background taken from `--panel-background-fill`, and on stock Gradio that
+    painted every card white while the text stayed the light colour a dark page
+    asks for. A card nobody could read, on the theme most people use.
+
+    The lesson is not "pick a better variable". A fill and a text colour taken
+    from two different host variables are two guesses that have to agree, and an
+    extension has no standing to make either of them."""
+
+    @pytest.fixture
+    def section(self):
+        css = (ROOT / "style.css").read_text(encoding="utf-8")
+        block = css.split("The semantic token adapter.", 1)[1]
+        block = block.split("*/", 1)[1].split("/* -- the treatment rows", 1)[0]
+        return re.sub(r"/\*.*?\*/", "", block, flags=re.S)
+
+    @pytest.fixture
+    def rules(self, section):
+        found = []
+        for part in section.split("}"):
+            if "{" not in part:
+                continue
+            selector, body = part.rsplit("{", 1)
+            found.append((" ".join(selector.split()), body))
+        return found
+
+    def test_no_host_fill_variable_is_read_at_all(self, section):
+        """The whole class of bug, named. Any one of these can be light while
+        `--body-text-color` is light, and an extension has no way to know which
+        way round a given theme has them."""
+        for banned in ("--panel-background-fill", "--block-background-fill",
+                       "--background-fill-secondary", "--background-fill-primary",
+                       "--body-background-fill", "--input-background-fill"):
+            assert banned not in section, banned
+
+    def test_the_surfaces_are_outlines_and_not_fills(self, rules):
+        """Cards, drawers and bodies paint nothing. What is left painting a
+        background is the rail, the elbow and the node -- one or two pixels
+        each, in a border colour, with no text on top of them."""
+        surfaces = (".mc-pipeline-stage", ".mc-pipeline-drawer",
+                    ".mc-pipeline-editor", ".mc-pipeline-body",
+                    ".mc-krea-creative-direction")
+        for selector, body in rules:
+            if "::" in selector:
+                continue
+            if not any(part in selector for part in surfaces):
+                continue
+            for line in body.splitlines():
+                said = line.strip()
+                if said.startswith("background"):
+                    assert "none" in said, (selector, said)
+
+    def test_it_states_no_colour_of_its_own(self, rules):
+        """Every colour is one of the host's custom properties, which is what
+        lets a theme -- Lobe, stock Gradio, or anything else -- decide what all
+        of this looks like."""
+        for selector, body in rules:
+            for line in body.splitlines():
+                said = line.strip()
+                if ":" not in said:
+                    continue
+                assert not re.search(r":\s*#[0-9a-fA-F]{3,8}\s*[;!]", said), \
+                    (selector, said)
+                assert not re.search(r":\s*rgba?\(", said), (selector, said)
+
+    def test_the_header_is_found_structurally(self, section):
+        """A Gradio Accordion is two elements: the thing you press and the thing
+        it shows. `> :first-child` is the header under every theme and every
+        version, and it names no class of Gradio's.
+
+        The first pass had the browser file move the switch and the summary into
+        whatever header it could recognise, which worked under Lobe -- where the
+        header is a <button> -- and found nothing at all under stock Gradio."""
+        assert ".mc-pipeline-editor > :first-child" in section
+        assert ".mc-pipeline-drawer > :first-child" in section
+        for generated in ("label-wrap", "svelte-", "gradio-"):
+            assert generated not in section
+
+    def test_the_summary_and_the_switch_are_painted_into_the_header_band(self,
+                                                                        section):
+        """Both are siblings of the accordion in the page, so when the card is
+        open the body would otherwise push them below everything it contains."""
+        for name in ("summary", "switch"):
+            rule = section.split(f".mc-pipeline-stage > .mc-pipeline-{name} {{",
+                                 1)[1].split("}", 1)[0]
+            assert "position: absolute" in rule, name
+
+    def test_the_band_reserves_room_for_both(self, section):
+        """The switch is painted over the header, so the header's own padding is
+        what stops the stage's name running underneath it."""
+        rule = section.split(".mc-pipeline-editor > :first-child {", 1)[1].split(
+            "}", 1)[0]
+
+        assert "--mc-pipe-lane" in rule
+        assert "--mc-pipe-head" in rule
+
+    def test_the_nesting_rail_has_its_elbow(self, section):
+        """§2's fifth invariant, and the half the first pass left out."""
+        assert ".mc-pipeline-body::before" in section
+        assert ".mc-pipeline-body::after" in section
+
+    def test_sibling_sections_are_separated(self, section):
+        """§2's third invariant: a drawer's contents sit under its own header
+        with a rule between them, so a long body is not one undivided run."""
+        rule = section.split(
+            ".mc-pipeline-drawer > :last-child:not(:first-child) {", 1)[1].split(
+            "}", 1)[0]
+
+        assert "border-top" in rule
+
+    def test_the_enable_switch_is_a_target_and_not_a_tick(self, section):
+        """It is the one control on a collapsed pipeline. The default checkbox
+        is thirteen pixels of it in the corner of a card."""
+        rule = section.split(".mc-pipeline-switch label {", 1)[1].split("}", 1)[0]
+
+        assert "min-height: var(--mc-pipe-tap)" in rule
+        assert "min-width" in rule
+
+    def test_a_coarse_pointer_gets_forty_four_pixels(self, section):
+        coarse = section.split("@media (pointer: coarse)", 1)[1].split("}", 1)[0]
+
+        assert "--mc-pipe-tap: 44px" in coarse
+
+    def test_the_composition_mode_is_two_large_targets(self, section):
+        """§3 asks for large segmented targets rather than two radio dots. It is
+        still the same stock Radio underneath, wearing the shape."""
+        rule = section.split(".mc-pipeline-segmented label {", 1)[1].split("}", 1)[0]
+
+        assert "min-height: var(--mc-pipe-tap)" in rule
+
+        surface = (ROOT / "scripts" / "model_chain_krea_creative.py").read_text(
+            encoding="utf-8")
+
+        assert 'mc_pipeline_panel.classes("segmented")' in surface
+
+    def test_an_armed_stage_says_so_without_relying_on_colour(self, section):
+        """§2: never communicate enabled/bypassed status using only colour. The
+        pill is outlined *and* the box inside it is ticked."""
+        rule = section.split(".mc-pipeline-switch label:has(input:checked) {",
+                             1)[1].split("}", 1)[0]
+
+        assert "box-shadow: inset" in rule
+
+
+class TestTheHeaderLookup:
+    """What is left of the browser file's interest in a disclosure's header:
+    pressing it to restore a drawer somebody had open."""
+
+    @pytest.fixture
+    def code(self):
+        return PIPELINE_JS.read_text(encoding="utf-8")
+
+    def test_it_counts_children_rather_than_naming_a_class(self, code):
+        block = code.split("function headerOf(", 1)[1].split("\n    }", 1)[0]
+
+        assert "children.length !== 2" in block
+        assert "BUTTON" not in block
+        assert "aria-expanded" not in block
+
+    def test_nothing_is_moved_in_the_page_any_more(self, code):
+        """The layout is the stylesheet's job. It can select "the accordion's
+        first child" without any of this, and the move that could not was what
+        broke the panel on stock Gradio."""
+        assert "appendChild" not in code
+        assert "furnish" not in code
 
 
 class TestBothScriptsFillOneShell:
