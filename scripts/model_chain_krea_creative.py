@@ -1657,6 +1657,30 @@ class ScriptKreaCreative(scripts.Script):
         stored = mc_creative_krea.settings()
         spatial = mc_spatial.settings()
 
+        # A stage is armed for a session, never inherited from one. Both
+        # switches come up off and the store is told so, which is the whole of
+        # this change to the engine.
+        #
+        # It is a fix for a state the panel could not describe. The switch was
+        # built from the saved preference and the card's description from the
+        # placeholder, so a Creative Mode left on last week came back as a
+        # checkbox reading ON above a line reading "Bypassed" -- and the engine
+        # sided with the checkbox, so pressing Generate started a language model
+        # for a stage the panel had just called bypassed.
+        #
+        # Off is the safe half of that disagreement to settle on. Stage 2's
+        # switch has always been built this way; these two now match it, so all
+        # three stages of the pipeline mean the same thing on a fresh page.
+        # Arming any of them is one press, and it is a press somebody makes
+        # while looking at the panel rather than one made for them by a
+        # preference file they last touched days ago.
+        if stored.get("enabled"):
+            stored["enabled"] = False
+            mc_creative_krea.remember(**{mc_creative_krea.ENABLED: False})
+        if spatial.get("enabled"):
+            spatial["enabled"] = False
+            mc_spatial.remember(**{mc_spatial.ENABLED: False})
+
         # The shared shell. Whichever of the two feature scripts Forge builds
         # first creates it; this one fills the two stages it owns, wherever it
         # came in the order. See mc_pipeline_panel.

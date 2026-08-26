@@ -343,6 +343,48 @@ class TestTheStagesShipOff:
 
         assert "value=False" in head
 
+    def test_a_stage_left_on_last_time_still_comes_up_off(self, store):
+        """The bug this exists for, and the reason it reaches into the engine.
+
+        A switch built from the saved preference and a description built from
+        the placeholder disagree the moment somebody leaves a stage on: the card
+        came back reading ON above a line reading "Bypassed". The engine gates
+        on the checkbox -- ``before_process(self, p, enabled=False, ...)`` takes
+        it as its first argument -- so the checkbox was the half that was true,
+        and pressing Generate started a language model for a stage the panel had
+        just called bypassed.
+
+        Off is the half to settle on. A stage is armed for a session and never
+        inherited from one, which is how Stage 2's switch has always been built.
+        """
+        import mc_creative_krea
+        import mc_spatial
+
+        mc_creative_krea.remember(**{mc_creative_krea.ENABLED: True})
+        mc_spatial.remember(**{mc_spatial.ENABLED: True})
+        assert mc_creative_krea.settings()["enabled"] is True
+        assert mc_spatial.settings()["enabled"] is True
+
+        source = (ROOT / "scripts"
+                  / "model_chain_krea_creative.py").read_text(encoding="utf-8")
+        head = source.split("def ui(self, is_img2img):", 1)[1].split(
+            "pipeline = mc_pipeline_panel.host()", 1)[0]
+
+        # Both stores are put back to off, so the switch, the description and
+        # the engine's gate cannot come apart again.
+        assert 'stored["enabled"] = False' in head
+        assert 'spatial["enabled"] = False' in head
+        assert "mc_creative_krea.remember" in head
+        assert "mc_spatial.remember" in head
+
+    def test_the_off_switch_is_the_gate_the_engine_reads(self):
+        """Which is why turning the switch off is enough to turn the stage off:
+        nothing downstream re-reads the preference file to decide."""
+        source = (ROOT / "scripts"
+                  / "model_chain_krea_creative.py").read_text(encoding="utf-8")
+
+        assert "def before_process(self, p, enabled=False, *args, **kwargs):" in source
+
 
 # --------------------------------------------------------------------------- #
 # Creative: one level, four drawers
@@ -671,7 +713,7 @@ class TestThePipelineStylesheet:
 
         rule = self.header(section)
 
-        assert "white-space: pre;" in rule
+        assert "white-space: pre !important;" in rule
         assert ".mc-pipeline-editor > :first-child::first-line" in section
 
     def test_the_header_never_soft_wraps(self, section):
@@ -685,6 +727,52 @@ class TestThePipelineStylesheet:
 
         assert "white-space: pre-line" not in rule
         assert "text-overflow: ellipsis" in rule
+
+    def test_the_card_header_is_reached_through_its_card(self, section):
+        """Specificity, and it is load-bearing rather than tidy.
+
+        Gradio's accordion header is a <button class="label-wrap">, and a theme
+        restyles it. `.mc-pipeline-editor > :first-child` is (0,2,0) -- the same
+        weight as `.gradio-container .label-wrap` -- and a tie goes to whichever
+        stylesheet loaded last, which an extension does not get to choose.
+        Measured against a theme of that shape: *none* of the header treatment
+        applied, the header stayed flex at the theme's height, and the break
+        came out as a space.
+
+        Naming the card as well makes it (0,3,0), which no selector of classes
+        alone can tie.
+        """
+        card = ".mc-pipeline-stage > .mc-pipeline-editor > :first-child"
+
+        for tail in (" {", " * {", "::first-line {", "::after {",
+                     " > :last-child:not(:first-child) {"):
+            assert card + tail in section, tail
+
+    def test_the_properties_that_decide_the_layout_are_marked(self, section):
+        """The narrow set worth an `!important`, and no more than that.
+
+        This is the one element in the panel that earns it: the extension put
+        two lines of its own text in the header and painted a switch over the
+        right-hand end, so how tall it is, how it wraps, how wide it is and what
+        it keeps clear are this file's to answer and not a theme's. What it is
+        *coloured* stays the theme's, through the host's own tokens.
+        """
+        rule = self.header(section)
+
+        for marked in ("display: block", "width: 100%", "height: var(--mc-pipe-head)",
+                       "white-space: pre", "overflow: hidden"):
+            assert f"{marked} !important;" in rule, marked
+        assert "!important" in rule.split("padding:", 1)[1].split(";", 1)[0]
+
+    def test_the_header_is_made_to_fill_its_card(self, section):
+        """Gradio's header is a <button>, and a block-level button still sizes
+        to its contents rather than to its parent. So the header came out
+        narrower than the card, and every measurement taken from its right edge
+        came up short with it: the lane the padding reserves stopped before the
+        switch, and the caret was drawn on top of it. A block div fills the line
+        and a block button does not, which is why a fixture built from divs
+        could not see this."""
+        assert "width: 100% !important;" in self.header(section)
 
     def test_the_label_span_is_told_to_inherit_and_never_told_a_value(self, section):
         """The one rule in this file that has to be `inherit` and could not be
