@@ -2994,7 +2994,7 @@
    it is *coloured* is still the theme's, and the tokens are still the host's.
 */
 
-.mc-pipeline-stage > .mc-pipeline-editor > :first-child {
+.mc-pipeline-stage:not(.mc-pipeline-carded) > .mc-pipeline-editor > :first-child {
     position: relative;
     box-sizing: border-box;
 
@@ -3041,7 +3041,7 @@
 /* The span Gradio puts the label in, told to have no opinion. Never a value of
    its own here: a value would beat ::first-line and flatten the two lines back
    into one voice. */
-.mc-pipeline-stage > .mc-pipeline-editor > :first-child * {
+.mc-pipeline-stage:not(.mc-pipeline-carded) > .mc-pipeline-editor > :first-child * {
     white-space: inherit !important;
     font: inherit !important;
     color: inherit !important;
@@ -3051,10 +3051,171 @@
     text-overflow: ellipsis;
 }
 
-.mc-pipeline-stage > .mc-pipeline-editor > :first-child::first-line {
+.mc-pipeline-stage:not(.mc-pipeline-carded) > .mc-pipeline-editor > :first-child::first-line {
     font-size: var(--text-lg, 1.2em);
     font-weight: 700;
     color: var(--body-text-color);
+}
+
+/* -- the two lines, as two elements ------------------------------------- */
+/*
+   Everything above is the fallback, and it is scoped to say so: not one of
+   those rules fires on a card the browser file has dressed. They used to fire
+   anyway, and on a build whose accordion has an extra child they landed on that
+   child instead of on the header -- a second caret drawn on an empty element,
+   and a band's worth of height above a header that then had nowhere to sit.
+   A fallback that is still running next to the thing that replaced it is not a
+   fallback, it is a second implementation.
+
+   This is the layout.
+
+   Three rounds were spent trying to make one string read as two lines with
+   `white-space: pre` and `::first-line`, and all three lost the same way: both
+   have to reach an element whose shape belongs to Gradio and whose styling
+   belongs to the theme. `.mc-pipeline-editor > :first-child` is (0,2,0), the
+   same weight as a theme's own rule for the same element, and a tie goes to
+   whichever stylesheet loaded last -- which an extension does not choose. Even
+   winning that only bought the next problem: the header is not the accordion's
+   first child on every build, so on some of them the selector matched nothing
+   at all.
+
+   So the newline is no longer styled. The browser file finds the text Python
+   wrote -- wherever the theme put it -- and replaces it with two spans of this
+   extension's own, then marks the element it found as the header. What is left
+   for this file is two of its own elements with two of its own classes, which
+   is a thing it can style without asking anybody's permission.
+
+   `.mc-pipeline-carded` says the browser file got that far. Until it does, and
+   forever if it never does, the card is a plain stack: no band, no lane, no
+   switch painted over anything. Readable, usable, and honest about what it is.
+*/
+
+.mc-pipeline-carded > .mc-pipeline-editor > .mc-pipeline-card-head {
+    position: relative;
+    box-sizing: border-box;
+    display: block !important;
+    width: 100% !important;
+    height: var(--mc-pipe-head) !important;
+    padding: 0.35em calc(var(--mc-pipe-lane) + var(--mc-pipe-caret))
+             0.35em 0.7em !important;
+    border: none;
+    background: none;
+    text-align: left;
+    overflow: hidden !important;
+    white-space: normal !important;
+    gap: 0 !important;
+}
+
+/*
+   The header, cleared. A theme is free to hang a marker off its own accordion
+   headers -- a bullet before, a caret after, a chevron element in between --
+   and on a header it owns that is its business. This one has two lines' room
+   and a switch painted over the end of it, and the moment the band became a
+   block those markers each took a line of their own: the bullet on one, the
+   name on the next, the description clipped off the bottom. That is what the
+   third screenshot of this was.
+
+   So: the lane holding the two lines stays, everything else in the header goes,
+   and the caret is drawn by the rule below rather than by whoever drew it last.
+*/
+.mc-pipeline-carded > .mc-pipeline-editor > .mc-pipeline-card-head
+    > :not(.mc-pipeline-label) {
+    display: none !important;
+}
+
+.mc-pipeline-carded > .mc-pipeline-editor > .mc-pipeline-card-head::before {
+    content: none !important;
+    display: none !important;
+}
+
+.mc-pipeline-carded > .mc-pipeline-editor > .mc-pipeline-card-head::after {
+    content: "\203a" !important;
+    display: block !important;
+    position: absolute;
+    top: 50%;
+    right: 0.6em;
+    left: auto;
+    bottom: auto;
+    width: var(--mc-pipe-caret);
+    height: auto;
+    margin: 0;
+    transform: translateY(-50%);
+    text-align: center;
+    font-size: 1.2em !important;
+    font-weight: 400 !important;
+    line-height: 1 !important;
+    color: var(--mc-pipe-muted) !important;
+    pointer-events: none;
+}
+
+.mc-pipeline-carded > .mc-pipeline-editor > .mc-pipeline-card-head
+    > .mc-pipeline-label {
+    display: block !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    max-width: none !important;
+}
+
+/*
+   Addressed through the card and named by tag as well, which puts these at
+   (0,3,1). The weight is measured rather than chosen: a theme's rule for the
+   text inside a card header is `.gradio-container .label-wrap span`, which is
+   (0,2,1) -- and against a bare `.mc-pipeline-name` at (0,1,0) it won, so both
+   lines came out at the theme's one size and there was nothing to tell them
+   apart. Being divs rather than spans takes this out of the reach of that rule
+   altogether; the specificity is what covers the theme that writes it
+   differently.
+*/
+.mc-pipeline-carded .mc-pipeline-card-head div.mc-pipeline-name,
+.mc-pipeline-carded .mc-pipeline-card-head div.mc-pipeline-said {
+    display: block !important;
+    width: 100%;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+    white-space: nowrap !important;
+    text-overflow: ellipsis;
+    text-transform: none !important;
+    letter-spacing: normal !important;
+    text-align: left !important;
+}
+
+.mc-pipeline-carded .mc-pipeline-card-head div.mc-pipeline-name {
+    font-size: var(--text-lg, 1.2em) !important;
+    font-weight: 700 !important;
+    line-height: 1.3 !important;
+    color: var(--body-text-color) !important;
+}
+
+.mc-pipeline-carded .mc-pipeline-card-head div.mc-pipeline-said {
+    font-size: var(--text-sm, 0.88em) !important;
+    font-weight: 400 !important;
+    line-height: 1.32 !important;
+    color: var(--mc-pipe-muted) !important;
+}
+
+.mc-pipeline-carded .mc-pipeline-card-head div.mc-pipeline-said:empty {
+    display: none !important;
+}
+
+/* Whatever the theme draws on its own header -- a chevron, a bullet, a caret
+   of its own -- is drawn beside these two rather than on top of them, because
+   the band is this file's height and the lane is kept clear by its padding. A
+   theme's own marker is its business; the two lines are this file's. */
+
+/* -- the fallback, when the browser file found nothing -------------------- */
+/*
+   No band, no absolute switch, no reserved lane: a header, a switch under it,
+   and a body. Every control is present and reachable, which is the bar a
+   fallback has to clear.
+*/
+
+.mc-pipeline-stage:not(.mc-pipeline-carded) > .mc-pipeline-switch {
+    position: static;
+    width: auto;
+    max-width: none;
+    height: auto;
 }
 
 /* Gradio's own chevron, out of the way. It is the header's last child, and it
@@ -3062,11 +3223,11 @@
    honours the header's padding and under another it is pinned to the edge, so
    it and the switch land on each other. Replaced by a caret of this file's own
    at a position this file chose. */
-.mc-pipeline-stage > .mc-pipeline-editor > :first-child > :last-child:not(:first-child) {
+.mc-pipeline-stage:not(.mc-pipeline-carded) > .mc-pipeline-editor > :first-child > :last-child:not(:first-child) {
     display: none !important;
 }
 
-.mc-pipeline-stage > .mc-pipeline-editor > :first-child::after {
+.mc-pipeline-stage:not(.mc-pipeline-carded) > .mc-pipeline-editor > :first-child::after {
     content: "›";
     position: absolute;
     top: 50%;

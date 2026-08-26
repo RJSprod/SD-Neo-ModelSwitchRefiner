@@ -1689,10 +1689,7 @@ class ScriptKreaCreative(scripts.Script):
         # -- Creative ------------------------------------------------------- #
 
         with pipeline.head("creative"):
-            enabled = gr.Checkbox(
-                value=bool(stored["enabled"]), label="ON", container=False,
-                elem_id=ident("toggle"),
-                elem_classes=mc_pipeline_panel.classes("toggle"))
+            enabled = mc_pipeline_panel.switch(elem_id=ident("toggle"))
 
         with pipeline.body("creative"):
             status = gr.HTML(notice("Creative Mode is off."),
@@ -1808,10 +1805,8 @@ class ScriptKreaCreative(scripts.Script):
         # around the prompt somebody typed.
 
         with pipeline.head("spatial"):
-            spatial_enabled = gr.Checkbox(
-                value=bool(spatial["enabled"]), label="ON", container=False,
-                elem_id=ident("spatial", "toggle"),
-                elem_classes=mc_pipeline_panel.classes("toggle"))
+            spatial_enabled = mc_pipeline_panel.switch(
+                elem_id=ident("spatial", "toggle"))
 
         with pipeline.body("spatial"):
             with gr.Group(elem_id=ident("spatial", "layout")):

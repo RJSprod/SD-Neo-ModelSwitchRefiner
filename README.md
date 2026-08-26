@@ -85,18 +85,18 @@ of those four — a title above the disclosure that restated it, a rail with a
 node beside every card, a handoff line between two of them — read as structure
 under one theme and as debris under another, and is gone.
 
-**The name and the description are one label, on two lines.** They live in the
-accordion's own header, which is the only place a Gradio disclosure can carry
-text that is guaranteed to be *inside* it. So they cannot drift out of the card,
-land under the body when it opens, or sit at the wrong height because a theme
-has different padding.
+**The name and the description are one label, on two lines.** Python writes them
+as one string with one newline in it, in the accordion's own header — the only
+place a Gradio disclosure can carry text that is guaranteed to be *inside* it.
+The browser file then finds that text, wherever a theme has put it, and makes it
+two elements of the extension's own: a name, larger and heavier and at full
+contrast, and a description below it, smaller and muted, cut with an ellipsis if
+the column is too narrow for it.
 
-One label and two voices: the name is larger, heavier and at full contrast, the
-description below it is smaller and muted, and the split is `::first-line`. The
-header never soft-wraps, so it is two lines on any column width, and a
-description wider than the column is cut — once in Python, so it survives a theme
-that flattens the break, and again by the header, which knows how wide the column
-actually is.
+Two elements rather than a styled line break, because a line break has to be
+styled on an element whose shape belongs to Gradio and whose appearance belongs
+to the theme. If the text is never found the card falls back to a plain stack —
+header, switch, body — with every control still present and reachable.
 
 **The switch and the disclosure share a line and never each other's presses.**
 The switch has a lane of its own on the right, the caret has a zone beyond it,

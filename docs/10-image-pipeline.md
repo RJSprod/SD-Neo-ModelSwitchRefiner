@@ -895,3 +895,93 @@ A stage is armed for a session and never inherited from one, which is how Stage
 the same thing on a fresh page. Arming one is a press somebody makes while
 looking at the panel, rather than one made for them by a preference file they
 last touched days ago.
+
+## 16. Stop styling the newline; remove it (26 August 2026)
+
+> "I loaded and double checked im using the latest verison, and looks like its
+> still the same broken layout ... I did the merge, i don't understand why
+> nothing changed."
+
+The merge was fine. §14 and §15 were both merged and both wrong, and the reason
+they were wrong is the same reason §13 was: every one of them was measured
+against a fixture built the way the *previous* bug suggested, and every time the
+real page turned out to be a shape the fixture did not have.
+
+### 16.1 What the screenshot ruled out
+
+The switch was still absolutely positioned on the right — so `style.css` was
+loaded and `.mc-pipeline-stage > .mc-pipeline-switch` matched, which means the
+stage column and its direct children are exactly what this file thinks they are.
+The failure was therefore specific to `> :first-child`: **on that build the
+header is not the accordion's first child.** The browser file already suspected
+as much — `headerOf()` refused to answer at all unless the accordion had
+*exactly* two children, which on such a build meant no header was found, no
+drawer was remembered, and no rule keyed to `:first-child` matched anything.
+
+### 16.2 The newline is no longer styled
+
+Three rounds went into making one string read as two lines with
+`white-space: pre` and `::first-line`. Both have to reach an element whose shape
+belongs to Gradio and whose styling belongs to the theme, and a rule that has to
+win a cascade it does not control is a rule that works until somebody changes
+their theme.
+
+So the newline is removed rather than styled. The browser file finds the text
+Python wrote — by walking to a text node whose first line is one of the three
+stage names, wherever a theme has put it — and replaces it with two elements of
+this extension's own:
+
+```html
+<div class="mc-pipeline-name">Creative</div>
+<div class="mc-pipeline-said">Bypassed — prompt as-is</div>
+```
+
+Divs and not spans, which is not a trick: these are two stacked blocks, and a
+theme's rule for header text reaches the span inside it. Measured — as spans,
+both lines came out at the theme's one size.
+
+The element the text was found in is marked `mc-pipeline-card-head`, the lane
+holding the two lines is marked `mc-pipeline-label`, and the card is marked
+`mc-pipeline-carded`. The stylesheet then addresses only its own elements. This
+is what `CARD_HEAD` and `CARDED` in `mc_pipeline_panel` were always for; they
+had been declared and documented and never used.
+
+Two consequences worth naming. The header is cleared of everything that is not
+the label lane — a theme's bullet, its caret, Gradio's chevron — because the
+moment the band became a block each of those took a line of its own and pushed
+the description out of the card. And every `:first-child` rule is now scoped
+`:not(.mc-pipeline-carded)`: they are the fallback for when the browser file
+finds nothing, and a fallback still running beside the thing that replaced it is
+not a fallback but a second implementation. Left unscoped, they drew a second
+caret on the accordion's extra child.
+
+If the text is never found, nothing is marked and the card is a plain stack —
+header, switch, body, every control present and reachable.
+
+### 16.3 The switch was being restored by the host
+
+§15 forced both stores off in `ui()` and the toggles still came up **ON**, which
+is pure Python with no cascade in it — so the value the script asked for was not
+the value being used. It is not: Forge keeps a `ui-config.json` of every
+component a script builds and writes the saved value back over it. Right for a
+slider somebody tuned; wrong for the one control that decides whether a language
+model runs.
+
+`do_not_save_to_config` is the host's own opt-out, and it is the whole fix. All
+three switches are now built by one factory, `mc_pipeline_panel.switch()`, which
+sets it — so the value that ships is the value that shows.
+
+### 16.4 The test that would have caught all three rounds
+
+`tests/test_pipeline_render.py` renders. It builds the hostile case — a theme
+that marks every declaration `!important` and hangs its own bullet and caret off
+the header, an accordion whose header is *not* the first child, and a wrapper
+element around the label text — loads the real `style.css` and the real
+`model_chain_pipeline.js` in headless Chromium, and asks the browser where
+things ended up: two lines, the name larger and heavier than the description,
+the text clear of the switch, the description inside the card, and nothing in
+the header but those two lines.
+
+Every fix above was checked by reverting it and watching this fail. Reading the
+source could never have caught any of them, because none of them were wrong in
+the source.
