@@ -79,10 +79,26 @@ body { font-size: 16px; font-family: system-ui, sans-serif; margin: 0; }
     font-size: 15px !important;
 }
 </style>
-<div class="gradio-container"><div class="col mc-pipeline-panel" id="col"></div></div>
+<div class="gradio-container"><div class="col" id="col"></div></div>
 <pre id="out"></pre>
 <script>
 const CARDS = %(cards)s;
+
+// The real nesting, which is the part that mattered. The three cards live
+// inside the Image Pipeline panel -- itself one of this extension's drawers --
+// and each card's body holds more of them. Anything that walks "every drawer"
+// meets the panel first, and the panel contains all three cards' text.
+const panel = document.createElement('div');
+panel.className = 'mc-pipeline-panel mc-pipeline-drawer';
+panel.id = 'mc-panel';
+const panelHead = document.createElement('button');
+panelHead.className = 'label-wrap';
+panelHead.appendChild(Object.assign(document.createElement('span'),
+                                    { textContent: 'Image Pipeline' }));
+const panelBody = document.createElement('div');
+panel.append(panelHead, panelBody);
+document.getElementById('col').appendChild(panel);
+
 for (const [id, label] of CARDS) {
   const stage = document.createElement('div');
   stage.className = 'mc-pipeline-stage';
@@ -99,7 +115,19 @@ for (const [id, label] of CARDS) {
   head.appendChild(Object.assign(document.createElement('span'),
                                  { className: 'icon', textContent: '\\u25bc' }));
   const body = document.createElement('div');
-  body.className = 'mc-pipeline-body'; body.style.display = 'none';
+  body.className = 'mc-pipeline-body';
+  // A card's body holds drawers of its own, and prose this extension wrote --
+  // including a paragraph that opens with the stage's own name.
+  const nested = document.createElement('div');
+  nested.className = 'mc-pipeline-drawer';
+  const nestedHead = document.createElement('button');
+  nestedHead.className = 'label-wrap';
+  nestedHead.appendChild(Object.assign(document.createElement('span'),
+                                       { textContent: 'Directions' }));
+  nested.append(nestedHead, document.createElement('div'));
+  body.appendChild(nested);
+  body.appendChild(Object.assign(document.createElement('p'),
+                                 { textContent: label + ' (body prose)' }));
   ed.append(head, body);
   const sw = document.createElement('div');
   sw.className = 'mc-pipeline-switch';
@@ -108,7 +136,7 @@ for (const [id, label] of CARDS) {
              Object.assign(document.createElement('span'), { textContent: 'ON' }));
   sw.appendChild(lab);
   stage.append(ed, sw);
-  document.getElementById('col').appendChild(stage);
+  panelBody.appendChild(stage);
 }
 window.gradioApp = () => document;
 window.onUiLoaded = f => f();
