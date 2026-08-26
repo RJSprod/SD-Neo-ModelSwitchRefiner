@@ -629,7 +629,54 @@ class TestThePipelineStylesheet:
         rule = section.split(".mc-pipeline-switch label {", 1)[1].split("}", 1)[0]
 
         assert "min-height: var(--mc-pipe-tap)" in rule
-        assert "min-width" in rule
+
+        box = section.split('.mc-pipeline-switch input[type="checkbox"] {',
+                            1)[1].split("}", 1)[0]
+
+        assert "width: 1.3em" in box
+
+    def test_the_switch_is_bounded_to_its_own_lane(self, section):
+        """The bug this test is named after, and it was one omitted line.
+
+        An absolutely positioned box with no width takes the width it is given,
+        and Gradio gives every block `width: 100%` -- so the switch spanned the
+        whole card, and a <label> toggles its checkbox wherever it is pressed.
+        The whole header became the switch: tapping the stage's name armed it
+        instead of opening it, which is both controls broken at once.
+        """
+        rule = section.split(".mc-pipeline-stage > .mc-pipeline-switch {",
+                             1)[1].split("}", 1)[0]
+
+        assert "position: absolute" in rule
+        assert "width: auto" in rule
+        assert "max-width" in rule
+        assert "--mc-pipe-lane" in rule
+
+    def test_the_switch_draws_no_box_of_its_own(self, section):
+        """A pill in the header reads as a second card edge inside the card --
+        which is exactly what it looked like. The tick is the state signal, and
+        a tick is not a colour."""
+        rule = section.split(".mc-pipeline-switch label {", 1)[1].split("}", 1)[0]
+
+        assert "border: none" in rule
+        assert "border-radius" not in rule
+        assert ".mc-pipeline-switch label:has(input:checked)" not in section
+
+    def test_the_switch_and_the_disclosure_are_separate_controls(self, section):
+        """They share a line and they are not the same thing. The switch is a
+        sibling of the accordion painted over the lane its header reserved, so
+        its presses never reach the accordion's own handler -- and the summary
+        over the rest of the band lets presses through to it."""
+        switch = section.split(".mc-pipeline-stage > .mc-pipeline-switch {",
+                               1)[1].split("}", 1)[0]
+        summary = section.split(".mc-pipeline-stage > .mc-pipeline-summary {",
+                                1)[1].split("}", 1)[0]
+        header = section.split(".mc-pipeline-editor > :first-child {",
+                               1)[1].split("}", 1)[0]
+
+        assert "z-index" in switch
+        assert "pointer-events: none" in summary
+        assert "--mc-pipe-lane" in header
 
     def test_a_coarse_pointer_gets_forty_four_pixels(self, section):
         coarse = section.split("@media (pointer: coarse)", 1)[1].split("}", 1)[0]
@@ -648,13 +695,13 @@ class TestThePipelineStylesheet:
 
         assert 'mc_pipeline_panel.classes("segmented")' in surface
 
-    def test_an_armed_stage_says_so_without_relying_on_colour(self, section):
-        """§2: never communicate enabled/bypassed status using only colour. The
-        pill is outlined *and* the box inside it is ticked."""
-        rule = section.split(".mc-pipeline-switch label:has(input:checked) {",
-                             1)[1].split("}", 1)[0]
+    def test_an_armed_stage_says_so_without_relying_on_colour(self):
+        """§2: never communicate enabled/bypassed status using only colour.
 
-        assert "box-shadow: inset" in rule
+        The switch is a checkbox, so ticked-or-not carries it without any help;
+        and the summary a bypassed stage shows begins with the word."""
+        for stage in mc_pipeline_panel.ORDER:
+            assert mc_pipeline_panel.PLACEHOLDERS[stage].startswith("Bypassed")
 
 
 class TestTheHeaderLookup:
@@ -678,6 +725,74 @@ class TestTheHeaderLookup:
         broke the panel on stock Gradio."""
         assert "appendChild" not in code
         assert "furnish" not in code
+
+
+# --------------------------------------------------------------------------- #
+# Nothing on this panel flashes
+# --------------------------------------------------------------------------- #
+
+
+class TestTheePanelDoesNotFlicker:
+    """Every handler on the pipeline repaints text somebody is looking at: a
+    summary line, a status note, a count. Gradio's default draws a spinner over
+    each output for the length of the round trip and takes it away again, and
+    on a panel where a press changes three lines that reads as the whole card
+    blinking.
+
+    None of them is long enough to be worth a spinner. They are all
+    ``queue=False`` already -- no work worth queueing, nothing that starts,
+    stops or waits for a generation -- and a handler that is not worth queueing
+    is not worth animating either."""
+
+    SURFACES = ("scripts/model_chain_krea_creative.py", "scripts/model_chain.py",
+                "mc_creative_panel.py")
+
+    def test_no_handler_on_the_tab_draws_a_progress_overlay(self):
+        for name in self.SURFACES:
+            source = (ROOT / name).read_text(encoding="utf-8")
+            for at, call in enumerate(re.findall(r"\.(?:click|change|input|release|"
+                                                 r"submit|select)\(((?:[^()]|\([^()]*\))*)\)",
+                                                 source, re.S)):
+                if "fn=" not in call and "fn =" not in call:
+                    continue
+                assert "show_progress=False" in call, (name, at, call[:120])
+
+    def test_a_stage_toggle_only_moves_the_prompt_area_when_it_has_to(self, store):
+        """The Literal Prompt row is visible when either stage is on, so
+        flipping one of them changes that only when the other is off. Re-sending
+        a visibility Gradio already has is a component torn down and rebuilt for
+        nothing, in the middle of the prompt area -- a whole page reflowing so
+        that nothing can change."""
+        import scripts.model_chain_krea_creative as creative_script
+
+        # The other stage is on, so the row was visible and stays visible.
+        assert creative_script._literal_row(True, True, other=True) == {}
+        assert creative_script._literal_row(False, True, other=True) == {}
+
+        # The other stage is off, so this toggle is the one that decides.
+        assert creative_script._literal_row(
+            True, False, other=False)["visible"] is True
+        assert creative_script._literal_row(
+            False, False, other=False)["visible"] is False
+
+    def test_the_summary_cannot_move_anything_when_it_changes(self):
+        """The line most often repainted is the one in the card header, and it
+        is painted into a band the header's own padding reserved. Its text can
+        change length, wrap, or empty entirely without the card resizing --
+        which is the difference between a value updating and the page jumping.
+        """
+        css = (ROOT / "style.css").read_text(encoding="utf-8")
+        rule = css.split(".mc-pipeline-stage > .mc-pipeline-summary {",
+                         1)[1].split("}", 1)[0]
+
+        assert "position: absolute" in rule
+        assert "white-space: nowrap" in rule
+        assert "text-overflow: ellipsis" in rule
+
+        header = css.split(".mc-pipeline-editor > :first-child {",
+                           1)[1].split("}", 1)[0]
+
+        assert "min-height: var(--mc-pipe-head)" in header
 
 
 class TestBothScriptsFillOneShell:

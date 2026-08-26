@@ -583,3 +583,67 @@ to be read.
 
 One guard, `mc_pipeline_panel.confirmed()`, in all three places — and a test that
 fails if a fourth delete appears without it.
+## 12. One omitted line broke both controls (26 August 2026)
+
+Section 11 replaced the header move with a band the switch is painted into, and
+shipped with the switch spanning the whole card: an orange pill wrapped around
+the stage's name and its summary, and tapping anywhere on the header armed the
+stage instead of opening it.
+
+### 12.1 An absolute box with no width is not shrink-wrapped
+
+`.mc-pipeline-stage > .mc-pipeline-switch` set `position`, `top`, `right` and
+`z-index`, and no `width`. An absolutely positioned box with `width: auto` does
+shrink-wrap -- but only if nothing else sets a width, and Gradio gives every
+block `width: 100%`. That rule won by default because this one never made a
+claim, so the switch box became the whole card anchored to the right edge, and
+the label inside it filled the box.
+
+A `<label>` toggles its checkbox wherever it is pressed. So the label was the
+header: the name, the summary and the empty space all armed the stage, and the
+accordion underneath could not be reached at all. Two controls that were meant
+to share a line, and one omitted declaration took both of them out -- the switch
+by making it enormous, the disclosure by burying it.
+
+The box is bounded twice now: `width: auto` is what makes it shrink-wrap, and
+`max-width: calc(var(--mc-pipe-lane) - 0.8em)` is what stops a long label or a
+theme with generous padding creeping back over the name. The subtraction keeps
+it clear of the chevron, which Gradio puts at the inner edge of the padding the
+lane is made of.
+
+That the switch is a *sibling* of the accordion rather than a child of its
+header is what makes the arrangement work at all: its presses never reach the
+accordion's own click handler, so there is nothing to stop propagating and
+nothing to get wrong. The summary over the rest of the band carries
+`pointer-events: none`, so presses there fall through to the disclosure.
+
+### 12.2 The pill is gone
+
+It was drawn to make the switch look like a control. In the header of a card
+that already has an outline it reads as a second card edge, and in the accent
+colour it reads as an error. A checkbox is already legible as a control, and
+ticked-or-not is already a state signal that is not a colour -- which is all §2
+asks for. What is left is the hit area, which is the part that had to be big:
+one tap tall, with a 1.3em box in it, and no box around any of it.
+
+### 12.3 Nothing here is worth a spinner
+
+Every handler on this panel repaints text somebody is looking at -- a summary
+line, a status note, a count. Gradio's default draws a progress overlay over
+each output for the length of the round trip and takes it away again, and on a
+panel where one press changes three lines that reads as the card blinking.
+
+All 48 of them now pass `show_progress=False`, and there is a test that walks
+every `.click`, `.change`, `.input` and `.release` in the three files that draw
+on txt2img and fails on one that does not. They were all `queue=False` already
+-- no work worth queueing, nothing that starts, stops or waits for a generation
+-- and a handler that is not worth queueing is not worth animating either.
+
+The other half of the flicker was layout. The summary is painted into a reserved
+band, so its text can change length or empty entirely without the card resizing.
+And the Literal Prompt row, which sits in the middle of the prompt area, is no
+longer re-sent its own visibility on every toggle: the row is visible when
+either stage is on, so flipping one changes the answer only when the other is
+off, and that is derivable from the two values the handler already receives.
+When it is not the deciding vote it now says nothing at all, and the prompt area
+does not reflow so that nothing can change.

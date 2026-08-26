@@ -378,7 +378,7 @@ def _toggled(enabled, spatial_enabled, serialized, mode):
                             creative=bool(enabled), mode=mode),
             _creative_line(bool(enabled)),
             _spatial_line(serialized, bool(spatial_enabled), mode),
-            _literal_row(enabled, spatial_enabled))
+            _literal_row(enabled, spatial_enabled, other=spatial_enabled))
 
 
 def _remember_creativity(value):
@@ -1011,7 +1011,7 @@ def _spatial_toggled(enabled, serialized, creative, mode):
     return (spatial_summary(serialized, bool(enabled), creative=bool(creative),
                             mode=mode),
             _spatial_line(serialized, bool(enabled), mode),
-            _literal_row(creative, enabled))
+            _literal_row(creative, enabled, other=creative))
 
 
 def _spatial_mode(mode, serialized, enabled, creative):
@@ -1064,7 +1064,7 @@ def _spatial_scenes(record):
 # --------------------------------------------------------------------------- #
 
 
-def _literal_row(creative, spatial):
+def _literal_row(creative, spatial, other=None):
     """Whether the Literal Prompt row is on screen. Section 5, and only that.
 
     Visible when either owned prompt-transforming feature is on, hidden when
@@ -1077,7 +1077,16 @@ def _literal_row(creative, spatial):
     every generation while the row is hidden -- see :func:`_literals_for` --
     which is why :func:`mc_literal_prompts.active_note` exists and why the
     Prompt row of the Image Pipeline says how many are in effect.
+
+    ``other`` is the stage that did *not* just change, and giving it turns this
+    into "say something only if the answer moved". The row is visible when
+    either stage is on, so flipping one of them changes the answer only when
+    the other is off -- and re-sending a visibility Gradio already has is a
+    component torn down and rebuilt for nothing, in the middle of the prompt
+    area, which is a whole page reflowing so that nothing can change.
     """
+    if other is not None and bool(other):
+        return gr.update()
     return gr.update(visible=bool(creative) or bool(spatial))
 
 
@@ -2141,7 +2150,7 @@ class ScriptKreaCreative(scripts.Script):
                                 self.components["creative_line"],
                                 self.components["spatial_line"],
                                 self.components["literal_row"]],
-                       queue=False)
+                       queue=False, show_progress=False)
 
         # The slider moves what the brief costs as well as what it says, and the
         # cost line is the thing somebody looks at straight after moving it. Sent
@@ -2153,14 +2162,15 @@ class ScriptKreaCreative(scripts.Script):
                                   gr.update(value=_creative_line())),
                 inputs=[creativity],
                 outputs=[status, self.panel.cost, self.components["creative_line"]],
-                queue=False)
+                queue=False, show_progress=False)
         else:
             creativity.release(
                 fn=lambda value: (_remember_creativity(value),
                                   gr.update(value=_creative_line())),
                 inputs=[creativity],
-                outputs=[status, self.components["creative_line"]], queue=False)
-        show.click(fn=_last_roll, outputs=[recipe, expanded], queue=False)
+                outputs=[status, self.components["creative_line"]], queue=False, show_progress=False)
+        show.click(fn=_last_roll, outputs=[recipe, expanded], queue=False,
+                   show_progress=False)
 
         # The one handler in this extension that writes to a native control, and
         # the only one that ever should: it is a button whose entire purpose is
@@ -2176,15 +2186,15 @@ class ScriptKreaCreative(scripts.Script):
             restore.click(fn=_restore_setup, inputs=[exactly],
                           outputs=[self.prompt_box, enabled, status, pasted,
                                    *literal_boxes],
-                          queue=False)
+                          queue=False, show_progress=False)
         else:
             logger.debug("Model Chain: the txt2img prompt box was not offered to "
                          "Creative Mode; Restore Creative setup will not fill it in")
             restore.click(fn=lambda exactly: _restore_setup(exactly)[1:],
                           inputs=[exactly],
                           outputs=[enabled, status, pasted, *literal_boxes],
-                          queue=False)
-        disarm.click(fn=_disarm_replay, outputs=[status], queue=False)
+                          queue=False, show_progress=False)
+        disarm.click(fn=_disarm_replay, outputs=[status], queue=False, show_progress=False)
 
     def _wire_spatial(self, spatial_enabled, spatial_compose, spatial_status,
                       spatial_state, record_scenes, restore_spatial,
@@ -2217,25 +2227,26 @@ class ScriptKreaCreative(scripts.Script):
             fn=_spatial_toggled,
             inputs=[spatial_enabled, spatial_state, creative_enabled, spatial_compose],
             outputs=[spatial_status, line, self.components["literal_row"]],
-            queue=False)
+            queue=False, show_progress=False)
         spatial_compose.change(
             fn=_spatial_mode,
             inputs=[spatial_compose, spatial_state, spatial_enabled, creative_enabled],
-            outputs=[spatial_status, line], queue=False)
+            outputs=[spatial_status, line], queue=False, show_progress=False)
         spatial_state.change(
             fn=_spatial_saved,
             inputs=[spatial_state, spatial_enabled, creative_enabled, spatial_compose],
             outputs=[spatial_status, line,
-                     self.components["spatial_profile_state"]], queue=False)
+                     self.components["spatial_profile_state"]], queue=False, show_progress=False)
         record_scenes.change(fn=_spatial_scenes, inputs=[record_scenes],
-                             outputs=[spatial_status], queue=False)
+                             outputs=[spatial_status], queue=False,
+                             show_progress=False)
         # Spatial's own restore, writing only to Spatial's own controls. Nothing
         # in this list is Creative Mode's, which is the whole difference between
         # this button and the one in the other section.
         restore_spatial.click(
             fn=_restore_spatial,
             outputs=[spatial_state, spatial_enabled, spatial_compose, spatial_status],
-            queue=False)
+            queue=False, show_progress=False)
 
     def _register_paste_fields(self):
         """Make an ordinary paste reproduce the image rather than re-expand it.

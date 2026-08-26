@@ -923,8 +923,8 @@ def _wire_axis(panel, key, picker, remove) -> None:
     # ``change`` fires when the server sets a value, so this would be a loop --
     # one that terminates only because the value it writes back is the value it
     # just read.
-    picker.input(fn=choose, inputs=[picker], outputs=outputs, queue=False)
-    remove.click(fn=drop_row, outputs=outputs, queue=False)
+    picker.input(fn=choose, inputs=[picker], outputs=outputs, queue=False, show_progress=False)
+    remove.click(fn=drop_row, outputs=outputs, queue=False, show_progress=False)
 
 
 def _wire_profiles(panel, save, save_as, create, drop, make_default, reset) -> None:
@@ -1004,14 +1004,14 @@ def _wire_profiles(panel, save, save_as, create, drop, make_default, reset) -> N
                             profile=name)
 
     outputs = panel.outputs()
-    panel.profile.input(fn=choose, inputs=[panel.profile], outputs=outputs, queue=False)
-    save.click(fn=save_over, inputs=[panel.profile], outputs=outputs, queue=False)
-    save_as.click(fn=start_naming, outputs=outputs, queue=False)
-    create.click(fn=create_new, inputs=[panel.profile_name], outputs=outputs, queue=False)
+    panel.profile.input(fn=choose, inputs=[panel.profile], outputs=outputs, queue=False, show_progress=False)
+    save.click(fn=save_over, inputs=[panel.profile], outputs=outputs, queue=False, show_progress=False)
+    save_as.click(fn=start_naming, outputs=outputs, queue=False, show_progress=False)
+    create.click(fn=create_new, inputs=[panel.profile_name], outputs=outputs, queue=False, show_progress=False)
     drop.click(fn=remove, inputs=[panel.profile, panel.arm_delete],
-               outputs=[panel.arm_delete, drop, *outputs], queue=False)
-    make_default.click(fn=nominate, inputs=[panel.profile], outputs=outputs, queue=False)
-    reset.click(fn=restore_default, outputs=outputs, queue=False)
+               outputs=[panel.arm_delete, drop, *outputs], queue=False, show_progress=False)
+    make_default.click(fn=nominate, inputs=[panel.profile], outputs=outputs, queue=False, show_progress=False)
+    reset.click(fn=restore_default, outputs=outputs, queue=False, show_progress=False)
 
 
 def _wire_settings(panel, forget) -> None:
@@ -1042,12 +1042,13 @@ def _wire_settings(panel, forget) -> None:
                             "again.")
 
     panel.add.input(fn=add, inputs=[panel.add], outputs=panel.outputs(),
-                    queue=False)
+                    queue=False, show_progress=False)
     panel.seed.input(fn=remember_seed, inputs=[panel.seed], outputs=[panel.seed],
-                     queue=False)
+                     queue=False, show_progress=False)
     panel.anti.input(fn=remember_anti, inputs=[panel.anti], outputs=[panel.anti],
-                     queue=False)
-    forget.click(fn=forget_history, outputs=[panel.status], queue=False)
+                     queue=False, show_progress=False)
+    forget.click(fn=forget_history, outputs=[panel.status], queue=False,
+                 show_progress=False)
 
 
 # --------------------------------------------------------------------------- #
