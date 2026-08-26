@@ -2313,7 +2313,12 @@
     flex-direction: column;
     gap: var(--mc-gap);
     flex: 0 0 auto;
+    /* Bounded, or overflow-y has nothing to do. `min-height: 0` stops the flex
+       default of "at least as tall as my content", and `max-height: 100%` is
+       what stops a rail of six open widgets from being taller than the body it
+       is in on a browser that stretches it anyway. */
     min-height: 0;
+    max-height: 100%;
     overflow-y: auto;
     overscroll-behavior: contain;
 }
@@ -2352,6 +2357,34 @@
 
 .mc-krea-spatial-widget-name {
     flex: 1 1 auto;
+}
+
+/* Grip to move the widget, header to collapse it. Two targets because the
+   header is wide and gets pressed often, and a rail that rearranged itself
+   whenever a finger slid six pixels on the way to collapsing something would
+   be a rail nobody trusted. */
+.mc-krea-spatial-widget-grip {
+    flex: 0 0 auto;
+    padding: 0 0.15em;
+    color: var(--body-text-color-subdued);
+    cursor: grab;
+    touch-action: none;
+}
+
+.mc-krea-spatial-widget-grip:hover {
+    color: var(--mc-accent);
+}
+
+.mc-krea-spatial-widget.dragging {
+    opacity: 0.5;
+}
+
+.mc-krea-spatial-widget.drop-before {
+    box-shadow: inset 0 3px 0 0 var(--mc-accent);
+}
+
+.mc-krea-spatial-widget.drop-after {
+    box-shadow: inset 0 -3px 0 0 var(--mc-accent);
 }
 
 .mc-krea-spatial-caret {
@@ -2468,11 +2501,6 @@
     white-space: nowrap;
 }
 
-.mc-krea-spatial-row-size {
-    font-variant-numeric: tabular-nums;
-    color: var(--body-text-color-subdued);
-}
-
 .mc-krea-spatial-row-trash {
     appearance: none;
     flex: 0 0 auto;
@@ -2528,14 +2556,11 @@
     color: var(--body-text-color-subdued);
 }
 
-.mc-krea-spatial-pair,
-.mc-krea-spatial-bbox {
+.mc-krea-spatial-pair {
     display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--mc-gap);
 }
-
-.mc-krea-spatial-pair { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.mc-krea-spatial-bbox { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
 .mc-krea-spatial-range {
     gap: 0.25em;
@@ -2560,7 +2585,6 @@
    rather than !important: this is one selector more specific than a Gradio
    base rule and nothing here has to shout. */
 #mc-krea-spatial-workspace input[type="text"],
-#mc-krea-spatial-workspace input[type="number"],
 #mc-krea-spatial-workspace textarea,
 #mc-krea-spatial-workspace select {
     width: 100%;
@@ -2575,7 +2599,6 @@
 }
 
 #mc-krea-spatial-workspace input[type="text"]:focus,
-#mc-krea-spatial-workspace input[type="number"]:focus,
 #mc-krea-spatial-workspace textarea:focus,
 #mc-krea-spatial-workspace select:focus {
     outline: 2px solid var(--mc-accent);

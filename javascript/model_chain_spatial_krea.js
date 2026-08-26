@@ -176,10 +176,6 @@
         rotation: P + "-rotation",
         rotationField: P + "-rotation-field",
         rotationRead: P + "-rotation-read",
-        bboxX: P + "-bbox-x",
-        bboxY: P + "-bbox-y",
-        bboxW: P + "-bbox-w",
-        bboxH: P + "-bbox-h",
         autoHint: P + "-auto-hint",
         grid: P + "-grid",
         aspect: P + "-aspect",
@@ -271,7 +267,6 @@
     const state = {
         wired: false,
         listening: false,   // the one document-level listener, installed once
-        dragging: "",       // the region id a list drag is carrying, if any
         pendingSave: false, // an edit finished and not yet committed
         typing: false,      // a keystroke is in flight; see settle()
         committed: "",      // what was last written to the state box
@@ -304,6 +299,10 @@
         shotAt: -1,         // which one the Gallery widget is showing
         watching: false,    // the element the gallery observer is watching
         watcher: null,      // that observer, so a rebuilt gallery can replace it
+        scrolled: null,     // where the page was when the workspace opened
+        order: [],          // the rail's widgets, in the order somebody put them
+        carrying: null,     // a rail widget or a layer row being dragged
+        slid: false,        // that drag ended; the click it caused is spent
     };
 
     function root() {
@@ -520,6 +519,39 @@
         })[0] || null;
     }
 
+    // One region, in the document's shape. The only place a live region becomes
+    // a written one, and therefore the only place that has to know that the
+    // document says `ui_shape` where the editor says `shape`.
+    //
+    // It has one caller more than it looks: the undo stack. A snapshot that
+    // stringified the live objects instead would round-trip through normalise()
+    // -- which reads the document's names -- and quietly hand back a rectangle
+    // for every silhouette and an empty box for every region literal. That is
+    // exactly what it used to do.
+    function entryFor(region) {
+        const entry = {
+            id: region.id,
+            name: region.name || region.id,
+            type: region.type,
+            bbox: region.bbox.slice(),
+            prompt: region.prompt,
+        };
+        if (region.type === "text") entry.text = region.text;
+        // Written only when they carry something, so a layout with no region
+        // literals in it serializes to the bytes it always did.
+        if (region.literalPrefix) entry.literal_prefix = region.literalPrefix;
+        if (region.literalSuffix) entry.literal_suffix = region.literalSuffix;
+        entry.framing = region.framing;
+        entry.angle = region.angle;
+        entry.z = region.z;
+        // §21.2, for the same reason: a rectangle layout serializes to the bytes
+        // it always did, and a build that predates the editor metadata still
+        // reads every document this one writes.
+        if (region.shape && region.shape !== "rect") entry.ui_shape = region.shape;
+        if (region.rotation) entry.ui_rotation = region.rotation;
+        return entry;
+    }
+
     function serializeIn(source) {
         const document_ = {
             version: 1,
@@ -530,30 +562,7 @@
             },
             compose_mode: source.compose_mode,
             auto_position_hint: !!source.auto_position_hint,
-            regions: orderedIn(source).map(function (region) {
-                const entry = {
-                    id: region.id,
-                    name: region.name || region.id,
-                    type: region.type,
-                    bbox: region.bbox.slice(),
-                    prompt: region.prompt,
-                };
-                if (region.type === "text") entry.text = region.text;
-                // Written only when they carry something, so a layout with no
-                // region literals in it serializes to the bytes it always did.
-                if (region.literalPrefix) entry.literal_prefix = region.literalPrefix;
-                if (region.literalSuffix) entry.literal_suffix = region.literalSuffix;
-                entry.framing = region.framing;
-                entry.angle = region.angle;
-                entry.z = region.z;
-                // §21.2. Written only when they say something, for the reason
-                // the region literals are: a rectangle layout serializes to the
-                // bytes it always did, and a build that predates the editor
-                // metadata still reads every document this one writes.
-                if (region.shape && region.shape !== "rect") entry.ui_shape = region.shape;
-                if (region.rotation) entry.ui_rotation = region.rotation;
-                return entry;
-            }),
+            regions: orderedIn(source).map(entryFor),
         };
         return JSON.stringify(document_);
     }
@@ -578,7 +587,12 @@
 
     function snapshot() {
         return JSON.stringify({
-            regions: state.working.regions,
+            // Through entryFor(), not the live objects: restore() reads a
+            // snapshot with normalise(), which speaks the document's names.
+            // Handed the editor's names it silently drops every one it does not
+            // recognise -- which is how an undo used to turn a head back into a
+            // plain box and empty both of a region's Literal fields.
+            regions: state.working.regions.map(entryFor),
             auto: !!state.working.auto_position_hint,
             grid: state.working.canvas.grid || "none",
         });
@@ -793,6 +807,42 @@
         return true;
     }
 
+    // Where the page is, and putting it back.
+    //
+    // The workspace lives at the bottom of the txt2img column, several screens
+    // down: it is the last thing in the extension's accordion, which is the
+    // last thing on the tab. So the moment before the takeover hides everything
+    // above it, the page is scrolled to wherever somebody was reading -- and
+    // the moment after, that scroll offset is measured against a page that is
+    // now one screen tall. The workspace opens showing its bottom edge and the
+    // WebUI footer, with the action bar off the top.
+    //
+    // Both halves matter. Opening scrolls to the top, because the workspace is
+    // the only thing on the tab and its top is the action bar. Closing puts the
+    // page back exactly where it was, because coming back from Full Screen to a
+    // tab scrolled somewhere else is the same lost place by another route.
+    function scroller() {
+        if (typeof document === "undefined") return null;
+        return document.scrollingElement || document.documentElement || document.body;
+    }
+
+    function scrollTo(top) {
+        const at = scroller();
+        if (at && typeof at.scrollTop === "number") at.scrollTop = top;
+        if (typeof window !== "undefined" && typeof window.scrollTo === "function") {
+            try { window.scrollTo(0, top); } catch (error) { /* not fatal */ }
+        }
+    }
+
+    function scrollNow() {
+        const at = scroller();
+        if (at && typeof at.scrollTop === "number") return at.scrollTop;
+        if (typeof window !== "undefined" && typeof window.pageYOffset === "number") {
+            return window.pageYOffset;
+        }
+        return 0;
+    }
+
     function surrender() {
         const host = tab();
         if (host && host.classList) host.classList.remove(P + "-taken");
@@ -941,7 +991,7 @@
     //                   commits like everything else.
     function settle() {
         if (!state.pendingSave) return;
-        if (state.drag || state.dragging || state.typing) return;
+        if (state.drag || state.carrying || state.typing) return;
         state.pendingSave = false;
         if (!autoSaveOn()) return;
         const box = stateBox();
@@ -1072,11 +1122,9 @@
             const row = document.createElement("div");
             row.className = P + "-row" + (region.id === state.selected ? " selected" : "");
             row.dataset.regionId = region.id;
-            // Reordering by pointer. The rows are rebuilt on every paint, so
-            // the listeners for this are delegated to the container -- see
-            // wire() -- and all a row carries is the flag that makes it a drag
-            // source.
-            row.draggable = true;
+            // Reordering is delegated to the container -- see wire() -- because
+            // the rows are rebuilt on every paint, so a row carries no listener
+            // and no drag flag of its own.
             row.setAttribute && row.setAttribute("role", "option");
             row.setAttribute && row.setAttribute("aria-selected",
                                                  region.id === state.selected ? "true" : "false");
@@ -1105,12 +1153,6 @@
             name.textContent = region.name || region.id;
             row.appendChild(name);
 
-            const size = document.createElement("span");
-            size.className = P + "-row-size";
-            size.textContent = (region.bbox[2] - region.bbox[0]) + "×"
-                + (region.bbox[3] - region.bbox[1]);
-            row.appendChild(size);
-
             const trash = document.createElement("button");
             trash.className = P + "-row-trash";
             trash.type = "button";
@@ -1132,7 +1174,7 @@
         const region = find(state.selected);
         const fields = [IDS.name, IDS.type, IDS.text, IDS.prompt, IDS.framing,
                         IDS.angle, IDS.literalPrefix, IDS.literalSuffix,
-                        IDS.rotation, IDS.bboxX, IDS.bboxY, IDS.bboxW, IDS.bboxH];
+                        IDS.rotation];
         fields.forEach(function (id) { enable(id, !!region); });
         enable(IDS.duplicate, !!region);
         enable(IDS.remove, !!region);
@@ -1149,8 +1191,7 @@
         if (!region) {
             if (title) title.textContent = "";
             [IDS.name, IDS.text, IDS.prompt, IDS.literalPrefix, IDS.literalSuffix,
-             IDS.shape, IDS.bboxX, IDS.bboxY, IDS.bboxW, IDS.bboxH]
-                .forEach(function (id) { set(id, ""); });
+             IDS.shape].forEach(function (id) { set(id, ""); });
             set(IDS.type, "obj");
             set(IDS.framing, "");
             set(IDS.angle, "");
@@ -1176,10 +1217,6 @@
         set(IDS.angle, region.angle);
         set(IDS.rotation, String(region.rotation));
         write(IDS.rotationRead, region.rotation + "°");
-        set(IDS.bboxX, String(region.bbox[0]));
-        set(IDS.bboxY, String(region.bbox[1]));
-        set(IDS.bboxW, String(region.bbox[2] - region.bbox[0]));
-        set(IDS.bboxH, String(region.bbox[3] - region.bbox[1]));
         show(IDS.textField, region.type === "text");
         show(IDS.framingField, region.type !== "text");
         show(IDS.angleField, region.type !== "text");
@@ -1213,11 +1250,24 @@
             if (check) check.checked = shown;
         });
         const rail = byId(IDS.rail);
-        if (rail && rail.classList) {
+        if (!rail) return;
+        if (rail.classList) {
             rail.classList.toggle("empty", PANELS.every(function (key) {
                 return state.hidden[key];
             }));
         }
+        // Only when it is actually wrong. This runs inside every repaint, a
+        // canvas drag included, and appendChild on an element that is already
+        // where it belongs still detaches and reattaches it -- which is a
+        // scroll position and a focus lost sixty times a second.
+        const wanted = panelOrder();
+        const now = (rail.querySelectorAll("." + P + "-widget") || [])
+            .map(function (entry) { return entry.dataset.panel; });
+        if (wanted.join(",") === now.join(",")) return;
+        wanted.forEach(function (key) {
+            const section = byId(P + "-panel-" + key);
+            if (section) rail.appendChild(section);
+        });
     }
 
     function paintChrome() {
@@ -1405,12 +1455,30 @@
 
     // §10.1: the Quick Add size is a reference length, and each shape is a
     // proportion of it. A head is not square and a leg is not a head.
+    //
+    // The correction is the part that is easy to miss. Normalized coordinates
+    // are fractions of the frame in each axis independently, so 0..1000 across
+    // and 0..1000 down describe a *square* only on a square frame. Take a
+    // head's proportions as normalized numbers and drop it on a 2:3 portrait
+    // and it arrives as a long oval, because the same fraction is worth more
+    // pixels down the page than across it.
+    //
+    // So a silhouette's proportions are read as what they are -- a picture --
+    // and turned into normalized units through the frame's own aspect. A
+    // rectangle is not corrected: §10.1 says it uses the selected size
+    // directly, and "directly" is the size in the units the box is stored in.
     function sized(shape, size) {
         const spec = shapeOf(shape);
-        return {
-            width: clamp(Math.round(size * spec.w), MIN_SIZE, SCALE),
-            height: clamp(Math.round(size * spec.h), MIN_SIZE, SCALE),
-        };
+        const width = clamp(Math.round(size * spec.w), MIN_SIZE, SCALE);
+        if (shape === "rect") {
+            return {width: width, height: clamp(Math.round(size * spec.h),
+                                                MIN_SIZE, SCALE)};
+        }
+        const frame = state.working ? state.working.canvas : {width: 0, height: 0};
+        const across = Number(frame.width) > 0 && Number(frame.height) > 0
+            ? Number(frame.width) / Number(frame.height) : 1;
+        const height = clamp(Math.round(size * spec.h * across), MIN_SIZE, SCALE);
+        return {width: width, height: height};
     }
 
     // Centred on `at`, or on the frame when there is no `at` -- §10.2's tap and
@@ -1532,17 +1600,6 @@
         moved.forEach(function (entry, index) { entry.z = index; });
         paint();
         return true;
-    }
-
-    // Above the middle of the row it is over, or below it. The only geometry
-    // this needs: everything else about the drop is list order.
-    function dropBefore(event, row) {
-        try {
-            const box = row.getBoundingClientRect();
-            return (event.clientY - box.top) < (box.height / 2);
-        } catch (error) {
-            return false;
-        }
     }
 
     function nudge(dx, dy) {
@@ -1811,6 +1868,169 @@
         PANELS.forEach(function (key) {
             if (!state.hidden[key]) state.collapsed[key] = false;
         });
+        paintPanels();
+    }
+
+    // ------------------------------------------------------------------ //
+    // ReorderController -- one gesture for the two lists that have an order
+    // ------------------------------------------------------------------ //
+    //
+    // The layer list used to reorder with HTML5 drag-and-drop -- `draggable`,
+    // `dragstart`, `dragover`, `drop`. That API is mouse-only in practice: a
+    // finger produces no drag events at all on any mobile browser, and a
+    // `touch-action: none` on the grip (which the resize handles need, and
+    // which the grip inherited) suppresses the long-press that Android used to
+    // synthesise one from. It also cannot start a drag without a `dataTransfer`
+    // payload nobody reads, and refuses to set one outside a user gesture in
+    // some browsers. The rows looked draggable and were not.
+    //
+    // §2.3 asks for Pointer Events for all direct manipulation, and this is the
+    // last place in the file that was not. So both ordered lists -- the layers,
+    // and now the rail's own widgets -- run through one implementation: press,
+    // and a contact that moves more than a few pixels is a reorder while one
+    // that does not is the press it looks like. That threshold is what lets a
+    // row be both "select this" and "move this" without a modifier, and a
+    // widget header be both "collapse" and, from its grip, "move".
+
+    const SLIDE = 6;    // pixels a press may wander and still be a press
+
+    function carryItems(kind) {
+        const holder = kind === "row" ? byId(IDS.list) : byId(IDS.rail);
+        if (!holder || !holder.querySelectorAll) return [];
+        return Array.prototype.slice.call(holder.querySelectorAll(
+            "." + P + (kind === "row" ? "-row" : "-widget")))
+            .filter(function (element) { return !element.hidden; });
+    }
+
+    function carryId(element) {
+        if (!element || !element.dataset) return "";
+        return element.dataset.regionId || element.dataset.panel || "";
+    }
+
+    // Which item a contact is over, and which side of its middle. Read from the
+    // items' own boxes rather than from elementFromPoint, because the thing
+    // being dragged is under the contact and would be the answer every time.
+    // Past either end clamps to it, so letting go in the empty space under the
+    // last row means the end of the list rather than nothing at all.
+    function overAt(items, clientY) {
+        let first = null;
+        let last = null;
+        for (let at = 0; at < items.length; at += 1) {
+            const element = items[at];
+            if (!element.getBoundingClientRect) continue;
+            const box = element.getBoundingClientRect();
+            if (!box.height) continue;
+            if (first === null) first = {element: element, before: true, top: box.top};
+            last = {element: element, before: false, bottom: box.top + box.height};
+            if (clientY < box.top || clientY > box.top + box.height) continue;
+            return {element: element,
+                    before: (clientY - box.top) < (box.height / 2)};
+        }
+        if (first && clientY < first.top) return {element: first.element, before: true};
+        if (last && clientY > last.bottom) return {element: last.element, before: false};
+        return null;
+    }
+
+    function carryDown(event, kind, id) {
+        if (typeof event.button === "number" && event.button > 0) return;
+        if (!id) return;
+        state.carrying = {kind: kind, id: id, from: event.clientY, moved: false,
+                          pointer: event.pointerId};
+        const holder = kind === "row" ? byId(IDS.list) : byId(IDS.rail);
+        if (holder && typeof holder.setPointerCapture === "function"
+            && event.pointerId !== undefined) {
+            try {
+                holder.setPointerCapture(event.pointerId);
+            } catch (error) {
+                // A synthetic pointer, or one already released. The drag still
+                // works; it just stops following a contact that leaves.
+            }
+        }
+    }
+
+    function carryPaint(carrying, over) {
+        carryItems(carrying.kind).forEach(function (element) {
+            element.classList.remove("drop-before");
+            element.classList.remove("drop-after");
+            element.classList.toggle("dragging", carryId(element) === carrying.id);
+        });
+        if (!over || carryId(over.element) === carrying.id) return;
+        over.element.classList.add(over.before ? "drop-before" : "drop-after");
+    }
+
+    function carryClear(kind) {
+        carryItems(kind).forEach(function (element) {
+            element.classList.remove("dragging");
+            element.classList.remove("drop-before");
+            element.classList.remove("drop-after");
+        });
+    }
+
+    function carryMove(event) {
+        const carrying = state.carrying;
+        if (!carrying) return;
+        if (!carrying.moved && Math.abs(event.clientY - carrying.from) < SLIDE) return;
+        carrying.moved = true;
+        prevent(event);
+        carryPaint(carrying, overAt(carryItems(carrying.kind), event.clientY));
+    }
+
+    function carryUp(event) {
+        const carrying = state.carrying;
+        state.carrying = null;
+        if (!carrying) return;
+        const holder = carrying.kind === "row" ? byId(IDS.list) : byId(IDS.rail);
+        if (holder && typeof holder.releasePointerCapture === "function"
+            && carrying.pointer !== undefined) {
+            try { holder.releasePointerCapture(carrying.pointer); } catch (error) { /* gone */ }
+        }
+        const over = carrying.moved
+            ? overAt(carryItems(carrying.kind), event.clientY) : null;
+        carryClear(carrying.kind);
+        if (!carrying.moved) return;
+        // The click the browser sends after the pointer comes up would select
+        // the row, or collapse the widget, that was just moved. It is the same
+        // gesture and it has already been answered.
+        state.slid = true;
+        if (!over) return;
+        const target = carryId(over.element);
+        if (!target || target === carrying.id) return;
+        if (carrying.kind === "row") {
+            reorder(carrying.id, target, over.before);
+            return;
+        }
+        movePanel(carrying.id, target, over.before);
+    }
+
+    function carryCancel() {
+        const carrying = state.carrying;
+        state.carrying = null;
+        if (carrying) carryClear(carrying.kind);
+    }
+
+    // The rail's order, filled out from PANELS so that a widget added to the
+    // list appears for somebody who has already rearranged the others -- at the
+    // end, rather than not at all.
+    function panelOrder() {
+        const chosen = state.order.filter(function (key) {
+            return PANELS.indexOf(key) >= 0;
+        });
+        PANELS.forEach(function (key) {
+            if (chosen.indexOf(key) < 0) chosen.push(key);
+        });
+        return chosen;
+    }
+
+    function movePanel(moved, target, before) {
+        const order = panelOrder();
+        const from = order.indexOf(moved);
+        if (from < 0) return;
+        order.splice(from, 1);
+        let to = order.indexOf(target);
+        if (to < 0) to = order.length;
+        else if (!before) to += 1;
+        order.splice(to, 0, moved);
+        state.order = order;
         paintPanels();
     }
 
@@ -2100,48 +2320,6 @@
     }
 
     // ------------------------------------------------------------------ //
-    // Numeric geometry -- the inspector's four boxes
-    // ------------------------------------------------------------------ //
-    //
-    // §8.3: the canvas writes these and these write the canvas, in the one
-    // coordinate system the whole document is in. §26: an edit that cannot make
-    // a valid box is refused rather than applied halfway, and the field is
-    // repainted from the region so the screen never shows a number the layout
-    // does not hold.
-
-    function applyBbox(settled) {
-        const region = find(state.selected);
-        if (!region) return;
-        function read(id, fallback) {
-            const field = byId(id);
-            const said = field ? String(field.value).trim() : "";
-            // A field somebody has just emptied on the way to typing a new
-            // number is not a request for a box of zero width. Number("") is 0
-            // and finite, which is exactly the wrong answer here.
-            if (!said) return fallback;
-            const number = Math.round(Number(said));
-            return Number.isFinite(number) ? number : fallback;
-        }
-        const width = region.bbox[2] - region.bbox[0];
-        const height = region.bbox[3] - region.bbox[1];
-        const w = clamp(read(IDS.bboxW, width), MIN_SIZE, SCALE);
-        const h = clamp(read(IDS.bboxH, height), MIN_SIZE, SCALE);
-        const x = clamp(read(IDS.bboxX, region.bbox[0]), 0, SCALE - w);
-        const y = clamp(read(IDS.bboxY, region.bbox[1]), 0, SCALE - h);
-        const made = orient([x, y, x + w, y + h]);
-        if (!made) { paintInspector(); return; }
-        mark("bbox:" + region.id);
-        region.bbox = made;
-        // Repainting the inspector while somebody is mid-number would rewrite
-        // the field under the cursor, so a live edit moves the frame and leaves
-        // the four boxes alone until the cursor leaves them.
-        if (settled) { paint(); return; }
-        paintFrame();
-        paintChrome();
-        paintFacts();
-    }
-
-    // ------------------------------------------------------------------ //
     // Opening, saving, leaving
     // ------------------------------------------------------------------ //
 
@@ -2177,8 +2355,12 @@
         state.open = true;
         workspace.hidden = false;
         // §3.1: the workspace takes the txt2img work area rather than escaping
-        // to document.body or asking the browser for the screen.
+        // to document.body or asking the browser for the screen. Remembered
+        // before the takeover, because the takeover is what changes the height
+        // of the page the offset is measured against.
+        state.scrolled = scrollNow();
         takeover();
+        scrollTo(0);
         say("");
         zoomTo(1);
         reframe();
@@ -2199,6 +2381,8 @@
     }
 
     function close() {
+        const back = state.scrolled;
+        state.scrolled = null;
         surrender();
         const workspace = byId(IDS.workspace);
         if (workspace) workspace.hidden = true;
@@ -2214,6 +2398,10 @@
         clearGhost();
         dropGhost();
         release();
+        // After the workspace is hidden and the marks are off, so the page is
+        // its full height again and the offset means what it meant on the way
+        // in. Restored last for that reason and no other.
+        if (back !== null) scrollTo(back);
     }
 
     // §3.2. Save commits and stays: the whole point of §3.3 is that somebody
@@ -2410,6 +2598,9 @@
             // markup, but one listener on the rail is one listener however many
             // widgets the rail grows.
             once(byId(IDS.rail), "click", function (event) {
+                // The click a completed reorder leaves behind: the same
+                // gesture, already answered.
+                if (state.slid) { state.slid = false; prevent(event); return; }
                 const target = event.target || {};
                 const head = target.closest
                     ? target.closest("." + P + "-widget-head") : null;
@@ -2418,6 +2609,26 @@
                 const key = head.dataset.panel;
                 panelCollapse(key, !state.collapsed[key]);
             });
+
+            // The rail's own order, dragged from each widget's grip. §12 makes
+            // the rail a set of optional tools rather than a fixed panel, and
+            // which of them somebody wants nearest the canvas is a preference
+            // like collapsing one -- a session preference (§20), not layout
+            // history, and serialized nowhere.
+            once(byId(IDS.rail), "pointerdown", function (event) {
+                const target = event.target || {};
+                const grip = target.closest
+                    ? target.closest("." + P + "-widget-grip") : null;
+                if (!grip) return;
+                const widget = target.closest
+                    ? target.closest("." + P + "-widget") : null;
+                if (!widget) return;
+                prevent(event);
+                carryDown(event, "panel", widget.dataset.panel);
+            }, "Carry");
+            once(byId(IDS.rail), "pointermove", carryMove, "Carry");
+            once(byId(IDS.rail), "pointerup", carryUp, "Carry");
+            once(byId(IDS.rail), "pointercancel", carryCancel, "Carry");
 
             // §10 and §9: one gesture, both palettes. Delegated from the
             // workspace because the Quick Add buttons live in a popup that
@@ -2496,10 +2707,13 @@
                     });
                 });
 
-            // The region list is rebuilt on every paint, so its rows cannot
+            // The layer list is rebuilt on every paint, so its rows cannot
             // carry their own listeners without leaking one per repaint. One
             // delegated listener on the container outlives every row.
             once(byId(IDS.list), "click", function (event) {
+                // The click a completed reorder leaves behind. It is the same
+                // gesture and it has already been answered.
+                if (state.slid) { state.slid = false; prevent(event); return; }
                 const target = event.target || {};
                 const trash = target.closest ? target.closest("." + P + "-row-trash") : null;
                 if (trash) {
@@ -2521,7 +2735,7 @@
                 }
                 // The same move, without a pointer. Dragging is not something
                 // every hand or every input device can do, and a reorder that
-                // only a mouse can reach is a reorder half the people using
+                // only a pointer can reach is a reorder half the people using
                 // this cannot make.
                 if (!event.altKey) return;
                 const step = event.key === "ArrowUp" ? -1
@@ -2541,71 +2755,20 @@
                 if (moved && moved.focus) moved.focus();
             });
 
-            // Reordering by pointer. Four delegated listeners on the container,
-            // because the rows are rebuilt on every paint and a listener per row
-            // would be a listener per row per repaint.
-            //
-            // `dataTransfer` is set because Firefox refuses to start a drag
-            // without it; nothing reads it back. The id being moved is held here
-            // instead, where it cannot be replaced by a drag that started
-            // somewhere else on the page.
-            once(byId(IDS.list), "dragstart", function (event) {
-                const row = event.target && event.target.closest
-                    ? event.target.closest("." + P + "-row") : null;
+            // §2.3 and §14.1: reordering by pointer, and by the same pointer
+            // path as everything else in the file. Four delegated listeners on
+            // the container, because the rows are rebuilt on every paint and a
+            // listener per row would be a listener per row per repaint.
+            once(byId(IDS.list), "pointerdown", function (event) {
+                const target = event.target || {};
+                if (target.closest && target.closest("." + P + "-row-trash")) return;
+                const row = target.closest ? target.closest("." + P + "-row") : null;
                 if (!row) return;
-                state.dragging = row.dataset.regionId;
-                row.classList.add("dragging");
-                if (event.dataTransfer) {
-                    event.dataTransfer.effectAllowed = "move";
-                    try {
-                        event.dataTransfer.setData("text/plain", row.dataset.regionId);
-                    } catch (error) {
-                        // Some browsers refuse this outside a user gesture. The
-                        // drag still works; only the payload nobody reads is
-                        // missing.
-                    }
-                }
-            });
-
-            once(byId(IDS.list), "dragover", function (event) {
-                if (!state.dragging) return;
-                prevent(event);
-                if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-                const row = event.target && event.target.closest
-                    ? event.target.closest("." + P + "-row") : null;
-                const list = byId(IDS.list);
-                if (!list) return;
-                list.querySelectorAll("." + P + "-row").forEach(function (entry) {
-                    entry.classList.remove("drop-before", "drop-after");
-                });
-                if (!row || row.dataset.regionId === state.dragging) return;
-                row.classList.add(dropBefore(event, row) ? "drop-before" : "drop-after");
-            });
-
-            once(byId(IDS.list), "drop", function (event) {
-                if (!state.dragging) return;
-                prevent(event);
-                const row = event.target && event.target.closest
-                    ? event.target.closest("." + P + "-row") : null;
-                const moving = state.dragging;
-                state.dragging = "";
-                if (!row) {
-                    // Dropped on the empty space under the last row: the end of
-                    // the list is the answer somebody means by that.
-                    reorder(moving, "", false);
-                    return;
-                }
-                reorder(moving, row.dataset.regionId, dropBefore(event, row));
-            });
-
-            once(byId(IDS.list), "dragend", function () {
-                state.dragging = "";
-                const list = byId(IDS.list);
-                if (!list) return;
-                list.querySelectorAll("." + P + "-row").forEach(function (entry) {
-                    entry.classList.remove("dragging", "drop-before", "drop-after");
-                });
-            });
+                carryDown(event, "row", row.dataset.regionId);
+            }, "Carry");
+            once(byId(IDS.list), "pointermove", carryMove, "Carry");
+            once(byId(IDS.list), "pointerup", carryUp, "Carry");
+            once(byId(IDS.list), "pointercancel", carryCancel, "Carry");
 
             once(byId(IDS.autoHint), "change", function (event) {
                 if (!state.working) return;
@@ -2643,25 +2806,29 @@
                 region.rotation = rotate(value);
             }, true);
 
-            // §8.3. Live while a number is being typed -- the frame follows the
-            // field -- and normalized when the cursor leaves, which is the one
-            // moment the field may be rewritten under somebody's hands.
-            [IDS.bboxX, IDS.bboxY, IDS.bboxW, IDS.bboxH].forEach(function (id) {
-                once(byId(id), "input", function () {
-                    state.typing = true;
-                    try { applyBbox(false); } finally { state.typing = false; }
-                });
-                once(byId(id), "change", function () {
-                    applyBbox(true);
-                    state.editing = "";
-                    paint();
-                });
-            });
-
             // §5.1/§5.2: one pointer path, captured on the frame, so a drag
             // that leaves the frame is still this drag and a finger is not a
             // second implementation.
             const canvas = byId(IDS.canvas);
+            // A shape somebody wants to describe is the shape they are looking
+            // at, and the shortest route from one to the other is the one every
+            // other editor has: open it. Selects first -- a double-click on a
+            // region that was not selected has already selected it through
+            // onDown, and one on the proxy is already the selection -- then
+            // opens the Inspector and puts the cursor in the prompt.
+            once(canvas, "dblclick", function (event) {
+                if (!state.open || !state.working) return;
+                const target = event.target || {};
+                const onProxy = target.closest
+                    ? target.closest("." + P + "-proxy") : null;
+                const onRegion = target.closest
+                    ? target.closest("." + P + "-region") : null;
+                if (!onProxy && !onRegion) return;
+                prevent(event);
+                if (onRegion && !onProxy) select(onRegion.dataset.regionId);
+                if (!find(state.selected)) return;
+                focusPrompt();
+            });
             once(canvas, "pointerdown", onDown);
             once(canvas, "pointermove", onMove);
             once(canvas, "pointerup", onUp);
@@ -3136,6 +3303,8 @@
         popupsShut: popupsShut,
         panelShow: panelShow,
         panelCollapse: panelCollapse,
+        panelOrder: panelOrder,
+        movePanel: movePanel,
         collapseAll: collapseAll,
         expandVisible: expandVisible,
         composeMode: composeMode,
