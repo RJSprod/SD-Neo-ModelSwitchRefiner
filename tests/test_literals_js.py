@@ -263,6 +263,25 @@ BODY
 """
 
 
+PLACEHOLDERS = ("SOURCE", "FAMILY", "BODY")
+"""The words this harness substitutes to build itself.
+
+A plain substring replace over the file under test, which is fine until that
+file contains one of these words -- as a constant, or inside a longer name, or
+even in a comment. Then the substitution lands mid-token and node reports a
+syntax error twenty lines from anything to do with the test. It has happened
+twice; `test_the_files_under_test_avoid_the_placeholders` is why it will not
+happen a third time.
+"""
+
+
+def test_the_files_under_test_avoid_the_placeholders():
+    for path in (PIPELINE, SCRIPT):
+        source = path.read_text(encoding="utf-8")
+        for word in PLACEHOLDERS:
+            assert word not in source, (path.name, word)
+
+
 def run_pipeline(script: str) -> dict:
     """The same page, driving the Image Pipeline's browser file instead.
 

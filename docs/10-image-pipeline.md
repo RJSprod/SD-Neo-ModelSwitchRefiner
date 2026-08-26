@@ -985,3 +985,44 @@ the header but those two lines.
 Every fix above was checked by reverting it and watching this fail. Reading the
 source could never have caught any of them, because none of them were wrong in
 the source.
+
+### 16.5 The panel is a drawer too
+
+> "Whatever you did for spatial and stage 2 looks good. Creative is still
+> broken."
+
+One card wrong and two right is a much sharper report than three wrong, because
+it rules out everything the three have in common. What Creative has that the
+others do not is *position*: it is first.
+
+`dressCards()` walked `drawers()` — every disclosure this extension builds. That
+includes the Image Pipeline panel the three cards live **inside**, and the panel
+comes first in document order. So the panel was dressed first, and the walk
+looking for a two-line label inside it found the first one there was:
+Creative's. Creative's text was split against the panel's own header, and by the
+time Creative's own accordion came round it already carried a name element and
+was skipped as done. Spatial and Stage 2, further down, were then dressed
+correctly by their own cards.
+
+It walks stage cards now — `.mc-pipeline-stage > .mc-pipeline-editor` — and the
+label walk additionally refuses any text inside a card's body, because a card's
+body is full of prose this extension also wrote and a paragraph that opens with
+a stage's name is not a header just because it shares an accordion with one.
+
+The render fixture had no enclosing panel and no nested drawers, which is why it
+passed. It has both now, and reverting this fix reproduces the report exactly:
+`creative` un-dressed, `spatial` and `stage2` fine.
+
+### 16.6 A harness that rewrites the file it is testing
+
+Adding a constant called `CARD_BODY` broke eight tests in
+`tests/test_literals_js.py` with a syntax error from node. That harness builds
+itself with a plain substring replace over the file under test, and one of the
+words it substitutes is `BODY` — so a constant whose name merely *contains* it
+is rewritten mid-token, and the error surfaces twenty lines from anything to do
+with the test.
+
+The constant is renamed, and `test_the_files_under_test_avoid_the_placeholders`
+now fails on any of those words appearing in either file under test, comments
+included. This cost two rounds of confusion inside one change; it should not
+cost a third.

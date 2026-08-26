@@ -56,6 +56,12 @@
     // once that has happened. All four are mc_pipeline_panel's names -- see
     // CARD_HEAD and CARDED there, which is where they are documented.
     const STAGE = P + "-stage";
+    const EDITOR = P + "-editor";
+    // The card's content region. Named nothing like the element it selects,
+    // because the node harness in tests/test_literals_js.py builds itself with
+    // a plain substring replace over this file -- so a constant whose name
+    // merely *contains* one of its placeholder words is rewritten mid-token.
+    const CONTENT = P + "-body";
     const CARD_HEAD = P + "-card-head";
     const CARDED = P + "-carded";
     const NAME = P + "-name";
@@ -408,6 +414,12 @@
             const cut = said.indexOf("\n");
             if (cut <= 0) continue;
             if (TITLES.indexOf(said.slice(0, cut).trim()) === -1) continue;
+            // The header, never the body. A card's body is full of prose that
+            // this extension also wrote, and a paragraph that happens to open
+            // with a stage's name is not the header just because it is inside
+            // the same accordion.
+            if (node.parentElement && node.parentElement.closest
+                && node.parentElement.closest("." + CONTENT)) continue;
             return node;
         }
         return null;
@@ -478,8 +490,30 @@
         return true;
     }
 
+    // A stage card's own disclosure, and only that.
+    //
+    // Not `drawers()`, which is every disclosure this extension builds -- and
+    // that includes the Image Pipeline panel the three cards live *inside*, and
+    // the drawers nested in each card's body. The panel comes first in document
+    // order, so it was dressed first, and the walk below found the first
+    // two-line label inside it: Creative's. Creative's text was then split
+    // against the panel's own header, and Creative's card -- already carrying a
+    // name element by the time its turn came -- was skipped as done.
+    //
+    // Which is exactly what it looked like: Spatial and Stage 2 correct,
+    // Creative alone still one bold line. A fixture without the enclosing panel
+    // could not show it, and mine did not have one.
+    function cards() {
+        try {
+            return Array.prototype.slice.call(
+                root().querySelectorAll("." + STAGE + " > ." + EDITOR));
+        } catch (error) {
+            return [];
+        }
+    }
+
     function dressCards() {
-        drawers().forEach(function (accordion) {
+        cards().forEach(function (accordion) {
             try {
                 twoLines(accordion);
             } catch (error) {
@@ -495,7 +529,7 @@
     // frame it happens in.
     function watchCards() {
         if (typeof MutationObserver !== "function") return;
-        drawers().forEach(function (accordion) {
+        cards().forEach(function (accordion) {
             if (!accordion.dataset || accordion.dataset.mcPipelineCards) return;
             accordion.dataset.mcPipelineCards = "1";
             new MutationObserver(function () {
@@ -652,6 +686,7 @@
         headerOf: headerOf,
         twoLines: twoLines,
         dressCards: dressCards,
+        cards: cards,
         watchCards: watchCards,
         labelNode: labelNode,
         titles: TITLES,
