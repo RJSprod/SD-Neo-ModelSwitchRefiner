@@ -663,10 +663,16 @@ def _stage2_summary(enabled, target, denoise, multiplier, loaded="",
     this panel that nothing else on the page states. It leads, because it is
     true whether or not Stage 2 is armed, and because it is the number somebody
     reads in order to decide.
+
+    Which is why the bypassed line drops the explanation rather than the number:
+    the two together are wider than the header's second line, and a card header
+    has exactly one line to say this in. With the size in front, "Bypassed" is
+    the whole of what is left to say; it is only without one that the line has
+    the room to spell out what being bypassed means.
     """
     lead = f"{handoff} · " if handoff else ""
     if not enabled:
-        return f"{lead}Bypassed — the Stage 1 image is the final image."
+        return f"{lead}Bypassed" if lead else "Bypassed — Stage 1 is final"
 
     parts = []
     name = _short_checkpoint(target)

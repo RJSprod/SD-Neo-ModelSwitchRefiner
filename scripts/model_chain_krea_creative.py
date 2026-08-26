@@ -1106,7 +1106,7 @@ def _creative_line(enabled=None, stored=None) -> str:
     if enabled is None:
         enabled = bool(stored.get("enabled"))
     if not enabled:
-        return "Bypassed — the prompt is expanded as written."
+        return "Bypassed — prompt as-is"
 
     parts = [f"C{int(stored.get('creativity', 5))}"]
     directing = mc_creative_krea.active_axes(stored)
@@ -1151,7 +1151,7 @@ def _spatial_line(serialized=None, enabled=None, mode=None) -> str:
     count = len(layout.regions)
     regions = f"{count} region{'' if count == 1 else 's'}" if count else "no regions"
     if not enabled:
-        return f"Bypassed — {regions} drawn, not applied."
+        return f"Bypassed — {regions}"
 
     named = "Smart" if str(mode or "").strip().casefold() == spatial.SMART else "Direct"
     parts = [named, regions]
