@@ -36,7 +36,12 @@ PIPELINE_JS = ROOT / "javascript" / "model_chain_pipeline.js"
 
 
 def _panel():
-    """The Creative panel, built outside any surface, for a handler test."""
+    """The Creative panel, built outside any surface, for a handler test.
+
+    Every caller takes the ``store`` fixture first. Without it the profile
+    store writes into the repository, which is how a stray
+    ``krea_creative_profiles.json`` once ended up in a commit.
+    """
     import mc_creative_panel
 
     return mc_creative_panel.build(
@@ -56,10 +61,20 @@ def _clicked(panel, marker):
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
-    """Point every preferences and history file at a throwaway directory."""
+    """Point every preferences and history file at a throwaway directory.
+
+    Both roots, because the extension has two. LLM Studio's files hang off
+    ``mc_llm_paths.data_root``; the Creative profile store and the Spatial
+    layout store hang off the host's own ``paths.data_path``, which falls back
+    to the working directory -- which is how a test that saved a profile once
+    left a ``krea_creative_profiles.json`` in the repository.
+    """
+    from modules import paths
+
     import mc_llm_paths
 
     monkeypatch.setattr(mc_llm_paths, "data_root", lambda: tmp_path)
+    monkeypatch.setattr(paths, "data_path", str(tmp_path), raising=False)
     yield tmp_path
 
 
