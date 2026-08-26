@@ -336,12 +336,32 @@ class TestTheStagesShipOff:
 
         assert found.get("creative_mode_enabled") is False
 
-    def test_stage_2_is_off_before_anybody_touches_it(self):
-        source = (ROOT / "scripts" / "model_chain.py").read_text(encoding="utf-8")
-        head = source.split('with pipeline.head("stage2"):', 1)[1].split(
-            "with pipeline.body", 1)[0]
+    def test_every_stage_builds_its_switch_the_one_way(self):
+        """One factory, because the important half of it is invisible at the
+        call site: a checkbox Forge is allowed to restore is a checkbox that
+        comes back armed."""
+        for path, marker in (
+                ("scripts/model_chain.py", 'with pipeline.head("stage2"):'),
+                ("scripts/model_chain_krea_creative.py",
+                 'with pipeline.head("creative"):'),
+                ("scripts/model_chain_krea_creative.py",
+                 'with pipeline.head("spatial"):')):
+            source = (ROOT / path).read_text(encoding="utf-8")
+            head = source.split(marker, 1)[1].split("with pipeline.body", 1)[0]
 
-        assert "value=False" in head
+            assert "mc_pipeline_panel.switch(" in head, marker
+            assert "gr.Checkbox(" not in head, marker
+
+    def test_the_switch_is_built_off(self, host):
+        assert mc_pipeline_panel.switch(elem_id="x").value is False
+
+    def test_the_host_is_told_not_to_restore_the_switch(self, host):
+        """`ui-config.json` writes the saved value back over the one the script
+        asked for. Right for a slider somebody tuned; wrong for the one control
+        that decides whether a language model runs. This is the host's own
+        opt-out, and without it no amount of work in Python keeps a stage off:
+        the value below is overwritten before the page is ever built."""
+        assert mc_pipeline_panel.switch(elem_id="x").do_not_save_to_config is True
 
     def test_a_stage_left_on_last_time_still_comes_up_off(self, store):
         """The bug this exists for, and the reason it reaches into the engine.
@@ -742,7 +762,8 @@ class TestThePipelineStylesheet:
         Naming the card as well makes it (0,3,0), which no selector of classes
         alone can tie.
         """
-        card = ".mc-pipeline-stage > .mc-pipeline-editor > :first-child"
+        card = (".mc-pipeline-stage:not(.mc-pipeline-carded) "
+                "> .mc-pipeline-editor > :first-child")
 
         for tail in (" {", " * {", "::first-line {", "::after {",
                      " > :last-child:not(:first-child) {"):
@@ -951,19 +972,49 @@ class TestTheHeaderLookup:
     def code(self):
         return PIPELINE_JS.read_text(encoding="utf-8")
 
-    def test_it_counts_children_rather_than_naming_a_class(self, code):
+    def test_it_names_no_class_of_gradio_s(self, code):
         block = code.split("function headerOf(", 1)[1].split("\n    }", 1)[0]
 
-        assert "children.length !== 2" in block
         assert "BUTTON" not in block
         assert "aria-expanded" not in block
+        for generated in ("label-wrap", "svelte-", "gradio-"):
+            assert generated not in block
 
-    def test_nothing_is_moved_in_the_page_any_more(self, code):
-        """The layout is the stylesheet's job. It can select "the accordion's
-        first child" without any of this, and the move that could not was what
-        broke the panel on stock Gradio."""
-        assert "appendChild" not in code
+    def test_an_extra_child_no_longer_makes_it_give_up(self, code):
+        """The guard that broke it. `headerOf` used to answer only when the
+        accordion had *exactly* two children, and return null otherwise -- so a
+        build that puts one more node inside the accordion got no header at all,
+        and with it no drawer memory and no marked header for the stylesheet to
+        key off. A guard that answers "no" to a question it could have answered
+        is worse than the risk it was avoiding."""
+        block = code.split("function headerOf(", 1)[1].split("\n    }", 1)[0]
+
+        assert "children.length !== 2" not in block
+        assert "children.length < 2" in block
+        assert "children[0]" in block
+
+    def test_it_prefers_the_header_the_page_was_marked_with(self, code):
+        """Which is the only answer here that is not an assumption about the
+        shape of somebody else's DOM: `twoLines` walks to the element Gradio
+        actually put the label in, and marks it."""
+        block = code.split("function headerOf(", 1)[1].split("\n    }", 1)[0]
+
+        assert "CARD_HEAD" in block
+
+    def test_the_only_thing_moved_is_this_extension_s_own_text(self, code):
+        """The abandoned version moved Gradio's elements around the page, which
+        worked under Lobe and found nothing under stock Gradio. What replaced it
+        touches exactly one node: the text node this extension's own Python
+        wrote, split into two spans of this extension's own."""
         assert "furnish" not in code
+
+        block = code.split("function twoLines(", 1)[1].split("\n    }", 1)[0]
+
+        # Its own elements, put where its own text was.
+        assert "createElement" in block
+        assert "replaceChild" in block
+        for generated in ("label-wrap", "svelte-", "gradio-"):
+            assert generated not in block
 
 
 # --------------------------------------------------------------------------- #

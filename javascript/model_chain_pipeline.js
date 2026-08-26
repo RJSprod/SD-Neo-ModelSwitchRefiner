@@ -52,6 +52,26 @@
     // extension builds.
     const DRAWER = P + "-drawer";
 
+    // The stage card, its header once this file has found it, and the card
+    // once that has happened. All four are mc_pipeline_panel's names -- see
+    // CARD_HEAD and CARDED there, which is where they are documented.
+    const STAGE = P + "-stage";
+    const CARD_HEAD = P + "-card-head";
+    const CARDED = P + "-carded";
+    const NAME = P + "-name";
+    const SUMMARY = P + "-said";
+
+    // The one child of the header that holds the two lines. Everything else in
+    // there is the theme's -- a chevron, a caret, a marker -- and is hidden,
+    // because the header is this file's band now and the right-hand end of it
+    // belongs to the switch.
+    const LABEL = P + "-label";
+
+    // The first line of a stage card's label. Python's mc_pipeline_panel.TITLES
+    // says these, and tests/test_pipeline.py fails if the two lists drift --
+    // the same coupling PHASES has, for the same reason.
+    const TITLES = ["Creative", "Spatial", "Stage 2"];
+
     // The Literal Prompt boxes. Read from here rather than reported by them,
     // because the note has exactly one writer and this is it -- two files
     // writing one element is how a line ends up alternating between two truths
@@ -323,8 +343,170 @@
 
     function headerOf(accordion) {
         if (!accordion || !accordion.children) return null;
-        if (accordion.children.length !== 2) return null;
+        if (accordion.children.length < 2) return null;
+
+        // The one this file dressed, if it got that far: `twoLines` walks to
+        // the element Gradio actually put the label in and marks it, which is
+        // the only answer here that is not an assumption about the shape of
+        // somebody else's DOM.
+        const marked = accordion.querySelector("." + CARD_HEAD);
+        if (marked && marked.parentNode === accordion) return marked;
+
+        // Otherwise the first child, which is true of a disclosure in general:
+        // the thing you press is drawn before the thing it shows.
+        //
+        // It used to be first child *and exactly two children*, and the count
+        // is what broke it. A build that puts anything else inside the
+        // accordion -- one extra node is enough -- made this return null, and
+        // then nothing here ran at all: no drawer was remembered and no header
+        // was found. A guard that answers "no" to a question it could have
+        // answered is worse than the risk it was avoiding.
         return accordion.children[0] || null;
+    }
+
+    // ------------------------------------------------------------------ //
+    // Two lines in a card header
+    // ------------------------------------------------------------------ //
+    //
+    // Python writes a stage card's header as one string with one newline in
+    // it -- `Creative\nBypassed - prompt as-is` -- because an Accordion's own
+    // label is the only place a Gradio disclosure carries text that is
+    // guaranteed to be inside its header.
+    //
+    // Making that newline *show* was left to the stylesheet, and the
+    // stylesheet lost. Three rounds of it: `white-space: pre` and
+    // `::first-line` both have to reach an element whose shape and selector
+    // belong to Gradio and whose styling belongs to the theme, and a rule that
+    // has to win a cascade it does not control is a rule that works until
+    // somebody changes their theme.
+    //
+    // So the newline is not styled any more, it is *removed*: the text node
+    // becomes two elements with two classes of this extension's own, and the
+    // stylesheet is left addressing its own elements. Nothing here guesses at
+    // structure -- it finds the text Python wrote, wherever the theme has put
+    // it, and works outwards from there.
+    //
+    // If it cannot be found, nothing is marked, and the card falls back to a
+    // plain stack that is still readable and still works. That is what CARDED
+    // is for: the layout that assumes a lane on the right is a stylesheet
+    // state, not a hope.
+
+    function labelNode(accordion) {
+        // The text node carrying a stage card's label: two lines, and a first
+        // line that is one of the three names this panel gives a stage. Both
+        // halves matter -- a body full of prose has newlines in it too, and
+        // this walk cannot know where the header ends.
+        let walk;
+        try {
+            walk = document.createTreeWalker(accordion, NodeFilter.SHOW_TEXT, null);
+        } catch (error) {
+            return null;
+        }
+        let node;
+        while ((node = walk.nextNode())) {
+            const said = node.nodeValue || "";
+            const cut = said.indexOf("\n");
+            if (cut <= 0) continue;
+            if (TITLES.indexOf(said.slice(0, cut).trim()) === -1) continue;
+            return node;
+        }
+        return null;
+    }
+
+    function twoLines(accordion) {
+        if (!accordion || accordion.querySelector("." + NAME)) return false;
+
+        const node = labelNode(accordion);
+        if (!node || !node.parentNode) return false;
+
+        const said = node.nodeValue.split("\n");
+        const name = said.shift().trim();
+        const rest = said.join(" ").trim();
+        if (!name) return false;
+
+        // Divs, and that is not arbitrary. A theme that styles a card header
+        // reaches the text through the span inside it -- that is the shape
+        // every one of those rules has -- and the two lines were coming out at
+        // the same size because such a rule was reaching them. Being a
+        // different element is not a trick: these are two stacked blocks,
+        // which is what a div is for and what a span is not.
+        const holder = node.parentNode;
+
+        // The header first, because what is marked afterwards is relative to
+        // it: whichever ancestor of the text sits directly inside the
+        // accordion, however many wrappers a theme put in between.
+        let head = holder;
+        while (head && head.parentNode && head.parentNode !== accordion) {
+            head = head.parentNode;
+        }
+        if (!head || head.parentNode !== accordion) return false;
+
+        const first = document.createElement("div");
+        first.className = NAME;
+        first.textContent = name;
+
+        const second = document.createElement("div");
+        second.className = SUMMARY;
+        second.textContent = rest;
+        // The line is cut to fit, so the whole of it is worth having on hover.
+        if (rest) second.title = rest;
+
+        try {
+            holder.replaceChild(second, node);
+            holder.insertBefore(first, second);
+        } catch (error) {
+            return false;
+        }
+
+        if (head.classList) head.classList.add(CARD_HEAD);
+
+        // And the lane the two lines are in, so the stylesheet can hide the
+        // header's other children without having to know what they are. A
+        // theme's own marker or caret is fine on a header it owns; on this one
+        // it is furniture in a band that has exactly two lines' room and a
+        // switch painted over the end of it.
+        [first, second].forEach(function (line) {
+            let lane = line;
+            while (lane && lane.parentNode && lane.parentNode !== head) {
+                lane = lane.parentNode;
+            }
+            if (lane && lane.classList) lane.classList.add(LABEL);
+        });
+
+        const card = accordion.closest ? accordion.closest("." + STAGE) : null;
+        if (card && card.classList) card.classList.add(CARDED);
+        return true;
+    }
+
+    function dressCards() {
+        drawers().forEach(function (accordion) {
+            try {
+                twoLines(accordion);
+            } catch (error) {
+                console.error("Model Chain: a pipeline card header could not be "
+                              + "split into two lines", error);
+            }
+        });
+    }
+
+    // Gradio repaints a card's description by setting the accordion's label,
+    // which replaces the text and takes this file's two spans with it. Watching
+    // is cheaper than re-running on a timer and catches the repaint in the same
+    // frame it happens in.
+    function watchCards() {
+        if (typeof MutationObserver !== "function") return;
+        drawers().forEach(function (accordion) {
+            if (!accordion.dataset || accordion.dataset.mcPipelineCards) return;
+            accordion.dataset.mcPipelineCards = "1";
+            new MutationObserver(function () {
+                try {
+                    twoLines(accordion);
+                } catch (error) {
+                    /* a repaint this file could not follow is not fatal */
+                }
+            }).observe(accordion, {childList: true, subtree: true,
+                                   characterData: true});
+        });
     }
 
     // ------------------------------------------------------------------ //
@@ -425,6 +607,15 @@
     // ------------------------------------------------------------------ //
 
     function wire() {
+        // Before the drawers: headerOf() prefers the header this marks, and
+        // finding it by the text Python wrote beats assuming which child it is.
+        try {
+            dressCards();
+            watchCards();
+        } catch (error) {
+            console.error("Model Chain: the pipeline card headers could not be "
+                          + "split into two lines", error);
+        }
         try {
             watchPrompt();
         } catch (error) {
@@ -459,6 +650,11 @@
     window.modelChainPipeline = {
         watchDrawers: watchDrawers,
         headerOf: headerOf,
+        twoLines: twoLines,
+        dressCards: dressCards,
+        watchCards: watchCards,
+        labelNode: labelNode,
+        titles: TITLES,
         drawers: drawers,
         opened: opened,
         literalNote: literalNote,

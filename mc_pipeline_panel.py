@@ -307,6 +307,32 @@ def card_label(stage: str, summary: str = "") -> str:
     return f"{name}\n{said}" if said else name
 
 
+def switch(*, elem_id=None, label="ON", **kwargs):
+    """A stage's ON control: built off, and never restored from ui-config.json.
+
+    The second half is the point, and it is why this exists rather than three
+    ``gr.Checkbox`` calls. Forge keeps a ``ui-config.json`` of every component a
+    script builds and writes the saved value back over the one the script asked
+    for -- which is exactly right for a slider somebody has tuned, and exactly
+    wrong for this. A stage left armed last week came back armed, the card's
+    description was built from the settings and said *Bypassed*, and the panel
+    contradicted itself in a way no amount of work on the description could fix:
+    the checkbox was the half the engine reads, so Generate really did start a
+    language model for a stage the panel had just called bypassed.
+
+    ``do_not_save_to_config`` is the host's own opt-out for this, and it is the
+    whole fix. The value below is then the value that ships: off, every time,
+    on every stage. Being armed lasts for a session, which is one press to
+    start and nothing at all to remember.
+    """
+    box = gr.Checkbox(value=False, label=label, container=False,
+                      elem_id=elem_id, elem_classes=classes("toggle"), **kwargs)
+    # An attribute rather than an argument: it is Forge's, not Gradio's, and a
+    # host that does not have it simply does not read it.
+    box.do_not_save_to_config = True
+    return box
+
+
 def card_summary(stage: str, summary: str):
     """The update that repaints one stage card's description."""
     return gr.update(label=card_label(stage, summary))

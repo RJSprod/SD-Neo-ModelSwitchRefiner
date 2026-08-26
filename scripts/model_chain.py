@@ -1012,13 +1012,8 @@ class ScriptModelChain(scripts.Script):
         # returns and still the first field of a preset -- an InputAccordion is
         # a checkbox with a drawer attached, and the drawer moved.
         with pipeline.head("stage2"):
-            enabled = gr.Checkbox(
-                value=False,
-                label="ON",
-                container=False,
-                elem_id=self.elem_id("enable"),
-                elem_classes=mc_pipeline_panel.classes("toggle"),
-            )
+            enabled = mc_pipeline_panel.switch(
+                elem_id=self.elem_id("enable"))
 
         with pipeline.body("stage2"):
 
