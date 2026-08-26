@@ -245,16 +245,53 @@ def confirmed(armed, label: str = "Delete"):
 
 
 def handoff_note(width: int = 0, height: int = 0) -> str:
-    """The line on the connector between Stage 1 and Stage 2.
+    """What crosses the edge into Stage 2, for Stage 2's own description.
 
     The single most important number on the panel and the one that used to be
     nowhere: Stage 2 refines *finished Stage 1 pixels*, so a Hires pass changes
     what Stage 2 is handed, and a user who has read only the width and height
     sliders has read the wrong number.
+
+    It had a row of its own on the connector between the two stages. That row
+    is gone: a pipeline of three cards should be three cards, and a fourth
+    thing between two of them that is not a stage, cannot be opened and cannot
+    be switched off is furniture. The number is Stage 2's, so it is in Stage 2's
+    description now.
     """
     if width > 0 and height > 0:
-        return f"{width} × {height} pixel handoff"
-    return "pixel handoff"
+        return f"{width} × {height} in"
+    return ""
+
+
+def card_label(stage: str, summary: str = "") -> str:
+    """A stage card's whole header, as the one string Gradio gives it.
+
+    Name on the first line, description on the second, in the Accordion's own
+    label -- which is the only place a Gradio disclosure can carry text that is
+    guaranteed to be *inside* its header.
+
+    Three arrangements were tried before this one and each failed on a theme.
+    Building the description beside the accordion and moving it into the header
+    from JavaScript worked under Lobe and found nothing under stock Gradio.
+    Painting it into a reserved band with `position: absolute` worked under
+    stock Gradio and fell outside the card under Lobe, whose header is a
+    different height. Leaving it in flow puts it under the *body* the moment
+    the card is open.
+
+    A label has none of those failure modes because it is not a second element:
+    whatever a theme does to the header, the text is in it. The newline needs
+    `white-space: pre-line` to show as a line break, and a theme that refuses
+    that gets one line reading "Creative C7 · 2 directions" -- which is a worse
+    layout and still the right information in the right place.
+    """
+    said = " ".join(str(summary or "").split())
+    name = TITLES.get(stage, str(stage))
+    return f"{name}\n{said}" if said else name
+
+
+def card_summary(stage: str, summary: str):
+    """The update that repaints one stage card's description."""
+    return gr.update(label=card_label(stage, summary))
 
 
 class Pipeline:
@@ -268,12 +305,16 @@ class Pipeline:
 
     def __init__(self):
         self.accordion = None
+        # Kept as an attribute and never built. The handoff had a row of its
+        # own between Spatial and Stage 2; the number is Stage 2's and is in
+        # Stage 2's description now. Anything still reading this gets None
+        # rather than a traceback.
+        self.handoff = None
         self.heads: dict = {}
         self.bodies: dict = {}
         self.editors: dict = {}
         self.summaries: dict = {}
         self.rows: dict = {}
-        self.handoff = None
         self.filled: set = set()
 
     # -- what a feature script asks for ------------------------------------ #
@@ -292,11 +333,12 @@ class Pipeline:
         return self._slot(self.bodies, stage, "body")
 
     def summary(self, stage: str):
-        """The live second line under a stage's title, or ``None``.
+        """The component a stage's description is written to, or ``None``.
 
-        Owned by this module and written by the feature that knows what it
-        should say, which is how one row can describe a feature this file knows
-        nothing about.
+        It is the stage's own disclosure. A feature repaints its description by
+        returning ``card_summary(stage, text)`` for this component, which sets
+        the accordion's label -- so the description is inside the header under
+        every theme, and there is no second element to fall out of it.
         """
         return self.summaries.get(stage)
 
@@ -319,60 +361,43 @@ class Pipeline:
 
 
 def _row(pipeline: Pipeline, stage: str) -> None:
-    """One stage card: one disclosure, one switch, one live summary, one body.
+    """One stage card: a name, a description, a switch, and a way in.
 
-    The card used to be four things stacked: a title row, a switch, a summary
-    line, and *then* a second accordion, labelled with a restatement of the
-    stage's own name, that had to be opened to reach the settings. Two rows
-    saying the same word, one above the other, and only the lower one opening
-    anything.
+    That is the whole of it, and the list is exhaustive on purpose. A pipeline
+    of three stages should be three rows; everything this card grew that was
+    not one of those four things -- a title row above the disclosure, a rail
+    with a node on it beside every card, a handoff line between two of them --
+    was furniture that read as structure under one theme and as debris under
+    another.
 
-    So there is one disclosure now and it is the stage's own name. The switch
-    and the summary are built as siblings of it and moved into its header by
-    ``javascript/model_chain_pipeline.js``, because Gradio gives an Accordion a
-    plain string for a label and neither a live line nor a checkbox can be built
-    into one. The move is presentation only and is allowed to fail: if the
-    browser file never runs, or a Gradio version renders a header this file
-    cannot recognise, the card reads name / summary / switch stacked in ordinary
-    flow -- which is the panel as it was, and every control still works.
+    The name and the description are one string in the accordion's own label,
+    because that is the only place a Gradio disclosure can carry text that is
+    guaranteed to be inside its header. The switch is the one element that has
+    to be outside it: it is a sibling, painted into a lane the header reserves,
+    so that arming a stage and opening it are two controls that share a line
+    and never each other's presses.
     """
-    if stage == "stage2":
-        # The edge into Stage 2 says what crosses it: the pixel size Stage 2 is
-        # handed, which is Stage 1's size *after* any Hires pass and so not the
-        # number the width and height sliders show. Its own element and not
-        # Stage 2's summary line, because it is equally true when Stage 2 is
-        # off -- where it says what Stage 2 would have been given.
-        pipeline.handoff = gr.Markdown(
-            handoff_note(), elem_id=ident("handoff"),
-            elem_classes=classes("handoff"))
-
     with gr.Column(elem_id=ident("stage", stage),
                    elem_classes=classes("stage", "stage-owned", f"stage-{stage}")) as row:
         pipeline.rows[stage] = row
 
-        # Closed. Every drawer this extension builds opens on a press and not
-        # before -- a tab that unfolds three stages of settings the moment it is
-        # drawn is a tab nobody can see the top of.
-        with drawer(TITLES[stage], elem_id=ident("editor", stage),
+        # Closed, and the summary target. A stage's description is repainted by
+        # whichever feature owns it, through `card_summary()`, which writes this
+        # accordion's label rather than a second component's value.
+        with drawer(card_label(stage, PLACEHOLDERS.get(stage, "")),
+                    elem_id=ident("editor", stage),
                     elem_classes=classes("editor")) as editor:
             pipeline.editors[stage] = editor
+            pipeline.summaries[stage] = editor
             with gr.Column(elem_id=ident("body", stage),
                            elem_classes=classes("body")) as body:
                 pipeline.bodies[stage] = body
-
-        # Two separate elements and not one row holding both, because they are
-        # moved into two different places in the header: the summary under the
-        # name, the switch out at the right where §2 of the intent asks for it
-        # to be spatially separated from the surface that opens the card.
-        pipeline.summaries[stage] = gr.Markdown(
-            PLACEHOLDERS.get(stage, ""), elem_id=ident("summary", stage),
-            elem_classes=classes("summary"))
 
         # Filled by the feature that owns the stage, with the switch it already
         # had. Nothing is created here: a second checkbox mirroring the real one
         # is exactly the duplicate source-of-truth section 2.5 forbids, and it
         # would be the one the user reached for first.
-        with gr.Column(min_width=90, scale=0,
+        with gr.Column(min_width=0, scale=0,
                        elem_id=ident("switch", stage),
                        elem_classes=classes("switch")) as head:
             pipeline.heads[stage] = head

@@ -639,22 +639,34 @@ def _stage1_size(width, height, hires=False, hr_scale=2.0, hr_resize_x=0, hr_res
         return width, height
 
 
-def _handoff_summary(width, height, hires=False, hr_scale=2.0, hr_resize_x=0,
-                     hr_resize_y=0, enabled=False) -> str:
-    """What crosses the edge between Stage 1 and Stage 2.
+def _handoff_note(width, height, hires=False, hr_scale=2.0, hr_resize_x=0,
+                  hr_resize_y=0) -> str:
+    """What crosses the edge into Stage 2, for Stage 2's own description.
 
     Said even when Stage 2 is off, because it is what Stage 2 *would* be handed
     and the number a user needs in order to decide whether to arm it.
+
+    It had a row of its own on the connector between the two stages. That row
+    is gone -- a pipeline of three cards should be three cards, and a fourth
+    thing between two of them that is not a stage, cannot be opened and cannot
+    be switched off is furniture.
     """
     width, height = _stage1_size(width, height, hires, hr_scale, hr_resize_x, hr_resize_y)
-    note = mc_pipeline_panel.handoff_note(width, height)
-    return note if enabled else f"{note} — Stage 2 is bypassed"
+    return mc_pipeline_panel.handoff_note(width, height)
 
 
-def _stage2_summary(enabled, target, denoise, multiplier, loaded="") -> str:
-    """The Stage 2 pipeline row's second line: model, preset, denoise."""
+def _stage2_summary(enabled, target, denoise, multiplier, loaded="",
+                    handoff="") -> str:
+    """The Stage 2 card's description: what it is handed, and what it does.
+
+    ``handoff`` is the Stage 1 size after any Hires pass -- the one number on
+    this panel that nothing else on the page states. It leads, because it is
+    true whether or not Stage 2 is armed, and because it is the number somebody
+    reads in order to decide.
+    """
+    lead = f"{handoff} · " if handoff else ""
     if not enabled:
-        return "Bypassed — the Stage 1 image is the final image."
+        return f"{lead}Bypassed — the Stage 1 image is the final image."
 
     parts = []
     name = _short_checkpoint(target)
@@ -1817,11 +1829,11 @@ class ScriptModelChain(scripts.Script):
             geometry = (read.get("width", 0), read.get("height", 0),
                         bool(read.get("hires", False)), read.get("hr_scale", 2.0),
                         read.get("hr_resize_x", 0), read.get("hr_resize_y", 0))
-            return (
-                _handoff_summary(*geometry, enabled=bool(is_on)),
+            return mc_pipeline_panel.card_summary(
+                "stage2",
                 _stage2_summary(bool(is_on), target_name, denoise_value,
-                                multiplier, loaded),
-            )
+                                multiplier, loaded,
+                                handoff=_handoff_note(*geometry)))
 
         def wire_pipeline_context(stitch_gallery=None):
             """Connect the context rows, once it is settled what they can read.
@@ -1831,7 +1843,7 @@ class ScriptModelChain(scripts.Script):
             panel is being built, and a Gradio event captures its input list at
             registration.
             """
-            outputs = [pipeline.handoff, pipeline.summary("stage2")]
+            outputs = [pipeline.summary("stage2")]
             if not all(outputs):
                 return
 

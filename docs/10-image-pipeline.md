@@ -647,3 +647,81 @@ either stage is on, so flipping one changes the answer only when the other is
 off, and that is derivable from the two values the handler already receives.
 When it is not the deciding vote it now says nothing at all, and the prompt area
 does not reflow so that nothing can change.
+## 13. Three rows, and nothing else (26 August 2026)
+
+Under Lobe the panel showed a stray ✕ between Spatial and Stage 2, each stage's
+description sitting outside its card rather than under its name, two node
+markers down the left where there should have been none, and a switch whose
+invisible box overlapped the chevron so the switch could not be tapped.
+
+Four symptoms, and reading them together says the same thing four times: the
+card had grown parts that were not the card.
+
+### 13.1 What a stage row is
+
+A name, a one-line description, a switch, and a way in. That list is exhaustive,
+and everything outside it went:
+
+* **The title row above the disclosure** -- gone in §10, and this is where the
+  last of it goes: the name is the disclosure's own label.
+* **The rail and the node beside every card.** A vertical timeline is a good
+  idea in a mockup and a duplicate in a themed page: Lobe draws its own bullet
+  on every accordion header, so each stage had two markers half a line apart.
+  The order of the rows already says the order they run in.
+* **The handoff line between Spatial and Stage 2.** A pipeline of three stages
+  should be three rows, and a fourth thing between two of them that is not a
+  stage, cannot be opened and cannot be switched off is furniture. Under Lobe
+  it rendered as a stray glyph, which is what furniture does when nobody owns
+  its styling. The number is Stage 2's -- it is what Stage 2 is handed -- so it
+  leads Stage 2's description: `1536 × 2304 in · Klein 9B · denoise .35`, and
+  `1536 × 2304 in · Bypassed — the Stage 1 image is the final image` when it is
+  not armed, because that is exactly when somebody is deciding whether to arm
+  it.
+
+### 13.2 The description belongs in the label
+
+Three arrangements were tried for it and each failed on a theme:
+
+1. Build it beside the accordion and move it into the header from JavaScript.
+   Worked under Lobe, where the header is a `<button>`; found nothing under
+   stock Gradio, where it is not.
+2. Paint it into a reserved band with `position: absolute`. Worked under stock
+   Gradio; fell outside the card under Lobe, whose header is a different height
+   than the one the offsets were measured against.
+3. Leave it in flow after the accordion. Puts it under the *body* the moment the
+   card is open.
+
+The fourth has none of those failure modes because it is not a second element.
+A Gradio Accordion's label is a string, and a string with a newline in it is two
+lines: `Creative\nC7 · 2 directions · Editorial`. `white-space: pre-line` shows
+the break and `::first-line` makes the name a name. Whatever a theme does to the
+header, the text is in it -- and a theme that refuses `pre-line` gets one line
+reading "Creative C7 · 2 directions", which is a worse layout and still the right
+information in the right place.
+
+So `pipeline.summaries[stage]` **is** the accordion now, and a feature repaints
+its description with `card_summary(stage, text)` -- an update that sets a label
+rather than replacing a component. That is also one less thing that flickers:
+setting a label replaces text, where replacing a Markdown beside it tears an
+element out of the page and builds another one.
+
+### 13.3 The chevron had to become ours
+
+The switch is painted into a lane the header's padding reserves. That works only
+if nothing else lands in the lane, and the one thing on the right this file could
+not place was Gradio's own chevron: under stock Gradio it honours the header's
+padding, under Lobe it is pinned to the edge. Either way it and the switch
+eventually meet, and the report was the plain consequence -- the switch's hit
+area under the chevron, and neither reachable where they overlapped.
+
+Gradio's chevron is hidden -- it is the header's last child, which is structure
+rather than a class name -- and replaced by a caret this file draws at a position
+this file chose. The header now reserves two zones on its right, the lane and the
+caret, and both of them are ours. Nothing can arrive between them.
+
+### 13.4 What is left of the running indicator
+
+The pulse and the filled node went with the rail. A running card takes the accent
+on its own border and its own name, which is the same information with nothing
+new drawn on the page -- and one fewer animation on a panel whose last round of
+feedback was about flicker.
