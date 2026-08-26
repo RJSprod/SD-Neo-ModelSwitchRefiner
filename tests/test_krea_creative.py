@@ -1313,9 +1313,14 @@ class TestTheTxt2imgSurface:
         the stage will do -- section 3.3. The drawer behind it is no longer
         hidden by the toggle: configuring a stage before arming it is an
         ordinary thing to want, and a drawer that emptied itself when the stage
-        was off made turning it on the only way to set it up."""
+        was off made turning it on the only way to set it up.
+
+        "Bypassed" and not "Off", because a card that is visible, expandable
+        and full of settings needs its summary to be the thing that says
+        whether any of them will run.
+        """
         assert built.components["enabled"].value is False
-        assert "Off" in built.components["creative_line"].value
+        assert built.components["creative_line"].value.startswith("Bypassed")
 
     def test_the_two_stages_this_script_owns_have_their_own_switches(self, built):
         """Creative and Spatial are peers. Two rows, two switches, and neither

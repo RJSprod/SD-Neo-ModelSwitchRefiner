@@ -180,7 +180,7 @@ def build() -> dict:
                 # does.
                 panel = mc_creative_panel.build(
                     lambda *parts: ui.ident("krea", *parts), ui.notice, status,
-                    creativity, stored=stored)
+                    creativity=creativity, stored=stored)
                 axis_controls = list(panel.axis_controls) if panel is not None else []
                 if panel is not None:
                     creative_seed, anti = panel.seed, panel.anti

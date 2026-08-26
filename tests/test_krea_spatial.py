@@ -1619,13 +1619,13 @@ class TestWhereTheLayoutControlsSit:
         block = self.panel()
         opened = block[:block.index('ident("spatial", "profile")')]
 
-        assert 'gr.Accordion("Saved layouts"' in opened
+        assert 'drawer("Saved layouts"' in opened
 
     def test_they_sit_directly_above_the_spatial_options(self):
         """So the two drawers read as a pair rather than as a control that
         wandered off on its own."""
         block = self.panel()
         between = block[block.index('ident("spatial", "profile", "delete")'):
-                        block.index('gr.Accordion("Spatial options"')]
+                        block.index('drawer("Spatial options"')]
 
         assert "gr.Accordion" not in between

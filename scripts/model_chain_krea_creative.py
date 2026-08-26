@@ -1093,7 +1093,7 @@ def _creative_line(enabled=None, stored=None) -> str:
     if enabled is None:
         enabled = bool(stored.get("enabled"))
     if not enabled:
-        return "Off — the prompt is expanded as written."
+        return "Bypassed — the prompt is expanded as written."
 
     parts = [f"C{int(stored.get('creativity', 5))}"]
     directing = mc_creative_krea.active_axes(stored)
@@ -1138,7 +1138,7 @@ def _spatial_line(serialized=None, enabled=None, mode=None) -> str:
     count = len(layout.regions)
     regions = f"{count} region{'' if count == 1 else 's'}" if count else "no regions"
     if not enabled:
-        return f"Off — {regions} drawn, not applied."
+        return f"Bypassed — {regions} drawn, not applied."
 
     named = "Smart" if str(mode or "").strip().casefold() == spatial.SMART else "Direct"
     parts = [named, regions]
@@ -1645,92 +1645,105 @@ class ScriptKreaCreative(scripts.Script):
                 elem_classes=mc_pipeline_panel.classes("toggle"))
 
         with pipeline.body("creative"):
-            creativity = gr.Slider(
-                label=variation.LABEL, minimum=variation.MINIMUM,
-                maximum=variation.MAXIMUM, step=1, value=stored["creativity"],
-                info=variation.HELP, elem_id=ident("creativity"))
-
             status = gr.HTML(notice("Creative Mode is off."),
                              elem_id=ident("status"))
 
             # A Group and no longer an Accordion, and always visible. The
-            # disclosure is the pipeline row's now, and the switch is on it --
+            # disclosure is the stage card's now, and the switch is on it --
             # so the drawer is already open by the time anybody is looking at
             # this, and hiding its contents when the stage is off would mean
             # the only way to configure Creative Mode was to turn it on first.
             with gr.Group(elem_id=ident("controls")) as controls:
-                panel = mc_creative_panel.build(ident, notice, status, creativity,
+                # Profile, Creativity, and three of the four sibling drawers §3
+                # asks for. The fourth is built below rather than in there,
+                # because what it holds -- the pasted-image recovery, the last
+                # roll, the help -- belongs to this surface and not to the panel
+                # LLM Studio's Krea tab builds from the same function.
+                panel = mc_creative_panel.build(ident, notice, status,
                                                 stored=stored)
+                if panel is not None:
+                    creativity = panel.creativity
+                else:
+                    # No vocabulary, so no drawers and no directions. The slider
+                    # still means something without a library, and losing it
+                    # with the rest would take away the one Creative control
+                    # that does.
+                    creativity = gr.Slider(
+                        label=variation.LABEL, minimum=variation.MINIMUM,
+                        maximum=variation.MAXIMUM, step=1,
+                        value=stored["creativity"], info=variation.HELP,
+                        elem_id=ident("creativity"))
 
-                with gr.Accordion("Continue from a pasted image", open=False,
-                                  elem_id=ident("restore")):
-                    gr.Markdown(
-                        "Pasting an image made with Creative Mode restores its **final "
-                        "expanded prompt** and turns Creative Mode off, so the picture "
-                        "reproduces. This is the other half: the short idea it was "
-                        "written from, and the settings behind it.")
-                    pasted = gr.Textbox(
-                        label="What the pasted image records", lines=6, max_lines=8,
-                        interactive=False, show_copy_button=True,
-                        value=_pasted_view(), elem_id=ident("pasted"))
-                    exactly = gr.Checkbox(
-                        value=True, label="Replay the recorded recipe exactly",
-                        elem_id=ident("replay"),
-                        info="one generation only; off rolls fresh direction from the "
-                             "same idea")
-                    with gr.Row():
-                        restore = gr.Button("Restore Creative setup", size="sm",
-                                            variant="primary",
-                                            elem_id=ident("restore", "apply"))
-                        disarm = gr.Button("Clear armed replay", size="sm",
-                                           elem_id=ident("restore", "clear"))
+                # §3's fourth drawer, at the same level as the other three.
+                with mc_pipeline_panel.drawer(
+                        "Recovery & diagnostics", elem_id=ident("recovery"),
+                        elem_classes=mc_pipeline_panel.classes("drawer")):
+                    with mc_pipeline_panel.drawer("Continue from a pasted image", elem_id=ident("restore")):
+                        gr.Markdown(
+                            "Pasting an image made with Creative Mode restores its **final "
+                            "expanded prompt** and turns Creative Mode off, so the picture "
+                            "reproduces. This is the other half: the short idea it was "
+                            "written from, and the settings behind it.")
+                        pasted = gr.Textbox(
+                            label="What the pasted image records", lines=6, max_lines=8,
+                            interactive=False, show_copy_button=True,
+                            value=_pasted_view(), elem_id=ident("pasted"))
+                        exactly = gr.Checkbox(
+                            value=True, label="Replay the recorded recipe exactly",
+                            elem_id=ident("replay"),
+                            info="one generation only; off rolls fresh direction from the "
+                                 "same idea")
+                        with gr.Row():
+                            restore = gr.Button("Restore Creative setup", size="sm",
+                                                variant="primary",
+                                                elem_id=ident("restore", "apply"))
+                            disarm = gr.Button("Clear armed replay", size="sm",
+                                               elem_id=ident("restore", "clear"))
 
-                # Filled on request rather than streamed. The roll happens
-                # inside the generation now, where there is no open Gradio
-                # event to push anything down -- and a drawer nobody opened is
-                # the wrong thing to hold a websocket open for anyway. The
-                # button reads whatever the last roll left behind, which is
-                # still there after the tab has been closed and reopened.
-                with gr.Accordion("Last creative roll", open=False,
-                                  elem_id=ident("diagnostics")):
-                    show = gr.Button("Show the last roll", size="sm",
-                                     elem_id=ident("show"))
-                    recipe = gr.Textbox(
-                        label="Recipe and brief", lines=12, max_lines=12,
-                        interactive=False, show_copy_button=True,
-                        elem_id=ident("recipe"))
-                    expanded = gr.Textbox(
-                        label="Expanded Krea prompt", lines=6, max_lines=6,
-                        interactive=False, show_copy_button=True,
-                        elem_id=ident("expanded"))
+                    # Filled on request rather than streamed. The roll happens
+                    # inside the generation now, where there is no open Gradio
+                    # event to push anything down -- and a drawer nobody opened is
+                    # the wrong thing to hold a websocket open for anyway. The
+                    # button reads whatever the last roll left behind, which is
+                    # still there after the tab has been closed and reopened.
+                    with mc_pipeline_panel.drawer("Last creative roll", elem_id=ident("diagnostics")):
+                        show = gr.Button("Show the last roll", size="sm",
+                                         elem_id=ident("show"))
+                        recipe = gr.Textbox(
+                            label="Recipe and brief", lines=12, max_lines=12,
+                            interactive=False, show_copy_button=True,
+                            elem_id=ident("recipe"))
+                        expanded = gr.Textbox(
+                            label="Expanded Krea prompt", lines=6, max_lines=6,
+                            interactive=False, show_copy_button=True,
+                            elem_id=ident("expanded"))
 
-                with gr.Accordion("How Creative Mode reads your prompt", open=False,
-                                  elem_id=ident("help")):
-                    gr.Markdown(
-                        "**Literal commands.** Anything you write inside `[[double "
-                        "brackets]]` is lifted out of the prompt before any language "
-                        "model sees it and put back at the end, on its way to Forge's "
-                        "own prompt processing — so LoRA tags, wildcards, `$styles`, "
-                        "another extension's syntax and instructions about your "
-                        "ImageStitch reference images all arrive exactly as you typed "
-                        "them. `[[<lora:krea2_edit:1>]]` goes in front of the written "
-                        "prompt; `-[[__grain__]]` goes after it. Written inside a "
-                        "region's prompt on the Spatial canvas, a command stays with "
-                        "that region and reaches that element of the composition.\n\n"
-                        "**Directions.** An axis with no row is left out of the brief "
-                        "entirely — the model decides as it would without Creative "
-                        "Mode. Add a direction and choose the treatments you are "
-                        "willing to use: **one** treatment repeats every roll, "
-                        "**several** let the Creative seed choose between them, and "
-                        "the Creativity slider decides how strongly the choice is "
-                        "expressed and how hard recent ones are pushed away. A row "
-                        "with nothing chosen directs nothing.\n\n"
-                        "Your own words always win. Type *oil painting of a car* and "
-                        "Medium stays oil painting however Medium is set.\n\n"
-                        "Creative Mode changes the positive prompt only. The negative "
-                        "prompt, the checkpoint, the sampler, the size, Steps, the "
-                        "image seed and every other setting stay exactly where Forge "
-                        "puts them, and the image itself is generated by Forge.")
+                    with mc_pipeline_panel.drawer("How Creative Mode reads your prompt", elem_id=ident("help")):
+                        gr.Markdown(
+                            "**Literal commands.** Anything you write inside `[[double "
+                            "brackets]]` is lifted out of the prompt before any language "
+                            "model sees it and put back at the end, on its way to Forge's "
+                            "own prompt processing — so LoRA tags, wildcards, `$styles`, "
+                            "another extension's syntax and instructions about your "
+                            "ImageStitch reference images all arrive exactly as you typed "
+                            "them. `[[<lora:krea2_edit:1>]]` goes in front of the written "
+                            "prompt; `-[[__grain__]]` goes after it. Written inside a "
+                            "region's prompt on the Spatial canvas, a command stays with "
+                            "that region and reaches that element of the composition.\n\n"
+                            "**Directions.** An axis with no row is left out of the brief "
+                            "entirely — the model decides as it would without Creative "
+                            "Mode. Add a direction and choose the treatments you are "
+                            "willing to use: **one** treatment repeats every roll, "
+                            "**several** let the Creative seed choose between them, and "
+                            "the Creativity slider decides how strongly the choice is "
+                            "expressed and how hard recent ones are pushed away. A row "
+                            "with nothing chosen directs nothing.\n\n"
+                            "Your own words always win. Type *oil painting of a car* and "
+                            "Medium stays oil painting however Medium is set.\n\n"
+                            "Creative Mode changes the positive prompt only. The negative "
+                            "prompt, the checkpoint, the sampler, the size, Steps, the "
+                            "image seed and every other setting stay exactly where Forge "
+                            "puts them, and the image itself is generated by Forge.")
 
         # -- Spatial -------------------------------------------------------- #
         #
@@ -1824,8 +1837,7 @@ class ScriptKreaCreative(scripts.Script):
             # start of a session and then left alone, while the canvas under it
             # is what somebody actually works in. The canvas keeps the top of
             # the panel; this is where you go to keep what is on it.
-            with gr.Accordion("Saved layouts", open=False,
-                              elem_id=ident("spatial", "profiles")):
+            with mc_pipeline_panel.drawer("Saved layouts", elem_id=ident("spatial", "profiles")):
                 with gr.Row():
                     spatial_profile = gr.Dropdown(
                         label="Layout", value=loaded_layout,
@@ -1854,8 +1866,7 @@ class ScriptKreaCreative(scripts.Script):
                         "Delete", size="sm", scale=1, variant="stop",
                         elem_id=ident("spatial", "profile", "delete"))
 
-            with gr.Accordion("Spatial options", open=False,
-                              elem_id=ident("spatial", "options")):
+            with mc_pipeline_panel.drawer("Spatial options", elem_id=ident("spatial", "options")):
                 record_scenes = gr.Checkbox(
                     value=bool(spatial["record_scenes"]),
                     label="Record the scene before and after the composer pass",
@@ -1868,8 +1879,7 @@ class ScriptKreaCreative(scripts.Script):
                 # from, and asking somebody to look under Creative Controls for
                 # the canvas of an image that never used Creative Mode is the
                 # coupling this refactor removed, left in the furniture.
-                with gr.Accordion("Continue from a pasted image", open=False,
-                                  elem_id=ident("spatial", "restore")):
+                with mc_pipeline_panel.drawer("Continue from a pasted image", elem_id=ident("spatial", "restore")):
                     gr.Markdown(
                         "Pasting an image made with Spatial Layout restores its "
                         "**final structured prompt** and turns Spatial Layout off, so "

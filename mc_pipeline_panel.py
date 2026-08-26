@@ -127,12 +127,24 @@ TITLES = {
     "stage2": "Stage 2",
 }
 
-EDITOR_LABELS = {
-    "creative": "Creative direction",
-    "spatial": "Spatial layout",
-    "stage2": "Stage 2 refinement",
-}
-"""What an owned stage's disclosure says. The stage name is already above it."""
+CARD_HEAD = f"{PREFIX}-card-head"
+"""The class the browser file puts on whichever element Gradio made the header.
+
+Everything about the card's header layout is keyed off this rather than off
+Gradio's own class for it. That is the whole of rule 2 below: a theme is allowed
+to rebuild Gradio's internals, and when it does the browser file either still
+recognises the header -- in which case this class lands on it and the layout
+holds -- or it does not, in which case no rule matches and the card falls back
+to a plain stack that still works.
+"""
+
+CARDED = f"{PREFIX}-carded"
+"""On the stage column, once its header has been found and furnished.
+
+Two classes rather than one because they answer different questions. The header
+needs to know it is a header; the card needs to know whether the move happened
+at all, so that the fallback layout is a stylesheet state rather than a guess.
+"""
 
 PROMPT_ECHO = f"{PREFIX}-prompt-echo"
 """The one element the browser writes the hidden-but-active note into.
@@ -152,11 +164,17 @@ height at all, so the line costs nothing until there is something to say.
 """
 
 PLACEHOLDERS = {
-    "creative": "Off — the prompt is expanded as written.",
-    "spatial": "Off — nothing is composed onto the scene.",
-    "stage2": "Off — the Stage 1 image is the final image.",
+    "creative": "Bypassed — the prompt is expanded as written.",
+    "spatial": "Bypassed — nothing is composed onto the scene.",
+    "stage2": "Bypassed — the Stage 1 image is the final image.",
 }
-"""The second line before anything has been wired. Replaced on first render."""
+"""The second line before anything has been wired. Replaced on first render.
+
+"Bypassed" and not "Off", and the same word every stage that is switched off
+uses. §1 of the intent: a bypassed card stays visible and configurable, so the
+summary is the only thing standing between "this setting exists" and "this
+setting will run", and it has to say which without being read twice.
+"""
 
 
 def ident(*parts) -> str:
@@ -167,6 +185,35 @@ def ident(*parts) -> str:
 def classes(*names: str) -> list[str]:
     """Class names for one element, all under this module's stem."""
     return [f"{PREFIX}-{name}" for name in names]
+
+
+DRAWER = f"{PREFIX}-drawer"
+"""The class on every disclosure this extension builds.
+
+One class, three jobs, and all of them belong to whoever is looking at the page
+rather than to whoever wrote the feature behind it: the stylesheet gives every
+drawer the same outline and the same header, the browser file remembers which
+ones were opened, and a test can count them. A feature that builds its own bare
+``gr.Accordion`` gets none of that, which is why :func:`drawer` exists and why
+there is a test that says so.
+"""
+
+
+def drawer(label: str, *, elem_id=None, elem_classes=None, **kwargs):
+    """One disclosure, closed, and marked as belonging to this extension.
+
+    ``open`` is not a parameter. Every drawer starts closed -- a tab that
+    unfolds four levels of settings the moment it is drawn is a tab nobody can
+    see the top of -- and what somebody opens is remembered per browser by
+    ``javascript/model_chain_pipeline.js``, so the default is a first-visit
+    answer rather than a decision imposed on every visit after it.
+    """
+    found = [DRAWER]
+    if elem_classes:
+        found.extend(elem_classes if isinstance(elem_classes, (list, tuple))
+                     else [elem_classes])
+    return gr.Accordion(label=label, open=False, elem_id=elem_id,
+                        elem_classes=found, **kwargs)
 
 
 def handoff_note(width: int = 0, height: int = 0) -> str:
@@ -244,7 +291,23 @@ class Pipeline:
 
 
 def _row(pipeline: Pipeline, stage: str) -> None:
-    """One pipeline item: a title, a switch slot, a live line, and a drawer."""
+    """One stage card: one disclosure, one switch, one live summary, one body.
+
+    The card used to be four things stacked: a title row, a switch, a summary
+    line, and *then* a second accordion, labelled with a restatement of the
+    stage's own name, that had to be opened to reach the settings. Two rows
+    saying the same word, one above the other, and only the lower one opening
+    anything.
+
+    So there is one disclosure now and it is the stage's own name. The switch
+    and the summary are built as siblings of it and moved into its header by
+    ``javascript/model_chain_pipeline.js``, because Gradio gives an Accordion a
+    plain string for a label and neither a live line nor a checkbox can be built
+    into one. The move is presentation only and is allowed to fail: if the
+    browser file never runs, or a Gradio version renders a header this file
+    cannot recognise, the card reads name / summary / switch stacked in ordinary
+    flow -- which is the panel as it was, and every control still works.
+    """
     if stage == "stage2":
         # The edge into Stage 2 says what crosses it: the pixel size Stage 2 is
         # handed, which is Stage 1's size *after* any Hires pass and so not the
@@ -259,38 +322,45 @@ def _row(pipeline: Pipeline, stage: str) -> None:
                    elem_classes=classes("stage", "stage-owned", f"stage-{stage}")) as row:
         pipeline.rows[stage] = row
 
-        with gr.Row(elem_classes=classes("head")):
-            gr.Markdown(f"**{TITLES[stage]}**",
-                        elem_id=ident("title", stage),
-                        elem_classes=classes("title"))
-            # Filled by the feature that owns the stage, with the switch it
-            # already had. Nothing is created here: a second checkbox mirroring
-            # the real one is exactly the duplicate source-of-truth section 2.5
-            # forbids, and it would be the one the user reached for first.
-            with gr.Column(min_width=96, scale=0,
-                           elem_id=ident("switch", stage),
-                           elem_classes=classes("switch")) as head:
-                pipeline.heads[stage] = head
-
-        pipeline.summaries[stage] = gr.Markdown(
-            PLACEHOLDERS.get(stage, ""), elem_id=ident("summary", stage),
-            elem_classes=classes("summary"))
-
-        with gr.Accordion(EDITOR_LABELS[stage], open=False,
-                          elem_id=ident("editor", stage),
-                          elem_classes=classes("editor")) as editor:
+        # Closed. Every drawer this extension builds opens on a press and not
+        # before -- a tab that unfolds three stages of settings the moment it is
+        # drawn is a tab nobody can see the top of.
+        with drawer(TITLES[stage], elem_id=ident("editor", stage),
+                    elem_classes=classes("editor")) as editor:
             pipeline.editors[stage] = editor
             with gr.Column(elem_id=ident("body", stage),
                            elem_classes=classes("body")) as body:
                 pipeline.bodies[stage] = body
+
+        # Two separate elements and not one row holding both, because they are
+        # moved into two different places in the header: the summary under the
+        # name, the switch out at the right where §2 of the intent asks for it
+        # to be spatially separated from the surface that opens the card.
+        pipeline.summaries[stage] = gr.Markdown(
+            PLACEHOLDERS.get(stage, ""), elem_id=ident("summary", stage),
+            elem_classes=classes("summary"))
+
+        # Filled by the feature that owns the stage, with the switch it already
+        # had. Nothing is created here: a second checkbox mirroring the real one
+        # is exactly the duplicate source-of-truth section 2.5 forbids, and it
+        # would be the one the user reached for first.
+        with gr.Column(min_width=90, scale=0,
+                       elem_id=ident("switch", stage),
+                       elem_classes=classes("switch")) as head:
+            pipeline.heads[stage] = head
 
 
 def _build() -> Pipeline:
     """Assemble the whole shell into whatever container is currently open."""
     pipeline = Pipeline()
 
-    with gr.Accordion("Image Pipeline", open=True, elem_id=ident("panel"),
-                      elem_classes=classes("panel")) as accordion:
+    # Closed, like everything else. This is one accordion among however many
+    # else a user has on txt2img, and the extension does not get to decide that
+    # its own is the one worth the whole screen on arrival. What is opened is
+    # remembered -- see javascript/model_chain_pipeline.js -- so the second
+    # visit to the tab looks like the first one was left.
+    with drawer("Image Pipeline", elem_id=ident("panel"),
+                elem_classes=classes("panel")) as accordion:
         pipeline.accordion = accordion
 
         # Section 3.3, and the only thing left of the Prompt row: what is in

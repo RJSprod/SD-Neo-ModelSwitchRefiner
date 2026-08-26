@@ -648,13 +648,13 @@ def _handoff_summary(width, height, hires=False, hr_scale=2.0, hr_resize_x=0,
     """
     width, height = _stage1_size(width, height, hires, hr_scale, hr_resize_x, hr_resize_y)
     note = mc_pipeline_panel.handoff_note(width, height)
-    return note if enabled else f"{note} — Stage 2 is off"
+    return note if enabled else f"{note} — Stage 2 is bypassed"
 
 
 def _stage2_summary(enabled, target, denoise, multiplier, loaded="") -> str:
     """The Stage 2 pipeline row's second line: model, preset, denoise."""
     if not enabled:
-        return "Off — the Stage 1 image is the final image."
+        return "Bypassed — the Stage 1 image is the final image."
 
     parts = []
     name = _short_checkpoint(target)
@@ -1046,8 +1046,7 @@ class ScriptModelChain(scripts.Script):
                     "", elem_id=self.elem_id("preset_explain"),
                     elem_classes=mc_pipeline_panel.classes("explain"))
 
-                with gr.Accordion("Save or delete a preset", open=False,
-                                  elem_id=self.elem_id("section_presets")):
+                with mc_pipeline_panel.drawer("Save or delete a preset", elem_id=self.elem_id("section_presets")):
                     with gr.Row():
                         preset_name = gr.Textbox(
                             label="Preset name",
@@ -1095,8 +1094,7 @@ class ScriptModelChain(scripts.Script):
             # somebody picks fresh on every image -- it is part of what a preset
             # is -- and the modules and the residency status that describe the
             # same model belong beside it rather than five sections apart.
-            with gr.Accordion("Checkpoint & Model Components", open=False,
-                              elem_id=self.elem_id("section_modules")):
+            with mc_pipeline_panel.drawer("Checkpoint & Model Components", elem_id=self.elem_id("section_modules")):
                 with gr.Row():
                     target = gr.Dropdown(
                         value=_NO_MODEL,
@@ -1125,8 +1123,7 @@ class ScriptModelChain(scripts.Script):
                 residency_status = gr.Markdown("", elem_id=self.elem_id("residency"))
 
             # -- 9.3 Prompt & Styles --------------------------------------- #
-            with gr.Accordion("Prompt & Styles", open=False,
-                              elem_id=self.elem_id("section_prompt")):
+            with mc_pipeline_panel.drawer("Prompt & Styles", elem_id=self.elem_id("section_prompt")):
                 with gr.Row():
                     prompt_mode = gr.Radio(
                         choices=list(mc_infotext.PROMPT_MODES),
@@ -1173,8 +1170,7 @@ class ScriptModelChain(scripts.Script):
                     )
 
             # -- 9.4 Sampling ---------------------------------------------- #
-            with gr.Accordion("Sampling", open=False,
-                              elem_id=self.elem_id("section_sampling")):
+            with mc_pipeline_panel.drawer("Sampling", elem_id=self.elem_id("section_sampling")):
                 with gr.Row():
                     steps = gr.Slider(
                         label="Stage 2 steps",
@@ -1208,8 +1204,7 @@ class ScriptModelChain(scripts.Script):
                     )
 
             # -- 9.5 Edit & References ------------------------------------- #
-            with gr.Accordion("Edit & References", open=False,
-                              elem_id=self.elem_id("section_references")):
+            with mc_pipeline_panel.drawer("Edit & References", elem_id=self.elem_id("section_references")):
                 edit_mode = gr.Radio(
                     choices=list(mc_arch.EDIT_MODES),
                     value=mc_arch.EDIT_AUTO,
@@ -1296,8 +1291,7 @@ class ScriptModelChain(scripts.Script):
                 )
 
             # -- 9.6 Seed --------------------------------------------------- #
-            with gr.Accordion("Seed", open=False,
-                              elem_id=self.elem_id("section_seed")):
+            with mc_pipeline_panel.drawer("Seed", elem_id=self.elem_id("section_seed")):
                 seed_mode = gr.Radio(
                     choices=list(mc_infotext.SEED_MODES),
                     value="Inherit",

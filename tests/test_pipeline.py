@@ -120,6 +120,288 @@ class TestTheShell:
         assert mc_pipeline_panel.handoff_note(0, 0) == "pixel handoff"
 
 
+# --------------------------------------------------------------------------- #
+# One disclosure per card, and every drawer closed
+# --------------------------------------------------------------------------- #
+
+
+SURFACES = ("scripts/model_chain_krea_creative.py", "scripts/model_chain.py",
+            "mc_creative_panel.py", "mc_pipeline_panel.py", "mc_plan_panel.py")
+"""Every file that draws something on the txt2img tab."""
+
+
+class TestTheStageCard:
+    """§1.3: one large disclosure surface, one switch, one live summary, one
+    attached body, and no redundant second "open me" row.
+
+    The card used to be four things stacked -- a title row, a switch, a summary
+    line, and then an accordion labelled "Creative direction" that had to be
+    opened to reach the settings. Two rows saying the same word, one above the
+    other, and only the second one opening anything."""
+
+    def test_the_disclosure_is_the_stage_s_own_name(self, host):
+        pipeline = mc_pipeline_panel.host()
+
+        for stage in mc_pipeline_panel.ORDER:
+            assert pipeline.editors[stage].label == mc_pipeline_panel.TITLES[stage]
+
+    def test_there_is_no_second_open_me_label(self, host):
+        """The table of labels the inner accordion used to carry. Checked as an
+        absence rather than left to the eye, because the way this regresses is
+        somebody re-adding a drawer inside the card with a title of its own."""
+        assert not hasattr(mc_pipeline_panel, "EDITOR_LABELS")
+
+        pipeline = mc_pipeline_panel.host()
+
+        # One disclosure per card: the editor. The body is a plain Column.
+        for stage in mc_pipeline_panel.ORDER:
+            body = pipeline.bodies[stage]
+            assert not hasattr(body, "open")
+
+    def test_the_card_opens_closed(self, host):
+        pipeline = mc_pipeline_panel.host()
+
+        for stage in mc_pipeline_panel.ORDER:
+            assert pipeline.editors[stage].open is False
+
+    def test_a_bypassed_card_says_bypassed(self):
+        """§1: a bypassed card stays visible and configurable, so the summary is
+        the only thing between "this setting exists" and "this setting will
+        run". It has to say which without being read twice, and every stage has
+        to say it the same way."""
+        for stage in mc_pipeline_panel.ORDER:
+            assert mc_pipeline_panel.PLACEHOLDERS[stage].startswith("Bypassed")
+
+    def test_every_stage_says_bypassed_when_it_is_off(self, store):
+        import scripts.model_chain as chain_script
+        import scripts.model_chain_krea_creative as creative_script
+
+        assert creative_script._creative_line(enabled=False).startswith("Bypassed")
+        assert creative_script._spatial_line("", enabled=False).startswith("Bypassed")
+        assert chain_script._stage2_summary(False, "", 0.35, 1.0).startswith("Bypassed")
+
+
+class TestEveryDrawerStartsClosed:
+    """The user-facing half of this refactor: a tab that unfolds four levels of
+    settings the moment it is drawn is a tab nobody can see the top of."""
+
+    def test_nothing_on_txt2img_builds_a_bare_accordion(self):
+        """`drawer()` is the only way this extension makes a disclosure, which
+        is what lets one rule style them all, one file remember which are open,
+        and this test count them. A bare `gr.Accordion` gets none of that."""
+        for name in SURFACES:
+            source = (ROOT / name).read_text(encoding="utf-8")
+            if name == "mc_pipeline_panel.py":
+                # The one that wraps it.
+                assert source.count("gr.Accordion(") == 1
+                continue
+            assert "gr.Accordion(" not in source, name
+
+    def test_a_drawer_cannot_be_opened_at_build_time(self):
+        """Not a default that a caller may override: there is no parameter."""
+        import inspect
+
+        signature = inspect.signature(mc_pipeline_panel.drawer)
+
+        assert "open" not in signature.parameters
+
+    def test_a_drawer_is_marked_as_this_extension_s(self, host):
+        made = mc_pipeline_panel.drawer("Anything")
+
+        assert made.open is False
+        assert mc_pipeline_panel.DRAWER in made.elem_classes
+
+    def test_a_caller_s_own_classes_survive(self, host):
+        made = mc_pipeline_panel.drawer("Anything", elem_classes=["mine"])
+
+        assert mc_pipeline_panel.DRAWER in made.elem_classes
+        assert "mine" in made.elem_classes
+
+    def test_the_shell_itself_starts_closed(self, host):
+        pipeline = mc_pipeline_panel.host()
+
+        assert pipeline.accordion.open is False
+        assert mc_pipeline_panel.DRAWER in pipeline.accordion.elem_classes
+
+
+class TestTheStagesShipOff:
+    """A fresh Forge with this extension installed generates exactly as it would
+    without it, until somebody says otherwise."""
+
+    def test_creative_is_off_before_anybody_touches_it(self, store):
+        import mc_creative_krea
+
+        assert mc_creative_krea.settings()["enabled"] is False
+
+    def test_spatial_is_off_before_anybody_touches_it(self, store):
+        import mc_spatial
+
+        assert mc_spatial.settings()["enabled"] is False
+
+    def test_the_shipped_library_does_not_arm_creative_mode(self):
+        """The one default that is not in this repository's Python: the
+        creativity package can ask for Creative Mode to start on, and the
+        settings honour it. The package this build ships must not."""
+        found = json.loads(
+            (ROOT / "prompt_master" / "krea" / "creativity"
+             / "defaults.json").read_text(encoding="utf-8"))
+
+        assert found.get("creative_mode_enabled") is False
+
+    def test_stage_2_is_off_before_anybody_touches_it(self):
+        source = (ROOT / "scripts" / "model_chain.py").read_text(encoding="utf-8")
+        head = source.split('with pipeline.head("stage2"):', 1)[1].split(
+            "with pipeline.body", 1)[0]
+
+        assert "value=False" in head
+
+
+# --------------------------------------------------------------------------- #
+# Creative: one level, four drawers
+# --------------------------------------------------------------------------- #
+
+
+class TestTheCreativeHierarchy:
+    """§1's Creative hierarchy change, and the final acceptance statement's
+    first clause: the Profile is top-level, and Create a profile, Directions,
+    Advanced settings and Recovery & diagnostics are same-level sibling drawers
+    with nesting only inside their opened contents.
+
+    Directions used to *be* the body of the panel -- twenty axis rows, a
+    heading, a cost line and an Add dropdown, all unfolded the moment Creative
+    was expanded, with Settings tucked in an accordion underneath. So the first
+    screen of the stage was a list of axes nobody had asked about yet."""
+
+    @pytest.fixture
+    def source(self):
+        return (ROOT / "mc_creative_panel.py").read_text(encoding="utf-8")
+
+    def test_the_four_drawers_are_the_four_the_intent_names(self, source):
+        found = re.findall(r'drawer\(\s*\n?\s*"([^"]+)"', source)
+        surface = (ROOT / "scripts" / "model_chain_krea_creative.py").read_text(
+            encoding="utf-8")
+        found += re.findall(r'drawer\(\s*\n?\s*"([^"]+)"', surface)[:1]
+
+        assert "Create a profile" in found
+        assert "Advanced settings" in found
+
+    def test_they_are_built_at_one_level(self, source):
+        """Same left edge, same treatment. The way this regresses is a drawer
+        opened inside another drawer's `with` block, which indents it."""
+        body = source.split("def build(", 1)[1]
+        opens = [line for line in body.splitlines()
+                 if "mc_pipeline_panel.drawer(" in line]
+
+        assert len(opens) >= 3
+        indents = {len(line) - len(line.lstrip()) for line in opens}
+
+        assert indents == {4}
+
+    def test_the_profile_and_creativity_are_above_all_of_them(self, source):
+        body = source.split("def build(", 1)[1]
+
+        assert body.index("panel.profile = gr.Dropdown") \
+            < body.index("panel.creativity = ") \
+            < body.index("mc_pipeline_panel.drawer(")
+
+    def test_directions_says_how_many_are_active(self):
+        import mc_creative_panel
+
+        assert mc_creative_panel.directions_label(()) == "Directions"
+        assert mc_creative_panel.directions_label(("medium",)) == "Directions — 1 active"
+        assert mc_creative_panel.directions_label(
+            ("medium", "lighting")) == "Directions — 2 active"
+
+    def test_the_count_is_derived_and_not_written(self, store, host):
+        """§4's rule about summaries, applied to a drawer label: it is a
+        selector over canonical state, not a value somebody's click set."""
+        import mc_creative_krea
+        import mc_creative_panel
+
+        panel = mc_creative_panel.build(
+            lambda *parts: "test-" + "-".join(str(part) for part in parts),
+            lambda text, kind="info": text, None,
+            stored=dict(mc_creative_krea.settings(), directions=["medium"]))
+        if panel is None:
+            pytest.skip("the creativity library did not load")
+
+        assert panel.directions.label == "Directions — 1 active"
+
+        updates = panel.render(stored=dict(mc_creative_krea.settings(),
+                                           directions=["medium", "lighting"]))
+        at = panel.outputs().index(panel.directions)
+
+        assert updates[at]["label"] == "Directions — 2 active"
+
+    def test_the_recovery_drawer_holds_what_the_intent_lists(self):
+        surface = (ROOT / "scripts" / "model_chain_krea_creative.py").read_text(
+            encoding="utf-8")
+        block = surface.split('drawer(\n                        "Recovery & diagnostics"',
+                              1)[1].split("# -- Spatial", 1)[0]
+
+        for held in ("Continue from a pasted image", "Last creative roll",
+                     "How Creative Mode reads your prompt"):
+            assert held in block
+
+
+# --------------------------------------------------------------------------- #
+# What was opened stays opened
+# --------------------------------------------------------------------------- #
+
+
+class TestTheDrawerMemory:
+    """A default is the right answer exactly once. After that, a tab that folds
+    everything away again on every reload is a tab somebody has to re-open four
+    drawers in before they can carry on."""
+
+    @pytest.fixture
+    def code(self):
+        return PIPELINE_JS.read_text(encoding="utf-8")
+
+    def test_it_remembers_per_browser_and_not_per_generation(self, code):
+        """Furniture, and stored where furniture belongs. Nothing about a
+        generation is kept here and nothing here is ever sent anywhere."""
+        assert "localStorage" in code
+        assert "modelChainOpenDrawers" in code
+
+    def test_a_blocked_store_is_not_an_error(self, code):
+        """Private browsing, a blocked store, a value somebody edited by hand.
+        Every one of them means "no preferences", which is what this shipped
+        with -- so every read and every write is inside a try."""
+        block = code.split("function opened()", 1)[1].split("function remember(", 1)[0]
+
+        assert "try {" in block
+        assert "catch" in block
+
+        block = code.split("function remember(", 1)[1].split("function isOpen(", 1)[0]
+
+        assert "try {" in block
+        assert "catch" in block
+
+    def test_restoring_is_a_press_and_not_a_class(self, code):
+        """Gradio owns whether an accordion is open and re-renders it from its
+        own state. Setting the class would leave the two disagreeing at the
+        first update; pressing the header is what the user would have done."""
+        block = code.split("function watchDrawers()", 1)[1]
+
+        assert "header.click()" in block
+        assert "classList.add" not in block
+
+    def test_it_only_finds_drawers_this_extension_built(self, code):
+        """The class comes from mc_pipeline_panel.drawer(), so this cannot pick
+        up a host accordion, a theme's own furniture, or a Column that happens
+        to start with a button."""
+        block = code.split("function drawers()", 1)[1].split("function watchDrawers",
+                                                             1)[0]
+
+        assert "DRAWER" in block
+
+    def test_it_binds_once_however_often_gradio_rebuilds(self, code):
+        block = code.split("function watchDrawers()", 1)[1]
+
+        assert "dataset.mcPipelineDrawer" in block
+
+
 class TestBothScriptsFillOneShell:
     """The property that makes the shared shell safe: it does not matter which
     script Forge builds first.
@@ -223,7 +505,7 @@ class TestTheHandoffLine:
         said = mc._handoff_summary(1024, 1536, True, 1.5, enabled=False)
 
         assert "1536 × 2304 pixel handoff" in said
-        assert "Stage 2 is off" in said
+        assert "Stage 2 is bypassed" in said
 
     def test_a_size_nobody_has_set_yet_says_nothing_rather_than_zero(self):
         mc = self.helpers()

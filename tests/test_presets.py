@@ -244,7 +244,7 @@ class TestWhereThePresetControlsSit:
         block = self.stage2()
         opened = block[:block.index('elem_id=self.elem_id("target")')]
 
-        assert opened.rindex("gr.Accordion") > opened.rindex("gr.Group")
+        assert opened.rindex("mc_pipeline_panel.drawer") > opened.rindex("gr.Group")
 
     def test_the_modules_are_beside_the_checkpoint_they_describe(self):
         """They used to be five sections apart, describing the same model."""
