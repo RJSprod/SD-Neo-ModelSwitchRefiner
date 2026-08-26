@@ -505,6 +505,11 @@ class Panel:
         self.keys = list(keys)
         self.axes = dict(axes)
 
+        # Whether Delete is armed. A gr.State and not a module variable: an
+        # arm is one person's half-finished gesture in one browser, and a flag
+        # on this process would be shared by every tab open on the server.
+        self.arm_delete = None
+
         # Filled in by build(), in the order the page is assembled.
         self.creativity = None
         self.profile = None
@@ -573,7 +578,7 @@ class Panel:
         found = {"profile": self.profile, "profile_name": self.profile_name,
                  "profile_state": self.profile_state,
                  "create": self.create, "directions": self.directions,
-                 "creativity": self.creativity,
+                 "creativity": self.creativity, "arm_delete": self.arm_delete,
                  "summary": self.summary, "cost": self.cost,
                  "add": self.add,
                  "seed": self.seed, "anti": self.anti,
@@ -719,6 +724,7 @@ def build(ident, notice, status, *, creativity=None, stored=None) -> Panel | Non
         return made
 
     active_now = list(stored.get("directions") or ())
+    panel.arm_delete = gr.State(False)
 
     # -- the profile bar --------------------------------------------------- #
     # Shown, not applied. The dropdown opens on the profile the live settings
@@ -954,17 +960,31 @@ def _wire_profiles(panel, save, save_as, create, drop, make_default, reset) -> N
         return panel.render(told=f'Created the "{name.strip()}" Creative profile.',
                             profile=name.strip())
 
-    def remove(name):
+    def remove(name, armed):
+        """Two presses, because deleting a profile removes a file.
+
+        The first press arms the button and says which profile is about to go;
+        the second does it. §3 of the pipeline intent asks for an explicit
+        confirmation where the loss is irreversible, and this one is.
+        """
+        go, now, button = mc_pipeline_panel.confirmed(armed)
+        if not go:
+            return (now, button,
+                    *panel.render(told=f'Press Delete again to remove the "{name}" '
+                                       "Creative profile. This cannot be undone.",
+                                  kind="warn"))
         try:
             profiles.delete(name)
         except profiles.ProfileError as exc:
-            return panel.render(told=str(exc), kind="warn")
+            return (now, button, *panel.render(told=str(exc), kind="warn"))
         # The settings on screen are left exactly as they are. Deleting a saved
         # copy of a configuration is not a request to stop using it, and a delete
         # that silently reconfigured the panel would be a destructive undo of
         # work nobody asked to undo.
-        return panel.render(told=f'Deleted the "{name}" Creative profile. The settings '
-                                 "on screen are unchanged.", profile=profiles.FACTORY)
+        return (now, button,
+                *panel.render(told=f'Deleted the "{name}" Creative profile. The '
+                                   "settings on screen are unchanged.",
+                              profile=profiles.FACTORY))
 
     def nominate(name):
         try:
@@ -988,7 +1008,8 @@ def _wire_profiles(panel, save, save_as, create, drop, make_default, reset) -> N
     save.click(fn=save_over, inputs=[panel.profile], outputs=outputs, queue=False)
     save_as.click(fn=start_naming, outputs=outputs, queue=False)
     create.click(fn=create_new, inputs=[panel.profile_name], outputs=outputs, queue=False)
-    drop.click(fn=remove, inputs=[panel.profile], outputs=outputs, queue=False)
+    drop.click(fn=remove, inputs=[panel.profile, panel.arm_delete],
+               outputs=[panel.arm_delete, drop, *outputs], queue=False)
     make_default.click(fn=nominate, inputs=[panel.profile], outputs=outputs, queue=False)
     reset.click(fn=restore_default, outputs=outputs, queue=False)
 

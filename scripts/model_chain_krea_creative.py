@@ -1222,15 +1222,27 @@ def _layout_saved(name, serialized):
             _layout_state(kept, serialized))
 
 
-def _layout_deleted(name, serialized):
-    """Remove a named layout. The working canvas is left exactly as it is."""
+def _layout_deleted(name, serialized, armed):
+    """Remove a named layout, on the second press. The canvas is left as it is.
+
+    §3 of the pipeline intent asks for an explicit confirmation where the loss
+    is irreversible, and a named layout is a file. The confirmation is the
+    button: the first press arms it and says which layout is about to go.
+    """
+    go, now, button = mc_pipeline_panel.confirmed(armed)
+    if not go:
+        return (now, button,
+                notice(f'Press Delete again to remove the spatial layout "{name}". '
+                       "This cannot be undone.", "warn"),
+                gr.skip(), gr.skip())
     try:
         remaining = mc_spatial_profiles.delete(name)
     except mc_spatial_profiles.LayoutError as exc:
-        return notice(str(exc), "warn"), gr.skip(), gr.skip()
+        return now, button, notice(str(exc), "warn"), gr.skip(), gr.skip()
 
     mc_spatial.remember(**{mc_spatial.PROFILE: ""})
-    return (notice(f'Deleted the spatial layout "{name}". The boxes on screen are '
+    return (now, button,
+            notice(f'Deleted the spatial layout "{name}". The boxes on screen are '
                    "unchanged."),
             gr.update(choices=[mc_spatial_profiles.NONE] + remaining,
                       value=mc_spatial_profiles.NONE),
@@ -1784,11 +1796,18 @@ class ScriptKreaCreative(scripts.Script):
                                  if spatial["profile"] in layout_choices
                                  else mc_spatial_profiles.NONE)
 
+                # §3 asks for the two composition modes as large segmented
+                # targets rather than two radio dots. It is still the same
+                # stock Radio -- the same component, the same handler, the same
+                # value -- wearing the shape: the class turns the group into
+                # two full-height halves in the stylesheet and nothing about
+                # what it sends changes.
                 spatial_compose = gr.Radio(
                     choices=[("Smart Spatial Compose", spatial_module.SMART),
                              ("Direct BBOX Merge", spatial_module.DIRECT)],
                     value=spatial["compose_mode"], label="Composition",
-                    elem_id=ident("spatial", "compose"))
+                    elem_id=ident("spatial", "compose"),
+                    elem_classes=mc_pipeline_panel.classes("segmented"))
 
                 # Position correction, in the pipeline, without opening a
                 # workspace. Section 6.2: drag the topmost box under the
@@ -1865,6 +1884,9 @@ class ScriptKreaCreative(scripts.Script):
                     spatial_profile_delete = gr.Button(
                         "Delete", size="sm", scale=1, variant="stop",
                         elem_id=ident("spatial", "profile", "delete"))
+                # Whether Delete is armed. A gr.State and not a module variable:
+                # an arm is one person's half-finished gesture in one browser.
+                arm_layout_delete = gr.State(False)
 
             with mc_pipeline_panel.drawer("Spatial options", elem_id=ident("spatial", "options")):
                 record_scenes = gr.Checkbox(
@@ -1986,6 +2008,7 @@ class ScriptKreaCreative(scripts.Script):
         self._wire_layouts(spatial_profile, spatial_profile_refresh,
                            spatial_profile_state, spatial_profile_name,
                            spatial_profile_save, spatial_profile_delete,
+                           arm_layout_delete,
                            spatial_auto_save, spatial_state, spatial_enabled,
                            spatial_compose, spatial_status, enabled)
         self._register_paste_fields()
@@ -2066,8 +2089,8 @@ class ScriptKreaCreative(scripts.Script):
                       queue=False, show_progress=False)
 
     def _wire_layouts(self, profile, refresh, state_line, name, save, delete,
-                      auto_save, spatial_state, spatial_enabled, spatial_compose,
-                      spatial_status, creative_enabled) -> None:
+                      arm_layout_delete, auto_save, spatial_state, spatial_enabled,
+                      spatial_compose, spatial_status, creative_enabled) -> None:
         """Named layouts, and the Auto Save switch. Six handlers, none of them
         touching a layout the user did not name.
 
@@ -2088,8 +2111,10 @@ class ScriptKreaCreative(scripts.Script):
         save.click(fn=_layout_saved, inputs=[name, spatial_state],
                    outputs=[spatial_status, profile, state_line],
                    queue=False, show_progress=False)
-        delete.click(fn=_layout_deleted, inputs=[profile, spatial_state],
-                     outputs=[spatial_status, profile, state_line],
+        delete.click(fn=_layout_deleted,
+                     inputs=[profile, spatial_state, arm_layout_delete],
+                     outputs=[arm_layout_delete, delete,
+                              spatial_status, profile, state_line],
                      queue=False, show_progress=False)
         auto_save.change(fn=_auto_save_changed, inputs=[auto_save],
                          outputs=[spatial_status], queue=False,

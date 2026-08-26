@@ -113,11 +113,16 @@ sliders, and it is shown even with Stage 2 bypassed, because it is what Stage 2
 **All three stages ship switched off.** A fresh install generates exactly as
 Forge would without the extension until you say otherwise.
 
-**It survives your theme.** The panel's hierarchy is carried by geometry —
-outlines on the cards and drawers, a separator under each header, an indent and
-a one-pixel rail down nested content — and every colour is one of the host's own
-theme variables. A theme whose block fill and page fill are the same colour
-still gets a structured panel, because none of the structure is a fill.
+**It survives your theme,** because it has no palette of its own. The cards,
+drawers and bodies paint nothing at all — they are outlines over whatever your
+theme is already painting, and they inherit its text colour, so there is no pair
+of colours that can come out light-on-light. What carries the hierarchy is
+geometry: outlines, a separator under each header, an indent, and a one-pixel
+rail and elbow down nested content.
+
+**Deleting asks first.** A saved Creative profile, a Stage 2 preset and a named
+Spatial layout are files, and nothing brings one back — so Delete arms on the
+first press, says which one is about to go, and does it on the second.
 
 While a generation runs, the row that is currently working is marked — a filled
 node on the rail and a coloured title, nothing that covers a label or a control,
