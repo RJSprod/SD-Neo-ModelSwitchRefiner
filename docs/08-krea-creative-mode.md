@@ -1505,9 +1505,9 @@ refusal to open a document this build cannot read.
 that quietly dropped Framing would pass every behavioural test by never
 exercising it.
 
-Removed on purpose (and the fields, though not the readout, asked for again in
-§20): the numeric X/Y/W/H fields and the `Box (0–1000)` readout that §8.3 asks
-for. They were built and then taken out, which is worth recording
+Removed on purpose: the numeric X/Y/W/H fields and the `Box (0–1000)` readout
+that §8.3 asks for. (§20 put the fields back and §21 took them out again, which
+is recorded there rather than repaired here.) They were built and then taken out, which is worth recording
 rather than quietly reverting. The editor is pointer-first — finger, mouse, pen —
 and a normalized coordinate is an implementation detail of the storage format
 rather than something anybody composes in. Four number boxes and a coordinate
@@ -2294,3 +2294,130 @@ One sentence survives, and it is worth saying why: the 24-region cap, which is a
 fact about something that just failed to happen rather than a description of a
 control somebody is looking at. Clear All lost its sentence, because Undo is
 right there and enabled.
+## 21. Eight things that were wrong with it (26 August 2026)
+
+Section 20 rebuilt the workspace and shipped it. This is what using it for an
+afternoon found, in the order it was reported.
+
+### 21.1 It opened at the bottom of the page
+
+The workspace is the last thing in the extension's accordion, which is the last
+thing on the txt2img tab — several screens down. So the sequence on open was:
+the page is scrolled to wherever somebody was reading, the takeover hides
+everything above the workspace, and the page is now one screen tall with a
+scroll offset measured against the old one. It opened showing its own bottom
+edge and the WebUI footer, with the action bar off the top of the screen.
+
+Two lines, and both halves matter. Opening remembers the offset and scrolls to
+the top — the workspace is the only thing on the tab and its top is the action
+bar. Closing puts the page back exactly where it was, *after* the marks come off
+and the page is its full height again, because coming back from Full Screen to a
+tab scrolled somewhere else is the same lost place by another route.
+
+### 21.2 The reorder handles did not work
+
+The layer rows used HTML5 drag-and-drop — `draggable`, `dragstart`, `dragover`,
+`drop`. That API is mouse-only in practice: a finger produces no drag events at
+all on any mobile browser, and the `touch-action: none` the grip inherited from
+the resize handles suppresses the long-press Android used to synthesise one
+from. It also cannot start a drag without a `dataTransfer` payload nobody reads,
+and some browsers refuse to set one outside a user gesture. The rows looked
+draggable and were not.
+
+§2.3 asks for Pointer Events for all direct manipulation and this was the last
+place in the file that was not, so both ordered lists now run through one
+implementation: press, and a contact that moves more than six pixels is a
+reorder while one that does not is the press it looks like. That threshold is
+what lets a row be *both* "select this" and "move this" without a modifier.
+
+Two details are load-bearing. What a contact is over is read from the items'
+own rectangles rather than from `elementFromPoint`, because the thing being
+dragged is under the contact and would be the answer every time; past either
+end it clamps, so letting go in the empty space under the last row means the end
+of the list rather than nothing. And the `click` the browser sends after a
+`pointerup` is spent: without that, a completed reorder immediately selects the
+row it just moved, or collapses the widget.
+
+### 21.3 The rail had no order of its own
+
+The same gesture, on the rail's widgets, from a grip in each header. A grip and
+not the whole header because the header is wide and gets pressed often, and a
+rail that rearranged itself whenever a finger slid six pixels on the way to
+collapsing something would be a rail nobody trusted.
+
+The order is a session preference like hiding and collapsing (§20 of the
+intent): not serialized, not history. It is stored as a list of keys and filled
+out from the canonical one on read, so a widget added to the rail later appears
+for somebody who has already rearranged the others — at the end, rather than not
+at all. The DOM is only re-ordered when it is actually wrong, because
+`appendChild` on an element already in place still detaches and reattaches it,
+and doing that inside every repaint is a scroll position and a focus lost sixty
+times a second.
+
+### 21.4 Undo turned silhouettes back into boxes
+
+Reported as "drop a person shape, drop another shape, undo, and the person shape
+becomes a plain box". It was worse than reported.
+
+`snapshot()` stringified the live region objects. `restore()` read them back
+through `normalise()`, which is the function that reads a *document* — so it
+looked for `ui_shape` and `ui_rotation` and found `shape` and `rotation`, and
+dropped both. It also looked for `literal_prefix` and `literal_suffix` and found
+`literalPrefix` and `literalSuffix`, so an undo silently emptied both Literal
+boxes of every region as well. That one had been there since the region literal
+fields were added and nobody had caught it.
+
+The fix is that there is now one place a live region becomes a written one —
+`entryFor()` — and both the state box and the undo stack go through it. The two
+tests are named after the bugs and were checked by putting the old snapshot
+back.
+
+### 21.5 A head dropped as a long oval
+
+Normalized coordinates are fractions of the frame *in each axis independently*,
+so 0–1000 across and 0–1000 down describe a square only on a square frame. The
+shape table's proportions are a picture — a head is 0.62 wide by 0.74 tall —
+and using them as normalized numbers on a 2:3 portrait stretched every
+silhouette vertically, because the same fraction is worth more pixels down the
+page than across it.
+
+So a silhouette's proportions are now read as what they are and turned into
+normalized units through the frame's own aspect. A rectangle is not corrected:
+§10.1 says it uses the selected size directly, and "directly" is the size in the
+units the box is stored in. The test asserts the *visual* aspect on two
+differently-shaped frames rather than the stored numbers, which is the only form
+of the assertion that would have failed before.
+
+### 21.6 There was no way from a shape to its words
+
+Double-clicking a region — on the canvas or on the selection proxy — selects it,
+opens the Inspector if it is hidden or collapsed, and puts the cursor in its
+prompt. It is the only listener on the frame that is not a pointer event, and
+that is deliberate: a double-click is a gesture Pointer Events does not report,
+it is *read* rather than driven, and nothing about moving, resizing or drawing
+depends on it.
+
+### 21.7 The coordinates went, for the third time
+
+They were built for §15, removed in §15.7, asked for again by §8.3 and rebuilt
+in §20, and asked to go again. They are gone: the four number boxes, and the
+`280×305` on each layer row that was the same information by another name.
+
+Recorded rather than quietly reverted, because the round trip is the useful
+part. The objection §15.7 raised was about *space* — they were the two widest
+things in a sidebar whose job was the prompt — and §20 answered that objection
+by putting them in a widget that collapses in a column that scrolls. The
+objection that actually stands is the other one in that paragraph: a normalized
+coordinate is an implementation detail of the storage format, and a number box
+invites people to think in a unit the picture does not have. Nothing about
+validation changed. What is gone is the way of typing one.
+
+### 21.8 The rail is bounded, and says so
+
+`overflow-y: auto` does nothing without a height to overflow. `min-height: 0`
+was already there, stopping the flex default of "at least as tall as my
+content"; `max-height: 100%` is what stops six open widgets outgrowing the body
+on a browser that stretches the item anyway. The stylesheet test asks for both
+by name now, because neither is visible in a fake DOM and the failure is a rail
+that pushes the canvas off the screen — which is the one thing §12.1 exists to
+prevent.

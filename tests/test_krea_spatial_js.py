@@ -451,8 +451,16 @@ let generatePresses = 0;
 generate.addEventListener = function () { generateListeners += 1; };
 generate.click = function () { generatePresses += 1; };
 
+// A page with a scroll position, because the takeover changes how tall the
+// page is and the workspace's job on the way in and the way out is to leave
+// somebody looking at the right part of it.
+const sheet = new El("html");
+sheet.scrollTop = 0;
+
 globalThis.document = {
     body: body,
+    documentElement: sheet,
+    scrollingElement: sheet,
     dataset: {},
     readyState: "complete",
     createElement: (tag) => new El(tag),
@@ -464,6 +472,9 @@ globalThis.document = {
 const docListeners = {};
 
 globalThis.window = globalThis;
+globalThis.scrollTo = (_x, top) => { sheet.scrollTop = top; };
+globalThis.pageYOffset = 0;
+function pageTop() { return sheet.scrollTop; }
 if (POINTERS) globalThis.PointerEvent = function () {};
 globalThis.gradioApp = () => globalThis.document;
 globalThis.Event = function (type) { this.type = type; this.bubbles = true; };
@@ -599,6 +610,43 @@ function inList(target) {
 
 function clickRow(index) {
     inList(rows()[index]);
+}
+
+// One reorder gesture, on either list. The items are given boxes first --
+// 40px tall, stacked from the top -- because the file works out what a contact
+// is over from the items' own rectangles rather than from elementFromPoint,
+// and a fake DOM hands every element the same default box.
+function laid(kind) {
+    const items = kind === "row"
+        ? rows()
+        : el("mc-krea-spatial-rail")
+            .querySelectorAll(".mc-krea-spatial-widget")
+            .filter((entry) => !entry.hidden);
+    items.forEach(function (element, at) {
+        element._rect = {left: 0, top: at * 40, width: 300, height: 40};
+    });
+    return items;
+}
+
+function slide(kind, from, to) {
+    const items = laid(kind);
+    const holder = el(kind === "row" ? "mc-krea-spatial-list" : "mc-krea-spatial-rail");
+    const source = kind === "row" ? items[from]
+        : items[from].querySelector(".mc-krea-spatial-widget-grip");
+    // Past the middle of the target, on the side the move is going, which is
+    // where a hand actually lets go.
+    const landing = to * 40 + (to > from ? 30 : 10);
+    holder.dispatchEvent({type: "pointerdown", target: source, pointerId: 9,
+                          button: 0, clientY: from * 40 + 20, preventDefault() {}});
+    holder.dispatchEvent({type: "pointermove", target: source, pointerId: 9,
+                          clientY: landing, preventDefault() {}});
+    holder.dispatchEvent({type: "pointerup", target: source, pointerId: 9,
+                          clientY: landing, preventDefault() {}});
+    laid(kind);
+}
+
+function railOrder() {
+    return ks.panelOrder();
 }
 
 // The list's own keydown, delegated the same way its clicks are: Alt with an
@@ -831,12 +879,18 @@ class TestOnePointerPath:
     document-wide mousemove/mouseup gone with it."""
 
     def test_the_frame_listens_for_pointer_events(self):
+        """Four pointer kinds and a dblclick, which is not a fifth input path:
+        a double-click is a gesture Pointer Events does not report, and it is
+        read rather than driven -- nothing about moving, resizing or drawing
+        depends on it."""
         found = run("""
             report({kinds: Object.keys(canvas._listeners).sort()});
         """, initial=document())
 
-        assert found["kinds"] == ["pointercancel", "pointerdown", "pointermove",
-                                  "pointerup"]
+        assert found["kinds"] == ["dblclick", "pointercancel", "pointerdown",
+                                  "pointermove", "pointerup"]
+        assert "mousedown" not in found["kinds"]
+        assert "mousemove" not in found["kinds"]
 
     def test_a_browser_without_pointer_events_still_gets_a_mouse_path(self):
         """Deliberately the old path and not a second maintained one: modern
@@ -1189,13 +1243,20 @@ class TestTheRegionList:
         assert found["rows"] == ["a", "b"]
         assert [region["id"] for region in found["regions"]] == ["a", "b"]
 
-    def test_every_row_can_be_picked_up(self):
+    def test_a_row_is_picked_up_by_a_pointer_and_not_by_an_api(self):
+        """§2.3. The rows used to be HTML5 `draggable`, which is mouse-only in
+        practice -- a finger produces no drag events at all, and the grip's own
+        `touch-action: none` suppressed the long-press Android used to
+        synthesise one from. The rows looked draggable and were not."""
         found = run("""
             ks.open();
-            report({draggable: rows().map((row) => row.draggable)});
+            report({draggable: rows().map((row) => row.draggable),
+                    kinds: Object.keys(el("mc-krea-spatial-list")._listeners).sort()});
         """, initial=document(BURIED))
 
-        assert found["draggable"] == [True, True]
+        assert found["draggable"] == [None, None]
+        assert found["kinds"] == ["click", "keydown", "pointercancel",
+                                  "pointerdown", "pointermove", "pointerup"]
 
     def test_touching_a_row_selects_without_touching_the_frame(self):
         found = run("""
@@ -1459,23 +1520,38 @@ class TestTheInspector:
         assert region["framing"] == "Wide shot"
         assert region["angle"] == "Low angle"
 
-    def test_the_coordinates_are_four_labelled_fields_and_no_readout(self):
-        """The numeric BBOX was built, taken out, and asked for again.
+    def test_the_editor_offers_no_coordinates_anywhere(self):
+        """§8.3 offers numeric X/Y/W/H. They are not here, for the third and
+        final time, and the round trip is why this test names them.
 
-        It was removed because four number boxes and a `Box (0-1000)` readout
-        invited people to think in a unit the picture does not have, and were
-        the two widest things in a sidebar whose job was the prompt. §8.3 asks
-        for it back, and the rail is why the objection no longer holds: the
-        four fields are in a widget that collapses, in a column that scrolls,
-        neither of them costing the canvas anything. What has not come back is
-        the readout -- a line of coordinates nobody typed into.
+        Boxes are placed with a finger, a mouse or a pen. A normalized
+        coordinate is an implementation detail of the storage format rather
+        than something anybody composes in, and a number box invites people to
+        think in a unit the picture does not have. Nothing about validation
+        changed -- boxes are still clamped and ordered exactly as before. What
+        is gone is the way of typing one, and the way of reading one off a
+        layer row.
         """
         markup = _markup()
+        emitted = {identifier for _tag, identifier in editor_elements()}
+        gone = {"mc-krea-spatial-" + name for name in
+                ("x", "y", "w", "h", "bbox", "bbox-x", "bbox-y", "bbox-w",
+                 "bbox-h")}
 
+        assert emitted & gone == set()
         assert "0\u20131000" not in markup
         assert "0-1000" not in markup
-        for name in ("bbox-x", "bbox-y", "bbox-w", "bbox-h"):
-            assert f'id="mc-krea-spatial-{name}"' in markup
+        assert 'type="number"' not in markup.split("mc-krea-spatial-panel-session")[0]
+
+    def test_a_layer_row_names_a_region_rather_than_measuring_it(self):
+        found = run("""
+            ks.open();
+            report({row: rows()[0].textContent});
+        """, initial=document())
+
+        assert "280" not in found["row"]
+        assert "×" not in found["row"]
+        assert "Face" in found["row"]
 
     def test_the_inspector_empties_when_the_selection_goes(self):
         """An inspector still saying "Text" and describing a text region after
@@ -2139,8 +2215,8 @@ class TestTheMarkupAndTheFileAgree:
             "show-gallery", "show-session",
             # §13, §9, §15, §16 and §17.
             "scene", "literal-plus", "literal-minus", "creative", "person",
-            "shape", "rotation", "rotation-field", "bbox-x", "bbox-y",
-            "bbox-w", "bbox-h", "shot", "shot-previous", "shot-next",
+            "shape", "rotation", "rotation-field",
+            "shot", "shot-previous", "shot-next",
             "generate", "progress", "fact-frame", "fact-ratio", "fact-regions",
             "fact-pipeline", "fact-state", "size-width", "size-height",
         }
@@ -2299,10 +2375,43 @@ class TestQuickAdd:
         assert region["shape"] == "head"
         assert region["prompt"] == "head"
         assert region["rotation"] == 0
-        # Centred, and taller than it is wide the way a head is.
         assert abs((left + right) / 2 - 500) < 60
         assert abs((top + bottom) / 2 - 500) < 60
-        assert bottom - top > right - left
+        # Taller than it is wide *on screen*, which is not the same thing as
+        # taller than it is wide in normalized units. The frame here is
+        # 1024x1344, so a fraction of it is worth more pixels down the page
+        # than across it, and a head whose stored numbers looked like a head
+        # would arrive as a long oval.
+        across = (right - left) / 1000 * 1024
+        down = (bottom - top) / 1000 * 1344
+
+        assert down > across
+        assert abs(across / down - 0.62 / 0.74) < 0.03
+
+    def test_a_silhouette_keeps_its_proportions_on_any_frame(self):
+        """The same head, on a square frame and on a tall one, is the same
+        picture. Only the numbers behind it differ."""
+        found = run("""
+            width.value = "1024"; height.value = "1024";
+            ks.open();
+            ks.clear();
+            place("head", null);
+            const square = ks.ordered()[0].bbox.slice();
+            ks.close();
+            width.value = "1024"; height.value = "1536";
+            ks.open();
+            ks.clear();
+            place("head", null);
+            report({square: square, tall: ks.ordered()[0].bbox.slice()});
+        """, initial=document())
+
+        def picture(bbox, frame_w, frame_h):
+            wide = (bbox[2] - bbox[0]) / 1000 * frame_w
+            high = (bbox[3] - bbox[1]) / 1000 * frame_h
+            return wide / high
+
+        assert abs(picture(found["square"], 1024, 1024)
+                   - picture(found["tall"], 1024, 1536)) < 0.02
 
     def test_a_tap_does_not_take_the_focus_off_the_canvas_for_a_person_part(self):
         """§10.2: a silhouette arrives with a usable prompt already in it, so
@@ -2528,6 +2637,48 @@ class TestTheEditorMetadata:
         assert found["regions"][0]["shape"] == "rect"
         assert found["regions"][0]["rotation"] == 20
         assert found["regions"][0]["bbox"] == [35, 55, 315, 360]
+
+    def test_undo_gives_a_silhouette_back_as_a_silhouette(self):
+        """The bug this test is named after: a snapshot stringified the live
+        region objects, and restoring one ran them back through the reader that
+        speaks the *document's* field names. `shape` and `rotation` are not
+        `ui_shape` and `ui_rotation`, so every silhouette on the canvas turned
+        into a plain box the first time anybody pressed Undo."""
+        found = run("""
+            ks.open();
+            ks.clear();
+            place("left_arm", [300, 400]);
+            commit("mc-krea-spatial-rotation", "35");
+            place("rect", null);
+            press("mc-krea-spatial-undo");
+            report();
+        """, initial=document())
+
+        arm = found["regions"][0]
+
+        assert len(found["regions"]) == 1
+        assert arm["shape"] == "left_arm"
+        assert arm["rotation"] == 35
+        assert arm["prompt"] == "left arm"
+
+    def test_undo_gives_a_region_its_literal_fields_back_too(self):
+        """The same defect, on the fields that met it first: the snapshot said
+        `literalPrefix` and the reader wanted `literal_prefix`, so an undo
+        emptied both boxes of every region it touched."""
+        found = run("""
+            ks.open();
+            commit("mc-krea-spatial-literal-prefix", "<lora:krea2:1>");
+            commit("mc-krea-spatial-literal-suffix", "__grain__");
+            place("rect", null);
+            press("mc-krea-spatial-undo");
+            press("mc-krea-spatial-save");
+            report({document: saved()});
+        """, initial=document())
+
+        entry = found["document"]["regions"][0]
+
+        assert entry["literal_prefix"] == "<lora:krea2:1>"
+        assert entry["literal_suffix"] == "__grain__"
 
     def test_the_names_are_numbers(self):
         """§6.1. "Region 4" is the word "region" on every row of a panel called
@@ -2873,69 +3024,288 @@ class TestTheSessionWidget:
 
 
 # --------------------------------------------------------------------------- #
-# Numeric geometry
+# Where the page is, on the way in and on the way out
 # --------------------------------------------------------------------------- #
 
 
-class TestTheNumericBbox:
-    """§8.3. The canvas writes these and these write the canvas."""
+class TestTheScrollPosition:
+    """The workspace is the last thing in the extension's accordion, which is
+    the last thing on the txt2img tab -- several screens down. So the moment
+    before the takeover hides everything above it, the page is scrolled to
+    wherever somebody was reading, and the moment after, that offset is measured
+    against a page one screen tall: the workspace opens showing its bottom edge
+    and the WebUI footer, with the action bar off the top."""
 
-    def test_the_four_boxes_show_the_selected_region(self):
+    def test_opening_shows_the_action_bar(self):
         found = run("""
+            scrollTo(0, 4000);
             ks.open();
-            report({x: el("mc-krea-spatial-bbox-x").value,
-                    y: el("mc-krea-spatial-bbox-y").value,
-                    w: el("mc-krea-spatial-bbox-w").value,
-                    h: el("mc-krea-spatial-bbox-h").value});
+            report({at: pageTop()});
         """, initial=document())
 
-        assert [found["x"], found["y"], found["w"], found["h"]] == [
-            "35", "55", "280", "305"]
+        assert found["at"] == 0
 
-    def test_typing_a_width_moves_the_edge(self):
+    def test_closing_puts_the_page_back_where_it_was(self):
+        """Coming back from Full Screen to a tab scrolled somewhere else is the
+        same lost place by another route."""
+        found = run("""
+            scrollTo(0, 4000);
+            ks.open();
+            press("mc-krea-spatial-cancel");
+            report({at: pageTop()});
+        """, initial=document())
+
+        assert found["open"] is False
+        assert found["at"] == 4000
+
+    def test_discarding_puts_it_back_too(self):
+        found = run("""
+            scrollTo(0, 2500);
+            ks.open();
+            draw([100, 200], [400, 600]);
+            press("mc-krea-spatial-cancel");
+            press("mc-krea-spatial-discard");
+            report({at: pageTop()});
+        """, initial=document())
+
+        assert found["open"] is False
+        assert found["at"] == 2500
+
+    def test_saving_does_not_move_the_page_because_it_does_not_close(self):
+        found = run("""
+            scrollTo(0, 4000);
+            ks.open();
+            draw([100, 200], [400, 600]);
+            press("mc-krea-spatial-save");
+            report({at: pageTop()});
+        """, initial=document())
+
+        assert found["open"] is True
+        assert found["at"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Reordering, by the one pointer path
+# --------------------------------------------------------------------------- #
+
+
+THREE = [dict(FACE, id="a", name="A", z=0), dict(FACE, id="b", name="B", z=1),
+         dict(FACE, id="c", name="C", z=2)]
+
+
+class TestReorderingByPointer:
+    """§2.3 and §14.1. The rows used to be HTML5 `draggable`, which a finger
+    cannot start and which the grip's own `touch-action: none` suppressed the
+    long-press fallback for. One pointer path now, and the threshold between a
+    press and a slide is what lets a row be both "select this" and "move this"
+    without a modifier."""
+
+    def test_dragging_a_row_down_moves_it_down(self):
         found = run("""
             ks.open();
-            commit("mc-krea-spatial-bbox-w", "500");
+            slide("row", 0, 2);
             report();
-        """, initial=document())
+        """, initial=document(THREE))
 
-        assert found["regions"][0]["bbox"] == [35, 55, 535, 360]
+        assert [region["id"] for region in found["regions"]] == ["b", "c", "a"]
 
-    def test_a_drag_writes_the_numbers_back(self):
+    def test_dragging_a_row_up_moves_it_up(self):
         found = run("""
             ks.open();
-            drag([100, 100], [200, 150], proxy());
-            report({x: el("mc-krea-spatial-bbox-x").value,
-                    y: el("mc-krea-spatial-bbox-y").value});
-        """, initial=document())
-
-        assert [found["x"], found["y"]] == ["135", "105"]
-
-    def test_a_number_that_cannot_make_a_box_is_clamped_rather_than_applied(self):
-        """§26: reject or clamp safely, and never leave the field showing a
-        number the layout does not hold."""
-        found = run("""
-            ks.open();
-            commit("mc-krea-spatial-bbox-w", "0");
-            report({w: el("mc-krea-spatial-bbox-w").value});
-        """, initial=document())
-
-        left, _top, right, _bottom = found["regions"][0]["bbox"]
-
-        assert right - left >= 8
-        assert found["w"] == str(right - left)
-
-    def test_one_history_entry_per_burst_of_numbers(self):
-        found = run("""
-            ks.open();
-            const box = el("mc-krea-spatial-bbox-w");
-            box.value = "300"; box.dispatchEvent({type: "input", target: box});
-            box.value = "320"; box.dispatchEvent({type: "input", target: box});
-            box.value = "340"; box.dispatchEvent({type: "input", target: box});
+            slide("row", 2, 0);
             report();
+        """, initial=document(THREE))
+
+        assert [region["id"] for region in found["regions"]] == ["c", "a", "b"]
+
+    def test_a_press_that_does_not_move_selects_instead(self):
+        found = run("""
+            ks.open();
+            const row = rows()[0];
+            const list = el("mc-krea-spatial-list");
+            list.dispatchEvent({type: "pointerdown", target: row, pointerId: 7,
+                                clientY: 10, button: 0, preventDefault() {}});
+            list.dispatchEvent({type: "pointerup", target: row, pointerId: 7,
+                                clientY: 12, preventDefault() {}});
+            inList(row);
+            report();
+        """, initial=document(THREE))
+
+        assert found["selected"] == "a"
+        assert [region["id"] for region in found["regions"]] == ["a", "b", "c"]
+
+    def test_the_click_a_completed_drag_leaves_behind_is_spent(self):
+        """A pointerup is followed by a click, and that click would select the
+        row that was just moved -- or collapse the widget. Same gesture, already
+        answered."""
+        found = run("""
+            ks.open();
+            ks.select("c");
+            slide("row", 0, 2);
+            const after = ks.state.selected;
+            inList(rows()[0]);
+            report({after: after});
+        """, initial=document(THREE))
+
+        assert found["after"] == "c"
+        assert found["selected"] == "c"
+
+    def test_a_reorder_is_one_history_entry_and_undoes(self):
+        found = run("""
+            ks.open();
+            slide("row", 0, 2);
+            const moved = ks.ordered().map((r) => r.id);
+            press("mc-krea-spatial-undo");
+            report({moved: moved});
+        """, initial=document(THREE))
+
+        assert found["moved"] == ["b", "c", "a"]
+        assert [region["id"] for region in found["regions"]] == ["a", "b", "c"]
+        assert found["past"] == 0
+
+    def test_a_cancelled_drag_reorders_nothing(self):
+        found = run("""
+            ks.open();
+            const list = el("mc-krea-spatial-list");
+            list.dispatchEvent({type: "pointerdown", target: rows()[0], pointerId: 7,
+                                clientY: 10, button: 0, preventDefault() {}});
+            list.dispatchEvent({type: "pointermove", target: rows()[0], pointerId: 7,
+                                clientY: 250, preventDefault() {}});
+            list.dispatchEvent({type: "pointercancel", target: rows()[0], pointerId: 7,
+                                preventDefault() {}});
+            report({marks: rows().filter((row) =>
+                        row.classList.contains("dragging")).length});
+        """, initial=document(THREE))
+
+        assert [region["id"] for region in found["regions"]] == ["a", "b", "c"]
+        assert found["marks"] == 0
+
+    def test_the_trash_button_is_not_a_drag_handle(self):
+        found = run("""
+            ks.open();
+            const list = el("mc-krea-spatial-list");
+            const trash = rows()[0].querySelector(".mc-krea-spatial-row-trash");
+            list.dispatchEvent({type: "pointerdown", target: trash, pointerId: 7,
+                                clientY: 10, button: 0, preventDefault() {}});
+            report({carrying: !!ks.state.carrying});
+        """, initial=document(THREE))
+
+        assert found["carrying"] is False
+
+
+class TestReorderingTheRail:
+    """§12 makes the rail a set of optional tools rather than a fixed panel, so
+    which of them is nearest the canvas is a preference like collapsing one."""
+
+    def test_a_widget_can_be_dragged_up_the_rail(self):
+        found = run("""
+            ks.open();
+            slide("panel", 4, 0);
+            report({order: railOrder()});
         """, initial=document())
 
-        assert found["past"] == 1
+        assert found["order"][0] == "gallery"
+        assert found["order"] == ["gallery", "prompts", "person", "layers",
+                                  "inspector", "session"]
+
+    def test_the_dom_follows_the_order(self):
+        found = run("""
+            ks.open();
+            ks.movePanel("session", "prompts", true);
+            report({order: railOrder(),
+                    dom: el("mc-krea-spatial-rail")
+                        .querySelectorAll(".mc-krea-spatial-widget")
+                        .map((entry) => entry.dataset.panel)});
+        """, initial=document())
+
+        assert found["order"][0] == "session"
+        assert found["dom"] == found["order"]
+
+    def test_only_the_grip_starts_a_drag(self):
+        """The header is wide and gets pressed often. A rail that rearranged
+        itself whenever a finger slid six pixels on the way to collapsing
+        something would be a rail nobody trusted."""
+        found = run("""
+            ks.open();
+            const rail = el("mc-krea-spatial-rail");
+            const head = el("mc-krea-spatial-panel-layers")
+                .querySelector(".mc-krea-spatial-widget-head");
+            rail.dispatchEvent({type: "pointerdown", target: head, pointerId: 8,
+                                clientY: 10, button: 0, preventDefault() {}});
+            report({carrying: !!ks.state.carrying});
+        """, initial=document())
+
+        assert found["carrying"] is False
+
+    def test_the_order_is_a_preference_and_not_layout_history(self):
+        found = run("""
+            ks.open();
+            const before = ks.serialize();
+            ks.movePanel("gallery", "prompts", true);
+            report({same: ks.serialize() === before});
+        """, initial=document())
+
+        assert found["same"] is True
+        assert found["past"] == 0
+        assert found["published"] == 0
+
+    def test_a_widget_the_rail_grows_appears_for_somebody_who_rearranged(self):
+        """The stored order is filled out from the canonical list, so a widget
+        added later shows up at the end rather than not at all."""
+        found = run("""
+            ks.open();
+            ks.state.order = ["session", "layers"];
+            report({order: ks.panelOrder()});
+        """, initial=document())
+
+        assert found["order"][:2] == ["session", "layers"]
+        assert sorted(found["order"]) == sorted(
+            ["prompts", "person", "layers", "inspector", "gallery", "session"])
+
+
+# --------------------------------------------------------------------------- #
+# Straight from the shape to its words
+# --------------------------------------------------------------------------- #
+
+
+class TestDoubleClickToDescribe:
+    def test_double_clicking_a_region_opens_its_prompt(self):
+        found = run("""
+            ks.open();
+            ks.select("");
+            ks.panelCollapse("inspector", true);
+            const region = body.querySelectorAll(".mc-krea-spatial-region")[0];
+            canvas.dispatchEvent({type: "dblclick", target: region,
+                                  preventDefault() {}});
+            report({open: panelOpen("inspector"),
+                    focused: !!el("mc-krea-spatial-prompt").focused});
+        """, initial=document())
+
+        assert found["selected"] == "r1"
+        assert found["open"] is True
+        assert found["focused"] is True
+
+    def test_double_clicking_the_selection_proxy_does_the_same(self):
+        found = run("""
+            ks.open();
+            canvas.dispatchEvent({type: "dblclick", target: proxy(),
+                                  preventDefault() {}});
+            report({focused: !!el("mc-krea-spatial-prompt").focused});
+        """, initial=document())
+
+        assert found["focused"] is True
+
+    def test_double_clicking_bare_canvas_does_nothing(self):
+        found = run("""
+            ks.open();
+            ks.select("");
+            canvas.dispatchEvent({type: "dblclick", target: canvas,
+                                  preventDefault() {}});
+            report({focused: !!el("mc-krea-spatial-prompt").focused});
+        """, initial=document())
+
+        assert found["selected"] == ""
+        assert found["focused"] is False
 
 
 # --------------------------------------------------------------------------- #
@@ -3048,7 +3418,12 @@ class TestTheWorkspaceStylesheet:
         rail = section.split(".mc-krea-spatial-rail {", 1)[1].split("}", 1)[0]
 
         assert "overflow-y: auto" in rail
+        # Bounded, or overflow-y has nothing to do: min-height stops the flex
+        # default of "at least as tall as my content", and max-height stops a
+        # rail of six open widgets outgrowing the body on a browser that
+        # stretches it anyway.
         assert "min-height: 0" in rail
+        assert "max-height: 100%" in rail
 
         body = section.split(".mc-krea-spatial-body {", 1)[1].split("}", 1)[0]
 

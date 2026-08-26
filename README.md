@@ -1812,8 +1812,9 @@ achieve it.
 
 The frame is the shape of the image you are about to make, and follows the
 generation size while you work. The rail scrolls on its own; every widget in it
-collapses from its own header and can be switched off entirely from **Panels**,
-so nothing you open in it ever costs the canvas a pixel.
+collapses from its own header, can be switched off entirely from **Panels**, and
+can be dragged by the grip in its header to sit wherever you want it in the
+rail. Nothing you open in it ever costs the canvas a pixel.
 
 | | |
 | --- | --- |
@@ -1821,8 +1822,9 @@ so nothing you open in it ever costs the canvas a pixel.
 | **Draw** then drag | a region at exactly the bounds you dragged, selected, with the cursor already in its prompt box. One region, then Draw switches itself off |
 | **Clear All** | removes every region in one action — and one **Undo** brings them all back, which is why it does not stop to ask |
 | drag a box / drag a corner | move it / resize it, with eight handles and hit targets that grow on a touch screen |
+| **double-click a box** | opens the Inspector and puts the cursor in that region's prompt |
 | **Panels ▾** | which widgets are in the rail, plus Collapse All and Expand Visible |
-| **Save** / **Close** | Save commits and *stays open*; Close asks before discarding anything unsaved, and never saves silently |
+| **Save** / **Close** | Save commits and *stays open*; Close asks before discarding anything unsaved, and never saves silently. Close puts the tab back exactly where you left it |
 | **Escape** | closes a menu, then abandons a gesture, then offers to close the workspace |
 | arrows / **Delete** / **Ctrl+Z** | nudge, delete, undo — with the canvas focused |
 
@@ -1832,15 +1834,16 @@ so nothing you open in it ever costs the canvas a pixel.
 | --- | --- |
 | **Prompts** | your **Prompt**, **Literal +** and **Literal −** — the same boxes as the ones on the tab, not copies of them. Type in either place and the other follows |
 | **Person** | a segmented figure whose head, chest, waist, arms, hands, legs and feet can each be dragged onto the canvas on their own. Each part arrives with its own words already in its prompt |
-| **Layers** | every region in prompt order, draggable to reorder (or Alt+↑/↓), with Duplicate, Back, Front and Delete |
-| **Inspector** | the selected region: name, shape, type, prompt, Literal + / −, framing, camera angle, rotation, the four BBOX numbers and the position-hint switch |
+| **Layers** | every region in prompt order. Drag a row to reorder it (or Alt+↑/↓ with a row focused), tap one to select it, and Duplicate, Back, Front and Delete for the rest |
+| **Inspector** | the selected region: name, shape, type, prompt, Literal + / −, framing, camera angle, rotation and the position-hint switch. No coordinates — boxes are placed with a finger, a mouse or a pen |
 | **Gallery** | the tab's own results, with Previous, Next and **Generate**. Generate presses the ordinary txt2img button, so you can generate, look, change a box and generate again without ever leaving |
 | **Session** | frame, ratio, region count, which pipeline is armed, and whether the working layout is saved — plus **Width** and **Height** if you want to change the shape from here |
 
 #### Silhouettes are a drawing, not a mask
 
 A region placed from **Person** or from Quick Add's Head/Chest/Waist looks like
-what it is, and can be rotated from the Inspector so a raised arm looks raised.
+what it is — in the right proportions whatever shape your frame is — and can be
+rotated from the Inspector so a raised arm looks raised.
 None of that reaches the model. Every region — silhouette or not, rotated or
 not — is still one axis-aligned rectangle in normalized coordinates, and that
 rectangle is what Krea 2 is given. Rotating a shape does not rotate its box, and

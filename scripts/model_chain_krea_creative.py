@@ -581,6 +581,12 @@ def _widget(key: str, label: str, head_extra: str, body: str) -> str:
     heading with a listener bolted to it. Whatever live number belongs beside
     the name -- a region count, an image position -- rides in ``head_extra``,
     which is the only thing §2.2 lets a header say beyond its own name.
+
+    The grip is where a widget is dragged to reorder the rail, and it is a
+    separate target from the rest of the header for one reason: the header is
+    wide and gets pressed often, and a rail that rearranged itself whenever
+    somebody's finger slid six pixels on the way to collapsing something would
+    be a rail nobody trusted. Grip to move, header to collapse.
     """
     return f'''
       <section class="{SPATIAL_PREFIX}-widget" data-panel="{key}"
@@ -588,6 +594,7 @@ def _widget(key: str, label: str, head_extra: str, body: str) -> str:
         <button type="button" class="{SPATIAL_PREFIX}-widget-head"
                 data-panel="{key}" aria-expanded="true"
                 aria-controls="{_spatial_id("panel", key, "body")}">
+          <span class="{SPATIAL_PREFIX}-widget-grip" aria-hidden="true">&#10287;</span>
           <span class="{SPATIAL_PREFIX}-caret" aria-hidden="true"></span>
           <span class="{SPATIAL_PREFIX}-widget-name">{label}</span>
           {head_extra}
@@ -632,6 +639,18 @@ def spatial_editor() -> str:
     the theme it is standing in, it cannot be clipped out of existence by a
     container it is no longer escaping, and on a phone it is a page rather than
     a window over one.
+
+    No coordinates
+    --------------
+    §8.3 offers numeric X/Y/W/H, and they are not here. They were built once,
+    removed, built again with the rail underneath them, and removed again --
+    which is worth recording rather than quietly reverting a third time. The
+    editor is pointer-first: a normalized coordinate is an implementation
+    detail of the storage format rather than something anybody composes in, and
+    four number boxes and a coordinate readout invite people to think in a unit
+    the picture does not have. Boxes are still clamped, ordered and validated
+    exactly as before; what is gone is the way of typing one, and the way of
+    reading one off a layer row.
 
     Nothing here explains itself
     ----------------------------
@@ -859,28 +878,6 @@ def spatial_editor() -> str:
           <input type="range" id="{_spatial_id("rotation")}"
                  min="-180" max="180" step="1" value="0" />
         </label>
-        <div class="{SPATIAL_PREFIX}-bbox" role="group" aria-label="BBOX">
-          <label class="{SPATIAL_PREFIX}-field">
-            <span>X</span>
-            <input type="number" id="{_spatial_id("bbox", "x")}"
-                   min="0" max="1000" step="1" />
-          </label>
-          <label class="{SPATIAL_PREFIX}-field">
-            <span>Y</span>
-            <input type="number" id="{_spatial_id("bbox", "y")}"
-                   min="0" max="1000" step="1" />
-          </label>
-          <label class="{SPATIAL_PREFIX}-field">
-            <span>W</span>
-            <input type="number" id="{_spatial_id("bbox", "w")}"
-                   min="1" max="1000" step="1" />
-          </label>
-          <label class="{SPATIAL_PREFIX}-field">
-            <span>H</span>
-            <input type="number" id="{_spatial_id("bbox", "h")}"
-                   min="1" max="1000" step="1" />
-          </label>
-        </div>
         <label class="{SPATIAL_PREFIX}-check">
           <input type="checkbox" id="{_spatial_id("auto-hint")}" checked />
           <span>Position and size hints</span>
