@@ -48,6 +48,13 @@
 
     const ECHO = P + "-prompt-echo";
 
+    // Written by mc_pipeline_panel: the class on every disclosure this
+    // extension builds, and the two this file puts on a card whose header it
+    // has been able to furnish.
+    const DRAWER = P + "-drawer";
+    const CARD_HEAD = P + "-card-head";
+    const CARDED = P + "-carded";
+
     // The Literal Prompt boxes. Read from here rather than reported by them,
     // because the note has exactly one writer and this is it -- two files
     // writing one element is how a line ends up alternating between two truths
@@ -298,6 +305,184 @@
     }
 
     // ------------------------------------------------------------------ //
+    // The stage cards -- one disclosure, furnished
+    // ------------------------------------------------------------------ //
+    //
+    // Gradio gives an Accordion a plain string for a label, so a header that
+    // carries a live summary and an enable switch cannot be built in Python.
+    // It is built beside the accordion and moved into the header here.
+    //
+    // This is presentation and is allowed to fail. If a Gradio version renders
+    // a header this cannot recognise, nothing is moved, no class is added, no
+    // rule in the stylesheet matches, and the card falls back to name / summary
+    // / switch stacked in ordinary flow -- which is the panel as it was before
+    // this ran, with every control working. That is the only acceptable failure
+    // mode for a file whose whole job is where things are drawn.
+    //
+    // The header is found without naming a single Gradio class. An Accordion's
+    // disclosure is its first element child and it is the thing that carries
+    // the click handler, so it is recognised by what it *is* -- a button, or an
+    // element that says whether it is expanded -- rather than by what a Svelte
+    // component happened to call it. A version that renders something else gets
+    // no header, no class, and the fallback layout.
+    //
+    // Deliberately not a querySelector for a button anywhere inside: the first
+    // button inside an accordion that has no header button is a button in its
+    // *body*, and furnishing that would move the switch into the settings.
+
+    function headerOf(accordion) {
+        if (!accordion) return null;
+        const first = accordion.firstElementChild;
+        if (!first) return null;
+        if (first.tagName === "BUTTON") return first;
+        if (first.getAttribute && first.getAttribute("aria-expanded") !== null) {
+            return first;
+        }
+        return null;
+    }
+
+    // A click on the switch must arm the stage and not also open the card it is
+    // sitting on. The switch is inside the header's own click target once it
+    // has been moved there, so the event is stopped at the switch rather than
+    // the header being taught about exceptions.
+    function keepToItself(element) {
+        if (!element || element.dataset.mcPipelineOwn) return;
+        element.dataset.mcPipelineOwn = "1";
+        ["click", "keydown", "pointerdown"].forEach(function (kind) {
+            element.addEventListener(kind, function (event) {
+                event.stopPropagation();
+            });
+        });
+    }
+
+    function furnish(stage) {
+        const card = rowFor(stage);
+        const accordion = byId(P + "-editor-" + stage);
+        const header = headerOf(accordion);
+        if (!card || !header) return;
+
+        if (!header.classList.contains(CARD_HEAD)) {
+            header.classList.add(CARD_HEAD);
+            // The name and the chevron Gradio already put in the header, named
+            // by this extension so that the stylesheet never has to.
+            Array.prototype.slice.call(header.children).forEach(function (child, at) {
+                child.classList.add(at === 0 ? P + "-name" : P + "-chev");
+            });
+        }
+
+        const summary = byId(P + "-summary-" + stage);
+        const control = byId(P + "-switch-" + stage);
+        if (summary && summary.parentNode !== header) header.appendChild(summary);
+        if (control && control.parentNode !== header) header.appendChild(control);
+        keepToItself(control);
+        card.classList.add(CARDED);
+    }
+
+    function furnishCards() {
+        ORDER.forEach(function (stage) {
+            try {
+                furnish(stage);
+            } catch (error) {
+                console.error("Model Chain: the " + stage + " card header was left "
+                              + "as Gradio drew it", error);
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------ //
+    // What was opened stays opened
+    // ------------------------------------------------------------------ //
+    //
+    // Every drawer this extension builds starts closed, which is the right
+    // default exactly once. After that, a tab that folds everything away again
+    // on every reload is a tab somebody has to re-open four drawers in before
+    // they can carry on.
+    //
+    // So the open ones are remembered, by element id, in localStorage -- a
+    // per-browser preference about furniture, which is what it is. Nothing
+    // about a generation is stored here and nothing here is ever sent
+    // anywhere: if the whole store is lost, every drawer is closed and one
+    // press opens the one that was wanted.
+    //
+    // Restoring is a *click*, not a class. Gradio owns whether an accordion is
+    // open and re-renders it from its own state; setting the class would leave
+    // the two disagreeing at the first update. Pressing the header is the same
+    // thing the user would have done.
+
+    const REMEMBERED = "modelChainOpenDrawers";
+
+    function opened() {
+        try {
+            const said = window.localStorage.getItem(REMEMBERED);
+            const read = said ? JSON.parse(said) : null;
+            return read && typeof read === "object" ? read : {};
+        } catch (error) {
+            // Private browsing, a blocked store, a value somebody edited by
+            // hand. Every one of them means "no preferences", which is the
+            // state this shipped in.
+            return {};
+        }
+    }
+
+    function remember(id, open) {
+        try {
+            const found = opened();
+            if (open) found[id] = 1;
+            else delete found[id];
+            window.localStorage.setItem(REMEMBERED, JSON.stringify(found));
+        } catch (error) {
+            // Nothing is remembered this session. The drawer still opens.
+        }
+    }
+
+    // Asked of the page rather than of a class name. The body is the
+    // accordion's other child and Gradio hides it rather than removing it, so
+    // "is this open" is "is the body taking up space" -- which is true under
+    // any theme, any Gradio version, and any class this file has never heard of.
+    function isOpen(accordion, header) {
+        if (!accordion) return false;
+        if (header && header.getAttribute) {
+            const said = header.getAttribute("aria-expanded");
+            if (said === "true") return true;
+            if (said === "false") return false;
+        }
+        const body = accordion.children[accordion.children.length - 1];
+        if (!body || body === header) return false;
+        return !offScreen(body);
+    }
+
+    // Every disclosure this extension built, and nothing else on the page.
+    // The class is put there by mc_pipeline_panel.drawer(), which is the only
+    // way this extension makes one -- so this cannot pick up a host accordion,
+    // a theme's own furniture, or a Column that happens to start with a button.
+    function drawers() {
+        try {
+            return Array.prototype.slice.call(root().querySelectorAll("." + DRAWER));
+        } catch (error) {
+            return [];
+        }
+    }
+
+    function watchDrawers() {
+        const wanted = opened();
+        drawers().forEach(function (accordion) {
+            const header = headerOf(accordion);
+            if (!header || !header.dataset) return;
+            if (!header.dataset.mcPipelineDrawer) {
+                header.dataset.mcPipelineDrawer = "1";
+                // After the press, not before: Gradio toggles on the same
+                // event, so the state worth recording is the one that follows.
+                header.addEventListener("click", function () {
+                    remember(accordion.id, !isOpen(accordion, header));
+                });
+                if (wanted[accordion.id] && !isOpen(accordion, header)) {
+                    header.click();
+                }
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------ //
     // Wiring
     // ------------------------------------------------------------------ //
 
@@ -306,6 +491,18 @@
             watchPrompt();
         } catch (error) {
             console.error("Model Chain: the pipeline prompt echo failed", error);
+        }
+        try {
+            furnishCards();
+        } catch (error) {
+            console.error("Model Chain: the pipeline stage headers were left as "
+                          + "Gradio drew them", error);
+        }
+        try {
+            watchDrawers();
+        } catch (error) {
+            console.error("Model Chain: which drawers were open was not restored",
+                          error);
         }
     }
 
@@ -328,6 +525,11 @@
     // Exposed for the tests, which drive this file under node against a fake
     // page. Nothing in the extension reads it.
     window.modelChainPipeline = {
+        furnishCards: furnishCards,
+        watchDrawers: watchDrawers,
+        headerOf: headerOf,
+        drawers: drawers,
+        opened: opened,
         literalNote: literalNote,
         echo: echo,
         stageFor: stageFor,

@@ -346,3 +346,150 @@ accordion is one `overflow: hidden` or one `transform` away from being a window
 nobody can see — which is the exact bug the workspace was moved out of an
 overlay to fix. It is hidden until Full Screen reveals it, so it costs no space
 in the pipeline and competes with nothing.
+
+
+## 10. The stage card, and everything that starts closed (26 August 2026)
+
+The panel worked and read badly. Each stage was four things stacked — a title
+row, a switch, a summary line, and *then* an accordion labelled with a
+restatement of the stage's own name that had to be opened to reach the
+settings. Two rows saying "Creative", one above the other, and only the lower
+one opening anything. Inside it, Creative's twenty axis rows unfolded the
+moment the stage did.
+
+### 10.1 One disclosure, and the switch is not on it
+
+§1.3 of the redesign intent asks for one large disclosure surface, one
+enable/bypass switch, one live summary, one attached body, and no redundant
+second "open me" row. The card is now the stage's own accordion, labelled with
+the stage's name, and that is the only disclosure.
+
+The switch and the summary cannot be built into it. Gradio gives an Accordion a
+plain string for a label — no slot, no components — so a header carrying a live
+line and a checkbox is not something Python can express. They are built as
+siblings of the accordion and moved into its header by
+`javascript/model_chain_pipeline.js`.
+
+That file finds the header without naming a single Gradio class. An Accordion's
+disclosure is its first element child and it is the thing that carries the
+click handler, so it is recognised by what it *is* — a button, or an element
+that says whether it is expanded — rather than by what a Svelte component
+happened to call it. Deliberately not a `querySelector` for a button anywhere
+inside: the first button inside an accordion that has no header button is a
+button in its *body*, and furnishing that would move the enable switch into the
+settings.
+
+Two classes go on when it works: one on the header, one on the card. Every rule
+in the stylesheet is keyed on those, so if the browser file never runs, or a
+Gradio version renders a header it cannot recognise, nothing is moved, no class
+is added, no rule matches, and the card falls back to name / summary / switch
+stacked in ordinary flow. Every control still works and only the arrangement is
+lost, which is the right thing to lose.
+
+A click on the switch is stopped at the switch rather than the header being
+taught about exceptions. Arming a stage never also opens it.
+
+### 10.2 "Bypassed", not "Off"
+
+§1 again: a bypassed card stays visible and configurable, so its summary is the
+only thing standing between "this setting exists" and "this setting will run".
+Every stage that is switched off now begins its summary with the same word.
+
+The summaries themselves did not need changing in any deeper way, and that is
+worth recording rather than assuming: they were already what §4 of the intent
+asks for. `_creative_line`, `_spatial_line` and `_stage2_summary` are selectors
+over the stored settings — `summarize(canonical)` and never
+`summary = what_the_user_just_clicked` — so a collapsed card cannot disagree
+with the expanded controls behind it. What changed is one word in three
+functions.
+
+### 10.3 Everything starts closed, and what is opened is remembered
+
+`mc_pipeline_panel.drawer()` is now the only way this extension makes a
+disclosure on txt2img. It has no `open` parameter — not a default a caller may
+override, an absence — and it stamps one class on everything it builds.
+
+One class, three jobs: the stylesheet gives every drawer the same outline and
+the same header, the browser file remembers which ones were opened, and a test
+counts them. A feature that built a bare `gr.Accordion` would get none of that,
+which is why there is a test asserting that no file drawing on txt2img contains
+one.
+
+Closed is the right answer exactly once. After that, a tab that folds everything
+away again on every reload is a tab somebody has to re-open four drawers in
+before they can carry on — so the open ones are remembered by element id in
+`localStorage`. Furniture, stored where furniture belongs: nothing about a
+generation is kept there and nothing there is ever sent anywhere. Every read and
+every write is inside a `try`, because private browsing, a blocked store and a
+value somebody edited by hand all mean the same thing — no preferences, which is
+what this shipped with.
+
+Restoring is a *press*, not a class. Gradio owns whether an accordion is open
+and re-renders it from its own state, so setting the class would leave the two
+disagreeing at the first update. Pressing the header is what the user would have
+done.
+
+### 10.4 Creative is four drawers at one level
+
+§1's Creative hierarchy change, and the first clause of the final acceptance
+statement. Profile and Creativity are top-level; Create a profile, Directions,
+Advanced settings and Recovery & diagnostics are same-level siblings, and
+nesting begins only inside one of them.
+
+Directions used to *be* the body of the panel with everything else arranged
+around it. The first screen of the stage was a list of axes nobody had asked
+about yet. It is a drawer now, and its label carries the count — `Directions —
+2 active` — which is a derived selector like every other summary here and is
+returned by `render()` with everything else, so it cannot disagree with the rows
+inside it.
+
+The Save As name box moved with it. It used to be a row that appeared out of
+nowhere when a button was pressed; it is the contents of "Create a profile" now,
+which is a thing somebody can find without pressing Save As first to discover
+what Save As does. Save As opens that drawer, and nothing ever closes it — a
+render that folded it away would do so while somebody was typing into it, on any
+handler that happened to fire.
+
+The Creativity slider is built by `build()` rather than handed to it, because
+where it goes is part of the shape: §3 puts it beside Profile at the top level,
+and a caller that made it first would put it above them both. LLM Studio's Krea
+tab is the exception and passes its own, because there the slider lives outside
+the panel entirely and shows and hides with Creative Mode.
+
+### 10.5 Structure in geometry, not in palette
+
+§2's objective is that the extension look native inside somebody's Gradio theme
+without losing the hierarchy. So the palette is the theme's decision and the
+geometry is the stylesheet's.
+
+Every colour, radius and shadow is a semantic token mapped to a host variable
+with a fallback — `--mc-pipe-border` to `--block-border-color`, `--mc-pipe-accent`
+to `--color-accent`, and so on. Nothing below them is a literal colour. What
+carries the structure instead is the list §2 calls invariant: a closed outline
+on each card, a separator between a header and its body, a nesting indent, a
+one-pixel rail down the left of nested content, an outline on every drawer, an
+outline on every direction row, and read-only context shaped like nothing that
+could be edited.
+
+A theme whose block fill and page fill are the same colour still gets a
+structured panel, because none of the structure is carried by a fill.
+
+Touch targets are sized in `em` so they follow the theme's type scale, and a
+coarse-pointer media query takes them to a literal 44px.
+
+### 10.6 What this refactor did not do
+
+Pages 4 and 5 of the intent describe a canonical `PipelineSettings` structure
+with a monotonic revision, expected-revision checks on every mutation, a
+pending/acknowledged state per control, and a Generate that blocks until
+`ui_ack_revision == model_revision`. None of that is here, deliberately: it is
+an engine change and this was asked for as a surface one.
+
+It is worth saying which half of it is already true. The settings *are*
+canonical and server-side — `mc_creative_krea`, `mc_spatial` and the preset
+store are the one authoritative representation, every handler writes through
+them before returning anything, and every summary on the panel is derived from
+them rather than from a control's value. What is missing is the revision guard:
+there is no version number on a mutation, and nothing stops a user moving a
+slider and pressing Generate before the callback lands. That is a real race and
+it is unaddressed.

@@ -56,6 +56,7 @@ import gradio as gr
 
 import mc_creative_krea
 import mc_creative_profiles as profiles
+import mc_pipeline_panel
 import mc_profile_state
 
 logger = logging.getLogger("model_chain")
@@ -497,18 +498,19 @@ class Panel:
     and each surface styles its own.
     """
 
-    def __init__(self, ident, notice, status, creativity, keys, axes):
+    def __init__(self, ident, notice, status, keys, axes):
         self.ident = ident
         self.notice = notice
         self.status = status
-        self.creativity = creativity
         self.keys = list(keys)
         self.axes = dict(axes)
 
         # Filled in by build(), in the order the page is assembled.
+        self.creativity = None
         self.profile = None
         self.profile_state = None
-        self.name_row = None
+        self.create = None
+        self.directions = None
         self.profile_name = None
         self.summary = None
         self.cost = None
@@ -559,8 +561,8 @@ class Panel:
     def outputs(self) -> list:
         """Every component :meth:`render` returns an update for, in order."""
         found = [self.status, self.creativity, self.profile, self.profile_state,
-                 self.name_row, self.profile_name, self.summary, self.cost,
-                 self.add, self.seed, self.anti]
+                 self.create, self.directions, self.profile_name, self.summary,
+                 self.cost, self.add, self.seed, self.anti]
         for key in self.keys:
             found.extend([self.rows[key], self.labels[key], self.treatments[key],
                           self.modes[key], self.fixed[key], self.excluded[key]])
@@ -570,7 +572,9 @@ class Panel:
         """Everything this panel owns, for a surface to expose and a test to read."""
         found = {"profile": self.profile, "profile_name": self.profile_name,
                  "profile_state": self.profile_state,
-                 "name_row": self.name_row, "summary": self.summary, "cost": self.cost,
+                 "create": self.create, "directions": self.directions,
+                 "creativity": self.creativity,
+                 "summary": self.summary, "cost": self.cost,
                  "add": self.add,
                  "seed": self.seed, "anti": self.anti,
                  "axes": self.axis_controls,
@@ -606,7 +610,11 @@ class Panel:
             else gr.update(choices=profiles.choices()),
             gr.update(value=profile_state(profile if profile is not None
                                           else profiles.selected(), stored)),
-            gr.update(visible=bool(naming)),
+            # Save As opens the drawer the name box lives in, and nothing ever
+            # closes it: a render that folded it away would do so while
+            # somebody was typing into it, on any handler that happened to fire.
+            gr.update(open=True) if naming else gr.update(),
+            gr.update(label=directions_label(active)),
             gr.update(value="") if not naming else gr.update(),
             gr.update(value=DIRECTIONS_HEADING if active else NO_DIRECTIONS),
             gr.update(value=describe_cost(stored)),
@@ -638,15 +646,59 @@ class Panel:
 # --------------------------------------------------------------------------- #
 
 
-def build(ident, notice, status, creativity, *, stored=None) -> Panel | None:
+def directions_label(active) -> str:
+    """The Directions drawer's own title, with how many are set.
+
+    §3 of the pipeline intent: a disclosure summary says what is behind it, so
+    the count belongs in the label rather than on a line inside the drawer that
+    only opening the drawer reveals. Derived from the settings on every render
+    like every other summary in this file -- never written from what a control
+    was just set to.
+    """
+    count = len(list(active or ()))
+    if not count:
+        return "Directions"
+    return f"Directions — {count} active"
+
+
+def build(ident, notice, status, *, creativity=None, stored=None) -> Panel | None:
     """Assemble the panel into whatever container is open. ``None`` if it cannot.
 
     A creativity library that will not load leaves a sentence on the page saying
     so and returns nothing: Creative Mode has no vocabulary to direct with, and a
     panel of empty dropdowns would invite somebody to configure a feature that
     cannot run.
+
+    The shape it builds
+    -------------------
+    Profile and Creativity at the top level, then four drawers at one level:
+
+        Profile
+        Creativity
+        Create a profile      ]
+        Directions            ]  same left edge, same treatment,
+        Advanced settings     ]  nesting only inside their contents
+        Recovery & diagnostics]  (built by the owning surface)
+
+    Directions used to be the body of this panel with everything else arranged
+    around it: twenty axis rows, a heading, a cost line and an Add dropdown, all
+    unfolded the moment Creative Mode was expanded, with Settings tucked in an
+    accordion underneath. What that produced was a stage whose first screen was
+    a list of axes nobody had asked about yet. The four drawers are peers now
+    and all of them start closed, so expanding Creative shows the two settings
+    somebody came for and four labelled ways in.
+
+    The slider is built here rather than handed in, because where it goes is
+    part of the shape: §3 puts Creativity beside Profile at the top level, and a
+    caller that made it first would put it above them both.
+
+    ``creativity`` is for the surface where that is not true. LLM Studio's Krea
+    tab draws the slider outside this panel entirely -- it shows and hides with
+    Creative Mode there, and the panel is inside a drawer that does the same --
+    so it passes the one it already made and this builds none.
     """
     from prompt_master.krea import director
+    from prompt_master.krea import variation
 
     try:
         from prompt_master.krea import library as library_module
@@ -659,13 +711,14 @@ def build(ident, notice, status, creativity, *, stored=None) -> Panel | None:
 
     stored = stored or mc_creative_krea.settings()
     keys = list(lib.axis_keys)
-    panel = Panel(ident, notice, status, creativity, keys,
-                  {key: lib.axis(key) for key in keys})
+    panel = Panel(ident, notice, status, keys, {key: lib.axis(key) for key in keys})
 
     def button(label, *parts, **kwargs):
         made = gr.Button(label, size="sm", elem_id=ident(*parts), **kwargs)
         panel.buttons.append(made)
         return made
+
+    active_now = list(stored.get("directions") or ())
 
     # -- the profile bar --------------------------------------------------- #
     # Shown, not applied. The dropdown opens on the profile the live settings
@@ -690,89 +743,113 @@ def build(ident, notice, status, creativity, *, stored=None) -> Panel | None:
             drop = button("Delete", "profile", "delete", variant="stop")
             make_default = button("Set as default", "profile", "default")
             reset = button("Reset to default", "profile", "reset")
-        with gr.Row(visible=False, elem_classes=classes("profile-name")) as name_row:
-            panel.name_row = name_row
+
+    # -- creativity, beside the profile it belongs to ---------------------- #
+    panel.creativity = creativity if creativity is not None else gr.Slider(
+        label=variation.LABEL, minimum=variation.MINIMUM, maximum=variation.MAXIMUM,
+        step=1, value=stored["creativity"], info=variation.HELP,
+        elem_id=ident("creativity"), elem_classes=classes("creativity"))
+
+    # -- drawer one: create a profile -------------------------------------- #
+    # The Save As name box, in a drawer of its own rather than a row that
+    # appears out of nowhere when a button is pressed. Save As opens it; it is
+    # also just *there*, which is how somebody finds it without pressing Save As
+    # first to discover what Save As does.
+    with mc_pipeline_panel.drawer(
+            "Create a profile", elem_id=ident("profile", "create-drawer"),
+            elem_classes=classes("drawer", "profile-create")) as create:
+        panel.create = create
+        with gr.Row(elem_classes=classes("profile-name")):
             panel.profile_name = gr.Textbox(
                 label="New profile name", value="", scale=3, max_lines=1,
                 placeholder="Editorial portraits", elem_id=ident("profile", "name"))
-            create = button("Create", "profile", "create", variant="primary")
+            make = button("Create", "profile", "create", variant="primary")
 
-    # -- the active directions --------------------------------------------- #
-    active_now = list(stored.get("directions") or ())
-    panel.summary = gr.Markdown(DIRECTIONS_HEADING if active_now else NO_DIRECTIONS,
-                                elem_id=ident("summary"),
-                                elem_classes=classes("summary"))
-
+    # -- drawer two: the active directions --------------------------------- #
     axis_rows: list = []
 
-    for key in keys:
-        axis = lib.axis(key)
-        setting = _axis_setting(stored, key)
-        active = key in active_now
+    with mc_pipeline_panel.drawer(
+            directions_label(active_now), elem_id=ident("directions"),
+            elem_classes=classes("drawer", "directions")) as directions:
+        panel.directions = directions
+        panel.summary = gr.Markdown(
+            DIRECTIONS_HEADING if active_now else NO_DIRECTIONS,
+            elem_id=ident("summary"), elem_classes=classes("summary"))
 
-        # One row, one question. The picker is a stock multiselect Dropdown --
-        # a compact closed field that opens a scrollable, filterable popup and
-        # closes on an outside click -- which is section 5.4 exactly, and is
-        # the host's own component rather than an imitation of it. A theme
-        # restyles it along with every other dropdown on the page.
-        with gr.Group(visible=active, elem_id=ident("row", key),
-                      elem_classes=classes("direction")) as row:
-            panel.rows[key] = row
-            with gr.Row(elem_classes=classes("direction-bar")):
-                panel.treatments[key] = gr.Dropdown(
-                    label=axis.label, multiselect=True, filterable=True,
-                    value=selection(axis, setting), scale=5,
+        for key in keys:
+            axis = lib.axis(key)
+            setting = _axis_setting(stored, key)
+            active = key in active_now
+
+            # One row, one question. The picker is a stock multiselect Dropdown
+            # -- a compact closed field that opens a scrollable, filterable
+            # popup and closes on an outside click -- which is section 5.4
+            # exactly, and is the host's own component rather than an imitation
+            # of it. A theme restyles it along with every other dropdown.
+            with gr.Group(visible=active, elem_id=ident("row", key),
+                          elem_classes=classes("direction")) as row:
+                panel.rows[key] = row
+                with gr.Row(elem_classes=classes("direction-bar")):
+                    panel.treatments[key] = gr.Dropdown(
+                        label=axis.label, multiselect=True, filterable=True,
+                        value=selection(axis, setting), scale=5,
+                        choices=[(variant.label, variant.identifier)
+                                 for variant in axis.variants],
+                        elem_id=ident("treatments", key),
+                        elem_classes=classes("treatments"),
+                        info="one treatment repeats it; two or more let the "
+                             "Creative seed choose between them")
+                    panel.removes[key] = button("Remove", "row", key, "remove")
+                panel.labels[key] = gr.Markdown(
+                    summarise(axis, setting), elem_id=ident("row", key, "summary"),
+                    elem_classes=classes("direction-summary"))
+
+            # The machine-facing triple, built and never shown. `visible=False`
+            # in Gradio removes an element from the layout but keeps its value
+            # in the payload, which is exactly what is wanted: these are what
+            # travel to the generation, and `axis_controls` -- mode, fixed,
+            # excluded, three per axis, in the library's own order -- is the
+            # contract the hook, the profiles and `axes_from` all still read
+            # unchanged.
+            with gr.Group(visible=False, elem_id=ident("editor", key),
+                          elem_classes=classes("editor")) as editor:
+                panel.editors[key] = editor
+                panel.modes[key] = gr.Radio(
+                    label="How this axis behaves",
+                    choices=[("Natural", director.NATURAL), ("Vary", director.VARY),
+                             ("Fixed", director.FIXED)],
+                    value=setting["mode"], elem_id=ident("editor", key, "mode"))
+                panel.fixed[key] = gr.Dropdown(
+                    label="Always use", value=setting["fixed"],
                     choices=[(variant.label, variant.identifier)
                              for variant in axis.variants],
-                    elem_id=ident("treatments", key),
-                    elem_classes=classes("treatments"),
-                    info="one treatment repeats it; two or more let the "
-                         "Creative seed choose between them")
-                panel.removes[key] = button("Remove", "row", key, "remove")
-            panel.labels[key] = gr.Markdown(
-                summarise(axis, setting), elem_id=ident("row", key, "summary"),
-                elem_classes=classes("direction-summary"))
+                    elem_id=ident("editor", key, "fixed"))
+                panel.excluded[key] = gr.Dropdown(
+                    label="Exclude choices", value=setting["excluded"],
+                    multiselect=True,
+                    choices=[(variant.label, variant.identifier)
+                             for variant in axis.variants],
+                    elem_id=ident("editor", key, "excluded"))
 
-        # The machine-facing triple, built and never shown. `visible=False` in
-        # Gradio removes an element from the layout but keeps its value in the
-        # payload, which is exactly what is wanted: these are what travel to
-        # the generation, and `axis_controls` -- mode, fixed, excluded, three
-        # per axis, in the library's own order -- is the contract the hook,
-        # the profiles and `axes_from` all still read unchanged.
-        with gr.Group(visible=False, elem_id=ident("editor", key),
-                      elem_classes=classes("editor")) as editor:
-            panel.editors[key] = editor
-            panel.modes[key] = gr.Radio(
-                label="How this axis behaves",
-                choices=[("Natural", director.NATURAL), ("Vary", director.VARY),
-                         ("Fixed", director.FIXED)],
-                value=setting["mode"], elem_id=ident("editor", key, "mode"))
-            panel.fixed[key] = gr.Dropdown(
-                label="Always use", value=setting["fixed"],
-                choices=[(variant.label, variant.identifier) for variant in axis.variants],
-                elem_id=ident("editor", key, "fixed"))
-            panel.excluded[key] = gr.Dropdown(
-                label="Exclude choices", value=setting["excluded"], multiselect=True,
-                choices=[(variant.label, variant.identifier) for variant in axis.variants],
-                elem_id=ident("editor", key, "excluded"))
+            # Wired at the end, not here: every handler answers with an update
+            # for every component the panel owns, and half of them do not exist
+            # yet.
+            axis_rows.append((key, panel.treatments[key], panel.removes[key]))
 
-        # Wired at the end, not here: every handler answers with an update for
-        # every component the panel owns, and half of them do not exist yet.
-        axis_rows.append((key, panel.treatments[key], panel.removes[key]))
+        panel.cost = gr.Markdown(describe_cost(stored), elem_id=ident("cost"),
+                                 elem_classes=classes("cost"))
 
-    panel.cost = gr.Markdown(describe_cost(stored), elem_id=ident("cost"),
-                             elem_classes=classes("cost"))
+        natural_now = [key for key in keys if key not in set(active_now)]
+        panel.add = gr.Dropdown(
+            label=ADD_LABEL, value=None, elem_id=ident("add"),
+            choices=[(lib.axis(key).label, key) for key in natural_now],
+            visible=bool(natural_now), elem_classes=classes("add"),
+            filterable=False,
+            info="choose an axis to give a direction; everything else stays Natural")
 
-    natural_now = [key for key in keys if key not in set(active_now)]
-    panel.add = gr.Dropdown(
-        label=ADD_LABEL, value=None, elem_id=ident("add"),
-        choices=[(lib.axis(key).label, key) for key in natural_now],
-        visible=bool(natural_now), elem_classes=classes("add"), filterable=False,
-        info="choose an axis to give a direction; everything else stays Natural")
-
-    # -- the secondary settings -------------------------------------------- #
-    with gr.Accordion("Settings", open=False, elem_id=ident("settings"),
-                      elem_classes=classes("settings")):
+    # -- drawer three: the secondary settings ------------------------------ #
+    with mc_pipeline_panel.drawer("Advanced settings", elem_id=ident("settings"),
+                                  elem_classes=classes("drawer", "settings")):
         panel.seed = gr.Number(
             label="Creative seed", value=stored["seed"], precision=0,
             elem_id=ident("seed"),
@@ -786,7 +863,7 @@ def build(ident, notice, status, creativity, *, stored=None) -> Panel | None:
 
     for key, picker, remove in axis_rows:
         _wire_axis(panel, key, picker, remove)
-    _wire_profiles(panel, save, save_as, create, drop, make_default, reset)
+    _wire_profiles(panel, save, save_as, make, drop, make_default, reset)
     _wire_settings(panel, forget)
 
     if complaint:

@@ -52,49 +52,72 @@ settings would normally have produced.
 ### The Image Pipeline
 
 Everything this extension adds to txt2img is in one panel, laid out as the path
-your prompt actually takes:
+your prompt actually takes. Every drawer starts closed, so it costs one line
+until you open it:
 
 ```
-IMAGE PIPELINE
+▸ IMAGE PIPELINE
 
-Prompt
-  "astronaut botanist in a Martian greenhouse"
-  │
-Creative                                              [ON]
-  C7 · 2 directions · Editorial
-  │
-Spatial                                               [ON]
-  Smart · 2 regions · Studio thirds
-  │
-Stage 1
-  Krea 2 · 1024×1536 · Hires 1.5× → 1536×2304
-  Euler · 20 steps · CFG 3.5 · ImageStitch · 2 references
-  │ 1536 × 2304 pixel handoff
-Stage 2                                               [ON]
-  Klein 9B · Portrait polish · denoise 0.35
-  │
-Output
-  1536×2304 — refined by Stage 2
+  ┌──────────────────────────────────────────────────────────┐
+  ●─┤ ▸ Creative                                    [  ON  ] │
+  │ │   Bypassed — the prompt is expanded as written         │
+  │ └──────────────────────────────────────────────────────────┘
+  │ ┌──────────────────────────────────────────────────────────┐
+  ●─┤ ▾ Spatial                                     [  ON  ] │
+  │ │   Smart · 2 regions · Studio thirds                    │
+  │ ├────────────────────────────────────────────────────────┤
+  │ │  │ Composition   [ Smart Spatial ][ Direct BBOX ]      │
+  │ │  │ ┌──────────────┐                                    │
+  │ │  │ │  the canvas  │   [x] Auto Save  [Undo] [Full Screen]
+  │ │  │ └──────────────┘                                    │
+  │ │  │ ▸ Saved layouts                                     │
+  │ │  │ ▸ Spatial options                                   │
+  │ └──────────────────────────────────────────────────────────┘
+  │   1536 × 2304 pixel handoff
+  │ ┌──────────────────────────────────────────────────────────┐
+  ●─┤ ▸ Stage 2                                     [  ON  ] │
+    │   Klein 9B · Portrait polish · denoise 0.35            │
+    └──────────────────────────────────────────────────────────┘
 ```
 
-**Creative**, **Spatial** and **Stage 2** are this extension's. Each has a
-switch on its own row, so a stage can be armed or bypassed without opening it,
-and an editor behind a disclosure. A bypassed stage stays on the path and reads
-as bypassed rather than disappearing — what is switched off is as much a part of
-"what will happen when I press Generate" as what is switched on.
+**One card, one disclosure.** A stage card has exactly one thing that opens it:
+its own header, and the whole of that header outside the switch is the target.
+There is no second "open me" row under a title saying the same word, and the
+chevron is an indicator rather than the only place you can press.
 
-**Prompt**, **Stage 1** and **Output** are Forge's. They are drawn muted, carry
-no switch, and open nothing. They are read, never written: the checkpoint,
-size, Hires, sampler and steps shown on the Stage 1 row come from Forge's own
-controls, which remain the only place any of them can be changed. There is no
-second width box here and there never will be — two controls holding one value
-is a bug with a delay on it.
+**The switch is on the header,** separated from the surface that opens the card,
+so a stage can be armed or bypassed without opening it — and arming one never
+also opens it. A bypassed stage stays on the path, stays configurable, and its
+summary begins with **Bypassed**, because what is switched off is as much a part
+of "what will happen when I press Generate" as what is switched on.
 
-The line between Stage 1 and Stage 2 is the one number that used to be nowhere.
+**The summary is derived, never typed.** `Smart · 2 regions · Studio thirds` is
+computed from the saved settings on every render — the same settings Generate
+reads — so a collapsed card cannot disagree with the controls behind it.
+
+**Everything starts closed, and what you open stays open.** Which drawers you
+had open is remembered per browser, so the tab comes back the way you left it.
+Nothing about a generation is stored there.
+
+**Creative** opens onto its Profile and Creativity and four drawers at one
+level — *Create a profile*, *Directions*, *Advanced settings*, *Recovery &
+diagnostics* — rather than onto twenty axis rows. The Directions drawer says how
+many are active in its own label.
+
+The line between Spatial and Stage 2 is the one number that used to be nowhere.
 Stage 2 refines **finished Stage 1 pixels**, so a Hires pass changes what it is
 handed; the handoff size follows Hires rather than quoting the width and height
-sliders, and it is shown even with Stage 2 off, because it is what Stage 2
+sliders, and it is shown even with Stage 2 bypassed, because it is what Stage 2
 *would* receive and the number you need in order to decide whether to arm it.
+
+**All three stages ship switched off.** A fresh install generates exactly as
+Forge would without the extension until you say otherwise.
+
+**It survives your theme.** The panel's hierarchy is carried by geometry —
+outlines on the cards and drawers, a separator under each header, an indent and
+a one-pixel rail down nested content — and every colour is one of the host's own
+theme variables. A theme whose block fill and page fill are the same colour
+still gets a structured panel, because none of the structure is a fill.
 
 While a generation runs, the row that is currently working is marked — a filled
 node on the rail and a coloured title, nothing that covers a label or a control,
@@ -1685,7 +1708,7 @@ is off.
 ```
 Spatial                                               [ON]
   Smart · 2 regions · Studio thirds
-  ▾ Spatial layout
+  ▾ Spatial
 
     Spatial Layout
     Layout: [ Studio thirds        ▾ ]  ⟳
@@ -2645,7 +2668,8 @@ Settings toggle removes the tab entirely.
 
 ```
 mc_arch.py            architecture detection + per-architecture geometry
-mc_pipeline_panel.py  the Image Pipeline shell: six rows, and the slots they offer
+mc_pipeline_panel.py  the Image Pipeline shell: three stage cards, the drawer
+                      every disclosure is made with, and the slots they offer
 mc_literal_prompts.py the two Literal Prompt boxes, and the note when they hide
 mc_profile_state.py   loaded / modified / not saved, said one way for all three
 mc_memory.py          image model residency / cache management

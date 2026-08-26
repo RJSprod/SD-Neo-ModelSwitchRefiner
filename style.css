@@ -2839,11 +2839,39 @@
       theme's decision.
 */
 
+/* ---------------------------------------------------------------------------
+   The semantic token adapter.
+
+   Every colour, radius and shadow below is one of these, and every one of these
+   is a host variable with a fallback. §2 of the redesign intent: the extension
+   should look native inside somebody's Gradio theme without losing the
+   hierarchy, so the palette is the theme's decision and the *geometry* is this
+   file's -- outlines, separators, indentation, a nesting rail, spacing and
+   type. A theme with almost no contrast between its fills still gets a
+   structured panel, because none of the structure is carried by a fill.
+   --------------------------------------------------------------------------- */
+
 :root {
-    --mc-pipe-rail: var(--border-color-primary, #d0d0d0);
+    --mc-pipe-bg: var(--panel-background-fill, var(--background-fill-secondary));
+    --mc-pipe-stage-bg: var(--block-background-fill, var(--background-fill-primary));
+    --mc-pipe-text: var(--body-text-color);
+    --mc-pipe-muted: var(--body-text-color-subdued, var(--block-info-text-color, #808080));
+    --mc-pipe-border: var(--block-border-color, var(--border-color-primary, #d0d0d0));
+    --mc-pipe-border-strong: var(--input-border-color, var(--border-color-accent,
+                                 var(--border-color-primary, #b0b0b0)));
+    --mc-pipe-accent: var(--color-accent, var(--primary-500, #0060df));
+    --mc-pipe-radius: var(--block-radius, var(--radius-md, 0.4em));
+
+    /* Kept: the rail's own two, named for what they draw. */
+    --mc-pipe-rail: var(--mc-pipe-border);
     --mc-pipe-node: var(--background-fill-primary, #fff);
-    --mc-pipe-accent: var(--primary-500, #0060df);
-    --mc-pipe-muted: var(--body-text-color-subdued, #808080);
+
+    /* Geometry, and the numbers §2 suggests. A nested control begins farther to
+       the right than its parent by exactly one of these, every time. */
+    --mc-pipe-indent: 1.15em;
+    --mc-pipe-gap: 0.7em;
+    --mc-pipe-tap: 2.4em;
+
     /* The compact canvas's height budget. aspect-ratio supplies the rest, so
        this is the only number that decides how much of the column it takes. */
     --mc-compact-h: 210px;
@@ -2852,7 +2880,7 @@
 /* -- the rail ------------------------------------------------------------ */
 /*
    A vertical timeline, because the panel's whole claim is that these things
-   happen in this order. A stack of boxes would show the same six stages and
+   happen in this order. A stack of boxes would show the same three stages and
    say nothing about the sequence.
 */
 
@@ -2868,7 +2896,7 @@
 }
 
 /* The line. It runs past the bottom of its own row to meet the next node,
-   which is what makes six separate elements read as one path. */
+   which is what makes separate elements read as one path. */
 .mc-pipeline-stage::before,
 .mc-pipeline-handoff::before {
     content: "";
@@ -2899,48 +2927,40 @@
     background: var(--mc-pipe-node);
 }
 
-/* -- ownership ----------------------------------------------------------- */
-/*
-   Every row here is one this extension owns and runs. The three that were
-   Forge's -- Prompt, Stage 1, Output -- are gone; what is left of them is the
-   handoff line, which is a number and not a row.
-*/
-
 .mc-pipeline-stage-owned::after {
     border-color: var(--mc-pipe-accent);
 }
 
+/* Read-only pipeline context, and shaped like nothing else here. §1.4: it is
+   not editable, so it must not look like a card that could be. */
 .mc-pipeline-handoff {
     color: var(--mc-pipe-muted);
 }
 
-/* -- structure ----------------------------------------------------------- */
+/* -- the stage card ------------------------------------------------------ */
 /*
-   On a dark theme the rail and the text were the only two things on the panel,
-   and three stages of unboxed text on a black background read as one paragraph
-   with bold words in it. Each stage is a surface now, with an edge: the rail
-   still says these things happen in order, and the surfaces say where one stage
-   stops and the next begins.
-
-   Colours are the host's own custom properties, so a theme -- Lobe included --
-   decides what "a surface" looks like here exactly as it does everywhere else.
+   §2's first invariant: a stage card has a closed outline. On a theme whose
+   block fill and page fill are the same colour, this border is the only thing
+   saying where one stage stops and the next begins -- so it is a border and
+   not a background, and it is drawn in the theme's own border variable rather
+   than in a tint of anything.
 */
 
 .mc-pipeline-stage {
-    background: var(--panel-background-fill, var(--background-fill-secondary));
-    border: 1px solid var(--border-color-primary);
-    border-radius: var(--radius-md, 0.4em);
+    background: var(--mc-pipe-bg);
+    border: 1px solid var(--mc-pipe-border);
+    border-radius: var(--mc-pipe-radius);
     padding-right: 0.6em;
-    margin-bottom: 0.5em;
+    margin-bottom: 0.6em;
 }
 
 /* The rail passes behind the surfaces rather than through them: it is drawn
    from the gap above each node down to the next, so the segment a surface
    would have covered is the segment nobody needed to see. */
 .mc-pipeline-stage::before {
-    top: -0.55em;
+    top: -0.6em;
     bottom: auto;
-    height: 1.05em;
+    height: 1.1em;
 }
 
 .mc-pipeline-stage:first-of-type::before {
@@ -2950,7 +2970,11 @@
 /* The one line that is not a surface: it sits on the edge between two of them
    and describes the edge. */
 .mc-pipeline-handoff {
-    margin: -0.15em 0 0.35em 0;
+    margin: -0.15em 0 0.4em 0;
+    font-size: var(--text-xs, 0.78em);
+    font-style: italic;
+    padding-top: 0.1em;
+    padding-bottom: 0.1em;
 }
 
 /* Section 3.3's note, and nothing when there is nothing to say. Gradio gives a
@@ -2967,23 +2991,85 @@
     margin-bottom: 0.35em;
 }
 
-.mc-pipeline-title {
-    display: flex;
+/* -- the card header ----------------------------------------------------- */
+/*
+   §1.3: one large disclosure surface, one switch, one live summary, and no
+   second "open me" row. The disclosure is the stage's own accordion header;
+   the switch and the summary are moved into it by
+   javascript/model_chain_pipeline.js, which is also what puts the two classes
+   these rules are keyed on.
+
+   Nothing here names a Gradio class. If the browser file cannot recognise the
+   header -- a Gradio version that renders it differently, a theme that rebuilds
+   it -- no class is added, none of this matches, and the card falls back to
+   name / summary / switch stacked in ordinary flow. Every control still works;
+   only the arrangement is lost, which is the right thing to lose.
+*/
+
+.mc-pipeline-card-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+        "name    switch chev"
+        "summary switch chev";
     align-items: center;
+    column-gap: var(--mc-pipe-gap);
+    /* §1.6: 44px minimum, in em so it follows the theme's type scale. */
+    min-height: 3.4em;
+    text-align: left;
+}
+
+.mc-pipeline-card-head > .mc-pipeline-name {
+    grid-area: name;
+    align-self: end;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+
+.mc-pipeline-card-head > .mc-pipeline-chev {
+    grid-area: chev;
+    align-self: center;
+}
+
+/* §2's ninth invariant: the switch is spatially separated from the surface
+   that opens the card. It is in the header's own click target, so the browser
+   file stops its events there -- arming a stage never also opens it. */
+.mc-pipeline-carded .mc-pipeline-switch {
+    grid-area: switch;
+    align-self: center;
+    flex: 0 0 auto;
     min-width: 0;
 }
 
+.mc-pipeline-carded .mc-pipeline-summary {
+    grid-area: summary;
+    align-self: start;
+    min-width: 0;
+    font-size: var(--text-sm, 0.86em);
+    line-height: 1.3;
+    color: var(--mc-pipe-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* A summary is one line on a wide column and two on a narrow one; it never
+   pushes the switch off the card. */
+.mc-pipeline-carded .mc-pipeline-summary p {
+    margin: 0;
+}
+
+/* The fallback, and it is a layout rather than a mess: without the move, the
+   summary is an ordinary line under the accordion and the switch an ordinary
+   control under that. */
 .mc-pipeline-summary {
     font-size: var(--text-sm, 0.86em);
     line-height: 1.35;
-    opacity: 0.92;
+    color: var(--mc-pipe-muted);
 }
 
-.mc-pipeline-handoff {
-    font-size: var(--text-xs, 0.78em);
-    font-style: italic;
-    padding-top: 0.1em;
-    padding-bottom: 0.1em;
+.mc-pipeline-switch {
+    flex: 0 0 auto;
+    align-self: center;
 }
 
 .mc-pipeline-explain {
@@ -2991,17 +3077,101 @@
     color: var(--mc-pipe-muted);
 }
 
-/* The ON switch sits on the collapsed row -- §3.3 -- so it has to be small
-   enough not to become the row. `container=False` on the Checkbox takes the
-   Gradio wrapper away; this takes the leftover margins. */
-.mc-pipeline-switch {
-    flex: 0 0 auto;
-    align-self: center;
+/* -- the stage body ------------------------------------------------------ */
+/*
+   §2's second and fourth invariants: the expanded body is separated from its
+   header by a line, and its contents begin farther to the right than the header
+   does. The vertical line down the left of the body is the nesting rail -- one
+   pixel, in the theme's border colour, and the thing that says "this belongs to
+   the card above" on a theme where the card and the body are the same fill.
+*/
+
+.mc-pipeline-body {
+    position: relative;
+    border-top: 1px solid var(--mc-pipe-border);
+    padding: 0.6em 0 0.2em var(--mc-pipe-indent);
+    margin-top: 0.2em;
 }
 
-.mc-pipeline-head {
-    align-items: center;
-    gap: 0.5em;
+.mc-pipeline-body::before {
+    content: "";
+    position: absolute;
+    left: 0.25em;
+    top: 0.6em;
+    bottom: 0.4em;
+    width: 1px;
+    background: var(--mc-pipe-border);
+}
+
+/* -- drawers ------------------------------------------------------------- */
+/*
+   §2's sixth invariant: a drawer has its own outline, so a closed one is a
+   visible affordance rather than a line of text. Every disclosure this
+   extension builds carries this class -- see mc_pipeline_panel.drawer() -- so
+   Create a profile, Directions, Advanced settings and Recovery & diagnostics
+   are one treatment at one level, and the thing that makes them siblings is
+   that they look identical rather than that they happen to be adjacent.
+*/
+
+.mc-pipeline-drawer {
+    border: 1px solid var(--mc-pipe-border);
+    border-radius: var(--mc-pipe-radius);
+    margin-top: 0.45em;
+    background: var(--mc-pipe-stage-bg);
+}
+
+/* The stage cards are drawers too -- one disclosure each -- but they have the
+   card's own outline already and a second one inside it is a box in a box. */
+.mc-pipeline-stage > .mc-pipeline-editor.mc-pipeline-drawer {
+    border: none;
+    border-radius: 0;
+    margin-top: 0;
+    background: none;
+}
+
+/* And so is the shell. */
+.mc-pipeline-panel.mc-pipeline-drawer {
+    margin-top: 0;
+}
+
+/* §2's seventh: a direction row is contained. Its own outline, at the level
+   inside the Directions drawer where nesting is allowed to begin. */
+.mc-krea-creative-direction {
+    border: 1px solid var(--mc-pipe-border);
+    border-radius: var(--mc-pipe-radius);
+    padding: 0.4em;
+    margin-bottom: 0.4em;
+}
+
+/* -- touch targets ------------------------------------------------------- */
+/*
+   §1.6 and §2's QA list: nothing collapses below a practical size, and the
+   whole non-switch area of a header opens the card. Sized in em so a theme
+   that scales its type scales these with it.
+*/
+
+.mc-pipeline-drawer > button,
+.mc-pipeline-drawer > [aria-expanded] {
+    min-height: var(--mc-pipe-tap);
+}
+
+@media (pointer: coarse), (hover: none) {
+    :root {
+        --mc-pipe-tap: 44px;
+    }
+
+    .mc-pipeline-card-head {
+        min-height: 44px;
+    }
+}
+
+/* §2's tenth: the focus ring is visible whatever the theme does, because it is
+   drawn in the theme's own accent and offset off the element rather than
+   tinting it. */
+.mc-pipeline-card-head:focus-visible,
+.mc-pipeline-drawer > button:focus-visible {
+    outline: 2px solid var(--mc-pipe-accent);
+    outline-offset: 2px;
 }
 
 /* -- the running row ----------------------------------------------------- */
@@ -3027,7 +3197,7 @@
     );
 }
 
-.mc-pipeline-stage.mc-pipeline-running .mc-pipeline-title {
+.mc-pipeline-stage.mc-pipeline-running .mc-pipeline-name {
     color: var(--mc-pipe-accent);
 }
 

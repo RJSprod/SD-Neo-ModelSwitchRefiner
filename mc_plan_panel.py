@@ -349,10 +349,12 @@ def build(elem_id):
     so the caller can wire anything else that should refresh them.
     """
     import gradio as gr
+
+    import mc_pipeline_panel
     from modules.ui_components import ToolButton
     from modules.ui_common import refresh_symbol
 
-    with gr.Accordion(TITLE, open=False, elem_id=elem_id("memory")):
+    with mc_pipeline_panel.drawer(TITLE, elem_id=elem_id("memory")):
         gr.Markdown(
             "The plan for the next generation, the VRAM it is protected for, and where "
             "the language model was placed in what is left. Mutually exclusive phases — "
