@@ -3347,6 +3347,11 @@ def _on_script_unloaded():
     # stopped first, and the residency register cleared after, so a reload
     # starts from an empty picture rather than from stale entries describing
     # models that are no longer anywhere.
+    #
+    # This is Forge asking an extension to tidy up, and it is not the exit
+    # anybody performs: closing the window or killing the process never reaches
+    # it. Those are covered by ``mc_llm_runtime.stop_on_exit``, which the first
+    # start arms, and by the job object it describes.
     try:
         mc_llm_runtime.shutdown()
     except Exception:

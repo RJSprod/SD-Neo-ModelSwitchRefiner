@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "registry_version": "2026.08.27-1",
+  "registry_version": "2026.08.27-2",
   "models": [
     {
       "id": "gemma4-12b-qat-balanced",
@@ -230,21 +230,6 @@
         "mtp": {
           "embedded": true,
           "draft_tokens": 3
-        },
-        "dflash2": {
-          "filename": "dflash-Qwen3.8-27B-ABLITERATED-BF16.gguf",
-          "sha256": "ca6dacc0bba87332b4eae6f103fa4c0c800ca871657e83d2aed658351b2c4fb3",
-          "bytes": null,
-          "display_size": "3.86 GB",
-          "runtime_family": "qwen38-dflash2",
-          "requires_full_target_gpu": true,
-          "requires_full_draft_gpu": true,
-          "same_gpu_as_target": true,
-          "draft_tokens": 3,
-          "draft_min_tokens": 0,
-          "draft_p_min": 0.0,
-          "draft_kv_type_k": "f16",
-          "draft_kv_type_v": "f16"
         }
       }
     },
@@ -276,28 +261,13 @@
         "mtp": {
           "embedded": true,
           "draft_tokens": 3
-        },
-        "dflash2": {
-          "filename": "dflash-Qwen3.8-27B-ABLITERATED-BF16.gguf",
-          "sha256": "ca6dacc0bba87332b4eae6f103fa4c0c800ca871657e83d2aed658351b2c4fb3",
-          "bytes": null,
-          "display_size": "3.86 GB",
-          "runtime_family": "qwen38-dflash2",
-          "requires_full_target_gpu": true,
-          "requires_full_draft_gpu": true,
-          "same_gpu_as_target": true,
-          "draft_tokens": 3,
-          "draft_min_tokens": 0,
-          "draft_p_min": 0.0,
-          "draft_kv_type_k": "f16",
-          "draft_kv_type_v": "f16"
         }
       }
     },
     {
       "id": "qwen38-27b-abliterated-q4km",
       "label": "Qwen 3.8 27B Abliterated — Low",
-      "role": "24 GB DFlash2 tier",
+      "role": "Smallest 27B",
       "group": "Qwen 3.8 27B",
       "family": "Qwen 3.8",
       "profile": "qwen38-27b-prompt-author",
@@ -322,21 +292,6 @@
         "mtp": {
           "embedded": true,
           "draft_tokens": 3
-        },
-        "dflash2": {
-          "filename": "dflash-Qwen3.8-27B-ABLITERATED-BF16.gguf",
-          "sha256": "ca6dacc0bba87332b4eae6f103fa4c0c800ca871657e83d2aed658351b2c4fb3",
-          "bytes": null,
-          "display_size": "3.86 GB",
-          "runtime_family": "qwen38-dflash2",
-          "requires_full_target_gpu": true,
-          "requires_full_draft_gpu": true,
-          "same_gpu_as_target": true,
-          "draft_tokens": 3,
-          "draft_min_tokens": 0,
-          "draft_p_min": 0.0,
-          "draft_kv_type_k": "f16",
-          "draft_kv_type_v": "f16"
         }
       }
     },

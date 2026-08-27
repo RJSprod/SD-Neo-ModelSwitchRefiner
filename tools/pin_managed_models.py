@@ -128,11 +128,12 @@ def _sha256(headers: dict) -> str:
 def _accelerator_artifacts(model: dict) -> list[dict]:
     """The files an entry's accelerators name, in the shape the loop expects.
 
-    The DFlash2 draft is a file in the same repository at the same revision,
-    with the same three fields, and it is downloaded by the same verified path
-    -- so it is checked and pinned by the same run. Leaving it out would mean
-    the one artifact in the catalogue whose committed hash nobody had ever
-    compared against the hub, which is exactly the comparison this tool is for.
+    Empty for every accelerator this catalogue has today: multi-token heads are
+    tensors inside the GGUF that is already being pinned, so there is no second
+    file to check. The walk stays because an accelerator that *does* name a
+    file -- there has been one -- must be checked against the hub by the same
+    run rather than being the one artifact whose committed hash nobody ever
+    compared.
     """
     accelerators = model.get("accelerators")
     if not isinstance(accelerators, dict):

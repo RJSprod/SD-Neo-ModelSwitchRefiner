@@ -63,6 +63,13 @@ behind. A sheet rather than a row in the flow, because a row inserted between
 the transcript and the composer moves both of them every time you tap a
 message.
 
+Regenerate is the one action that also has an icon on the bubble itself, because
+it is the one asked for often enough that three taps is two too many. The icon
+is drawn in the browser -- there is nowhere in a Gradio 4.40 bubble to put a
+component -- and all it does is nominate a reply: the handler behind it is the
+sheet's, so the two can never mean different things. It is polish in the strict
+sense, and the tab is complete without it.
+
 ``Chatbot`` pairs turns, so the row and column the click reports is not the
 index of a message. The map between them is built with the transcript, in one
 pass, and carried in a ``gr.State`` -- deriving it a second time somewhere else
@@ -195,6 +202,26 @@ def build() -> dict:
                 value=initial_rows,
                 elem_id=ui.ident("chat", "transcript"),
                 elem_classes=ui.classes("transcript"))
+
+            # THE PER-REPLY REGENERATE ICON, as far as Python is concerned.
+            #
+            # A Gradio 4.40 Chatbot draws its own bubbles and there is nowhere
+            # to put a component on one, so the icon itself is drawn in the
+            # browser by javascript/llm_studio.js. What it does when tapped is
+            # entirely here: it writes which reply was tapped into this box and
+            # presses this button, and the handler below is the same one the
+            # action sheet's Regenerate uses. The browser nominates; Python
+            # decides, loads, streams and saves.
+            #
+            # Both are invisible and neither is anything to do without the
+            # other. The icons are polish: with the script absent, or a theme
+            # whose bubbles it cannot recognise, they are simply not drawn and
+            # Regenerate is where it has always been -- on the sheet a tap on
+            # the bubble opens.
+            regenerate_at = gr.Textbox(value="", visible=False, container=False,
+                                       elem_id=ui.ident("chat", "regenerate-at"))
+            regenerate_now = gr.Button("Regenerate this reply", visible=False,
+                                       elem_id=ui.ident("chat", "regenerate-now"))
 
             # ATTACHMENT_PREVIEW. Not in the layout until Attach opens it, and
             # small when it is: the picture for the next message is a chip, not
@@ -340,11 +367,24 @@ def build() -> dict:
                                      placeholder="Who the character is. Shown to the model "
                                                  "before the first line of dialogue.")
                 greeting = gr.Textbox(label="Greeting", lines=3)
-                system = gr.Textbox(label="System prompt override", lines=3,
-                                    placeholder="Leave empty to use the built prompt.")
+                # What the model is actually told, built from the boxes above
+                # and from the persona, and updated as they are typed into. It
+                # is the answer to "what is the system prompt right now", which
+                # nothing on this screen could answer before.
+                system_preview = gr.Textbox(
+                    label="System prompt in force", lines=6, interactive=False,
+                    elem_id=ui.ident("chat", "system-preview"),
+                    info="Built from the name, the Context and your persona. Read-only — "
+                         "press Edit this to take a copy into the box below.")
+                edit_system = gr.Button("Edit this system prompt", size="sm")
+                system = gr.Textbox(label="System prompt override", lines=6,
+                                    placeholder="Leave empty to use the built prompt above.",
+                                    info="Set, this replaces the built prompt entirely and "
+                                         "stops following the Context and the persona.")
                 gr.Markdown(
-                    "Save writes the Advanced generation settings below with the rest of the "
-                    "character, so a seed of −1 there is what makes its replies vary.",
+                    "Save writes the override and the Advanced generation settings below "
+                    "with the rest of the character, so a seed of −1 there is what makes "
+                    "its replies vary.",
                     elem_classes=ui.classes("hint"))
                 with gr.Row():
                     save_character = gr.Button("Save character", variant="primary", size="sm")
@@ -461,16 +501,24 @@ def build() -> dict:
     # ``_editor_fields`` answers in, so none of them can leave the boxes and
     # the character being written to describing different characters.
     editor = ([character_editor, editing, name, context, greeting, system]
-              + sampling + [status])
+              + sampling + [system_preview, status])
 
     character.change(fn=_select_character, inputs=[character, search],
                      outputs=[threads, thread_state] + view
-                     + [name, context, greeting, system] + sampling + [editing], queue=False)
+                     + [name, context, greeting, system] + sampling
+                     + [editing, system_preview], queue=False)
     edit_character.click(fn=_open_character, inputs=[character], outputs=editor, queue=False)
     new_character.click(fn=_new_character, outputs=editor, queue=False)
     refresh_characters.click(fn=_refresh_characters, inputs=[character],
                              outputs=[character, status], queue=False)
     close_editor.click(fn=_cancel_character, inputs=[character], outputs=editor, queue=False)
+    # The preview follows what is being typed rather than what is on disk, so
+    # the three boxes it is built from all refresh it.
+    for box in (name, context, system):
+        box.change(fn=_system_preview, inputs=[name, context, system],
+                   outputs=[system_preview], queue=False)
+    edit_system.click(fn=_adopt_system_prompt, inputs=[name, context, system],
+                      outputs=[system, status], queue=False)
     save_character.click(
         fn=_save_character,
         inputs=[editing, name, context, greeting, system] + sampling,
@@ -529,9 +577,19 @@ def build() -> dict:
     # a composer that is one line tall, which is what this one starts as.
     submitted = message.submit(fn=_send, inputs=sent, outputs=stream,
                                show_progress="minimal")
+    # The only streaming handler whose outputs carry the thread list and the
+    # open thread: regenerating in the middle of a thread branches, and a panel
+    # left pointing at the thread it came from would apply the next action to
+    # the wrong conversation.
     regenerating = actions["regenerate"].click(
-        fn=_regenerate, inputs=[character, thread_state, selected] + sampling,
-        outputs=stream, show_progress="minimal")
+        fn=_regenerate, inputs=[character, thread_state, selected] + sampling + [search],
+        outputs=[threads, thread_state] + stream, show_progress="minimal")
+    # The same handler, nominated from the bubble instead of from the sheet.
+    # One tap rather than three, which is the whole of what the icon is for.
+    again = regenerate_now.click(
+        fn=_regenerate_reply,
+        inputs=[character, thread_state, positions, regenerate_at] + sampling + [search],
+        outputs=[threads, thread_state] + stream, show_progress="minimal")
     continuing = actions["continue"].click(
         fn=_continue, inputs=[character, thread_state, selected] + sampling,
         outputs=stream, show_progress="minimal")
@@ -546,7 +604,7 @@ def build() -> dict:
         control.click(fn=lambda: gr.update(visible=False), outputs=[actions["sheet"]],
                       queue=False)
 
-    for run in (replying, submitted, regenerating, continuing, resending):
+    for run in (replying, submitted, regenerating, again, continuing, resending):
         # The thread list is refreshed because an untitled thread has just been
         # named, and the selection is dropped because the message it pointed at
         # may not be the message that is there now.
@@ -555,7 +613,7 @@ def build() -> dict:
         run.then(fn=_close_selection, inputs=[character, thread_state], outputs=view)
 
     stop.click(fn=_cancel, inputs=[cancellation], outputs=[status, send, stop],
-               cancels=[replying, submitted, regenerating, continuing, resending],
+               cancels=[replying, submitted, regenerating, again, continuing, resending],
                queue=False)
 
     return {"status": status, "transcript": transcript, "header": header,
@@ -754,6 +812,56 @@ def _message_at(positions, row, column) -> int:
     return NO_SELECTION
 
 
+def _reply_at(positions, ordinal) -> int:
+    """The message the ``ordinal``-th reply in the transcript is.
+
+    What the regenerate icon on a bubble sends back. The browser cannot know a
+    message index -- ``_view`` pairs turns, so the row a bubble is on is not
+    one -- and it should not be taught to: all it can honestly report is *which
+    reply this is*, counted down the transcript, and the map that answers what
+    that means is already in the panel's hands.
+
+    Counted against ``positions`` rather than against the conversation, for the
+    same reason the click map exists at all: the transcript the icons were
+    drawn on is the one ``positions`` describes, and a reply is only ever the
+    ``n``-th thing on screen.
+    """
+    try:
+        wanted = int(str(ordinal).strip())
+    except (TypeError, ValueError):
+        return NO_SELECTION
+    if wanted < 0:
+        return NO_SELECTION
+    replies = []
+    for entry in positions or ():
+        try:
+            _, at_column, index = entry
+        except (TypeError, ValueError):
+            continue
+        if int(at_column) == 1:
+            replies.append(int(index))
+    return replies[wanted] if wanted < len(replies) else NO_SELECTION
+
+
+def _regenerate_reply(who, identifier, positions, ordinal, temperature, top_p,
+                      reply_tokens, seed, filter_text=""):
+    """Regenerate the reply whose icon was tapped.
+
+    A translation and nothing else: the ordinal becomes a message index and
+    :func:`_regenerate` does the rest, so the icon and the sheet's Regenerate
+    cannot come to mean two different things -- including the branching, which
+    is the part it would be worst to have two of.
+    """
+    index = _reply_at(positions, ordinal)
+    if index == NO_SELECTION:
+        yield _here(identifier, _idle(_load(who, identifier), "", None,
+                                      "That reply is no longer in the thread. Reopen it "
+                                      "and try again.", "warn"))
+        return
+    yield from _regenerate(who, identifier, index, temperature, top_p, reply_tokens,
+                           seed, filter_text)
+
+
 def _selection_updates(conversation, index: int) -> list:
     """What the action sheet shows for message ``index``.
 
@@ -929,7 +1037,8 @@ def _select_character(who, filter_text):
             + _refresh(conversation, note)
             + [loaded.name, loaded.context, loaded.greeting, loaded.system,
                loaded.temperature, loaded.top_p, loaded.max_reply_tokens, loaded.seed,
-               loaded.name or NOT_EDITING])
+               loaded.name or NOT_EDITING,
+               _system_preview(loaded.name, loaded.context, loaded.system)])
 
 
 def _open_thread(who, identifier):
@@ -1176,30 +1285,87 @@ def _send(who, identifier, text, image_path, temperature, top_p, reply_tokens, s
                        temperature, top_p, reply_tokens, seed)
 
 
-def _regenerate(who, identifier, index, temperature, top_p, reply_tokens, seed):
-    """Write this reply again, keeping the one it had as a version.
+def _into_thread(events, threads, identifier):
+    """``events`` from :func:`_stream`, prefixed with the thread they are in.
 
-    Paging rather than replacing, which is what makes a regenerate reversible:
-    the reply that came back worse is undone with ``◀`` rather than by
-    regenerating until luck returns.
+    Regenerate is the one streaming handler that can change which thread the
+    panel is on, so it is the one whose outputs carry the thread list and the
+    open thread in front of everything :func:`_stream` yields.
+    """
+    for event in events:
+        yield (threads, identifier) + tuple(event)
+
+
+def _here(identifier, event):
+    """One :func:`_stream`-shaped event, in the thread that is already open."""
+    return (gr.update(), identifier or "") + tuple(event)
+
+
+def _regenerate(who, identifier, index, temperature, top_p, reply_tokens, seed,
+                filter_text=""):
+    """Write this reply again — as a version at the end, as a branch in the middle.
+
+    Two behaviours because there are two situations, and one of them used to be
+    handled by throwing away the user's conversation.
+
+    **At the end of the thread**, where nothing follows, regenerating appends a
+    version and ``◀ 2/3 ▶`` pages between the attempts. That is what makes it
+    reversible: a reply that came back worse is undone rather than re-rolled
+    until luck returns, and nothing is lost because there was nothing after it.
+
+    **In the middle**, it branches. The old behaviour was
+    ``truncate_after(index)`` — every message after the one being regenerated
+    was *deleted*, so paging back to the first version showed that reply with
+    the rest of the conversation gone for ever. Reported as exactly that: "if I
+    go back to the original response, I expect the entire thread to load."
+
+    Versions cannot answer that. A version is one string; the thing that has to
+    come back is every message that followed it, and the store's own word for a
+    conversation that diverges is a *branch*. So the thread up to the message
+    before this reply is copied into a new one, the new reply is written there,
+    and the thread it came from keeps every word of what followed — reachable
+    in the thread list, whole.
+
+    The two rules together are also what makes paging safe: versions now only
+    ever exist where nothing follows them.
     """
     from prompt_master.chat.history import ASSISTANT
 
     conversation = _load(who, identifier)
     index = _last_reply(conversation, index)
     if conversation is None or not (0 <= index < len(conversation.messages)):
-        yield _idle(conversation, "", None, "There is no reply to regenerate.", "warn")
+        yield _here(identifier, _idle(conversation, "", None,
+                                      "There is no reply to regenerate.", "warn"))
         return
     message = conversation.messages[index]
     if message.role != ASSISTANT:
-        yield _idle(conversation, "", None,
-                    "Regenerate applies to a reply. For one of your own messages, use Send "
-                    "again from here.", "warn")
+        yield _here(identifier, _idle(conversation, "", None,
+                                      "Regenerate applies to a reply. For one of your own "
+                                      "messages, use Send again from here.", "warn"))
+        return
+
+    if index < len(conversation.messages) - 1:
+        # Branch at the message *before* this reply, so the branch ends on the
+        # turn the reply was answering and the new one is written to it. An
+        # opening reply has no turn before it, and ``branch(-1)`` is the empty
+        # copy that says so -- still a branch, so the thread it came from is
+        # still whole, which is the whole point.
+        branched = _chats().branch(conversation, index - 1)
+        mc_llm_state.remember(character=who or "", thread=branched.identifier)
+        branched.append(ASSISTANT, "")
+        yield from _into_thread(
+            _stream(who, branched, len(branched.messages) - 1,
+                    temperature, top_p, reply_tokens, seed),
+            gr.update(choices=_thread_choices(who, filter_text),
+                      value=branched.identifier),
+            branched.identifier)
         return
 
     conversation.truncate_after(index)
     message.add_version("")
-    yield from _stream(who, conversation, index, temperature, top_p, reply_tokens, seed)
+    yield from _into_thread(
+        _stream(who, conversation, index, temperature, top_p, reply_tokens, seed),
+        gr.update(), identifier)
 
 
 def _continue(who, identifier, index, temperature, top_p, reply_tokens, seed):
@@ -1552,12 +1718,62 @@ def _editor_fields(character, editing: str, note: str, kind: str = "info") -> li
             _decimal(character.top_p, blank.top_p),
             _number(character.max_reply_tokens, blank.max_reply_tokens),
             _number(character.seed, blank.seed),
+            _system_preview(character.name, character.context, character.system),
             ui.notice(note, kind)]
 
 
 def _closed_editor(note: str, kind: str = "info") -> list:
     """The editor shut, with everything in it left exactly as it was."""
-    return [gr.update(visible=False), gr.update()] + [gr.update()] * 8 + [ui.notice(note, kind)]
+    return [gr.update(visible=False), gr.update()] + [gr.update()] * 9 + [ui.notice(note, kind)]
+
+
+def _system_preview(name, context, system) -> str:
+    """The system message this character would actually be given, as it stands.
+
+    Composed rather than described. A character's system prompt is *built* --
+    the wrapper, the character's own context folded into it, and the persona's
+    name and description if there is one -- and the only honest way to answer
+    "what is it currently?" is to build the thing and show it. It updates as
+    the boxes above it are typed into, so what is on screen is the prompt for
+    the character being written rather than for the one on disk.
+
+    Read-only, and the override box under it is where an edit goes. Those are
+    two different objects on purpose: this one follows the persona and the name
+    for ever, and an override is frozen text that stops following anything. A
+    panel that let somebody type into the preview would be converting every
+    character they looked at into the second kind.
+    """
+    try:
+        from prompt_master.chat import prompt as chat_prompt
+        from prompt_master.chat.characters import Character
+
+        character = Character(name=(name or "").strip(), context=context or "",
+                              system=system or "")
+        return chat_prompt.system_text(character, _persona())
+    except Exception:
+        logger.debug("Model Chain: could not compose the system prompt", exc_info=True)
+        return ""
+
+
+def _adopt_system_prompt(name, context, system):
+    """Put the prompt in force into the override box, to be edited from there.
+
+    The route from "let me see it" to "let me change it", and one press because
+    the alternative is selecting eight lines of read-only text and pasting them
+    into the box underneath. What lands there is exactly what was running a
+    moment ago, so saving without touching it changes nothing about how the
+    character behaves -- it only stops the wrapper following the persona.
+    """
+    if (system or "").strip():
+        return gr.update(), ui.notice(
+            "This character already has a system prompt of its own — the box below is it, "
+            "and the preview is showing what it produces.", "warn")
+    composed = _system_preview(name, context, system)
+    if not composed:
+        return gr.update(), ui.notice("There is no system prompt to copy yet.", "warn")
+    return composed, ui.notice(
+        "Copied into the box below. It is the character's own now: editing the Context or "
+        "the persona will no longer change it. Clear the box to go back to the built one.")
 
 
 def _open_character(who):

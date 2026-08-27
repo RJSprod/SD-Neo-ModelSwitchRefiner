@@ -1723,6 +1723,102 @@ class TestMappingIsTurnedOffForATensorOverride:
         assert runtime.accelerator_flags(configuration, placement) == [runtime.CPU_MOE_FLAG]
 
 
+class TestNothingOutlivesTheWebUI:
+    """Reported: "if I kill the webui process, there tends to be
+    llama-server.exe running on my system."
+
+    Three exits, and the extension was covered for the one nobody performs.
+    ``on_script_unloaded`` is Forge asking an extension to tidy up and never
+    fires when a window is closed or a process killed.
+    """
+
+    def test_shutdown_stops_every_server_and_not_just_the_shared_one(self, monkeypatch):
+        """A split installation has two. Stopping one leaves the other holding
+        twenty gigabytes with nothing left that knows about it."""
+        stopped = []
+
+        class Held:
+            def __init__(self, name):
+                self.name = name
+
+            def stop(self):
+                stopped.append(self.name)
+
+            def describe(self):
+                return self.name
+
+        monkeypatch.setattr(runtime.registry, "all",
+                            lambda: (Held("creative"), Held("spatial")))
+        monkeypatch.setattr(runtime, "release_strays", lambda: (0, 0))
+
+        runtime.shutdown()
+
+        assert stopped == ["creative", "spatial"]
+
+    def test_one_server_that_will_not_stop_does_not_strand_the_others(self, monkeypatch):
+        stopped = []
+
+        class Held:
+            def __init__(self, name, fails=False):
+                self.name, self.fails = name, fails
+
+            def stop(self):
+                if self.fails:
+                    raise RuntimeError("wedged")
+                stopped.append(self.name)
+
+            def describe(self):
+                return self.name
+
+        monkeypatch.setattr(runtime.registry, "all",
+                            lambda: (Held("first", fails=True), Held("second")))
+        monkeypatch.setattr(runtime, "release_strays", lambda: (0, 0))
+
+        runtime.shutdown()
+
+        assert stopped == ["second"]
+
+    def test_it_sweeps_a_server_no_handle_is_left_for(self, monkeypatch):
+        """A reload, or an exception during a start, loses the Python handle
+        while the process carries on. It is still recognisable by its alias."""
+        swept = []
+        monkeypatch.setattr(runtime.registry, "all", lambda: ())
+        monkeypatch.setattr(runtime, "release_strays",
+                            lambda: (swept.append(True), (1, 2 * _GB))[1])
+
+        runtime.shutdown()
+
+        assert swept == [True]
+
+    def test_the_exit_hooks_are_armed_once_by_the_first_start(self, monkeypatch):
+        registered = []
+        monkeypatch.setattr(runtime, "_shutdown_registered", False)
+        monkeypatch.setattr(runtime, "_relay_signal", lambda name: registered.append(name))
+
+        import atexit
+
+        monkeypatch.setattr(atexit, "register", lambda hook: registered.append(hook))
+        runtime.stop_on_exit()
+        runtime.stop_on_exit()
+
+        assert registered.count("SIGTERM") == 1
+        assert registered.count("SIGINT") == 1
+        assert runtime._shutdown_registered
+
+    def test_the_exit_hook_never_raises(self, monkeypatch):
+        """Nothing may raise out of an interpreter that is already leaving."""
+        monkeypatch.setattr(runtime, "shutdown",
+                            lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+        runtime._at_exit()
+
+    def test_tying_the_lifetime_is_best_effort(self):
+        """A language model that runs and might outlive its parent is better
+        than one that does not run."""
+        runtime._die_with_us(None)
+        runtime._die_with_us(object())
+
+
 class TestRetryingASmallerPlacement:
     """A start that ran out of VRAM is tried again with more headroom, because
     nothing this module knows could have predicted the refusal: the card said

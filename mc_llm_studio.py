@@ -759,14 +759,11 @@ def _runtime_detail(state=None) -> str:
     if report is not None and report.placement is not None:
         parts.append(f"Context: {ui.tokens(report.placement.context)}")
     # Which mechanism produced the tokens, named rather than implied. Section 9
-    # of the DFlash2 design intent: the status has to say what actually ran, and
-    # "Lightning" is a preset rather than an answer -- a Lightning request that
-    # ended up on ordinary decoding has to read as ordinary decoding here.
+    # Which mechanism produced the tokens, named rather than implied: a preset
+    # is what was asked for and not an answer, and a Fast request that ended up
+    # on ordinary decoding has to read as ordinary decoding here.
     if state.get("running") and state.get("accelerator") not in (None, "", "none"):
-        said = f"Accelerator: {state['accelerator']}"
-        if state.get("runtime_family"):
-            said = f"{said} ({state['runtime_family']})"
-        parts.append(said)
+        parts.append(f"Accelerator: {state['accelerator']}")
     # What llama.cpp said, not what it was asked for. The two agreeing is the
     # answer to "is it really all on the GPU?", and that question is only ever
     # asked by somebody whose replies are slower than they should be.
@@ -990,15 +987,14 @@ def _setup_panel() -> dict:
 
             # Performance sits under the model rather than beside the runtime,
             # because it is a question about *this backbone*: which
-            # accelerators exist at all is a property of the catalogue entry,
-            # and the DFlash2 draft is a file inside its bundle.
+            # accelerators exist at all is a property of the catalogue entry.
             gr.Markdown("#### Performance")
             gr.Markdown(
                 "How the language model decodes, and who owns the card while it does — two "
                 "settings rather than one. A preset writes both; the controls under "
-                "**Advanced** are what actually runs, so DFlash2 with cooperative memory is "
-                "reachable there, and it is the combination that gets the fast decoder on a "
-                "card that already has room without releasing anything.",
+                "**Advanced** are what actually runs, so MTP with cooperative memory is "
+                "reachable there, and it is the combination that gets the faster decoder "
+                "without giving the language model priority over the image side.",
                 elem_classes=ui.classes("hint"))
             preset = gr.Radio(
                 label="Performance", choices=_preset_choices(),
@@ -1015,47 +1011,6 @@ def _setup_panel() -> dict:
                     label="Memory priority", choices=_priority_choices(),
                     value=_performance_axes()[1],
                     elem_id=ui.ident("settings", "priority"))
-                # Two installs, and they are separated on screen because
-                # conflating them is a mistake somebody has already made: the
-                # *draft model* is weights that live in the backbone's bundle,
-                # and the *runtime* is a second llama.cpp. Downloading one does
-                # nothing for the other, and a panel that put a download button
-                # next to the wrong box said otherwise.
-                gr.Markdown("##### 1. The DFlash2 llama.cpp runtime",
-                            elem_classes=ui.classes("sheet-label"))
-                gr.Markdown(
-                    "**DFlash2** is llama.cpp pull request 27342 and is not in any release, "
-                    "so it runs on a second llama.cpp installed beside the ordinary one and "
-                    "never over it. It is offered only after a real load of the backbone and "
-                    "its draft model has answered a real question — a build whose help text "
-                    "mentions DFlash is not the same thing as a build that runs it.",
-                    elem_classes=ui.classes("hint"))
-                dflash_notice = gr.HTML(_dflash_line(),
-                                        elem_id=ui.ident("settings", "dflash"))
-                dflash_path = gr.Textbox(
-                    label="DFlash2 llama.cpp build", value=_dflash_path(),
-                    placeholder="Installed automatically, or paste a build directory here",
-                    info="Filled in for you once a build is installed; it is kept in the LLM "
-                         "data directory, not wherever it was built.",
-                    elem_id=ui.ident("settings", "dflash", "path"))
-                mc_llm_browse.attach(dflash_path, suffixes=(), key="dflash", allow_folders=True,
-                                     title="Choose the DFlash2 llama-server",
-                                     folder_title="Choose the DFlash2 build directory")
-                with gr.Row():
-                    fetch_dflash = gr.Button("Download the DFlash2 runtime", size="sm")
-                    use_dflash = gr.Button("Use this build", size="sm")
-                    verify_dflash = gr.Button("Verify it", size="sm")
-
-                gr.Markdown("##### 2. The draft model",
-                            elem_classes=ui.classes("sheet-label"))
-                gr.Markdown(
-                    "About 3.9 GB of weights, kept beside the backbone in its own bundle. "
-                    "Separate from the runtime above and needed as well as it, not instead "
-                    "of it.", elem_classes=ui.classes("hint"))
-                draft_notice = gr.HTML(_draft_line(_managed_current()),
-                                       elem_id=ui.ident("settings", "draft"))
-                fetch_draft = gr.Button("Download the draft model", size="sm")
-
         with gr.Column(scale=3, min_width=360):
             gr.Markdown("#### What fits")
             estimator = gr.HTML(_estimator_html(), elem_id=ui.ident("settings", "estimator"))
@@ -1110,15 +1065,6 @@ def _setup_panel() -> dict:
     for control in (accelerator, memory_priority):
         _picked(control)(fn=_apply_axes, inputs=[accelerator, memory_priority, role],
                          outputs=[performance_notice, preset], queue=False)
-    use_dflash.click(fn=_adopt_dflash, inputs=[dflash_path],
-                     outputs=[dflash_notice, dflash_path], queue=False)
-    fetch_dflash.click(fn=_download_dflash, outputs=[dflash_notice, dflash_path])
-    # Queued: this one starts a llama-server with two models in it.
-    verify_dflash.click(fn=_verify_dflash, outputs=[dflash_notice])
-    fetch_draft.click(fn=_install_draft, inputs=[catalogue],
-                      outputs=[draft_notice, fetch_draft])
-    _picked(catalogue)(fn=_draft_line, inputs=[catalogue], outputs=[draft_notice],
-                       queue=False)
     # Changing which configuration is being edited moves the performance
     # controls with everything else: a Creative Writer on a 3090 and a Spatial
     # Composer on a 5090 can hold different answers here, and a panel that kept
@@ -1141,13 +1087,12 @@ def _setup_panel() -> dict:
 # --------------------------------------------------------------------------- #
 #
 # The presets are on top because they are what somebody actually wants to say --
-# "as fast as this machine can go" is a sentence, and "DFlash2 with LLM
-# priority" is a configuration. The two controls under them are the same three
-# choices spelled out, and they are *authoritative*: a preset writes them and
-# then has no further existence, so the one combination no preset offers --
-# DFlash2 with cooperative memory, which is how a card that already has room
-# gets the fast decoder without anything being evicted -- is reachable by
-# moving one dropdown.
+# "as fast as this machine can go" is a sentence, and "MTP with LLM priority"
+# is a configuration. The two controls under them are the same choices spelled
+# out, and they are *authoritative*: a preset writes them and then has no
+# further existence, so the combination no preset offers -- MTP with
+# cooperative memory, the faster decoder without giving the language model
+# priority over the image side -- is reachable by moving one dropdown.
 
 
 def _switch_performance(role):
@@ -1181,13 +1126,13 @@ def _preset_choices() -> list[tuple[str, str]]:
 
 
 def _accelerator_choices() -> list[tuple[str, str]]:
-    """Auto, None, MTP and DFlash2, with the ones this backbone lacks marked.
+    """Auto, None and MTP, with the one this backbone lacks marked.
 
-    Marked rather than hidden. A DFlash2 entry missing from the list is
+    Marked rather than hidden. An entry missing from the list is
     indistinguishable from a build that never had one, and somebody who has
     read the release notes and cannot find the control has no way to tell which
     of the two happened -- so it is offered, it says what is missing, and
-    choosing it produces the actionable sentence rather than silence.
+    choosing it reports what ran rather than saying nothing.
     """
     import mc_llm_accel
 
@@ -1196,8 +1141,6 @@ def _accelerator_choices() -> list[tuple[str, str]]:
     for value, label in mc_llm_accel.ACCELERATORS:
         if value == mc_llm_accel.ACCEL_MTP and not getattr(advertised, "mtp", None):
             label = f"{label} — not in this backbone"
-        elif value == mc_llm_accel.ACCEL_DFLASH2 and not getattr(advertised, "dflash2", None):
-            label = f"{label} — not offered for this backbone"
         offered.append((label, value))
     return offered
 
@@ -1224,9 +1167,9 @@ def _performance_line(role: str = "") -> str:
 
     Three sentences at most: what the preset means, what is missing before it
     can mean it, and what the last run actually did. The middle one is the
-    reason this is computed rather than written down -- "Lightning" is a
-    promise, and a panel that made it without checking whether the draft model
-    and the special runtime are installed would be making it falsely.
+    reason this is computed rather than written down -- "Fast LLM" is a promise
+    about a backbone's own heads, and a panel that made it without checking
+    whether this backbone has any would be making it falsely.
     """
     try:
         import mc_llm_accel
@@ -1262,9 +1205,9 @@ def _accelerator_ran() -> str:
 
     Section 14 forbids hard-coded sample speeds, so there are none: this line
     is empty until llama.cpp has timed a request, and what it then shows is
-    that timing and the acceptance rate beside it. A DFlash2 run whose drafted
-    tokens are mostly rejected is slower than ordinary decoding, and this is
-    the only place that is visible.
+    that timing and the acceptance rate beside it. An accelerated run whose
+    drafted tokens are mostly rejected is slower than ordinary decoding, and
+    this is the only place that is visible.
     """
     import mc_llm_runtime
 
@@ -1273,8 +1216,6 @@ def _accelerator_ran() -> str:
         return ""
     plan = state["report"].plan
     parts = [f"Running: {plan.describe()}"]
-    if plan.runtime_family:
-        parts.append(f"runtime {plan.runtime_family}")
     prompt, reply = mc_llm_runtime.runtime.speed()
     if reply > 0:
         parts.append(f"measured {reply:.1f} tokens/s")
@@ -1304,186 +1245,6 @@ def _apply_axes(accelerator, memory_priority, role=""):
     # apply different values if pressed.
     selected = (found.preset if found.preset != mc_llm_accel.PRESET_CUSTOM else None)
     return _performance_line(role), gr.update(value=selected)
-
-
-def _dflash_line() -> str:
-    """Where the special runtime and the draft model stand, in one line."""
-    try:
-        import mc_llm_dflash
-
-        component = mc_llm_dflash.installed_component()
-        if not component:
-            builds = mc_llm_dflash.builds()
-            named = builds[0].describe() if builds else "a DFlash2 build"
-            return ui.notice(
-                f"No DFlash2 runtime is installed. It is llama.cpp pull request 27342 and is "
-                f"not part of any release, so it is built rather than downloaded: build "
-                f"{named} and point the box at the result. Ordinary llama.cpp is untouched "
-                f"either way.")
-        capability = mc_llm_dflash.capability(component)
-        source = mc_llm_dflash.provenance(component)
-        said = f"{component} · llama.cpp {source.commit[:7] or 'unknown'} · " \
-               f"{capability.describe()}"
-        detail = capability.vision_detail or capability.detail
-        kind = "info" if capability.text else "warn"
-        return ui.notice(f"{said}{f' — {detail}' if detail else ''}", kind)
-    except Exception:
-        logger.warning("Model Chain: the DFlash2 line could not be drawn", exc_info=True)
-        return ui.notice("DFlash2 runtime information unavailable — see the console.", "warn")
-
-
-def _dflash_path() -> str:
-    """Where the installed DFlash2 llama-server is, or ``""``.
-
-    The box under the line is filled from this rather than left empty, which is
-    the whole of what "LLM Studio should keep the path" means: a build that has
-    been installed once is a fact this extension already holds, and asking for
-    it again is asking somebody to look up something the panel knows.
-    """
-    try:
-        import mc_llm_dflash
-
-        found = mc_llm_dflash.installed()
-        return str(found) if found is not None else ""
-    except Exception:
-        logger.debug("Model Chain: could not read the DFlash2 runtime path", exc_info=True)
-        return ""
-
-
-def _adopt_dflash(path):
-    """Take a locally built DFlash2 llama.cpp, without touching the ordinary one.
-
-    An empty box is not an error when a build is already installed. It means
-    "use the one you have", which is the honest reading of pressing this button
-    on a panel that just told you a runtime is installed -- and the path goes
-    back into the box so the answer is visible rather than remembered.
-    """
-    import mc_llm_dflash
-
-    if not str(path or "").strip():
-        installed = _dflash_path()
-        if installed:
-            return _dflash_line(), gr.update(value=installed)
-        return (ui.notice(
-            "No DFlash2 runtime is installed yet, and there is nothing in the box to "
-            "install. DFlash2 is llama.cpp pull request 27342 and is not part of any "
-            "release — press Download the DFlash2 runtime to see what this extension has "
-            "pinned, or build the branch yourself and paste the path here.", "warn"),
-            gr.update())
-    try:
-        placed, _said = mc_llm_dflash.adopt(path)
-    except mc_llm_dflash.DFlashError as exc:
-        return ui.notice(ui.failure(exc), "error"), gr.update()
-    except Exception as exc:
-        logger.warning("Model Chain: the DFlash2 build could not be adopted", exc_info=True)
-        return (ui.notice(f"That build could not be installed ({ui.failure(exc)}). Ordinary "
-                          f"llama.cpp is unchanged.", "error"), gr.update())
-    # What is drawn is the state, not the sentence describing how it got there:
-    # the build is installed and has proved nothing, and the line that says so
-    # is the one somebody has to act on next. The box is rewritten to where the
-    # build now *lives*, which is inside the data directory rather than wherever
-    # it was copied from -- so pressing the button twice is idempotent.
-    return _dflash_line(), gr.update(value=str(placed))
-
-
-def _download_dflash(progress=gr.Progress()):
-    """Fetch the pinned DFlash2 runtime, or say plainly why there is not one.
-
-    This button exists because its absence was itself the bug. The panel had a
-    download for the *draft model* and a path box for the *llama.cpp build*
-    sitting next to each other, and pressing the one that was there and then
-    pressing the button beside the empty box produced "enter the path" -- which
-    is true, unhelpful, and says nothing about the fact that the thing being
-    asked for has no download anywhere yet. A button that answers the question
-    is worth more than no button at all.
-    """
-    import mc_llm_dflash
-
-    yield ui.working("Downloading the DFlash2 runtime…"), gr.update()
-    try:
-        placed = mc_llm_dflash.download(on_status=lambda text: progress(0, desc=text),
-                                        on_progress=lambda fraction: progress(fraction))
-    except mc_llm_dflash.DFlashError as exc:
-        yield ui.notice(ui.failure(exc), "warn"), gr.update()
-        return
-    except Exception as exc:
-        logger.warning("Model Chain: the DFlash2 runtime could not be downloaded",
-                       exc_info=True)
-        yield (ui.notice(f"The DFlash2 runtime could not be downloaded ({ui.failure(exc)}). "
-                         f"Ordinary llama.cpp is unchanged.", "error"), gr.update())
-        return
-    yield _dflash_line(), gr.update(value=str(placed))
-
-
-def _verify_dflash(progress=gr.Progress()):
-    """Load the real target and the real draft, and see what they do.
-
-    Queued and yielding, like the managed download it sits beside: this starts
-    a llama-server with two models in it, and a button that looks inert for a
-    minute gets pressed again.
-    """
-    import mc_llm_dflash
-
-    yield ui.working("Verifying the DFlash2 runtime…")
-    try:
-        found = mc_llm_dflash.verify(on_status=lambda text: progress(0, desc=text))
-    except mc_llm_dflash.DFlashError as exc:
-        yield ui.notice(ui.failure(exc), "warn")
-        return
-    except Exception as exc:
-        logger.warning("Model Chain: DFlash2 verification failed", exc_info=True)
-        yield ui.notice(f"The DFlash2 runtime could not be verified ({ui.failure(exc)}). "
-                        f"Ordinary llama.cpp is unchanged.", "error")
-        return
-    yield _dflash_line() if found.passed else ui.notice(
-        f"DFlash2 did not pass its text smoke test: {found.detail} It is not offered, and "
-        f"ordinary llama.cpp is unchanged.", "warn")
-
-
-def _draft_line(identifier) -> str:
-    """Whether this backbone's speculative sidecar is on disk, and what it costs."""
-    found = _managed_status(identifier)
-    if found is None or found.model.draft is None:
-        return ui.notice("This backbone has no DFlash2 draft model, so Lightning is not "
-                         "offered for it.")
-    artifact = found.model.draft
-    if found.bundle is not None and found.bundle.drafts(found.model):
-        return ui.notice(f"Draft model installed · {artifact.display_size} · "
-                         f"{artifact.filename}")
-    if found.bundle is None:
-        return ui.notice(f"Download {found.model.label} first; its {artifact.display_size} "
-                         f"draft model is installed separately afterwards.")
-    return ui.notice(f"Draft model not installed · {artifact.display_size}. It is only needed "
-                     f"for DFlash2, and every other mode runs without it.")
-
-
-def _install_draft(identifier, progress=gr.Progress()):
-    """Add the speculative sidecar to a bundle already on disk.
-
-    Its own button and its own transaction. Nothing about the model that is
-    running changes, nothing is selected, and a failure leaves the bundle
-    exactly as it was -- which is why this is not a checkbox on the download.
-    """
-    import mc_llm_managed_models as managed
-
-    if not identifier:
-        yield ui.notice("Choose a backbone first.", "warn"), gr.update()
-        return
-    yield ui.working("Downloading the draft model…"), gr.update(interactive=False)
-    try:
-        managed.install_draft(str(identifier),
-                              on_status=lambda text: progress(0, desc=text),
-                              on_progress=lambda fraction: progress(fraction))
-    except managed.ManagedError as exc:
-        yield ui.notice(ui.failure(exc), "error"), gr.update(interactive=True)
-        return
-    except Exception as exc:
-        logger.warning("Model Chain: the draft model could not be installed", exc_info=True)
-        yield (ui.notice(f"The draft model could not be downloaded ({ui.failure(exc)}). Your "
-                         f"current model is unchanged.", "error"),
-               gr.update(interactive=True))
-        return
-    yield _draft_line(identifier), gr.update(interactive=True)
 
 
 def _models_folder() -> str:

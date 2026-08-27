@@ -2257,17 +2257,16 @@ at settings chosen for it.
 | **Gemma 4 26B-A4B — Low Memory** | Low memory · ~10.7 GB + 1.19 GB vision · Q2_K_P |
 | **Qwen 3.8 27B Abliterated — High** | High quality · ~22.4 GB + 928 MB vision · Q6_K |
 | **Qwen 3.8 27B Abliterated — Medium** | Recommended 27B · ~19.5 GB + 928 MB vision · Q5_K_M |
-| **Qwen 3.8 27B Abliterated — Low** | 24 GB DFlash2 tier · ~16.8 GB + 928 MB vision · Q4_K_M |
+| **Qwen 3.8 27B Abliterated — Low** | Smallest 27B · ~16.8 GB + 928 MB vision · Q4_K_M |
 | **Gemma 4 26B-A4B Balanced** | Current large baseline · ~16.8 GB + 1.19 GB vision · Q4_K_M |
 
 The three **Qwen 3.8 27B** entries are one backbone at three weights, the same
-way the Gemma 26B ones are, and they are the entries that can be accelerated —
-see [Performance](#performance) below. **Medium (Q5_K_M)** is the one to start
-from. **High (Q6_K)** is the highest weight offered on purpose: Q8_0 exists
-upstream and is about 29 GB, which leaves even a 32 GB card too little for a
-draft model, 8K of state, compute buffers and a projector, so it is not in this
-list. **Low (Q4_K_M)** is the tier a 24 GB card can hold together with the
-DFlash2 draft model, and it is the one to choose on a 3090 if you want that.
+way the Gemma 26B ones are, and they are the entries with multi-token
+prediction heads — see [Performance](#performance) below. **Medium (Q5_K_M)**
+is the one to start from. **High (Q6_K)** is the highest weight offered on
+purpose: Q8_0 exists upstream and is about 29 GB, which leaves even a 32 GB
+card too little for 8K of state, compute buffers and a projector, so it is not
+in this list. **Low (Q4_K_M)** is the tier a 24 GB card can hold comfortably.
 
 The Gemma 26B group is **one backbone at four weights** — the same uncensored
 26B-A4B, the same vision projector, the same instructions — so the choice
@@ -2336,106 +2335,51 @@ has to answer a one-line test before it is called active.
 
 **Setup → Performance** decides how the language model produces its tokens, and
 who owns the card while it does. Those are two questions, so there are two
-settings, and the three presets are names for pairs of them.
+settings, and the presets are names for pairs of them.
 
 | | What it asks for |
 | --- | --- |
 | **Normal** | The fastest mechanism this backbone and runtime both have, using the VRAM that is already free. Never asks the image side for any. |
 | **Fast LLM** | The backbone's own multi-token heads, where it has them, and permission to release image residency **on this card** if the model needs the room. |
-| **Lightning Fast LLM** | The DFlash2 draft model, wholly resident beside the backbone on one card, with the same permission. Never a partial offload. |
 
 Normal is the default and is exactly what every earlier build did. Upgrading
 does not start releasing image VRAM because this exists.
 
-Under **Advanced** the same three choices are spelled out as **Acceleration**
-(Auto, None, MTP, DFlash2) and **Memory priority** (Cooperative, LLM priority),
-and *those* are what runs — a preset writes them and then has no further
-existence. That matters because of the combination no preset offers:
-
-> **DFlash2 + Cooperative** is the fast decoder with nothing evicted to get it.
-
-If the backbone and its draft model already fit on the card, that is the
-setting to use: DFlash2 runs, and the image side is not asked for a byte.
-Lightning is the same accelerator *plus* permission to make room, for the case
-where they do not fit yet.
-
-Every memory decision is keyed to one physical GPU. A Creative Writer on a 3090
-with Lightning selected will never empty a 5090 that is holding a checkpoint,
-in either direction and whichever way round the two roles are pinned —
-releasing a card the model is not being placed on cannot free a byte of the one
-it is. Each role has its own Performance setting, so a writer and a composer on
-two different cards can answer this differently.
-
-#### MTP, and DFlash2
+Under **Advanced** the same choices are spelled out as **Acceleration** (Auto,
+None, MTP) and **Memory priority** (Cooperative, LLM priority), and *those* are
+what runs — a preset writes them and then has no further existence. That
+matters because of the combination no preset offers: **MTP + Cooperative** is
+the faster decoder without giving the language model priority over the image
+side.
 
 **MTP** is multi-token prediction: extra heads inside the GGUF that were
 downloaded with the weights. Nothing extra to install and nothing extra to find
-room for. A backbone either has them or does not, and the line under the
-controls says which. It also needs a llama.cpp that takes `draft-mtp` as a
-speculative type — b10621 does; older builds do not, and there the backbone
-decodes ordinarily and the status line says so.
+room for. A backbone either has them or does not — the three Qwen 3.8 tiers do
+— and the line under the controls says which. It also needs a llama.cpp that
+takes `draft-mtp` as a speculative type; b10621 does, older builds do not, and
+there the backbone decodes ordinarily and the status line says so.
 
 If a llama.cpp ever refuses one of these optional flags outright, the start is
 retried without it rather than failing: a flag this extension got wrong is not
 a reason you cannot use a model. The console names the flag, the run reports
 ordinary decoding, and nothing asks for it again until the runtime changes.
 
-**DFlash2** is a separate 3.86 GB draft model that runs beside the backbone and
-guesses several tokens ahead for it. Two things have to be installed before it
-is offered, and both are separate presses:
-
-* **The DFlash2 llama.cpp runtime**, first in the panel. *Download the DFlash2
-  runtime* fetches whatever this extension has pinned — and while pull request
-  27342 is unmerged there is no published archive, so what it does today is
-  tell you that and name the commit to build. Build the branch, point *DFlash2
-  llama.cpp build* at the result, and press *Use this build*. It is copied into
-  a directory of its own and **never over the ordinary runtime** — losing it,
-  or failing to install it, cannot break ordinary LLM Studio or ordinary image
-  generation. Once it is installed the path box holds it: the box is filled in
-  for you, and pressing *Use this build* on an empty box keeps what you have.
-* **The draft model**, second and separate. *Download the draft model* fetches
-  about 3.9 GB of weights into the backbone's own bundle. It is needed **as
-  well as** the runtime, not instead of it — downloading one does nothing for
-  the other — and it is never part of an ordinary managed download, so a
-  machine that never chooses Lightning never pays for it.
-
-Then press **Verify it**. That loads the real backbone with the real draft
-model and asks it a question with one right answer, because a build whose help
-text mentions DFlash is not the same thing as a build that runs it. Text and
-images are verified separately and recorded separately: a runtime can be
-trustworthy for text and produce nothing usable for a picture.
-
-Until the image test passes, a request **carrying an image** runs at ordinary
-speed and says so — reference captioning keeps working, and the text requests
-on the same settings still use DFlash2. That is the one case where a chosen
-accelerator steps aside for a single request rather than refusing: everything
-else on this page that cannot run is reported and stops.
-
-#### What it will not do
-
-DFlash2 needs the backbone **and** the draft model wholly on one CUDA card,
-with the context, the model's state and the compute buffers beside them. There
-is no smaller version of that. If the whole plan does not fit, the run is
-refused with both numbers — what it needed and what is spendable — and a note
-saying whether any image VRAM was released. It is never quietly turned into a
-shorter context, a partial offload, or a run in system RAM that still calls
-itself Lightning, because every one of those is slower than Normal and says the
-opposite on screen.
-
-A forced accelerator that cannot run always says which piece is missing: the
-draft model, the runtime, a verification that has not passed, or the fit. Auto
-never refuses — it steps down through DFlash2, MTP and ordinary decoding, and
-names the one it used.
+Every memory decision is keyed to one physical GPU. A Creative Writer on a 3090
+with **LLM priority** set will never empty a 5090 that is holding a checkpoint,
+in either direction and whichever way round the two roles are pinned —
+releasing a card the model is not being placed on cannot free a byte of the one
+it is. Each role has its own Performance setting, so a writer and a composer on
+two different cards can answer this differently.
 
 #### What it measured
 
-The status line reports the mechanism that actually ran, the runtime family it
-ran on, and the speed **llama.cpp timed**, along with how many drafted tokens
-were accepted where the build reports it. Nothing here is a promise: the
-acceptance rate is what decides whether speculative decoding was worth its
-VRAM, and a run whose drafts are mostly rejected is slower than ordinary
-decoding. Learned speeds are kept per backbone, per placement, per card **and**
-per accelerator, so a DFlash2 rate is never averaged into an ordinary one.
+The status line reports the mechanism that actually ran and the speed
+**llama.cpp timed**, along with how many drafted tokens were accepted where the
+build reports it. Nothing here is a promise: the acceptance rate is what
+decides whether speculative decoding was worth having, and a run whose drafts
+are mostly rejected is slower than ordinary decoding. Learned speeds are kept
+per backbone, per placement, per card **and** per accelerator, so an
+accelerated rate is never averaged into an ordinary one.
 
 ### Switching models
 
@@ -2458,6 +2402,15 @@ got, and anything that had to be reduced to fit. **Unload** stops it and gives
 back every byte of VRAM. Both are also what happens on their own when you send
 a message or when an image generation needs the card, so the buttons are for
 when you want to decide rather than for making it work.
+
+**A server never outlives the WebUI.** Closing the WebUI, Ctrl+C, and a kill
+from the task manager all stop every llama-server this extension started, and on
+Windows the operating system stops them even if the WebUI is killed in a way
+that runs no Python at all — the servers are put in a job object that ends with
+the process that made it. Any that are somehow still there are found and stopped
+by their command line the next time the extension loads. A model left resident
+after the WebUI has gone is several gigabytes of VRAM you cannot get back
+without noticing it first.
 
 Switching model does not carry the vision projector across, and does not guess
 one from the new model's folder. A projector has to match the model it was made
@@ -2484,6 +2437,14 @@ been given a seed has −1 already. The same boxes are the per-message override
 for the conversation you are in, so **Cancel** in the editor puts them back to
 the selected character's.
 
+The editor also shows **the system prompt this character actually runs with** —
+the whole thing, composed the way it will be sent, not a description of it. It
+follows the name and description as they are typed, so the effect of a change is
+visible before it is saved. **Edit this system prompt** copies what is showing
+into the override box below it, where it becomes this character's own and is
+saved with them; empty it again and the character goes back to the common
+default. It never overwrites an override already written.
+
 ### Conversation, per message
 
 Tap a message in the transcript and the actions for that message open in a
@@ -2493,11 +2454,24 @@ composer, so neither of them moves:
 | Action | What it does |
 | --- | --- |
 | **Edit** | Rewrite the message in place. The version showing is the one changed. |
-| **Regenerate** | Ask for the reply again, keeping the one it had. `◀ 2/3 ▶` pages between attempts, so one that came back worse is undone rather than re-rolled. |
+| **Regenerate** | Ask for the reply again. At the end of a thread it keeps the one it had and `◀ 2/3 ▶` pages between attempts, so one that came back worse is undone rather than re-rolled. In the middle of a thread it **branches**, and the thread it came from keeps every message that followed. |
 | **Continue** | Carry the last reply on from exactly where it stopped. |
 | **Send again from here** | Answer one of your own messages again, dropping everything after it. |
 | **Branch from here** | Copy the thread up to this message into a new one. The thread it came from is untouched. |
 | **Delete message** / **Delete from here** | One message, or that one and everything after it. |
+
+Every reply also carries a small **↻** of its own, at the bottom of the bubble:
+one tap regenerates that reply, without opening the sheet first. It is the same
+action with the same rules — including the branching — and it is drawn in the
+browser, so a theme that replaces Gradio's chat DOM entirely may not show it.
+Regenerate is on the sheet either way.
+
+Regenerating in the middle of a thread makes a branch rather than deleting what
+came after it. Both threads are then in **Threads**: the new one is where the
+new reply is, the original still holds the reply you had *and every message
+after it*, and going back to it loads the whole conversation. Only a reply at
+the end of a thread — where there is nothing after it to lose — keeps its
+attempts as versions on the one message.
 
 Tapping the same message again puts the sheet away; tapping a different one
 moves it there. **Edit** replaces the composer with an *Editing message* row
@@ -2525,7 +2499,10 @@ beside it.
 
 The workspace sizes itself to the window: the header and the composer are
 measured first, the transcript takes whatever is left, and the page does not
-scroll — the thread does. That is the same layout at 320px as on a desktop; what
+scroll — the thread does. The header — **☰**, who you are talking to, and the
+state chip — stays docked at the top while the thread scrolls under it, so the
+menu and the loading state are reachable from anywhere in a long conversation
+without scrolling back. That is the same layout at 320px as on a desktop; what
 changes with the width is that the sheets become a side panel instead of
 covering the screen.
 
@@ -2858,7 +2835,6 @@ mc_llm_files.py       what a pasted path means, and what is in a folder
 mc_llm_browse.py      the Browse button beside every path box
 mc_llm_native.py      the operating system's own file dialog
 mc_llm_setup.py       getting a llama.cpp runtime in place
-mc_llm_dflash.py      the DFlash2 llama.cpp family: install it apart, prove it apart
 mc_llm_accel.py       acceleration and VRAM priority, as two settings
 mc_llm_managed_models.py   the managed backbone catalogue: verify, install, switch
 mc_llm_state.py       shared preferences + the mode histories
@@ -2880,7 +2856,6 @@ prompt_master/krea/library.py     loads and validates that package
 prompt_master/krea/director.py    the local Creative Director; no inference
 prompt_master/krea/variation.py   Creativity 0-10, as sampling settings
 prompt_master/models/managed-models.json  the curated backbone registry (data only)
-prompt_master/models/dflash2-runtimes.json  the pinned DFlash2 builds (data only)
 prompt_master/models/managed_profiles.py  the hidden per-backbone quality profiles
 
 scripts/model_chain.py                Script class, UI, orchestration
@@ -2903,8 +2878,7 @@ mc_llm_browse  ->  mc_llm_native        mc_llm_context      mc_memory
 mc_llm_files  <-  mc_llm_setup            mc_gguf
 
 mc_llm_studio  ->  mc_llm_managed_models  ->  mc_llm_paths
-       |
-mc_llm_dflash  ->  mc_llm_setup      mc_llm_runtime  ->  mc_llm_accel
+                                mc_llm_runtime  ->  mc_llm_accel
                             |
                    mc_llm_runtime (stop / start / one switch at a time)
 ```

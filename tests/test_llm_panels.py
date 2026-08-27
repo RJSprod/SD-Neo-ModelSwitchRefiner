@@ -392,6 +392,332 @@ class TestPerMessageActions:
         assert len(conversation.messages) == 4
 
 
+class TestRegeneratingInTheMiddleBranches:
+    """Asking for a different reply must not cost the conversation after it.
+
+    Reported as exactly that: "if I go back to the original response, I expect
+    the entire thread to load". It did not, because regenerating ran
+    ``truncate_after`` -- every message after the one being rewritten was
+    deleted, and paging back to the first attempt showed it with the rest of
+    the conversation gone for ever.
+
+    A version is one string, so versions cannot hold what followed. A branch
+    can, and the store already had one. So the rule is now positional: at the
+    end of a thread, where nothing follows, regenerating pages between
+    attempts; anywhere else it branches, and the thread it came from keeps
+    every word of what came after.
+    """
+
+    def _thread(self, store, monkeypatch, turns=3, pieces=("A new", " reply")):
+        import mc_llm_chat_panel as chat
+        from prompt_master.chat.characters import Character, Persona, save_persona
+        from prompt_master.chat.history import ASSISTANT, ChatStore, USER
+
+        save_persona(mc_llm_paths.app_paths(), Persona(name="Me", description="a reader"))
+        chats = ChatStore(store / "chats")
+        monkeypatch.setattr(chat, "_chats", lambda: chats)
+
+        class Characters:
+            def load(self, who):
+                return Character(name="Ada", context="a reader of maps")
+
+        monkeypatch.setattr(chat, "_characters", lambda: Characters())
+        events = [chat.sessions.Event(chat.sessions.CHUNK, piece) for piece in pieces]
+        events.append(chat.sessions.Event(chat.sessions.DONE, "".join(pieces)))
+        monkeypatch.setattr(chat.sessions, "conversation",
+                            lambda request, cancel: iter(events))
+
+        conversation = chats.new("Ada")
+        for index in range(turns):
+            conversation.append(USER, f"ask {index}")
+            conversation.append(ASSISTANT, f"reply {index}")
+        chats.save(conversation)
+        return chat, chats, conversation
+
+    def _run(self, chat, identifier, index):
+        """Regenerate to completion, and hand back the events it yielded."""
+        return list(chat._regenerate("Ada", identifier, index,
+                                     None, None, None, None, ""))
+
+    # -- the middle: a branch ------------------------------------------------ #
+
+    def test_the_thread_it_came_from_keeps_everything_after_it(self, store, monkeypatch):
+        """The bug, as an assertion: six messages before, six messages after."""
+        chat, chats, conversation = self._thread(store, monkeypatch)
+
+        self._run(chat, conversation.identifier, 1)
+
+        kept = chats.load("Ada", conversation.identifier)
+        assert [message.text for message in kept.messages] == [
+            "ask 0", "reply 0", "ask 1", "reply 1", "ask 2", "reply 2"]
+
+    def test_the_middle_reply_never_grows_a_version(self, store, monkeypatch):
+        """Versions only ever exist where nothing follows them, which is what
+        makes paging between them safe."""
+        chat, chats, conversation = self._thread(store, monkeypatch)
+
+        self._run(chat, conversation.identifier, 1)
+
+        assert chats.load("Ada", conversation.identifier).messages[1].versions == ["reply 0"]
+
+    def test_the_new_reply_is_written_to_a_branch_of_its_own(self, store, monkeypatch):
+        chat, chats, conversation = self._thread(store, monkeypatch)
+
+        events = self._run(chat, conversation.identifier, 1)
+        identifier = events[-1][1]
+
+        assert identifier != conversation.identifier
+        branched = chats.load("Ada", identifier)
+        # Up to the message the reply was answering, and then the new reply --
+        # so the branch ends on the same turn, answered differently.
+        assert [message.text for message in branched.messages] == ["ask 0", "A new reply"]
+
+    def test_the_panel_moves_onto_the_branch_it_just_made(self, store, monkeypatch):
+        """Every event carries it, not just the last: a panel still pointing at
+        the thread it came from would apply the next action to the wrong
+        conversation."""
+        chat, chats, conversation = self._thread(store, monkeypatch)
+
+        events = self._run(chat, conversation.identifier, 1)
+        identifier = events[-1][1]
+
+        assert {event[1] for event in events} == {identifier}
+        assert events[-1][0].get("value") == identifier
+        assert identifier in [value for _, value in events[-1][0].get("choices")]
+
+    def test_the_thread_it_made_is_the_one_reopened_later(self, store, monkeypatch):
+        import mc_llm_state
+
+        chat, chats, conversation = self._thread(store, monkeypatch)
+
+        identifier = self._run(chat, conversation.identifier, 1)[-1][1]
+
+        assert mc_llm_state.preferences().get("thread") == identifier
+
+    def test_an_opening_reply_branches_rather_than_emptying_the_thread(self, store,
+                                                                      monkeypatch):
+        """Index nought is the one place ``truncate_after`` would have taken the
+        whole conversation. There is no turn before it, so the branch it starts
+        is empty -- but it is still a branch, and nothing is lost."""
+        from prompt_master.chat.history import ASSISTANT, USER
+
+        chat, chats, conversation = self._thread(store, monkeypatch, turns=0)
+        conversation.append(ASSISTANT, "hello, traveller")
+        conversation.append(USER, "hello yourself")
+        conversation.append(ASSISTANT, "reply 0")
+        chats.save(conversation)
+
+        identifier = self._run(chat, conversation.identifier, 0)[-1][1]
+
+        assert [message.text for message in
+                chats.load("Ada", conversation.identifier).messages] == [
+                    "hello, traveller", "hello yourself", "reply 0"]
+        assert [message.text for message in chats.load("Ada", identifier).messages] == \
+            ["A new reply"]
+
+    # -- the end: a version -------------------------------------------------- #
+
+    def test_the_last_reply_still_pages_between_attempts(self, store, monkeypatch):
+        chat, chats, conversation = self._thread(store, monkeypatch)
+
+        self._run(chat, conversation.identifier, 5)
+
+        kept = chats.load("Ada", conversation.identifier)
+        assert len(kept.messages) == 6
+        assert kept.messages[5].versions == ["reply 2", "A new reply"]
+
+    def test_regenerating_the_end_stays_in_the_thread_it_is_in(self, store, monkeypatch):
+        chat, chats, conversation = self._thread(store, monkeypatch)
+
+        events = self._run(chat, conversation.identifier, 5)
+
+        assert {event[1] for event in events} == {conversation.identifier}
+        # A no-op update: there is no new thread for the list to learn about,
+        # and nothing was branched to make one.
+        assert events[-1][0] == {}
+        assert len(chats.listing("Ada")) == 1
+
+    def test_nothing_selected_still_asks_the_last_reply_again(self, store, monkeypatch):
+        chat, chats, conversation = self._thread(store, monkeypatch)
+
+        self._run(chat, conversation.identifier, chat.NO_SELECTION)
+
+        assert chats.load("Ada", conversation.identifier).messages[5].versions == \
+            ["reply 2", "A new reply"]
+
+    # -- the shape of what it yields ----------------------------------------- #
+
+    def test_every_event_carries_one_value_per_output(self, store, monkeypatch):
+        """Two more than :func:`_stream` yields, because this is the one
+        streaming handler whose outputs begin with the thread list and the open
+        thread. One short and a thread identifier would land in a textbox."""
+        chat, chats, conversation = self._thread(store, monkeypatch)
+        width = 2 + len(chat._idle(conversation, "", None, ""))
+
+        for index in (1, 5, chat.NO_SELECTION):
+            for event in self._run(chat, conversation.identifier, index):
+                assert len(event) == width
+
+    def test_a_message_of_your_own_is_refused_in_that_shape_too(self, store, monkeypatch):
+        chat, chats, conversation = self._thread(store, monkeypatch)
+
+        events = self._run(chat, conversation.identifier, 0)
+
+        assert len(events) == 1 and events[0][1] == conversation.identifier
+        assert [message.text for message in
+                chats.load("Ada", conversation.identifier).messages][-1] == "reply 2"
+
+
+class TestTheRegenerateIconOnAReply:
+    """One tap on the bubble, rather than three through the sheet.
+
+    Everything the icon can do is here, because the browser half of it does not
+    decide anything: it reports which reply on screen was tapped, and that
+    ordinal has to survive the trip. What makes it worth testing rather than
+    reading is that ``_view`` pairs turns -- two replies in a row are two rows
+    with an empty left side, one exchange is one row holding two messages -- so
+    "the third reply" and "the third row" are not the same number, and the map
+    between them is the only thing standing between an icon and a rewritten
+    message somebody did not point at.
+    """
+
+    def _conversation(self, store):
+        from prompt_master.chat.history import ASSISTANT, ChatStore, USER
+
+        chats = ChatStore(store / "chats")
+        conversation = chats.new("Ada")
+        conversation.append(USER, "ask 0")
+        conversation.append(ASSISTANT, "reply 0")
+        # Two replies in a row: the pairing that makes rows and replies differ.
+        conversation.append(ASSISTANT, "reply 1")
+        conversation.append(USER, "ask 1")
+        conversation.append(ASSISTANT, "reply 2")
+        chats.save(conversation)
+        return chats, conversation
+
+    def test_the_nth_reply_is_the_nth_reply_and_not_the_nth_row(self, store):
+        chats, conversation = self._conversation(store)
+        rows, positions = mc_llm_chat_panel._view(conversation)
+
+        # Three replies over three rows, but the second one is alone on its row
+        # and the third is on a row of its own after a message of yours.
+        assert len(rows) == 3
+        assert [mc_llm_chat_panel._reply_at(positions, ordinal) for ordinal in range(3)] == \
+            [1, 2, 4]
+
+    def test_a_message_of_your_own_is_never_what_an_ordinal_names(self, store):
+        chats, conversation = self._conversation(store)
+        _, positions = mc_llm_chat_panel._view(conversation)
+
+        named = [mc_llm_chat_panel._reply_at(positions, ordinal) for ordinal in range(3)]
+
+        assert all(conversation.messages[index].role == "assistant" for index in named)
+
+    def test_an_ordinal_past_the_end_names_nothing(self, store):
+        chats, conversation = self._conversation(store)
+        _, positions = mc_llm_chat_panel._view(conversation)
+
+        assert mc_llm_chat_panel._reply_at(positions, 3) == mc_llm_chat_panel.NO_SELECTION
+        assert mc_llm_chat_panel._reply_at(positions, -1) == mc_llm_chat_panel.NO_SELECTION
+
+    def test_what_the_browser_sends_is_text_and_is_read_as_a_number(self, store):
+        """It comes back out of a Textbox, so it is a string, and an empty one
+        the first time the tab is opened."""
+        chats, conversation = self._conversation(store)
+        _, positions = mc_llm_chat_panel._view(conversation)
+
+        assert mc_llm_chat_panel._reply_at(positions, " 2 ") == 4
+        for nothing in ("", None, "second", []):
+            assert mc_llm_chat_panel._reply_at(positions, nothing) == \
+                mc_llm_chat_panel.NO_SELECTION
+
+    def test_no_transcript_at_all_names_nothing(self):
+        assert mc_llm_chat_panel._reply_at(None, 0) == mc_llm_chat_panel.NO_SELECTION
+        assert mc_llm_chat_panel._reply_at([], 0) == mc_llm_chat_panel.NO_SELECTION
+
+    def test_it_regenerates_the_reply_the_icon_was_on(self, store, monkeypatch):
+        branching = TestRegeneratingInTheMiddleBranches()
+        chat, chats, conversation = branching._thread(store, monkeypatch)
+        _, positions = chat._view(conversation)
+
+        # The second reply of three: mid-thread, so this also proves the icon
+        # branches rather than truncating, because it is the same handler.
+        events = list(chat._regenerate_reply("Ada", conversation.identifier, positions, "1",
+                                             None, None, None, None, ""))
+
+        assert [message.text for message in
+                chats.load("Ada", conversation.identifier).messages] == [
+                    "ask 0", "reply 0", "ask 1", "reply 1", "ask 2", "reply 2"]
+        branched = chats.load("Ada", events[-1][1])
+        assert [message.text for message in branched.messages] == \
+            ["ask 0", "reply 0", "ask 1", "A new reply"]
+
+    def test_a_stale_icon_is_refused_rather_than_pointed_somewhere_else(self, store,
+                                                                       monkeypatch):
+        """A transcript the browser is a moment behind on must never cost
+        somebody a message: an ordinal that names nothing says so, and does not
+        fall back to the last reply the way the sheet's Regenerate does with
+        nothing selected."""
+        branching = TestRegeneratingInTheMiddleBranches()
+        chat, chats, conversation = branching._thread(store, monkeypatch)
+
+        events = list(chat._regenerate_reply("Ada", conversation.identifier, [], "4",
+                                             None, None, None, None, ""))
+
+        assert len(events) == 1
+        assert [message.text for message in
+                chats.load("Ada", conversation.identifier).messages] == [
+                    "ask 0", "reply 0", "ask 1", "reply 1", "ask 2", "reply 2"]
+
+    def test_it_answers_in_the_same_shape_the_sheet_does(self, store, monkeypatch):
+        branching = TestRegeneratingInTheMiddleBranches()
+        chat, chats, conversation = branching._thread(store, monkeypatch)
+        _, positions = chat._view(conversation)
+        width = 2 + len(chat._idle(conversation, "", None, ""))
+
+        for ordinal in ("0", "2", "nowhere"):
+            for event in chat._regenerate_reply("Ada", conversation.identifier, positions,
+                                                ordinal, None, None, None, None, ""):
+                assert len(event) == width
+
+    def test_the_pair_the_browser_presses_is_in_the_panel(self, monkeypatch):
+        """Two invisible components with one job between them. If either loses
+        its id the icon stops working silently, because a control nobody can
+        see is a control nobody notices has gone."""
+        import gradio as gr
+
+        import mc_llm_ui as ui
+
+        seen = []
+
+        def recording(original):
+            class Recorded(original):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    seen.append(kwargs.get("elem_id"))
+            return Recorded
+
+        for name in ("Textbox", "Button"):
+            monkeypatch.setattr(gr, name, recording(getattr(gr, name)))
+        mc_llm_chat_panel.build()
+
+        assert ui.ident("chat", "regenerate-at") in seen
+        assert ui.ident("chat", "regenerate-now") in seen
+
+    def test_the_script_presses_the_ids_the_panel_declares(self):
+        """The two halves are in two languages and nothing links them but these
+        strings, so they are compared rather than trusted."""
+        from pathlib import Path
+
+        import mc_llm_ui as ui
+
+        script = (Path(mc_llm_chat_panel.__file__).resolve().parent
+                  / "javascript" / "llm_studio.js").read_text(encoding="utf-8")
+
+        for name in ("regenerate-at", "regenerate-now", "transcript"):
+            assert f'"{ui.ident("chat", name)}"' in script
+
+
 class TestTheSurfaces:
     """Conversation is the home state, and everything else is temporary.
 
@@ -1763,7 +2089,7 @@ class TestTheFilePicker:
         assert [kind for kind, _kwargs in built["folders"]._callbacks] == ["input"]
 
     def test_the_panel_carries_a_picker_for_each_path_box(self, store):
-        """Four boxes, four pickers, and ids that are this extension's."""
+        """Three boxes, three pickers, and ids that are this extension's."""
         import mc_llm_browse
         import mc_llm_ui as ui
 
@@ -1780,7 +2106,7 @@ class TestTheFilePicker:
         finally:
             mc_llm_browse.attach = original
 
-        assert built == ["runtime", "model", "mmproj", "dflash"]
+        assert built == ["runtime", "model", "mmproj"]
         assert ui.ident("browse", "model") == "mc-llm-browse-model"
 
 
@@ -2086,6 +2412,89 @@ class TestTheCharacterMenu:
         assert restored[6] == 0.4
         assert restored[9] == 99
 
+
+class TestTheSystemPromptIsVisible:
+    """Asked for: "expose the current system prompt in the character view".
+
+    It was never on screen anywhere. The override box showed what a character
+    had *instead of* the built prompt, which is empty for almost every
+    character and says nothing at all about what the model is actually told.
+    """
+
+    @pytest.fixture
+    def characters(self, store):
+        from prompt_master.chat.characters import Character
+
+        (store / "characters").mkdir(parents=True, exist_ok=True)
+        held = mc_llm_chat_panel._characters()
+        held.save(Character(name="Ada", context="a mathematician"))
+        return held
+
+    def test_it_shows_the_prompt_that_would_actually_be_sent(self, characters):
+        from prompt_master.chat import prompt as chat_prompt
+        from prompt_master.chat.characters import Character, Persona
+
+        shown = mc_llm_chat_panel._system_preview("Ada", "a mathematician", "")
+
+        assert shown == chat_prompt.system_text(
+            Character(name="Ada", context="a mathematician"), Persona())
+        assert "You are Ada" in shown
+        assert "a mathematician" in shown
+
+    def test_it_follows_what_is_being_typed_rather_than_what_is_on_disk(self, characters):
+        """The character being written is the one worth previewing."""
+        shown = mc_llm_chat_panel._system_preview("Grace", "a rear admiral", "")
+
+        assert "You are Grace" in shown
+        assert "a rear admiral" in shown
+
+    def test_an_override_is_what_it_previews_when_there_is_one(self, characters):
+        shown = mc_llm_chat_panel._system_preview("Ada", "a mathematician",
+                                                  "You are {{char}}. Be brief.")
+
+        assert shown == "You are Ada. Be brief."
+        assert "a mathematician" not in shown
+
+    def test_opening_the_editor_fills_it_in(self, characters):
+        opened = mc_llm_chat_panel._open_character("Ada")
+
+        assert "You are Ada" in opened[10]
+
+    def test_a_new_character_previews_the_bare_wrapper(self, characters):
+        created = mc_llm_chat_panel._new_character()
+
+        assert "the character" in created[10]
+
+    def test_editing_it_copies_it_into_the_override_box(self, characters):
+        """One press, because the alternative is selecting eight lines of
+        read-only text and pasting them into the box underneath."""
+        copied, note = mc_llm_chat_panel._adopt_system_prompt("Ada", "a mathematician", "")
+
+        assert "You are Ada" in copied
+        assert "no longer change it" in note
+
+    def test_it_will_not_overwrite_an_override_somebody_wrote(self, characters):
+        copied, note = mc_llm_chat_panel._adopt_system_prompt("Ada", "a mathematician",
+                                                              "mine")
+
+        assert copied == {}
+        assert "already has a system prompt of its own" in note
+
+    def test_what_is_copied_is_what_was_running(self, characters):
+        """So saving without touching it changes nothing about how the
+        character behaves -- it only stops the wrapper following the persona."""
+        before = mc_llm_chat_panel._system_preview("Ada", "a mathematician", "")
+
+        copied, _note = mc_llm_chat_panel._adopt_system_prompt("Ada", "a mathematician", "")
+
+        assert mc_llm_chat_panel._system_preview("Ada", "a mathematician", copied) == before
+
+    def test_it_never_raises_into_the_panel(self, monkeypatch, characters):
+        monkeypatch.setattr(mc_llm_chat_panel, "_persona",
+                            lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+        assert mc_llm_chat_panel._system_preview("Ada", "", "") == ''
+
     def test_every_editor_handler_answers_the_same_shape(self, characters):
         """They share one output list, so one of them returning a different
         number of values is a panel that breaks on a button press."""
@@ -2097,7 +2506,7 @@ class TestTheCharacterMenu:
             len(mc_llm_chat_panel._cancel_character("")),
         }
 
-        assert shapes == {11}
+        assert shapes == {12}
 
 
 class TestSeedsAreRandomUntilSomebodyChoosesOne:

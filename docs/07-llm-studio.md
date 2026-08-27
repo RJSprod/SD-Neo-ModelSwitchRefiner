@@ -3045,3 +3045,210 @@ quietly stops matching the engine behind it.
 Conversation was already right in the two places that matter: `Character.seed`
 defaults to `RANDOM_SEED`, and the box does too. What it did not do was reset
 that box when New was pressed, which is 29.1's bug wearing this one's clothes.
+
+## 30. DFlash2 taken back out (27 August 2026)
+
+Reported after one evening with it: *"DFlash mode is just not available for my
+CUDA, please remove it and LIGHTNING FAST mode."*
+
+It is worth recording as its own section rather than quietly reverting, because
+the thing that was wrong with it was not a bug. Every mechanism in section 28
+worked as designed: the runtime family installed apart, the capability record
+refused to trust help text, the planner would not report a partial offload as
+Lightning. What it could not do was run, on the machine it was built for,
+because DFlash2 is llama.cpp pull request 27342 and that user's CUDA build is
+not it — and no amount of correct refusal machinery is worth carrying for a
+mechanism that never starts.
+
+So the accelerator, the preset, the runtime family, the capability record, the
+speculative sidecar, the full-residency planner and the two Setup rows are
+gone: `mc_llm_dflash.py` and `dflash2-runtimes.json` deleted,
+`accelerators.dflash2` out of the registry, `Speculator` and the draft out of
+`mc_llm_managed_models`, and `Plan` down to the mechanism and the binary.
+
+### 30.1 What stayed, and why it is not sentiment
+
+**The two axes.** Acceleration and memory priority are still two settings and
+not one switch. That was never a fact about DFlash2 — it is a fact about the
+difference between *how a model decodes* and *who owns the card*, and MTP with
+cooperative memory is as real a combination as DFlash2 with cooperative memory
+ever was. It is still the one no preset offers and still reachable in one
+dropdown.
+
+**The value gate.** `runtime_accepts` and the argument-error retry came out of
+section 29.3 and apply to `draft-mtp` exactly as they did to `draft-dflash`.
+
+**The hybrid state arithmetic.** Qwen 3.8 interleaves Gated DeltaNet blocks with
+periodic full attention whatever is decoding it, and a planner that charges
+nothing for the recurrent half reports the model as cheaper than it is.
+
+**The two-stage choice.** `accelerator_choice` still answers from files and
+`accelerator_plan` still asks the binary, because the first is stable enough to
+put in the warm identity and the second costs a `--help`.
+
+### 30.2 The setting that would have become a lie
+
+`llm_priority` had exactly one caller: the DFlash2 fit. Removing DFlash2 without
+noticing would have left **Fast LLM** as a preset whose second half did nothing
+at all — a control that says "this card's image residency may be released for
+it" and never releases anything.
+
+So `_make_room_for_the_llm` now runs on the ordinary placement path: under LLM
+priority, and only then, it asks the broker for the configured placement's
+deficit on the card that placement is going to. It sits in `Runtime.client`
+before the negotiation rather than inside it, because `negotiate` promises to
+move nothing and the estimator relies on that — what this does is find more
+free VRAM than there would have been a moment ago and let the ordinary ladder
+place against it.
+
+`mc_broker.release_for_llm` is unchanged and is still the narrow door section
+28.4 describes: one card, the deficit, re-measured, never a sweep.
+
+### 30.3 What an upgraded installation is left holding
+
+A `draft.gguf` inside any bundle whose sidecar was downloaded — about 3.9 GB,
+now referenced by nothing. It is **not** deleted on upgrade: reading a manifest
+is not a licence to remove four gigabytes of somebody's disk, and a bundle with
+an unreferenced file in it is a bundle that works. `cleanup` sweeps the
+`~draft` staging directory, which nothing writes any more; the installed file
+is the user's to remove.
+
+## 31. Five things after an evening in Conversation (27 August 2026)
+
+Reported together, and they are five separate things: one is a resource leak,
+one is a layout, two are the same complaint about regenerating, and one is a
+thing the panel knew and would not say.
+
+### 31.1 A server that outlived the WebUI
+
+> *"If I kill the webui process, there tends to be llama-server.exe running on
+> my system. Can these processes be closed on webui exit?"*
+
+Yes, and this is the failure that costs the most: a resident model is several
+gigabytes of VRAM that nothing on the machine will reclaim, and nothing tells
+you it is still there. There was already a stray sweep — `release_strays`, run
+when the extension loads — but sweeping on the way *in* only ever helps the next
+session, and only if there is one.
+
+Three doors, because a WebUI stops in three different ways and only the first of
+them runs any Python of ours:
+
+- **`on_script_unloaded`** — the host's own "the UI is going away" callback, in
+  `scripts/model_chain.py`. `shutdown()` stops every runtime in the registry and
+  then calls `release_strays()`, so a server whose `Popen` handle was lost to a
+  reload is stopped as well as the ones still held.
+- **`atexit` and the signals.** `stop_on_exit()` arms an `atexit` hook and
+  chains `SIGTERM` and `SIGINT` — *chains*, so the previous handler still runs
+  and Ctrl+C in the console still stops the WebUI the way it always did. It is
+  armed from `_repair_launcher()`, which is to say the first time this extension
+  is in a position to have started anything.
+- **The job object**, for the case none of the above covers: an End Task, a
+  crash, a kill -9. On Windows every server is created inside a job created with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and the kernel ends the job — and every
+  process in it — when the last handle to it closes, which happens when the
+  WebUI process dies however it dies. `_die_with_us` assigns each child as it is
+  launched, from `_Launcher.Popen`, and fails quietly on anything that is not
+  Windows or refuses the assignment, because a server that has to be stopped by
+  one of the two doors above is still better than no server at all.
+
+### 31.2 A header that scrolled away
+
+> *"I would like the options bar to stay docked to the top of the screen in
+> conversation mode."*
+
+`position: sticky; top: 0` on `.mc-llm-chat-header`, with the surface's own
+background painted behind it and a `z-index` above the transcript. It needs the
+background stated: a sticky element with a transparent background has the
+messages scrolling *through* it.
+
+### 31.3 Regenerate, twice
+
+Two of the five were the same feature, and the second is the one that mattered.
+
+> *"Add a regenerate icon directly next to the chat response in thread view."*
+
+There is nowhere in a Gradio 4.40 `Chatbot` bubble to put a component, so the
+icon is drawn in `javascript/llm_studio.js` and does exactly one thing: it
+writes **which reply it is on** — counted down the transcript — into a hidden
+`Textbox` and presses a hidden `Button`. `_regenerate_reply` turns that ordinal
+into a message index through the same `positions` map a click on a bubble goes
+through, and then calls `_regenerate`. The browser nominates and decides
+nothing, which is the line that file stays on.
+
+The ordinal is read **when the icon is tapped**, not when it was drawn. An
+ordinal captured in a closure names the wrong message as soon as anything above
+it is deleted, and for this button naming the wrong message means rewriting a
+reply the reader did not point at. There is a node test that moves the bubbles
+underneath the icon and then taps it.
+
+This is also the one place in that file that reads the host's own DOM, because a
+bubble carries no id of ours. The shapes Gradio 4 and the themes that reskin it
+are known to use are tried in turn, and when none matches **no icon is drawn and
+nothing else changes** — Regenerate is still on the sheet a tap on the bubble
+opens. A theme this cannot read costs an icon, never an action.
+
+### 31.4 What regenerating in the middle used to cost
+
+> *"When I decide to regenerate a message that is mid threaded response, it
+> should effectively create a branch. … If I go back to the original response, I
+> expect the entire thread to load!"*
+
+It did not, and the reason is one line:
+
+```python
+conversation.truncate_after(index)
+message.add_version("")
+```
+
+Regenerating **deleted every message after the reply** and then added a version
+to it. So `◀ 1/2 ▶` paged back to the original reply with the rest of the
+conversation gone for ever — the versions were the only thing kept, and a
+version is one string.
+
+That is the shape of the bug, and it says what the fix has to be. The thing that
+has to come back is *every message that followed*, and a list of strings on one
+message cannot hold it. The store's own word for a conversation that diverges is
+a **branch**, and `ChatStore.branch` already made one.
+
+So `_regenerate` is now positional:
+
+- **At the end of a thread**, where nothing follows, it appends a version and
+  `◀ 2/3 ▶` pages between the attempts. Nothing is lost because there was
+  nothing after it, and that is what makes it reversible.
+- **Anywhere else**, it branches at the message *before* the reply — so the
+  branch ends on the turn the reply was answering — writes the new reply there,
+  and moves the panel onto it. The thread it came from keeps every word.
+
+Index nought is included in "anywhere else", and it is the case that would have
+been easiest to leave out: an opening reply has no turn before it, so the branch
+starts empty. Still a branch, and still nothing lost, which is the whole point.
+
+The two rules together are also what makes the pager safe from here on: versions
+now only ever exist on a message with nothing after it.
+
+Regenerate is the one streaming handler whose outputs carry the thread list and
+the open thread, because it is the one that can change which thread the panel is
+on — `_into_thread` prefixes every event `_stream` yields. A panel left pointing
+at the thread it came from would apply the next action to the wrong
+conversation.
+
+### 31.5 A system prompt the panel would not show
+
+> *"Please expose the current system prompt in the character view. … Let me see
+> the default right in the character edit view so I can edit if I want."*
+
+The character editor now shows the prompt **composed the way it will be sent**,
+by calling `prompt_master.chat.prompt.system_text` — not a description of it and
+not the template with the fields left in. It follows the name, the description
+and the override as they are typed, so what a change does is visible before it
+is saved.
+
+**Edit this system prompt** copies what is showing into the override box, where
+it becomes this character's own; emptying that box puts them back on the common
+default. It will not overwrite an override somebody has already written, and
+what it copies is what was *running* — the preview and the copy are the same
+call, so the two cannot disagree.
+
+The preview never raises into the panel: a character mid-edit is a character
+that may not compose, and a stack trace where a prompt should be is worse than a
+sentence saying so.

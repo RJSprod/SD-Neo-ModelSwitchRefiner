@@ -66,10 +66,9 @@ _GB = 1024**3
 
 MODEL_FILENAME = "model.gguf"
 MMPROJ_FILENAME = "mmproj.gguf"
-DRAFT_FILENAME = "draft.gguf"
 INSTALLED_FILENAME = "installed.json"
 SIDECAR_FILENAME = "download-state.json"
-"""The five names a managed bundle is allowed to contain.
+"""The four names a managed bundle is allowed to contain.
 
 Fixed rather than taken from the registry, and that is a security decision as
 much as a tidiness one: a publisher's filename is a string from a JSON file,
@@ -77,9 +76,6 @@ and the set of strings that are safe to join onto a path is much smaller than
 the set that look like it. The publisher's name is *recorded* in
 ``installed.json`` -- so a bundle can always say what it really is -- and is
 never what anything here opens.
-
-``draft.gguf`` is the speculative sidecar and is the one of the five that a
-complete bundle may not have. See :func:`install_draft`.
 """
 
 BUNDLE_SUFFIX = ".previous"
@@ -227,37 +223,6 @@ class Multitoken:
 
 
 @dataclass(frozen=True)
-class Speculator:
-    """A separately downloaded draft model, and the terms it runs under.
-
-    Everything here except :attr:`artifact` is *policy* rather than a file --
-    the residency rules the publisher's own testing established, in the form
-    the planner asks about them. They are declarative on purpose: section 15
-    of the design intent forbids free-form executable command strings in the
-    registry, so what a catalogue row may say is "the draft must be wholly on
-    the same card as the target", and what turns that into a command line is
-    :mod:`mc_llm_accel`, in this repository, where it can be reviewed.
-    """
-
-    artifact: Artifact
-    runtime_family: str = ""
-    """Which llama.cpp family can run it, or ``""`` for the ordinary one.
-
-    Non-empty while DFlash2 is an unmerged pull request: the build that
-    understands the sidecar is not the build everything else runs on, and
-    installing one may never overwrite the other. See :mod:`mc_llm_setup`.
-    """
-    requires_full_target_gpu: bool = True
-    requires_full_draft_gpu: bool = True
-    same_gpu_as_target: bool = True
-    draft_tokens: int = 0
-    draft_min_tokens: int = 0
-    draft_p_min: float = 0.0
-    draft_kv_type_k: str = ""
-    draft_kv_type_v: str = ""
-
-
-@dataclass(frozen=True)
 class Accelerators:
     """What a backbone can be made to decode faster with, if anything.
 
@@ -269,11 +234,10 @@ class Accelerators:
     """
 
     mtp: Multitoken | None = None
-    dflash2: Speculator | None = None
 
     @property
     def any(self) -> bool:
-        return self.mtp is not None or self.dflash2 is not None
+        return self.mtp is not None
 
 
 @dataclass(frozen=True)
@@ -302,19 +266,11 @@ class ManagedModel:
     def artifacts(self) -> tuple[Artifact, ...]:
         """What an ordinary install downloads: the weights and the projector.
 
-        The speculative sidecar is deliberately not here. It is three and a
-        half gigabytes that only a machine choosing Lightning will ever load,
-        and folding it into this tuple would make every managed download of
-        this backbone pay for a runtime that may not even be installed. See
-        :attr:`draft` and :func:`install_draft`.
+        The weights and the projector, which is the whole of what a managed
+        bundle holds. Accelerator metadata describes the file that is already
+        being downloaded rather than naming another one.
         """
         return (self.model,) if self.projector is None else (self.model, self.projector)
-
-    @property
-    def draft(self) -> Artifact | None:
-        """The speculative draft file, or ``None`` when this entry has none."""
-        found = self.accelerators.dflash2
-        return None if found is None else found.artifact
 
     @property
     def pinned(self) -> bool:
@@ -549,33 +505,7 @@ def _read_accelerators(identifier: str, raw) -> Accelerators:
                          draft_tokens=_whole(identifier, raw_mtp.get("draft_tokens"),
                                              "accelerators.mtp.draft_tokens"))
 
-    dflash2 = None
-    raw_dflash = raw.get("dflash2")
-    if raw_dflash not in (None, {}):
-        if not isinstance(raw_dflash, dict):
-            raise ManagedError(f"{identifier}: accelerators.dflash2 is not a JSON object.")
-        artifact = _read_artifact(identifier, raw_dflash, DRAFT_FILENAME, required=True)
-        family = str(raw_dflash.get("runtime_family") or "").strip()
-        if family and not _RUNTIME_FAMILY.match(family):
-            raise ManagedError(
-                f"{identifier}: {family!r} is not a usable runtime family name.")
-        dflash2 = Speculator(
-            artifact=artifact,
-            runtime_family=family,
-            requires_full_target_gpu=bool(raw_dflash.get("requires_full_target_gpu", True)),
-            requires_full_draft_gpu=bool(raw_dflash.get("requires_full_draft_gpu", True)),
-            same_gpu_as_target=bool(raw_dflash.get("same_gpu_as_target", True)),
-            draft_tokens=_whole(identifier, raw_dflash.get("draft_tokens"),
-                                "accelerators.dflash2.draft_tokens"),
-            draft_min_tokens=_whole(identifier, raw_dflash.get("draft_min_tokens"),
-                                    "accelerators.dflash2.draft_min_tokens"),
-            draft_p_min=_fraction(identifier, raw_dflash.get("draft_p_min"),
-                                  "accelerators.dflash2.draft_p_min"),
-            draft_kv_type_k=_cache_type(identifier, raw_dflash.get("draft_kv_type_k")),
-            draft_kv_type_v=_cache_type(identifier, raw_dflash.get("draft_kv_type_v")),
-        )
-
-    return Accelerators(mtp=mtp, dflash2=dflash2)
+    return Accelerators(mtp=mtp)
 
 
 def _whole(identifier: str, value, field_name: str) -> int:
@@ -671,13 +601,6 @@ class Installed:
     profile_version: str = ""
     hashes: dict = field(default_factory=dict)
     installed_at: float = 0.0
-    draft: Path | None = None
-    """The speculative sidecar, when one has been installed beside the weights.
-
-    ``None`` on every bundle that has not been given one, which is every bundle
-    until somebody asks for DFlash2 -- and which is a complete, current,
-    perfectly usable install. See :func:`install_draft`.
-    """
 
     @property
     def sees(self) -> bool:
@@ -691,27 +614,10 @@ class Installed:
         not changed the bytes, and re-downloading eight gigabytes to obtain the
         same eight gigabytes would be a poor way to celebrate it. A *changed*
         hash is a different model wearing the same id, and the panel says so.
-
-        The draft is not in the comparison, and could not be: an absent sidecar
-        is the normal state of a current bundle, so asking for it here would
-        report every ordinary install as superseded.
         """
         wanted = {artifact.local_name: artifact.sha256 for artifact in model.artifacts}
         return all(str(self.hashes.get(name, "")).casefold() == sha
                    for name, sha in wanted.items())
-
-    def drafts(self, model: ManagedModel) -> bool:
-        """Whether this bundle holds the exact draft ``model`` names.
-
-        False both when there is no sidecar and when there is one the catalogue
-        has since moved off -- the second being a bundle that would start
-        DFlash2 against a draft nobody tested with these weights, which is a
-        worse outcome than not offering DFlash2 at all.
-        """
-        wanted = model.draft
-        if wanted is None or self.draft is None:
-            return False
-        return str(self.hashes.get(wanted.local_name, "")).casefold() == wanted.sha256
 
 
 def bundle_root(identifier: str) -> Path:
@@ -735,24 +641,6 @@ def staging_root(identifier: str) -> Path:
     """Where ``identifier`` is downloaded to before it is promoted."""
     bundle_root(identifier)  # the same containment check, for the same reason
     return mc_llm_paths.managed_staging_root() / identifier
-
-
-DRAFT_STAGING_SUFFIX = "~draft"
-"""What separates a sidecar's staging directory from a bundle's.
-
-A character :data:`_ID` does not allow, so no model id can ever name the
-directory another model's sidecar is staged in. Two staging directories rather
-than one because they hold two different downloads with two different sets of
-expectations, and :func:`_prepare_staging` discards a staging directory whose
-expectations have changed -- so sharing one would have fetching a 3.86 GB
-sidecar throw away nine tenths of an interrupted 22 GB download.
-"""
-
-
-def draft_staging_root(identifier: str) -> Path:
-    """Where ``identifier``'s speculative sidecar is downloaded to."""
-    bundle_root(identifier)
-    return mc_llm_paths.managed_staging_root() / f"{identifier}{DRAFT_STAGING_SUFFIX}"
 
 
 def installed(identifier: str) -> Installed | None:
@@ -779,11 +667,9 @@ def installed(identifier: str) -> Installed | None:
     if not model.is_file():
         return None
     mmproj = root / MMPROJ_FILENAME
-    draft = root / DRAFT_FILENAME
     artifacts = document.get("artifacts") or {}
     hashes = {name: str((artifacts.get(key) or {}).get("sha256") or "").casefold()
-              for key, name in (("model", MODEL_FILENAME), ("projector", MMPROJ_FILENAME),
-                                ("draft", DRAFT_FILENAME))}
+              for key, name in (("model", MODEL_FILENAME), ("projector", MMPROJ_FILENAME))}
 
     return Installed(
         identifier=str(document.get("model_id") or identifier),
@@ -796,11 +682,6 @@ def installed(identifier: str) -> Installed | None:
         profile_version=str(document.get("profile_version") or ""),
         hashes={name: value for name, value in hashes.items() if value},
         installed_at=float(document.get("installed_at") or 0.0),
-        # Both halves asked for: a file with no manifest entry is an orphan
-        # from an interrupted install and is not something to start a runtime
-        # against, and a manifest entry with no file is a bundle somebody has
-        # been deleting things out of by hand.
-        draft=draft if draft.is_file() and hashes.get(DRAFT_FILENAME) else None,
     )
 
 
@@ -1053,24 +934,6 @@ def _staged_bytes(model: ManagedModel) -> int:
                 total += (staging / name).stat().st_size
             except OSError:
                 continue
-    return total
-
-
-def _staged_draft_bytes(model: ManagedModel) -> int:
-    """How much of ``model``'s sidecar is already in its own staging directory."""
-    artifact = model.draft
-    if artifact is None:
-        return 0
-    try:
-        staging = draft_staging_root(model.identifier)
-    except ManagedError:
-        return 0
-    total = 0
-    for name in (artifact.local_name, artifact.local_name + ".part"):
-        try:
-            total += (staging / name).stat().st_size
-        except OSError:
-            continue
     return total
 
 
@@ -1477,171 +1340,6 @@ def _check_cancelled(cancel: threading.Event | None) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# The speculative sidecar, installed on its own
-# --------------------------------------------------------------------------- #
-
-
-def install_draft(identifier: str, on_status=None, on_progress=None,
-                  cancel: threading.Event | None = None) -> Installed:
-    """Add ``identifier``'s DFlash2 draft model to a bundle already on disk.
-
-    A second transaction rather than a flag on the first, because it answers a
-    different question. The weights and the projector are what a backbone *is*;
-    the draft is 3.86 GB that only ever runs under a llama.cpp build this
-    extension has to fetch separately and may not have -- so an ordinary
-    managed install must not pay for it, and a machine that never chooses
-    Lightning must never download it.
-
-    The transaction is smaller than a download's and has to be, because there
-    is no directory to rename: the bundle exists and is in use. So the file is
-    staged and verified exactly as any other artifact is, moved into the bundle
-    with one ``os.replace``, and only then is ``installed.json`` rewritten to
-    mention it. The ordering is the whole of the safety: a crash before the
-    rewrite leaves a bundle that does not know about a file, which
-    :func:`installed` reads as a bundle with no sidecar -- which is what it had
-    a minute earlier. A crash after it leaves a complete one. There is no
-    ordering that leaves a bundle claiming a draft it does not have.
-
-    Nothing about the model that is loaded changes, and nothing selects
-    anything: this is a download, and choosing to *use* DFlash2 is a separate
-    setting on a separate screen.
-    """
-    say = on_status or (lambda _text: None)
-    tick = on_progress or (lambda _fraction: None)
-
-    model = entry(identifier)
-    artifact = model.draft
-    if artifact is None:
-        raise ManagedError(
-            f"{model.label} has no speculative draft model in this extension's catalogue, so "
-            f"there is nothing to install. Lightning is not offered for it."
-        )
-
-    bundle = installed(model.identifier)
-    if bundle is None or not bundle.matches(model):
-        raise ManagedError(
-            f"{model.label} has to be downloaded before its draft model can be added to it. "
-            f"Nothing was downloaded."
-        )
-    if bundle.drafts(model):
-        say(f"{model.label}'s draft model is already downloaded.")
-        tick(1.0)
-        return bundle
-
-    staging = draft_staging_root(model.identifier)
-    _preflight(model, staging, (artifact,))
-    _prepare_staging(model, staging, (artifact,))
-
-    staged = staging / artifact.local_name
-    _check_cancelled(cancel)
-    if not _adopt_local_copy(model, artifact, staged, say):
-        say(f"Downloading {artifact.filename}…")
-        share = artifact.approximate_bytes or 1
-
-        def report(done, _expected):
-            _check_cancelled(cancel)
-            tick(min(done / share, 1.0))
-
-        _fetch(model, artifact, staged, report, say)
-
-    say(f"Verifying {artifact.filename}…")
-    _check_gguf(staged, artifact)
-
-    say("Installing…")
-    _adopt_draft(model, artifact, staged, bundle)
-    shutil.rmtree(staging, ignore_errors=True)
-
-    updated = installed(model.identifier)
-    if updated is None or not updated.drafts(model):
-        raise ManagedError(
-            f"{model.label}'s draft model was downloaded and verified, but the bundle at "
-            f"{bundle.root} cannot be read back with it. Nothing else was changed."
-        )
-    tick(1.0)
-    logger.info("Model Chain: the DFlash2 draft for %s installed at %s",
-                model.identifier, updated.draft)
-    return updated
-
-
-def _adopt_draft(model: ManagedModel, artifact: Artifact, staged: Path,
-                 bundle: Installed) -> None:
-    """Move a verified sidecar into an installed bundle, file before manifest.
-
-    ``os.replace`` rather than a rename into a name that must not already
-    exist: a previous attempt that got this far and then failed to write the
-    manifest leaves a file this one has just proved is the right file, and
-    refusing to overwrite it would leave the bundle permanently unable to
-    finish. The manifest is rewritten from what is on disk now, so the entry
-    and the file cannot describe different things.
-    """
-    destination = bundle.root / artifact.local_name
-    try:
-        os.replace(staged, destination)
-    except OSError as exc:
-        raise ManagedError(
-            f"{artifact.filename} was verified but could not be moved into {bundle.root} "
-            f"({exc}). It is still at {staged} and nothing about the model you are using "
-            f"has changed."
-        ) from None
-
-    manifest = bundle.root / INSTALLED_FILENAME
-    try:
-        document = json.loads(manifest.read_text(encoding="utf-8"))
-        if not isinstance(document, dict):
-            raise ValueError("the installed manifest is not a JSON object")
-        artifacts = dict(document.get("artifacts") or {})
-        artifacts["draft"] = {"filename": artifact.filename,
-                              "stored_as": artifact.local_name,
-                              "sha256": artifact.sha256,
-                              "bytes": _size_of(destination),
-                              "accelerator": "dflash2",
-                              "repo_id": model.repo_id,
-                              "revision": model.revision}
-        document["artifacts"] = artifacts
-        _write_json(manifest, document)
-    except (OSError, ValueError) as exc:
-        with contextlib.suppress(OSError):
-            destination.unlink()
-        raise ManagedError(
-            f"{model.label}'s manifest could not be updated ({exc}), so the draft model was "
-            f"removed again rather than left in a bundle that does not know about it. Your "
-            f"current model is unchanged."
-        ) from None
-
-
-def remove_draft(identifier: str) -> Installed | None:
-    """Take a sidecar back out of a bundle. Returns what is left of it.
-
-    Manifest first here, which is the reverse of :func:`_adopt_draft` and is
-    the same rule read the other way round: the moment that must not exist is
-    one where the manifest names a file that is not there. A crash between the
-    two leaves an orphan file and a bundle that reads as having no sidecar,
-    which is exactly what was being asked for.
-    """
-    bundle = installed(identifier)
-    if bundle is None:
-        return None
-
-    manifest = bundle.root / INSTALLED_FILENAME
-    try:
-        document = json.loads(manifest.read_text(encoding="utf-8"))
-        if isinstance(document, dict) and (document.get("artifacts") or {}).get("draft"):
-            artifacts = dict(document["artifacts"])
-            artifacts.pop("draft", None)
-            document["artifacts"] = artifacts
-            _write_json(manifest, document)
-    except (OSError, ValueError):
-        logger.warning("Model Chain: could not take the draft model out of %s's manifest",
-                       identifier, exc_info=True)
-        return bundle
-
-    with contextlib.suppress(OSError):
-        (bundle.root / DRAFT_FILENAME).unlink()
-    shutil.rmtree(draft_staging_root(identifier), ignore_errors=True)
-    return installed(identifier)
-
-
-# --------------------------------------------------------------------------- #
 # Apply / switch (section 8 of the design intent)
 # --------------------------------------------------------------------------- #
 
@@ -1870,9 +1568,11 @@ def cleanup(identifier: str) -> None:
     twenty gigabytes is not something a panel should do on a button that also
     means "tidy up".
 
-    Both staging directories, because a user pressing this has one idea of what
-    is unfinished and it does not distinguish between the weights and the
-    sidecar beside them.
+    The ``~draft`` directory is swept with it. Nothing writes one any more --
+    it staged a speculative sidecar for an accelerator this extension no longer
+    has -- and an installation upgraded from a build that did may still be
+    holding a part-finished one.
     """
     shutil.rmtree(staging_root(identifier), ignore_errors=True)
-    shutil.rmtree(draft_staging_root(identifier), ignore_errors=True)
+    shutil.rmtree(mc_llm_paths.managed_staging_root() / f"{identifier}~draft",
+                  ignore_errors=True)
