@@ -126,8 +126,6 @@ def runtime_families(root=None) -> dict:
     for directory in sorted(base.glob(f"{RUNTIME_DIRNAME}*")):
         if not directory.is_dir() or directory.name.endswith((".previous", ".incoming")):
             continue
-        if is_special(directory):
-            continue
         server = _server_in(directory)
         if server is None:
             continue
@@ -135,29 +133,6 @@ def runtime_families(root=None) -> dict:
     return found
 
 
-SPECIAL_MARKER = ".dflash2-id"
-"""``mc_llm_dflash.PROVENANCE_MARKER``, restated so this module can exclude it.
-
-Restated rather than imported for the reason every ``prompt_master`` import
-here is done inside a function -- this module is reached while the WebUI is
-still building its UI -- and because the dependency belongs in that direction:
-the DFlash2 installer knows about ordinary runtimes, and an ordinary runtime
-must not need the DFlash2 installer to be importable to find itself.
-"""
-
-
-def is_special(directory) -> bool:
-    """Whether ``directory`` holds a build that is not an ordinary llama.cpp.
-
-    The DFlash2 family lives under the same ``runtime*`` naming as every other
-    family, because it is installed by the same staged-and-swapped mechanism.
-    It must not be *offered* as one: it is an unmerged pull request that has to
-    pass a smoke test before anything runs on it, and a machine whose ordinary
-    runtime was missing would otherwise silently adopt it as the runtime for
-    every model, every role and every mode. So the directories are shared and
-    the lists are not.
-    """
-    return (Path(directory) / SPECIAL_MARKER).is_file()
 """Where a runtime lives under the install root. The vendored installer's own
 choice, matched so a build placed by either route is found by both."""
 
@@ -254,7 +229,7 @@ def detect() -> Path | None:
     """
     root = mc_llm_paths.data_root()
     directory = root / RUNTIME_DIRNAME
-    if directory.is_dir() and not is_special(directory):
+    if directory.is_dir():
         for name in SERVER_NAMES:
             matches = sorted(directory.rglob(name))
             if matches:
@@ -363,11 +338,11 @@ def _server_in(directory: Path) -> Path | None:
 
 
 # The three helpers below are the same mechanism this module uses to place the
-# ordinary runtime, named so a second family can be installed through them
-# rather than beside them. :mod:`mc_llm_dflash` installs the DFlash2 build, and
-# the one property that matters about it -- that a failure there cannot damage
-# the runtime here -- is easiest to guarantee when both go through one
-# staged-then-swapped path with one set of checks.
+# ordinary runtime, named rather than private so that a second runtime family
+# can be installed through them rather than beside them. There is not one
+# today; there has been, and the property that mattered about it -- that a
+# failure installing one cannot damage the other -- is easiest to guarantee
+# when both go through one staged-then-swapped path with one set of checks.
 
 
 def server_in(directory) -> Path | None:

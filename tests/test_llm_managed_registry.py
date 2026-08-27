@@ -399,9 +399,10 @@ class TestThePinningTool:
         assert len(changes) == 3
 
     def test_it_pins_the_files_an_accelerator_names_too(self):
-        """The DFlash2 draft is a file in the same repository at the same
-        revision. Leaving it out would leave one artifact in the catalogue
-        whose committed hash nobody had compared against the hub."""
+        """No accelerator in the shipped catalogue names a file today, and one
+        has. A file named there is in the same repository at the same revision
+        and is downloaded by the same verified path, so leaving the walk out
+        would leave one artifact whose committed hash nobody compared."""
         tool = load_pin_tool()
         document = self.document()
         document["models"][0]["accelerators"] = {

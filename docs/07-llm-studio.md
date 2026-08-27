@@ -3045,3 +3045,70 @@ quietly stops matching the engine behind it.
 Conversation was already right in the two places that matter: `Character.seed`
 defaults to `RANDOM_SEED`, and the box does too. What it did not do was reset
 that box when New was pressed, which is 29.1's bug wearing this one's clothes.
+
+## 30. DFlash2 taken back out (27 August 2026)
+
+Reported after one evening with it: *"DFlash mode is just not available for my
+CUDA, please remove it and LIGHTNING FAST mode."*
+
+It is worth recording as its own section rather than quietly reverting, because
+the thing that was wrong with it was not a bug. Every mechanism in section 28
+worked as designed: the runtime family installed apart, the capability record
+refused to trust help text, the planner would not report a partial offload as
+Lightning. What it could not do was run, on the machine it was built for,
+because DFlash2 is llama.cpp pull request 27342 and that user's CUDA build is
+not it — and no amount of correct refusal machinery is worth carrying for a
+mechanism that never starts.
+
+So the accelerator, the preset, the runtime family, the capability record, the
+speculative sidecar, the full-residency planner and the two Setup rows are
+gone: `mc_llm_dflash.py` and `dflash2-runtimes.json` deleted,
+`accelerators.dflash2` out of the registry, `Speculator` and the draft out of
+`mc_llm_managed_models`, and `Plan` down to the mechanism and the binary.
+
+### 30.1 What stayed, and why it is not sentiment
+
+**The two axes.** Acceleration and memory priority are still two settings and
+not one switch. That was never a fact about DFlash2 — it is a fact about the
+difference between *how a model decodes* and *who owns the card*, and MTP with
+cooperative memory is as real a combination as DFlash2 with cooperative memory
+ever was. It is still the one no preset offers and still reachable in one
+dropdown.
+
+**The value gate.** `runtime_accepts` and the argument-error retry came out of
+section 29.3 and apply to `draft-mtp` exactly as they did to `draft-dflash`.
+
+**The hybrid state arithmetic.** Qwen 3.8 interleaves Gated DeltaNet blocks with
+periodic full attention whatever is decoding it, and a planner that charges
+nothing for the recurrent half reports the model as cheaper than it is.
+
+**The two-stage choice.** `accelerator_choice` still answers from files and
+`accelerator_plan` still asks the binary, because the first is stable enough to
+put in the warm identity and the second costs a `--help`.
+
+### 30.2 The setting that would have become a lie
+
+`llm_priority` had exactly one caller: the DFlash2 fit. Removing DFlash2 without
+noticing would have left **Fast LLM** as a preset whose second half did nothing
+at all — a control that says "this card's image residency may be released for
+it" and never releases anything.
+
+So `_make_room_for_the_llm` now runs on the ordinary placement path: under LLM
+priority, and only then, it asks the broker for the configured placement's
+deficit on the card that placement is going to. It sits in `Runtime.client`
+before the negotiation rather than inside it, because `negotiate` promises to
+move nothing and the estimator relies on that — what this does is find more
+free VRAM than there would have been a moment ago and let the ordinary ladder
+place against it.
+
+`mc_broker.release_for_llm` is unchanged and is still the narrow door section
+28.4 describes: one card, the deficit, re-measured, never a sweep.
+
+### 30.3 What an upgraded installation is left holding
+
+A `draft.gguf` inside any bundle whose sidecar was downloaded — about 3.9 GB,
+now referenced by nothing. It is **not** deleted on upgrade: reading a manifest
+is not a licence to remove four gigabytes of somebody's disk, and a bundle with
+an unreferenced file in it is a bundle that works. `cleanup` sweeps the
+`~draft` staging directory, which nothing writes any more; the installed file
+is the user's to remove.

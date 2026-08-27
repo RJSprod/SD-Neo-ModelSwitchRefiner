@@ -1,40 +1,49 @@
 """Two settings, because they are two decisions: how tokens are produced, and
 who owns the card while they are.
 
-The obvious way to ship speculative decoding is as one switch called something
-like "Lightning", meaning *use the fast decoder and empty the card for it*. It
-is the wrong shape, and it is wrong in a way that costs users VRAM they did not
-have to spend. Those are separate facts:
+The obvious way to ship a "go faster" control is as one switch meaning *use the
+fast decoder and empty the card for it*. It is the wrong shape, and it is wrong
+in a way that costs users VRAM they did not have to spend. Those are separate
+facts:
 
-* **Acceleration** is a decoding mechanism. Multi-token prediction and DFlash2
-  produce the same tokens as ordinary decoding and produce more of them per
-  step; neither is a quality setting and neither is a memory setting.
+* **Acceleration** is a decoding mechanism. Multi-token prediction produces the
+  same tokens as ordinary decoding and produces more of them per step; it is
+  not a quality setting and not a memory setting.
 * **Memory priority** is a statement about ownership. Cooperative is what this
   extension has always done -- the language model lives in the VRAM the image
   side is not using and never asks for more. LLM priority is a user saying, in
   as many words, that on *this card* the language model may take room back.
 
-Fold them together and a machine whose target and draft already fit has to
-evict a checkpoint to get the decoder it could have had for nothing. So they
-are two controls, the presets are a mapping over them, and the advanced
-combination the presets do not offer -- DFlash2 with cooperative memory -- is
-the one that matters most:
+So they are two controls and the presets are a mapping over them:
 
-    accelerator      auto | none | mtp | dflash2
+    accelerator      auto | none | mtp
     memory priority  cooperative | llm_priority
 
-    Normal              auto      + cooperative
-    Fast LLM            mtp       + llm_priority
-    Lightning Fast LLM  dflash2   + llm_priority
+    Normal    auto + cooperative
+    Fast LLM  mtp  + llm_priority
+
+The accelerator that is not here
+--------------------------------
+There was a third, DFlash2: a separately downloaded draft model running on a
+separately built llama.cpp, because it is an unmerged pull request. It was
+removed at the request of the person it was built for, whose CUDA build cannot
+run it -- three and a half thousand lines of runtime family, capability record,
+residency planner and Setup panel for a mechanism that could not start on the
+machine it was for.
+
+The *shape* it argued for is what stayed. Acceleration and memory priority are
+still two axes rather than one switch, because that was never a fact about
+DFlash2: it is a fact about the difference between how a model decodes and who
+owns the card, and MTP with cooperative memory is as real a combination as it
+ever was.
 
 Where the launch contract lives, and why here
 ---------------------------------------------
-The registry may not carry command lines -- a checked-in JSON file says *the
-draft must be wholly resident on the same card as the target*, and this module
-is what turns that into ``--spec-draft-model`` and the flags beside it. Every
-one of them is gated on the runtime advertising it, because a flag passed to a
-build that does not know it is not a slower server, it is a server that exits
-at startup.
+The registry may not carry command lines -- a checked-in JSON file says *this
+backbone has multi-token heads*, and this module is what turns that into
+``--spec-type draft-mtp``. Every flag is gated on the runtime advertising it
+*and* on the runtime accepting the value, because a flag passed to a build that
+does not know it is not a slower server, it is a server that exits at startup.
 
 What this module will not do
 ----------------------------
@@ -63,13 +72,11 @@ _GB = 1024**3
 ACCEL_AUTO = "auto"
 ACCEL_NONE = "none"
 ACCEL_MTP = "mtp"
-ACCEL_DFLASH2 = "dflash2"
 
 ACCELERATORS = (
     (ACCEL_AUTO, "Auto — the fastest mechanism this backbone and runtime both have"),
     (ACCEL_NONE, "None — ordinary decoding"),
     (ACCEL_MTP, "MTP — the backbone's own multi-token prediction heads"),
-    (ACCEL_DFLASH2, "DFlash2 — the separately installed speculative draft model"),
 )
 """``(value, label)`` pairs, the shape every option table in this extension has.
 
@@ -102,13 +109,11 @@ door, on one card, because a user opened it.
 
 PRESET_NORMAL = "normal"
 PRESET_FAST = "fast"
-PRESET_LIGHTNING = "lightning"
 PRESET_CUSTOM = "custom"
 
 PRESETS = (
     (PRESET_NORMAL, "Normal"),
     (PRESET_FAST, "Fast LLM"),
-    (PRESET_LIGHTNING, "Lightning Fast LLM"),
 )
 """The three a user picks between. :data:`PRESET_CUSTOM` is not among them.
 
@@ -121,15 +126,13 @@ values it would apply are the ones already in force.
 PRESET_AXES: dict[str, tuple[str, str]] = {
     PRESET_NORMAL: (ACCEL_AUTO, PRIORITY_COOPERATIVE),
     PRESET_FAST: (ACCEL_MTP, PRIORITY_LLM),
-    PRESET_LIGHTNING: (ACCEL_DFLASH2, PRIORITY_LLM),
 }
 """What each preset means in the two axes. The single source of that mapping.
 
-Fast asks for MTP rather than for auto, and the difference is what happens when
-the backbone has no MTP heads: auto would find DFlash2 and use it, which is not
-what somebody who chose the middle preset asked for. MTP is embedded and free,
-so Fast is "use what the model already has, and give it room"; when the model
-has none, Fast is ordinary decoding with room, and the status line says so.
+Fast asks for MTP by name rather than for auto, and the difference is what it
+promises: "use what the model already has, and give it room". A backbone with
+no multi-token heads decodes ordinarily under it -- with the memory priority
+the preset also carries -- and the status line says which of the two it got.
 """
 
 PRESET_DETAIL = {
@@ -138,15 +141,11 @@ PRESET_DETAIL = {
                     "the image side for any."),
     PRESET_FAST: ("The backbone's own multi-token heads, where it has them, and permission "
                   "to release image residency on this card if the model needs the room."),
-    PRESET_LIGHTNING: ("The DFlash2 draft model, which must be wholly resident on the same "
-                       "card as the backbone, and permission to release image residency on "
-                       "that card to get it there. Never a partial offload."),
 }
 """One sentence per preset for the panel, saying what it will and will not do.
 
-The third sentence of Lightning is the one that had to be written down: a run
-that could not fit the whole plan and quietly put half of it in system RAM
-would still be labelled Lightning, and would be slower than Normal.
+What each of them will *not* do is the half worth writing down: Normal never
+asks the image side for a byte, and Fast asks only for this card.
 """
 
 
@@ -347,78 +346,56 @@ def label_for(table, value: str) -> str:
 
 
 def short_label(accelerator: str) -> str:
-    """One word for a status line: ``DFlash2``, ``MTP``, ``ordinary decoding``."""
-    return {ACCEL_DFLASH2: "DFlash2", ACCEL_MTP: "MTP",
-            ACCEL_NONE: "ordinary decoding", ACCEL_AUTO: "auto"}.get(accelerator,
-                                                                     str(accelerator or ""))
+    """One word for a status line: ``MTP`` or ``ordinary decoding``."""
+    return {ACCEL_MTP: "MTP", ACCEL_NONE: "ordinary decoding",
+            ACCEL_AUTO: "auto"}.get(accelerator, str(accelerator or ""))
 
 
 # --------------------------------------------------------------------------- #
 # The launch contract
 # --------------------------------------------------------------------------- #
 
-SPEC_MODEL_FLAG = "--spec-draft-model"
 SPEC_TYPE_FLAG = "--spec-type"
 SPEC_MAX_FLAG = "--spec-draft-n-max"
-SPEC_MIN_FLAG = "--spec-draft-n-min"
-SPEC_P_MIN_FLAG = "--spec-draft-p-min"
-SPEC_TYPE_K_FLAG = "--spec-draft-type-k"
-SPEC_TYPE_V_FLAG = "--spec-draft-type-v"
-DRAFT_LAYERS_FLAG = "--n-gpu-layers-draft"
 
-SPEC_TYPE_DFLASH = "draft-dflash"
 SPEC_TYPE_MTP = "draft-mtp"
-"""The publisher's tested start contract, one constant per option.
+"""The two options MTP needs, and the value llama.cpp spells it with.
 
-Written out rather than assembled from a string in the registry, because
-section 15 of the design intent forbids executable command strings in a data
-file and because these are the flags a reviewer has to be able to find. The
-*values* beside them -- how many tokens to draft, what the draft's cache types
-are -- do come from the registry, where they are numbers and cache-type names
-that have already been validated.
-
-``--spec-type`` takes one of an enumerated set, and both values here are
-*prefixed*: llama.cpp spells them ``draft-mtp`` and ``draft-dflash``, not
-``mtp`` and ``dflash``. That distinction is worth a sentence because getting it
-wrong does not degrade anything -- the server refuses the argument and exits
+``draft-mtp``, not ``mtp``. The prefix is worth a sentence because getting it
+wrong does not degrade anything: the server refuses the argument and exits
 before it loads, which arrives as "the backbone would not start" and rolls the
-user back to whichever model they were on.
+user back to whichever model they were on. It happened.
+
+Written out here rather than assembled from a string in the registry, because a
+data file may not carry executable command lines and because these are the
+flags a reviewer has to be able to find. The *number* beside them -- how many
+tokens to draft per step -- does come from the registry, where it has already
+been validated as a whole number.
 """
 
 
 @dataclass(frozen=True)
 class Plan:
-    """What will actually accelerate this request, and what it costs.
+    """What will actually accelerate this request.
 
     The distinction between :attr:`requested` and :attr:`accelerator` is the
-    whole of the failure contract. They differ only where ``requested`` was
-    ``auto``: an automatic plan steps down to what it can prove is available
-    and records which mechanism that was, and a *forced* plan that cannot be
-    met does not step down at all -- it comes back with :attr:`refusal` set and
-    nothing started.
+    whole of the failure contract. They differ only where the request could not
+    be met: an automatic plan steps down to what it can prove is available and
+    records which mechanism that was, and a named one that cannot run says so
+    in :attr:`notes` rather than pretending.
     """
 
     requested: str = ACCEL_AUTO
     accelerator: str = ACCEL_NONE
     memory_priority: str = PRIORITY_COOPERATIVE
-    runtime_family: str = ""
-    """Which llama.cpp family this plan needs, or ``""`` for the ordinary one."""
     runtime: Path | None = None
-    """The executable to start, when it is not the configured one."""
-    draft: Path | None = None
-    draft_bytes: int = 0
-    """What the draft's weights, cache and graph are expected to take, together."""
-    required_bytes: int = 0
-    """The complete plan: target, its cache and state, the draft, the projector
-    allowance when this request needs vision, compute, and the safety margin."""
-    spendable_bytes: int = 0
-    reclaimed_bytes: int = 0
-    """VRAM an explicit LLM-priority request released on this card. Zero on
-    every cooperative plan, always, and that is worth asserting in a test."""
+    """The executable to start, when it is not the configured one. Always
+    ``None`` today -- kept because the launch reads it, and a second runtime
+    family is a thing this extension has had once and may have again."""
     flags: tuple[str, ...] = ()
     refusal: str = ""
-    """Why a forced request could not be honoured. Empty on every plan that
-    can run, including one that stepped down from ``auto``."""
+    """Why a named request could not be honoured. Empty on every plan that can
+    run, including one that stepped down from ``auto``."""
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     @property
@@ -430,105 +407,51 @@ class Plan:
         return bool(self.refusal)
 
     @property
-    def speculative(self) -> bool:
-        """Whether a second model has to be resident for this plan."""
-        return self.accelerator == ACCEL_DFLASH2
-
-    @property
     def identity(self) -> tuple:
         """What a warm server would have to be restarted to change.
 
-        Section 16 asks the warm identity to distinguish the runtime family,
-        the accelerator, and whether a draft model is loaded and where. Those
-        are exactly these four: the mechanism, the executable, the draft file
-        and the family it belongs to. The draft's *placement* is not among them
-        because the contract has only one -- wholly resident on the target's
-        card -- so a plan that exists at all has it.
+        The mechanism and the executable running it. Both are start-time facts:
+        an MTP server is started with ``--spec-type`` and a server that was not
+        cannot be given it later.
         """
-        return (self.accelerator, str(self.runtime or ""), str(self.draft or ""),
-                self.runtime_family)
+        return (self.accelerator, str(self.runtime or ""))
 
     @property
     def token(self) -> str:
         """This plan as one key-safe word, for keying a measured rate by.
 
         Empty for ordinary decoding, so that every rate this machine has
-        already learned keeps the key it was written under. Section 17 is
-        explicit that a DFlash rate and an ordinary one must not be averaged
-        into one estimate, and separate keys are how that is arranged.
+        already learned keeps the key it was written under. An accelerated rate
+        and an ordinary one must not be averaged into one estimate, and
+        separate keys are how that is arranged.
         """
         return "" if self.accelerator in (ACCEL_NONE, ACCEL_AUTO) else str(self.accelerator)
 
     def describe(self) -> str:
         """One clause for the status line, naming the mechanism that ran."""
-        if self.accelerator == ACCEL_DFLASH2:
-            return "DFlash2 · target + draft fully on GPU"
         if self.accelerator == ACCEL_MTP:
             return "MTP · the backbone's own draft heads"
         return "ordinary decoding"
 
 
-def dflash2_flags(speculator, draft: Path, *, supports, accepts,
-                  layers_flag: bool = True,
-                  flash_attention: tuple[str, ...] = ()) -> tuple[str, ...]:
-    """The publisher's DFlash2 start contract, minus anything this build lacks.
-
-    ``supports`` is a predicate over long option *names* and ``accepts`` is a
-    predicate over ``--spec-type``'s *values*, and needing both is the lesson
-    of a server that exited at startup. Advertising an option is not the same
-    as accepting a value for it: every llama.cpp build since the speculative
-    framework landed advertises ``--spec-type``, and which types it will take
-    is a list that has grown release by release. A build asked for one it does
-    not have prints ``unknown speculative type`` and exits before it loads
-    anything -- which reaches the user as "this backbone would not start".
-
-    The two flags that are not optional are the draft model and the speculative
-    type: without either of them the server is not running DFlash2 at all, so a
-    build that does not have them produces no flags rather than a partial
-    contract that would start an ordinary server under a Lightning label.
-
-    ``flash_attention`` is passed in rather than decided here because its
-    spelling changed upstream from a switch to a three-state option and
-    :mod:`mc_llm_runtime` already owns that question for the ordinary path.
-    """
-    if not (supports(SPEC_MODEL_FLAG) and supports(SPEC_TYPE_FLAG)):
-        return ()
-    if not accepts(SPEC_TYPE_DFLASH):
-        return ()
-
-    flags = [SPEC_MODEL_FLAG, str(draft), SPEC_TYPE_FLAG, SPEC_TYPE_DFLASH]
-    if speculator.draft_tokens and supports(SPEC_MAX_FLAG):
-        flags += [SPEC_MAX_FLAG, str(int(speculator.draft_tokens))]
-    if supports(SPEC_MIN_FLAG):
-        flags += [SPEC_MIN_FLAG, str(int(speculator.draft_min_tokens))]
-    if supports(SPEC_P_MIN_FLAG):
-        flags += [SPEC_P_MIN_FLAG, _decimal(speculator.draft_p_min)]
-    # The draft is required to be wholly resident, so the count is "all of it"
-    # in llama.cpp's own spelling of that -- a number larger than any draft has.
-    if layers_flag and supports(DRAFT_LAYERS_FLAG):
-        flags += [DRAFT_LAYERS_FLAG, str(EVERY_DRAFT_LAYER)]
-    if speculator.draft_kv_type_k and supports(SPEC_TYPE_K_FLAG):
-        flags += [SPEC_TYPE_K_FLAG, str(speculator.draft_kv_type_k)]
-    if speculator.draft_kv_type_v and supports(SPEC_TYPE_V_FLAG):
-        flags += [SPEC_TYPE_V_FLAG, str(speculator.draft_kv_type_v)]
-    flags.extend(flash_attention)
-    return tuple(flags)
-
-
 def mtp_flags(multitoken, *, supports, accepts) -> tuple[str, ...]:
     """What asks a build to use a backbone's own multi-token heads.
 
-    Nothing at all on a build that does not advertise ``--spec-type`` *or* does
-    not list ``draft-mtp`` among the types it takes -- see
-    :func:`dflash2_flags` for why the second question has to be asked
-    separately. Either way the empty answer is the honest one rather than a
-    failure: the heads are in the GGUF regardless, and a runtime that cannot be
-    told to use them decodes ordinarily. The caller reports which mechanism
-    ran, so this returning empty is visible.
+    Two questions, and needing both is the lesson of a server that exited at
+    startup. ``supports`` is a predicate over long option *names* and
+    ``accepts`` is one over ``--spec-type``'s *values*: every llama.cpp build
+    since the speculative framework landed advertises the option, and which
+    types it will take is a list that has grown release by release. A build
+    asked for one it does not have prints ``unknown speculative type`` and
+    exits before it loads a tensor.
+
+    Nothing at all when either question answers no, which is the honest result
+    rather than a failure: the heads are in the GGUF regardless, and a runtime
+    that cannot be told to use them decodes ordinarily. The caller reports which
+    mechanism ran, so this returning empty is visible.
 
     No memory term goes with it. The heads were downloaded with the weights and
-    are resident with the weights; unlike a draft model there is no second file
-    and nothing extra to find room for.
+    are resident with the weights; there is no second file to find room for.
     """
     if multitoken is None or not multitoken.embedded:
         return ()
@@ -540,62 +463,12 @@ def mtp_flags(multitoken, *, supports, accepts) -> tuple[str, ...]:
     return tuple(flags)
 
 
-EVERY_DRAFT_LAYER = 999
-"""What to ask for when a draft's own layer count has not been read.
-
-The same trick and the same reason as :data:`mc_llm_runtime.EVERY_LAYER`: a
-count above the model's own is clamped by llama.cpp, and one below it is a
-draft partly in system RAM under a label that promises otherwise.
-"""
+def no_heads(label: str) -> str:
+    return (f"{label} has no multi-token prediction heads, so this runs at ordinary "
+            f"decoding speed.")
 
 
-def _decimal(value: float) -> str:
-    """A float as llama.cpp will parse it, without exponent notation."""
-    return f"{float(value):g}"
-
-
-# --------------------------------------------------------------------------- #
-# Sentences for the failures the contract names
-# --------------------------------------------------------------------------- #
-
-
-def no_runtime(label: str) -> str:
-    return (f"DFlash2 needs a separately installed llama.cpp build, and this installation "
-            f"does not have one yet. Install the DFlash2 runtime in Setup, then choose "
-            f"{label} again. Nothing about the model you are running has changed.")
-
-
-def no_sidecar(label: str) -> str:
-    return (f"DFlash2 needs {label}'s draft model, which has not been downloaded. Install "
-            f"it in Setup — it is about 3.9 GB and is kept beside the weights. Nothing "
-            f"about the model you are running has changed.")
-
-
-def not_validated(family: str) -> str:
-    return (f"The DFlash2 runtime installed here ({family}) has not passed the text smoke "
-            f"test, so it is not offered. Re-run its verification in Setup; until it "
-            f"passes, this backbone decodes the way it always has.")
-
-
-def vision_not_validated(family: str) -> str:
-    return (f"DFlash2 vision is not validated for this runtime ({family}), so this image "
-            f"request ran at ordinary decoding speed. The text smoke test passed and the "
-            f"image one has not, and they are recorded separately on purpose — text requests "
-            f"on these settings still use DFlash2.")
-
-
-def does_not_fit(required: int, spendable: int, card: str, reclaimed: int = 0) -> str:
-    """The fit refusal, with both numbers in it and no promises about the other card."""
-    said = [
-        "DFlash2 requires the backbone and its draft model to be wholly resident on one "
-        f"card, and they do not fit on {card}.",
-        f"Required estimate: {required / _GB:.1f} GB.",
-        f"Spendable now: {spendable / _GB:.1f} GB.",
-    ]
-    said.append(f"{reclaimed / _GB:.1f} GB of image VRAM was released on this card and it is "
-                f"still short." if reclaimed else "No image VRAM was released.")
-    said.append("Choose Lightning Fast LLM to let it release image residency on this card, "
-                "free VRAM yourself, reduce the context, or use a smaller quantization."
-                if not reclaimed else
-                "Free VRAM yourself, reduce the context, or use a smaller quantization.")
-    return " ".join(said)
+def no_option(label: str) -> str:
+    return (f"This llama.cpp build does not accept the multi-token prediction options, so "
+            f"{label}'s own draft heads are not used. Update the runtime in Setup to get "
+            f"them.")
