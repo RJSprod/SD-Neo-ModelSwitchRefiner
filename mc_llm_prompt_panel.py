@@ -55,6 +55,15 @@ def build() -> dict:
     def initial(key, fallback=None):
         return stored.get(key, defaults.get(key, fallback))
 
+    # The seed is the one control that does *not* go through ``initial``, and
+    # the reason is what the engine's default is for. ``opt.DEFAULTS["seed"]``
+    # is 7 because upstream's node needs a fixed number for its own self-tests
+    # -- it is a value chosen to make two runs identical. A panel that opens on
+    # it hands every user a generator that repeats itself until they notice the
+    # box and change it, which is the opposite of what a seed control is for.
+    # So what is offered is RANDOM_SEED, and a seed somebody actually chose is
+    # still remembered in ``stored`` and still wins.
+
     controls: dict = {}
     cancellation = gr.State(None)
 
@@ -132,7 +141,7 @@ def build() -> dict:
                     value=initial("dimensions",
                                   f"{defaults['output_width']}x{defaults['output_height']}"))
                 controls["seed"] = gr.Number(
-                    label="Seed", value=initial("seed", 7), precision=0,
+                    label="Seed", value=stored.get("seed", RANDOM_SEED), precision=0,
                     info=f"{RANDOM_SEED} draws a new seed for every generation.")
 
             with gr.Accordion("Look", open=False):

@@ -321,10 +321,18 @@ def build() -> dict:
             with gr.Row():
                 edit_character = gr.Button("Edit", size="sm")
                 new_character = gr.Button("New", size="sm")
+                refresh_characters = gr.Button("↻ Refresh", size="sm")
             # Choosing, editing and creating a character are three things done
             # to the same object, so they are one screen: the drop-down is who
             # you are talking to, and the editor under it is that same
             # character, opened only when it is being changed.
+            #
+            # Which character the editor is *bound to* is this State and never
+            # the drop-down above. They are the same name while an existing
+            # character is being edited and deliberately different while a new
+            # one is being written, and reading the drop-down for it is what
+            # made New behave as Rename. See the note above ``_open_character``.
+            editing = gr.State(NOT_EDITING)
             with gr.Group(visible=False,
                           elem_id=ui.ident("chat", "character-editor")) as character_editor:
                 name = gr.Textbox(label="Name", elem_id=ui.ident("chat", "name"))
@@ -334,6 +342,10 @@ def build() -> dict:
                 greeting = gr.Textbox(label="Greeting", lines=3)
                 system = gr.Textbox(label="System prompt override", lines=3,
                                     placeholder="Leave empty to use the built prompt.")
+                gr.Markdown(
+                    "Save writes the Advanced generation settings below with the rest of the "
+                    "character, so a seed of −1 there is what makes its replies vary.",
+                    elem_classes=ui.classes("hint"))
                 with gr.Row():
                     save_character = gr.Button("Save character", variant="primary", size="sm")
                     close_editor = gr.Button("Cancel", size="sm")
@@ -445,25 +457,28 @@ def build() -> dict:
 
     # -- the character and the persona ------------------------------------ #
 
+    # One output list for every handler that touches the editor, in the order
+    # ``_editor_fields`` answers in, so none of them can leave the boxes and
+    # the character being written to describing different characters.
+    editor = ([character_editor, editing, name, context, greeting, system]
+              + sampling + [status])
+
     character.change(fn=_select_character, inputs=[character, search],
                      outputs=[threads, thread_state] + view
-                     + [name, context, greeting, system] + sampling, queue=False)
-    edit_character.click(fn=_open_character, inputs=[character],
-                         outputs=[character_editor, name, context, greeting, system]
-                         + sampling + [status], queue=False)
-    new_character.click(fn=_new_character,
-                        outputs=[character_editor, name, context, greeting, system, status],
-                        queue=False)
-    close_editor.click(fn=lambda: gr.update(visible=False), outputs=[character_editor],
-                       queue=False)
+                     + [name, context, greeting, system] + sampling + [editing], queue=False)
+    edit_character.click(fn=_open_character, inputs=[character], outputs=editor, queue=False)
+    new_character.click(fn=_new_character, outputs=editor, queue=False)
+    refresh_characters.click(fn=_refresh_characters, inputs=[character],
+                             outputs=[character, status], queue=False)
+    close_editor.click(fn=_cancel_character, inputs=[character], outputs=editor, queue=False)
     save_character.click(
         fn=_save_character,
-        inputs=[character, name, context, greeting, system] + sampling,
-        outputs=[character, status], queue=False)
+        inputs=[editing, name, context, greeting, system] + sampling,
+        outputs=[character, editing, status], queue=False)
     delete_character.click(fn=_delete_character, inputs=[character],
-                           outputs=[character, status], queue=False)
+                           outputs=[character, character_editor, editing, status], queue=False)
     import_card.upload(fn=_import_character, inputs=[import_card],
-                       outputs=[character, status], queue=False)
+                       outputs=[character, character_editor, editing, status], queue=False)
 
     save_persona.click(fn=_save_persona, inputs=[persona_name, persona_description],
                        outputs=[status], queue=False)
@@ -907,10 +922,14 @@ def _select_character(who, filter_text):
         loaded = Character(name=who or "")
     mc_llm_state.remember(character=who or "", thread=identifier)
     note = f"{len(choices)} thread{'s' if len(choices) != 1 else ''}."
+    # The editor follows the selection. It is usually shut, and when it is not,
+    # leaving it bound to the character that *was* selected would have the next
+    # Save write this character's boxes over that character's file.
     return ([gr.update(choices=choices, value=identifier or None), identifier]
             + _refresh(conversation, note)
             + [loaded.name, loaded.context, loaded.greeting, loaded.system,
-               loaded.temperature, loaded.top_p, loaded.max_reply_tokens, loaded.seed])
+               loaded.temperature, loaded.top_p, loaded.max_reply_tokens, loaded.seed,
+               loaded.name or NOT_EDITING])
 
 
 def _open_thread(who, identifier):
@@ -1488,75 +1507,182 @@ def _context_size() -> int:
 # --------------------------------------------------------------------------- #
 
 
-def _open_character(who):
-    """Open the editor on the character being talked to."""
+# Creating a character and editing one are the same screen and *not* the same
+# operation, and the difference is one field: which character on disk the
+# editor is bound to. That is ``editing`` -- the empty string while a new one
+# is being written, and a name once there is a file behind it.
+#
+# It has to be its own State because the obvious alternative is what shipped
+# and what lost somebody's work: Save read the "Talking to" drop-down for the
+# name to write over. So pressing New, typing a name and pressing Save renamed
+# the character that happened to be selected -- moving its file, taking its
+# picture with it, and leaving the user with a list that no longer had the
+# character they started from. The drop-down says who you are talking to. It
+# has never said what the editor is editing, and it does not decide it now.
+
+NOT_EDITING = ""
+"""``editing`` while the editor holds a character that is not on disk yet."""
+
+
+def _blank_character():
+    """A character with the vendored package's own defaults and no name.
+
+    Named rather than copied, for the reason the panel already gives about the
+    Advanced accordion: a second set of literals in the UI is how a panel
+    quietly stops matching the engine behind it. The seed among them is
+    :data:`RANDOM_SEED`, so a character nobody gives a seed to draws a fresh
+    one for every reply.
+    """
     from prompt_master.chat.characters import Character
 
+    return Character(name="")
+
+
+def _editor_fields(character, editing: str, note: str, kind: str = "info") -> list:
+    """One state of the editor, in the order the outputs are wired.
+
+    Every handler that touches the editor returns this, so none of them can
+    leave the name box, the sampling and the character being written to
+    describing three different characters.
+    """
+    blank = _blank_character()
+    return [gr.update(visible=True), editing,
+            character.name, character.context, character.greeting, character.system or "",
+            _decimal(character.temperature, blank.temperature),
+            _decimal(character.top_p, blank.top_p),
+            _number(character.max_reply_tokens, blank.max_reply_tokens),
+            _number(character.seed, blank.seed),
+            ui.notice(note, kind)]
+
+
+def _closed_editor(note: str, kind: str = "info") -> list:
+    """The editor shut, with everything in it left exactly as it was."""
+    return [gr.update(visible=False), gr.update()] + [gr.update()] * 8 + [ui.notice(note, kind)]
+
+
+def _open_character(who):
+    """Open the editor on the character being talked to."""
     if not who:
-        return ([gr.update(visible=False), gr.update(), gr.update(), gr.update(), gr.update(),
-                 gr.update(), gr.update(), gr.update(), gr.update()]
-                + [ui.notice("Choose a character to edit, or press New.", "warn")])
+        return _closed_editor("Choose a character to edit, or press New.", "warn")
     try:
         loaded = _characters().load(who)
     except Exception as exc:
-        return ([gr.update(visible=False)] + [gr.update()] * 8
-                + [ui.notice(ui.failure(exc), "error")])
-    blank = Character(name="")
-    return [gr.update(visible=True), loaded.name, loaded.context, loaded.greeting,
-            loaded.system or "",
-            _decimal(loaded.temperature, blank.temperature),
-            _decimal(loaded.top_p, blank.top_p),
-            _number(loaded.max_reply_tokens, blank.max_reply_tokens),
-            _number(loaded.seed, blank.seed),
-            ui.notice(f"Editing {loaded.name}. Save writes it back; changing the name saves it "
-                      f"under the new one.")]
+        return _closed_editor(ui.failure(exc), "error")
+    return _editor_fields(loaded, loaded.name,
+                          f"Editing {loaded.name}. Save writes it back; changing the name "
+                          f"renames it.")
 
 
 def _new_character():
-    return (gr.update(visible=True), "", "", "", "",
-            ui.notice("Fill in a name and press Save character to create it."))
+    """Clear the editor for a character that does not exist yet.
+
+    The sampling is reset with the rest of it. Leaving it alone would have a
+    new character silently inherit the settings of whichever one was selected
+    when New was pressed -- which is how a character nobody gave a seed to ends
+    up with somebody else's.
+    """
+    return _editor_fields(_blank_character(), NOT_EDITING,
+                          "Fill in a name and press Save character to create it. It will not "
+                          "touch the character you are talking to.")
 
 
-def _save_character(previous, name, context, greeting, system, temperature, top_p,
+def _cancel_character(who):
+    """Shut the editor and put the sampling back to the selected character's.
+
+    Cancel has to undo what New did to the boxes outside the editor, or a user
+    who thought better of creating a character is left talking to their old one
+    at a new one's settings.
+    """
+    try:
+        loaded = _characters().load(who) if who else None
+    except Exception:
+        loaded = None
+    if loaded is None:
+        return _closed_editor("Ready.")
+    fields = _editor_fields(loaded, NOT_EDITING, "Ready.")
+    fields[0] = gr.update(visible=False)
+    return fields
+
+
+def _save_character(editing, name, context, greeting, system, temperature, top_p,
                     reply_tokens, seed):
+    """Write the editor to disk, creating or renaming as ``editing`` says.
+
+    ``editing`` and not the drop-down, which is the whole fix. Creating refuses
+    a name that is already taken rather than writing over it -- overwriting a
+    character silently is the same loss by a shorter road.
+    """
     from prompt_master.chat.characters import Character
 
-    if not (name or "").strip():
-        return gr.update(), ui.notice("A character needs a name.", "warn")
-    blank = Character(name="")
+    wanted = (name or "").strip()
+    if not wanted:
+        return [gr.update(), gr.update(), ui.notice("A character needs a name.", "warn")]
+
+    store = _characters()
+    creating = not (editing or "").strip()
+    if creating and store.exists(wanted):
+        return [gr.update(), gr.update(),
+                ui.notice(f"There is already a character called {wanted}. Give this one "
+                          f"another name, or press Edit to change that one.", "warn")]
+
+    blank = _blank_character()
     character = Character(
-        name=name.strip(), context=context or "", greeting=greeting or "",
+        name=wanted, context=context or "", greeting=greeting or "",
         temperature=_decimal(temperature, blank.temperature),
         top_p=_decimal(top_p, blank.top_p),
         max_reply_tokens=_number(reply_tokens, blank.max_reply_tokens),
         seed=_number(seed, blank.seed), system=system or "")
     try:
-        _characters().save(character, previous_name=previous or None)
+        store.save(character, previous_name=None if creating else editing)
     except Exception as exc:
-        return gr.update(), ui.notice(ui.failure(exc), "error")
-    return (gr.update(choices=_character_choices(), value=character.name),
-            ui.notice(f"Saved {character.name}."))
+        return [gr.update(), gr.update(), ui.notice(ui.failure(exc), "error")]
+
+    # ``editing`` becomes the saved name, so pressing Save a second time edits
+    # what was just created rather than trying to create it again.
+    return [gr.update(choices=_character_choices(), value=character.name), character.name,
+            ui.notice(f"{'Created' if creating else 'Saved'} {character.name}.")]
 
 
 def _delete_character(who):
+    """Remove a character, and land on whichever one is left."""
     if not who:
-        return gr.update(), ui.notice("Choose a character first.", "warn")
+        return [gr.update(), gr.update(visible=False), NOT_EDITING,
+                ui.notice("Choose a character first.", "warn")]
     try:
         _characters().delete(who)
     except Exception as exc:
-        return gr.update(), ui.notice(ui.failure(exc), "error")
-    return gr.update(choices=_character_choices(), value=None), ui.notice(f"Deleted {who}.")
+        return [gr.update(), gr.update(), gr.update(), ui.notice(ui.failure(exc), "error")]
+    left = _character_choices()
+    return [gr.update(choices=left, value=left[0] if left else None),
+            gr.update(visible=False), NOT_EDITING,
+            ui.notice(f"Deleted {who}." if left else
+                      f"Deleted {who}. There are no characters left — press New to write one.")]
+
+
+def _refresh_characters(who):
+    """Re-read the characters folder without changing anything in it.
+
+    For the case the panel cannot see on its own: a ``.yaml`` copied in from an
+    oobabooga install while the tab was open, or a file deleted by hand.
+    """
+    found = _character_choices()
+    keep = who if who in found else (found[0] if found else None)
+    return [gr.update(choices=found, value=keep),
+            ui.notice(f"{len(found)} character{'' if len(found) == 1 else 's'}."
+                      if found else "No characters yet — press New to write one.")]
 
 
 def _import_character(upload):
     if not upload:
-        return gr.update(), ui.notice("Choose a card to import.", "warn")
+        return [gr.update(), gr.update(visible=False), NOT_EDITING,
+                ui.notice("Choose a card to import.", "warn")]
     try:
         imported = _characters().import_file(Path(getattr(upload, "name", upload)))
     except Exception as exc:
-        return gr.update(), ui.notice(ui.failure(exc), "error")
-    return (gr.update(choices=_character_choices(), value=imported.name),
-            ui.notice(f"Imported {imported.name}."))
+        return [gr.update(), gr.update(), gr.update(), ui.notice(ui.failure(exc), "error")]
+    return [gr.update(choices=_character_choices(), value=imported.name),
+            gr.update(visible=False), NOT_EDITING,
+            ui.notice(f"Imported {imported.name}.")]
 
 
 def _save_persona(name, description):

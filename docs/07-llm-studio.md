@@ -2944,3 +2944,104 @@ draft model, 8K of state, compute buffers and a projector. Q6_K is the highest
 sensible managed weight and Q5_K_M is the recommended one, and promoting Q6
 past it is a decision for the project's own prompt-quality corpus rather than
 for a file size.
+
+## 29. Three reports from one evening (27 August 2026)
+
+Unrelated to each other except in having been found in the same session, and
+recorded together because two of them are the same mistake in different
+clothes: a control that reads a value from somewhere it has no business reading
+it from.
+
+### 29.1 New + Save renamed the character you had
+
+Reported as *"I created a new character, tried to switch back to existing and
+it wasn't an option."*
+
+`save_character.click` was wired `inputs=[character, name, …]`, where
+`character` is the **Talking to** drop-down, and `_save_character` passed that
+first value to `CharacterStore.save` as `previous_name`. That parameter means
+"the character this file is currently on disk as", and `save` acts on it:
+
+```python
+renaming = bool(previous_name) and previous_name != character.name
+...
+old.unlink(missing_ok=True)
+```
+
+So pressing New, typing a name and pressing Save renamed whichever character
+was selected — moved its file, carried its picture across with it, and deleted
+the original. The list then held one character where there had been two, and
+the one the user started from was gone. Not a display bug: their file was
+unlinked.
+
+The drop-down says *who you are talking to*. It has never said *what the editor
+is editing*, and the fix is to stop pretending it does. `editing` is a `State`
+holding the name the editor is bound to — the empty string while a new
+character is being written — and Save reads that and nothing else. Around it:
+
+- `_editor_fields` is the single shape every handler touching the editor
+  returns, so none of them can leave the name box, the sampling and the
+  character being written to describing three different characters. A test
+  asserts all five answer the same length, because a handler returning a
+  different number of values is a panel that breaks on a button press.
+- **New** resets the Advanced sampling with the rest of the editor. Leaving it
+  alone had a new character silently inherit the settings — including the
+  seed — of whichever one was selected when New was pressed.
+- **Cancel** restores those boxes from the selected character, because they are
+  also the *conversation's* per-message override and New had just cleared them.
+- Creating over a name already taken is refused. Overwriting somebody's
+  character silently is the same loss by a shorter road.
+- Saving sets `editing` to the saved name, so a second Save edits rather than
+  trying to create again.
+- **↻ Refresh** re-reads the folder, and **Delete** lands on whatever is left
+  rather than on nothing.
+
+### 29.2 The path the panel already knew
+
+Reported as *"Even though I chose to download the DFlash2 llama.cpp build, LLM
+Studio doesn't seem to know its location."* — and the clarification is the
+whole of it: the button pressed was *Download the draft model*.
+
+Under one Advanced heading sat a download button for the **draft model**
+(weights, in the backbone's bundle) and a path box for the **llama.cpp build**
+(a program, in its own directory). Two installs, one heading, and a download
+next to the wrong box. Pressing the download and then the button beside the
+empty box produced *"Enter the path to the DFlash2 llama.cpp build"* — true,
+unhelpful, and silent about the fact that the thing being asked for has no
+download anywhere yet.
+
+Three changes, and only one of them is code that does anything:
+
+- The two are **numbered and separated on screen**, each with a sentence saying
+  it is needed as well as the other and not instead of it.
+- The runtime has a **Download button of its own**, wired to
+  `mc_llm_dflash.download`. There is no published archive, so what it does
+  today is say so and name the commit to build — which is the answer to the
+  question that was actually being asked. A button that answers is worth more
+  than no button at all.
+- The **path is kept**. The box is filled from `mc_llm_dflash.installed()`, an
+  empty box means "use the build you have" rather than an error, and adopting
+  rewrites the box to where the build now *lives* — inside the data directory
+  rather than wherever it was compiled — so pressing the button twice is a
+  no-op instead of a second install of the same thing.
+
+### 29.3 A seed of 7
+
+`prompt_engine.options.DEFAULTS["seed"]` is `7`, and Prompt Studio's box opened
+on it through `initial("seed", 7)`. That value is not a default anybody chose
+for a user: it is what upstream's node self-tests use, picked so two runs come
+out identical, which is the exact opposite of what a seed control is for. A
+panel that opens on it hands every user a generator that repeats itself until
+they notice the box.
+
+So the seed is the one control in that panel that does not go through
+`initial`: it reads `stored` directly and falls back to `RANDOM_SEED`, which
+leaves a seed somebody actually chose still remembered and still winning.
+MiniMax and Krea already opened on −1 and now say so with the constant rather
+than a literal — the same reason the Conversation panel gives about its
+Advanced accordion, that a second set of literals in the UI is how a panel
+quietly stops matching the engine behind it.
+
+Conversation was already right in the two places that matter: `Character.seed`
+defaults to `RANDOM_SEED`, and the box does too. What it did not do was reset
+that box when New was pressed, which is 29.1's bug wearing this one's clothes.

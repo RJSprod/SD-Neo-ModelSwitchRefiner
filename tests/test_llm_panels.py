@@ -1968,6 +1968,221 @@ class TestConversationDefaults:
         assert mc_llm_chat_panel._number(256, 900) == 256
 
 
+class TestTheCharacterMenu:
+    """Create, load, edit, delete -- and the one that got away.
+
+    Reported from a real installation: "I created a new character, tried to
+    switch back to existing and it wasn't an option." Save was wired to the
+    *Talking to* drop-down for the name to write over, so New + Save renamed
+    whichever character happened to be selected -- moving its file, taking its
+    picture with it, and leaving a list that no longer had the character the
+    user started from. Every test here is a way of doing that again.
+    """
+
+    @pytest.fixture
+    def characters(self, store):
+        from prompt_master.chat.characters import Character
+
+        (store / "characters").mkdir(parents=True, exist_ok=True)
+        held = mc_llm_chat_panel._characters()
+        held.save(Character(name="Ada", context="an existing character"))
+        return held
+
+    def test_creating_one_keeps_the_one_that_was_selected(self, characters):
+        editor = mc_llm_chat_panel._new_character()
+
+        mc_llm_chat_panel._save_character(editor[1], "Grace", "someone else", "", "",
+                                          0.85, 0.95, 512, -1)
+
+        assert sorted(mc_llm_chat_panel._character_choices()) == ["Ada", "Grace"]
+        assert characters.load("Ada").context == "an existing character"
+
+    def test_new_binds_the_editor_to_nothing(self, characters):
+        """The whole of the fix, asserted at the field that carries it."""
+        editor = mc_llm_chat_panel._new_character()
+
+        assert editor[1] == mc_llm_chat_panel.NOT_EDITING
+
+    def test_a_second_save_edits_rather_than_creating_again(self, characters):
+        editor = mc_llm_chat_panel._new_character()
+        _dropdown, editing, _note = mc_llm_chat_panel._save_character(
+            editor[1], "Grace", "first", "", "", 0.85, 0.95, 512, -1)
+
+        mc_llm_chat_panel._save_character(editing, "Grace", "second", "", "",
+                                          0.85, 0.95, 512, -1)
+
+        assert sorted(mc_llm_chat_panel._character_choices()) == ["Ada", "Grace"]
+        assert characters.load("Grace").context == "second"
+
+    def test_creating_over_an_existing_name_is_refused(self, characters):
+        """Overwriting somebody's character silently is the same loss by a
+        shorter road."""
+        _dropdown, _editing, note = mc_llm_chat_panel._save_character(
+            "", "Ada", "hijack", "", "", 0.85, 0.95, 512, -1)
+
+        assert "already a character" in note
+        assert characters.load("Ada").context == "an existing character"
+
+    def test_editing_binds_to_the_character_opened(self, characters):
+        editor = mc_llm_chat_panel._open_character("Ada")
+
+        assert editor[1] == "Ada"
+        assert editor[2] == "Ada"
+
+    def test_renaming_moves_the_character_rather_than_copying_it(self, characters):
+        editor = mc_llm_chat_panel._open_character("Ada")
+
+        mc_llm_chat_panel._save_character(editor[1], "Ada Lovelace", "renamed", "", "",
+                                          0.85, 0.95, 512, -1)
+
+        assert mc_llm_chat_panel._character_choices() == ["Ada Lovelace"]
+
+    def test_deleting_lands_on_whatever_is_left(self, characters):
+        from prompt_master.chat.characters import Character
+
+        characters.save(Character(name="Grace"))
+
+        dropdown, _editor, editing, _note = mc_llm_chat_panel._delete_character("Ada")
+
+        assert dropdown["choices"] == ["Grace"]
+        assert dropdown["value"] == "Grace"
+        assert editing == mc_llm_chat_panel.NOT_EDITING
+
+    def test_deleting_the_last_one_says_what_to_do_next(self, characters):
+        dropdown, _editor, _editing, note = mc_llm_chat_panel._delete_character("Ada")
+
+        assert dropdown["choices"] == []
+        assert "press New" in note
+
+    def test_refresh_sees_a_file_copied_in_while_the_tab_was_open(self, characters):
+        from prompt_master.chat.characters import Character
+
+        characters.save(Character(name="Hopper"))
+
+        dropdown, _note = mc_llm_chat_panel._refresh_characters("Ada")
+
+        assert dropdown["choices"] == ["Ada", "Hopper"]
+        assert dropdown["value"] == "Ada", "refreshing must not change who you are talking to"
+
+    def test_refresh_moves_off_a_character_that_is_no_longer_there(self, characters):
+        characters.delete("Ada")
+
+        dropdown, note = mc_llm_chat_panel._refresh_characters("Ada")
+
+        assert dropdown["value"] is None
+        assert "No characters yet" in note
+
+    def test_cancel_puts_the_sampling_back(self, characters):
+        """New resets the boxes, and they are the boxes the *conversation*
+        uses -- so thinking better of it has to restore them."""
+        from prompt_master.chat.characters import Character
+
+        characters.save(Character(name="Ada", temperature=0.4, seed=99))
+        mc_llm_chat_panel._new_character()
+
+        restored = mc_llm_chat_panel._cancel_character("Ada")
+
+        assert restored[0] == {"visible": False}
+        assert restored[6] == 0.4
+        assert restored[9] == 99
+
+    def test_every_editor_handler_answers_the_same_shape(self, characters):
+        """They share one output list, so one of them returning a different
+        number of values is a panel that breaks on a button press."""
+        shapes = {
+            len(mc_llm_chat_panel._new_character()),
+            len(mc_llm_chat_panel._open_character("Ada")),
+            len(mc_llm_chat_panel._open_character("")),
+            len(mc_llm_chat_panel._cancel_character("Ada")),
+            len(mc_llm_chat_panel._cancel_character("")),
+        }
+
+        assert shapes == {11}
+
+
+class TestSeedsAreRandomUntilSomebodyChoosesOne:
+    """A seed control that opens on a fixed number is a generator that repeats.
+
+    ``prompt_engine.options.DEFAULTS["seed"]`` is 7 because upstream's node
+    needs a fixed number for its own self-tests -- it is chosen to make two
+    runs identical, which is the opposite of what the box is for.
+    """
+
+    @staticmethod
+    def _seed_boxes(module, monkeypatch):
+        """Every control this panel builds that is labelled "Seed", as built.
+
+        Recorded at construction rather than read off the returned handles,
+        because most of these panels do not hand their controls back -- and the
+        value under test is precisely the one the box *opens* on.
+        """
+        import gradio as gr
+
+        found = []
+        original = gr.Number
+
+        def record(*args, **kwargs):
+            made = original(*args, **kwargs)
+            if str(kwargs.get("label", "")).strip().casefold() == "seed":
+                found.append(made)
+            return made
+
+        monkeypatch.setattr(gr, "Number", record)
+        module.build()
+        return found
+
+    def test_prompt_studio_opens_on_a_random_seed(self, store, monkeypatch):
+        from prompt_master.core.models import RANDOM_SEED
+        from prompt_master.prompt_engine import options as opt
+
+        boxes = self._seed_boxes(mc_llm_prompt_panel, monkeypatch)
+
+        assert opt.DEFAULTS["seed"] == 7, "the engine's own test default"
+        assert boxes and all(box.value == RANDOM_SEED for box in boxes)
+
+    def test_a_seed_somebody_chose_still_wins(self, store, monkeypatch):
+        import mc_llm_state
+
+        monkeypatch.setattr(mc_llm_state, "preferences",
+                            lambda: {"prompt_defaults": {"seed": 4242}})
+
+        boxes = self._seed_boxes(mc_llm_prompt_panel, monkeypatch)
+
+        assert [box.value for box in boxes] == [4242]
+
+    @pytest.mark.parametrize("module", ["minimax", "krea", "chat"])
+    def test_every_other_mode_opens_on_one_too(self, store, monkeypatch, module):
+        from prompt_master.core.models import RANDOM_SEED
+
+        panel = {"minimax": mc_llm_minimax_panel, "krea": mc_llm_krea_panel,
+                 "chat": mc_llm_chat_panel}[module]
+
+        boxes = self._seed_boxes(panel, monkeypatch)
+
+        assert boxes, "this panel offers no seed at all"
+        assert all(box.value == RANDOM_SEED for box in boxes)
+
+    def test_a_character_with_no_seed_draws_a_fresh_one(self):
+        from prompt_master.core.models import RANDOM_SEED
+        from prompt_master.chat.characters import Character
+
+        assert Character(name="").seed == RANDOM_SEED
+
+    def test_a_character_can_hold_a_random_seed(self, store):
+        """So a character with a seed can be given one back."""
+        from prompt_master.core.models import RANDOM_SEED
+        from prompt_master.chat.characters import Character
+
+        (store / "characters").mkdir(parents=True, exist_ok=True)
+        held = mc_llm_chat_panel._characters()
+        held.save(Character(name="Ada", seed=99))
+
+        mc_llm_chat_panel._save_character("Ada", "Ada", "", "", "", 0.85, 0.95, 512,
+                                          RANDOM_SEED)
+
+        assert held.load("Ada").seed == RANDOM_SEED
+
+
 class TestStoppingGivesTheControlsBack:
     """``cancels=`` closes the running generator where it stands, which is what
     makes Stop immediate — and a closed generator never reaches the yield that

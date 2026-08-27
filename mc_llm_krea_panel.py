@@ -102,6 +102,7 @@ def build() -> dict:
     that the axis table is built from the library rather than from a list here
     -- and a promise nothing can ask about is a promise nothing can hold you to.
     """
+    from prompt_master.core.models import RANDOM_SEED
     from prompt_master.krea import enhancer, variation
 
     stored = mc_creative_krea.settings()
@@ -118,8 +119,8 @@ def build() -> dict:
                 load = gr.Button("Load", size="sm")
                 drop = gr.Button("Delete", size="sm", variant="stop")
             refresh = gr.Button("Refresh", size="sm")
-            seed = gr.Number(label="Seed", value=-1, precision=0,
-                             info="-1 draws a fresh seed for every prompt.",
+            seed = gr.Number(label="Seed", value=RANDOM_SEED, precision=0,
+                             info=f"{RANDOM_SEED} draws a fresh seed for every prompt.",
                              elem_id=ui.ident("krea", "seed"))
 
             creative = gr.Checkbox(
