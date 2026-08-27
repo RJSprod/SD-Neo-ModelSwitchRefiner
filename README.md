@@ -2371,7 +2371,14 @@ two different cards can answer this differently.
 **MTP** is multi-token prediction: extra heads inside the GGUF that were
 downloaded with the weights. Nothing extra to install and nothing extra to find
 room for. A backbone either has them or does not, and the line under the
-controls says which.
+controls says which. It also needs a llama.cpp that takes `draft-mtp` as a
+speculative type — b10621 does; older builds do not, and there the backbone
+decodes ordinarily and the status line says so.
+
+If a llama.cpp ever refuses one of these optional flags outright, the start is
+retried without it rather than failing: a flag this extension got wrong is not
+a reason you cannot use a model. The console names the flag, the run reports
+ordinary decoding, and nothing asks for it again until the runtime changes.
 
 **DFlash2** is a separate 3.86 GB draft model that runs beside the backbone and
 guesses several tokens ahead for it. Two things have to be installed before it

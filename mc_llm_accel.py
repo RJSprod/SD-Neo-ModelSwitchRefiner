@@ -367,7 +367,7 @@ SPEC_TYPE_V_FLAG = "--spec-draft-type-v"
 DRAFT_LAYERS_FLAG = "--n-gpu-layers-draft"
 
 SPEC_TYPE_DFLASH = "draft-dflash"
-SPEC_TYPE_MTP = "mtp"
+SPEC_TYPE_MTP = "draft-mtp"
 """The publisher's tested start contract, one constant per option.
 
 Written out rather than assembled from a string in the registry, because
@@ -376,6 +376,13 @@ file and because these are the flags a reviewer has to be able to find. The
 *values* beside them -- how many tokens to draft, what the draft's cache types
 are -- do come from the registry, where they are numbers and cache-type names
 that have already been validated.
+
+``--spec-type`` takes one of an enumerated set, and both values here are
+*prefixed*: llama.cpp spells them ``draft-mtp`` and ``draft-dflash``, not
+``mtp`` and ``dflash``. That distinction is worth a sentence because getting it
+wrong does not degrade anything -- the server refuses the argument and exits
+before it loads, which arrives as "the backbone would not start" and rolls the
+user back to whichever model they were on.
 """
 
 
@@ -461,23 +468,32 @@ class Plan:
         return "ordinary decoding"
 
 
-def dflash2_flags(speculator, draft: Path, *, supports, layers_flag: bool = True,
+def dflash2_flags(speculator, draft: Path, *, supports, accepts,
+                  layers_flag: bool = True,
                   flash_attention: tuple[str, ...] = ()) -> tuple[str, ...]:
     """The publisher's DFlash2 start contract, minus anything this build lacks.
 
-    ``supports`` is a predicate over long option names -- in practice
-    :func:`mc_llm_runtime.runtime_supports` bound to the runtime being started
-    -- and every optional flag is asked about before it is added. The two that
-    are not optional are the draft model and the speculative type: without
-    either of them the server is not running DFlash2 at all, so a build that
-    does not advertise them produces no flags rather than a partial contract
-    that would start an ordinary server under a Lightning label.
+    ``supports`` is a predicate over long option *names* and ``accepts`` is a
+    predicate over ``--spec-type``'s *values*, and needing both is the lesson
+    of a server that exited at startup. Advertising an option is not the same
+    as accepting a value for it: every llama.cpp build since the speculative
+    framework landed advertises ``--spec-type``, and which types it will take
+    is a list that has grown release by release. A build asked for one it does
+    not have prints ``unknown speculative type`` and exits before it loads
+    anything -- which reaches the user as "this backbone would not start".
+
+    The two flags that are not optional are the draft model and the speculative
+    type: without either of them the server is not running DFlash2 at all, so a
+    build that does not have them produces no flags rather than a partial
+    contract that would start an ordinary server under a Lightning label.
 
     ``flash_attention`` is passed in rather than decided here because its
     spelling changed upstream from a switch to a three-state option and
     :mod:`mc_llm_runtime` already owns that question for the ordinary path.
     """
     if not (supports(SPEC_MODEL_FLAG) and supports(SPEC_TYPE_FLAG)):
+        return ()
+    if not accepts(SPEC_TYPE_DFLASH):
         return ()
 
     flags = [SPEC_MODEL_FLAG, str(draft), SPEC_TYPE_FLAG, SPEC_TYPE_DFLASH]
@@ -499,13 +515,16 @@ def dflash2_flags(speculator, draft: Path, *, supports, layers_flag: bool = True
     return tuple(flags)
 
 
-def mtp_flags(multitoken, *, supports) -> tuple[str, ...]:
+def mtp_flags(multitoken, *, supports, accepts) -> tuple[str, ...]:
     """What asks a build to use a backbone's own multi-token heads.
 
-    Nothing at all on a build that does not advertise ``--spec-type``, which is
-    the honest answer rather than a failure: the heads are in the GGUF either
-    way, and a runtime that cannot be told to use them decodes ordinarily. The
-    caller reports which mechanism ran, so this returning empty is visible.
+    Nothing at all on a build that does not advertise ``--spec-type`` *or* does
+    not list ``draft-mtp`` among the types it takes -- see
+    :func:`dflash2_flags` for why the second question has to be asked
+    separately. Either way the empty answer is the honest one rather than a
+    failure: the heads are in the GGUF regardless, and a runtime that cannot be
+    told to use them decodes ordinarily. The caller reports which mechanism
+    ran, so this returning empty is visible.
 
     No memory term goes with it. The heads were downloaded with the weights and
     are resident with the weights; unlike a draft model there is no second file
@@ -513,7 +532,7 @@ def mtp_flags(multitoken, *, supports) -> tuple[str, ...]:
     """
     if multitoken is None or not multitoken.embedded:
         return ()
-    if not supports(SPEC_TYPE_FLAG):
+    if not supports(SPEC_TYPE_FLAG) or not accepts(SPEC_TYPE_MTP):
         return ()
     flags = [SPEC_TYPE_FLAG, SPEC_TYPE_MTP]
     if multitoken.draft_tokens and supports(SPEC_MAX_FLAG):

@@ -877,8 +877,9 @@ def _smoke(server: Path, bundle, speculator, projector) -> tuple[bool, str]:
 
     flags = mc_llm_accel.dflash2_flags(
         speculator, bundle.draft,
-        supports=lambda flag: mc_llm_runtime.runtime_supports(
-            flag, _probe_config(server)),
+        supports=lambda flag: mc_llm_runtime.runtime_supports(flag, _probe_config(server)),
+        accepts=lambda value: mc_llm_runtime.runtime_accepts(
+            mc_llm_accel.SPEC_TYPE_FLAG, value, _probe_config(server)),
         flash_attention=_flash_attention(server))
     if not flags:
         return False, ("This build does not accept the speculative draft options, so DFlash2 "

@@ -54,6 +54,14 @@ A set rather than a real ``--help``: what is under test here is the planner's
 gating, and a subprocess would be testing llama.cpp.
 """
 
+SPEC_TYPES = ("none", "draft-simple", "draft-eagle3", "draft-mtp", "draft-dflash",
+              "draft-dspark", "ngram-simple", "ngram-map-k", "ngram-mod", "ngram-cache")
+"""The speculative types llama.cpp b10621 lists, copied from a real usage line.
+
+Two of them are load-bearing and the rest are here because leaving them out
+would make the list a restatement of the assertion rather than a sample of what
+a build really prints."""
+
 
 # --------------------------------------------------------------------------- #
 # A machine, assembled piece by piece
@@ -223,12 +231,26 @@ def set_free(monkeypatch, gigabytes, *, card=None):
     monkeypatch.setattr(mc_broker, "device_free_vram_bytes", device_free)
 
 
-def with_flags(monkeypatch, flags=DFLASH_FLAGS):
-    """Every build in this test advertises ``flags``, without a subprocess."""
-    monkeypatch.setattr(runtime, "runtime_capabilities",
-                        lambda configuration=None: frozenset(flags))
+def with_flags(monkeypatch, flags=DFLASH_FLAGS, types=SPEC_TYPES):
+    """A fake ``llama-server --help``, in the shape a real one has.
+
+    The *text* rather than a parsed flag set, because the difference between
+    those two is the bug this helper exists to be able to reproduce: every
+    build in the wild advertises ``--spec-type``, and which types it takes is
+    an enumeration printed in its usage line. A test that faked only the flag
+    set could not tell a build that accepts ``draft-mtp`` from one that has
+    never heard of it, which is exactly the pair that has to be told apart.
+    """
+    lines = [f"  {flag} VALUE" for flag in sorted(flags)]
+    if "--spec-type" in flags:
+        lines.append("--spec-type " + ",".join(types))
+        lines.append("       comma-separated list of types of speculative decoding to use")
+    help_text = "\n".join(lines)
+    monkeypatch.setattr(runtime, "_capability_text", lambda configuration=None: help_text)
     monkeypatch.setattr(runtime, "_flash_attention_takes_a_value",
                         lambda configuration=None: True)
+    runtime._rejected.clear()
+    return help_text
 
 
 class Counting:
@@ -565,7 +587,7 @@ class TestCooperativeDFlash2:
         plan = runtime.accelerator_plan(configuration)
 
         assert plan.refused
-        assert "does not accept the speculative draft options" in plan.refusal
+        assert "does not take the speculative draft options" in plan.refusal
 
     def test_a_partial_offload_is_refused_rather_than_labelled_lightning(
             self, install, tmp_path, monkeypatch, registry, image):
@@ -757,7 +779,49 @@ class TestAuto:
 
         assert plan.accelerator == accel.ACCEL_MTP
         assert not plan.refused
-        assert plan.flags[:2] == ("--spec-type", "mtp")
+        # llama.cpp's own spelling. ``mtp`` is not one of the types it takes,
+        # and a build handed it prints "unknown speculative type" and exits
+        # before it loads a tensor -- which arrives as "this backbone would not
+        # start" and rolls the user back to whatever they were on.
+        assert plan.flags[:2] == ("--spec-type", "draft-mtp")
+
+    def test_a_build_that_lists_the_option_but_not_the_type_gets_no_flags(
+            self, install, tmp_path, monkeypatch, registry, image):
+        """Advertising an option is not accepting a value for it.
+
+        Every llama.cpp since the speculative framework landed advertises
+        ``--spec-type``; which types it takes is an enumeration that grew
+        release by release. Gating on the option alone is how a start dies at
+        argument parsing, and the model switch that asked for it rolls back.
+        """
+        install_bundle(install, tmp_path, draft=False)
+        with_flags(monkeypatch, types=("none", "draft-simple", "ngram-cache"))
+        set_free(monkeypatch, 24)
+        configuration = configure(monkeypatch, install, tmp_path)
+
+        plan = runtime.accelerator_plan(configuration)
+
+        assert runtime.runtime_supports("--spec-type", configuration)
+        assert not runtime.runtime_accepts("--spec-type", "draft-mtp", configuration)
+        assert plan.accelerator == accel.ACCEL_NONE
+        assert plan.flags == ()
+        assert any("Update the runtime" in note for note in plan.notes)
+
+    def test_a_value_the_build_refused_at_startup_is_not_asked_for_again(
+            self, install, tmp_path, monkeypatch, registry, image):
+        """The help text can be wrong by omission, and one failed start is the
+        only way to find out. Paying for it twice is not."""
+        install_bundle(install, tmp_path, draft=False)
+        with_flags(monkeypatch)
+        set_free(monkeypatch, 24)
+        configuration = configure(monkeypatch, install, tmp_path)
+        assert runtime.accelerator_plan(configuration).accelerator == accel.ACCEL_MTP
+
+        runtime.note_rejected_value("--spec-type", "draft-mtp", configuration)
+
+        assert not runtime.runtime_accepts("--spec-type", "draft-mtp", configuration)
+        assert runtime.accelerator_plan(configuration).accelerator == accel.ACCEL_NONE
+        assert ("--spec-type", "draft-mtp") in runtime.rejected_values(configuration)
 
     def test_it_steps_down_to_ordinary_decoding_on_an_older_runtime(
             self, install, tmp_path, monkeypatch, registry, image):
@@ -1579,3 +1643,144 @@ class TestThroughTheRuntime:
         assert "--spec-draft-model" in seen[0]
         assert "--spec-draft-model" not in seen[1]
         assert "--spec-type" not in seen[1]
+
+# --------------------------------------------------------------------------- #
+# A flag llama.cpp will not take (27 August 2026)
+# --------------------------------------------------------------------------- #
+
+
+class TestAnOptionTheBuildRefuses:
+    """The model is not what pays for a flag this extension got wrong.
+
+    Reported from a real machine: ``--spec-type mtp`` on llama.cpp b10621,
+    whose speculative types are all ``draft-``-prefixed. The server printed
+    ``unknown speculative type`` and exited before it loaded a tensor, the
+    switch that asked for it rolled back, and what the user read was "Qwen 3.8
+    27B Abliterated — Medium was downloaded but would not start".
+    """
+
+    REAL = ('error while handling argument "--spec-type": unknown speculative type: mtp\n'
+            '\nusage:\n--spec-type none,draft-simple,draft-eagle3,draft-mtp,draft-dflash\n')
+
+    def test_the_refusal_is_read_as_a_flag_problem_and_not_a_model_problem(self):
+        failure = runtime.read_failure(self.REAL)
+
+        assert failure.bad_argument == "--spec-type"
+        assert failure.bad_value == "mtp"
+        assert not failure.out_of_memory
+        assert "not anything about the model" in failure.text
+
+    def test_a_flag_the_launcher_must_pass_is_not_treated_this_way(self):
+        """``--device`` is not optional, a refusal of it is a real
+        misconfiguration, and it already has a diagnosis worth far more."""
+        failure = runtime.read_failure(
+            'error while handling argument "--device": invalid device: CUDA0\n')
+
+        assert failure.bad_argument == ""
+        assert failure.out_of_memory
+
+    @pytest.fixture
+    def quiet(self, monkeypatch):
+        monkeypatch.setattr(runtime, "_prime_prompt_cache", lambda client: None)
+        monkeypatch.setattr(runtime, "RESIDENCY_SETTLE_SECONDS", 0.0)
+        for family in (mc_broker.FAMILY_IMAGE, mc_broker.FAMILY_LLM):
+            mc_broker.unregister_reclaimer(family)
+        yield runtime.Runtime()
+
+    def test_the_start_is_retried_without_the_accelerator(self, install, tmp_path,
+                                                          monkeypatch, registry, quiet):
+        install_bundle(install, tmp_path, draft=False)
+        with_flags(monkeypatch)
+        set_free(monkeypatch, 24)
+        configure(monkeypatch, install, tmp_path)
+        attempts: list = []
+
+        class Reached(RuntimeError):
+            pass
+
+        def launch(configuration, placement, projector=None, plan=None):
+            attempts.append(plan)
+            if len(attempts) == 1:
+                raise runtime._StartFailed(
+                    "llama-server would not take --spec-type: unknown speculative type: mtp",
+                    bad_argument="--spec-type", bad_value="mtp")
+            raise Reached()
+
+        monkeypatch.setattr(quiet, "_launch", launch)
+        with pytest.raises(Reached):
+            quiet.client()
+
+        assert len(attempts) == 2, "the start was not retried"
+        assert attempts[0].accelerator == accel.ACCEL_MTP
+        assert attempts[1].accelerator == accel.ACCEL_NONE
+        assert attempts[1].flags == ()
+        assert any("MTP was not used" in note for note in attempts[1].notes)
+
+    def test_the_value_is_not_asked_for_again_afterwards(self, install, tmp_path,
+                                                         monkeypatch, registry, quiet):
+        install_bundle(install, tmp_path, draft=False)
+        with_flags(monkeypatch)
+        set_free(monkeypatch, 24)
+        configuration = configure(monkeypatch, install, tmp_path)
+
+        def launch(configuration, placement, projector=None, plan=None):
+            if plan.flags:
+                raise runtime._StartFailed("refused", bad_argument="--spec-type",
+                                           bad_value="draft-mtp")
+            raise RuntimeError("far enough")
+
+        monkeypatch.setattr(quiet, "_launch", launch)
+        with pytest.raises(RuntimeError, match="far enough"):
+            quiet.client()
+
+        assert ("--spec-type", "draft-mtp") in runtime.rejected_values(configuration)
+        assert runtime.accelerator_plan(configuration).accelerator == accel.ACCEL_NONE
+
+    def test_it_is_retried_once_and_not_for_ever(self, install, tmp_path, monkeypatch,
+                                                 registry, quiet):
+        """A second argument error is a real failure. Retrying past it would
+        hide whatever is actually wrong behind an endless loop."""
+        install_bundle(install, tmp_path, draft=False)
+        with_flags(monkeypatch)
+        set_free(monkeypatch, 24)
+        configure(monkeypatch, install, tmp_path)
+        attempts: list = []
+
+        def launch(configuration, placement, projector=None, plan=None):
+            attempts.append(plan)
+            raise runtime._StartFailed("refused", bad_argument="--swa-full")
+
+        monkeypatch.setattr(quiet, "_launch", launch)
+        with pytest.raises(RuntimeError, match="refused"):
+            quiet.client()
+
+        assert len(attempts) == 2
+
+    def test_a_forced_dflash2_argument_error_does_not_become_a_lightning_run(
+            self, install, tmp_path, monkeypatch, registry, quiet):
+        """The drop is to ordinary decoding, reported. What it must never be is
+        a start that keeps the label and loses the mechanism."""
+        install_bundle(install, tmp_path)
+        install_dflash_runtime(install)
+        with_flags(monkeypatch)
+        set_free(monkeypatch, 24)
+        configure(monkeypatch, install, tmp_path, accelerator=accel.ACCEL_DFLASH2)
+        attempts: list = []
+
+        class Reached(RuntimeError):
+            pass
+
+        def launch(configuration, placement, projector=None, plan=None):
+            attempts.append(plan)
+            if len(attempts) == 1:
+                raise runtime._StartFailed("refused", bad_argument="--spec-draft-model")
+            raise Reached()
+
+        monkeypatch.setattr(quiet, "_launch", launch)
+        with pytest.raises(Reached):
+            quiet.client()
+
+        assert attempts[0].speculative
+        assert not attempts[1].speculative
+        assert attempts[1].accelerator == accel.ACCEL_NONE
+        assert any("DFlash2 was not used" in note for note in attempts[1].notes)

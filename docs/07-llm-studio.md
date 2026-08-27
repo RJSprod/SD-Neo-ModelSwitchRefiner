@@ -2866,7 +2866,68 @@ generation depends on it — parsing a log is the only way to get the figure fro
 another process, and a parser that failed loudly when a format moved would
 break generation for a statistic.
 
-### 28.9 What is not here
+### 28.9 Advertising an option is not accepting a value for it
+
+Reported from a real machine within hours of the first build, and worth the
+section because the mistake is easy to make twice.
+
+`runtime_supports` asks whether `llama-server --help` lists a long option, and
+that gate has been right for every flag this module added before now:
+`--n-cpu-moe` either exists or it does not. `--spec-type` is a different shape.
+It has existed since the speculative framework landed, so the gate says yes on
+every build in the wild; *which types* it takes is an enumeration that has
+grown release by release, and it is printed in the option's own usage line:
+
+```
+--spec-type none,draft-simple,draft-eagle3,draft-mtp,draft-dflash,draft-dspark,…
+```
+
+The value written here was `mtp`. llama.cpp's is `draft-mtp`. So b10621 printed
+`error while handling argument "--spec-type": unknown speculative type: mtp`
+and exited before it loaded a tensor — and because that happened inside
+`_start_and_smoke_test`, the managed switch rolled back and told the user
+*"Qwen 3.8 27B Abliterated — Medium was downloaded but would not start"*, about
+a backbone that was perfectly fine.
+
+Three things came out of it.
+
+**The spelling.** Both constants are prefixed now, `draft-mtp` and
+`draft-dflash`, and the docstring beside them says why the prefix is worth a
+sentence.
+
+**A second gate.** `runtime_accepts(flag, value)` asks whether the value
+appears as a whole word anywhere in the help output, and both flag builders now
+take an `accepts` predicate beside `supports`. The match is deliberately loose
+rather than a parse of the usage block — llama.cpp has formatted that block
+three ways and `draft-dflash` is distinctive enough that finding it anywhere
+means the build knows it. A false negative costs an accelerator that would have
+worked, and says so; a false positive costs one failed start, which is what the
+third thing is for.
+
+**The model stops paying for this extension's mistakes.** `read_failure` now
+recognises `error while handling argument`, and `Runtime.client` responds to one
+by dropping the accelerator and starting again — once — rather than by letting
+the failure stand. The scoping is the careful part in two directions:
+
+- Only flags on `OPTIONAL_FLAGS` — the ones this extension *chooses* to append
+  — are treated this way. `--device` produces the identical message shape and
+  is a symptom of a card that could not be enumerated, which is diagnosed above
+  in far more useful terms; the existing tests for that caught the first
+  version of this branch swallowing it, which is exactly what they are for.
+- Once. A second argument error is a real failure, and retrying past it would
+  hide whatever is actually wrong behind a loop.
+
+The refused value goes into a session-scoped negative cache, so the next start
+does not repeat the doomed attempt. Not persisted: relearning it costs one
+failed start per session, and a file on disk claiming a runtime cannot do
+something would outlive the runtime being replaced.
+
+This is also why the DFlash2 capability record exists in the form it does. The
+help text is evidence, and it is evidence about what a build *says*. Only a
+real load of the real target answering a real question is evidence about what
+it does.
+
+### 28.10 What is not here
 
 **No published DFlash2 archive.** The manifest entries carry the shape, the
 commit, the CUDA version and the compute architectures, and null bytes. Filling
