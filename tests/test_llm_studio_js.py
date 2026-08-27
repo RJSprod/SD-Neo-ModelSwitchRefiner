@@ -84,9 +84,25 @@ const elements = {
     "mc-llm-chat": element("mc-llm-chat", WORKSPACE_TOP),
 };
 
+// The page, as tall as whatever the workspace was given plus whatever sits
+// under it -- the container's own bottom padding, and anything the host puts
+// after the tab. TRAILING is that strip, and it is what makes the page scroll
+// when the workspace has been sized only against the window.
+const page = {
+    scrollTop: SCROLLED,
+    clientHeight: WINDOW_HEIGHT,
+    get scrollHeight() {
+        const published = elements["mc-llm-chat"].style.getPropertyValue("--mc-llm-available");
+        const height = published ? parseInt(published, 10) : 400;
+        return WORKSPACE_TOP + height + TRAILING;
+    },
+    getAttribute: () => null,
+    setAttribute() {},
+    removeAttribute() {},
+};
+
 globalThis.document = {
-    documentElement: {scrollTop: SCROLLED, getAttribute: () => null,
-                      setAttribute() {}, removeAttribute() {}},
+    documentElement: page,
     querySelector: (selector) => elements[selector.replace("#", "")] || null,
     addEventListener() {},
     readyState: "complete",
@@ -121,11 +137,13 @@ console.log(JSON.stringify({
 """
 
 
-def published(top: int = 240, window: int = 900, scrolled: int = 0) -> dict:
+def published(top: int = 240, window: int = 900, scrolled: int = 0,
+              trailing: int = 0) -> dict:
     harness = (
         HARNESS.replace("SOURCE", SCRIPT.read_text())
         .replace("WORKSPACE_TOP", json.dumps(top))
         .replace("WINDOW_HEIGHT", json.dumps(window))
+        .replace("TRAILING", json.dumps(trailing))
         .replace("SCROLLED", json.dumps(scrolled))
     )
     result = subprocess.run(["node", "--input-type=module", "-e", harness],
@@ -134,9 +152,10 @@ def published(top: int = 240, window: int = 900, scrolled: int = 0) -> dict:
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-def measure(top: int = 240, window: int = 900, scrolled: int = 0) -> str:
+def measure(top: int = 240, window: int = 900, scrolled: int = 0,
+            trailing: int = 0) -> str:
     """What the script published, wherever it published it."""
-    return published(top, window, scrolled)["available"]
+    return published(top, window, scrolled, trailing)["available"]
 
 
 def pixels(value: str) -> int:
@@ -169,6 +188,36 @@ class TestFittingTheWorkspace:
         that is a little short, never one that cannot be scrolled back out of."""
         for window in (700, 900, 1400):
             assert pixels(measure(top=0, window=window)) <= window
+
+    def test_it_gives_back_whatever_still_hangs_below_the_fold(self):
+        """The point of the whole thing: when the workspace has been sized and
+        the page can *still* be scrolled, the difference is space the reader can
+        only scroll into and find nothing in.
+
+        Reported after the WebUI's footer was hidden -- "I am still able to
+        scroll down, but now into blank space". Hiding the links took away the
+        links and left the room they were in, and no list of selectors can be
+        relied on to find every element that could be responsible. So none is
+        used: what is measured is whether the page still scrolls."""
+        for trailing in (16, 48, 120):
+            height = pixels(measure(top=240, window=900, trailing=trailing))
+            # Where the page now ends. Anything past the window is somewhere to
+            # scroll to, and there is nothing there.
+            assert 240 + height + trailing <= 900
+
+    def test_a_page_that_already_fits_is_left_alone(self):
+        """The correction only ever shrinks. A page with nothing below the fold
+        has nothing to give back, and a workspace that grew to fill an overflow
+        that was not there would be the feedback loop this file already has a
+        test against."""
+        assert pixels(measure(top=240, window=900, trailing=0)) == 900 - 240 - 16
+
+    def test_it_never_shrinks_below_the_floor_it_will_lay_out_in(self):
+        """A trailing strip taller than the room available would otherwise take
+        the workspace to nothing. Below the floor it stops and the page keeps
+        its scroll bar, which is the honest outcome: there is genuinely not
+        enough window."""
+        assert pixels(measure(top=240, window=900, trailing=5000)) >= 260
 
     def test_a_window_too_short_to_lay_out_in_publishes_nothing(self):
         """Below that, style.css hands the page its scroll bar back rather than
@@ -877,3 +926,112 @@ class TestHidingTheFooter:
 
         assert changed["first"] == "hidden"
         assert changed["footer"] is None
+
+
+# --------------------------------------------------------------------------- #
+# The paperclip opens the browser's own file picker
+# --------------------------------------------------------------------------- #
+
+# Conversation's picture chip is a Gradio Image, which is an upload area with a
+# file input inside it. Tapping the area opens the picker; the paperclip beside
+# it forwards a press to that same input, so there is one way in and it is the
+# ordinary one. What used to be there instead was a full-width drop target above
+# the composer -- a panel's worth of empty dashed border to say "no picture yet",
+# on the one surface that must never grow.
+
+PICKER = """
+const opened = [];
+
+function chip(id) {
+    const input = {type: "file", click() { opened.push(id); }};
+    return {
+        id,
+        tagName: "DIV",
+        dataset: {},
+        querySelector: (selector) => (selector.indexOf("file") >= 0 ? input : null),
+        querySelectorAll: () => [],
+        addEventListener() {},
+    };
+}
+
+function paperclip(id) {
+    const node = {
+        id,
+        tagName: "BUTTON",
+        dataset: {},
+        handlers: {},
+        addEventListener(kind, fn) { node.handlers[kind] = fn; },
+        querySelector: () => null,
+        querySelectorAll: () => [],
+    };
+    return node;
+}
+
+const elements = {
+    "mc-llm-chat-attach": paperclip("mc-llm-chat-attach"),
+    "mc-llm-chat-image": chip("mc-llm-chat-image"),
+    "mc-llm-chat-edit-attach": paperclip("mc-llm-chat-edit-attach"),
+    "mc-llm-chat-edit-image": chip("mc-llm-chat-edit-image"),
+};
+
+const html = {scrollTop: 0, scrollHeight: 0, clientHeight: 0,
+              getAttribute: () => null, setAttribute() {}, removeAttribute() {}};
+globalThis.document = {
+    documentElement: html,
+    querySelector: (selector) => elements[selector.replace("#", "")] || null,
+    addEventListener() {},
+    readyState: "complete",
+};
+globalThis.window = globalThis;
+globalThis.innerHeight = 900;
+globalThis.scrollY = 0;
+globalThis.addEventListener = () => {};
+globalThis.setTimeout = (fn) => { fn(); return 0; };
+globalThis.setInterval = () => 0;
+globalThis.MutationObserver = function () { this.observe = () => {}; };
+globalThis.gradioApp = () => globalThis.document;
+
+const loaded = [];
+globalThis.onUiLoaded = (fn) => loaded.push(fn);
+globalThis.onAfterUiUpdate = () => {};
+
+SOURCE
+
+loaded.forEach((fn) => fn());
+__PRESS__
+console.log(JSON.stringify({opened, wired: Object.keys(elements["mc-llm-chat-attach"].handlers)}));
+"""
+
+
+def picker(press: str = "") -> dict:
+    harness = PICKER.replace("SOURCE", SCRIPT.read_text()).replace("__PRESS__", press)
+    result = subprocess.run(["node", "--input-type=module", "-e", harness],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+class TestThePaperclipOpensThePicker:
+    def test_pressing_it_clicks_the_chip_s_own_file_input(self):
+        found = picker('elements["mc-llm-chat-attach"].handlers.click();')
+
+        assert found["opened"] == ["mc-llm-chat-image"]
+
+    def test_the_editor_has_one_of_its_own(self):
+        """A message that was sent with a picture is edited as a whole, so the
+        picture has to be changeable there and not only where it was first
+        attached."""
+        found = picker('elements["mc-llm-chat-edit-attach"].handlers.click();')
+
+        assert found["opened"] == ["mc-llm-chat-edit-image"]
+
+    def test_nothing_is_opened_until_it_is_pressed(self):
+        assert picker()["opened"] == []
+
+    def test_wiring_twice_does_not_press_twice(self):
+        """The tab is rebuilt on some updates, so the wiring is re-applied. A
+        listener added on every pass would open one picker per rebuild."""
+        found = picker('loaded.forEach((fn) => fn());'
+                       'elements["mc-llm-chat-attach"].handlers.click();')
+
+        assert found["opened"] == ["mc-llm-chat-image"]

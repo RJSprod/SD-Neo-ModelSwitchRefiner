@@ -96,6 +96,7 @@ from pathlib import Path
 
 import gradio as gr
 
+import mc_llm_attachments
 import mc_llm_paths
 import mc_llm_runtime
 import mc_llm_sessions as sessions
@@ -108,17 +109,25 @@ logger = logging.getLogger("model_chain")
 NO_SELECTION = -1
 """What ``selected`` holds when the action sheet applies to nothing."""
 
-SCREENS = ("nav", "threads", "character", "persona")
+SCREENS = ("threads", "character", "persona")
 """The overlay surfaces, in the order :func:`_screens` returns them.
 
 One at a time, always. They occupy the same space -- the whole conversation
 workspace on a narrow display -- so two open at once is two half-drawn panels
 rather than one usable one, and the way that is guaranteed is that there is one
 function which decides, and it decides for all of them at once.
+
+There is no menu among them any more. Threads, Character and You were behind
+one, and a menu whose entire contents are three destinations is a tap in front
+of every one of them: they are buttons in the header now, and the header wraps
+on a narrow display rather than folding back into a menu. What ``\u2630`` opens
+is the shell's own workspace chooser, which is what it opens in every other
+mode -- one button, one behaviour, everywhere in LLM Studio.
 """
 
 SELECTION_ORDER = ("sheet", "heading", "back", "pager", "forward", "drop",
-                   "regenerate", "continue", "resend", "edit", "edit_box", "composer")
+                   "regenerate", "continue", "resend", "edit", "edit_box", "edit_image",
+                   "composer")
 """The order :func:`_selection_updates` answers in.
 
 The action sheet is redrawn from that one function by every handler that
@@ -127,13 +136,18 @@ written down once. ``tests/test_llm_panels.py`` asserts the two are the same
 length: a handler one value short would put a label into a visibility and
 nothing would raise.
 
-The last three are not in the sheet. Editing a *reply* replaces the composer
-rather than opening an editor between the transcript and the composer, so
-"which message is selected" decides the state of the edit row and of the
-composer too -- and because they are in this list, every refresh returns the
-panel to CHAT_HOME without a second handler having to remember to. Editing one
-of your own messages does not come through here at all: it puts the message
-back in the composer, which is :func:`_take_back`.
+The last four are not in the sheet. An edit borrows the composer's space rather
+than opening a panel of its own, so "which message is selected" decides the
+state of the edit row, of the picture in it, and of the composer -- and because
+they are in this list, every refresh returns the panel to CHAT_HOME without a
+second handler having to remember to.
+
+Every message is edited the same way, yours and the character's alike. Yours
+used to be *taken back* into the composer instead, which meant editing one in
+the middle of a thread had to branch, because sending it again would have
+destroyed the replies that followed. That made Edit a second Branch. It is now
+what it says: the words in the thread change, the thread stays where it is, and
+what follows is a conversation whose earlier turn now says something else.
 """
 
 
@@ -163,10 +177,6 @@ def build() -> dict:
     # was made on.
     selected = gr.State(NO_SELECTION)
     positions = gr.State(initial_map)
-    # Whether the attachment row is open. Held here rather than read back off
-    # the component because an Image has no value for a handler to be given --
-    # only a State can be an input to the click that flips it.
-    attachment_open = gr.State(False)
     # Which overlay is open, by name. Held here rather than read back off the
     # components because a Column has no value a handler can be given -- and
     # without it the menu button could only ever open the menu, never close it.
@@ -186,12 +196,31 @@ def build() -> dict:
                        elem_classes=ui.classes("chat-stage")):
 
             with gr.Row(elem_classes=ui.classes("chat-header")):
+                # The same button LLM Studio's own bar carries, doing the same
+                # thing: it opens the shell's workspace chooser. It used to
+                # open a menu of this panel's own, which meant the control in
+                # the top-left corner did one thing in Conversation and another
+                # everywhere else.
                 menu = gr.Button("☰", size="sm", scale=0, min_width=44,
                                  elem_id=ui.ident("chat", "menu"),
                                  elem_classes=ui.classes("icon-button"))
                 header = gr.HTML(_heading(who, opened),
                                  elem_id=ui.ident("chat", "title"),
                                  elem_classes=ui.classes("chat-title"))
+                # Out of the menu and onto the bar. Three destinations behind a
+                # menu is a tap in front of each of them, and they are the three
+                # this mode is navigated by. The row wraps on a narrow display
+                # rather than folding back into a menu -- a second line of
+                # chips is a smaller loss than a hidden one.
+                to_threads = gr.Button("Threads", size="sm", scale=0, min_width=0,
+                                       elem_id=ui.ident("chat", "to-threads"),
+                                       elem_classes=ui.classes("chip-button"))
+                to_character = gr.Button("Character", size="sm", scale=0, min_width=0,
+                                         elem_id=ui.ident("chat", "to-character"),
+                                         elem_classes=ui.classes("chip-button"))
+                to_persona = gr.Button("You", size="sm", scale=0, min_width=0,
+                                       elem_id=ui.ident("chat", "to-persona"),
+                                       elem_classes=ui.classes("chip-button"))
                 # The runtime, as one tappable word. What it opens -- the model
                 # chooser, Load, Unload, the route to Setup -- is the shell's,
                 # and the shell wires this button to it: Conversation is not
@@ -234,24 +263,6 @@ def build() -> dict:
             regenerate_now = gr.Button("Regenerate this reply", visible=False,
                                        elem_id=ui.ident("chat", "regenerate-now"))
 
-            # ATTACHMENT_PREVIEW. Not in the layout until Attach opens it, and
-            # small when it is: the picture for the next message is a chip, not
-            # a panel.
-            with gr.Row(visible=False, elem_id=ui.ident("chat", "attachment"),
-                        elem_classes=ui.classes("attachment")) as attachment_row:
-                # type="pil" and not "filepath": Gradio's filepath preprocess
-                # calls ``processing_utils.save_pil_to_cache`` with a ``name``
-                # argument, and this WebUI replaces that function with an older
-                # one that has no such parameter -- so every filepath image
-                # input in the host raises ``TypeError`` before a handler is
-                # ever reached. Attaching a picture to a message did nothing
-                # but write a traceback to the console. Asking for the picture
-                # itself skips that call entirely.
-                attachment = gr.Image(label="Next message", type="pil", height=96,
-                                      show_label=False, scale=1,
-                                      elem_id=ui.ident("chat", "image"))
-                remove_attachment = gr.Button("Remove", size="sm", scale=0, min_width=88)
-
             # One line, always the same height, immediately above the composer.
             # "Ready." is quiet; a warning or an error is not, and neither of
             # them moves the transcript by a pixel when it arrives.
@@ -263,6 +274,36 @@ def build() -> dict:
                 attach = gr.Button("\U0001f4ce", size="sm", scale=0, min_width=44,
                                    elem_id=ui.ident("chat", "attach"),
                                    elem_classes=ui.classes("icon-button"))
+                # A chip beside the composer, and nothing at all until there is
+                # a picture in it. It was a full-width drop target above the
+                # composer, opened by the paperclip -- a panel's worth of empty
+                # dashed border to say "no picture yet", on the one surface
+                # that must not grow.
+                #
+                # The paperclip opens the browser's own file picker, which is
+                # what tapping the drop target did anyway; javascript/
+                # llm_studio.js forwards the press to this component's file
+                # input. The Python handler beside it makes the chip visible,
+                # so a browser that never ran the script still gets a target it
+                # can click rather than nothing at all.
+                #
+                # type="pil" and not "filepath": Gradio's filepath preprocess
+                # calls ``processing_utils.save_pil_to_cache`` with a ``name``
+                # argument, and this WebUI replaces that function with an older
+                # one that has no such parameter -- so every filepath image
+                # input in the host raises ``TypeError`` before a handler is
+                # ever reached.
+                # ``sources`` is one, and that is what makes the paperclip
+                # work: with more than one, Gradio draws a chooser and the file
+                # input is not in the DOM until somebody has picked "upload".
+                # A chip this size has room for a picture and nothing else
+                # anyway.
+                attachment = gr.Image(label="Next message", type="pil", visible=False,
+                                      sources=["upload"], show_label=False,
+                                      show_download_button=False, container=False,
+                                      scale=0, min_width=0,
+                                      elem_id=ui.ident("chat", "image"),
+                                      elem_classes=ui.classes("attachment"))
                 # One line, and never more than six: the composer is the one
                 # thing that must stay on screen, so it grows with what is
                 # being written and then stops, and a longer message scrolls
@@ -295,6 +336,21 @@ def build() -> dict:
                 # the transcript is a composer somebody sends by accident.
                 gr.HTML(f'<div class="{ui.PREFIX}-editing">\u270e Editing</div>',
                         elem_classes=ui.classes("editing"))
+                # The same paperclip and the same chip as the composer, for
+                # the same reason: a message that was sent with a picture is
+                # edited as a whole, so the picture has to be changeable and
+                # removable here rather than only at the moment it was first
+                # attached. Empty for a message that has none, which is also
+                # how one is added to a message that never had one.
+                edit_attach = gr.Button("\U0001f4ce", size="sm", scale=0, min_width=44,
+                                        elem_id=ui.ident("chat", "edit-attach"),
+                                        elem_classes=ui.classes("icon-button"))
+                edit_image = gr.Image(label="This message", type="pil", visible=False,
+                                      sources=["upload"], show_label=False,
+                                      show_download_button=False, container=False,
+                                      scale=0, min_width=0,
+                                      elem_id=ui.ident("chat", "edit-image"),
+                                      elem_classes=ui.classes("attachment"))
                 edit_box = gr.Textbox(label="Editing message", lines=2, max_lines=8,
                                       show_label=False, container=False, scale=1,
                                       placeholder="Editing this message…",
@@ -302,24 +358,6 @@ def build() -> dict:
                 save_edit = gr.Button("Save", variant="primary", size="sm", scale=0,
                                       min_width=80)
                 cancel_edit = gr.Button("Cancel", size="sm", scale=0, min_width=80)
-
-        # -- NAV_SHEET ------------------------------------------------------ #
-
-        with gr.Column(visible=False, elem_id=ui.ident("chat", "nav"),
-                       elem_classes=ui.classes("sheet", "sheet-side")) as nav:
-            with gr.Row(elem_classes=ui.classes("sheet-head")):
-                gr.Markdown("#### Menu")
-                close_nav = gr.Button("✕", size="sm", scale=0, min_width=44,
-                                      elem_classes=ui.classes("icon-button"))
-            to_threads = gr.Button("Threads", elem_classes=ui.classes("nav-entry"))
-            to_character = gr.Button("Character", elem_classes=ui.classes("nav-entry"))
-            to_persona = gr.Button("You", elem_classes=ui.classes("nav-entry"))
-            gr.Markdown("##### Elsewhere", elem_classes=ui.classes("sheet-label"))
-            to_model = gr.Button("Model / Runtime", size="sm",
-                                 elem_classes=ui.classes("nav-entry"))
-            to_setup = gr.Button("Setup", size="sm", elem_classes=ui.classes("nav-entry"))
-            to_modes = gr.Button("Switch mode", size="sm",
-                                 elem_classes=ui.classes("nav-entry"))
 
         # -- THREADS_SCREEN ------------------------------------------------- #
 
@@ -459,20 +497,24 @@ def build() -> dict:
                  "forward": actions["forward"], "drop": actions["drop"],
                  "regenerate": actions["regenerate"], "continue": actions["continue"],
                  "resend": actions["resend"],
-                 "edit": edit_row, "edit_box": edit_box, "composer": composer}
+                 "edit": edit_row, "edit_box": edit_box, "edit_image": edit_image,
+                 "composer": composer}
     view = ([transcript, positions, selected, status, header]
             + [selection[key] for key in SELECTION_ORDER])
     stream = [cancellation, transcript, positions, message, attachment, status, send, stop]
     sampling = [temperature, top_p, reply_tokens, seed]
     # The State first, then one visibility per surface: the order
     # :func:`_screens` answers in.
-    screens = [surface, nav, threads_screen, character_screen, persona_screen]
+    screens = [surface, threads_screen, character_screen, persona_screen]
 
     # -- getting about ---------------------------------------------------- #
 
-    menu.click(fn=_toggle_nav, inputs=[surface, character, thread_state],
+    # The workspace chooser is the shell's, so all this panel does is get its
+    # own surfaces out of the way; the shell adds the second handler that opens
+    # it. Two handlers on one button, which is what makes one control mean the
+    # same thing in Conversation as it does in every other mode.
+    menu.click(fn=_leave, inputs=[character, thread_state],
                outputs=screens + view, queue=False)
-    close_nav.click(fn=_close_screens, outputs=screens, queue=False)
     for control in (threads_back, character_back, persona_back):
         control.click(fn=_close_screens, outputs=screens, queue=False)
 
@@ -482,12 +524,6 @@ def build() -> dict:
                        outputs=screens + [character], queue=False)
     to_persona.click(fn=_open_persona,
                      outputs=screens + [persona_name, persona_description], queue=False)
-    # The three secondary entries belong to the shell -- the model sheet, the
-    # Setup workspace and the mode chooser are not Conversation's to own -- so
-    # all this panel does is get out of the way, and the shell adds the second
-    # handler that does the rest.
-    for control in (to_model, to_setup, to_modes):
-        control.click(fn=_close_screens, outputs=screens, queue=False)
 
     # -- threads ---------------------------------------------------------- #
 
@@ -565,17 +601,19 @@ def build() -> dict:
     actions["drop"].click(fn=_drop_version, inputs=[character, thread_state, selected],
                           outputs=view, queue=False)
 
-    # Edit is the one action that can move the panel onto another thread, so it
-    # answers with the thread list and the open thread in front of the view --
-    # the same shape branching gives Regenerate, because it is the same rule.
-    # The third answer is the composer: a message of yours is edited *in it*.
+    # One shape for both roles now. Edit used to be able to move the panel onto
+    # another thread -- editing one of your own messages branched -- and
+    # answered with the thread list and the open thread in front of the view to
+    # say so. It edits in place, so there is nothing in front of the view.
     actions["edit"].click(fn=_open_editor,
-                          inputs=[character, thread_state, selected, search],
-                          outputs=[threads, thread_state, message] + view, queue=False)
-    save_edit.click(fn=_commit_edit, inputs=[character, thread_state, selected, edit_box],
+                          inputs=[character, thread_state, selected],
+                          outputs=view, queue=False)
+    save_edit.click(fn=_commit_edit,
+                    inputs=[character, thread_state, selected, edit_box, edit_image],
                     outputs=view, queue=False)
-    cancel_edit.click(fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
-                      outputs=[edit_row, composer], queue=False)
+    cancel_edit.click(fn=lambda: (gr.update(visible=False), gr.update(value=None, visible=False),
+                                  gr.update(visible=True)),
+                      outputs=[edit_row, edit_image, composer], queue=False)
 
     actions["branch"].click(fn=_branch_here, inputs=[character, thread_state, selected, search],
                             outputs=[threads, thread_state] + view, queue=False)
@@ -585,12 +623,15 @@ def build() -> dict:
                                  outputs=view, queue=False)
 
     # -- the attachment ---------------------------------------------------- #
-
-    attach.click(fn=_toggle_attachment, inputs=[attachment_open],
-                 outputs=[attachment_open, attachment_row, status], queue=False)
-    remove_attachment.click(fn=_clear_attachment,
-                            outputs=[attachment_open, attachment_row, attachment, status],
-                            queue=False)
+    #
+    # The paperclip only makes the chip visible. Opening the file picker is the
+    # browser's own, forwarded to this component's file input by
+    # javascript/llm_studio.js -- a press that reaches Python and comes back is
+    # a round trip to open a dialog that was already one tap away.
+    attach.click(fn=_offer_attachment, outputs=[attachment, status], queue=False)
+    attachment.clear(fn=_cleared_attachment, outputs=[attachment, status], queue=False)
+    edit_attach.click(fn=lambda: gr.update(visible=True), outputs=[edit_image], queue=False)
+    edit_image.clear(fn=lambda: gr.update(visible=False), outputs=[edit_image], queue=False)
 
     # -- sending, and the three ways of asking again ---------------------- #
 
@@ -641,11 +682,10 @@ def build() -> dict:
 
     return {"status": status, "transcript": transcript, "header": header,
             "persona": (persona_name, persona_description),
-            # What the shell wires: the state chip and the nav entry both open
-            # the model sheet, Setup switches workspace, and Switch mode opens
-            # the workspace chooser.
-            "model": [model, to_model], "setup": to_setup, "modes": to_modes,
-            "chip": model}
+            # What the shell wires: the state chip opens the model sheet, and
+            # the menu opens the workspace chooser -- the same two sheets its
+            # own bar opens, from the same corner of the screen.
+            "model": [model], "modes": menu, "chip": model}
 
 
 _MODEL_LABEL = "● Model"
@@ -748,13 +788,30 @@ def _thread_choices(who: str, filter_text: str = "") -> list[tuple[str, str]]:
 
 
 def _load(who: str, identifier: str):
+    """One thread, with its pictures where pictures now live.
+
+    The migration is here rather than in a script somebody has to run: a chat
+    written before there was an attachment folder carries its stills inline,
+    and the first time it is opened they are written out to files and the chat
+    is saved without them. Once, per chat, invisibly -- and a chat that has
+    nothing to move is not written at all.
+    """
     if not who or not identifier:
         return None
     try:
-        return _chats().load(who, identifier)
+        conversation = _chats().load(who, identifier)
     except Exception:
         logger.debug("Model Chain: could not load thread %s", identifier, exc_info=True)
         return None
+    try:
+        if mc_llm_attachments.adopt(conversation, who):
+            _chats().save(conversation)
+            logger.info("Model Chain: moved this thread's attachments into %s",
+                        mc_llm_attachments.folder(who))
+    except Exception:
+        logger.warning("Model Chain: could not move this thread's attachments onto disk; "
+                       "they stay inside the chat file", exc_info=True)
+    return conversation
 
 
 # --------------------------------------------------------------------------- #
@@ -783,9 +840,7 @@ def _view(conversation) -> tuple[list[list[str | None]], list[list[int]]]:
     if conversation is None:
         return rows, positions
     for index, message in enumerate(conversation.messages):
-        body = message.text
-        if message.image_name:
-            body = f"*[{message.image_name}]*\n\n{body}" if body else f"*[{message.image_name}]*"
+        body = _body(message)
         if message.role == USER:
             rows.append([body, None])
             positions.append([len(rows) - 1, 0, index])
@@ -796,6 +851,31 @@ def _view(conversation) -> tuple[list[list[str | None]], list[list[int]]]:
             rows.append([None, body])
             positions.append([len(rows) - 1, 1, index])
     return rows, positions
+
+
+def _body(message) -> str:
+    """One message as the transcript draws it: the picture, then the words.
+
+    The picture itself rather than its name. A conversation about a photograph
+    that shows the reader a line of italic text saying a photograph was
+    attached is a conversation missing half of itself -- most of all when it is
+    reopened a week later, which is the case this was reported from.
+
+    An image the file for has gone answers with a sentence saying so, because a
+    message that was sent with a picture is not the same message without one.
+    """
+    body = message.text
+    if not getattr(message, "attached", False):
+        return body
+    shown = (mc_llm_attachments.markup(message.image_path, message.image_name)
+             if message.image_path
+             # A chat whose pictures could not be moved onto disk still shows
+             # them; there is simply nothing to point the browser at, so the
+             # bytes go inline as they always did. Rare, and better than a
+             # transcript that has lost a picture the file still holds.
+             else f'<img src="{message.image}" alt="{ui.escape(message.image_name or "attached image")}"'
+                  f' class="mc-llm-attached">')
+    return f"{shown}\n\n{body}" if body else shown
 
 
 def _transcript(conversation) -> list[list[str | None]]:
@@ -892,15 +972,15 @@ def _selection_updates(conversation, index: int, editing: bool = False) -> list:
     about this function that has to be kept in step with the layout.
 
     ``editing`` is the one state that is not a property of the message: the
-    in-place editor is open on it. Only a *reply* can be in that state -- one of
-    your own messages is edited in the composer, which is a different thing
-    entirely -- so everywhere else this is left alone and the last three answers
-    put the editor away and give the composer back.
+    in-place editor is open on it. Everywhere else this is left alone, and the
+    last four answers put the editor away, empty its picture chip and give the
+    composer back.
     """
     from prompt_master.chat.history import ASSISTANT
 
     hidden = gr.update(visible=False)
-    home = [gr.update(visible=False), gr.update(), gr.update(visible=True)]
+    home = [gr.update(visible=False), gr.update(), gr.update(value=None, visible=False),
+            gr.update(visible=True)]
     if (conversation is None or index < 0 or index >= len(conversation.messages)):
         return [gr.update(visible=False), gr.update(value=""), hidden, hidden, hidden, hidden,
                 hidden, hidden, hidden] + home
@@ -935,11 +1015,32 @@ def _selection_updates(conversation, index: int, editing: bool = False) -> list:
         gr.update(visible=not reply),
         # The edit row is put away and the composer comes back: a refresh is a
         # return to CHAT_HOME, whatever the panel was doing before it -- unless
-        # this refresh is the one that opened the editor on a reply.
+        # this refresh is the one that opened the editor.
         gr.update(visible=editing),
         gr.update(value=message.text),
+        _editable_picture(message) if editing else gr.update(value=None, visible=False),
         gr.update(visible=not editing),
     ]
+
+
+def _editable_picture(message):
+    """The editor's chip, holding this message's picture when there is one.
+
+    A path rather than the bytes: the component is being given a value to show,
+    and handing it a file it can fetch costs a URL where handing it a decoded
+    photograph would cost the photograph, twice -- once to send and once when
+    the edit comes back.
+
+    Nothing to show for a message with no attachment, and nothing to show for
+    one whose file has gone. The second is deliberate rather than an oversight:
+    an empty chip means "this message has no picture now", and offering to keep
+    one that is not there would be offering to keep nothing.
+    """
+    found = mc_llm_attachments.locate(getattr(message, "image_path", ""))
+    if found is None:
+        return gr.update(value=None, visible=False)
+    mc_llm_attachments.allow(found)
+    return gr.update(value=str(found), visible=True)
 
 
 def _refresh(conversation, note: str, kind: str = "info",
@@ -985,21 +1086,14 @@ def _close_screens() -> list:
     return _screens("")
 
 
-def _toggle_nav(open_now, who, identifier) -> list:
-    """The menu button: open the menu, or put away whatever is open.
+def _leave(who, identifier) -> list:
+    """Put this panel's own surfaces away, for a control that opens the shell's.
 
-    A menu that only opens is a menu you cannot dismiss from the control you
-    opened it with -- which is exactly what "the menus are not toggling open
-    and close" was. The state it is toggling against is a State rather than the
-    component's own visibility, because a Column has no value a handler can be
-    given.
-
-    Opening also drops the message selection: the action sheet applies to a
-    message the reader can no longer see, and a sheet left open under another
-    sheet is the second half of every "why is this still here?".
+    The message selection goes with them: the action sheet applies to a message
+    the reader is about to stop looking at, and a sheet left open underneath
+    another sheet is the second half of every "why is this still here?".
     """
-    wanted = "" if open_now == "nav" else "nav"
-    return _screens(wanted) + _close_selection(who, identifier)
+    return _close_screens() + _close_selection(who, identifier)
 
 
 def _open_threads(who, filter_text) -> list:
@@ -1016,38 +1110,35 @@ def _open_persona() -> list:
     return _screens("persona") + [person.name, person.description]
 
 
-def _toggle_attachment(open_now):
-    """Open the image row, or close it — and say when it would be pointless.
+def _offer_attachment():
+    """Show the picture chip, and say when sending one would be pointless.
 
-    Warned when it is opened rather than when the reply fails: whether a
-    picture can be sent depends on the model running, and finding that out
-    after writing a message is finding it out too late.
+    Warned here rather than when the reply fails: whether a picture can be sent
+    depends on the model that is running, and finding that out after writing a
+    message is finding it out too late.
+
+    All this does is make the chip visible. The file picker is the browser's
+    own and is opened by javascript/llm_studio.js, which forwards this press to
+    the component's file input -- so the ordinary case is a picker, and the
+    case where that script did not run is a small target to click instead of
+    nothing at all.
     """
-    showing = not bool(open_now)
-    if not showing:
-        return False, gr.update(visible=False), ui.notice("Ready.")
     try:
         sees = mc_llm_runtime.config().sees
     except Exception:
         logger.debug("Model Chain: could not read the vision configuration", exc_info=True)
         sees = True
     if sees:
-        return True, gr.update(visible=True), ui.notice(
-            "The attached image goes with your next message.")
-    return True, gr.update(visible=True), ui.notice(
+        return gr.update(visible=True), ui.notice("Choose a picture for the next message.")
+    return gr.update(visible=True), ui.notice(
         "The model running has no vision projector, so an attached image cannot be sent to "
-        "it. Choose one in LLM Studio’s Setup mode, or send the message without a "
-        "picture.", "warn")
+        "it. Choose a multimodal backbone in Setup, or send the message without a picture.",
+        "warn")
 
 
-def _clear_attachment():
-    """Take the picture off the next message, and put the row away with it."""
-    return False, gr.update(visible=False), None, ui.notice("Ready.")
-
-
-# --------------------------------------------------------------------------- #
-# Threads
-# --------------------------------------------------------------------------- #
+def _cleared_attachment():
+    """The component's own ✕. The chip goes away with the picture it held."""
+    return gr.update(visible=False), ui.notice("Ready.")
 
 
 def _select_character(who, filter_text, typed=""):
@@ -1236,84 +1327,29 @@ def _drop_version(who, identifier, index):
     return _refresh(conversation, "Version deleted.", index=index)
 
 
-def _open_editor(who, identifier, index, filter_text=""):
-    """Edit a message: yours in the composer, a reply where it sits.
+def _open_editor(who, identifier, index):
+    """Open the editor on one message -- yours or the character’s, alike.
 
-    Two different things wearing one word, and treating them as one thing is
-    what was wrong with this before. A reply is *text on the transcript* and
-    editing it means rewriting that text. One of your own messages is **a
-    prompt that was sent**, and editing it means sending a different one -- so
-    the place it belongs is the box you send from, and the answer it already
-    got is part of what is being replaced.
+    It used to be two different things wearing one word. A reply was rewritten
+    where it sat; one of your own messages was *taken back* into the composer,
+    and because sending it again would have destroyed the replies that followed
+    it, doing that in the middle of a thread had to branch.
 
-    So a message of yours is **taken back**: lifted out of the thread and into
-    the composer, where it is an ordinary unsent message again and Send does
-    what Send does. Reported as *"if I want to edit a prompt, I should see it
-    immediately in the user prompt field"*, and it is also why the old in-place
-    editor for it had to go rather than be repaired -- a second text box under
-    the transcript, with its own Save, that borrowed the composer's space and
-    left the panel looking stuck.
+    Which made Edit a second Branch, and that is what was wrong with it. Branch
+    already exists, one button along, and says what it does.
 
-    Mid-thread, taking it back would destroy the replies that followed, so it
-    happens **in a branch** -- the same rule regenerating follows, for the same
-    reason. See :func:`_take_back`.
-
-    A reply keeps the in-place editor, because there is nowhere else for it to
-    go: the composer is where *your* messages are written.
+    So Edit edits. The words in the thread change and the thread stays where it
+    is, replies included. That is not a side effect to be apologised for -- it
+    is the feature: a conversation whose second turn now asks about the sun,
+    with a reply under it that says "blue", is a conversation you can then ask
+    about. What was said is what the file says was said, and the file is the
+    only record there is.
     """
-    from prompt_master.chat.history import ASSISTANT
-
     conversation = _load(who, identifier)
-    still = [gr.update(), identifier or "", gr.update()]
     if conversation is None or not (0 <= index < len(conversation.messages)):
-        return still + _refresh(conversation, "Choose a message first.", "warn")
-    if conversation.messages[index].role == ASSISTANT:
-        return still + _refresh(conversation, "Editing this reply. Save when you are done.",
-                                index=index, editing=True)
-    return _take_back(who, conversation, index, filter_text)
-
-
-def _take_back(who, conversation, index, filter_text):
-    """Lift one of your own messages out of the thread and into the composer.
-
-    Three answers in front of the ordinary refresh: the thread list, the thread
-    now open, and what the composer should hold.
-
-    At the end of a thread the message is simply removed -- there is nothing
-    after it to lose, and Send puts it back. In the middle there is a great deal
-    after it, so the thread is copied up to the turn before this message and the
-    copy is what gets edited: the thread it came from keeps this message and
-    every one that followed, whole and reachable in the thread list.
-
-    A picture cannot come back with it. The composer's attachment is a decoded
-    picture the browser uploaded and a saved one is a JPEG data URL inside the
-    thread, and reconstructing the first from the second is a great deal of
-    machinery for the rarest path here. So an attachment is said out loud rather
-    than silently dropped -- and in the branching case it is not lost at all,
-    because the thread it came from still has it.
-    """
-    message = conversation.messages[index]
-    lifted, attached = message.text, bool(message.image)
-
-    if index < len(conversation.messages) - 1:
-        branched = _chats().branch(conversation, index - 1)
-        mc_llm_state.remember(character=who or "", thread=branched.identifier)
-        note = ("Editing in a new thread. The one it came from still has this message "
-                "and everything after it.")
-        if attached:
-            note += " Attach the picture again if you want it on this one."
-        return ([gr.update(choices=_thread_choices(who, filter_text),
-                           value=branched.identifier),
-                 branched.identifier, lifted]
-                + _refresh(branched, note))
-
-    conversation.delete_from(index)
-    _chats().save(conversation)
-    note = "Editing. Send it again when you are ready."
-    if attached:
-        note += " The picture that was attached did not come back with it."
-    return ([gr.update(), conversation.identifier, lifted]
-            + _refresh(conversation, note))
+        return _refresh(conversation, "Choose a message first.", "warn")
+    return _refresh(conversation, "Editing this message. Save when you are done.",
+                    index=index, editing=True)
 
 
 def _unanswered(conversation) -> int:
@@ -1329,9 +1365,11 @@ def _unanswered(conversation) -> int:
     was asked for: *"if the last message in a thread is a user message, it
     should just appear in the user prompt field for me to submit."*
 
-    Not one carrying a picture: see :func:`_take_back` on why an attachment
-    cannot come back, and **Send again from here** answers that one in place
-    without disturbing it.
+    Not one carrying a picture. The composer's chip is a picture the browser
+    uploaded and a saved one is a file beside the chat, and putting the second
+    back into the first is machinery for the rarest path here -- so a message
+    with an attachment stays in the thread, where **Edit** changes it in place
+    and **Send again from here** re-asks it without disturbing it.
     """
     from prompt_master.chat.history import USER
 
@@ -1340,24 +1378,54 @@ def _unanswered(conversation) -> int:
         return NO_SELECTION
     index = len(messages) - 1
     message = messages[index]
-    if message.role != USER or message.image or not message.text.strip():
+    if message.role != USER or message.attached or not message.text.strip():
         return NO_SELECTION
     return index
 
 
-def _commit_edit(who, identifier, index, text):
-    """Save a reply that was edited in place, and go back to the conversation.
+def _commit_edit(who, identifier, index, text, picture):
+    """Save one edited message -- its words and its picture -- and go home.
 
     Home rather than back to the action sheet: the sheet covers the bottom of
     the transcript, and reopening it over the message just saved is the panel
     looking stuck on a thing that has finished.
+
+    The picture is taken from the editor's own chip, so removing it there
+    removes it from the message and putting a different one there replaces it.
+    The one case where the chip is *not* the message's picture is a chat old
+    enough to still be carrying it inline and too broken to have been moved
+    onto disk when it was opened -- there is nothing to show in the chip then,
+    so an empty chip must not be read as "the user took the picture away".
     """
     conversation = _load(who, identifier)
     if conversation is None or not (0 <= index < len(conversation.messages)):
         return _refresh(conversation, "Choose a message first.", "warn")
-    conversation.messages[index].text = (text or "").strip()
+    message = conversation.messages[index]
+    message.text = (text or "").strip()
+    shown = bool(message.image_path) or not message.image
+    if shown:
+        _attach_to(message, picture, who)
     _chats().save(conversation)
     return _refresh(conversation, "Edited.")
+
+
+def _attach_to(message, picture, who: str) -> None:
+    """Make ``message``'s attachment agree with what the editor's chip holds."""
+    if picture is None:
+        message.image_path, message.image, message.image_name = "", "", ""
+        return
+    try:
+        kept = mc_llm_attachments.store(picture, who)
+    except Exception:
+        logger.warning("Model Chain: could not keep the edited attachment; the message keeps "
+                       "the picture it had", exc_info=True)
+        return
+    if kept != message.image_path:
+        # A different picture, so the old name is no longer about it. The
+        # chip's own round trip through Gradio drops the filename it was
+        # uploaded under, which is why there is a name for the case at all.
+        message.image_name = ui.ATTACHED
+    message.image_path, message.image = kept, ""
 
 
 def _branch_here(who, identifier, index, filter_text):
@@ -1417,7 +1485,7 @@ def _send(who, identifier, text, picture, temperature, top_p, reply_tokens, seed
         yield _idle(conversation, text, gr.update(), "Write a message first.", "warn")
         return
 
-    attachment, attachment_name = "", ""
+    kept, attachment_name = "", ""
     if picture is not None:
         if not mc_llm_runtime.config().sees:
             yield _idle(conversation, text, gr.update(),
@@ -1426,13 +1494,14 @@ def _send(who, identifier, text, picture, temperature, top_p, reply_tokens, seed
                         "error")
             return
         try:
-            attachment = ui.data_url(picture) or ""
+            kept = mc_llm_attachments.store(picture, who)
             attachment_name = ui.picked_name(picture)
         except Exception as exc:
             yield _idle(conversation, text, gr.update(), ui.failure(exc), "error")
             return
 
-    conversation.append(USER, (text or "").strip(), attachment, attachment_name)
+    conversation.append(USER, (text or "").strip(), image_name=attachment_name,
+                        image_path=kept)
     _chats().save(conversation)
     conversation.append(ASSISTANT, "")
     yield from _stream(who, conversation, len(conversation.messages) - 1,
@@ -1592,8 +1661,42 @@ def _last_reply(conversation, index) -> int:
 # interactivity: only one of the two is ever on screen, and the one that is not
 # is also disabled, so a keyboard shortcut aimed at a hidden Stop finds a
 # control that refuses rather than one that quietly cancels nothing.
+SENT = gr.update(value=None, visible=False)
+"""What the composer's picture chip becomes once the message carrying it has gone.
+
+Emptied *and* taken out of the layout, which is one update rather than two
+because they are one fact: a chip with nothing in it is a gap beside the
+composer, and a chip still holding the picture that has just been sent is a
+picture the next message would carry again without anybody asking for it.
+"""
+
 BUSY = (gr.update(visible=False, interactive=False), gr.update(visible=True, interactive=True))
 IDLE = (gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False))
+
+
+def _with_pictures(messages):
+    """Read the attached stills back for the request about to be built.
+
+    The conversation on disk holds paths; the vendored prompt builder wants the
+    embedded bytes, and knows nothing about a folder. Read here, at the one
+    moment they are needed, and never written back -- a message that has an
+    ``image_path`` never saves an inline copy beside it.
+
+    Only the newest few, because that is all a request can carry: the builder
+    keeps at most ``MAX_IMAGES`` of the stills that survive trimming, and
+    decoding forty photographs to send four would be forty reads a message.
+    """
+    from prompt_master.chat.prompt import MAX_IMAGES
+
+    allowance = MAX_IMAGES
+    for message in reversed(messages or ()):
+        if not message.image_path or message.image:
+            continue
+        if allowance <= 0:
+            break
+        message.image = mc_llm_attachments.data_url(message.image_path)
+        allowance -= 1
+    return messages
 
 
 def _idle(conversation, text, attachment, note: str, kind: str = "info") -> tuple:
@@ -1649,8 +1752,8 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
     # built afterwards. The two answers differ exactly when trimming has dropped
     # the only still, and the request that is actually sent is the one whose
     # needs decide whether a projector has to be loaded for it.
-    wire = build(character, persona, history, context_size=_context_size(),
-                 reply_tokens=tokens, instruction=instruction)
+    wire = build(character, persona, _with_pictures(history),
+                 context_size=_context_size(), reply_tokens=tokens, instruction=instruction)
     request = sessions.ChatRequest(
         messages=wire,
         needs_vision=needs_vision(wire),
@@ -1686,7 +1789,7 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
             logger.warning("Model Chain: could not save the conversation", exc_info=True)
 
     rows, positions = _view(conversation)
-    yield cancel, rows, positions, "", None, ui.working("Starting…"), *busy
+    yield cancel, rows, positions, "", SENT, ui.working("Starting…"), *busy
 
     try:
         for event in sessions.conversation(request, cancel):
@@ -1697,10 +1800,10 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
                 streamed += event.text
                 message.text = streamed
                 rows, positions = _view(conversation)
-                yield cancel, rows, positions, "", None, gr.update(), *busy
+                yield cancel, rows, positions, "", SENT, gr.update(), *busy
             elif event.kind == sessions.STATUS:
                 rows, positions = _view(conversation)
-                yield cancel, rows, positions, "", None, ui.working(event.text), *busy
+                yield cancel, rows, positions, "", SENT, ui.working(event.text), *busy
             elif event.kind in (sessions.DONE, sessions.CANCELLED):
                 whole = event.text if event.kind == sessions.DONE and not opening else streamed
                 message.text = clean_reply(whole or streamed, character, persona)
@@ -1716,12 +1819,12 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
                 # you typed is not lost to a server that would not start.
                 keep()
                 rows, positions = _view(conversation)
-                yield cancel, rows, positions, "", None, ui.notice(event.text, "error"), *idle
+                yield cancel, rows, positions, "", SENT, ui.notice(event.text, "error"), *idle
                 return
     except Exception as exc:
         keep()
         rows, positions = _view(conversation)
-        yield cancel, rows, positions, "", None, ui.notice(ui.failure(exc), "error"), *idle
+        yield cancel, rows, positions, "", SENT, ui.notice(ui.failure(exc), "error"), *idle
         return
     finally:
         # The reply you were reading has to survive whatever ended this
@@ -1745,7 +1848,7 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
             keep()
 
     rows, positions = _view(conversation)
-    yield cancel, rows, positions, "", None, ui.notice("Reply complete."), *idle
+    yield cancel, rows, positions, "", SENT, ui.notice("Reply complete."), *idle
 
 
 def _tidy(conversation, index: int) -> None:

@@ -273,13 +273,16 @@ def _build():
         for control in conversation["model"] + [chip, model_from_modes]:
             control.click(fn=_toggle_sheet("model"), inputs=[sheet_state], outputs=sheets,
                           queue=False)
+        # Conversation's own menu button, doing what this bar's does. One
+        # control in the top-left corner of every workspace, opening the same
+        # chooser -- it used to open a menu of Conversation's own, which is how
+        # the same button came to mean two things.
         conversation["modes"].click(fn=_toggle_sheet("mode"), inputs=[sheet_state],
                                     outputs=sheets, queue=False)
         # Setup is a workspace, so getting to it is a mode switch: the radio is
         # moved, which is what redraws the views and the bar through _switch.
-        for control in (to_setup, conversation["setup"]):
-            control.click(fn=lambda: (gr.update(value="setup"),) + tuple(_sheet("")),
-                          outputs=[mode] + sheets, queue=False)
+        to_setup.click(fn=lambda: (gr.update(value="setup"),) + tuple(_sheet("")),
+                       outputs=[mode] + sheets, queue=False)
 
         rescanning = rescan.click(fn=_rescan_models, outputs=[chooser, runtime_status],
                                   queue=False)

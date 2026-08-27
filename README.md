@@ -2424,6 +2424,44 @@ chosen — from the catalogue, from the model drop-down, or by pasting the path
 into Setup. Keeping the association is not the same as loading it: the projector
 is still read only when a request actually carries an image.
 
+### Pictures in a conversation
+
+Press the paperclip beside the composer and the browser's own file picker opens.
+What comes back is a small chip to the left of the message box, and the box
+takes the rest of the room; sending clears it.
+
+A picture that has been sent is **kept**, and kept where you can find it:
+
+```
+<LLM data root>/chat-images/<character>/<content hash>.jpg
+```
+
+It is the same JPEG the model was shown, so a thread reopened next month shows
+exactly what was sent — inline, at a readable size, in the message it belongs
+to. Content-addressed inside the character's folder, so the same picture
+attached twice is one file and a branch shares its parent's pictures rather than
+copying them.
+
+Nothing in the extension deletes from that folder. A picture can be reachable
+from several threads and from several branches of one thread, so no thread knows
+whether it is the last one holding it — and a tidy-up that guessed wrong would
+take away part of a conversation. The folder is yours: open it, look through it,
+and delete whatever you like. A thread whose picture has been deleted says so
+where the picture was, rather than quietly reading as though there had never
+been one.
+
+Chats written before there was a folder carried their pictures inside the chat
+file. Those are moved out the first time the thread is opened — once, per
+thread, without being asked — and the chat file gets smaller by however much
+base64 it was carrying.
+
+**Editing.** Every message is edited the same way, yours and the character's
+alike: pick it, change the words, change or remove the picture, Save. It edits
+the thread. Replies that came after it stay where they are and now follow a turn
+that says something else, which is the point — asking "why did you say the sun
+was blue" only works if the earlier question really did change. **Branch from
+here** is one button along when you want the other thing.
+
 ### Characters
 
 **Character** in the Conversation menu is one screen doing four things, and the
@@ -2890,6 +2928,7 @@ mc_llm_setup.py       getting a llama.cpp runtime in place
 mc_llm_accel.py       acceleration and VRAM priority, as two settings
 mc_llm_managed_models.py   the managed backbone catalogue: verify, install, switch
 mc_llm_vision.py      which projector belongs to the model, and repairing it
+mc_llm_attachments.py      where a conversation's pictures are kept
 mc_llm_state.py       shared preferences + the mode histories
 mc_llm_sessions.py    the run orchestrations, as streaming generators
 mc_llm_studio.py      the LLM Studio tab shell, model chooser and Setup mode

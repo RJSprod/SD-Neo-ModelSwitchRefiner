@@ -46,11 +46,26 @@ class Message:
     role: str
     versions: list[str] = field(default_factory=lambda: [""])
     active: int = 0
-    # A still, as the data URL the vision request carries. Stored rather than
-    # referenced: the file it came from can be moved or deleted, and a
-    # conversation that then cannot be replayed is a conversation that lied
-    # about what it sent.
+    image_path: str = ""
+    """Where this turn's still is kept, relative to the attachment folder.
+
+    A reference and not the bytes, which is the opposite of what this held
+    before and for a reason that only appears in use: the transcript is
+    re-sent to the browser on every token of a reply, so a photograph inside a
+    message is re-sent on every token. The picture lives in a folder beside
+    the chats -- see :mod:`mc_llm_attachments` -- and what travels is a path.
+
+    Still not a reference to *the user's own file*, which is what the note
+    below was guarding against. The bytes are copied into a folder this
+    application owns, so moving or deleting the original changes nothing.
+    """
     image: str = ""
+    """The still as an inline data URL: a chat written before there was a folder.
+
+    Kept so those conversations keep working exactly as they did, and moved
+    onto disk the first time one is opened -- see
+    :func:`mc_llm_attachments.adopt`. A message never has both.
+    """
     image_name: str = ""
 
     @property
@@ -78,9 +93,22 @@ class Message:
         if self.versions:
             self.active = max(0, min(index, len(self.versions) - 1))
 
+    @property
+    def attached(self) -> bool:
+        """Whether this turn carries a still, wherever it is being kept."""
+        return bool(self.image_path or self.image)
+
     def to_dict(self) -> dict:
-        return {"role": self.role, "versions": list(self.versions), "active": self.active,
-                "image": self.image, "image_name": self.image_name}
+        written = {"role": self.role, "versions": list(self.versions), "active": self.active,
+                   "image_name": self.image_name}
+        # One or the other and never both. Writing the inline copy beside the
+        # path would keep every migrated chat exactly as large as it was, which
+        # is the thing moving the pictures out was for.
+        if self.image_path:
+            written["image_path"] = self.image_path
+        elif self.image:
+            written["image"] = self.image
+        return written
 
     @classmethod
     def from_dict(cls, data: dict) -> "Message":
@@ -93,7 +121,9 @@ class Message:
         active = active if isinstance(active, int) and 0 <= active < len(versions) else 0
         role = ASSISTANT if str(data.get("role")) == ASSISTANT else USER
         return cls(role=role, versions=versions, active=active,
-                   image=str(data.get("image", "")), image_name=str(data.get("image_name", "")))
+                   image_path=str(data.get("image_path", "")),
+                   image=str(data.get("image", "")),
+                   image_name=str(data.get("image_name", "")))
 
 
 @dataclass
@@ -114,8 +144,10 @@ class Conversation:
 
     # ── editing ──────────────────────────────────────────────────────────────
 
-    def append(self, role: str, text: str = "", image: str = "", image_name: str = "") -> Message:
-        message = Message(role=role, versions=[text], image=image, image_name=image_name)
+    def append(self, role: str, text: str = "", image: str = "", image_name: str = "",
+               image_path: str = "") -> Message:
+        message = Message(role=role, versions=[text], image=image, image_name=image_name,
+                          image_path=image_path)
         self.messages.append(message)
         self.retitle()
         return message

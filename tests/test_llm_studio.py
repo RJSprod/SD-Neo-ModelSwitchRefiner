@@ -806,6 +806,75 @@ class TestAReplySurvivesWhateverEndsTheGenerator:
         saved = chats.load("Ada", conversation.identifier)
         assert [message.role for message in saved.messages] == ["user"]
 
+    @staticmethod
+    def _configured(chat):
+        """A configuration with eyes. The real object, because the panel reads
+        more off it than ``sees`` -- the context size, for one, which is what a
+        stand-in with one attribute on it fails at."""
+        return chat.mc_llm_runtime.Config(
+            runtime=None, model=None, mmproj="mmproj.gguf", gpu_index=0, device="CUDA0",
+            gpu_layers="all", context_size=8192, context_mode="fixed",
+            context_buffer_gb=4.0, kv_type_k="f16", kv_type_v="f16")
+
+    def test_a_picture_sent_with_a_message_lands_in_the_folder(self, store, host,
+                                                              monkeypatch):
+        """End to end from the composer's chip: what the message keeps is a
+        path, what the folder keeps is the JPEG, and the chat file keeps no
+        base64 at all."""
+        import json
+
+        import mc_llm_attachments
+        from PIL import Image
+
+        chat, chats, conversation = self._thread(store, monkeypatch)
+        seeing = self._configured(chat)
+        monkeypatch.setattr(chat.mc_llm_runtime, "config", lambda *args, **kwargs: seeing)
+
+        list(chat._send("Ada", conversation.identifier, "what is this",
+                        Image.new("RGB", (16, 16), (200, 30, 30)),
+                        None, None, None, None))
+
+        saved = chats.load("Ada", conversation.identifier)
+        assert mc_llm_attachments.locate(saved.messages[0].image_path) is not None
+        written = chats.path_for("Ada", conversation.identifier).read_text()
+        assert "base64" not in written
+        assert json.loads(written)["messages"][0]["image_path"]
+
+    def test_and_the_transcript_shows_it(self, store, host, monkeypatch):
+        import mc_llm_attachments
+        from PIL import Image
+
+        chat, chats, conversation = self._thread(store, monkeypatch)
+        seeing = self._configured(chat)
+        monkeypatch.setattr(chat.mc_llm_runtime, "config", lambda *args, **kwargs: seeing)
+
+        list(chat._send("Ada", conversation.identifier, "what is this",
+                        Image.new("RGB", (16, 16), (200, 30, 30)),
+                        None, None, None, None))
+
+        shown = chat._transcript(chats.load("Ada", conversation.identifier))[0][0]
+        assert shown.startswith("<img src=\"file=")
+        assert shown.endswith("what is this")
+
+    def test_a_model_with_no_eyes_refuses_before_anything_is_written(self, store, host,
+                                                                     monkeypatch):
+        """Section 24.1's rule at the panel: the picture is not stored, the
+        message is not appended, and the composer keeps both."""
+        from PIL import Image
+
+        chat, chats, conversation = self._thread(store, monkeypatch)
+        import dataclasses
+
+        blind = dataclasses.replace(self._configured(chat), mmproj=None)
+        monkeypatch.setattr(chat.mc_llm_runtime, "config", lambda *args, **kwargs: blind)
+
+        answers = list(chat._send("Ada", conversation.identifier, "what is this",
+                                  Image.new("RGB", (16, 16), (200, 30, 30)),
+                                  None, None, None, None))
+
+        assert "no vision projector" in answers[0][5]
+        assert chats.load("Ada", conversation.identifier).messages == []
+
     def test_the_transcript_shows_a_message_with_no_reply_under_it(self, store, host):
         """What the bug looked like, kept as the description of the shape: a
         user message whose reply never reached the file is a row with an empty
