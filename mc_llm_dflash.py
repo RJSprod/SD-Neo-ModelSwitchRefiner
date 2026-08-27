@@ -738,7 +738,16 @@ def verify(component_id: str = "", identifier: str = "", on_status=None,
     recorded separately, so an installation can sit at "text yes, vision no" --
     which is a real state of this pull request and is the state a forced
     DFlash2 image request has to be told about rather than crash into.
+
+    Every server this starts is started under the workload lock, with whatever
+    llama-server was running stopped first. That is the same rule a backbone
+    switch keeps and for the same reason: this loads a 20 GB target and a
+    3.86 GB draft, and doing it beside a resident model or an image generation
+    is not a verification, it is an out-of-memory error in somebody else's
+    work.
     """
+    import mc_broker
+
     say = on_status or (lambda _text: None)
 
     component_id = component_id or installed_component()
@@ -762,23 +771,61 @@ def verify(component_id: str = "", identifier: str = "", on_status=None,
         record_capability(component_id, text=False, vision=False, detail=detail)
         return Verification(component_id, False, False, detail)
 
-    say("Loading the backbone and its draft model…")
-    passed, detail = _smoke(server, bundle, speculator, projector=None)
-    record_capability(component_id, text=passed, detail=detail)
-    if not passed:
-        return Verification(component_id, False, False, detail)
+    with mc_broker.workload(mc_broker.FAMILY_LLM, "verifying the DFlash2 runtime",
+                            timeout=WORKLOAD_TIMEOUT):
+        _stop_whatever_is_running()
 
-    if not include_vision or bundle.mmproj is None:
-        skipped = ("No vision projector is installed, so DFlash2 vision was not tested and "
-                   "stays unavailable." if bundle.mmproj is None else
-                   "DFlash2 vision was not tested on this run and stays unavailable.")
-        record_capability(component_id, vision=False, vision_detail=skipped)
-        return Verification(component_id, True, False, detail, skipped)
+        say("Loading the backbone and its draft model…")
+        passed, detail = _smoke(server, bundle, speculator, projector=None)
+        record_capability(component_id, text=passed, detail=detail)
+        if not passed:
+            return Verification(component_id, False, False, detail)
 
-    say("Sending one image through the projector…")
-    saw, vision_detail = _smoke(server, bundle, speculator, projector=bundle.mmproj)
-    record_capability(component_id, vision=saw, vision_detail=vision_detail)
-    return Verification(component_id, True, saw, detail, vision_detail)
+        if not include_vision or bundle.mmproj is None:
+            skipped = ("No vision projector is installed, so DFlash2 vision was not tested "
+                       "and stays unavailable." if bundle.mmproj is None else
+                       "DFlash2 vision was not tested on this run and stays unavailable.")
+            record_capability(component_id, vision=False, vision_detail=skipped)
+            return Verification(component_id, True, False, detail, skipped)
+
+        say("Sending one image through the projector…")
+        saw, vision_detail = _smoke(server, bundle, speculator, projector=bundle.mmproj)
+        record_capability(component_id, vision=saw, vision_detail=vision_detail)
+        return Verification(component_id, True, saw, detail, vision_detail)
+
+
+WORKLOAD_TIMEOUT = 20.0
+"""How long a verification waits for the GPU before saying something else has it.
+
+The same twenty seconds a backbone switch waits, and for the same reason: a
+user watching a button would rather read "Stable Diffusion is using the GPU"
+now than watch it do nothing and then succeed.
+"""
+
+STOP_TIMEOUT = 30.0
+"""How long to wait for a running llama-server to actually be gone.
+
+``stop()`` returning is a statement about a handle rather than about a process:
+on Windows a server can still be unmapping a 20 GB file for several seconds
+after it has been asked to exit, and starting the verification into that is how
+a good build fails its own test."""
+
+
+def _stop_whatever_is_running() -> None:
+    """Stop the managed llama-server, and observe that it is gone."""
+    import mc_llm_runtime
+
+    mc_llm_runtime.runtime.stop()
+    deadline = time.monotonic() + STOP_TIMEOUT
+    while time.monotonic() < deadline:
+        if not mc_llm_runtime.runtime.running():
+            return
+        time.sleep(0.25)
+    raise DFlashError(
+        "The llama-server that was running has not exited, so there is no room to verify "
+        "the DFlash2 runtime beside it. Press Unload in the model sheet and try again; "
+        "nothing was changed."
+    )
 
 
 def _verifiable_bundle(identifier: str):

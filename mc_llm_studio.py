@@ -1247,7 +1247,6 @@ def _accelerator_ran() -> str:
     tokens are mostly rejected is slower than ordinary decoding, and this is
     the only place that is visible.
     """
-    import mc_llm_accel
     import mc_llm_runtime
 
     state = mc_llm_runtime.runtime.status()
@@ -1359,8 +1358,6 @@ def _verify_dflash(progress=gr.Progress()):
 
 def _draft_line(identifier) -> str:
     """Whether this backbone's speculative sidecar is on disk, and what it costs."""
-    import mc_llm_managed_models as managed
-
     found = _managed_status(identifier)
     if found is None or found.model.draft is None:
         return ui.notice("This backbone has no DFlash2 draft model, so Lightning is not "

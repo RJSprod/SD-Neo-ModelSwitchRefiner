@@ -1384,6 +1384,88 @@ class TestTheDFlashRuntimeFamily:
         assert not dflash.capability(COMPONENT).known
         assert mc_llm_setup.detect() == ordinary / "llama-server"
 
+    def test_verifying_stops_the_server_that_is_running_first(self, install, tmp_path,
+                                                              monkeypatch, registry):
+        """A 20 GB target and a 3.86 GB draft loaded beside a resident model is
+        not a verification, it is an out-of-memory error in somebody's work."""
+        install_bundle(install, tmp_path)
+        install_dflash_runtime(install, text=False)
+        order: list[str] = []
+
+        class Running:
+            def stop(self):
+                order.append("stopped")
+
+            def running(self):
+                return False
+
+        monkeypatch.setattr(dflash, "advertises", lambda server: True)
+        monkeypatch.setattr(dflash, "_smoke",
+                            lambda *args, **kwargs: (order.append("smoked"), (True, "ok"))[1])
+        import mc_llm_runtime
+
+        monkeypatch.setattr(mc_llm_runtime, "runtime", Running())
+
+        dflash.verify()
+
+        assert order[0] == "stopped"
+        assert order.count("stopped") == 1
+        assert "smoked" in order
+
+    def test_no_projector_means_vision_stays_unavailable(self, install, tmp_path,
+                                                         monkeypatch, registry):
+        install_bundle(install, tmp_path, projector=False)
+        install_dflash_runtime(install, text=False)
+        smoked: list = []
+
+        class Running:
+            def stop(self):
+                pass
+
+            def running(self):
+                return False
+
+        monkeypatch.setattr(dflash, "advertises", lambda server: True)
+        monkeypatch.setattr(dflash, "_smoke",
+                            lambda *args, **kwargs: (smoked.append(kwargs), (True, "ok"))[1])
+        import mc_llm_runtime
+
+        monkeypatch.setattr(mc_llm_runtime, "runtime", Running())
+
+        found = dflash.verify()
+
+        assert found.text and not found.vision
+        assert len(smoked) == 1, "an image smoke ran with no projector installed"
+        assert not dflash.capability(COMPONENT).vision
+        assert "No vision projector" in dflash.capability(COMPONENT).vision_detail
+
+    def test_a_build_that_cannot_name_the_flags_fails_before_a_model_is_loaded(
+            self, install, tmp_path, monkeypatch, registry):
+        install_bundle(install, tmp_path)
+        install_dflash_runtime(install, text=True, vision=True)
+        smoked: list = []
+
+        class Running:
+            def stop(self):
+                pass
+
+            def running(self):
+                return False
+
+        monkeypatch.setattr(dflash, "advertises", lambda server: False)
+        monkeypatch.setattr(dflash, "_smoke",
+                            lambda *args, **kwargs: (smoked.append(1), (True, "ok"))[1])
+        import mc_llm_runtime
+
+        monkeypatch.setattr(mc_llm_runtime, "runtime", Running())
+
+        found = dflash.verify()
+
+        assert not found.passed
+        assert smoked == []
+        assert not dflash.capability(COMPONENT).text
+        assert not dflash.capability(COMPONENT).vision
+
     def test_the_registry_and_the_manifest_agree_on_the_family_name(self):
         """A registry entry naming a family nothing installs is a Lightning
         option that can never light up."""
