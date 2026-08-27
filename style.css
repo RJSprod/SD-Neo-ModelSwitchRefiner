@@ -995,6 +995,30 @@
     color: var(--body-text-color, inherit);
 }
 
+/* -- the WebUI's footer ----------------------------------------------------
+   Not this extension's element, and the one rule in this file that reaches
+   outside its own panels. It earns that: the conversation workspace is built to
+   fit the window -- the page does not scroll, the transcript does -- and the
+   footer is a strip below the fold that makes the page scroll anyway, by
+   exactly the height of a row of links. No measurement inside the workspace can
+   reach it.
+
+   Keyed on an attribute javascript/llm_studio.js writes from the "Hide the
+   WebUI footer" setting, so it is off by nothing more than a setting and can be
+   overridden by a theme or a user stylesheet. `display: none` rather than
+   removing anything: the element and everything in it is still there, still
+   findable, and comes straight back.
+
+   Two selectors because two footers are possible: the WebUI's own `#footer`
+   (the API and Github links and the version line), and Gradio's built-in one,
+   which is a `footer` element inside the container. Nothing this extension
+   builds is a `footer`, so the second cannot reach our own markup. */
+:root[data-mc-footer="hidden"] #footer,
+:root[data-mc-footer="hidden"] .gradio-container > footer,
+:root[data-mc-footer="hidden"] gradio-app > footer {
+    display: none !important;
+}
+
 /* The regenerate icon on a reply, drawn into the bubble by
    javascript/llm_studio.js. Styled here rather than there so that a theme can
    override it the ordinary way, and so the script stays a script.

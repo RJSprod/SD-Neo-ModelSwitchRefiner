@@ -85,7 +85,8 @@ const elements = {
 };
 
 globalThis.document = {
-    documentElement: {scrollTop: SCROLLED},
+    documentElement: {scrollTop: SCROLLED, getAttribute: () => null,
+                      setAttribute() {}, removeAttribute() {}},
     querySelector: (selector) => elements[selector.replace("#", "")] || null,
     addEventListener() {},
     readyState: "complete",
@@ -216,7 +217,8 @@ const holder = {
 };
 
 globalThis.document = {
-    documentElement: {scrollTop: 0},
+    documentElement: {scrollTop: 0, getAttribute: () => null,
+                      setAttribute() {}, removeAttribute() {}},
     querySelector: (selector) =>
         (selector === "#mc-llm-chat-transcript" ? holder : null),
     addEventListener() {},
@@ -353,7 +355,8 @@ const status = {
 const now = {value: 0};
 globalThis.Date = {now: () => now.value};
 globalThis.document = {
-    documentElement: {scrollTop: 0},
+    documentElement: {scrollTop: 0, getAttribute: () => null,
+                      setAttribute() {}, removeAttribute() {}},
     querySelector: (selector) => (selector === "#mc-llm-chat-status" ? status : null),
     createElement: () => ({className: "", textContent: ""}),
     addEventListener() {},
@@ -472,7 +475,8 @@ const sheet = {
 };
 
 globalThis.document = {
-    documentElement: {scrollTop: 0},
+    documentElement: {scrollTop: 0, getAttribute: () => null,
+                      setAttribute() {}, removeAttribute() {}},
     querySelector: (selector) => (selector === "#mc-llm-chat-character" ? sheet : null),
     createElement: () => ({className: "", textContent: ""}),
     addEventListener() {},
@@ -617,8 +621,10 @@ const elements = {
 const created = [];
 
 globalThis.Event = function (kind) { this.type = kind; };
+const html = {scrollTop: 0, getAttribute: () => null,
+              setAttribute() {}, removeAttribute() {}};
 globalThis.document = {
-    documentElement: {scrollTop: 0},
+    documentElement: html,
     querySelector: (selector) => elements[selector.replace("#", "")] || null,
     createElement() {
         const node = {
@@ -653,6 +659,7 @@ globalThis.onAfterUiUpdate = () => {};
 
 SOURCE
 
+__BREAK__
 loaded.forEach((fn) => fn());
 
 const stopped = [];
@@ -680,9 +687,13 @@ console.log(JSON.stringify({
 """
 
 
-def transcript(bubbles: int = 3, rehearsal: str = "", selector: str = '[data-testid="bot"]'):
+def transcript(bubbles: int = 3, rehearsal: str = "", selector: str = '[data-testid="bot"]',
+               break_first: bool = False):
     """Run the script against a transcript of ``bubbles`` replies."""
+    broken = ("html.getAttribute = () => { throw new Error('no'); };"
+              if break_first else "")
     harness = (TRANSCRIPT.replace("SOURCE", SCRIPT.read_text())
+               .replace("__BREAK__", broken)
                .replace("__REHEARSAL__", rehearsal)
                .replace("__BUBBLES__", json.dumps([f"reply {index}" for index in range(bubbles)]))
                .replace("__SELECTOR__", json.dumps(selector)))
@@ -743,6 +754,12 @@ class TestTheRegenerateIcon:
 
         assert drawn["presses"] == ["1"]
 
+    def test_another_feature_throwing_does_not_stop_it_being_drawn(self):
+        """Each concern in this file is wired on its own. A single try around
+        all of them meant the first one throwing took the six after it down with
+        it, and the failure was silent -- the icons simply were not there."""
+        assert transcript(bubbles=2, break_first=True)["drawn"] == [1, 1]
+
     def test_bubbles_it_cannot_recognise_cost_an_icon_and_nothing_else(self):
         """A theme that replaces Gradio's DOM wholesale. Regenerate is still on
         the sheet a tap on the bubble opens, which is where it was before this
@@ -752,3 +769,111 @@ class TestTheRegenerateIcon:
 
         assert drawn["drawn"] == [0, 0, 0]
         assert drawn["presses"] == []
+
+
+# --------------------------------------------------------------------------- #
+# The WebUI's footer
+# --------------------------------------------------------------------------- #
+#
+# The conversation workspace is built to fit the window -- the page does not
+# scroll, the transcript does -- and the footer defeats that from outside
+# anything this extension lays out: it sits below the fold and takes real space,
+# so the page scrolls by exactly the height of a row of links. Nothing is
+# removed and no style is written on the element; an attribute goes on the root
+# and style.css does the hiding, which is what makes turning the setting off put
+# the footer straight back rather than at the next reload.
+
+FOOTER = """
+const html = {
+    attributes: {},
+    writes: 0,
+    getAttribute: (name) => (name in html.attributes ? html.attributes[name] : null),
+    setAttribute(name, value) { html.attributes[name] = value; html.writes += 1; },
+    removeAttribute(name) { delete html.attributes[name]; html.writes += 1; },
+};
+
+globalThis.document = {
+    documentElement: html,
+    querySelector: () => null,
+    createElement: () => ({className: "", textContent: "", setAttribute() {},
+                          addEventListener() {}}),
+    addEventListener() {},
+    readyState: "complete",
+};
+globalThis.window = globalThis;
+globalThis.innerHeight = 900;
+globalThis.scrollY = 0;
+globalThis.addEventListener = () => {};
+globalThis.setTimeout = (fn) => { fn(); return 0; };
+globalThis.setInterval = () => 0;
+globalThis.MutationObserver = function () { this.observe = () => {}; };
+globalThis.gradioApp = () => globalThis.document;
+__OPTS__
+
+const loaded = [];
+globalThis.onUiLoaded = (fn) => loaded.push(fn);
+globalThis.onAfterUiUpdate = () => {};
+
+SOURCE
+
+loaded.forEach((fn) => fn());
+const first = html.getAttribute("data-mc-footer");
+const settled = html.writes;
+__AFTER__
+
+console.log(JSON.stringify({
+    first,
+    footer: html.getAttribute("data-mc-footer"),
+    writes: html.writes,
+    settled,
+}));
+"""
+
+
+def footer(options="{}", after=""):
+    """What the script put on the root, given a settings object."""
+    declared = "globalThis.opts = OPTIONS;" if options is not None else ""
+    harness = (FOOTER.replace("SOURCE", SCRIPT.read_text())
+               .replace("__OPTS__", declared.replace("OPTIONS", options or "{}"))
+               .replace("__AFTER__", after))
+    result = subprocess.run(["node", "--input-type=module", "-e", harness],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+class TestHidingTheFooter:
+    def test_it_is_hidden_by_default(self):
+        """The setting defaults on, and the fallback here has to match it or the
+        footer flickers back for the moment before the options load."""
+        assert footer('{"model_chain_hide_footer": true}')["footer"] == "hidden"
+
+    def test_the_setting_turning_it_off_puts_the_footer_back(self):
+        assert footer('{"model_chain_hide_footer": false}')["footer"] is None
+
+    def test_no_settings_at_all_still_hides_it(self):
+        """``opts`` does not exist until the host has loaded the settings, and
+        an exception reading it would take the rest of this file's wiring down
+        with it."""
+        assert footer(None)["footer"] == "hidden"
+        assert footer("{}")["footer"] == "hidden"
+
+    def test_it_writes_the_attribute_once_and_not_on_every_update(self):
+        """This runs after every update the host makes, and setting an attribute
+        invalidates style whether or not the value moved."""
+        settled = footer('{"model_chain_hide_footer": true}',
+                         after="loaded.forEach((fn) => fn());"
+                               "loaded.forEach((fn) => fn());")
+
+        assert settled["settled"] == 1
+        assert settled["writes"] == 1
+
+    def test_turning_it_off_while_the_page_is_open_takes_effect(self):
+        """No reload: the rule is CSS keyed on this attribute, and the value is
+        read live rather than baked in at startup."""
+        changed = footer('{"model_chain_hide_footer": true}',
+                         after='opts.model_chain_hide_footer = false;'
+                               'loaded.forEach((fn) => fn());')
+
+        assert changed["first"] == "hidden"
+        assert changed["footer"] is None

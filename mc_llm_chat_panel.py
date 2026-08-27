@@ -63,6 +63,15 @@ behind. A sheet rather than a row in the flow, because a row inserted between
 the transcript and the composer moves both of them every time you tap a
 message.
 
+**Edit** means two different things and is two different things. A reply is text
+on the transcript, so editing it rewrites that text where it sits. One of your
+own messages is a *prompt that was sent*, so editing it takes it back out of the
+thread and into the composer, where it is an unsent message again -- and if
+there were replies after it, that happens in a branch, so the thread it came
+from keeps every one of them. The same rule regenerating follows, for the same
+reason: nothing a reader typed or was told is thrown away to make room for a
+second attempt.
+
 Regenerate is the one action that also has an icon on the bubble itself, because
 it is the one asked for often enough that three taps is two too many. The icon
 is drawn in the browser -- there is nowhere in a Gradio 4.40 bubble to put a
@@ -118,11 +127,13 @@ written down once. ``tests/test_llm_panels.py`` asserts the two are the same
 length: a handler one value short would put a label into a visibility and
 nothing would raise.
 
-The last three are not in the sheet. Editing replaces the composer rather than
-opening an editor between the transcript and the composer, so "which message is
-selected" decides the state of the edit row and of the composer too -- and
-because they are in this list, every refresh returns the panel to CHAT_HOME
-without a second handler having to remember to.
+The last three are not in the sheet. Editing a *reply* replaces the composer
+rather than opening an editor between the transcript and the composer, so
+"which message is selected" decides the state of the edit row and of the
+composer too -- and because they are in this list, every refresh returns the
+panel to CHAT_HOME without a second handler having to remember to. Editing one
+of your own messages does not come through here at all: it puts the message
+back in the composer, which is :func:`_take_back`.
 """
 
 
@@ -478,8 +489,8 @@ def build() -> dict:
     # send the reader home from the screen they were working in. Every handler
     # that moves the value returns the transcript with it, so nothing is lost
     # by listening only to the tap.
-    _picked(threads)(fn=_open_thread_home, inputs=[character, threads],
-                     outputs=[thread_state] + view + screens, queue=False)
+    _picked(threads)(fn=_open_thread_home, inputs=[character, threads, message],
+                     outputs=[thread_state, message] + view + screens, queue=False)
     search.change(fn=lambda person, text: gr.update(choices=_thread_choices(person, text)),
                   inputs=[character, search], outputs=[threads], queue=False)
     new_thread.click(fn=_new_thread, inputs=[character, search],
@@ -503,8 +514,8 @@ def build() -> dict:
     editor = ([character_editor, editing, name, context, greeting, system]
               + sampling + [system_preview, status])
 
-    character.change(fn=_select_character, inputs=[character, search],
-                     outputs=[threads, thread_state] + view
+    character.change(fn=_select_character, inputs=[character, search, message],
+                     outputs=[threads, thread_state, message] + view
                      + [name, context, greeting, system] + sampling
                      + [editing, system_preview], queue=False)
     edit_character.click(fn=_open_character, inputs=[character], outputs=editor, queue=False)
@@ -546,9 +557,13 @@ def build() -> dict:
     actions["drop"].click(fn=_drop_version, inputs=[character, thread_state, selected],
                           outputs=view, queue=False)
 
-    actions["edit"].click(fn=_open_editor, inputs=[character, thread_state, selected],
-                          outputs=[edit_row, edit_box, composer, actions["sheet"]],
-                          queue=False)
+    # Edit is the one action that can move the panel onto another thread, so it
+    # answers with the thread list and the open thread in front of the view --
+    # the same shape branching gives Regenerate, because it is the same rule.
+    # The third answer is the composer: a message of yours is edited *in it*.
+    actions["edit"].click(fn=_open_editor,
+                          inputs=[character, thread_state, selected, search],
+                          outputs=[threads, thread_state, message] + view, queue=False)
     save_edit.click(fn=_commit_edit, inputs=[character, thread_state, selected, edit_box],
                     outputs=view, queue=False)
     cancel_edit.click(fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
@@ -862,11 +877,17 @@ def _regenerate_reply(who, identifier, positions, ordinal, temperature, top_p,
                            seed, filter_text)
 
 
-def _selection_updates(conversation, index: int) -> list:
+def _selection_updates(conversation, index: int, editing: bool = False) -> list:
     """What the action sheet shows for message ``index``.
 
     Returned in the order :data:`SELECTION_ORDER` lists, which is the one thing
     about this function that has to be kept in step with the layout.
+
+    ``editing`` is the one state that is not a property of the message: the
+    in-place editor is open on it. Only a *reply* can be in that state -- one of
+    your own messages is edited in the composer, which is a different thing
+    entirely -- so everywhere else this is left alone and the last three answers
+    put the editor away and give the composer back.
     """
     from prompt_master.chat.history import ASSISTANT
 
@@ -884,7 +905,10 @@ def _selection_updates(conversation, index: int) -> list:
     opening = " ".join(message.text.split())[:80] or "(empty)"
 
     return [
-        gr.update(visible=True),
+        # Put away while the editor is open: the sheet covers the bottom of the
+        # transcript and the editor is under it, so leaving both up is two
+        # panels arguing over the same corner of the screen.
+        gr.update(visible=not editing),
         gr.update(value=ui.notice(f"Message {index + 1} of {len(conversation.messages)}, "
                                   f"from {speaker}: {opening}"
                                   + ("…" if len(message.text) > 80 else ""))),
@@ -902,15 +926,16 @@ def _selection_updates(conversation, index: int) -> list:
         gr.update(visible=reply and last and bool(message.text.strip())),
         gr.update(visible=not reply),
         # The edit row is put away and the composer comes back: a refresh is a
-        # return to CHAT_HOME, whatever the panel was doing before it.
-        gr.update(visible=False),
+        # return to CHAT_HOME, whatever the panel was doing before it -- unless
+        # this refresh is the one that opened the editor on a reply.
+        gr.update(visible=editing),
         gr.update(value=message.text),
-        gr.update(visible=True),
+        gr.update(visible=not editing),
     ]
 
 
 def _refresh(conversation, note: str, kind: str = "info",
-             index: int = NO_SELECTION) -> list:
+             index: int = NO_SELECTION, editing: bool = False) -> list:
     """Every output the ``view`` list names, for one state of one thread.
 
     One function for all of them because they are one fact: the rows, the map a
@@ -921,13 +946,13 @@ def _refresh(conversation, note: str, kind: str = "info",
     """
     rows, positions = _view(conversation)
     return ([rows, positions, index, ui.notice(note, kind), _heading(None, conversation)]
-            + _selection_updates(conversation, index))
+            + _selection_updates(conversation, index, editing))
 
 
 def _reopen(who, identifier, note: str, kind: str = "info",
-            index: int = NO_SELECTION) -> list:
+            index: int = NO_SELECTION, editing: bool = False) -> list:
     """:func:`_refresh` for a thread read back off disk."""
-    return _refresh(_load(who, identifier), note, kind, index)
+    return _refresh(_load(who, identifier), note, kind, index, editing)
 
 
 # --------------------------------------------------------------------------- #
@@ -1017,13 +1042,20 @@ def _clear_attachment():
 # --------------------------------------------------------------------------- #
 
 
-def _select_character(who, filter_text):
+def _select_character(who, filter_text, typed=""):
     """Switch character: reload its threads, open the newest, fill the editor."""
     from prompt_master.chat.characters import Character
 
     choices = _thread_choices(who, filter_text)
     identifier = choices[0][1] if choices else ""
     conversation = _load(who, identifier)
+    lifted = gr.update()
+    waiting = (_unanswered(conversation) if conversation is not None
+               and not (typed or "").strip() else NO_SELECTION)
+    if waiting != NO_SELECTION:
+        lifted = conversation.messages[waiting].text
+        conversation.delete_from(waiting)
+        _chats().save(conversation)
     try:
         loaded = _characters().load(who) if who else Character(name="")
     except Exception:
@@ -1033,7 +1065,7 @@ def _select_character(who, filter_text):
     # The editor follows the selection. It is usually shut, and when it is not,
     # leaving it bound to the character that *was* selected would have the next
     # Save write this character's boxes over that character's file.
-    return ([gr.update(choices=choices, value=identifier or None), identifier]
+    return ([gr.update(choices=choices, value=identifier or None), identifier, lifted]
             + _refresh(conversation, note)
             + [loaded.name, loaded.context, loaded.greeting, loaded.system,
                loaded.temperature, loaded.top_p, loaded.max_reply_tokens, loaded.seed,
@@ -1041,17 +1073,33 @@ def _select_character(who, filter_text):
                _system_preview(loaded.name, loaded.context, loaded.system)])
 
 
-def _open_thread(who, identifier):
+def _open_thread(who, identifier, typed=""):
+    """Open a thread. Two answers in front of the refresh: which, and the box.
+
+    A thread that ends in a message of yours nobody ever answered opens with
+    that message back in the composer -- see :func:`_unanswered`. Never over
+    something half-written: ``typed`` is what is in the box now, and a box with
+    anything in it is left exactly as it is. The message stays in the thread in
+    that case, where **Edit** will still take it back once the box is free.
+    """
     conversation = _load(who, identifier)
     if conversation is None:
-        return [identifier or ""] + _refresh(None, "Choose a thread.", "warn")
+        return [identifier or "", gr.update()] + _refresh(None, "Choose a thread.", "warn")
     mc_llm_state.remember(character=who or "", thread=identifier)
-    return [identifier] + _refresh(conversation, conversation.title)
+    waiting = _unanswered(conversation) if not (typed or "").strip() else NO_SELECTION
+    if waiting != NO_SELECTION:
+        lifted = conversation.messages[waiting].text
+        conversation.delete_from(waiting)
+        _chats().save(conversation)
+        return ([identifier, lifted]
+                + _refresh(conversation, "This message never got a reply, so it is back in "
+                                         "the box. Send it again when you are ready."))
+    return [identifier, gr.update()] + _refresh(conversation, conversation.title)
 
 
-def _open_thread_home(who, identifier):
+def _open_thread_home(who, identifier, typed=""):
     """Tapping a thread opens it and returns to the conversation."""
-    return _open_thread(who, identifier) + _close_screens()
+    return _open_thread(who, identifier, typed) + _close_screens()
 
 
 def _new_thread(who, filter_text):
@@ -1180,28 +1228,128 @@ def _drop_version(who, identifier, index):
     return _refresh(conversation, "Version deleted.", index=index)
 
 
-def _open_editor(who, identifier, index):
-    """Borrow the composer's space for the selected message.
+def _open_editor(who, identifier, index, filter_text=""):
+    """Edit a message: yours in the composer, a reply where it sits.
 
-    Four answers: the edit row, its text, the composer it replaces and the
-    action sheet it was opened from. The transcript is untouched and stays
-    where it was, which is the whole reason an edit is not a panel of its own.
+    Two different things wearing one word, and treating them as one thing is
+    what was wrong with this before. A reply is *text on the transcript* and
+    editing it means rewriting that text. One of your own messages is **a
+    prompt that was sent**, and editing it means sending a different one -- so
+    the place it belongs is the box you send from, and the answer it already
+    got is part of what is being replaced.
+
+    So a message of yours is **taken back**: lifted out of the thread and into
+    the composer, where it is an ordinary unsent message again and Send does
+    what Send does. Reported as *"if I want to edit a prompt, I should see it
+    immediately in the user prompt field"*, and it is also why the old in-place
+    editor for it had to go rather than be repaired -- a second text box under
+    the transcript, with its own Save, that borrowed the composer's space and
+    left the panel looking stuck.
+
+    Mid-thread, taking it back would destroy the replies that followed, so it
+    happens **in a branch** -- the same rule regenerating follows, for the same
+    reason. See :func:`_take_back`.
+
+    A reply keeps the in-place editor, because there is nowhere else for it to
+    go: the composer is where *your* messages are written.
     """
+    from prompt_master.chat.history import ASSISTANT
+
     conversation = _load(who, identifier)
+    still = [gr.update(), identifier or "", gr.update()]
     if conversation is None or not (0 <= index < len(conversation.messages)):
-        return (gr.update(visible=False), gr.update(), gr.update(visible=True),
-                gr.update(visible=False))
-    return (gr.update(visible=True), gr.update(value=conversation.messages[index].text),
-            gr.update(visible=False), gr.update(visible=False))
+        return still + _refresh(conversation, "Choose a message first.", "warn")
+    if conversation.messages[index].role == ASSISTANT:
+        return still + _refresh(conversation, "Editing this reply. Save when you are done.",
+                                index=index, editing=True)
+    return _take_back(who, conversation, index, filter_text)
+
+
+def _take_back(who, conversation, index, filter_text):
+    """Lift one of your own messages out of the thread and into the composer.
+
+    Three answers in front of the ordinary refresh: the thread list, the thread
+    now open, and what the composer should hold.
+
+    At the end of a thread the message is simply removed -- there is nothing
+    after it to lose, and Send puts it back. In the middle there is a great deal
+    after it, so the thread is copied up to the turn before this message and the
+    copy is what gets edited: the thread it came from keeps this message and
+    every one that followed, whole and reachable in the thread list.
+
+    A picture cannot come back with it. The composer's attachment is a file on
+    disk and a saved one is a data URL inside the thread, and inventing a
+    temporary file to bridge that is a great deal of machinery for the rarest
+    path here. So an attachment is said out loud rather than silently dropped --
+    and in the branching case it is not lost at all, because the thread it came
+    from still has it.
+    """
+    message = conversation.messages[index]
+    lifted, attached = message.text, bool(message.image)
+
+    if index < len(conversation.messages) - 1:
+        branched = _chats().branch(conversation, index - 1)
+        mc_llm_state.remember(character=who or "", thread=branched.identifier)
+        note = ("Editing in a new thread. The one it came from still has this message "
+                "and everything after it.")
+        if attached:
+            note += " Attach the picture again if you want it on this one."
+        return ([gr.update(choices=_thread_choices(who, filter_text),
+                           value=branched.identifier),
+                 branched.identifier, lifted]
+                + _refresh(branched, note))
+
+    conversation.delete_from(index)
+    _chats().save(conversation)
+    note = "Editing. Send it again when you are ready."
+    if attached:
+        note += " The picture that was attached did not come back with it."
+    return ([gr.update(), conversation.identifier, lifted]
+            + _refresh(conversation, note))
+
+
+def _unanswered(conversation) -> int:
+    """The last message, when it is one of yours that never got a reply.
+
+    The state a cancelled or failed reply leaves behind: your message is saved
+    before the request goes out -- deliberately, so it is not lost when the
+    reply is -- and ``_tidy`` then takes away the empty bubble that was going to
+    hold the answer. What is left is a thread ending in a question nobody
+    answered, and the only thing to do with it is ask again.
+
+    So it goes back into the composer when the thread is opened, which is what
+    was asked for: *"if the last message in a thread is a user message, it
+    should just appear in the user prompt field for me to submit."*
+
+    Not one carrying a picture: see :func:`_take_back` on why an attachment
+    cannot come back, and **Send again from here** answers that one in place
+    without disturbing it.
+    """
+    from prompt_master.chat.history import USER
+
+    messages = getattr(conversation, "messages", None) or ()
+    if not messages:
+        return NO_SELECTION
+    index = len(messages) - 1
+    message = messages[index]
+    if message.role != USER or message.image or not message.text.strip():
+        return NO_SELECTION
+    return index
 
 
 def _commit_edit(who, identifier, index, text):
+    """Save a reply that was edited in place, and go back to the conversation.
+
+    Home rather than back to the action sheet: the sheet covers the bottom of
+    the transcript, and reopening it over the message just saved is the panel
+    looking stuck on a thing that has finished.
+    """
     conversation = _load(who, identifier)
     if conversation is None or not (0 <= index < len(conversation.messages)):
         return _refresh(conversation, "Choose a message first.", "warn")
     conversation.messages[index].text = (text or "").strip()
     _chats().save(conversation)
-    return _refresh(conversation, "Edited.", index=index)
+    return _refresh(conversation, "Edited.")
 
 
 def _branch_here(who, identifier, index, filter_text):

@@ -2453,7 +2453,7 @@ composer, so neither of them moves:
 
 | Action | What it does |
 | --- | --- |
-| **Edit** | Rewrite the message in place. The version showing is the one changed. |
+| **Edit** | For a reply: rewrite it in place — the version showing is the one changed. For one of your own messages: it comes **back into the composer**, where it is an unsent message again and Send sends it. If replies followed it, that happens in a new branch and the thread it came from keeps all of them. |
 | **Regenerate** | Ask for the reply again. At the end of a thread it keeps the one it had and `◀ 2/3 ▶` pages between attempts, so one that came back worse is undone rather than re-rolled. In the middle of a thread it **branches**, and the thread it came from keeps every message that followed. |
 | **Continue** | Carry the last reply on from exactly where it stopped. |
 | **Send again from here** | Answer one of your own messages again, dropping everything after it. |
@@ -2473,11 +2473,25 @@ after it*, and going back to it loads the whole conversation. Only a reply at
 the end of a thread — where there is nothing after it to lose — keeps its
 attempts as versions on the one message.
 
+A prompt is edited in the box you write prompts in. **Edit** on one of your own
+messages takes it back out of the thread and puts it in the composer: change it,
+press Send, and it is asked again. There is nothing else to press and nothing
+left behind — the copy in the transcript is gone because the one in the composer
+replaces it. Editing a *reply* is a different thing and still happens in place,
+in an *Editing message* row that borrows the composer's space; Cancel gives you
+back whatever you had half-written.
+
+A thread that ends in one of your messages that never got a reply — a cancelled
+reply, a model that failed to load — opens with that message already in the
+composer, ready to send again. Never over something you were half-way through
+typing: a box with anything in it is left alone, and **Edit** will still take
+the message back once the box is free. A message with a picture attached stays
+where it is (the picture cannot come back into the composer with it); **Send
+again from here** answers that one in place.
+
 Tapping the same message again puts the sheet away; tapping a different one
-moves it there. **Edit** replaces the composer with an *Editing message* row
-rather than opening an editor between the transcript and the composer; Cancel
-gives you back whatever you had half-written. There is no per-message copy
-button — select the text and copy it.
+moves it there. There is no per-message copy button — select the text and copy
+it.
 
 The transcript follows a reply while you are at the end of it and holds your
 place while you are not: scroll up to read something and new messages arrive
@@ -2499,10 +2513,17 @@ beside it.
 
 The workspace sizes itself to the window: the header and the composer are
 measured first, the transcript takes whatever is left, and the page does not
-scroll — the thread does. The header — **☰**, who you are talking to, and the
-state chip — stays docked at the top while the thread scrolls under it, so the
-menu and the loading state are reachable from anywhere in a long conversation
-without scrolling back. That is the same layout at 320px as on a desktop; what
+scroll — the thread does. So the header — **☰**, who you are talking to, and the
+state chip — stays where it is while the thread scrolls under it, and the
+composer stays on screen.
+
+That only holds if nothing else is on the page below the workspace, and by
+default one thing is: the WebUI's own footer, which sits below the fold and
+takes real space, so the page scrolls by the height of a row of links and takes
+the header down with it. **Hide the WebUI footer** in Settings → Model Chain is
+on by default and takes it off the page. It applies to every tab, because the
+footer is one element on the page; turn it off and the footer comes straight
+back, no reload needed. That is the same layout at 320px as on a desktop; what
 changes with the width is that the sheets become a side panel instead of
 covering the screen.
 
