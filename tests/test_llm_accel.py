@@ -1784,3 +1784,75 @@ class TestAnOptionTheBuildRefuses:
         assert not attempts[1].speculative
         assert attempts[1].accelerator == accel.ACCEL_NONE
         assert any("DFlash2 was not used" in note for note in attempts[1].notes)
+
+
+# --------------------------------------------------------------------------- #
+# Setup knows where the DFlash2 build is (27 August 2026)
+# --------------------------------------------------------------------------- #
+
+
+class TestTheRuntimePathIsKept:
+    """Reported: "Even though I chose to download the DFlash2 llama.cpp build,
+    LLM Studio doesn't seem to know its location."
+
+    Two mistakes, one of them the panel's fault entirely. The *draft model* had
+    a download button and the *llama.cpp build* had a path box, sitting next to
+    each other under one heading -- so pressing the download and then the
+    button beside the empty box produced "Enter the path to the DFlash2
+    llama.cpp build", which is true, unhelpful, and says nothing about the fact
+    that the runtime has no download anywhere yet.
+    """
+
+    def test_the_panel_knows_where_an_installed_build_is(self, install):
+        import mc_llm_studio
+
+        assert mc_llm_studio._dflash_path() == ""
+        server = install_dflash_runtime(install)
+
+        assert mc_llm_studio._dflash_path() == str(server)
+
+    def test_an_empty_box_keeps_the_build_already_installed(self, install):
+        """It is not an error to press Use on a panel that has just told you a
+        runtime is installed. It means "use the one you have"."""
+        import mc_llm_studio
+
+        server = install_dflash_runtime(install)
+
+        notice, update = mc_llm_studio._adopt_dflash("")
+
+        assert update["value"] == str(server)
+        assert "text verified" in notice
+
+    def test_an_empty_box_with_nothing_installed_names_the_other_route(self, install):
+        import mc_llm_studio
+
+        notice, _update = mc_llm_studio._adopt_dflash("")
+
+        assert "pull request 27342" in notice
+        assert "Download the DFlash2 runtime" in notice
+
+    def test_adopting_writes_back_where_the_build_now_lives(self, install, tmp_path):
+        """Not where it was copied from, so pressing the button twice is a
+        no-op rather than a second install of the same thing."""
+        import mc_llm_studio
+
+        build = tmp_path / "elsewhere"
+        build.mkdir()
+        (build / "llama-server").write_bytes(b"")
+        (build / "ggml.dll").write_bytes(b"")
+
+        _notice, update = mc_llm_studio._adopt_dflash(str(build))
+
+        assert update["value"] == str(dflash.installed())
+        assert str(install) in update["value"]
+
+    def test_the_runtime_has_a_download_of_its_own(self, install):
+        """The button's absence was the bug. What it says is that there is no
+        archive to fetch -- which is the answer to the question that was
+        actually being asked."""
+        import mc_llm_studio
+
+        notice, _update = list(mc_llm_studio._download_dflash())[-1]
+
+        assert "no published archive" in notice
+        assert "1deefcc" in notice

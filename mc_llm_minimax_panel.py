@@ -33,6 +33,7 @@ logger = logging.getLogger("model_chain")
 
 def build() -> dict:
     """Assemble the panel. Returns the handles the shell needs."""
+    from prompt_master.core.models import RANDOM_SEED
     from prompt_master.minimax import enhancer
 
     prefs = mc_llm_state.preferences()
@@ -95,8 +96,8 @@ def build() -> dict:
                 label="Variant", choices=ui.choices(enhancer.VARIANTS),
                 value=prefs.get("minimax_variant") or enhancer.FL2VA,
                 elem_id=ui.ident("minimax", "variant"))
-            seed = gr.Number(label="Seed", value=-1, precision=0,
-                             info="-1 draws a fresh seed for every prompt.")
+            seed = gr.Number(label="Seed", value=RANDOM_SEED, precision=0,
+                             info=f"{RANDOM_SEED} draws a fresh seed for every prompt.")
             with gr.Accordion("What an H3 prompt is made of", open=False):
                 structure = gr.Markdown(enhancer.infos(prefs.get("minimax_variant")
                                                        or enhancer.FL2VA))

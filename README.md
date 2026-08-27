@@ -2384,15 +2384,20 @@ ordinary decoding, and nothing asks for it again until the runtime changes.
 guesses several tokens ahead for it. Two things have to be installed before it
 is offered, and both are separate presses:
 
-* **The draft model.** *Download the draft model*, under Advanced. It goes into
-  the bundle beside the weights and is never part of an ordinary download —
-  a machine that never chooses Lightning never downloads it.
-* **A DFlash2 llama.cpp.** DFlash2 is llama.cpp pull request 27342 and is not
-  in any release, so it is built rather than downloaded: build the branch at
-  the commit the extension pins, and point *DFlash2 llama.cpp build* at the
-  result. It is copied into a directory of its own and **never over the
-  ordinary runtime** — losing it, or failing to install it, cannot break
-  ordinary LLM Studio or ordinary image generation.
+* **The DFlash2 llama.cpp runtime**, first in the panel. *Download the DFlash2
+  runtime* fetches whatever this extension has pinned — and while pull request
+  27342 is unmerged there is no published archive, so what it does today is
+  tell you that and name the commit to build. Build the branch, point *DFlash2
+  llama.cpp build* at the result, and press *Use this build*. It is copied into
+  a directory of its own and **never over the ordinary runtime** — losing it,
+  or failing to install it, cannot break ordinary LLM Studio or ordinary image
+  generation. Once it is installed the path box holds it: the box is filled in
+  for you, and pressing *Use this build* on an empty box keeps what you have.
+* **The draft model**, second and separate. *Download the draft model* fetches
+  about 3.9 GB of weights into the backbone's own bundle. It is needed **as
+  well as** the runtime, not instead of it — downloading one does nothing for
+  the other — and it is never part of an ordinary managed download, so a
+  machine that never chooses Lightning never pays for it.
 
 Then press **Verify it**. That loads the real backbone with the real draft
 model and asks it a question with one right answer, because a build whose help
@@ -2458,6 +2463,26 @@ Switching model does not carry the vision projector across, and does not guess
 one from the new model's folder. A projector has to match the model it was made
 for and a filename does not prove that it does; one sitting beside the new model
 is mentioned, and applying it is a press in **Setup**.
+
+### Characters
+
+**Character** in the Conversation menu is one screen doing four things, and the
+drop-down at the top of it — *Talking to* — is only ever the first:
+
+| | |
+| --- | --- |
+| **Edit** | Opens the editor on the character you are talking to. Saving writes it back; changing the name renames it, and its picture moves with it. |
+| **New** | Clears the editor for a character that does not exist yet, and resets the Advanced generation settings with it. It does **not** touch the character you are talking to. |
+| **↻ Refresh** | Re-reads the characters folder, for a `.yaml` copied in from an oobabooga install while the tab was open. |
+| **Save character** | Creates when the editor is on a new character and edits when it is on an existing one. Creating over a name already taken is refused rather than writing over it. |
+| **Delete this character** | Removes it and its picture, and lands you on whichever character is left. |
+| **Import a character card** | A `.yaml`, `.json`, or a `.png` V2/V3 card with its JSON inside. |
+
+The Advanced generation settings are saved *with* the character, so a seed of
+**−1** there is what makes its replies vary — and a character that has never
+been given a seed has −1 already. The same boxes are the per-message override
+for the conversation you are in, so **Cancel** in the editor puts them back to
+the selected character's.
 
 ### Conversation, per message
 

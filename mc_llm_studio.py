@@ -1015,6 +1015,14 @@ def _setup_panel() -> dict:
                     label="Memory priority", choices=_priority_choices(),
                     value=_performance_axes()[1],
                     elem_id=ui.ident("settings", "priority"))
+                # Two installs, and they are separated on screen because
+                # conflating them is a mistake somebody has already made: the
+                # *draft model* is weights that live in the backbone's bundle,
+                # and the *runtime* is a second llama.cpp. Downloading one does
+                # nothing for the other, and a panel that put a download button
+                # next to the wrong box said otherwise.
+                gr.Markdown("##### 1. The DFlash2 llama.cpp runtime",
+                            elem_classes=ui.classes("sheet-label"))
                 gr.Markdown(
                     "**DFlash2** is llama.cpp pull request 27342 and is not in any release, "
                     "so it runs on a second llama.cpp installed beside the ordinary one and "
@@ -1025,15 +1033,25 @@ def _setup_panel() -> dict:
                 dflash_notice = gr.HTML(_dflash_line(),
                                         elem_id=ui.ident("settings", "dflash"))
                 dflash_path = gr.Textbox(
-                    label="DFlash2 llama.cpp build",
-                    placeholder="Path to the build directory, or to the llama-server in it",
+                    label="DFlash2 llama.cpp build", value=_dflash_path(),
+                    placeholder="Installed automatically, or paste a build directory here",
+                    info="Filled in for you once a build is installed; it is kept in the LLM "
+                         "data directory, not wherever it was built.",
                     elem_id=ui.ident("settings", "dflash", "path"))
                 mc_llm_browse.attach(dflash_path, suffixes=(), key="dflash", allow_folders=True,
                                      title="Choose the DFlash2 llama-server",
                                      folder_title="Choose the DFlash2 build directory")
                 with gr.Row():
-                    use_dflash = gr.Button("Use this DFlash2 build", size="sm")
+                    fetch_dflash = gr.Button("Download the DFlash2 runtime", size="sm")
+                    use_dflash = gr.Button("Use this build", size="sm")
                     verify_dflash = gr.Button("Verify it", size="sm")
+
+                gr.Markdown("##### 2. The draft model",
+                            elem_classes=ui.classes("sheet-label"))
+                gr.Markdown(
+                    "About 3.9 GB of weights, kept beside the backbone in its own bundle. "
+                    "Separate from the runtime above and needed as well as it, not instead "
+                    "of it.", elem_classes=ui.classes("hint"))
                 draft_notice = gr.HTML(_draft_line(_managed_current()),
                                        elem_id=ui.ident("settings", "draft"))
                 fetch_draft = gr.Button("Download the draft model", size="sm")
@@ -1093,7 +1111,8 @@ def _setup_panel() -> dict:
         _picked(control)(fn=_apply_axes, inputs=[accelerator, memory_priority, role],
                          outputs=[performance_notice, preset], queue=False)
     use_dflash.click(fn=_adopt_dflash, inputs=[dflash_path],
-                     outputs=[dflash_notice], queue=False)
+                     outputs=[dflash_notice, dflash_path], queue=False)
+    fetch_dflash.click(fn=_download_dflash, outputs=[dflash_notice, dflash_path])
     # Queued: this one starts a llama-server with two models in it.
     verify_dflash.click(fn=_verify_dflash, outputs=[dflash_notice])
     fetch_draft.click(fn=_install_draft, inputs=[catalogue],
@@ -1313,22 +1332,87 @@ def _dflash_line() -> str:
         return ui.notice("DFlash2 runtime information unavailable — see the console.", "warn")
 
 
+def _dflash_path() -> str:
+    """Where the installed DFlash2 llama-server is, or ``""``.
+
+    The box under the line is filled from this rather than left empty, which is
+    the whole of what "LLM Studio should keep the path" means: a build that has
+    been installed once is a fact this extension already holds, and asking for
+    it again is asking somebody to look up something the panel knows.
+    """
+    try:
+        import mc_llm_dflash
+
+        found = mc_llm_dflash.installed()
+        return str(found) if found is not None else ""
+    except Exception:
+        logger.debug("Model Chain: could not read the DFlash2 runtime path", exc_info=True)
+        return ""
+
+
 def _adopt_dflash(path):
-    """Take a locally built DFlash2 llama.cpp, without touching the ordinary one."""
+    """Take a locally built DFlash2 llama.cpp, without touching the ordinary one.
+
+    An empty box is not an error when a build is already installed. It means
+    "use the one you have", which is the honest reading of pressing this button
+    on a panel that just told you a runtime is installed -- and the path goes
+    back into the box so the answer is visible rather than remembered.
+    """
     import mc_llm_dflash
 
+    if not str(path or "").strip():
+        installed = _dflash_path()
+        if installed:
+            return _dflash_line(), gr.update(value=installed)
+        return (ui.notice(
+            "No DFlash2 runtime is installed yet, and there is nothing in the box to "
+            "install. DFlash2 is llama.cpp pull request 27342 and is not part of any "
+            "release — press Download the DFlash2 runtime to see what this extension has "
+            "pinned, or build the branch yourself and paste the path here.", "warn"),
+            gr.update())
     try:
-        mc_llm_dflash.adopt(path)
+        placed, _said = mc_llm_dflash.adopt(path)
     except mc_llm_dflash.DFlashError as exc:
-        return ui.notice(ui.failure(exc), "error")
+        return ui.notice(ui.failure(exc), "error"), gr.update()
     except Exception as exc:
         logger.warning("Model Chain: the DFlash2 build could not be adopted", exc_info=True)
-        return ui.notice(f"That build could not be installed ({ui.failure(exc)}). Ordinary "
-                         f"llama.cpp is unchanged.", "error")
+        return (ui.notice(f"That build could not be installed ({ui.failure(exc)}). Ordinary "
+                          f"llama.cpp is unchanged.", "error"), gr.update())
     # What is drawn is the state, not the sentence describing how it got there:
     # the build is installed and has proved nothing, and the line that says so
-    # is the one somebody has to act on next.
-    return _dflash_line()
+    # is the one somebody has to act on next. The box is rewritten to where the
+    # build now *lives*, which is inside the data directory rather than wherever
+    # it was copied from -- so pressing the button twice is idempotent.
+    return _dflash_line(), gr.update(value=str(placed))
+
+
+def _download_dflash(progress=gr.Progress()):
+    """Fetch the pinned DFlash2 runtime, or say plainly why there is not one.
+
+    This button exists because its absence was itself the bug. The panel had a
+    download for the *draft model* and a path box for the *llama.cpp build*
+    sitting next to each other, and pressing the one that was there and then
+    pressing the button beside the empty box produced "enter the path" -- which
+    is true, unhelpful, and says nothing about the fact that the thing being
+    asked for has no download anywhere yet. A button that answers the question
+    is worth more than no button at all.
+    """
+    import mc_llm_dflash
+
+    yield ui.working("Downloading the DFlash2 runtime…"), gr.update()
+    try:
+        placed = mc_llm_dflash.download(on_status=lambda text: progress(0, desc=text),
+                                        on_progress=lambda fraction: progress(fraction))
+    except mc_llm_dflash.DFlashError as exc:
+        yield ui.notice(ui.failure(exc), "warn"), gr.update()
+        return
+    except Exception as exc:
+        logger.warning("Model Chain: the DFlash2 runtime could not be downloaded",
+                       exc_info=True)
+        yield (ui.notice(f"The DFlash2 runtime could not be downloaded ({ui.failure(exc)}). "
+                         f"Ordinary llama.cpp is unchanged.", "error"), gr.update())
+        return
+    yield _dflash_line(), gr.update(value=str(placed))
 
 
 def _verify_dflash(progress=gr.Progress()):
