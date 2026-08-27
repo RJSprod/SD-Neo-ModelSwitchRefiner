@@ -359,7 +359,8 @@ class TestPerMessageActions:
             mc_llm_chat_panel._delete_from("Ada", identifier, 2),
             mc_llm_chat_panel._select_message("Ada", identifier, [[0, 0, 0]],
                                              mc_llm_chat_panel.NO_SELECTION),
-            mc_llm_chat_panel._open_thread("Ada", identifier)[1:],
+            mc_llm_chat_panel._open_thread("Ada", identifier)[2:],
+            mc_llm_chat_panel._open_editor("Ada", identifier, 1)[3:],
         ):
             assert len(result) == width
 
@@ -718,6 +719,315 @@ class TestTheRegenerateIconOnAReply:
             assert f'"{ui.ident("chat", name)}"' in script
 
 
+class TestEditingOneOfYourOwnMessages:
+    """A prompt is edited in the box you send prompts from.
+
+    Reported as *"the edit view is messed up, it seems to hang"* with the rule
+    to replace it: *"if I want to edit a prompt, I should see it immediately in
+    the user prompt field, where if I submit a prompt mid thread (where there
+    are replies after) it should start a branch."*
+
+    Underneath the complaint is a category error the old editor made. A reply is
+    text on the transcript and editing it means rewriting that text. One of your
+    own messages is **a prompt that was sent**, and editing it means sending a
+    different one -- the answer it already got is part of what is being
+    replaced. Treating both as "rewrite this string in place" is what put a
+    second text box with its own Save under the transcript, and left a message
+    edited but never re-asked.
+
+    So a message of yours is *taken back*: lifted out of the thread and into the
+    composer, where it is an ordinary unsent message and Send does what Send
+    does. Mid-thread that would destroy the replies after it, so it happens in a
+    branch -- the same rule regenerating follows.
+    """
+
+    def _thread(self, store, turns=3):
+        from prompt_master.chat.history import ASSISTANT, ChatStore, USER
+
+        chats = ChatStore(store / "chats")
+        conversation = chats.new("Ada")
+        for index in range(turns):
+            conversation.append(USER, f"ask {index}")
+            conversation.append(ASSISTANT, f"reply {index}")
+        chats.save(conversation)
+        return chats, conversation
+
+    def _waiting(self, store):
+        """A thread ending in a message of yours that never got a reply."""
+        from prompt_master.chat.history import USER
+
+        chats, conversation = self._thread(store)
+        conversation.append(USER, "and one more thing")
+        chats.save(conversation)
+        return chats, conversation
+
+    # -- at the end of a thread ---------------------------------------------- #
+
+    def test_the_last_prompt_comes_back_into_the_composer(self, store):
+        chats, conversation = self._waiting(store)
+
+        threads, identifier, composer, *_ = mc_llm_chat_panel._open_editor(
+            "Ada", conversation.identifier, 6)
+
+        assert composer == "and one more thing"
+        # No branch: there is nothing after it to keep, so there is nothing to
+        # keep it in.
+        assert identifier == conversation.identifier
+        assert threads == {}
+
+    def test_and_is_taken_out_of_the_thread_so_send_puts_it_back_once(self, store):
+        """It is in the composer now, and a copy left in the transcript would be
+        a copy Send appends a second one beside."""
+        chats, conversation = self._waiting(store)
+
+        mc_llm_chat_panel._open_editor("Ada", conversation.identifier, 6)
+
+        assert [message.text for message in
+                chats.load("Ada", conversation.identifier).messages] == [
+                    "ask 0", "reply 0", "ask 1", "reply 1", "ask 2", "reply 2"]
+
+    def test_the_editor_under_the_transcript_never_opens_for_it(self, store):
+        """The whole of what was wrong with it: a second box, with its own Save,
+        borrowing the composer's space."""
+        chats, conversation = self._waiting(store)
+        order = mc_llm_chat_panel.SELECTION_ORDER
+
+        opened = mc_llm_chat_panel._open_editor("Ada", conversation.identifier, 6)
+        shown = dict(zip(order, opened[3:][5:]))
+
+        assert shown["edit"].get("visible") is False
+        assert shown["composer"].get("visible") is True
+        assert shown["sheet"].get("visible") is False
+
+    # -- in the middle of one ------------------------------------------------ #
+
+    def test_a_prompt_with_replies_after_it_is_edited_in_a_branch(self, store):
+        chats, conversation = self._thread(store)
+
+        threads, identifier, composer, *_ = mc_llm_chat_panel._open_editor(
+            "Ada", conversation.identifier, 2)
+
+        assert composer == "ask 1"
+        assert identifier != conversation.identifier
+        # Up to the turn before it, so Send lands the edited message where the
+        # one it replaces was.
+        assert [message.text for message in chats.load("Ada", identifier).messages] == \
+            ["ask 0", "reply 0"]
+
+    def test_the_thread_it_came_from_keeps_every_word(self, store):
+        chats, conversation = self._thread(store)
+
+        mc_llm_chat_panel._open_editor("Ada", conversation.identifier, 2)
+
+        assert [message.text for message in
+                chats.load("Ada", conversation.identifier).messages] == [
+                    "ask 0", "reply 0", "ask 1", "reply 1", "ask 2", "reply 2"]
+
+    def test_the_panel_moves_onto_the_branch(self, store):
+        import mc_llm_state
+
+        chats, conversation = self._thread(store)
+
+        threads, identifier, *_ = mc_llm_chat_panel._open_editor(
+            "Ada", conversation.identifier, 2, "")
+
+        assert threads.get("value") == identifier
+        assert identifier in [value for _, value in threads.get("choices")]
+        assert mc_llm_state.preferences().get("thread") == identifier
+
+    def test_the_first_message_of_all_branches_to_an_empty_thread(self, store):
+        """There is no turn before it, so the branch starts with nothing in it.
+        Still a branch, and the thread it came from is still whole."""
+        chats, conversation = self._thread(store)
+
+        threads, identifier, composer, *_ = mc_llm_chat_panel._open_editor(
+            "Ada", conversation.identifier, 0)
+
+        assert composer == "ask 0"
+        assert chats.load("Ada", identifier).messages == []
+        assert len(chats.load("Ada", conversation.identifier).messages) == 6
+
+    # -- a reply is still edited where it sits ------------------------------- #
+
+    def test_a_reply_is_not_taken_back_into_the_composer(self, store):
+        """The composer is where *your* messages are written. A reply put in it
+        would be sent as yours the moment you pressed Send."""
+        chats, conversation = self._thread(store)
+
+        threads, identifier, composer, *_ = mc_llm_chat_panel._open_editor(
+            "Ada", conversation.identifier, 1)
+
+        assert composer == {}                       # the box is left alone
+        assert identifier == conversation.identifier
+        assert len(chats.load("Ada", conversation.identifier).messages) == 6
+
+    def test_saving_a_reply_goes_home_rather_than_reopening_the_sheet(self, store):
+        """The sheet covers the bottom of the transcript, and reopening it over
+        the message just saved is the panel looking stuck on a finished thing."""
+        chats, conversation = self._thread(store)
+        order = mc_llm_chat_panel.SELECTION_ORDER
+
+        saved = mc_llm_chat_panel._commit_edit("Ada", conversation.identifier, 1, "changed")
+        shown = dict(zip(order, saved[5:]))
+
+        assert shown["sheet"].get("visible") is False
+        assert shown["edit"].get("visible") is False
+        assert shown["composer"].get("visible") is True
+        assert chats.load("Ada", conversation.identifier).messages[1].text == "changed"
+
+    # -- a message nobody ever answered -------------------------------------- #
+
+    def test_a_thread_ending_in_your_own_message_opens_with_it_in_the_box(self, store):
+        """What a cancelled or failed reply leaves behind: the message is saved
+        before the request goes out, so it survives the reply not arriving."""
+        chats, conversation = self._waiting(store)
+
+        identifier, composer, *_ = mc_llm_chat_panel._open_thread(
+            "Ada", conversation.identifier)
+
+        assert composer == "and one more thing"
+        assert [message.text for message in
+                chats.load("Ada", conversation.identifier).messages][-1] == "reply 2"
+
+    def test_an_ordinary_thread_leaves_the_box_alone(self, store):
+        chats, conversation = self._thread(store)
+
+        identifier, composer, *_ = mc_llm_chat_panel._open_thread(
+            "Ada", conversation.identifier)
+
+        assert composer == {}
+        assert len(chats.load("Ada", conversation.identifier).messages) == 6
+
+    def test_it_never_writes_over_something_half_written(self, store):
+        """A box with anything in it is left exactly as it is, and the message
+        stays in the thread where Edit will still take it back later."""
+        chats, conversation = self._waiting(store)
+
+        identifier, composer, *_ = mc_llm_chat_panel._open_thread(
+            "Ada", conversation.identifier, "something I was in the middle of")
+
+        assert composer == {}
+        assert [message.text for message in
+                chats.load("Ada", conversation.identifier).messages][-1] == \
+            "and one more thing"
+
+    def test_switching_character_lifts_it_too(self, store):
+        chats, conversation = self._waiting(store)
+
+        threads, identifier, composer, *_ = mc_llm_chat_panel._select_character("Ada", "")
+
+        assert composer == "and one more thing"
+
+    def test_a_message_carrying_a_picture_is_left_where_it_is(self, store):
+        """The composer's attachment is a file on disk and a saved one is a data
+        URL inside the thread. Rather than invent a temporary file, the message
+        stays put -- and **Send again from here** answers it without disturbing
+        it."""
+        from prompt_master.chat.history import USER
+
+        chats, conversation = self._thread(store)
+        conversation.append(USER, "look at this", "data:image/png;base64,AA", "frame.png")
+        chats.save(conversation)
+
+        identifier, composer, *_ = mc_llm_chat_panel._open_thread(
+            "Ada", conversation.identifier)
+
+        assert composer == {}
+        assert len(chats.load("Ada", conversation.identifier).messages) == 7
+
+    def test_taking_back_one_that_had_a_picture_says_so(self, store):
+        """Said out loud rather than silently dropped."""
+        from prompt_master.chat.history import USER
+
+        chats, conversation = self._thread(store)
+        conversation.append(USER, "look at this", "data:image/png;base64,AA", "frame.png")
+        chats.save(conversation)
+
+        result = mc_llm_chat_panel._open_editor("Ada", conversation.identifier, 6)
+
+        assert "picture" in result[3 + 3]
+
+    def test_an_empty_last_message_is_not_lifted(self, store):
+        from prompt_master.chat.history import USER
+
+        chats, conversation = self._thread(store)
+        conversation.append(USER, "   ")
+        chats.save(conversation)
+
+        assert mc_llm_chat_panel._unanswered(conversation) == \
+            mc_llm_chat_panel.NO_SELECTION
+
+    def test_nothing_selected_is_refused_rather_than_lifting_something(self, store):
+        chats, conversation = self._thread(store)
+
+        result = mc_llm_chat_panel._open_editor("Ada", conversation.identifier,
+                                                mc_llm_chat_panel.NO_SELECTION)
+
+        assert result[2] == {}
+        assert len(chats.load("Ada", conversation.identifier).messages) == 6
+
+    def test_every_answer_is_the_same_shape(self, store):
+        chats, conversation = self._thread(store)
+        width = 3 + 5 + len(mc_llm_chat_panel.SELECTION_ORDER)
+
+        for index in (0, 1, 4, mc_llm_chat_panel.NO_SELECTION, 99):
+            assert len(mc_llm_chat_panel._open_editor(
+                "Ada", conversation.identifier, index, "")) == width
+
+
+class TestTheFooterGoesAway:
+    """The one rule in this extension's stylesheet that reaches outside its own
+    panels, so the three halves of it are checked against each other here.
+
+    The conversation workspace is built to fit the window: the page does not
+    scroll, the transcript does. The footer sits below the fold and takes real
+    space, so the page scrolls anyway -- by exactly the height of a row of
+    links, from an element no measurement inside the workspace can reach.
+    """
+
+    def test_the_setting_is_registered_and_defaults_to_hiding_it(self, host):
+        import model_chain
+
+        registered = host.shared.options_templates
+
+        assert model_chain.OPT_HIDE_FOOTER in registered
+        assert registered[model_chain.OPT_HIDE_FOOTER].default is True
+
+    def test_the_stylesheet_hides_what_the_script_marks(self):
+        """Two files, one attribute, and nothing but the spelling linking them."""
+        from pathlib import Path
+
+        root = Path(mc_llm_chat_panel.__file__).resolve().parent
+        script = (root / "javascript" / "llm_studio.js").read_text(encoding="utf-8")
+        css = (root / "style.css").read_text(encoding="utf-8")
+
+        assert '"data-mc-footer"' in script
+        assert '[data-mc-footer="hidden"] #footer' in css
+
+    def test_the_script_reads_the_setting_by_the_name_python_registers(self):
+        from pathlib import Path
+
+        import model_chain
+
+        script = ((Path(mc_llm_chat_panel.__file__).resolve().parent
+                   / "javascript" / "llm_studio.js").read_text(encoding="utf-8"))
+
+        assert f'"{model_chain.OPT_HIDE_FOOTER}"' in script
+
+    def test_it_hides_a_footer_and_never_one_of_ours(self):
+        """`footer` is a tag as well as an id, so the rule is scoped to the
+        containers a host footer actually sits in -- and nothing this extension
+        builds is a `footer` in the first place."""
+        from pathlib import Path
+
+        root = Path(mc_llm_chat_panel.__file__).resolve().parent
+        panels = "".join((root / name).read_text(encoding="utf-8")
+                         for name in ("mc_llm_chat_panel.py", "mc_llm_studio.py"))
+
+        assert "gr.HTML(\"<footer" not in panels
+        assert "<footer" not in panels
+
+
 class TestTheSurfaces:
     """Conversation is the home state, and everything else is temporary.
 
@@ -865,16 +1175,20 @@ class TestTheComposer:
         assert idle_stop.get("interactive") is False
         assert busy_send.get("interactive") is False
 
-    def test_editing_replaces_the_composer_rather_than_growing_the_panel(self, store):
+    def test_editing_a_reply_replaces_the_composer_rather_than_growing_the_panel(self,
+                                                                                 store):
+        """A reply has nowhere else to be edited: the composer is where *your*
+        messages are written."""
         conversation = self._thread(store)
+        order = mc_llm_chat_panel.SELECTION_ORDER
 
-        row, box, composer, sheet = mc_llm_chat_panel._open_editor(
-            "Ada", conversation.identifier, 1)
+        opened = mc_llm_chat_panel._open_editor("Ada", conversation.identifier, 1)
+        shown = dict(zip(order, opened[3:][5:]))
 
-        assert row.get("visible") is True
-        assert box.get("value") == "reply"
-        assert composer.get("visible") is False
-        assert sheet.get("visible") is False
+        assert shown["edit"].get("visible") is True
+        assert shown["edit_box"].get("value") == "reply"
+        assert shown["composer"].get("visible") is False
+        assert shown["sheet"].get("visible") is False
 
     def test_saving_an_edit_comes_back_to_the_composer(self, store):
         conversation = self._thread(store)

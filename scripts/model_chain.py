@@ -93,6 +93,22 @@ widths the host already asked for. Default on, and independent of every other
 toggle here -- installing the extension is the whole condition.
 """
 
+OPT_HIDE_FOOTER = "model_chain_hide_footer"
+"""Take the WebUI's footer off the page. Read by javascript/llm_studio.js.
+
+Not an appearance setting and not really about this extension's own panels,
+which is why it sits on its own. The footer is below the fold and takes real
+space, so a page that otherwise fits the window still scrolls -- by exactly the
+height of a row of links. LLM Studio's workspace is built to fit the window
+precisely: the page does not scroll, the transcript does, and one scrollable
+strip under it undoes that from outside anything this extension can lay out.
+
+Default on, because the ask was *"can we just make the footer go away"* and the
+footer's contents (the API link, the Github link, the Gradio credit, the version
+line) are not things anybody reads twice. Off puts it straight back -- no
+reload, because the rule is CSS keyed on an attribute this reads live.
+"""
+
 OPT_STYLE_ENABLE = "model_chain_style_enable"
 OPT_STYLE_THEME = "model_chain_style_theme"
 OPT_STYLE_COLOR = "model_chain_style_color"
@@ -245,6 +261,17 @@ shared.options_templates.update(
                 "This fills in the movement between those writes. It changes nothing about "
                 "the numbers, applies to every generation whether or not Model Chain is "
                 "involved, and is independent of the appearance settings below"
+            ),
+            OPT_HIDE_FOOTER: shared.OptionInfo(
+                True,
+                "Hide the WebUI footer",
+            ).info(
+                "the footer sits below the fold and takes real space, so a page that "
+                "otherwise fits the window still scrolls by the height of a row of links. "
+                "LLM Studio's conversation workspace is built to fit the window exactly, "
+                "and this is the one strip under it that no layout here can reach. Applies "
+                "to every tab, because the footer is one element on the page; turning it "
+                "off puts it straight back"
             ),
             # -- appearance, deliberately independent of everything above --- #
             # These change how the host's bar looks and never what it reports,

@@ -4,7 +4,7 @@
 // JavaScript focused on enhancement, not core business logic. Python should
 // remain authoritative for model state, persistence, inference, and memory
 // decisions." Nothing here talks to a model, stores anything, or decides
-// anything. It does six things a browser is better placed to do than a
+// anything. It does seven things a browser is better placed to do than a
 // server round trip:
 //
 //   * Ctrl/Cmd+Enter submits the composer that has focus;
@@ -16,7 +16,8 @@
 //     can fit the space it actually has rather than a space guessed in a
 //     stylesheet;
 //   * a status line that says something is in progress counts the seconds it
-//     has been in progress for.
+//     has been in progress for;
+//   * the WebUI's footer is taken off the page, if the setting says so.
 //
 // The counter is the one that has to justify itself, because the server could
 // in principle have written the number. It could not have kept writing it: a
@@ -462,6 +463,51 @@
         window.setInterval(tick, 1000);
     }
 
+    // -- the footer, which is not ours and is in the way -------------------- //
+
+    // The workspace above is built to fit the window: the page does not scroll,
+    // the transcript does. The footer defeats that from outside anything this
+    // extension lays out -- it sits below the fold and takes real space, so the
+    // page scrolls by exactly the height of a row of links and no measurement
+    // here can prevent it. Reported as that, and asked for as "can we just make
+    // the footer go away".
+    //
+    // Nothing is removed and no style is written on the element: an attribute
+    // goes on the root and style.css does the hiding, so the rule is one a
+    // theme or a user stylesheet can override, and turning the setting off puts
+    // the footer straight back on the next update rather than at the next
+    // reload.
+    const FOOTER_ATTRIBUTE = "data-mc-footer";
+
+    function setting(name, fallback) {
+        // The host publishes every registered option on a global. Read
+        // defensively: it does not exist before the settings have loaded, and
+        // an exception here would take the rest of this file's wiring with it.
+        try {
+            if (typeof opts === "undefined" || opts === null) return fallback;
+            const value = opts[name];
+            return value === undefined || value === null ? fallback : value;
+        } catch (error) {
+            return fallback;
+        }
+    }
+
+    function hideFooter() {
+        const html = document.documentElement;
+        if (!html) return;
+        const wanted = setting("model_chain_hide_footer", true) ? "hidden" : "";
+        if (!wanted) {
+            if (html.getAttribute(FOOTER_ATTRIBUTE)) html.removeAttribute(FOOTER_ATTRIBUTE);
+            return;
+        }
+        // Written only when it changes: this runs after every update the host
+        // makes, and setting an attribute invalidates style whether or not the
+        // value moved.
+        if (html.getAttribute(FOOTER_ATTRIBUTE) !== wanted) {
+            html.setAttribute(FOOTER_ATTRIBUTE, wanted);
+        }
+    }
+
     // -- fit the workspace to the window ------------------------------------ //
 
     // Left under the workspace so a status line or a wrapped row of buttons
@@ -544,20 +590,28 @@
         }, true);
     }
 
-    function wire() {
+    // Each concern on its own. Polish must never be able to break the tab it is
+    // polishing -- and one piece of polish must never be able to break another,
+    // which a single try around all of them does not give you: these are
+    // independent features, and the first of them throwing took the six after
+    // it down with it. They are wired in no particular order and none of them
+    // needs any other to have run.
+    function attempt(what, run) {
         try {
-            PANELS.forEach(wireComposer);
-            wireTranscript();
-            wireReplies();
-            wireSheets();
-            watchActivity();
-            tick();
-            watchWindow();
-            fit();
+            run();
         } catch (error) {
-            // Polish must never be able to break the tab it is polishing.
-            console.error("Model Chain: LLM Studio polish failed", error);
+            console.error("Model Chain: LLM Studio could not " + what, error);
         }
+    }
+
+    function wire() {
+        attempt("hide the footer", hideFooter);
+        attempt("wire the composers", function () { PANELS.forEach(wireComposer); });
+        attempt("follow the transcript", wireTranscript);
+        attempt("draw the reply icons", wireReplies);
+        attempt("keep the sheets in view", wireSheets);
+        attempt("count the seconds", function () { watchActivity(); tick(); });
+        attempt("fit the workspace", function () { watchWindow(); fit(); });
     }
 
     // The tab's contents are rebuilt on some UI updates, so the wiring is

@@ -3252,3 +3252,130 @@ call, so the two cannot disagree.
 The preview never raises into the panel: a character mid-edit is a character
 that may not compose, and a stack trace where a prompt should be is worse than a
 sentence saying so.
+
+## 32. A prompt is edited where prompts are written (27 August 2026)
+
+Two more after another evening, and the second one is the answer to a thing 31.2
+did not actually fix.
+
+### 32.1 Edit was two verbs wearing one word
+
+> *"When I decide to edit a user submitted prompt in conversation mode, the edit
+> view is messed up. It seems to hang."*
+
+Underneath the symptom is a category error, and it is worth naming because the
+symptom is only what it looked like from outside.
+
+**A reply is text on the transcript.** Editing it means rewriting that text, and
+an in-place editor is the right shape for that.
+
+**One of your own messages is a prompt that was sent.** Editing it means sending
+a different one — and the answer it already got is part of what is being
+replaced. Rewriting the string in place produces a thread where you asked one
+thing and were answered another, with no way to re-ask short of finding
+*Send again from here* on a sheet.
+
+The old editor treated both as the first thing: a second text box under the
+transcript, with its own Save, borrowing the composer's space. So editing a
+prompt left the panel showing an editor where the composer had been, and a
+message changed but never re-asked. The rule that replaces it was given with the
+report:
+
+> *"If I want to edit a prompt, I should see it immediately in the user prompt
+> field, where if I submit a prompt mid thread (where there are replies after)
+> it should start a branch."*
+
+So a message of yours is **taken back** — `_take_back`: lifted out of the thread
+and into the composer, where it is an ordinary unsent message and Send is
+already the thing that sends it. No new state, no second box, no third button.
+The transcript and the composer never hold the same message at once, which is
+the property that makes it legible: what is in the box is what will be sent, and
+what is in the thread is what was.
+
+Mid-thread, lifting it would destroy every reply that followed, so it happens
+**in a branch** — the thread is copied up to the turn before the message, and
+that copy is what gets edited. Section 31.4's rule, applied to the other half of
+the transcript, for the same reason.
+
+The branch is made when Edit is pressed rather than when Send is. The end state
+is the same either way, and doing it early means the panel can *show* you that
+you are in a new thread before you commit to anything, rather than moving the
+ground after you press Send. It also means no state has to be carried between
+the two presses, and stale state is what the first version of the character menu
+lost people's files to.
+
+Two edges worth stating:
+
+- **The first message of all** has no turn before it, so the branch starts
+  empty. Still a branch; the thread it came from is still whole.
+- **A picture cannot come back.** The composer's attachment is a file on disk
+  and a saved one is a data URL inside the thread. Rather than invent a
+  temporary file for the rarest path here, it is said out loud — and in the
+  branching case nothing is lost at all, because the thread it came from still
+  has it.
+
+Saving an edited **reply** now returns to the conversation rather than reopening
+the action sheet over the message it just saved. The sheet covers the bottom of
+the transcript; putting it back up after the work is done is the panel looking
+stuck on a finished thing, which is the other half of what "hangs" described.
+
+### 32.2 A message nobody ever answered
+
+The same lift, applied automatically. A thread can end in one of your messages
+with no reply: `_send` saves your message before the request goes out —
+deliberately, so it survives the reply not arriving — and `_tidy` then removes
+the empty bubble that was going to hold the answer. What is left is a question
+nobody answered, and the only thing to do with it is ask again.
+
+So `_unanswered` finds exactly that shape and `_open_thread` puts it back in the
+composer. Guarded twice: never over a box with something in it (the message
+stays in the thread, where Edit will still take it back later), and never one
+carrying a picture.
+
+### 32.3 The footer, and why 31.2 did not dock anything
+
+> *"#3 from the last improvements did not work, the bar is not docked… The real
+> problem is that in forge neo web ui, the FOOTER takes up real space on the
+> page."*
+
+Correct, and the diagnosis is the fix. `position: sticky` sticks an element
+within its **scrolling ancestor**, and the conversation header's scrolling
+ancestor is the workspace — a flex column of a fixed height, in which the header
+is already `flex: 0 0 auto` and already stays put while the transcript scrolls
+under it. The header was never the thing moving. *The page* was moving, and
+taking the whole workspace with it.
+
+The workspace is measured to end 16px above the bottom of the viewport, so
+nothing below it should exist to scroll to. One thing does: the WebUI's footer,
+which is outside anything this extension lays out and adds a strip below the
+fold. The page then scrolls by the height of a row of links, and everything —
+header included — goes up with it.
+
+`model_chain_hide_footer`, on by default, takes it off the page. The shape is
+the one the progress styling already uses and needs no endpoint and no Gradio
+component: every registered option is dumped into the browser's global `opts`,
+`llm_studio.js` reads it and writes `data-mc-footer="hidden"` on the root, and
+`style.css` does the hiding. So it is one attribute, overridable by a theme or a
+user stylesheet, nothing is removed from the DOM, and turning the setting off
+puts the footer back on the next update rather than at the next reload.
+
+It applies to every tab, which is stated in the setting rather than hidden: the
+footer is one element on the page and there is no per-tab version of it.
+
+The sticky rule stays. It does nothing in the ordinary layout and costs nothing,
+and it is the correct behaviour for the case where the workspace itself is the
+thing that scrolls — a window too short to lay out in, where `fit` publishes
+nothing and `style.css` hands the page its scroll bar back.
+
+### 32.4 One try/catch was one too few
+
+Found while testing the above, and worth its own note because the failure was
+silent. `wire()` ran all six features inside a single `try`, so the first one
+throwing took the five after it with it — a tab with no reply icons, no
+Ctrl+Enter and no fitted workspace, and one line in the console. The file's own
+header promises the opposite: *"if an id is missing, the feature it drives is
+skipped and the rest carry on."*
+
+Each concern is now wired through `attempt(what, run)` with its own `try`, and a
+node test breaks the first feature deliberately and asserts the icons are still
+drawn.
