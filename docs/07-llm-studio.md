@@ -3720,3 +3720,86 @@ as "the user took the picture away".
 `_take_back` is gone. `_unanswered` — a message that never got a reply going
 back into the composer when the thread is opened — is a different feature that
 happened to share it, and is unchanged.
+
+## 35. Three corrections (27 August 2026)
+
+### 35.1 The header stacked instead of filling the bar
+
+Putting Threads, Character and You on the conversation header (§34.4) came with
+`flex-wrap: wrap`, on the reasoning that a narrow display should get a second
+line rather than a menu. What it produced on a *wide* one was three lines: the
+menu button alone, then the heading, then the chips — three rows of chrome above
+a conversation, on the page whose entire layout is about not wasting vertical
+space.
+
+Gradio gives a block `width: 100%`. In a wrapping flex row that is the heading's
+hypothetical main size, so it takes a line to itself and pushes everything
+around it onto lines of their own; items are only shrunk below their base size
+when the row does not wrap. `flex-wrap: nowrap` puts them back on one row and
+the heading — `flex: 1 1 auto; min-width: 0`, both lines truncating — is the one
+thing there that can lose width without losing meaning. The chips and the menu
+are pinned `flex: 0 0 auto; width: auto`, because a button squeezed to an
+ellipsis is a button nobody can identify.
+
+### 35.2 The footer that was actually left, and the space that was not there
+
+§34.3 measured the page's residual scroll overflow and gave it back from the
+workspace, on the theory that a strip left behind by a hidden footer could be
+found by its effect rather than by a selector.
+
+It found the wrong thing. This page's scroll overflow is not all this
+extension's — the host's own layout has some — so what the workspace gave back
+was somebody else's, and the result was a band of empty space *above* the strip
+it was trying to remove, with the page still scrolling. Reported as "it seems
+your fix added space instead of removed it".
+
+The correction is gone. A measurement that cannot tell whose overflow it is
+measuring should not be acting on it.
+
+The strip itself turned out to be nameable after all. It is
+`footer.rc-footer` — LobeTheme's own footer, several levels down inside its
+layout, so `.gradio-container > footer` never reached it: the WebUI's `#footer`
+went, and a 32px `section.rc-footer-bottom` stayed. The rule is a descendant
+selector on the tag now rather than a list of theme class names, and the safety
+argument is unchanged and stronger than guessing: the element is a `footer`,
+whoever drew it, and nothing this extension builds is one.
+
+### 35.3 Two speakers, one grey column
+
+"It gets difficult to track my reply vs a response when the messages get long."
+Two answers, because in a long thread one is not enough.
+
+**A face beside each message.** Gradio's Chatbot takes `avatar_images` as
+`(user, bot)` and already draws the first on the right of your messages and the
+second on the left of the replies — which is exactly where they were asked for.
+A character's picture lives beside its file as `<name>.png`, which is where
+oobabooga keeps one and where importing a `.png` card already wrote it; the
+vendored store had `avatar_for`/`set_avatar` all along and nothing had ever used
+them. Yours lives beside the persona it belongs to. Both pickers are `type="pil"`
+for the host reason in §33.6, so `set_avatar` learned to take a decoded picture
+as well as a path.
+
+`avatar_images` is resolved through `Blocks.serve_static_file`, which passes a
+dict straight through and, for a bare path, copies the file into Gradio's cache
+first. The dict form is used for both: one code path for the initial build and
+for a later change of face, and nothing is copied out of the folder the user can
+edit.
+
+Whoever has not chosen a picture gets a drawn one — a letter on a disc, with the
+hue from a hash of the name. A face on one side and a gap on the other is worse
+than either, because the gap reads as a message that failed to load. Drawn
+rather than shipped: a checked-in PNG is a binary in a repository of text, and
+one that would have to be two to sit honestly on either theme.
+
+The colour needed one more rule. Name-derived hues are well spread over three
+hundred and sixty degrees and still land next to each other often enough to
+matter when there are only two on screen — "Ada" and "Chatbot" hash three
+degrees apart, which on a dark theme is the same red twice. So the other side of
+a conversation is turned half a circle by construction, and the two can never
+collide whatever the names happen to be.
+
+**An edge on the bubble**, for a reader who has scrolled past the face or whose
+thread is one long reply: two pixels of the host's accent on the side each
+message is aligned to. An edge and not a wash — a background strong enough to
+separate two speakers on a dark theme is strong enough to be the loudest thing
+on a page whose job is to be read.

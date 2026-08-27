@@ -189,35 +189,19 @@ class TestFittingTheWorkspace:
         for window in (700, 900, 1400):
             assert pixels(measure(top=0, window=window)) <= window
 
-    def test_it_gives_back_whatever_still_hangs_below_the_fold(self):
-        """The point of the whole thing: when the workspace has been sized and
-        the page can *still* be scrolled, the difference is space the reader can
-        only scroll into and find nothing in.
+    def test_it_does_not_give_back_room_for_overflow_that_is_not_its_own(self):
+        """There was a pass here that read the page's scrollHeight and shrank
+        the workspace by whatever still hung below the fold, to find a strip
+        left behind by a hidden footer without naming it.
 
-        Reported after the WebUI's footer was hidden -- "I am still able to
-        scroll down, but now into blank space". Hiding the links took away the
-        links and left the room they were in, and no list of selectors can be
-        relied on to find every element that could be responsible. So none is
-        used: what is measured is whether the page still scrolls."""
-        for trailing in (16, 48, 120):
-            height = pixels(measure(top=240, window=900, trailing=trailing))
-            # Where the page now ends. Anything past the window is somewhere to
-            # scroll to, and there is nothing there.
-            assert 240 + height + trailing <= 900
-
-    def test_a_page_that_already_fits_is_left_alone(self):
-        """The correction only ever shrinks. A page with nothing below the fold
-        has nothing to give back, and a workspace that grew to fill an overflow
-        that was not there would be the feedback loop this file already has a
-        test against."""
-        assert pixels(measure(top=240, window=900, trailing=0)) == 900 - 240 - 16
-
-    def test_it_never_shrinks_below_the_floor_it_will_lay_out_in(self):
-        """A trailing strip taller than the room available would otherwise take
-        the workspace to nothing. Below the floor it stops and the page keeps
-        its scroll bar, which is the honest outcome: there is genuinely not
-        enough window."""
-        assert pixels(measure(top=240, window=900, trailing=5000)) >= 260
+        It found the wrong thing. The page's overflow is not all this
+        extension's -- the host's layout has its own -- so what the workspace
+        gave back was somebody else's, and what appeared was a band of empty
+        space *above* the strip, with the page still scrolling. Reported as
+        "your fix added space instead of removed it". A footer is a thing that
+        can be named, and style.css names it."""
+        for trailing in (0, 48, 5000):
+            assert pixels(measure(top=240, window=900, trailing=trailing)) == 900 - 240 - 16
 
     def test_a_window_too_short_to_lay_out_in_publishes_nothing(self):
         """Below that, style.css hands the page its scroll bar back rather than

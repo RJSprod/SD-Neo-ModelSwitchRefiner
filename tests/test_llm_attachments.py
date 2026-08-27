@@ -310,3 +310,61 @@ class TestTheRequestReadsThemBack:
         mc_llm_chat_panel._with_pictures([message])
 
         assert "image" not in message.to_dict()
+
+
+class TestTheFacesBesideTheMessages:
+    """Two speakers, one grey column. A long thread of identical blocks has
+    nothing to scan for, and "which of these did I write" should not be a
+    question the reader answers by reading."""
+
+    def test_a_drawn_face_is_produced_for_a_name(self, root):
+        found = attachments.default_avatar("Ada")
+
+        assert found is not None and found.is_file()
+        assert found.parent == root / attachments.AVATARS_DIRNAME
+
+    def test_the_same_name_is_the_same_face_and_written_once(self, root):
+        first = attachments.default_avatar("Ada")
+        written = first.stat().st_mtime_ns
+        second = attachments.default_avatar("Ada")
+
+        assert first == second
+        assert second.stat().st_mtime_ns == written
+
+    def test_two_names_get_two_faces(self, root):
+        assert attachments.default_avatar("Ada") != attachments.default_avatar("Chatbot")
+
+    def test_the_two_sides_cannot_come_out_the_same_colour(self, root):
+        """Name-derived hues are well spread and still land next to each other
+        often enough to matter when there are only two on screen: "Ada" and
+        "Chatbot" are three degrees apart, which on a dark theme is the same red
+        twice. So the other side is turned half a circle by construction."""
+        for name in ("Ada", "Chatbot", "You", ""):
+            mine = attachments._tint(name, attachments.OPPOSITE)
+            theirs = attachments._tint(name)
+            assert _apart(mine, theirs) > 0x30
+
+    def test_a_name_with_no_letters_in_it_still_gets_a_face(self, root):
+        assert attachments.default_avatar("!!!") is not None
+        assert attachments.default_avatar("") is not None
+
+    def test_a_face_is_handed_over_in_the_shape_gradio_takes(self, root):
+        """``avatar_images`` goes through ``serve_static_file``, which passes a
+        dict straight through and *copies* a bare path into Gradio's cache. The
+        dict is one code path for the build and for a later change, and nothing
+        is copied out of the folder the user can edit."""
+        found = attachments.file_data(attachments.default_avatar("Ada"))
+
+        assert found["url"].startswith("file=")
+        assert found["path"].endswith(".png")
+        assert found["meta"] == {"_type": "gradio.FileData"}
+
+    def test_nothing_is_handed_over_for_a_file_that_is_not_there(self, root):
+        assert attachments.file_data(None) is None
+        assert attachments.file_data(root / "never-written.png") is None
+
+
+def _apart(first: int, second: int) -> int:
+    """How far two packed RGB colours are, as the largest channel difference."""
+    return max(abs(((first >> shift) & 0xFF) - ((second >> shift) & 0xFF))
+               for shift in (16, 8, 0))

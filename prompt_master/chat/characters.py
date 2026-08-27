@@ -261,14 +261,9 @@ class CharacterStore:
             existing.unlink(missing_ok=True)
         if source is None:
             return None
-        from PIL import Image, ImageOps
-
         target = self.directory / f"{safe_stem(name)}.png"
         self.directory.mkdir(parents=True, exist_ok=True)
-        with Image.open(source) as opened:
-            image = ImageOps.exif_transpose(opened).convert("RGBA")
-            image.thumbnail((512, 512), Image.Resampling.LANCZOS)
-            image.save(target, "PNG")
+        write_avatar(source, target)
         return target
 
     # ── importing ────────────────────────────────────────────────────────────
@@ -331,6 +326,55 @@ def _unwrap(data: object) -> dict:
     if isinstance(data, dict) and isinstance(data.get("data"), dict):
         return data["data"]
     return data if isinstance(data, dict) else {}
+
+
+PERSONA_AVATAR = "persona.png"
+"""Your own picture, beside the persona it belongs to.
+
+Not in the characters folder: that folder is a set of character files and their
+pictures, in the layout oobabooga reads, and a face in it with no character
+behind it is a file that list has to know to skip.
+"""
+
+
+def write_avatar(source, target: Path) -> None:
+    """One picture, sized down and written as PNG.
+
+    ``source`` is a path or an already-decoded picture, because the UI has both:
+    an imported card is a file, and the picker in the panel hands over the image
+    itself -- Gradio's filepath preprocess is unusable in this host, which is
+    why nothing in this application asks it for one.
+
+    Bounded in size because a transcript showing a face beside every message
+    should not be reading a full-resolution photograph to do it.
+    """
+    from PIL import Image, ImageOps
+
+    opened = source if hasattr(source, "convert") else Image.open(source)
+    try:
+        image = ImageOps.exif_transpose(opened).convert("RGBA")
+        image.thumbnail((512, 512), Image.Resampling.LANCZOS)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        image.save(target, "PNG")
+    finally:
+        if opened is not source:
+            opened.close()
+
+
+def persona_avatar(paths) -> Path | None:
+    """Your picture, or ``None`` when you have not chosen one."""
+    found = Path(paths.data) / PERSONA_AVATAR
+    return found if found.is_file() else None
+
+
+def set_persona_avatar(paths, source) -> Path | None:
+    """Give yourself a face, or take the one you had away."""
+    target = Path(paths.data) / PERSONA_AVATAR
+    if source is None:
+        target.unlink(missing_ok=True)
+        return None
+    write_avatar(source, target)
+    return target
 
 
 def safe_stem(name: str) -> str:

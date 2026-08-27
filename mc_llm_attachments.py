@@ -200,6 +200,156 @@ to that question rebuilds a set each time.
 """
 
 
+AVATARS_DIRNAME = "avatars"
+"""Where the drawn stand-in faces are kept, beside the pictures.
+
+Only the *generated* ones. A character's own picture lives beside the character
+file, where oobabooga puts it and where importing a card already writes it, and
+yours lives beside the persona it belongs to. These are the discs drawn for
+whoever has not chosen one, and they are here because they are files this
+extension made rather than files anybody gave it.
+"""
+
+AVATAR_SIZE = 128
+"""How large a drawn face is. Twice the size it is ever shown at, so it stays
+crisp on a display that doubles everything."""
+
+
+def avatar_root() -> Path:
+    return mc_llm_paths.data_root() / AVATARS_DIRNAME
+
+
+def file_data(path) -> dict | None:
+    """One local file in the shape Gradio hands its own components.
+
+    ``avatar_images`` is resolved through ``Blocks.serve_static_file``, which
+    passes a dict straight through and, for a bare path, *copies the file into
+    Gradio's cache* first. The dict form is used for both reasons: there is one
+    code path for the initial build and for a later change of face, and nothing
+    is copied -- the file is served where it already is, which is the folder the
+    user can go and edit.
+    """
+    if path is None:
+        return None
+    found = Path(path)
+    if not found.is_file():
+        return None
+    allow(found)
+    return {"path": str(found), "url": f"file={quote(found.as_posix(), safe='/:')}",
+            "orig_name": found.name, "mime_type": None, "size": None,
+            "is_stream": False, "meta": {"_type": "gradio.FileData"}}
+
+
+OPPOSITE = 180
+"""The hue the other side of a conversation is drawn at.
+
+Two faces are on screen at once and they are always the same two -- yours and
+the character's -- so their colours are made to differ by construction rather
+than by luck. Name-derived hues are well spread over three hundred and sixty
+degrees and still land next to each other often enough to matter when there are
+only two of them: "Ada" and "Chatbot" come out three degrees apart, which on a
+dark theme is the same red twice.
+"""
+
+
+def default_avatar(label: str, shift: int = 0) -> Path | None:
+    """A drawn stand-in for whoever has not chosen a picture. Never raises.
+
+    A letter on a coloured disc, and the colour comes from the name, so two
+    characters are told apart at a glance rather than sharing one grey circle.
+    Deterministic, so the same name is the same face in every thread and the
+    file is written once.
+
+    ``shift`` turns the hue: :data:`OPPOSITE` for the other side of the
+    conversation, so the two faces on screen cannot come out the same colour
+    whatever the two names happen to hash to.
+
+    Drawn rather than shipped. A checked-in PNG is a binary in a repository of
+    text, and one that would have to be two -- a light and a dark -- to sit
+    honestly on either theme. A disc with a letter on it needs neither.
+    """
+    initial = _initial(label)
+    tint = _tint(label, shift)
+    destination = avatar_root() / f"{initial.lower()}-{tint:06x}.png"
+    if destination.is_file():
+        return destination
+    try:
+        _draw(destination, initial, tint)
+    except Exception:
+        logger.debug("Model Chain: could not draw a stand-in avatar for %r", label,
+                     exc_info=True)
+        return None
+    return destination
+
+
+def _initial(label: str) -> str:
+    for character in str(label or "").strip():
+        if character.isalnum():
+            return character.upper()
+    return "?"
+
+
+def _tint(label: str, shift: int = 0) -> int:
+    """A colour for this name: fixed hue, fixed saturation, chosen lightness.
+
+    Out of the hash rather than a palette lookup, so a name this extension has
+    never seen still gets a colour of its own -- and out of *hue* alone, so
+    every one of them is the same weight against a dark theme. A palette that
+    varied lightness would give one character a face that glowed and another one
+    that vanished.
+    """
+    import colorsys
+
+    hue = (int(hashlib.sha256(str(label or "").encode("utf-8")).hexdigest()[:8], 16)
+           + int(shift)) % 360
+    red, green, blue = colorsys.hls_to_rgb(hue / 360.0, 0.42, 0.55)
+    return (int(red * 255) << 16) | (int(green * 255) << 8) | int(blue * 255)
+
+
+def _draw(destination: Path, initial: str, tint: int) -> None:
+    from PIL import Image, ImageDraw
+
+    size = AVATAR_SIZE
+    face = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    canvas = ImageDraw.Draw(face)
+    canvas.ellipse((0, 0, size - 1, size - 1),
+                   fill=((tint >> 16) & 0xFF, (tint >> 8) & 0xFF, tint & 0xFF, 255))
+    glyph = _glyph(initial, int(size * 0.46))
+    if glyph is not None:
+        face.paste(glyph, ((size - glyph.width) // 2, (size - glyph.height) // 2), glyph)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.with_name(destination.name + ".part")
+    face.save(partial, "PNG")
+    partial.replace(destination)
+
+
+def _glyph(initial: str, wanted: int):
+    """One letter, at whatever size is asked for, from the font that is there.
+
+    Pillow's built-in font is a bitmap of one size, and asking it for another
+    needs a Pillow new enough to have grown the argument. So the letter is drawn
+    at the size the font has and then scaled, which works on every Pillow and
+    costs a slightly soft edge on a disc nobody is reading closely.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        return None
+    tile = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    ImageDraw.Draw(tile).text((32, 32), initial, font=font, anchor="mm",
+                              fill=(255, 255, 255, 235))
+    box = tile.getbbox()
+    if box is None:
+        return None
+    cropped = tile.crop(box)
+    scale = wanted / max(cropped.width, cropped.height)
+    return cropped.resize((max(1, int(cropped.width * scale)),
+                           max(1, int(cropped.height * scale))),
+                          Image.Resampling.LANCZOS)
+
+
 def allow(path: Path) -> None:
     """Ask the host to serve this file. Best-effort, and never raises.
 
@@ -266,5 +416,6 @@ def _escape(text: str) -> str:
     return html.escape(str(text or ""), quote=True)
 
 
-__all__ = ["DIRNAME", "MISSING", "adopt", "allow", "data_url", "folder", "locate",
-           "markup", "root", "store"]
+__all__ = ["AVATARS_DIRNAME", "DIRNAME", "MISSING", "OPPOSITE", "adopt", "allow", "avatar_root",
+           "data_url", "default_avatar", "file_data", "folder", "locate", "markup",
+           "root", "store"]

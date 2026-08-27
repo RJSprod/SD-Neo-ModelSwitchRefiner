@@ -905,14 +905,19 @@
     align-items: center;
     background: var(--background-fill-primary, var(--body-background-fill, inherit));
     flex: 0 0 auto;
-    /* Threads, Character and You are on this row rather than behind a menu, so
-       it has more on it than it used to and has to be allowed to wrap. Wrapping
-       to a second line is a smaller loss on a narrow display than folding three
-       destinations back into a menu, which is a tap in front of each of them.
-       The heading takes the width, so the chips are what move. */
-    flex-wrap: wrap;
+    /* One row, always. Gradio gives a block `width: 100%`, so in a *wrapping*
+       row the heading's hypothetical size is the whole bar and every control
+       around it is pushed onto a line of its own -- which is what putting
+       Threads, Character and You on this bar produced: three empty-ish rows of
+       chrome above a conversation, on the one page whose whole layout is about
+       not wasting vertical space.
+       Not wrapping, the flex algorithm shrinks instead, and the heading is the
+       only thing here that can lose width without losing meaning -- it is
+       `flex: 1 1 auto; min-width: 0` and both its lines truncate. */
+    flex-wrap: nowrap;
     gap: 0.4em;
     min-width: 0;
+    overflow: hidden;
     position: sticky;
     top: 0;
     /* Above the transcript and below the sheets, which are the panel's own
@@ -924,6 +929,15 @@
     flex: 1 1 auto;
     min-width: 0;
     overflow: hidden;
+}
+
+/* The destinations and the state chip keep their own width on that row: they
+   are words a finger aims at, and a button squeezed to an ellipsis is a button
+   nobody can identify. */
+#mc-llm-studio .mc-llm-chat-header .mc-llm-chip-button,
+#mc-llm-studio .mc-llm-chat-header .mc-llm-icon-button {
+    flex: 0 0 auto;
+    width: auto;
 }
 
 /* Height is taken, not given. gr.Chatbot(height=...) writes an inline style,
@@ -1004,6 +1018,55 @@
     color: var(--body-text-color, inherit);
 }
 
+/* -- telling a question from an answer ------------------------------------
+   Two things, because one of them is not enough in a long thread. A face
+   beside each message says whose it is at a glance -- Gradio draws yours on
+   the right and the character's on the left, which is where the eye is already
+   looking -- and an edge on the bubble says it again for a reader who has
+   scrolled past the face, or whose thread is one long reply.
+
+   An edge and not a wash. A background strong enough to distinguish two
+   speakers on a dark theme is a background strong enough to be the loudest
+   thing on the page, and the transcript's job is to be read. Two pixels of the
+   host's own accent on the side the message is aligned to costs nothing and is
+   unmistakable at any scroll position.
+
+   The accent is the host's, so a theme's own colour is what appears; the
+   fallback is `currentColor`, which is legible under every theme by
+   construction because it is the text that is already there. */
+#mc-llm-studio .mc-llm-transcript .message.user {
+    border-inline-end: 2px solid var(--color-accent, currentColor);
+}
+
+#mc-llm-studio .mc-llm-transcript .message.bot {
+    border-inline-start: 2px solid var(--border-color-accent, var(--border-color-primary,
+                                                                 currentColor));
+}
+
+/* The faces themselves. Round, small, and never allowed to grow: an avatar
+   that scaled with the bubble would be a portrait beside a one-word reply. */
+#mc-llm-studio .mc-llm-transcript .avatar-container {
+    align-self: flex-start;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    height: 2em;
+    overflow: hidden;
+    width: 2em;
+}
+
+#mc-llm-studio .mc-llm-transcript .avatar-container img {
+    height: 100%;
+    object-fit: cover;
+    width: 100%;
+}
+
+/* The two pickers that choose them, in the Character and You screens. Square,
+   modest, and the same size as each other so the two screens read alike. */
+#mc-llm-studio .mc-llm-face {
+    flex: 0 0 auto;
+    max-width: 8em;
+}
+
 /* -- the WebUI's footer ----------------------------------------------------
    Not this extension's element, and the one rule in this file that reaches
    outside its own panels. It earns that: the conversation workspace is built to
@@ -1018,13 +1081,20 @@
    removing anything: the element and everything in it is still there, still
    findable, and comes straight back.
 
-   Two selectors because two footers are possible: the WebUI's own `#footer`
-   (the API and Github links and the version line), and Gradio's built-in one,
-   which is a `footer` element inside the container. Nothing this extension
-   builds is a `footer`, so the second cannot reach our own markup. */
+   Three selectors because there are three footers about. The WebUI's own
+   `#footer` (the API and Github links and the version line); Gradio's built-in
+   one; and the theme's, which is what was actually left behind when the first
+   two went -- LobeTheme draws `footer.rc-footer` several levels down inside its
+   own layout, so a child selector never reached it and what remained was a
+   32px strip of nothing that the page still scrolled into.
+
+   A descendant selector rather than a list of theme class names: the element is
+   a `footer`, whoever drew it, and nothing this extension builds is one. That
+   is the whole safety argument, and it is a stronger one than guessing at the
+   class names of every theme somebody might install. */
 :root[data-mc-footer="hidden"] #footer,
-:root[data-mc-footer="hidden"] .gradio-container > footer,
-:root[data-mc-footer="hidden"] gradio-app > footer {
+:root[data-mc-footer="hidden"] .gradio-container footer,
+:root[data-mc-footer="hidden"] gradio-app footer {
     display: none !important;
 }
 
