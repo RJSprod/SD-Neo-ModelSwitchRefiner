@@ -583,23 +583,6 @@
         return element.getBoundingClientRect().top + scrolled;
     }
 
-    // How many times the height is corrected against what the page actually
-    // did with it. Two is enough in practice -- the first correction takes off
-    // whatever was below the fold, and the second confirms it -- and the bound
-    // is what stops a layout that will not settle from spinning here.
-    const SETTLE_PASSES = 2;
-
-    function overflow() {
-        // How much of the page is below the window. Zero when the content fits,
-        // which is the state this whole function exists to reach -- and zero
-        // when the two numbers cannot be read, because a correction computed
-        // from a missing measurement is worse than no correction at all.
-        const page = document.documentElement;
-        if (!page) return 0;
-        const spare = page.scrollHeight - page.clientHeight;
-        return Number.isFinite(spare) ? Math.max(0, spare) : 0;
-    }
-
     function publish(element, height) {
         const wanted = Math.round(height) + "px";
         // Written only when it changes: this runs on every click, and setting
@@ -625,36 +608,22 @@
         // Never taller than the window, whatever the arithmetic said. A
         // measurement that has somehow gone wrong should cost a workspace that
         // is a little short, never one that cannot be scrolled back out of.
-        let height = Math.min(available, window.innerHeight - BOTTOM_MARGIN_PX);
-        publish(element, height);
-
-        // What the arithmetic above cannot see. It measures from the top of the
-        // workspace to the bottom of the window, which is right only if nothing
-        // sits below the workspace -- and something always does: the container's
-        // own bottom padding, and whatever the host puts after the tab.
+        // And nothing after it. There was a pass here that read the page's own
+        // scrollHeight and gave back whatever still hung below the fold, on the
+        // theory that a strip left behind by a hidden footer could be found by
+        // its effect rather than by a selector.
         //
-        // Hiding the WebUI's footer took away the links and left the space they
-        // were in, and the page went on scrolling by that much into nothing.
-        // Reported as "I am still able to scroll down, but now into blank
-        // space", and no list of selectors can be relied on to find every
-        // element that could be responsible.
+        // It found the wrong thing. This page's scroll overflow is not all ours
+        // -- the host's layout has its own -- so what the workspace gave back
+        // was somebody else's, and the result was a band of empty space above
+        // the strip it was trying to remove, with the page still scrolling.
+        // Reported as "your fix added space instead of removed it".
         //
-        // So it is not looked for. What is measured is the *result*: if the page
-        // can still be scrolled after the height is applied, the workspace gives
-        // back exactly that much and the page stops scrolling. Reading
-        // scrollHeight forces the layout that has just been invalidated, which
-        // is the point -- the correction is against what the browser did, not
-        // against what this expected it to do.
-        //
-        // It converges because it only ever shrinks, and because documentTop is
-        // scroll-invariant: taking pixels off this element takes the same pixels
-        // off the page, and nothing above it moves.
-        for (let pass = 0; pass < SETTLE_PASSES; pass++) {
-            const spare = overflow();
-            if (spare <= 0 || height - spare < MIN_AVAILABLE_PX) break;
-            height -= spare;
-            if (!publish(element, height)) break;
-        }
+        // The strip was the theme's own footer, and a footer is a thing that
+        // can be named. It is named in style.css and hidden there. A measurement
+        // that cannot tell whose overflow it is measuring should not be acting
+        // on it.
+        publish(element, Math.min(available, window.innerHeight - BOTTOM_MARGIN_PX));
     }
 
     function fit() {

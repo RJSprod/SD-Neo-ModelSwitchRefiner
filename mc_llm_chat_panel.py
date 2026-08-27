@@ -240,6 +240,12 @@ def build() -> dict:
             transcript = gr.Chatbot(
                 label=None, show_label=False, show_copy_button=False, render_markdown=True,
                 value=initial_rows,
+                # Yours on the right of your messages and the character's on the
+                # left of its replies, which is where Gradio already puts them
+                # -- a reply and a question are otherwise the same grey block,
+                # and in a long thread there is nothing to scan for. See
+                # :func:`_faces`.
+                avatar_images=_faces(who),
                 elem_id=ui.ident("chat", "transcript"),
                 elem_classes=ui.classes("transcript"))
 
@@ -420,6 +426,14 @@ def build() -> dict:
             with gr.Group(visible=False,
                           elem_id=ui.ident("chat", "character-editor")) as character_editor:
                 name = gr.Textbox(label="Name", elem_id=ui.ident("chat", "name"))
+                # Beside the character file as ``<name>.png``, which is where
+                # oobabooga keeps one and where importing a card already writes
+                # it -- so a character imported with a face already has one and
+                # this box is only for the ones that did not.
+                character_face = gr.Image(label="Picture", type="pil", sources=["upload"],
+                                          height=96, width=96, show_download_button=False,
+                                          elem_id=ui.ident("chat", "character-face"),
+                                          elem_classes=ui.classes("face"))
                 context = gr.Textbox(label="Context", lines=6,
                                      placeholder="Who the character is. Shown to the model "
                                                  "before the first line of dialogue.")
@@ -478,6 +492,11 @@ def build() -> dict:
                                          elem_classes=ui.classes("sheet-back"))
                 gr.Markdown("#### You")
             persona_name = gr.Textbox(label="Your name", value=initial_persona.name)
+            persona_face = gr.Image(label="Your picture", type="pil", sources=["upload"],
+                                    height=96, width=96, show_download_button=False,
+                                    value=_face_value(_persona_face()),
+                                    elem_id=ui.ident("chat", "persona-face"),
+                                    elem_classes=ui.classes("face"))
             persona_description = gr.Textbox(label="About you", lines=4,
                                              value=initial_persona.description)
             save_persona = gr.Button("Save", variant="primary", size="sm")
@@ -523,7 +542,8 @@ def build() -> dict:
     to_character.click(fn=_open_character_screen, inputs=[character],
                        outputs=screens + [character], queue=False)
     to_persona.click(fn=_open_persona,
-                     outputs=screens + [persona_name, persona_description], queue=False)
+                     outputs=screens + [persona_name, persona_description, persona_face],
+                     queue=False)
 
     # -- threads ---------------------------------------------------------- #
 
@@ -556,12 +576,13 @@ def build() -> dict:
     # ``_editor_fields`` answers in, so none of them can leave the boxes and
     # the character being written to describing different characters.
     editor = ([character_editor, editing, name, context, greeting, system]
-              + sampling + [system_preview, status])
+              + sampling + [system_preview, status, character_face])
 
-    character.change(fn=_select_character, inputs=[character, search, message],
-                     outputs=[threads, thread_state, message] + view
-                     + [name, context, greeting, system] + sampling
-                     + [editing, system_preview], queue=False)
+    switched = character.change(fn=_select_character, inputs=[character, search, message],
+                                outputs=[threads, thread_state, message] + view
+                                + [name, context, greeting, system] + sampling
+                                + [editing, system_preview, character_face], queue=False)
+    switched.then(fn=_faces_update, inputs=[character], outputs=[transcript], queue=False)
     edit_character.click(fn=_open_character, inputs=[character], outputs=editor, queue=False)
     new_character.click(fn=_new_character, outputs=editor, queue=False)
     refresh_characters.click(fn=_refresh_characters, inputs=[character],
@@ -574,17 +595,26 @@ def build() -> dict:
                    outputs=[system_preview], queue=False)
     edit_system.click(fn=_adopt_system_prompt, inputs=[name, context, system],
                       outputs=[system, status], queue=False)
-    save_character.click(
+    saving = save_character.click(
         fn=_save_character,
-        inputs=[editing, name, context, greeting, system] + sampling,
+        inputs=[editing, name, context, greeting, system] + sampling + [character_face],
         outputs=[character, editing, status], queue=False)
+    saving.then(fn=_faces_update, inputs=[character], outputs=[transcript], queue=False)
     delete_character.click(fn=_delete_character, inputs=[character],
                            outputs=[character, character_editor, editing, status], queue=False)
-    import_card.upload(fn=_import_character, inputs=[import_card],
-                       outputs=[character, character_editor, editing, status], queue=False)
+    imported = import_card.upload(
+        fn=_import_character, inputs=[import_card],
+        outputs=[character, character_editor, editing, status], queue=False)
+    # A ``.png`` card carries its own picture, and importing one writes it
+    # beside the character. The transcript is told, because the character it
+    # has just landed on is the one being talked to.
+    imported.then(fn=_faces_update, inputs=[character], outputs=[transcript], queue=False)
 
-    save_persona.click(fn=_save_persona, inputs=[persona_name, persona_description],
-                       outputs=[status], queue=False)
+    persona_saved = save_persona.click(
+        fn=_save_persona, inputs=[persona_name, persona_description, persona_face],
+        outputs=[status], queue=False)
+    persona_saved.then(fn=_faces_update, inputs=[character], outputs=[transcript],
+                       queue=False)
 
     # -- the per-message actions ------------------------------------------ #
 
@@ -764,6 +794,78 @@ def _persona():
     from prompt_master.chat.characters import load_persona
 
     return load_persona(mc_llm_paths.app_paths())
+
+
+def _persona_face():
+    from prompt_master.chat.characters import persona_avatar
+
+    try:
+        return persona_avatar(mc_llm_paths.app_paths())
+    except Exception:
+        logger.debug("Model Chain: could not read your picture", exc_info=True)
+        return None
+
+
+def _character_face(who: str):
+    try:
+        return _characters().avatar_for(who) if who else None
+    except Exception:
+        logger.debug("Model Chain: could not read %s's picture", who, exc_info=True)
+        return None
+
+
+def _face_value(path):
+    """A picture for a picker to show, or nothing.
+
+    The host is asked to serve it on the way past. Gradio shows a path-valued
+    Image by handing the browser a ``file=`` URL, and a URL for a file Gradio
+    was never told about is a broken picture in a box that is supposed to be
+    showing somebody what they already chose.
+    """
+    if path is None:
+        return None
+    mc_llm_attachments.allow(Path(path))
+    return str(path)
+
+
+def _faces(who: str) -> list:
+    """``[you, the character]`` -- what the transcript draws beside each message.
+
+    In that order because that is the order Gradio's Chatbot takes them, and it
+    already puts the first on the right of your messages and the second on the
+    left of the replies. Which is the whole request: a long thread of grey
+    blocks has nothing to scan for, and "which of these did I write" should not
+    be a question the reader has to answer by reading.
+
+    Whoever has not chosen a picture gets a drawn one rather than nothing --
+    a face on one side and a gap on the other is worse than either, because the
+    gap reads as a message that failed to load. See
+    :func:`mc_llm_attachments.default_avatar`, and note the two are drawn at
+    opposite hues so they cannot come out the same colour.
+
+    Never raises: a transcript that cannot draw a face is a transcript, and a
+    panel that would not build because of one is not.
+    """
+    try:
+        person = _persona()
+        yours = _persona_face() or mc_llm_attachments.default_avatar(
+            person.display, mc_llm_attachments.OPPOSITE)
+        theirs = _character_face(who) or mc_llm_attachments.default_avatar(
+            who or "Character")
+        return [mc_llm_attachments.file_data(yours), mc_llm_attachments.file_data(theirs)]
+    except Exception:
+        logger.debug("Model Chain: could not work out the transcript's faces", exc_info=True)
+        return [None, None]
+
+
+def _faces_update(who: str):
+    """The transcript, told about a face that has just changed.
+
+    Only the faces: an update carrying no value leaves the messages exactly as
+    they are, which matters because this is chained after handlers that have
+    already put the right thread on screen.
+    """
+    return gr.update(avatar_images=_faces(who))
 
 
 def _character_choices() -> list[str]:
@@ -1107,7 +1209,8 @@ def _open_character_screen(who) -> list:
 
 def _open_persona() -> list:
     person = _persona()
-    return _screens("persona") + [person.name, person.description]
+    return _screens("persona") + [person.name, person.description,
+                                  _face_value(_persona_face())]
 
 
 def _offer_attachment():
@@ -1169,7 +1272,8 @@ def _select_character(who, filter_text, typed=""):
             + [loaded.name, loaded.context, loaded.greeting, loaded.system,
                loaded.temperature, loaded.top_p, loaded.max_reply_tokens, loaded.seed,
                loaded.name or NOT_EDITING,
-               _system_preview(loaded.name, loaded.context, loaded.system)])
+               _system_preview(loaded.name, loaded.context, loaded.system),
+               _face_value(_character_face(loaded.name))])
 
 
 def _open_thread(who, identifier, typed=""):
@@ -1989,12 +2093,17 @@ def _editor_fields(character, editing: str, note: str, kind: str = "info") -> li
             _number(character.max_reply_tokens, blank.max_reply_tokens),
             _number(character.seed, blank.seed),
             _system_preview(character.name, character.context, character.system),
-            ui.notice(note, kind)]
+            ui.notice(note, kind),
+            # The picture this character has, if it has one. Read off disk with
+            # everything else so the box cannot end up showing the face of the
+            # character that *was* open in the editor.
+            _face_value(_character_face(character.name))]
 
 
 def _closed_editor(note: str, kind: str = "info") -> list:
     """The editor shut, with everything in it left exactly as it was."""
-    return [gr.update(visible=False), gr.update()] + [gr.update()] * 9 + [ui.notice(note, kind)]
+    return ([gr.update(visible=False), gr.update()] + [gr.update()] * 9
+            + [ui.notice(note, kind), gr.update()])
 
 
 def _system_preview(name, context, system) -> str:
@@ -2091,7 +2200,7 @@ def _cancel_character(who):
 
 
 def _save_character(editing, name, context, greeting, system, temperature, top_p,
-                    reply_tokens, seed):
+                    reply_tokens, seed, face=None):
     """Write the editor to disk, creating or renaming as ``editing`` says.
 
     ``editing`` and not the drop-down, which is the whole fix. Creating refuses
@@ -2122,6 +2231,15 @@ def _save_character(editing, name, context, greeting, system, temperature, top_p
         store.save(character, previous_name=None if creating else editing)
     except Exception as exc:
         return [gr.update(), gr.update(), ui.notice(ui.failure(exc), "error")]
+
+    # After the save, so a rename has already moved the old picture onto the new
+    # stem and this writes over the right file. ``face`` is None when the box
+    # was emptied, which is how a character's picture is taken away.
+    try:
+        store.set_avatar(character.name, face)
+    except Exception:
+        logger.warning("Model Chain: %s was saved but its picture could not be",
+                       character.name, exc_info=True)
 
     # ``editing`` becomes the saved name, so pressing Save a second time edits
     # what was just created rather than trying to create it again.
@@ -2171,12 +2289,20 @@ def _import_character(upload):
             ui.notice(f"Imported {imported.name}.")]
 
 
-def _save_persona(name, description):
-    from prompt_master.chat.characters import Persona, save_persona
+def _save_persona(name, description, face=None):
+    """Your name, what you are like, and your face. ``face`` of None removes it."""
+    from prompt_master.chat.characters import Persona, save_persona, set_persona_avatar
 
+    paths = mc_llm_paths.app_paths()
     try:
-        save_persona(mc_llm_paths.app_paths(),
-                     Persona(name=(name or "").strip(), description=description or ""))
+        save_persona(paths, Persona(name=(name or "").strip(),
+                                    description=description or ""))
     except Exception as exc:
         return ui.notice(ui.failure(exc), "error")
+    try:
+        set_persona_avatar(paths, face)
+    except Exception:
+        logger.warning("Model Chain: your persona was saved but your picture could not be",
+                       exc_info=True)
+        return ui.notice("Saved, but your picture could not be written.", "warn")
     return ui.notice("Saved.")

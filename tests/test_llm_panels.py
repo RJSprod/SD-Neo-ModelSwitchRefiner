@@ -801,6 +801,136 @@ class TestTheHeaderCarriesTheDestinations:
             assert f'"{ui.ident("chat", name)}"' in script
 
 
+class TestWhoSaidWhat:
+    """A face beside every message, and an edge on the bubble saying it again.
+
+    Asked for as "it gets difficult to track my reply vs a response when the
+    messages get long" -- with the placement spelled out: yours to the right of
+    your message, the character's to the left of the reply. That is where
+    Gradio's Chatbot already draws them, so what this had to do was give it
+    two pictures and make sure neither side is ever missing one.
+    """
+
+    @pytest.fixture
+    def characters(self, store):
+        from prompt_master.chat.characters import Character
+
+        (store / "characters").mkdir(parents=True, exist_ok=True)
+        held = mc_llm_chat_panel._characters()
+        held.save(Character(name="Ada", context="an existing character"))
+        return held
+
+    def test_the_transcript_is_built_with_two_faces(self, store, monkeypatch):
+        import gradio as gr
+
+        seen = []
+
+        class Recorded(gr.Chatbot):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                seen.append(kwargs.get("avatar_images"))
+
+        monkeypatch.setattr(gr, "Chatbot", Recorded)
+        mc_llm_chat_panel.build()
+
+        assert seen and len(seen[0]) == 2
+        assert all(face is not None for face in seen[0])
+
+    def test_yours_is_first_because_that_is_the_order_gradio_takes(self, store):
+        """(user, bot). Getting it the wrong way round would put the character's
+        face on your messages, which reads as the transcript being confused
+        about who is talking."""
+        import mc_llm_attachments
+
+        faces = mc_llm_chat_panel._faces("Ada")
+        yours = mc_llm_attachments.default_avatar("You", mc_llm_attachments.OPPOSITE)
+
+        assert faces[0]["path"] == str(yours)
+
+    def test_nobody_is_left_without_one(self, store):
+        """A face on one side and a gap on the other is worse than either: the
+        gap reads as a message that failed to load."""
+        for who in ("Ada", "", None):
+            assert all(face is not None for face in mc_llm_chat_panel._faces(who))
+
+    def test_a_character_with_a_picture_of_its_own_uses_it(self, store, characters):
+        from pathlib import Path
+
+        from PIL import Image
+
+        import mc_llm_paths
+
+        chosen = Image.new("RGB", (20, 20), (10, 200, 90))
+        mc_llm_chat_panel._characters().set_avatar("Ada", chosen)
+
+        faces = mc_llm_chat_panel._faces("Ada")
+
+        assert faces[1]["path"].endswith("Ada.png")
+        assert mc_llm_paths.app_paths().characters in Path(faces[1]["path"]).parents
+
+    def test_your_own_picture_is_used_when_you_have_set_one(self, store):
+        from PIL import Image
+
+        answered = mc_llm_chat_panel._save_persona("Rin", "a reader",
+                                                   Image.new("RGB", (20, 20), (200, 10, 90)))
+
+        assert "Saved" in answered
+        assert mc_llm_chat_panel._faces("Ada")[0]["path"].endswith("persona.png")
+
+    def test_emptying_the_box_takes_your_picture_away(self, store):
+        from PIL import Image
+
+        mc_llm_chat_panel._save_persona("Rin", "a reader", Image.new("RGB", (20, 20)))
+        mc_llm_chat_panel._save_persona("Rin", "a reader", None)
+
+        assert mc_llm_chat_panel._persona_face() is None
+
+    def test_saving_a_character_writes_its_picture_with_it(self, store, characters):
+        from PIL import Image
+
+        mc_llm_chat_panel._save_character("Ada", "Ada", "a reader of maps", "hello", "",
+                                          0.8, 0.9, 512, -1,
+                                          Image.new("RGB", (20, 20), (10, 90, 200)))
+
+        assert mc_llm_chat_panel._character_face("Ada") is not None
+
+    def test_and_emptying_the_box_takes_it_away(self, store, characters):
+        from PIL import Image
+
+        mc_llm_chat_panel._save_character("Ada", "Ada", "", "", "", 0.8, 0.9, 512, -1,
+                                          Image.new("RGB", (20, 20)))
+        mc_llm_chat_panel._save_character("Ada", "Ada", "", "", "", 0.8, 0.9, 512, -1, None)
+
+        assert mc_llm_chat_panel._character_face("Ada") is None
+
+    def test_a_face_that_changed_is_published_without_touching_the_messages(self, store):
+        """Chained after handlers that have already put the right thread on
+        screen, so an update carrying a value would undo them."""
+        answered = mc_llm_chat_panel._faces_update("Ada")
+
+        assert set(answered) == {"avatar_images"}
+
+    def test_a_transcript_that_cannot_draw_a_face_is_still_a_transcript(self, store,
+                                                                        monkeypatch):
+        def refuse(*args, **kwargs):
+            raise OSError("no room")
+
+        monkeypatch.setattr(mc_llm_chat_panel.mc_llm_attachments, "default_avatar", refuse)
+
+        assert mc_llm_chat_panel._faces("Ada") == [None, None]
+
+    def test_the_bubbles_say_it_a_second_way(self):
+        """A reader who has scrolled past the face, or whose thread is one long
+        reply, still has the edge on the bubble."""
+        from pathlib import Path
+
+        css = ((Path(mc_llm_chat_panel.__file__).resolve().parent
+                / "style.css").read_text(encoding="utf-8"))
+
+        assert ".message.user {\n    border-inline-end" in css
+        assert ".message.bot {\n    border-inline-start" in css
+
+
 class TestEditingAMessageInPlace:
     """Edit edits. It does not branch, and it does not re-ask.
 
@@ -1085,6 +1215,20 @@ class TestTheFooterGoesAway:
         assert "gr.HTML(\"<footer" not in panels
         assert "<footer" not in panels
 
+    def test_it_reaches_a_footer_the_theme_drew_several_levels_down(self):
+        """What was actually left behind. A child selector only reaches a footer
+        that is a direct child of the container, and LobeTheme draws
+        `footer.rc-footer` inside two sections of its own -- so the links went
+        and a 32px strip of nothing stayed, which the page went on scrolling
+        into."""
+        from pathlib import Path
+
+        css = ((Path(mc_llm_chat_panel.__file__).resolve().parent
+                / "style.css").read_text(encoding="utf-8"))
+
+        assert '[data-mc-footer="hidden"] gradio-app footer' in css
+        assert '[data-mc-footer="hidden"] gradio-app > footer' not in css
+
 
 class TestTheSurfaces:
     """Conversation is the home state, and everything else is temporary.
@@ -1200,7 +1344,8 @@ class TestTheSurfaces:
 
         answered = mc_llm_chat_panel._open_persona()
 
-        assert answered[-2:] == ["Rin", "a reader"]
+        # The picture is last, and is None until one has been chosen.
+        assert answered[-3:] == ["Rin", "a reader", None]
 
 
 class TestTheComposer:
@@ -2879,7 +3024,7 @@ class TestTheSystemPromptIsVisible:
             len(mc_llm_chat_panel._cancel_character("")),
         }
 
-        assert shapes == {12}
+        assert shapes == {13}
 
 
 class TestSeedsAreRandomUntilSomebodyChoosesOne:

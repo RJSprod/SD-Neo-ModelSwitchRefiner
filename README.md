@@ -2462,6 +2462,25 @@ that says something else, which is the point — asking "why did you say the sun
 was blue" only works if the earlier question really did change. **Branch from
 here** is one button along when you want the other thing.
 
+### Who said what
+
+Every message carries a face: yours on the right of your messages, the
+character's on the left of its replies. Set them in **Character** and in **You**
+— any image; it is copied, sized down and kept beside the thing it belongs to,
+so the character's picture goes next to its file exactly where oobabooga keeps
+one. A `.png` character card imported with a picture already has its face.
+
+Whoever has not chosen one gets a drawn stand-in — a letter on a coloured disc,
+with the colour taken from the name so two characters are told apart at a
+glance. The two sides of one conversation are drawn half a colour wheel apart,
+so yours and the character's can never come out the same shade.
+
+The bubbles say it a second way, for a reader who has scrolled past the face or
+whose thread is one long reply: a thin edge in the theme's accent on the side
+each message is aligned to. An edge rather than a background wash — a tint
+strong enough to separate two speakers on a dark theme is a tint strong enough
+to be the loudest thing on a page whose job is to be read.
+
 ### Characters
 
 **Character** in the Conversation menu is one screen doing four things, and the
