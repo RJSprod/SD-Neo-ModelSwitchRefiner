@@ -84,7 +84,7 @@ def client(monkeypatch, host, store):
     mc_broker.clear()
     monkeypatch.setattr(mc_broker, "host_busy", lambda: False)
     fake = FakeClient()
-    monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0, role='': fake)
+    monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0, role='', cancel=None: fake)
     monkeypatch.setattr(sessions, "_placement_notes", lambda role="": [])
     # No checkpoint is loaded under the harness; the guard has its own tests.
     monkeypatch.setattr(mc_creative_krea, "checkpoint_objection", lambda: "")
@@ -774,7 +774,7 @@ class TestTheImageModelKeepsItsRoom:
         seen = []
         original = sessions._client
         monkeypatch.setattr(sessions, "_client",
-                            lambda needs_vision=False, reserve=0, role='': (
+                            lambda needs_vision=False, reserve=0, role='', cancel=None: (
                                 seen.append(reserve), original(needs_vision))[1])
 
         stored = mc_creative_krea.settings()
@@ -789,7 +789,7 @@ class TestTheImageModelKeepsItsRoom:
         seen = []
         original = sessions._client
         monkeypatch.setattr(sessions, "_client",
-                            lambda needs_vision=False, reserve=0, role='': (
+                            lambda needs_vision=False, reserve=0, role='', cancel=None: (
                                 seen.append(reserve), original(needs_vision))[1])
 
         stored = mc_creative_krea.settings()

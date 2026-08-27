@@ -62,7 +62,7 @@ def client(monkeypatch, host):
     mc_broker.clear()
     monkeypatch.setattr(mc_broker, "host_busy", lambda: False)
     fake = FakeClient()
-    monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0, role='': fake)
+    monkeypatch.setattr(sessions, "_client", lambda needs_vision=False, reserve=0, role='', cancel=None: fake)
     monkeypatch.setattr(sessions, "_placement_notes", lambda role="": [])
     yield fake
     mc_broker.clear()
@@ -205,7 +205,7 @@ class TestConversationRun:
 
     def test_a_failure_is_reported_rather_than_raised(self, client, monkeypatch):
         monkeypatch.setattr(sessions, "_client",
-                            lambda needs_vision=False, reserve=0, role='': FakeClient(fail=RuntimeError("no server")))
+                            lambda needs_vision=False, reserve=0, role='', cancel=None: FakeClient(fail=RuntimeError("no server")))
 
         events = drain(sessions.conversation(sessions.ChatRequest(messages=[]),
                                              sessions.Cancellation()))
@@ -258,7 +258,7 @@ class TestWhatTheConsoleIsTold:
     def test_a_failure_is_logged_with_the_sentence_that_explains_it(self, client, monkeypatch,
                                                                     caplog):
         monkeypatch.setattr(sessions, "_client",
-                            lambda needs_vision=False, reserve=0, role='': FakeClient(fail=RuntimeError("no server")))
+                            lambda needs_vision=False, reserve=0, role='', cancel=None: FakeClient(fail=RuntimeError("no server")))
 
         with caplog.at_level("INFO", logger="model_chain"):
             drain(sessions.conversation(sessions.ChatRequest(messages=[]),
@@ -331,7 +331,7 @@ class TestMinimaxRun:
 
     def test_an_empty_answer_is_an_error_not_an_empty_prompt(self, client, monkeypatch):
         monkeypatch.setattr(sessions, "_client",
-                            lambda needs_vision=False, reserve=0, role='': FakeClient(pieces=("",)))
+                            lambda needs_vision=False, reserve=0, role='', cancel=None: FakeClient(pieces=("",)))
 
         events = drain(sessions.minimax("a shot", "fl2va", None, 7, sessions.Cancellation()))
 
@@ -410,7 +410,7 @@ class TestSerializedRuns:
         """Section 15: cancellation and failure both have to leave the system in
         a known residency state -- a held lock would strand every later run."""
         monkeypatch.setattr(sessions, "_client",
-                            lambda needs_vision=False, reserve=0, role='': FakeClient(fail=RuntimeError("boom")))
+                            lambda needs_vision=False, reserve=0, role='', cancel=None: FakeClient(fail=RuntimeError("boom")))
 
         drain(sessions.conversation(sessions.ChatRequest(messages=[]),
                                     sessions.Cancellation()))

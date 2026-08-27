@@ -54,6 +54,7 @@ import mc_llm_accel
 import mc_llm_context
 import mc_llm_paths
 import mc_llm_state
+import mc_llm_vision
 
 if TYPE_CHECKING:
     from prompt_master.models.managed_profiles import ManagedProfile
@@ -3022,6 +3023,20 @@ class Runtime:
         an ``auto`` configuration from ordinary decoding into MTP without any
         setting having changed -- a different backbone, or a runtime that has
         learned what it accepts -- and the warm server has to be replaced."""
+        self._projector: Path | None = None
+        """The vision projector the *running* process was started with.
+
+        The third of the three facts :mod:`mc_llm_vision` keeps apart, and the
+        only one that is process state. ``configuration.mmproj`` says which
+        projector is compatible with the selected model; this says whether the
+        server that is up was actually launched with ``--mmproj``, which is the
+        difference between a capability that has to be paid for and one that has
+        already been paid for.
+
+        It is what makes vision *sticky*. A text-only request reads this rather
+        than deriving a wanted projector of ``None`` from its own needs, so a
+        warm vision-capable server satisfies it as it stands -- see
+        :meth:`_wanted_projector`, and design intent sections 5.6 and 6."""
         self._placement: mc_llm_context.Placement | None = None
         self._log: tuple | None = None
         """``(path, offset)`` of the running server's slice of the log."""
@@ -3089,7 +3104,7 @@ class Runtime:
 
     # -- lifecycle -------------------------------------------------------- #
 
-    def client(self, needs_vision: bool = False, reserve: int = 0):
+    def client(self, needs_vision: bool = False, reserve: int = 0, cancel=None):
         """A client for a ready server, started or restarted as placement requires.
 
         ``reserve`` is VRAM this request promises not to take: room for a
@@ -3131,9 +3146,27 @@ class Runtime:
         when it is a real improvement -- see :func:`_worth_restarting` -- and
         never when it is worse, because a running server holds its VRAM either
         way and giving it a smaller share of the card helps nobody.
+
+        ``needs_vision`` is a *requirement*, not a description. True means this
+        request cannot be served without the projector; False means it does not
+        care, which is not the same as "start without one". So the flag can only
+        ever move capability upward -- OFF to TEXT_ONLY to VISION_LOADED -- and
+        the server that comes back for a text turn after a picture is the same
+        process, with the same prompt cache. See :meth:`_wanted_projector` for
+        the rule and :meth:`_prepare_vision` for where a missing projector is
+        put back before any of this is reached.
         """
         from prompt_master.inference.device_detection import CPU_DEVICE, NO_OFFLOAD
         from prompt_master.inference.service import CPU_READY_TIMEOUT, GPU_READY_TIMEOUT
+
+        # Before the lock, and that is the whole reason it is a separate step.
+        # Resolving a projector can mean a gigabyte over somebody's connection,
+        # and section 13 is explicit that a slow transfer must not hold the
+        # process lock of a server that is answering other requests perfectly
+        # well meanwhile. Nothing is stopped here either, so a repair that
+        # cannot be completed leaves a running text server running (24.1).
+        if needs_vision:
+            self._prepare_vision(cancel)
 
         with self._lock:
             configuration = self.configuration()
@@ -3142,40 +3175,43 @@ class Runtime:
                     "No local model is configured yet. Choose a GGUF and a llama.cpp runtime "
                     "in LLM Studio’s Setup mode."
                 )
+            # Capability, not request: what this server should be running with
+            # once this request has been served. A picture asks for the
+            # compatible projector; anything else asks for whatever is already
+            # loaded, which is how vision stops being a mode that every turn
+            # switches back off.
+            projector = self._wanted_projector(configuration, needs_vision)
+            vision = projector is not None
             for label, path in (("llama-server", configuration.runtime),
                                 ("model", configuration.model),
-                                ("vision projector", configuration.mmproj)):
+                                ("vision projector", projector)):
                 if path is not None and not Path(path).is_file():
                     raise RuntimeError(f"Configured {label} is missing: {path}")
-            if needs_vision and configuration.mmproj is None:
-                raise RuntimeError(
-                    "This request carries an image, and the model running has no vision "
-                    "projector. Choose one in LLM Studio’s Setup mode, or send the "
-                    "request without the image; text-only fallback is disabled."
-                )
-
-            # The projector is loaded for a request that carries an image and
-            # for no other. It is a gigabyte and a third of a card this model
-            # is already filling, and every text-only turn was paying it. The
-            # cost of the rule is one restart when a picture is finally
-            # attached, which is a trade worth making the other way round.
-            projector = configuration.mmproj if needs_vision else None
+            if needs_vision and projector is None:
+                raise RuntimeError(mc_llm_vision.NO_PROJECTOR)
 
             # Which mechanism this request can use, before anything is measured
             # and before anything is stopped. A forced accelerator that is
             # simply not installed refuses here, in a sentence, rather than
             # after a twenty-second model load -- and an automatic one has
             # already stepped down to whatever it can prove is available.
-            chosen = accelerator_choice(configuration, needs_vision)
+            chosen = accelerator_choice(configuration, vision)
             if chosen.refused:
                 raise RuntimeError(chosen.refusal)
 
             ours = self.resident_bytes()
             if (self._running and self._identity == _identity(configuration, projector)
                     and self._accelerator == chosen.identity
-                    and not self._outgrown(configuration, ours)):
+                    and not self._outgrown(configuration, ours, vision)):
+                if self._projector is not None and not needs_vision:
+                    logger.debug("Model Chain: %sreusing the vision-loaded server for a "
+                                 "text-only request", self._said_for())
                 self._touch(configuration, ours)
                 return self._client(configuration)
+
+            if self._running and vision and self._projector is None:
+                logger.info("Model Chain: %svision is required by this request; restarting the "
+                            "warm server with %s", self._said_for(), Path(projector).name)
 
             # Before anything is measured, and only on a path that is really
             # going to start a server. The image allocator keeps the blocks it
@@ -3189,7 +3225,7 @@ class Runtime:
                             "placing the LLM", recovered / _GB)
 
             plan = accelerator_plan(configuration, already_ours=ours,
-                                    needs_vision=needs_vision, extra_reserve=reserve,
+                                    needs_vision=vision, extra_reserve=reserve,
                                     chosen=chosen)
             if plan.refused:
                 raise RuntimeError(plan.refusal)
@@ -3201,9 +3237,9 @@ class Runtime:
             # promises to move nothing and is relied on for that by the
             # estimator -- what it does here is find more free VRAM than it
             # would have found a moment ago, and place against that.
-            _make_room_for_the_llm(configuration, ours, needs_vision, reserve)
+            _make_room_for_the_llm(configuration, ours, vision, reserve)
 
-            negotiated = negotiate(configuration, already_ours=ours, vision=needs_vision,
+            negotiated = negotiate(configuration, already_ours=ours, vision=vision,
                                    extra_reserve=reserve)
             placement = negotiated.placement
             signature = _signature_of(configuration, projector, placement, plan)
@@ -3231,7 +3267,7 @@ class Runtime:
                 if penalty or expert_floor:
                     negotiated = negotiate(configuration, already_ours=ours,
                                            extra_reserve=reserve + penalty,
-                                           vision=needs_vision, expert_floor=expert_floor)
+                                           vision=vision, expert_floor=expert_floor)
                     placement = negotiated.placement
                     signature = _signature_of(configuration, projector, placement, plan)
                 try:
@@ -3255,7 +3291,7 @@ class Runtime:
                         plan = _without_accelerator(plan, str(failure))
                         negotiated = negotiate(configuration, already_ours=ours,
                                                extra_reserve=reserve + penalty,
-                                               vision=needs_vision,
+                                               vision=vision,
                                                expert_floor=expert_floor)
                         placement = negotiated.placement
                         signature = _signature_of(configuration, projector, placement, plan)
@@ -3281,7 +3317,15 @@ class Runtime:
 
             self._process, self._signature, self._placement = process, signature, placement
             self._identity = _identity(configuration, projector)
+            self._projector = Path(projector) if projector is not None else None
             self._accelerator = plan.identity
+            if self._projector is not None:
+                # Section 25's transition line. Said once per capability change
+                # and never per request, because what somebody debugging a slow
+                # first token needs to know is which starts loaded a projector
+                # -- not that every turn since has correctly reused it.
+                logger.info("Model Chain: %sllama-server is now vision-loaded — %s",
+                            self._said_for(), self._projector.name)
             self._record(configuration, negotiated, observed, offload, plan)
             # Which plan this placement answers. Everything after this point
             # compares against it rather than against free VRAM, so the server
@@ -3296,6 +3340,89 @@ class Runtime:
             prepared = self._client(configuration)
             _prime_prompt_cache(prepared)
             return prepared
+
+    def _prepare_vision(self, cancel=None) -> None:
+        """Make sure a compatible projector exists on disk. Outside the lock.
+
+        The one place invariant I-4 is met -- "the backend must ensure the
+        correct projector is available and loaded before sending image content"
+        -- and the one place section 11's repair happens. What it can change is
+        the *state file*: a managed bundle whose projector was missing has it
+        downloaded and recorded here, so the ``configuration`` read a few lines
+        later inside the lock already names it.
+
+        A configuration that cannot be read at all is left to the locked path,
+        which has the sentence for it. A selection that has no projector to
+        find is left alone too: refusing here would mean this function decided
+        what a text-only backbone does with a picture, and that answer belongs
+        beside the one about a missing runtime.
+        """
+        try:
+            configuration = self.configuration()
+        except Exception:
+            logger.debug("Model Chain: could not read the configuration before resolving a "
+                         "vision projector", exc_info=True)
+            return
+        if not configuration.configured:
+            return
+        # The repair's own progress goes to the console rather than nowhere.
+        # A projector is over a gigabyte, and a request that appears to have
+        # hung for two minutes is the one thing a silent download guarantees.
+        mc_llm_vision.ensure_projector(
+            configuration, role=self._role, cancel=cancel,
+            say=lambda text: logger.info("Model Chain: %s%s", self._said_for(), text))
+
+    def _wanted_projector(self, configuration: Config, needs_vision: bool):
+        """Which projector the server should be running with after this request.
+
+        The asymmetry in section 6's table, as one function. A request that
+        carries an image requires vision and names the compatible projector; a
+        request that does not require vision requires *nothing about* vision,
+        and so it inherits whatever the running process already has.
+
+        That inheritance is the fix. The old rule read the request's own
+        ``needs_vision`` as a complete description of the server that should be
+        running, so a text turn after an image turn asked for a server with no
+        projector, did not get one, and stopped a perfectly good process to
+        build it -- which the next picture then paid to undo. Two restarts, a
+        lost prompt cache each time, and a conversation that alternated between
+        fast and thirteen seconds of prompt evaluation for no gain at all:
+        vision capability is a superset of text capability, and a superset
+        satisfies the subset.
+
+        The projector is inherited only while it is still *this* configuration's
+        compatible one and still on disk. A model change makes the running
+        projector the wrong projector, and a file that has been deleted
+        underneath a live server cannot be passed to the next start; both fall
+        back to a text-only identity, which the lines below then treat as the
+        ordinary replacement it is rather than as a downgrade this request asked
+        for.
+        """
+        if needs_vision:
+            return configuration.mmproj
+        loaded = self._projector if self._running else None
+        if loaded is None:
+            return None
+        known = configuration.mmproj
+        if known is not None and Path(known) == Path(loaded) and Path(loaded).is_file():
+            return loaded
+        return None
+
+    def vision_loaded(self) -> bool:
+        """Whether the process that is up was started with a projector.
+
+        Not ``configuration.sees``, which answers the different and equally
+        real question of whether a compatible projector is *known*. Section 4's
+        three states are OFF, TEXT_ONLY and VISION_LOADED, and this is the only
+        thing that can tell the second from the third.
+        """
+        with self._lock:
+            return self._running and self._projector is not None
+
+    def loaded_projector(self) -> Path | None:
+        """The projector the running process holds, or ``None``."""
+        with self._lock:
+            return self._projector if self._running else None
 
     def _launch(self, configuration: Config, placement: mc_llm_context.Placement,
                 projector=None, plan: mc_llm_accel.Plan | None = None):
@@ -3428,7 +3555,7 @@ class Runtime:
         return LlamaClient(f"http://127.0.0.1:{self._process.port}", self._process.api_key,
                            managed_profiles.sampler_arguments(configuration.profile))
 
-    def _outgrown(self, configuration: Config, ours: int) -> bool:
+    def _outgrown(self, configuration: Config, ours: int, vision: bool = False) -> bool:
         """Whether the card could now hold more of the model than this server does.
 
         Asked with ``reclaim=False``: this runs before every request, and a
@@ -3489,7 +3616,14 @@ class Runtime:
                 return False
         try:
             described = mc_gguf.describe(configuration.model)
-            preview = negotiate(configuration, described, reclaim=False, already_ours=ours)
+            # ``vision`` and not ``False``: a preview that forgot the projector
+            # this server is holding would price a placement nobody can have,
+            # find it roomier than the one that is running, and restart a warm
+            # vision-capable server to reach it. Section 21 -- once
+            # VISION_LOADED, a request must not re-negotiate as though the
+            # projector were absent.
+            preview = negotiate(configuration, described, reclaim=False, already_ours=ours,
+                                vision=vision)
         except Exception:
             logger.debug("Model Chain: could not re-check the LLM placement", exc_info=True)
             return False
@@ -3814,6 +3948,14 @@ class Runtime:
         configuration = self.configuration()
         if not configuration.configured:
             return 0
+        # Read before the stop clears it. This move is a *relocation* of the
+        # server that is running, so the capability it comes back with has to
+        # be the one it went away with: starting from ``configuration.mmproj``
+        # would give a text-only server eyes it never had -- a projector loaded
+        # into system RAM to satisfy nothing -- and starting from ``None`` would
+        # take vision away from a conversation that is mid-picture, which
+        # section 7 lists nowhere among the ways stickiness ends.
+        projector = self._projector
         try:
             self._stop_locked("moving the LLM to system RAM")
             process = self._new_process()
@@ -3821,7 +3963,7 @@ class Runtime:
             paths.logs.mkdir(parents=True, exist_ok=True)
             placement = (self._placement or mc_llm_context.Placement()).with_layers(
                 mc_llm_context.NO_LAYERS)
-            process.start(configuration.runtime, configuration.model, configuration.mmproj,
+            process.start(configuration.runtime, configuration.model, projector,
                           configuration.gpu_index, configuration.device, placement.context,
                           paths.logs / "llama-server.log", gpu_layers=NO_OFFLOAD)
             process.wait_ready(CPU_READY_TIMEOUT)
@@ -3847,10 +3989,11 @@ class Runtime:
 
         self._process = process
         self._placement = placement
-        self._signature = (configuration.runtime, configuration.model, configuration.mmproj,
+        self._projector = projector
+        self._signature = (configuration.runtime, configuration.model, projector,
                            configuration.gpu_index, configuration.device,
                            placement.context, placement.gpu_layers)
-        self._identity = _identity(configuration)
+        self._identity = _identity(configuration, projector)
         mc_broker.retire(self.residency_key)
         freed = max(mc_broker.free_vram_bytes() - before, 0)
         mc_broker.note(mc_broker.FAMILY_LLM,
@@ -3954,7 +4097,13 @@ class Runtime:
     def _stop_locked(self, reason: str) -> None:
         process, self._process = self._process, None
         held = self.report.observed_bytes if self._placement is not None else 0
+        said_vision = self._projector is not None
         self._signature, self._identity, self._placement = None, None, None
+        # Section 7: vision residency ends when the server does, and only then.
+        # Cleared with the rest of the running process's state rather than by
+        # any request, so the next start is asked what it needs rather than
+        # inheriting what a dead process happened to hold.
+        self._projector = None
         # Cleared with the rest of the running server's identity. A stale
         # accelerator tuple surviving a stop is how a speculative flag comes
         # to be believed about a server that is not running, and the guarantee
@@ -3970,8 +4119,9 @@ class Runtime:
         except Exception:
             logger.warning("Model Chain: failed to stop llama-server (%s)", reason, exc_info=True)
             return
-        logger.info("Model Chain: llama-server stopped — %s%s", reason,
-                    f", {held / _GB:.1f} GB of VRAM released" if held else "")
+        logger.info("Model Chain: llama-server stopped — %s%s%s", reason,
+                    f", {held / _GB:.1f} GB of VRAM released" if held else "",
+                    "; its vision projector is no longer resident" if said_vision else "")
 
     # -- status ----------------------------------------------------------- #
 
@@ -3989,6 +4139,10 @@ class Runtime:
                 "device": configuration.device_name or configuration.device,
                 "mode": configuration.mode,
                 "sees": configuration.sees,
+                # Two answers because they are two facts (section 10): "sees"
+                # is whether a compatible projector is known, and this is
+                # whether the process that is up has actually loaded it.
+                "vision_loaded": self._running and self._projector is not None,
                 "placement": self._placement,
                 "report": self.report,
                 "resident_bytes": self.resident_bytes(),

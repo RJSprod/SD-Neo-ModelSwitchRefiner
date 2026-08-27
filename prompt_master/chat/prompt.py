@@ -210,10 +210,35 @@ def _limit_images(messages: list[Message]) -> list[tuple[Message, bool]]:
 
 
 def has_image(messages: list[Message]) -> bool:
-    """Whether a request built from these needs the vision projector."""
+    """Whether any of these conversation messages carries a still."""
     return any(message.image for message in messages)
 
 
+def needs_vision(wire: list[dict[str, Any]]) -> bool:
+    """Whether the request :func:`build` produced actually carries an image.
+
+    Asked of the built payload rather than of the history it was built from,
+    because those two can disagree and only one of them is what llama-server
+    will be shown. A long conversation trims to the context it has room for and
+    then keeps at most :data:`MAX_IMAGES` of the stills that survived, so a chat
+    whose only picture scrolled out of the window is a text-only request -- and
+    answering "yes, vision" about it would pay for a projector upgrade to send a
+    request with nothing for the projector to look at.
+
+    The other direction cannot happen: an image part in the payload came from a
+    message that had one. That asymmetry is the point. This never under-reports,
+    so invariant I-1 -- an existing feature that needs image understanding still
+    asks for it -- holds by construction.
+    """
+    for message in wire or ():
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, (list, tuple)):
+            continue
+        if any(isinstance(part, dict) and part.get("type") == "image_url" for part in content):
+            return True
+    return False
+
+
 __all__ = ["ASSISTANT", "USER", "build", "clean_reply", "continue_instruction",
-           "greeting_text", "has_image", "impersonate_instruction", "prefix_instruction",
-           "substitute", "system_text"]
+           "greeting_text", "has_image", "impersonate_instruction", "needs_vision",
+           "prefix_instruction", "substitute", "system_text"]

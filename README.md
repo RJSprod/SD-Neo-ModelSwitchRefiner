@@ -2412,10 +2412,17 @@ by their command line the next time the extension loads. A model left resident
 after the WebUI has gone is several gigabytes of VRAM you cannot get back
 without noticing it first.
 
-Switching model does not carry the vision projector across, and does not guess
-one from the new model's folder. A projector has to match the model it was made
-for and a filename does not prove that it does; one sitting beside the new model
-is mentioned, and applying it is a press in **Setup**.
+Switching model does not carry the previous model's vision projector across,
+and does not guess one from the new model's folder. A projector has to match the
+model it was made for and a filename does not prove that it does; one sitting
+beside the new model is mentioned, and applying it is a press in **Setup**.
+
+A *managed* backbone is the exception, and it is not a guess. The catalogue
+records which projector belongs to which backbone, by filename, revision and
+SHA-256, so choosing one of those keeps its projector associated however it was
+chosen — from the catalogue, from the model drop-down, or by pasting the path
+into Setup. Keeping the association is not the same as loading it: the projector
+is still read only when a request actually carries an image.
 
 ### Characters
 
@@ -2601,7 +2608,31 @@ start and in Setup's residency panel:
 The vision projector is loaded only for a request that actually carries an
 image; it costs over a gigabyte of the same VRAM the weights want, and a
 text-only conversation should not pay it. Attaching a picture restarts the
-server once.
+server once — *once*. After that the projector stays loaded until the server is
+stopped, so the text message after the picture is answered by the same process,
+with its prompt cache intact. Vision is a capability a server acquires, not a
+mode each message switches on and off:
+
+```
+    OFF  ->  TEXT_ONLY  ->  VISION_LOADED
+```
+
+and no ordinary request moves it back. A vision-capable server answers text
+perfectly well, and rebuilding a smaller one would spend a model load, a CUDA
+context and the prompt cache to reclaim memory that has already been paid for.
+It is given up when the server itself is — Unload, a model or device change, a
+memory reclamation, a crash, or the WebUI closing.
+
+Two llama-servers do not share this. If Creative and Spatial are configured onto
+separate processes, one of them loading a projector leaves the other exactly as
+it was; if they share a process, they share whatever that process can do.
+
+For a managed multimodal backbone none of this needs setting up. If the
+projector is missing from the bundle when a picture is finally attached, the
+exact catalogue artifact is downloaded and hash-verified first, the request is
+then sent with its image intact, and nobody is asked to go and find a file. If
+that download cannot be completed the request fails and says so; the text model
+that was running is left running.
 
 ### When it will not start
 
@@ -2858,6 +2889,7 @@ mc_llm_native.py      the operating system's own file dialog
 mc_llm_setup.py       getting a llama.cpp runtime in place
 mc_llm_accel.py       acceleration and VRAM priority, as two settings
 mc_llm_managed_models.py   the managed backbone catalogue: verify, install, switch
+mc_llm_vision.py      which projector belongs to the model, and repairing it
 mc_llm_state.py       shared preferences + the mode histories
 mc_llm_sessions.py    the run orchestrations, as streaming generators
 mc_llm_studio.py      the LLM Studio tab shell, model chooser and Setup mode
@@ -2899,7 +2931,8 @@ mc_llm_browse  ->  mc_llm_native        mc_llm_context      mc_memory
 mc_llm_files  <-  mc_llm_setup            mc_gguf
 
 mc_llm_studio  ->  mc_llm_managed_models  ->  mc_llm_paths
-                                mc_llm_runtime  ->  mc_llm_accel
+                              ^
+                    mc_llm_vision  <-  mc_llm_runtime  ->  mc_llm_accel
                             |
                    mc_llm_runtime (stop / start / one switch at a time)
 ```

@@ -94,7 +94,7 @@ def client(monkeypatch, host, store):
     monkeypatch.setattr(mc_broker, "host_busy", lambda: False)
     fake = FakeClient()
     monkeypatch.setattr(sessions, "_client",
-                        lambda needs_vision=False, reserve=0, role='': fake)
+                        lambda needs_vision=False, reserve=0, role='', cancel=None: fake)
     monkeypatch.setattr(sessions, "_placement_notes", lambda role="": [])
     monkeypatch.setattr(mc_creative_krea, "checkpoint_objection", lambda: "")
     mc_creative_krea.creative = mc_creative_krea.Creative()

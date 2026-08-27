@@ -129,7 +129,7 @@ class FakeRuntime:
             self.up = False
             self.servers = 0
 
-    def client(self, needs_vision=False, reserve=0):
+    def client(self, needs_vision=False, reserve=0, cancel=None):
         # The real signature, so a caller that passes what the modes pass --
         # ``mc_llm_sessions._client`` passes both -- is exercised rather than
         # accommodated.
@@ -358,7 +358,7 @@ class TestRollback:
         attempts = []
 
         class Flaky(FakeRuntime):
-            def client(self, needs_vision=False, reserve=0):
+            def client(self, needs_vision=False, reserve=0, cancel=None):
                 attempts.append(managed.selection().identifier)
                 if len(attempts) == 1:
                     raise RuntimeError("out of memory")
@@ -381,7 +381,7 @@ class TestRollback:
     def test_a_backbone_that_starts_but_will_not_answer_is_also_rolled_back(
             self, root, registry, monkeypatch):
         class Mute(FakeRuntime):
-            def client(self, needs_vision=False, reserve=0):
+            def client(self, needs_vision=False, reserve=0, cancel=None):
                 super().client(needs_vision, reserve)
                 return FakeClient(self, answers=False)
 
