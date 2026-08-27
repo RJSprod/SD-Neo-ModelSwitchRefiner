@@ -1513,8 +1513,22 @@ def _dflash_choice(configuration: Config, accelerators, priority: str, requested
     if not capability.text:
         return _replaced(refused, refusal=mc_llm_accel.not_validated(component))
     if needs_vision and not capability.vision:
-        return _replaced(refused,
-                                   refusal=mc_llm_accel.vision_not_validated(component))
+        # A note rather than a refusal, and it is the one place in this file
+        # where a forced request does not refuse. The distinction is between a
+        # *configuration* that cannot do what was asked -- no runtime, no
+        # sidecar, no room -- and a *request* that this configuration cannot
+        # accelerate: the very next text request on the same settings runs on
+        # DFlash2 unchanged.
+        #
+        # Refusing would also break the operation this product is mostly for.
+        # Krea captions reference images and then writes a prompt, so a
+        # Lightning installation with text verified and vision not -- which is
+        # the expected state until the pull request's multimodal work is
+        # validated -- would fail every generation that carries a reference.
+        # Section 13 asks for one validated mechanism per request, and this is
+        # that: the image request runs the way it always has, and says so.
+        logger.warning("Model Chain: %s", mc_llm_accel.vision_not_validated(component))
+        return _replaced(refused, notes=(mc_llm_accel.vision_not_validated(component),))
 
     return mc_llm_accel.Plan(
         requested=requested, accelerator=mc_llm_accel.ACCEL_DFLASH2,
@@ -1862,7 +1876,11 @@ def _speculative_negotiation(configuration: Config, plan: mc_llm_accel.Plan,
     described = mc_gguf.describe(configuration.model)
     placement = _requested_placement(configuration, described, already_ours)
     estimate = mc_llm_context.estimate(configuration.model, placement, described)
-    return Negotiation(placement, estimate, tuple(plan.notes), True)
+    # No notes here. They are the *plan's*, and :meth:`Runtime._record` adds
+    # them to every report rather than only to a speculative one -- an
+    # accelerator that stepped down has something to say too, and saying it in
+    # two places would print it twice.
+    return Negotiation(placement, estimate, (), True)
 
 
 def conservative_flags(configuration: Config) -> list[str]:
@@ -3591,14 +3609,19 @@ class Runtime:
     def _record(self, configuration: Config, negotiated: Negotiation, observed: int,
                 offload: Offload | None = None,
                 plan: mc_llm_accel.Plan | None = None) -> None:
+        # The placement's notes and the accelerator's, in one list. Both are
+        # section 13's "say what you changed": a context that had to shrink and
+        # an accelerator that stepped down are the same kind of news, and the
+        # console and the panel print this list.
+        notes = (*negotiated.notes, *(plan.notes if plan is not None else ()))
         self.report = Report(
             placement=negotiated.placement, estimate=negotiated.estimate,
-            notes=negotiated.notes, observed_bytes=observed, started_at=time.time(),
+            notes=notes, observed_bytes=observed, started_at=time.time(),
             model=Path(configuration.model).name if configuration.model else "",
             fits=negotiated.fits, offload=offload or Offload(),
             plan=plan or mc_llm_accel.Plan(),
         )
-        for text in negotiated.notes:
+        for text in notes:
             mc_broker.note(mc_broker.FAMILY_LLM, text)
 
         if negotiated.placement.on_gpu and observed > 0:
@@ -3617,7 +3640,7 @@ class Runtime:
             negotiated.placement.describe(),
             f"{negotiated.placement.context:,}",
             observed / _GB,
-            "" if not negotiated.notes else f" ({'; '.join(negotiated.notes)})",
+            "" if not notes else f" ({'; '.join(notes)})",
         )
         self._report_offload(negotiated)
 

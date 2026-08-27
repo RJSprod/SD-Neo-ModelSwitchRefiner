@@ -882,7 +882,15 @@ class TestForcedRequestsThatCannotBeMet:
     def test_vision_is_gated_apart_from_text(
             self, install, tmp_path, monkeypatch, registry, image):
         """The pull request's multimodal work moved separately from its text
-        path, so text passing says nothing about an image request."""
+        path, so text passing says nothing about an image request.
+
+        The image request is *reported* rather than refused, and it is the one
+        forced request that is. Krea captions references and then writes a
+        prompt, so refusing would fail every generation carrying a reference on
+        an installation whose text path is perfectly good -- and section 13
+        asks for one validated mechanism per request rather than for the
+        operation to stop.
+        """
         install_bundle(install, tmp_path)
         install_dflash_runtime(install, text=True, vision=False)
         with_flags(monkeypatch)
@@ -894,8 +902,39 @@ class TestForcedRequestsThatCannotBeMet:
         image_request = runtime.accelerator_choice(configuration, needs_vision=True)
 
         assert text_request.accelerator == accel.ACCEL_DFLASH2
-        assert image_request.refused
-        assert "DFlash2 vision is not validated" in image_request.refusal
+        assert not image_request.refused
+        assert image_request.accelerator == accel.ACCEL_NONE
+        assert any("DFlash2 vision is not validated" in note
+                   for note in image_request.notes)
+
+    def test_the_reported_downgrade_reaches_the_report_the_panel_draws(
+            self, install, tmp_path, monkeypatch, registry, image):
+        """Not silent is the whole of what makes it acceptable, so the note has
+        to survive as far as the thing that prints it."""
+        install_bundle(install, tmp_path)
+        install_dflash_runtime(install, text=True, vision=False)
+        with_flags(monkeypatch)
+        set_free(monkeypatch, 24)
+        monkeypatch.setattr(runtime, "_prime_prompt_cache", lambda client: None)
+        monkeypatch.setattr(runtime, "RESIDENCY_SETTLE_SECONDS", 0.0)
+        configure(monkeypatch, install, tmp_path, vision=True,
+                  accelerator=accel.ACCEL_DFLASH2)
+        found = runtime.Runtime()
+
+        class Reached(RuntimeError):
+            pass
+
+        def capture(configuration, placement, projector=None, plan=None):
+            found._record(configuration, runtime.negotiate(configuration),
+                          0, None, plan)
+            raise Reached()
+
+        monkeypatch.setattr(found, "_launch", capture)
+        with pytest.raises(Reached):
+            found.client(needs_vision=True)
+
+        assert any("DFlash2 vision is not validated" in note
+                   for note in found.report.notes)
 
     def test_a_verified_vision_runtime_takes_the_image_request(
             self, install, tmp_path, monkeypatch, registry, image):

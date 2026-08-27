@@ -559,10 +559,10 @@ def not_validated(family: str) -> str:
 
 
 def vision_not_validated(family: str) -> str:
-    return (f"DFlash2 vision is not validated for this runtime ({family}). The text smoke "
-            f"test passed and the image one has not, and they are recorded separately on "
-            f"purpose — send this request without an image, or choose another performance "
-            f"mode for it.")
+    return (f"DFlash2 vision is not validated for this runtime ({family}), so this image "
+            f"request ran at ordinary decoding speed. The text smoke test passed and the "
+            f"image one has not, and they are recorded separately on purpose — text requests "
+            f"on these settings still use DFlash2.")
 
 
 def does_not_fit(required: int, spendable: int, card: str, reclaimed: int = 0) -> str:

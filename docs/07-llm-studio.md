@@ -2782,8 +2782,23 @@ record only from a real load of the real target with the real Blackfrost
 sidecar answering a question with one right answer.
 
 `dflash2_text` and `dflash2_vision` are two fields because the pull request's
-multimodal work moved separately from its text path. Writing a text result
-always clears the vision one — in both directions, because a fresh verification
+multimodal work moved separately from its text path.
+
+That is also the one place a *forced* accelerator does not refuse. A request
+carrying an image, on a runtime whose text path is verified and whose image
+path is not, gets a note and ordinary decoding. The distinction is between a
+configuration that cannot do what was asked — no runtime, no sidecar, no room,
+all of which stop the start — and a *request* this configuration cannot
+accelerate, where the very next text request runs on DFlash2 unchanged.
+Refusing would also break the operation this product is mostly for: Krea
+captions references and then writes a prompt, so an installation with text
+verified and vision not — the expected state until phase 3 — would fail every
+generation carrying a reference. Section 13 of the intent asks for one
+validated mechanism per request, and that is this. It is reported rather than
+silent: a warning in the log, a note on the report, and the status line naming
+ordinary decoding.
+
+Writing a text result always clears the vision one — in both directions, because a fresh verification
 that never sent an image must not leave "vision verified" on screen. The record
 carries the executable's size and mtime, and a record whose fingerprint no
 longer matches is treated as absent, so dropping a different build into the

@@ -2391,9 +2391,13 @@ Then press **Verify it**. That loads the real backbone with the real draft
 model and asks it a question with one right answer, because a build whose help
 text mentions DFlash is not the same thing as a build that runs it. Text and
 images are verified separately and recorded separately: a runtime can be
-trustworthy for text and produce nothing usable for a picture, and until the
-image test passes an image request under forced DFlash2 says so rather than
-pretending.
+trustworthy for text and produce nothing usable for a picture.
+
+Until the image test passes, a request **carrying an image** runs at ordinary
+speed and says so — reference captioning keeps working, and the text requests
+on the same settings still use DFlash2. That is the one case where a chosen
+accelerator steps aside for a single request rather than refusing: everything
+else on this page that cannot run is reported and stops.
 
 #### What it will not do
 
