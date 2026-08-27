@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import logging
 import time
-from pathlib import Path
 
 import gradio as gr
 
@@ -80,7 +79,17 @@ def build() -> dict:
                                     "structured H3 prompt from it.",
                         elem_id=ui.ident("minimax", "prompt"))
                 with gr.Column(scale=1, min_width=160):
-                    image = gr.Image(label="Reference frame", type="filepath", height=140,
+                    # type="pil" and not "filepath": Gradio's filepath
+                    # preprocess calls ``processing_utils.save_pil_to_cache``
+                    # with a ``name`` argument, and this WebUI replaces that
+                    # function with an older one that has no such parameter --
+                    # so every filepath image input in the host raises
+                    # ``TypeError`` before a handler is ever reached. Asking
+                    # for the picture itself skips that call entirely, and is
+                    # the better answer anyway: one decode instead of a second
+                    # copy of somebody's photograph written into a cache we
+                    # then read back.
+                    image = gr.Image(label="Reference frame", type="pil", height=140,
                                      elem_id=ui.ident("minimax", "image"))
 
             with gr.Row(elem_classes=ui.classes("actions")):
@@ -131,7 +140,7 @@ def build() -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def _enhance(prompt, variant, image_path, seed):
+def _enhance(prompt, variant, picture, seed):
     """Stream one H3 prompt. Caption first when there is a picture."""
     from prompt_master.core.models import RANDOM_SEED, draw_seed
 
@@ -144,7 +153,10 @@ def _enhance(prompt, variant, image_path, seed):
         return
 
     attachment = None
-    if image_path:
+    # ``is None`` and not falsiness: the slot holds a decoded picture now, and
+    # asking the truthiness of an image is asking a question its class is free
+    # to answer for reasons of its own.
+    if picture is not None:
         if not mc_llm_runtime.config().sees:
             yield (None, "", hidden,
                    ui.notice("The model running has no vision projector, so the reference frame "
@@ -152,7 +164,7 @@ def _enhance(prompt, variant, image_path, seed):
                              "remove the image.", "error"), *idle)
             return
         try:
-            attachment = ui.data_url(image_path)
+            attachment = ui.data_url(picture)
         except Exception as exc:
             yield None, "", hidden, ui.notice(ui.failure(exc), "error"), *idle
             return
@@ -178,7 +190,7 @@ def _enhance(prompt, variant, image_path, seed):
                 yield cancel, text, gr.update(), ui.working(event.text), *busy
             elif event.kind == sessions.DONE:
                 text = event.text
-                _remember(prompt, variant, described, text, resolved, image_path)
+                _remember(prompt, variant, described, text, resolved, picture)
                 yield (cancel, text, gr.update(),
                        ui.notice(f"Complete · Seed: {resolved}"), *idle)
                 return
@@ -224,12 +236,12 @@ def _structure(variant):
     return enhancer.infos(variant or enhancer.FL2VA)
 
 
-def _remember(prompt, variant, caption, result, seed, image_path) -> None:
+def _remember(prompt, variant, caption, result, seed, picture) -> None:
     try:
         mc_llm_state.save_minimax_session(mc_llm_state.MinimaxSession(
             variant=variant, prompt=(prompt or "").strip(), caption=caption or "",
             result=result, seed=int(seed),
-            image_name=Path(image_path).name if image_path else ""))
+            image_name=ui.picked_name(picture)))
         mc_llm_state.remember(minimax_variant=variant)
     except Exception:
         logger.debug("Model Chain: could not save the MiniMax session", exc_info=True)

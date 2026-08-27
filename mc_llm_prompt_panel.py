@@ -113,8 +113,18 @@ def build() -> dict:
                         placeholder="What happens in the shot. Quoted lines become spoken dialogue.",
                         elem_id=ui.ident("prompt", "intent"))
                 with gr.Column(scale=1, min_width=160):
+                    # type="pil" and not "filepath": Gradio's filepath
+                    # preprocess calls ``processing_utils.save_pil_to_cache``
+                    # with a ``name`` argument, and this WebUI replaces that
+                    # function with an older one that has no such parameter --
+                    # so every filepath image input in the host raises
+                    # ``TypeError`` before a handler is ever reached. Asking
+                    # for the picture itself skips that call entirely, and is
+                    # the better answer anyway: one decode instead of a second
+                    # copy of somebody's photograph written into a cache we
+                    # then read back.
                     image = gr.Image(
-                        label="Start frame (I2V)", type="filepath", height=140,
+                        label="Start frame (I2V)", type="pil", height=140,
                         elem_id=ui.ident("prompt", "image"))
 
             with gr.Row(elem_classes=ui.classes("actions")):
@@ -237,7 +247,7 @@ def build() -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def _request(intent, image_path, values: dict):
+def _request(intent, picture, values: dict):
     """A ``PromptRequest`` from the panel, with the seed resolved.
 
     Resolved here for the same reason the standalone app resolved it here: a
@@ -251,8 +261,8 @@ def _request(intent, image_path, values: dict):
     seed = int(values["seed"] or 0)
     return PromptRequest(
         intent=(intent or "").strip(),
-        image_data_url=ui.data_url(image_path),
-        image_name=Path(image_path).name if image_path else "",
+        image_data_url=ui.data_url(picture),
+        image_name=ui.picked_name(picture),
         video_mode=values["video_mode"],
         seconds=float(values["seconds"]),
         fps=int(values["fps"]),
@@ -284,7 +294,7 @@ _ORDER = ["video_mode", "seconds", "fps", "dimensions", "seed", "style", "motion
           "music", "music_bg", "speech", "fmt", "smart_negative", "lexicon", "negative_extra"]
 
 
-def _generate(intent, image_path, *values):
+def _generate(intent, picture, *values):
     """Stream one generation. A Gradio generator, so every yield is a repaint."""
     settings = dict(zip(_ORDER, values))
     busy = (gr.update(interactive=False), gr.update(interactive=True))
@@ -294,14 +304,17 @@ def _generate(intent, image_path, *values):
         yield None, "", "", ui.notice("Enter a video intent first.", "warn"), *idle
         return
 
-    if settings["video_mode"] == "i2v" and not image_path:
+    # ``is None`` and not falsiness: the slot holds a decoded picture now,
+    # and asking the truthiness of an image is asking a question its class is
+    # free to answer for reasons of its own.
+    if settings["video_mode"] == "i2v" and picture is None:
         yield (None, "", "",
                ui.notice("Image to video needs an attached image. Attach one, or switch to "
                          "text to video.", "warn"), *idle)
         return
 
     try:
-        request = _request(intent, image_path, settings)
+        request = _request(intent, picture, settings)
     except Exception as exc:
         yield None, "", "", ui.notice(ui.failure(exc), "error"), *idle
         return

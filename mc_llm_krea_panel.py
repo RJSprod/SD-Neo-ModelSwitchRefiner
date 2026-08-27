@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 
 import gradio as gr
 
@@ -159,8 +160,14 @@ def build() -> dict:
                 elem_id=ui.ident("krea", "prompt"))
 
             with gr.Row(elem_id=ui.ident("krea", "references")):
+                # type="pil" and not "filepath": Gradio's filepath preprocess
+                # calls ``processing_utils.save_pil_to_cache`` with a ``name``
+                # argument, and this WebUI replaces that function with an older
+                # one that has no such parameter -- so every filepath image
+                # input in the host raises ``TypeError`` before a handler is
+                # ever reached. Asking for the picture itself skips that call.
                 images = [
-                    gr.Image(label=f"Image {position}", type="filepath", height=140,
+                    gr.Image(label=f"Image {position}", type="pil", height=140,
                              elem_id=ui.ident("krea", "image", str(position)))
                     for position in range(1, enhancer.MAX_REFERENCES + 1)]
 
@@ -261,7 +268,7 @@ def build() -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def references(paths) -> tuple[list, str]:
+def references(picked) -> tuple[list, str]:
     """The filled slots as numbered references, or a sentence saying why not.
 
     The order handed back is the order the slots are in on screen, and the
@@ -277,19 +284,40 @@ def references(paths) -> tuple[list, str]:
     """
     from prompt_master.krea.references import Reference
 
-    slots = list(paths or [])
-    filled = [(position, path) for position, path in enumerate(slots, start=1) if path]
+    slots = list(picked or [])
+    filled = [(position, found) for position, found in enumerate(slots, start=1)
+              if _in_a_slot(found)]
     if not filled:
         return [], ""
 
-    empty = [position for position in range(1, filled[-1][0]) if not slots[position - 1]]
+    empty = [position for position in range(1, filled[-1][0])
+             if not _in_a_slot(slots[position - 1])]
     if empty:
         missing = ", ".join(f"Image {position}" for position in empty)
         return [], (f"{missing} is empty, but a later slot has a picture in it. "
                     "Fill the reference slots in order — moving the pictures up would "
                     "change the numbers you are describing them by.")
 
-    return [Reference(ui_index=position, path=str(path)) for position, path in filled], ""
+    return [Reference(ui_index=position,
+                      path=str(found) if _is_a_path(found) else "",
+                      picture=None if _is_a_path(found) else found)
+            for position, found in filled], ""
+
+
+def _in_a_slot(found) -> bool:
+    """Whether a reference slot has something in it.
+
+    Not ``bool(found)``. A slot holds a decoded picture now, and a picture that
+    happens to be entirely black is still a picture -- while an empty slot is
+    ``None`` and an empty path is ``""``. Asking the truthiness of whatever
+    arrived would one day be asking it of something that answers False for a
+    reason of its own.
+    """
+    return found is not None and not (_is_a_path(found) and not str(found))
+
+
+def _is_a_path(found) -> bool:
+    return isinstance(found, (str, Path))
 
 
 def _encoded(found) -> str:
@@ -301,7 +329,7 @@ def _encoded(found) -> str:
     """
     for reference in found:
         try:
-            reference.data_url = ui.data_url(reference.path) or ""
+            reference.data_url = ui.data_url(reference.source) or ""
         except Exception as exc:
             # Named by slot, not by path. "Image 2 could not be read" is
             # something a user can act on; a temporary upload path is not, and

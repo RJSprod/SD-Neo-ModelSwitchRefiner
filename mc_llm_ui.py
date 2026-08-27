@@ -74,19 +74,50 @@ def grouped_choices(groups) -> list[tuple[str, str]]:
     return flattened
 
 
-def data_url(path) -> str | None:
+ATTACHED = "attached image"
+"""What a picture with no filename is called, in a transcript and in a history.
+
+Gradio's image component decodes an upload and hands back the picture itself;
+the name it was uploaded under is consumed inside that decode and is not part
+of what a handler receives. So there is a name for the case, rather than an
+empty string that would make the attachment marker vanish from the transcript
+and leave nothing on screen to say a picture was ever attached.
+"""
+
+
+def data_url(picked) -> str | None:
     """A picked image as the data URL the prompt engine wants, or ``None``.
 
-    Gradio hands back a temporary file path; the vendored preprocessor does the
-    EXIF transpose, the RGB conversion, the 768px thumbnail and the JPEG
-    encoding -- all of which the engine's vision policy depends on, and none of
-    which is re-implemented here.
+    Takes either shape Gradio can hand over: a decoded picture, which is what
+    these panels ask for, or a path, which is what an API caller or an older
+    component produces. The vendored preprocessor does the EXIF transpose, the
+    RGB conversion, the 768px thumbnail and the JPEG encoding -- all of which
+    the engine's vision policy depends on, and none of which is re-implemented
+    here.
     """
-    if not path:
+    if picked is None or (isinstance(picked, (str, Path)) and not str(picked)):
         return None
-    from prompt_master.imaging.preprocess import image_data_url
+    from prompt_master.imaging.preprocess import encode, image_data_url
 
-    return image_data_url(Path(path))
+    if isinstance(picked, (str, Path)):
+        return image_data_url(Path(picked))
+    return encode(picked)
+
+
+def picked_name(picked) -> str:
+    """What to call a picked image in a transcript, a history or a log line.
+
+    Never the path. A full path is somebody's home directory, their username
+    and often the name of the project they are working on, and none of that
+    belongs in a saved history -- so a file contributes its basename and
+    nothing else, and a decoded picture, which arrives with no name at all,
+    contributes :data:`ATTACHED`.
+    """
+    if picked is None:
+        return ""
+    if isinstance(picked, (str, Path)):
+        return Path(picked).name if str(picked) else ""
+    return ATTACHED
 
 
 def gigabytes(value: int | float) -> str:

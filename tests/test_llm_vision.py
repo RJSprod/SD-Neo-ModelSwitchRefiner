@@ -24,6 +24,7 @@ moves it back.
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 
@@ -899,6 +900,232 @@ class TestTheRequestGoesToTheLocalServer:
         client = server.client()
 
         assert client.base_url.startswith("http://127.0.0.1:")
+
+
+# --------------------------------------------------------------------------- #
+# Getting the picture out of the browser at all
+# --------------------------------------------------------------------------- #
+
+
+class TestThePictureReachesTheHandler:
+    """The failure in front of every other failure here.
+
+    Gradio 4.40 preprocesses a ``type="filepath"`` image by calling
+    ``processing_utils.save_pil_to_cache(im, cache_dir=..., name=..., format=...)``.
+    This WebUI replaces that function, in ``modules/ui_tempdir``, with an older
+    one whose signature is ``(pil_image, cache_dir=None, format="png")`` -- so
+    the ``name`` argument is unexpected and *every* filepath image input in the
+    host raises ``TypeError`` inside ``preprocess_data``, before any handler
+    runs. Attaching a picture wrote a traceback to the console and sent a
+    text-only request; no amount of correct projector handling downstream could
+    have made that work.
+
+    ``type="pil"`` returns the decoded image straight out of ``format_image``
+    and never reaches the replaced function, so it does not matter which
+    version of it the host installed.
+    """
+
+    def panels(self):
+        root = Path(__file__).resolve().parent.parent
+        for name in ("mc_llm_chat_panel.py", "mc_llm_prompt_panel.py",
+                     "mc_llm_minimax_panel.py", "mc_llm_krea_panel.py"):
+            yield root / name
+        yield from (root / "scripts").glob("*.py")
+
+    def test_no_image_input_asks_gradio_for_a_filepath(self):
+        offenders = [str(path) for path in self.panels()
+                     if 'type="filepath"' in path.read_text(encoding="utf-8")]
+
+        assert offenders == []
+
+    def test_every_panel_still_has_its_image_input(self):
+        """The other way to make the first test pass is to delete the feature."""
+        found = [path.name for path in self.panels()
+                 if "gr.Image(" in path.read_text(encoding="utf-8")]
+
+        assert set(found) >= {"mc_llm_chat_panel.py", "mc_llm_prompt_panel.py",
+                              "mc_llm_minimax_panel.py", "mc_llm_krea_panel.py"}
+
+
+class TestEncodingAPickedPicture:
+    def picture(self, size=(40, 30), colour=(200, 30, 30)):
+        from PIL import Image
+
+        return Image.new("RGB", size, colour)
+
+    def test_a_decoded_picture_becomes_an_embedded_jpeg(self):
+        import mc_llm_ui as ui
+
+        assert ui.data_url(self.picture()).startswith("data:image/jpeg;base64,")
+
+    def test_a_path_still_works(self, tmp_path):
+        """An API caller, or any component still handing over a file."""
+        import mc_llm_ui as ui
+
+        path = tmp_path / "shot.png"
+        self.picture().save(path)
+
+        assert ui.data_url(path).startswith("data:image/jpeg;base64,")
+
+    def test_nothing_picked_is_nothing_encoded(self):
+        import mc_llm_ui as ui
+
+        assert ui.data_url(None) is None
+        assert ui.data_url("") is None
+
+    def test_a_large_picture_is_shrunk_before_it_is_sent(self):
+        """A projector charges by the tile, and an 8-megapixel phone photograph
+        is several times the context of the conversation it is attached to."""
+        import base64
+
+        from PIL import Image
+
+        import mc_llm_ui as ui
+        from prompt_master.imaging.preprocess import MAX_SIDE
+
+        encoded = ui.data_url(self.picture(size=(4000, 3000)))
+        raw = base64.b64decode(encoded.split(",", 1)[1])
+        with Image.open(io.BytesIO(raw)) as sent:
+            assert max(sent.size) == MAX_SIDE
+
+    def test_a_file_is_named_by_its_basename_and_never_its_path(self):
+        """A full path is somebody's home directory and their username."""
+        import mc_llm_ui as ui
+
+        assert ui.picked_name("/home/someone/secret project/a.png") == "a.png"
+
+    def test_a_decoded_picture_is_named_something_rather_than_nothing(self):
+        """Gradio consumes the upload's filename inside its own decode, so
+        there is none to carry. An empty string would take the attachment
+        marker out of the transcript and leave nothing on screen to say a
+        picture was ever attached."""
+        import mc_llm_ui as ui
+
+        assert ui.picked_name(self.picture()) == ui.ATTACHED
+
+
+class TestThePanelsAcceptAPicture:
+    def picture(self):
+        from PIL import Image
+
+        return Image.new("RGB", (16, 16), (90, 90, 200))
+
+    def settings(self, **over):
+        import mc_llm_prompt_panel as prompt
+
+        defaults = {"video_mode": "i2v", "seconds": 5, "fps": 24, "dimensions": "768x512",
+                    "seed": 7, "speech": 0, "accent_strength": 0, "smart_negative": False,
+                    "dialogue": 0, "music_bg": False, "undress": False}
+        defaults.update(over)
+        return tuple(defaults.get(name, "") for name in prompt._ORDER)
+
+    def test_prompt_studio_i2v_is_satisfied_by_a_picture(self):
+        """The guard is ``picture is None`` rather than falsiness. An image
+        class is free to answer ``bool`` for reasons of its own -- a numpy
+        array raises outright -- and "Image to video needs an attached image"
+        about an attached image is a dead end with nothing to try."""
+        import mc_llm_prompt_panel as prompt
+
+        refusal = next(iter(prompt._generate("a red ball rolls", self.picture(),
+                                             *self.settings())))
+
+        assert "needs an attached image" not in str(refusal)
+
+    def test_prompt_studio_i2v_still_refuses_an_empty_slot(self):
+        import mc_llm_prompt_panel as prompt
+
+        refusal = next(iter(prompt._generate("a red ball rolls", None, *self.settings())))
+
+        assert "needs an attached image" in str(refusal)
+
+    def test_the_request_carries_the_picture_as_embedded_bytes(self):
+        import mc_llm_prompt_panel as prompt
+        import mc_llm_ui as ui
+
+        request = prompt._request("a red ball rolls", self.picture(),
+                                  dict(zip(prompt._ORDER, self.settings())))
+
+        assert request.image_data_url.startswith("data:image/jpeg;base64,")
+        assert request.image_name == ui.ATTACHED
+
+
+class TestTheWholeChainFromTheBrowser:
+    def test_a_picked_picture_reaches_the_wire_as_embedded_bytes(self):
+        """Component to request, in the order it really happens: the panel
+        encodes what Gradio handed it, the conversation stores that, the prompt
+        builder puts it in an ``image_url`` part, the runtime is told vision is
+        required, and the transmission guard accepts it because it is embedded.
+
+        One test for the whole path because the failure that prompted it was a
+        seam: every piece was correct and the first one never produced a value
+        at all."""
+        from PIL import Image
+
+        import mc_llm_ui as ui
+        from prompt_master.chat.characters import Character, Persona
+        from prompt_master.chat.history import Conversation
+        from prompt_master.chat.prompt import build, needs_vision
+        from prompt_master.inference.local_only import check_messages
+
+        picked = Image.new("RGB", (24, 24), (10, 90, 200))
+
+        encoded = ui.data_url(picked)
+        conversation = Conversation(identifier="t", character="C")
+        conversation.append("user", "what is this", encoded, ui.picked_name(picked))
+
+        wire = build(Character(name="C"), Persona(name="P"), conversation.messages)
+
+        assert needs_vision(wire)
+        check_messages(wire)
+        parts = [part for message in wire if isinstance(message.get("content"), list)
+                 for part in message["content"] if part.get("type") == "image_url"]
+        assert len(parts) == 1
+        assert parts[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+class TestKreaSlotsTakePictures:
+    def picture(self):
+        from PIL import Image
+
+        return Image.new("RGB", (8, 8), (0, 128, 0))
+
+    def test_the_visible_order_survives(self):
+        """§4 again, with the slots handing over pictures instead of paths:
+        identity comes from slot order and from nothing else."""
+        import mc_llm_krea_panel as krea
+
+        first, second = self.picture(), self.picture()
+        found, complaint = krea.references([first, second, None, None])
+
+        assert complaint == ""
+        assert [reference.ui_index for reference in found] == [1, 2]
+        assert [reference.picture for reference in found] == [first, second]
+
+    def test_a_gap_is_still_refused(self):
+        import mc_llm_krea_panel as krea
+
+        found, complaint = krea.references([self.picture(), None, self.picture(), None])
+
+        assert found == []
+        assert "Image 2 is empty" in complaint
+
+    def test_the_pictures_are_encoded_against_their_own_slots(self):
+        import mc_llm_krea_panel as krea
+
+        found, _ = krea.references([self.picture(), self.picture(), None, None])
+
+        assert krea._encoded(found) == ""
+        assert all(reference.data_url.startswith("data:image/jpeg;base64,")
+                   for reference in found)
+
+    def test_a_slot_that_cannot_be_read_is_named_by_its_number(self):
+        """Not by its path: a temporary upload path is somebody's home
+        directory, and "Image 2 could not be read" is what a user can act on."""
+        import mc_llm_krea_panel as krea
+
+        found, _ = krea.references([self.picture(), object(), None, None])
+
+        assert "Image 2 could not be read" in krea._encoded(found)
 
 
 # --------------------------------------------------------------------------- #
