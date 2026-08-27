@@ -3379,3 +3379,149 @@ skipped and the rest carry on."*
 Each concern is now wired through `attempt(what, run)` with its own `try`, and a
 node test breaks the first feature deliberately and asserts the icons are still
 drawn.
+
+## 33. Vision was a mode, and it should have been a capability (27 August 2026)
+
+Local multimodal inference did not work, and the reason was not one function. It
+was a lifecycle mistake repeated in three places, each of which was individually
+defensible.
+
+### 33.1 The three facts that had become one
+
+There are three separate things to know about a multimodal backbone, and the old
+code kept them in one variable:
+
+| | |
+| --- | --- |
+| **declared** | the catalogue says this backbone has a projector |
+| **present** | that projector is a file on this disk |
+| **loaded** | the running llama-server was started with `--mmproj` |
+
+Conflating them produced two bugs pointing in opposite directions.
+
+*The selection bug.* The ordinary model chooser records a model with no
+projector — correctly, because a filename does not prove which weights a
+projector was made for — and clears `mmproj` doing it. Recognising the path as a
+managed bundle afterwards restored the source, the id and the hidden profile,
+and not the projector. What that left was a state file which knew a managed
+multimodal backbone was selected and reported that it had no eyes: *declared*
+was true, and the only record of it had been erased. `follow_path` now restores
+the association with the profile, and the switch path records the declared path
+rather than the present file, because a bundle whose projector has been deleted
+still has one declared for it and that is what a repair works from.
+
+*The lifecycle bug.* `Runtime.client` read the current request's `needs_vision`
+as a complete description of the server that ought to be running:
+
+```python
+projector = configuration.mmproj if needs_vision else None
+```
+
+So `needs_vision=False` did not mean "no upgrade required". It meant "restart
+without the projector". A conversation with pictures in it thrashed:
+
+```
+    text  ->  text server
+    image ->  restart with the projector
+    text  ->  restart without it
+    image ->  restart with it again
+```
+
+Every one of those restarts costs a model load, a CUDA context, a VRAM
+re-placement and llama.cpp's prompt cache — which is the whole conversation
+re-evaluated from the first token before a single character appears.
+
+### 33.2 Capability, and it only moves upward
+
+The runtime now records what the *process* was started with, in `_projector`,
+beside the identity that records what the *user* chose. A request asks for the
+capability it needs rather than for the server it imagines:
+
+```
+    OFF  ->  TEXT_ONLY  ->  VISION_LOADED
+```
+
+`_wanted_projector` is the whole rule. A picture names the compatible projector.
+Anything else inherits whatever the running process already holds, because
+vision capability is a superset of text capability and a superset satisfies the
+subset. There is no path by which an ordinary request moves the state back.
+
+Two things had to follow it or the fix would have been undone elsewhere:
+
+- **`_outgrown` previews with the projector accounted for.** A vision-loaded
+  server is holding over a gigabyte, so a placement previewed *without* it looks
+  roomier — and "it now fits better" is a restart. That would have reintroduced
+  the thrash through the placement path instead of the capability path.
+- **`_restart_in_system_ram` carries the loaded projector, not the configured
+  one.** It is a relocation of the server that is running, so it has to come
+  back with the capability it went away with. Starting from
+  `configuration.mmproj` would have given a text-only server a projector in
+  system RAM to satisfy nothing; starting from `None` would have taken vision
+  away from a conversation that was mid-picture.
+
+Stickiness ends where the process does: Unload, a model or device change, a
+broker eviction, a crash, or shutdown. It is per runtime, so one server
+acquiring a projector leaves every other server's process, placement and prompt
+cache untouched.
+
+### 33.3 Repair happens before the lock, not inside it
+
+`mc_llm_vision` is the new module, and it is small on purpose: it answers "which
+file" and leaves "is it loaded" to the runtime. When a managed bundle's
+projector is missing, the first image request downloads the exact catalogue
+artifact — same revision, same SHA-256, through the same verified downloader —
+and records it, without anybody being asked to go and find a file.
+
+`repair_projector` is deliberately not `download()`. That call is a whole-bundle
+transaction: stage everything, verify everything, rename a finished directory
+over the installed one. Re-running it to obtain one missing sidecar would
+re-verify, and possibly re-fetch, seventeen gigabytes of weights that are
+already on the disk and quite possibly mmapped by a server that is answering
+requests. So one artifact is staged, verified and `os.replace`d in beside
+weights nothing touched, and its own staging directory is separate so an
+automatic repair cannot discard somebody's paused model download.
+
+It runs *before* `Runtime._lock` is taken. A gigabyte over somebody's connection
+must not hold the process lock of a llama-server that is answering other
+requests perfectly well — and nothing is stopped at that point either, so a
+repair that cannot be completed leaves a running text server running rather than
+destroying a usable text model over an optional upgrade. The run's cancellation
+is passed down, so Stop stops the transfer and what has arrived is kept.
+
+### 33.4 What "OpenAI-compatible" does not mean
+
+llama.cpp speaks an OpenAI-compatible chat schema. Those words describe the
+shape of a JSON body; they authorise nothing. `prompt_master/inference/
+local_only.py` turns that from a comment into two checks:
+
+- **The endpoint is loopback or it is refused** — at construction, which is the
+  last moment before a prompt, a character card, a Creative brief or Spatial
+  data can be attached to it. There is no setting anywhere in these paths that
+  can redirect inference at a host, public or private, and no fallback to a
+  hosted API on any failure.
+- **Images are embedded or they are refused** — llama.cpp will fetch a remote
+  `image_url` if it is given one, which would make the *server* perform a
+  data-dependent network request. Every caller in this project already builds a
+  `data:` URI; the guard is at the point of transmission so that stays true of
+  the sixth caller as well as the five that exist.
+
+The only thing that reaches the network is provisioning: a model, a projector, a
+runtime binary. With those on disk, pulling the network cable changes nothing
+about inference.
+
+### 33.5 What the tests assert
+
+Mostly process identity and counts, because a test that only checked each
+request eventually succeeded would have passed against the broken lifecycle. A
+mixed session of `text, text, image, text, text, image, text` has to produce
+exactly one start and exactly one capability upgrade, and the process object has
+to be the same one across every turn after it. Two runtimes are driven side by
+side and the second one's process identity is asserted unchanged while the first
+upgrades.
+
+The provisioning validator does the half that mocks cannot: it starts the real
+llama-server the install has just downloaded, proves the text probe loaded no
+projector, upgrades once for an embedded image, and then requires the *same
+process* to answer a text follow-up. Upstream multimodal regressions have
+shipped in builds where the request schema and the projector configuration were
+both correct, and only a real binary can catch that.

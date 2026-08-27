@@ -61,6 +61,7 @@ import mc_llm_files
 import mc_llm_roles
 import mc_llm_paths
 import mc_llm_ui as ui
+import mc_llm_vision
 
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
@@ -769,8 +770,17 @@ def _runtime_detail(state=None) -> str:
     # asked by somebody whose replies are slower than they should be.
     if report is not None and report.offload.known:
         parts.append(f"llama.cpp: {report.offload.describe()}")
+    # Three answers rather than two, because there are three states (section
+    # 4). A backbone with no projector says so; one that has a projector and
+    # has not needed it yet says that the cost has not been paid; one that has
+    # loaded it says so, which is the line that explains where a gigabyte and a
+    # third of the card went.
     if not state["sees"]:
         parts.append("No vision projector")
+    elif state.get("vision_loaded"):
+        parts.append("Vision loaded")
+    elif state.get("running"):
+        parts.append("Vision on first image")
     return " · ".join(parts)
 
 
@@ -1525,8 +1535,13 @@ def _model_line(configuration, notes=()) -> str:
     if configuration.model is None:
         return ui.notice("No model chosen yet. Enter the path to a .gguf file, or press "
                          "Browse.", "warn")
+    # "Available", not "loaded". The two are different facts and saying the
+    # second about the first is what the old line did: a projector this
+    # installation knows about is not a projector any llama-server has read.
+    # Which of them is resident is a question about a running process, and the
+    # status chip beside the Load button is where that is answered.
     line = (f"{_model_name(configuration)} · "
-            f"{'vision projector loaded' if configuration.sees else 'text only'}")
+            f"{'vision available' if configuration.sees else 'text only'}")
     return ui.notice(" ".join([line] + [str(note) for note in notes]))
 
 
@@ -1880,12 +1895,20 @@ def _apply_model(model, mmproj, role=""):
     except Exception as exc:
         return (ui.notice(ui.failure(exc), "error"),) + unchanged
 
+    # A managed bundle picked out of these boxes keeps the projector the
+    # catalogue declares for it, and only when the boxes named none. Not a
+    # filename guess -- see mc_llm_vision.projector_for_model and invariant I-8:
+    # it is the exact artifact the bundle was downloaded and hash-verified with,
+    # and losing it here is what left the installation knowing a multimodal
+    # backbone was selected while reporting that it had no eyes.
+    trusted = mc_llm_vision.projector_for_model(chosen.path) if projector is None else None
+
     try:
         if chosen_role:
             import mc_llm_setup
 
             mc_llm_setup.record_model(
-                chosen.path, projector.path if projector is not None else None,
+                chosen.path, projector.path if projector is not None else trusted,
                 role=chosen_role)
         else:
             model_choice.choose(mc_llm_paths.app_paths(), chosen.path,
@@ -1904,10 +1927,15 @@ def _apply_model(model, mmproj, role=""):
         for found in mc_llm_runtime.registry.all():
             found.stop()
     notes = list(chosen.notes) + list(projector.notes if projector is not None else ())
-    if projector is None:
+    if projector is None and trusted is not None:
+        notes.append(f"{trusted.name} is this backbone's own vision projector and stays "
+                     f"associated with it. It is loaded the first time a request actually "
+                     f"carries an image, not before.")
+    elif projector is None:
         notes.extend(_projector_hint(chosen.path))
-    return (_model_line(mc_llm_runtime.config(chosen_role), notes), _estimator_html(),
-            str(chosen.path), str(projector.path) if projector is not None else "")
+    updated = mc_llm_runtime.config(chosen_role)
+    return (_model_line(updated, notes), _estimator_html(),
+            str(chosen.path), str(updated.mmproj or ""))
 
 
 def _follow_managed(path) -> None:

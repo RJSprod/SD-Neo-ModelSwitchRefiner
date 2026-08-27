@@ -18,12 +18,23 @@ CPU_READY_TIMEOUT = 1200
 
 
 class InferenceService:
-    """Owns the single managed llama-server process for the application."""
+    """Owns the single managed llama-server process for the application.
+
+    Vision is a capability this process may acquire, not a mode each request
+    sets. A server starts text-only, is upgraded once when a request genuinely
+    needs to be shown a picture, and keeps the projector until it is stopped --
+    so a text turn after an image turn reuses the process it found rather than
+    rebuilding a smaller one that the next picture would rebuild again. See
+    ``mc_llm_runtime.Runtime.client``, which mirrors this and adds the placement
+    negotiation an extension sharing a card with Stable Diffusion needs.
+    """
 
     def __init__(self, paths: AppPaths):
         self.paths = paths
         self.process = LlamaProcess()
         self.signature: tuple | None = None
+        self.loaded_projector: Path | None = None
+        """The projector the running process was started with, if any."""
 
     def vision_ready(self) -> bool:
         """Whether the model this install runs can be shown a picture.
@@ -67,18 +78,46 @@ class InferenceService:
             if path is not None and not path.is_file():
                 raise RuntimeError(f"Configured {label} is missing: {path}")
         if needs_vision and mmproj is None:
-            raise RuntimeError("This request carries an image, and the model running has no vision projector. Choose one under Settings → Which model runs, or send the request without the image; text-only fallback is disabled.")
-        signature = (runtime, model, mmproj, int(state["gpu_index"]), state.get("gpu_device", "CUDA0"), int(state.get("context_size", 8192)), str(state.get("gpu_layers", "all")))
+            raise RuntimeError("This request carries an image, and the model running has no vision projector. Choose one under Settings → Which model runs, or send the request without the image; text-only fallback is disabled and nothing is ever sent to a hosted model.")
+        # What this server should be running with once the request is served: the
+        # compatible projector for a picture, and otherwise whatever the running
+        # process already holds. needs_vision=False means "no upgrade required",
+        # never "remove vision" — a vision-capable server satisfies a text-only
+        # request as it stands, and rebuilding a smaller one costs the model
+        # load, the CUDA context and llama.cpp's prompt cache to save VRAM that
+        # has already been paid for.
+        projector = mmproj if needs_vision else self._resident_projector(mmproj)
+        signature = (runtime, model, projector, int(state["gpu_index"]), state.get("gpu_device", "CUDA0"), int(state.get("context_size", 8192)), str(state.get("gpu_layers", "all")))
         # "No layers offloaded" is what both system-RAM modes record, and it is
         # the physical fact the load time follows from, so it is what is read
         # here rather than the mode name beside it.
         from_system_ram = signature[4].casefold() == CPU_DEVICE or signature[6] == NO_OFFLOAD
         if not self.process.running or signature != self.signature:
-            self.process.start(runtime, model, mmproj, signature[3], signature[4], signature[5], self.paths.logs / "llama-server.log", gpu_layers=signature[6])
+            self.process.start(runtime, model, projector, signature[3], signature[4], signature[5], self.paths.logs / "llama-server.log", gpu_layers=signature[6])
             self.process.wait_ready(CPU_READY_TIMEOUT if from_system_ram else GPU_READY_TIMEOUT)
             self.signature = signature
+            self.loaded_projector = projector
         return LlamaClient(f"http://127.0.0.1:{self.process.port}", self.process.api_key)
+
+    def _resident_projector(self, compatible: Path | None) -> Path | None:
+        """The projector the running process holds, while it is still the right one.
+
+        A model change makes the loaded projector the wrong projector, and a
+        file deleted underneath a live server cannot be passed to the next
+        start; both answer None and are handled as the ordinary replacement
+        they are, rather than as a downgrade some text request asked for.
+        """
+        if not self.process.running or self.loaded_projector is None:
+            return None
+        if compatible is None or Path(compatible) != Path(self.loaded_projector):
+            return None
+        return self.loaded_projector if Path(self.loaded_projector).is_file() else None
+
+    def vision_loaded(self) -> bool:
+        """Whether the process that is up was started with a projector."""
+        return self.process.running and self.loaded_projector is not None
 
     def stop(self) -> None:
         self.process.stop()
         self.signature = None
+        self.loaded_projector = None

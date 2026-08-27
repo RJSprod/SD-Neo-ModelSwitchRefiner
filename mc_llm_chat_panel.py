@@ -1607,7 +1607,7 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
     """
     from prompt_master.chat.characters import (DEFAULT_MAX_REPLY_TOKENS, DEFAULT_TEMPERATURE,
                                                DEFAULT_TOP_P)
-    from prompt_master.chat.prompt import build, clean_reply, has_image
+    from prompt_master.chat.prompt import build, clean_reply, needs_vision
     from prompt_master.core.models import RANDOM_SEED, draw_seed
 
     busy, idle = BUSY, IDLE
@@ -1631,10 +1631,15 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
         resolved = draw_seed()
     asked = _number(seed, RANDOM_SEED)
 
+    # Built once and then asked about, rather than asked about the history and
+    # built afterwards. The two answers differ exactly when trimming has dropped
+    # the only still, and the request that is actually sent is the one whose
+    # needs decide whether a projector has to be loaded for it.
+    wire = build(character, persona, history, context_size=_context_size(),
+                 reply_tokens=tokens, instruction=instruction)
     request = sessions.ChatRequest(
-        messages=build(character, persona, history, context_size=_context_size(),
-                       reply_tokens=tokens, instruction=instruction),
-        needs_vision=has_image(history),
+        messages=wire,
+        needs_vision=needs_vision(wire),
         temperature=_decimal(temperature, character.temperature, DEFAULT_TEMPERATURE),
         top_p=_decimal(top_p, character.top_p, DEFAULT_TOP_P),
         max_tokens=tokens,

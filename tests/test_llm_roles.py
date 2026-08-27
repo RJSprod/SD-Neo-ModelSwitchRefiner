@@ -667,7 +667,7 @@ class TestTheWriterAndTheComposerAskForTheirOwnRuntime:
             def __init__(self, role):
                 self.role = role
 
-            def client(self, needs_vision=False, reserve=0):
+            def client(self, needs_vision=False, reserve=0, cancel=None):
                 seen.append(self.role)
                 return object()
 
@@ -694,7 +694,7 @@ class TestTheWriterAndTheComposerAskForTheirOwnRuntime:
         sessions, seen = asked
         called: list = []
         monkeypatch.setattr(runtime.runtime, "client",
-                            lambda needs_vision=False, reserve=0: called.append(1))
+                            lambda needs_vision=False, reserve=0, cancel=None: called.append(1))
 
         sessions._client(False, 0)
 

@@ -81,6 +81,18 @@ never what anything here opens.
 BUNDLE_SUFFIX = ".previous"
 """Where a bundle being replaced waits until the replacement has succeeded."""
 
+REPAIR_DIRNAME = ".projector-repair"
+"""Where a projector being repaired on its own is staged.
+
+Beside the ordinary staging directory rather than inside it, because the two
+are different transactions with different contents. A repair stages one file
+and writes a sidecar naming one artifact; a full download that happened to be
+half finished names two, and :func:`_prepare_staging` -- quite correctly --
+discards a staging directory whose sidecar disagrees with what is being
+fetched now. Sharing the directory would mean an automatic vision repair threw
+away eight gigabytes of somebody's paused model download.
+"""
+
 SAFETY_MARGIN_BYTES = 512 * _MB
 SAFETY_MARGIN_FRACTION = 0.05
 """Free disk a download insists on beyond the bytes it is about to write.
@@ -792,6 +804,23 @@ def follow_path(model_path) -> Selection:
     the moment one is downloaded, because the managed root is under the folder
     that chooser scans -- has to restore the selection, or a curated backbone
     would quietly run as an anonymous GGUF with the previous model's settings.
+
+    The projector is restored with the profile, and that is the regression this
+    line exists to close rather than a convenience. The ordinary chooser records
+    a model with no projector -- correctly, because a filename proves nothing
+    about which weights a projector was made for -- and clears ``mmproj`` doing
+    it. Recognising the managed path afterwards used to put back the identity
+    and not the association, which left a state file that knew a multimodal
+    backbone was selected and reported that it had no eyes. A registry entry is
+    not a guess (invariant I-8): it is the exact artifact this bundle was
+    downloaded with, so it is what goes back.
+
+    Recorded whether or not the file is on disk at this moment, because those
+    are two different facts (section 10). What the state file holds is "the
+    compatible projector to use when vision is needed"; whether that artifact
+    is present is a question for the filesystem, and whether it is *loaded* is
+    a question for the running process. Dropping the association because the
+    file is missing is what turns a repairable bundle into a text-only one.
     """
     identifier = identify_path(model_path)
     state = _read_state()
@@ -803,18 +832,44 @@ def follow_path(model_path) -> Selection:
         except ManagedError:
             model = None
         if model is not None:
-            if current.managed and current.identifier == identifier:
+            projector = _recorded_projector(model)
+            settled = (current.managed and current.identifier == identifier
+                       and (projector is None or str(state.get("mmproj") or "") == projector))
+            if settled:
                 return current
-            _write_state({**state, STATE_KEY_SOURCE: SOURCE_MANAGED,
-                          STATE_KEY_ID: model.identifier,
-                          STATE_KEY_PROFILE: model.profile_id,
-                          STATE_KEY_PROFILE_VERSION: _profile_version()})
+            updated = {**state, STATE_KEY_SOURCE: SOURCE_MANAGED,
+                       STATE_KEY_ID: model.identifier,
+                       STATE_KEY_PROFILE: model.profile_id,
+                       STATE_KEY_PROFILE_VERSION: _profile_version()}
+            if projector is not None:
+                updated["mmproj"] = projector
+            _write_state(updated)
             logger.info("Model Chain: the chosen GGUF is the managed backbone %s; its profile "
-                        "applies", model.identifier)
+                        "applies%s", model.identifier,
+                        " and its vision projector stays associated" if projector else "")
             return selection()
 
     select_manual()
     return selection()
+
+
+def _recorded_projector(model: ManagedModel) -> str | None:
+    """How the state file should name ``model``'s projector, or ``None``.
+
+    ``None`` for a text-only entry, which must not have an ``mmproj`` written
+    for it: an entry the catalogue declares no projector for has none to
+    associate, and inventing a path to a file that will never exist would make
+    every later vision request fail on a missing artifact instead of saying
+    plainly that this backbone does not see.
+    """
+    if model.projector is None:
+        return None
+    try:
+        return mc_llm_paths.app_paths().record(bundle_root(model.identifier) / MMPROJ_FILENAME)
+    except (ManagedError, OSError, ValueError):
+        logger.debug("Model Chain: could not name the projector for %s", model.identifier,
+                     exc_info=True)
+        return None
 
 
 def select_manual() -> None:
@@ -1014,6 +1069,165 @@ def download(identifier: str, on_status=None, on_progress=None,
     tick(1.0)
     logger.info("Model Chain: managed backbone %s installed at %s", model.identifier, target)
     return bundle
+
+
+def repair_projector(identifier: str, on_status=None, on_progress=None,
+                     cancel: threading.Event | None = None) -> Path:
+    """Put ``identifier``'s registry-declared vision projector back on disk.
+
+    Design intent section 12: a managed installation is not fully valid merely
+    because an old manifest remembers that a projector once existed. If the
+    registry requires ``mmproj.gguf`` and the file is missing, truncated, or
+    fails its hash, that bundle is *incomplete for vision* -- and the repair is
+    automatic, because the alternative is asking a user to go and find a file
+    this extension already knows the exact name, revision and SHA-256 of.
+
+    Deliberately not ``download(identifier)``. That call is a whole-bundle
+    transaction: it stages every artifact, verifies every artifact, and renames
+    a finished directory over the installed one. Re-running it to obtain one
+    missing sidecar would re-verify -- and, when the manifest no longer matches,
+    re-fetch -- seventeen gigabytes of weights that are already on the disk and
+    quite possibly mmapped by a llama-server that is answering requests. So the
+    same verified downloader is reused a file at a time, and the finished file
+    is moved in beside weights that were never touched.
+
+    The model's own bytes are the invariant here: nothing in this function
+    removes, renames or rewrites ``model.gguf``, and a failure at any step
+    leaves an installation that still runs exactly as it did, without eyes.
+    """
+    say = on_status or (lambda _text: None)
+    tick = on_progress or (lambda _fraction: None)
+
+    model = entry(identifier)
+    if model.projector is None:
+        raise ManagedError(f"{model.label} has no vision projector in this extension's "
+                           f"catalogue, so there is nothing to repair.")
+    bundle = installed(model.identifier)
+    if bundle is None:
+        raise ManagedError(f"{model.label} is not installed, so its vision projector cannot be "
+                           f"repaired on its own. Download the backbone first.")
+
+    target = bundle.root / MMPROJ_FILENAME
+    if _is_the_declared_artifact(target, model.projector):
+        # Present and correct, and the manifest simply did not say so -- which
+        # is what an interrupted repair or a hand-copied file looks like.
+        _record_projector(bundle.root, model)
+        tick(1.0)
+        return target
+
+    staging = _repair_staging(model.identifier)
+    _preflight(model, staging, artifacts=(model.projector,))
+    _prepare_staging(model, staging, artifacts=(model.projector,))
+
+    destination = staging / model.projector.local_name
+    total = max(model.projector.approximate_bytes, 1)
+    _check_cancelled(cancel)
+    if not _adopt_local_copy(model, model.projector, destination, say):
+        say(f"Downloading {model.projector.filename}…")
+
+        def report(done, _expected):
+            _check_cancelled(cancel)
+            tick(min(done / total, 1.0))
+
+        _fetch(model, model.projector, destination, report, say)
+    _check_cancelled(cancel)
+
+    say(f"Verifying {model.projector.filename}…")
+    _check_gguf(destination, model.projector)
+    _install_beside(destination, target)
+    _record_projector(bundle.root, model)
+    shutil.rmtree(staging, ignore_errors=True)
+    tick(1.0)
+    logger.info("Model Chain: repaired the vision projector for managed backbone %s — %s",
+                model.identifier, target)
+    return target
+
+
+def _repair_staging(identifier: str) -> Path:
+    """Where a single-artifact repair for ``identifier`` is staged."""
+    bundle_root(identifier)  # the same containment check every path here gets
+    return mc_llm_paths.managed_staging_root() / REPAIR_DIRNAME / identifier
+
+
+def _is_the_declared_artifact(path: Path, artifact: Artifact) -> bool:
+    """Whether ``path`` is byte-for-byte the file the catalogue declares.
+
+    Size first because it is a stat and settles the common case -- a truncated
+    or half-written file -- without reading a gigabyte. The hash is what
+    actually decides, and it is read rather than remembered: a manifest saying
+    a file verified once is a statement about the past, and this is somebody's
+    disk.
+    """
+    if not path.is_file():
+        return False
+    try:
+        if artifact.size is not None and path.stat().st_size != artifact.size:
+            return False
+        from prompt_master.provisioning.verifier import digest_of
+
+        return digest_of(path).casefold() == artifact.sha256
+    except Exception:
+        logger.debug("Model Chain: could not check %s against the catalogue", path,
+                     exc_info=True)
+        return False
+
+
+def _install_beside(source: Path, target: Path) -> None:
+    """Move one verified artifact into an installed bundle, atomically.
+
+    ``os.replace`` rather than a delete and a rename: the moment between those
+    two is a bundle with no projector at all, and a power cut inside it is an
+    installation that has lost a file it used to have. A staging directory on
+    another filesystem cannot be renamed across, so that case copies to a name
+    nothing reads and replaces from there -- the same guarantee, one copy later.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.replace(source, target)
+        return
+    except OSError:
+        logger.debug("Model Chain: %s could not be renamed into place; copying instead",
+                     source, exc_info=True)
+    incoming = target.with_name(target.name + ".incoming")
+    try:
+        shutil.copy2(source, incoming)
+        os.replace(incoming, target)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            incoming.unlink()
+        raise ManagedError(
+            f"The verified vision projector could not be moved into {target.parent} ({exc}). "
+            f"It is still at {source} and the model you are running is unchanged."
+        ) from None
+
+
+def _record_projector(root: Path, model: ManagedModel) -> None:
+    """Note the repaired projector in the bundle's own ``installed.json``.
+
+    Without it the manifest keeps describing a bundle with no projector, which
+    is what :meth:`Installed.matches` reads -- so the panel would go on offering
+    to re-download a backbone whose files are now complete, and the local-reuse
+    optimisation would not see a projector it could hard-link for the next
+    tier of the same family.
+    """
+    if model.projector is None:
+        return
+    try:
+        document = json.loads((root / INSTALLED_FILENAME).read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            return
+        artifacts = document.get("artifacts")
+        document["artifacts"] = artifacts = dict(artifacts) if isinstance(artifacts, dict) else {}
+        artifacts["projector"] = {
+            "filename": model.projector.filename,
+            "stored_as": model.projector.local_name,
+            "sha256": model.projector.sha256,
+            "bytes": _size_of(root / model.projector.local_name),
+        }
+        _write_json(root / INSTALLED_FILENAME, document)
+    except (OSError, ValueError, ManagedError):
+        logger.debug("Model Chain: could not record the repaired projector in %s", root,
+                     exc_info=True)
 
 
 def _preflight(model: ManagedModel, staging: Path, artifacts=None) -> None:
@@ -1442,10 +1656,15 @@ def _record(model: ManagedModel, bundle: Installed, previous: dict) -> None:
     from prompt_master.inference import model_choice
 
     paths = mc_llm_paths.app_paths()
+    # The association and not the file. A bundle whose projector has been
+    # deleted still *has* one declared for it, and recording "" here is how a
+    # switch to a multimodal backbone used to come up reporting no eyes -- with
+    # nothing left in the state file for the first image request to repair from.
+    # See :func:`_recorded_projector` and section 10 of the design intent.
     _write_state({
         **previous,
         "model": paths.record(bundle.model),
-        "mmproj": paths.record(bundle.mmproj) if bundle.mmproj is not None else "",
+        "mmproj": _recorded_projector(model) or "",
         "quantization": model_choice.describe(Path(model.model.filename)),
         STATE_KEY_SOURCE: SOURCE_MANAGED,
         STATE_KEY_ID: model.identifier,

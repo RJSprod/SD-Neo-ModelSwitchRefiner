@@ -236,7 +236,7 @@ class _Gpu:
             self._held = None
 
 
-def _client(needs_vision: bool, reserve: int = 0, role: str = ""):
+def _client(needs_vision: bool, reserve: int = 0, role: str = "", cancel=None):
     """A ready client, optionally promising to leave ``reserve`` bytes of VRAM.
 
     Only Krea's Creative Mode passes anything: it is the one caller that knows
@@ -249,6 +249,12 @@ def _client(needs_vision: bool, reserve: int = 0, role: str = ""):
     own, exactly as before roles existed. A role that has not been configured
     separately resolves to that same installation and gets the same running
     server back, so this parameter costs nothing until somebody uses it.
+
+    ``cancel`` is this run's stop button, and it is passed on for one reason:
+    an image request against a managed backbone whose projector has gone
+    missing repairs it first, and a repair is a download. Without this the Stop
+    button would appear to do nothing until the transfer finished. What arrives
+    is kept either way, so a cancelled repair resumes rather than restarts.
     """
     chosen = _runtime_for(role)
     if role:
@@ -257,7 +263,7 @@ def _client(needs_vision: bool, reserve: int = 0, role: str = ""):
         except Exception:
             logger.debug("Model Chain: could not check the other role's runtime",
                          exc_info=True)
-    return chosen.runtime.client(needs_vision, reserve=reserve)
+    return chosen.runtime.client(needs_vision, reserve=reserve, cancel=cancel)
 
 
 class _Resolved(NamedTuple):
@@ -354,7 +360,7 @@ def _prompt_studio(request, cancel: Cancellation):
 
         needs_vision = bool(request.image_data_url) and request.video_mode == "i2v"
         yield Event(STATUS, _preparing())
-        client = _client(needs_vision)
+        client = _client(needs_vision, cancel=cancel.event)
         for event in _placement_notes():
             yield event
 
@@ -490,7 +496,7 @@ def _conversation(request: ChatRequest, cancel: Cancellation):
             return
 
         yield Event(STATUS, _preparing())
-        client = _client(request.needs_vision)
+        client = _client(request.needs_vision, cancel=cancel.event)
         for event in _placement_notes():
             yield event
         yield Event(STATUS, "Replying…")
@@ -543,7 +549,7 @@ def _minimax(prompt: str, variant: str, image: str | None, seed: int,
             return
 
         yield Event(STATUS, _preparing())
-        client = _client(image is not None)
+        client = _client(image is not None, cancel=cancel.event)
         for event in _placement_notes():
             yield event
 
@@ -657,7 +663,8 @@ def _krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=N
         # hold a conversation. The panel has already refused a run that would
         # need a projector the model has not got; this is the same requirement
         # stated where the client is actually obtained.
-        client = _client(bool(references), reserve, mc_llm_roles.CREATIVE)
+        client = _client(bool(references), reserve, mc_llm_roles.CREATIVE,
+                         cancel=cancel.event)
         for event in _placement_notes(mc_llm_roles.CREATIVE):
             yield event
 

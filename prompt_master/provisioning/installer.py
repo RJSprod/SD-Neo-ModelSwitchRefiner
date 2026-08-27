@@ -245,6 +245,15 @@ def validate(paths: AppPaths, *, on_status: StatusFn = _ignore_status) -> None:
     Both probes are required. A text-only pass would let an install whose vision
     projector is broken reach the main window and fail on the first attached
     image, which is the whole feature the projector is downloaded for.
+
+    The order is the vision lifecycle itself, run against the llama.cpp build
+    this install has just provisioned rather than against a stand-in: a
+    text-only server comes up without ``--mmproj``, the image probe upgrades it
+    once, and a second text probe then has to be answered by the *same* process.
+    That last step is not ceremony. Unit tests can prove this application asks
+    for the right thing; only a real binary can prove the backend does the right
+    thing with it, and upstream multimodal regressions have shipped in builds
+    where the request schema and the projector configuration were both correct.
     """
     from PIL import Image
 
@@ -262,6 +271,9 @@ def validate(paths: AppPaths, *, on_status: StatusFn = _ignore_status) -> None:
         text_probe = PromptRequest(intent, video_mode="t2v", smart_negative=False)
         if not client.stream_chat(engine.build(text_probe).messages, 64, 1, lambda _: None).strip():
             raise RuntimeError("Text validation returned no content")
+        if service.vision_loaded():
+            raise RuntimeError("The text-only probe started llama-server with a vision "
+                               "projector; a cold text start must not load one")
 
         on_status("Validating image generation…")
         probe = paths.cache / "temp-images" / "setup-probe.jpg"
@@ -269,8 +281,18 @@ def validate(paths: AppPaths, *, on_status: StatusFn = _ignore_status) -> None:
         Image.new("RGB", (32, 32), (220, 30, 30)).save(probe)
         image_probe = PromptRequest(intent, video_mode="i2v", image_data_url=image_data_url(probe),
                                     image_name=probe.name, smart_negative=False)
-        if not client.stream_chat(engine.build(image_probe).messages, 64, 1, lambda _: None).strip():
+        vision = service.client(needs_vision=True)
+        if not vision.stream_chat(engine.build(image_probe).messages, 64, 1, lambda _: None).strip():
             raise RuntimeError("Image validation returned no content")
+
+        on_status("Validating that vision stays loaded…")
+        upgraded = service.process.process
+        if not service.client().stream_chat(engine.build(text_probe).messages, 64, 1,
+                                            lambda _: None).strip():
+            raise RuntimeError("Text validation on the vision-capable server returned no content")
+        if service.process.process is not upgraded or not service.vision_loaded():
+            raise RuntimeError("A text-only request replaced the vision-capable llama-server; "
+                               "vision must stay resident until the server is stopped")
     except Exception:
         paths.state_file.unlink(missing_ok=True)
         raise
