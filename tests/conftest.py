@@ -86,6 +86,16 @@ class _Component:
     def upload(self, **kwargs):
         return self._record("upload", kwargs)
 
+    def clear(self, **kwargs):
+        """Gradio 4's "the user emptied this component" event.
+
+        An Image draws its own ✕, and that is the only way to take a picture
+        off a message without replacing it -- so the panel has to hear about
+        it. Distinct from ``change``, which also fires when the server puts a
+        value in.
+        """
+        return self._record("clear", kwargs)
+
     def load(self, **kwargs):
         return self._record("load", kwargs)
 

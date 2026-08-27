@@ -463,6 +463,44 @@
         window.setInterval(tick, 1000);
     }
 
+    // -- the paperclip opens the file picker -------------------------------- //
+
+    // Conversation's picture chip is a Gradio Image, and a Gradio Image is an
+    // upload area with a file input inside it. Tapping the area opens the
+    // browser's own picker; the paperclip beside it forwards a press to that
+    // same input, so there is one way in and it is the ordinary one.
+    //
+    // The alternative was what used to be there: a full-width drop target above
+    // the composer, opened by the paperclip and taking a panel's worth of room
+    // to say "no picture yet". Reported as exactly that.
+    //
+    // Python still handles the press as well -- it makes the chip visible and
+    // says whether the model running can be shown a picture at all -- so a
+    // browser where this script did not run has a target to click rather than
+    // nothing.
+    const PICKERS = [
+        {button: "mc-llm-chat-attach", picker: "mc-llm-chat-image"},
+        {button: "mc-llm-chat-edit-attach", picker: "mc-llm-chat-edit-image"},
+    ];
+
+    function wirePicker(pair) {
+        const button = clickable(pair.button);
+        if (!button || button.dataset.mcLlmPicker) return;
+        button.dataset.mcLlmPicker = "1";
+        button.addEventListener("click", function () {
+            // After the press has been handed to Python, which is what makes
+            // the chip visible: a file input inside a display:none ancestor
+            // opens nothing in some browsers, and the timeout is the cheapest
+            // way to be after the update rather than racing it.
+            window.setTimeout(function () {
+                const holder = byId(pair.picker);
+                if (!holder) return;
+                const input = holder.querySelector('input[type="file"]');
+                if (input) input.click();
+            }, 60);
+        });
+    }
+
     // -- the footer, which is not ours and is in the way -------------------- //
 
     // The workspace above is built to fit the window: the page does not scroll,
@@ -545,6 +583,32 @@
         return element.getBoundingClientRect().top + scrolled;
     }
 
+    // How many times the height is corrected against what the page actually
+    // did with it. Two is enough in practice -- the first correction takes off
+    // whatever was below the fold, and the second confirms it -- and the bound
+    // is what stops a layout that will not settle from spinning here.
+    const SETTLE_PASSES = 2;
+
+    function overflow() {
+        // How much of the page is below the window. Zero when the content fits,
+        // which is the state this whole function exists to reach -- and zero
+        // when the two numbers cannot be read, because a correction computed
+        // from a missing measurement is worse than no correction at all.
+        const page = document.documentElement;
+        if (!page) return 0;
+        const spare = page.scrollHeight - page.clientHeight;
+        return Number.isFinite(spare) ? Math.max(0, spare) : 0;
+    }
+
+    function publish(element, height) {
+        const wanted = Math.round(height) + "px";
+        // Written only when it changes: this runs on every click, and setting
+        // a custom property invalidates layout whether or not the value moved.
+        if (element.style.getPropertyValue("--mc-llm-available") === wanted) return false;
+        element.style.setProperty("--mc-llm-available", wanted);
+        return true;
+    }
+
     function fitOne(element) {
         // An element in a tab that is not open measures as nothing at all.
         // Publishing that would hand every tab a height of zero, so it is
@@ -561,12 +625,36 @@
         // Never taller than the window, whatever the arithmetic said. A
         // measurement that has somehow gone wrong should cost a workspace that
         // is a little short, never one that cannot be scrolled back out of.
-        const height = Math.round(Math.min(available, window.innerHeight - BOTTOM_MARGIN_PX));
-        const wanted = height + "px";
-        // Written only when it changes: this runs on every click, and setting
-        // a custom property invalidates layout whether or not the value moved.
-        if (element.style.getPropertyValue("--mc-llm-available") === wanted) return;
-        element.style.setProperty("--mc-llm-available", wanted);
+        let height = Math.min(available, window.innerHeight - BOTTOM_MARGIN_PX);
+        publish(element, height);
+
+        // What the arithmetic above cannot see. It measures from the top of the
+        // workspace to the bottom of the window, which is right only if nothing
+        // sits below the workspace -- and something always does: the container's
+        // own bottom padding, and whatever the host puts after the tab.
+        //
+        // Hiding the WebUI's footer took away the links and left the space they
+        // were in, and the page went on scrolling by that much into nothing.
+        // Reported as "I am still able to scroll down, but now into blank
+        // space", and no list of selectors can be relied on to find every
+        // element that could be responsible.
+        //
+        // So it is not looked for. What is measured is the *result*: if the page
+        // can still be scrolled after the height is applied, the workspace gives
+        // back exactly that much and the page stops scrolling. Reading
+        // scrollHeight forces the layout that has just been invalidated, which
+        // is the point -- the correction is against what the browser did, not
+        // against what this expected it to do.
+        //
+        // It converges because it only ever shrinks, and because documentTop is
+        // scroll-invariant: taking pixels off this element takes the same pixels
+        // off the page, and nothing above it moves.
+        for (let pass = 0; pass < SETTLE_PASSES; pass++) {
+            const spare = overflow();
+            if (spare <= 0 || height - spare < MIN_AVAILABLE_PX) break;
+            height -= spare;
+            if (!publish(element, height)) break;
+        }
     }
 
     function fit() {
@@ -606,6 +694,7 @@
 
     function wire() {
         attempt("hide the footer", hideFooter);
+        attempt("wire the attachment pickers", function () { PICKERS.forEach(wirePicker); });
         attempt("wire the composers", function () { PANELS.forEach(wireComposer); });
         attempt("follow the transcript", wireTranscript);
         attempt("draw the reply icons", wireReplies);

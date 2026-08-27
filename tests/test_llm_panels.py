@@ -32,6 +32,31 @@ def store(tmp_path, monkeypatch, host):
 
 
 @pytest.fixture
+def attached(store):
+    """A thread whose last message of yours carries a picture on disk.
+
+    Built through the store rather than by writing a data URL into a message,
+    because that is what a conversation now holds and because the round trip is
+    the thing under test: bytes in, a record out, and a file somebody could go
+    and look at.
+    """
+    from PIL import Image
+
+    import mc_llm_attachments
+    from prompt_master.chat.history import ASSISTANT, ChatStore, USER
+
+    chats = ChatStore(store / "chats")
+    conversation = chats.new("Ada")
+    for index in range(3):
+        conversation.append(USER, f"ask {index}")
+        conversation.append(ASSISTANT, f"reply {index}")
+    record = mc_llm_attachments.store(Image.new("RGB", (12, 12), (200, 30, 30)), "Ada")
+    conversation.append(USER, "look at this", image_name="frame.png", image_path=record)
+    chats.save(conversation)
+    return chats, conversation, record
+
+
+@pytest.fixture
 def a_card(monkeypatch):
     """One CUDA card in the machine, so the device list offers it both ways.
 
@@ -164,13 +189,19 @@ class TestConversation:
         assert mc_llm_chat_panel._transcript(conversation) == [[None, "first"],
                                                               [None, "second"]]
 
-    def test_an_attachment_is_named_in_the_transcript(self):
+    def test_an_attachment_is_shown_in_the_transcript(self):
+        """The picture itself, not a line of italic text saying there was one.
+        A conversation about a photograph that does not show the photograph is
+        a conversation missing half of itself a week later."""
         from prompt_master.chat.history import USER, Conversation
 
         conversation = Conversation(identifier="x", character="Ada")
         conversation.append(USER, "look", "data:image/jpeg;base64,AA", "frame.png")
 
-        assert "frame.png" in mc_llm_chat_panel._transcript(conversation)[0][0]
+        shown = mc_llm_chat_panel._transcript(conversation)[0][0]
+
+        assert "<img" in shown and "data:image/jpeg;base64,AA" in shown
+        assert shown.endswith("look")
 
     def test_an_empty_conversation_is_an_empty_transcript(self):
         assert mc_llm_chat_panel._transcript(None) == []
@@ -336,7 +367,7 @@ class TestPerMessageActions:
         conversation.messages[1].add_version("second attempt")
         mc_llm_chat_panel._chats().save(conversation)
 
-        mc_llm_chat_panel._commit_edit("Ada", conversation.identifier, 1, "  edited  ")
+        mc_llm_chat_panel._commit_edit("Ada", conversation.identifier, 1, "  edited  ", None)
         reloaded = mc_llm_chat_panel._load("Ada", conversation.identifier)
 
         assert reloaded.messages[1].versions == ["reply 0", "edited"]
@@ -354,13 +385,13 @@ class TestPerMessageActions:
             mc_llm_chat_panel._close_selection("Ada", identifier),
             mc_llm_chat_panel._page_version(1)("Ada", identifier, 1),
             mc_llm_chat_panel._drop_version("Ada", identifier, 1),
-            mc_llm_chat_panel._commit_edit("Ada", identifier, 0, "changed"),
+            mc_llm_chat_panel._commit_edit("Ada", identifier, 0, "changed", None),
             mc_llm_chat_panel._delete_message("Ada", identifier, 3),
             mc_llm_chat_panel._delete_from("Ada", identifier, 2),
             mc_llm_chat_panel._select_message("Ada", identifier, [[0, 0, 0]],
                                              mc_llm_chat_panel.NO_SELECTION),
             mc_llm_chat_panel._open_thread("Ada", identifier)[2:],
-            mc_llm_chat_panel._open_editor("Ada", identifier, 1)[3:],
+            mc_llm_chat_panel._open_editor("Ada", identifier, 1),
         ):
             assert len(result) == width
 
@@ -719,26 +750,70 @@ class TestTheRegenerateIconOnAReply:
             assert f'"{ui.ident("chat", name)}"' in script
 
 
-class TestEditingOneOfYourOwnMessages:
-    """A prompt is edited in the box you send prompts from.
 
-    Reported as *"the edit view is messed up, it seems to hang"* with the rule
-    to replace it: *"if I want to edit a prompt, I should see it immediately in
-    the user prompt field, where if I submit a prompt mid thread (where there
-    are replies after) it should start a branch."*
+class TestTheHeaderCarriesTheDestinations:
+    """Threads, Character and You are on the bar, not behind a menu.
 
-    Underneath the complaint is a category error the old editor made. A reply is
-    text on the transcript and editing it means rewriting that text. One of your
-    own messages is **a prompt that was sent**, and editing it means sending a
-    different one -- the answer it already got is part of what is being
-    replaced. Treating both as "rewrite this string in place" is what put a
-    second text box with its own Save under the transcript, and left a message
-    edited but never re-asked.
+    Asked for as "I would like to pull out the THREADS, CHARACTER, and YOU so
+    they appear top layer like the load state. It should not be in a menu unless
+    screen is greatly truncated" -- and the answer to the truncation is that the
+    header wraps, which is a smaller loss than three destinations behind a tap.
+    """
 
-    So a message of yours is *taken back*: lifted out of the thread and into the
-    composer, where it is an ordinary unsent message and Send does what Send
-    does. Mid-thread that would destroy the replies after it, so it happens in a
-    branch -- the same rule regenerating follows.
+    def _built_ids(self, monkeypatch):
+        import gradio as gr
+
+        seen = []
+
+        def recording(original):
+            class Recorded(original):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    seen.append(kwargs.get("elem_id"))
+            return Recorded
+
+        for name in ("Button", "Image"):
+            monkeypatch.setattr(gr, name, recording(getattr(gr, name)))
+        mc_llm_chat_panel.build()
+        return seen
+
+    def test_the_three_destinations_are_components_of_their_own(self, store, monkeypatch):
+        import mc_llm_ui as ui
+
+        seen = self._built_ids(monkeypatch)
+
+        for name in ("to-threads", "to-character", "to-persona"):
+            assert ui.ident("chat", name) in seen
+
+    def test_the_picture_chips_are_where_the_script_looks_for_them(self, store, monkeypatch):
+        """Two halves in two languages with nothing between them but these
+        strings, so they are compared rather than trusted."""
+        from pathlib import Path
+
+        import mc_llm_ui as ui
+
+        seen = self._built_ids(monkeypatch)
+        script = (Path(mc_llm_chat_panel.__file__).resolve().parent
+                  / "javascript" / "llm_studio.js").read_text(encoding="utf-8")
+
+        for name in ("attach", "image", "edit-attach", "edit-image"):
+            assert ui.ident("chat", name) in seen
+            assert f'"{ui.ident("chat", name)}"' in script
+
+
+class TestEditingAMessageInPlace:
+    """Edit edits. It does not branch, and it does not re-ask.
+
+    It used to do both, for one of your own messages: the text was lifted into
+    the composer and, mid-thread, the whole thread was copied first so that
+    sending it again would not destroy the replies that followed.
+
+    Which made Edit a second Branch -- reported as exactly that. Branch is one
+    button along and says what it does, so Edit now changes the words where they
+    are and leaves the thread alone. The conversation afterwards is one whose
+    earlier turn says something else, replies included, and that is the point of
+    it: a thread where you asked about the sky, were told "blue", and then made
+    the question about the sun is a thread you can ask about.
     """
 
     def _thread(self, store, turns=3):
@@ -761,125 +836,141 @@ class TestEditingOneOfYourOwnMessages:
         chats.save(conversation)
         return chats, conversation
 
-    # -- at the end of a thread ---------------------------------------------- #
+    def shown(self, answers):
+        """The action-sheet half of one ``view`` answer, by name."""
+        return dict(zip(mc_llm_chat_panel.SELECTION_ORDER, answers[5:]))
 
-    def test_the_last_prompt_comes_back_into_the_composer(self, store):
-        chats, conversation = self._waiting(store)
+    # -- one behaviour, both roles ------------------------------------------- #
 
-        threads, identifier, composer, *_ = mc_llm_chat_panel._open_editor(
-            "Ada", conversation.identifier, 6)
+    def test_your_own_message_opens_the_editor_rather_than_the_composer(self, store):
+        chats, conversation = self._thread(store)
 
-        assert composer == "and one more thing"
-        # No branch: there is nothing after it to keep, so there is nothing to
-        # keep it in.
-        assert identifier == conversation.identifier
-        assert threads == {}
+        shown = self.shown(mc_llm_chat_panel._open_editor("Ada", conversation.identifier, 2))
 
-    def test_and_is_taken_out_of_the_thread_so_send_puts_it_back_once(self, store):
-        """It is in the composer now, and a copy left in the transcript would be
-        a copy Send appends a second one beside."""
-        chats, conversation = self._waiting(store)
+        assert shown["edit"].get("visible") is True
+        assert shown["edit_box"].get("value") == "ask 1"
+        assert shown["composer"].get("visible") is False
 
-        mc_llm_chat_panel._open_editor("Ada", conversation.identifier, 6)
+    def test_a_reply_opens_the_same_editor(self, store):
+        chats, conversation = self._thread(store)
+
+        shown = self.shown(mc_llm_chat_panel._open_editor("Ada", conversation.identifier, 1))
+
+        assert shown["edit"].get("visible") is True
+        assert shown["edit_box"].get("value") == "reply 0"
+
+    def test_nothing_after_it_is_destroyed(self, store):
+        """The whole difference from what this used to do. Editing message two
+        of six leaves six messages, five of them untouched."""
+        chats, conversation = self._thread(store)
+
+        mc_llm_chat_panel._commit_edit("Ada", conversation.identifier, 2,
+                                       "what colour is the sun", None)
 
         assert [message.text for message in
                 chats.load("Ada", conversation.identifier).messages] == [
-                    "ask 0", "reply 0", "ask 1", "reply 1", "ask 2", "reply 2"]
+                    "ask 0", "reply 0", "what colour is the sun", "reply 1",
+                    "ask 2", "reply 2"]
 
-    def test_the_editor_under_the_transcript_never_opens_for_it(self, store):
-        """The whole of what was wrong with it: a second box, with its own Save,
-        borrowing the composer's space."""
-        chats, conversation = self._waiting(store)
-        order = mc_llm_chat_panel.SELECTION_ORDER
-
-        opened = mc_llm_chat_panel._open_editor("Ada", conversation.identifier, 6)
-        shown = dict(zip(order, opened[3:][5:]))
-
-        assert shown["edit"].get("visible") is False
-        assert shown["composer"].get("visible") is True
-        assert shown["sheet"].get("visible") is False
-
-    # -- in the middle of one ------------------------------------------------ #
-
-    def test_a_prompt_with_replies_after_it_is_edited_in_a_branch(self, store):
-        chats, conversation = self._thread(store)
-
-        threads, identifier, composer, *_ = mc_llm_chat_panel._open_editor(
-            "Ada", conversation.identifier, 2)
-
-        assert composer == "ask 1"
-        assert identifier != conversation.identifier
-        # Up to the turn before it, so Send lands the edited message where the
-        # one it replaces was.
-        assert [message.text for message in chats.load("Ada", identifier).messages] == \
-            ["ask 0", "reply 0"]
-
-    def test_the_thread_it_came_from_keeps_every_word(self, store):
-        chats, conversation = self._thread(store)
-
-        mc_llm_chat_panel._open_editor("Ada", conversation.identifier, 2)
-
-        assert [message.text for message in
-                chats.load("Ada", conversation.identifier).messages] == [
-                    "ask 0", "reply 0", "ask 1", "reply 1", "ask 2", "reply 2"]
-
-    def test_the_panel_moves_onto_the_branch(self, store):
-        import mc_llm_state
+    def test_no_branch_is_made(self, store):
+        from prompt_master.chat.history import ChatStore
 
         chats, conversation = self._thread(store)
 
-        threads, identifier, *_ = mc_llm_chat_panel._open_editor(
-            "Ada", conversation.identifier, 2, "")
+        mc_llm_chat_panel._commit_edit("Ada", conversation.identifier, 2, "changed", None)
 
-        assert threads.get("value") == identifier
-        assert identifier in [value for _, value in threads.get("choices")]
-        assert mc_llm_state.preferences().get("thread") == identifier
+        assert [row.identifier for row in ChatStore(store / "chats").listing("Ada")] == \
+            [conversation.identifier]
 
-    def test_the_first_message_of_all_branches_to_an_empty_thread(self, store):
-        """There is no turn before it, so the branch starts with nothing in it.
-        Still a branch, and the thread it came from is still whole."""
-        chats, conversation = self._thread(store)
-
-        threads, identifier, composer, *_ = mc_llm_chat_panel._open_editor(
-            "Ada", conversation.identifier, 0)
-
-        assert composer == "ask 0"
-        assert chats.load("Ada", identifier).messages == []
-        assert len(chats.load("Ada", conversation.identifier).messages) == 6
-
-    # -- a reply is still edited where it sits ------------------------------- #
-
-    def test_a_reply_is_not_taken_back_into_the_composer(self, store):
-        """The composer is where *your* messages are written. A reply put in it
-        would be sent as yours the moment you pressed Send."""
-        chats, conversation = self._thread(store)
-
-        threads, identifier, composer, *_ = mc_llm_chat_panel._open_editor(
-            "Ada", conversation.identifier, 1)
-
-        assert composer == {}                       # the box is left alone
-        assert identifier == conversation.identifier
-        assert len(chats.load("Ada", conversation.identifier).messages) == 6
-
-    def test_saving_a_reply_goes_home_rather_than_reopening_the_sheet(self, store):
+    def test_saving_goes_home_rather_than_reopening_the_sheet(self, store):
         """The sheet covers the bottom of the transcript, and reopening it over
         the message just saved is the panel looking stuck on a finished thing."""
         chats, conversation = self._thread(store)
-        order = mc_llm_chat_panel.SELECTION_ORDER
 
-        saved = mc_llm_chat_panel._commit_edit("Ada", conversation.identifier, 1, "changed")
-        shown = dict(zip(order, saved[5:]))
+        shown = self.shown(mc_llm_chat_panel._commit_edit(
+            "Ada", conversation.identifier, 1, "changed", None))
 
         assert shown["sheet"].get("visible") is False
         assert shown["edit"].get("visible") is False
         assert shown["composer"].get("visible") is True
         assert chats.load("Ada", conversation.identifier).messages[1].text == "changed"
 
+    def test_nothing_selected_is_refused_rather_than_editing_something(self, store):
+        chats, conversation = self._thread(store)
+
+        answers = mc_llm_chat_panel._open_editor("Ada", conversation.identifier, -1)
+
+        assert "Choose a message" in answers[3]
+
+    def test_every_answer_is_the_same_shape(self, store):
+        """One output list, whichever branch answered it."""
+        chats, conversation = self._thread(store)
+        wanted = 5 + len(mc_llm_chat_panel.SELECTION_ORDER)
+
+        for index in (-1, 0, 1, 2):
+            assert len(mc_llm_chat_panel._open_editor("Ada", conversation.identifier,
+                                                      index)) == wanted
+
+    # -- the picture is part of the message ---------------------------------- #
+
+    def test_the_editor_offers_the_picture_the_message_carries(self, store, attached):
+        chats, conversation, record = attached
+
+        shown = self.shown(mc_llm_chat_panel._open_editor("Ada", conversation.identifier, 6))
+
+        assert shown["edit_image"].get("visible") is True
+        assert record.split("/")[-1] in str(shown["edit_image"].get("value"))
+
+    def test_a_message_with_no_picture_offers_an_empty_chip(self, store):
+        chats, conversation = self._thread(store)
+
+        shown = self.shown(mc_llm_chat_panel._open_editor("Ada", conversation.identifier, 2))
+
+        assert shown["edit_image"].get("visible") is False
+        assert shown["edit_image"].get("value") is None
+
+    def test_saving_with_an_empty_chip_takes_the_picture_off(self, store, attached):
+        """The chip is the message's picture, so emptying it empties the
+        message. Asked for as "I should also be able to remove or change an
+        attachment"."""
+        chats, conversation, _record = attached
+
+        mc_llm_chat_panel._commit_edit("Ada", conversation.identifier, 6, "look at this", None)
+
+        message = chats.load("Ada", conversation.identifier).messages[6]
+        assert not message.attached
+
+    def test_saving_a_different_picture_replaces_it(self, store, attached):
+        from PIL import Image
+
+        chats, conversation, record = attached
+
+        mc_llm_chat_panel._commit_edit("Ada", conversation.identifier, 6, "look at this",
+                                       Image.new("RGB", (9, 9), (0, 200, 0)))
+
+        message = chats.load("Ada", conversation.identifier).messages[6]
+        assert message.image_path and message.image_path != record
+
+    def test_saving_the_same_picture_keeps_the_same_file(self, store, attached):
+        """The name of a stored picture is the hash of its bytes, so a save that
+        did not change the picture writes nothing and points at what is there."""
+        import mc_llm_attachments
+        from PIL import Image
+
+        chats, conversation, record = attached
+        again = Image.open(mc_llm_attachments.locate(record))
+
+        mc_llm_chat_panel._commit_edit("Ada", conversation.identifier, 6, "look", again)
+
+        assert chats.load("Ada", conversation.identifier).messages[6].image_path == record
+
     # -- a message nobody ever answered -------------------------------------- #
 
     def test_a_thread_ending_in_your_own_message_opens_with_it_in_the_box(self, store):
         """What a cancelled or failed reply leaves behind: the message is saved
-        before the request goes out, so it survives the reply not arriving."""
+        before the request goes out, so it survives the reply not arriving.
+        Unchanged by any of the above -- it is a different feature that happens
+        to move text into the same box."""
         chats, conversation = self._waiting(store)
 
         identifier, composer, *_ = mc_llm_chat_panel._open_thread(
@@ -899,8 +990,6 @@ class TestEditingOneOfYourOwnMessages:
         assert len(chats.load("Ada", conversation.identifier).messages) == 6
 
     def test_it_never_writes_over_something_half_written(self, store):
-        """A box with anything in it is left exactly as it is, and the message
-        stays in the thread where Edit will still take it back later."""
         chats, conversation = self._waiting(store)
 
         identifier, composer, *_ = mc_llm_chat_panel._open_thread(
@@ -918,34 +1007,18 @@ class TestEditingOneOfYourOwnMessages:
 
         assert composer == "and one more thing"
 
-    def test_a_message_carrying_a_picture_is_left_where_it_is(self, store):
-        """The composer's attachment is a file on disk and a saved one is a data
-        URL inside the thread. Rather than invent a temporary file, the message
-        stays put -- and **Send again from here** answers it without disturbing
-        it."""
-        from prompt_master.chat.history import USER
-
-        chats, conversation = self._thread(store)
-        conversation.append(USER, "look at this", "data:image/png;base64,AA", "frame.png")
-        chats.save(conversation)
+    def test_a_message_carrying_a_picture_is_left_where_it_is(self, store, attached):
+        """A saved picture is a file beside the chat and the composer's chip is
+        one the browser uploaded. Rather than reconstruct the second from the
+        first, the message stays put -- Edit changes it in place, and **Send
+        again from here** re-asks it without disturbing it."""
+        chats, conversation, _record = attached
 
         identifier, composer, *_ = mc_llm_chat_panel._open_thread(
             "Ada", conversation.identifier)
 
         assert composer == {}
         assert len(chats.load("Ada", conversation.identifier).messages) == 7
-
-    def test_taking_back_one_that_had_a_picture_says_so(self, store):
-        """Said out loud rather than silently dropped."""
-        from prompt_master.chat.history import USER
-
-        chats, conversation = self._thread(store)
-        conversation.append(USER, "look at this", "data:image/png;base64,AA", "frame.png")
-        chats.save(conversation)
-
-        result = mc_llm_chat_panel._open_editor("Ada", conversation.identifier, 6)
-
-        assert "picture" in result[3 + 3]
 
     def test_an_empty_last_message_is_not_lifted(self, store):
         from prompt_master.chat.history import USER
@@ -954,25 +1027,10 @@ class TestEditingOneOfYourOwnMessages:
         conversation.append(USER, "   ")
         chats.save(conversation)
 
-        assert mc_llm_chat_panel._unanswered(conversation) == \
-            mc_llm_chat_panel.NO_SELECTION
+        identifier, composer, *_ = mc_llm_chat_panel._open_thread(
+            "Ada", conversation.identifier)
 
-    def test_nothing_selected_is_refused_rather_than_lifting_something(self, store):
-        chats, conversation = self._thread(store)
-
-        result = mc_llm_chat_panel._open_editor("Ada", conversation.identifier,
-                                                mc_llm_chat_panel.NO_SELECTION)
-
-        assert result[2] == {}
-        assert len(chats.load("Ada", conversation.identifier).messages) == 6
-
-    def test_every_answer_is_the_same_shape(self, store):
-        chats, conversation = self._thread(store)
-        width = 3 + 5 + len(mc_llm_chat_panel.SELECTION_ORDER)
-
-        for index in (0, 1, 4, mc_llm_chat_panel.NO_SELECTION, 99):
-            assert len(mc_llm_chat_panel._open_editor(
-                "Ada", conversation.identifier, index, "")) == width
+        assert composer == {}
 
 
 class TestTheFooterGoesAway:
@@ -1075,37 +1133,32 @@ class TestTheSurfaces:
         assert answered[0] == ""
         assert all(shown is False for shown in self._visible(answered))
 
-    def test_the_menu_button_closes_the_menu_it_opened(self, store):
-        """A menu that can only open is a menu you cannot dismiss from the
-        control you opened it with, which is what "the menus are not toggling
-        open and close" was."""
+    def test_there_is_no_menu_among_the_surfaces(self):
+        """Threads, Character and You are buttons on the header now. A menu
+        whose whole contents are three destinations is a tap in front of each
+        of them, and the button it hung on has a job everywhere else in LLM
+        Studio -- it opens the workspace chooser."""
+        assert "nav" not in mc_llm_chat_panel.SCREENS
+
+    def test_the_menu_button_puts_this_panel_s_own_surfaces_away(self, store):
+        """It opens the shell's workspace sheet, which this panel does not own.
+        What it does here is get out of the way, so the sheet does not open over
+        a thread list."""
         conversation = self._thread(store)
 
-        opened = mc_llm_chat_panel._toggle_nav("", "Ada", conversation.identifier)
-        closed = mc_llm_chat_panel._toggle_nav("nav", "Ada", conversation.identifier)
+        answered = mc_llm_chat_panel._leave("Ada", conversation.identifier)
 
-        assert opened[0] == "nav"
-        assert self._visible(opened)[mc_llm_chat_panel.SCREENS.index("nav")] is True
-        assert closed[0] == ""
-        assert all(shown is False for shown in self._visible(closed))
+        assert answered[0] == ""
+        assert all(shown is False for shown in self._visible(answered))
 
-    def test_the_menu_button_replaces_whatever_else_was_open(self, store):
-        """Pressing it from a screen is asking for the menu, not for that
-        screen to be closed and nothing put in its place."""
-        conversation = self._thread(store)
-
-        answered = mc_llm_chat_panel._toggle_nav("threads", "Ada", conversation.identifier)
-
-        assert answered[0] == "nav"
-
-    def test_opening_the_menu_puts_the_message_actions_away(self, store):
-        """The action sheet applies to a message the reader can no longer see,
-        and a sheet left open under another sheet is the second half of every
-        "why is this still here?"."""
+    def test_the_menu_button_puts_the_message_actions_away(self, store):
+        """The action sheet applies to a message the reader is about to stop
+        looking at, and a sheet left open under another sheet is the second half
+        of every "why is this still here?"."""
         conversation = self._thread(store)
         screens = 1 + len(mc_llm_chat_panel.SCREENS)
 
-        answered = mc_llm_chat_panel._toggle_nav("", "Ada", conversation.identifier)
+        answered = mc_llm_chat_panel._leave("Ada", conversation.identifier)
 
         assert answered[screens + 2] == mc_llm_chat_panel.NO_SELECTION
         assert answered[screens + 5].get("visible") is False
@@ -1175,15 +1228,15 @@ class TestTheComposer:
         assert idle_stop.get("interactive") is False
         assert busy_send.get("interactive") is False
 
-    def test_editing_a_reply_replaces_the_composer_rather_than_growing_the_panel(self,
-                                                                                 store):
-        """A reply has nowhere else to be edited: the composer is where *your*
-        messages are written."""
+    def test_editing_replaces_the_composer_rather_than_growing_the_panel(self, store):
+        """The editor borrows the composer's space, so the transcript above it
+        does not move -- which is the whole reason an edit does not open a panel
+        of its own."""
         conversation = self._thread(store)
         order = mc_llm_chat_panel.SELECTION_ORDER
 
         opened = mc_llm_chat_panel._open_editor("Ada", conversation.identifier, 1)
-        shown = dict(zip(order, opened[3:][5:]))
+        shown = dict(zip(order, opened[5:]))
 
         assert shown["edit"].get("visible") is True
         assert shown["edit_box"].get("value") == "reply"
@@ -1194,7 +1247,8 @@ class TestTheComposer:
         conversation = self._thread(store)
         order = mc_llm_chat_panel.SELECTION_ORDER
 
-        saved = mc_llm_chat_panel._commit_edit("Ada", conversation.identifier, 1, "changed")
+        saved = mc_llm_chat_panel._commit_edit("Ada", conversation.identifier, 1,
+                                               "changed", None)
         shown = dict(zip(order, saved[5:]))
 
         assert shown["edit"].get("visible") is False
@@ -1211,26 +1265,30 @@ class TestTheComposer:
     def test_the_header_survives_having_no_thread_at_all(self):
         assert "No thread" in mc_llm_chat_panel._heading("", None)
 
-    def test_the_attachment_is_not_in_the_layout_until_it_is_asked_for(self):
-        _open, row, _note = mc_llm_chat_panel._clear_attachment()[:3]
+    def test_the_picture_chip_is_not_in_the_layout_until_it_is_asked_for(self):
+        """It was a full-width drop target above the composer, open whenever the
+        paperclip had been pressed: a panel's worth of empty dashed border on
+        the one surface that must not grow."""
+        chip, _note = mc_llm_chat_panel._offer_attachment()
 
-        assert row.get("visible") is False
+        assert chip.get("visible") is True
 
-    def test_removing_the_picture_clears_the_box_as_well(self):
-        """A row put away with an image still in it is an image that goes with
-        the next message and cannot be seen."""
-        opened, _row, image, _note = mc_llm_chat_panel._clear_attachment()
+    def test_emptying_the_chip_takes_it_out_of_the_layout(self):
+        """The component draws its own ✕. What that leaves behind is a slot with
+        nothing in it, which is a slot that should not be there."""
+        chip, note = mc_llm_chat_panel._cleared_attachment()
 
-        assert opened is False and image is None
+        assert chip.get("visible") is False
+        assert "Ready" in note
 
-    def test_the_image_box_warns_before_a_message_is_written(self, store, monkeypatch):
+    def test_the_paperclip_warns_before_a_message_is_written(self, store, monkeypatch):
         """Whether a picture can be sent depends on the model running, and
         finding that out after writing the message is finding it out late."""
         class Blind:
             sees = False
 
         monkeypatch.setattr(mc_llm_chat_panel.mc_llm_runtime, "config", lambda: Blind())
-        _, _, note = mc_llm_chat_panel._toggle_attachment(False)
+        _chip, note = mc_llm_chat_panel._offer_attachment()
 
         assert "no vision projector" in note
 
@@ -2589,10 +2647,11 @@ class TestConversationDefaults:
             characters.DEFAULT_TOP_P
         assert mc_llm_chat_panel.sessions.ChatRequest(messages=[]).max_tokens == \
             characters.DEFAULT_MAX_REPLY_TOKENS
-        # What the shell wires: the two state chips, the three secondary nav
-        # entries, and the handles it refreshes.
+        # What the shell wires: the state chip, the menu that opens its
+        # workspace chooser, and the handles it refreshes. Setup is no longer
+        # among them -- it is one of the workspaces that chooser lists.
         assert set(built) == {"status", "transcript", "header", "persona",
-                              "model", "setup", "modes", "chip"}
+                              "model", "modes", "chip"}
 
     def test_a_cleared_box_falls_back_to_the_character_then_to_the_default(self):
         from prompt_master.chat.characters import Character

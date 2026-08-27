@@ -792,7 +792,11 @@
 @media (min-width: 901px) {
     #mc-llm-studio .mc-llm-sheet-shell {
         bottom: auto;
-        left: auto;
+        /* The left, under the button that opens them. They used to open on the
+           right, which put a sheet in the far corner from the control that had
+           just been pressed -- and on a wide display that is most of a screen
+           away from where the eye already is. */
+        right: auto;
         max-height: min(34em, 80vh);
         width: min(26em, 90%);
     }
@@ -901,7 +905,12 @@
     align-items: center;
     background: var(--background-fill-primary, var(--body-background-fill, inherit));
     flex: 0 0 auto;
-    flex-wrap: nowrap;
+    /* Threads, Character and You are on this row rather than behind a menu, so
+       it has more on it than it used to and has to be allowed to wrap. Wrapping
+       to a second line is a smaller loss on a narrow display than folding three
+       destinations back into a menu, which is a tap in front of each of them.
+       The heading takes the width, so the chips are what move. */
+    flex-wrap: wrap;
     gap: 0.4em;
     min-width: 0;
     position: sticky;
@@ -1096,19 +1105,72 @@
     opacity: 1;
 }
 
-#mc-llm-studio .mc-llm-chat-stage .mc-llm-attachment,
 #mc-llm-studio .mc-llm-chat-stage .mc-llm-composer {
     flex: 0 0 auto;
 }
 
-/* The picture for the next message, as a chip above the composer rather than a
-   panel in the permanent layout: it is not there at all until Attach opens it,
-   and it is 96px when it is. */
+/* -- the picture for the next message -------------------------------------
+   A chip inside the composer, the height of the composer, and not in the
+   layout at all until there is a picture in it.
+
+   It was a full-width drop target above the composer, opened by the paperclip:
+   a panel's worth of empty dashed border saying "no picture yet", on the one
+   surface that must never grow. The paperclip opens the browser's own file
+   picker now, and what appears afterwards is the picture itself, beside the
+   box the message is written in. */
 #mc-llm-studio .mc-llm-attachment {
-    align-items: center;
-    gap: 0.5em;
+    flex: 0 0 auto;
     margin: 0;
-    max-height: 8em;
+    min-width: 0;
+    width: 4.5em;
+}
+
+#mc-llm-studio .mc-llm-attachment,
+#mc-llm-studio .mc-llm-attachment .image-container,
+#mc-llm-studio .mc-llm-attachment .image-frame {
+    height: 4.5em;
+}
+
+#mc-llm-studio .mc-llm-attachment img {
+    height: 100%;
+    object-fit: cover;
+    width: 100%;
+}
+
+/* Whatever the theme puts on an empty upload area, at this size it is a label
+   nobody can read inside a border that says nothing. The chip is only empty
+   for the moment between the paperclip and the picker, and in the browser that
+   never ran the script -- where a plain target to click is exactly right. */
+#mc-llm-studio .mc-llm-attachment .wrap {
+    font-size: 0.7em;
+    line-height: 1.1;
+    padding: 0.2em;
+}
+
+#mc-llm-studio .mc-llm-attachment .wrap span,
+#mc-llm-studio .mc-llm-attachment .wrap .or {
+    display: none;
+}
+
+/* -- a picture inside the transcript --------------------------------------
+   The message's own attachment, shown where the message is. It used to be a
+   line of italic text naming the file, because the transcript is streamed to
+   the browser on every token and a photograph inside it would have been
+   re-sent on every token -- so what is in the markup is a path through the
+   host's file route, and the picture costs the stream nothing.
+
+   Sized so that a message is still a message: a picture that filled the
+   transcript would push the words it belongs to off the screen. It is an
+   ordinary <img>, so a browser's own "open image in new tab" reaches the file
+   at full size -- deliberately not a link, because a link inside a bubble is a
+   click the transcript would also read as picking the message. */
+#mc-llm-studio .mc-llm-transcript img.mc-llm-attached {
+    border-radius: var(--radius-lg, 8px);
+    display: block;
+    margin: 0 0 0.5em;
+    max-height: 16em;
+    max-width: min(100%, 22em);
+    object-fit: contain;
 }
 
 #mc-llm-studio .mc-llm-composer {
@@ -1200,7 +1262,6 @@
    there is room beside it for the conversation it was opened from, and seeing
    the transcript you are navigating within is worth more than the width. */
 @media (min-width: 901px) {
-    #mc-llm-studio .mc-llm-chat-workspace .mc-llm-sheet-side,
     #mc-llm-studio .mc-llm-chat-workspace .mc-llm-sheet-screen {
         right: auto;
         width: min(23em, 85%);

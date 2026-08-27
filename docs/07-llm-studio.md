@@ -3577,3 +3577,146 @@ grew a `picture` field beside `path` so a slot can carry either without the
 numbering contract in §4 knowing which. A test asserts no image input in the
 extension asks Gradio for a filepath again, and a second one asserts the inputs
 still exist — because deleting them is the other way to make the first pass.
+
+## 34. Six things about pictures and chrome (27 August 2026)
+
+### 34.1 A conversation could not keep its pictures
+
+A chat carried its attachments inside itself: the JPEG the model was shown,
+base64-encoded, in the same JSON file as the words. Durable, and honest — the
+file held exactly what was sent — and wrong in three ways that only appear once
+somebody uses it for a week.
+
+*It could not be shown.* The transcript is re-sent to the browser on every token
+of a reply, so a picture inside a message is re-sent on every token: a hundred
+and fifty kilobytes per chunk, per image. Which is why the transcript only ever
+rendered `*[frame.png]*` — a line of italic text where a photograph had been.
+Reported as a screenshot of exactly that, a week later, with the reply
+underneath about something the reader could no longer see.
+
+*It could not be found.* A picture inside a JSON file is not a picture on a
+disk. No folder, nothing to look through, nothing to delete without editing a
+conversation by hand.
+
+*It could not be shared between turns.* The same picture attached twice was
+stored twice; a thread branched five times was six copies.
+
+So `mc_llm_attachments` puts the bytes on disk and the conversation keeps a
+path:
+
+```
+<LLM data root>/chat-images/<character>/<content hash>.jpg
+```
+
+Content-addressed inside the character's folder. Storing the same picture twice
+finds the file already there and writes nothing, a branch shares its parent's
+pictures, and an edit that re-attaches the same photograph is a no-op — the name
+*is* the hash, so all three fall out of one rule rather than three checks.
+
+The transcript then shows the picture through the host's own `file=` route,
+which costs a path per token instead of a photograph. That route needs the file
+to be allow-listed; the WebUI launches with its data directory already on
+Gradio's list and the LLM data root is inside it, so most installations need
+nothing — and where they do, `modules.ui_tempdir.register_tmp_file` is the
+host's own answer to the question and is what gets called, memoised, because
+`markup()` runs once per message per token.
+
+`Message` grew `image_path` beside `image`, and writes one or the other and
+never both — writing the inline copy beside the path would keep every migrated
+chat exactly as large as it was, which is the thing moving them out was for.
+Chats written before the folder existed are migrated when they are opened,
+once, in `_load`, rather than by a script somebody has to know to run. A picture
+that cannot be decoded is left exactly where it is: losing an attachment to a
+tidying-up would be far worse than a chat that goes on carrying one.
+
+Nothing deletes. A picture is reachable from several threads and from several
+branches of one thread, so no thread can know it is the last one holding it. The
+folder is the user's, and being able to find and delete these by hand is what it
+was asked for.
+
+### 34.2 The attach control was a panel
+
+Pressing the paperclip opened a full-width drop target above the composer:
+a panel's worth of empty dashed border to say "no picture yet", on the one
+surface in this mode that must never grow. Reported with a screenshot of the
+empty gallery stretched across the window.
+
+The picker was always one tap away inside that target, so the paperclip now
+forwards its press to the component's own file input —
+`javascript/llm_studio.js`, the same place the per-reply regenerate icon lives —
+and the component is a 4.5em chip inside the composer row, not in the layout at
+all until there is a picture in it. Python still handles the press as well: it
+makes the chip visible and says whether the model running can be shown a picture
+at all, so a browser where the script did not run has a target to click rather
+than nothing.
+
+`sources=["upload"]` and not the default three. With more than one source Gradio
+draws a chooser and the file input is not in the DOM until somebody has picked
+"upload", which would make the paperclip do nothing.
+
+### 34.3 Scrolling past the bottom of the content
+
+Hiding the WebUI's footer (§32.3) took away the links and left the room they
+were in. The page still scrolled, now into blank space.
+
+`fitOne` measures from the top of the workspace to the bottom of the window,
+which is right only if nothing sits below the workspace — and something always
+does: the container's own bottom padding, and whatever the host puts after the
+tab. No list of selectors can be relied on to find every element that could be
+responsible, and hunting for them is how this kind of fix breaks under the next
+theme.
+
+So none is used. What is measured is the *result*: after the height is applied,
+if `documentElement.scrollHeight` still exceeds `clientHeight`, the workspace
+gives back exactly that much. Reading `scrollHeight` forces the layout that was
+just invalidated, which is the point — the correction is against what the
+browser did, not against what the script expected it to do. It converges because
+it only ever shrinks and because `documentTop` is scroll-invariant, and it stops
+at the floor the layout needs, where the honest outcome is that there is not
+enough window and the page keeps its scroll bar.
+
+### 34.4 Three destinations behind a menu
+
+Threads, Character and You were entries in a menu the `☰` opened. A menu whose
+entire contents are three destinations is a tap in front of each of them, and
+they are the three this mode is navigated by, so they are buttons on the header
+now. The answer to a narrow display is `flex-wrap: wrap` — a second line of
+chips, which is a smaller loss than a hidden one.
+
+### 34.5 One button, one behaviour
+
+`☰` opened LLM Studio's workspace chooser everywhere except Conversation, where
+it opened a menu of Conversation's own. Same glyph, same corner, two meanings.
+Conversation's menu is gone, so the button does what it does everywhere else:
+the panel's own handler puts its surfaces away and the shell's second handler on
+the same button opens the chooser.
+
+The shell's sheets also moved to the left on a wide display. They were anchored
+`left: auto` — the far corner from the control that had just been pressed, which
+on a 27-inch monitor is most of a screen away from where the eye already is.
+
+### 34.6 Edit had become a second Branch
+
+Editing one of your own messages *took it back*: lifted it out of the thread and
+into the composer, where Send would ask it again. Mid-thread that would have
+destroyed the replies after it, so it branched first — which meant Edit and
+Branch did the same thing, one button apart.
+
+Edit now edits. The words in the thread change, the thread stays where it is,
+and the replies stay under it. That the conversation's meaning changes is the
+feature and not a side effect: a thread where you asked about the sky, were told
+"blue", and then made the question about the sun is a thread you can go on to
+ask about. The file is the only record there is, and what it says is what was
+said.
+
+Both roles go through one path now, so `SELECTION_ORDER` grew `edit_image` and
+the editor gained a picture chip of its own — a message that was sent with a
+picture is edited as a whole, so the picture has to be changeable and removable
+where the words are. The chip is filled from the message's stored path; the one
+case where it is *not* the message's picture is a chat too broken to have been
+migrated, and `_commit_edit` checks for that rather than reading an empty chip
+as "the user took the picture away".
+
+`_take_back` is gone. `_unanswered` — a message that never got a reply going
+back into the composer when the thread is opened — is a different feature that
+happened to share it, and is unchanged.
