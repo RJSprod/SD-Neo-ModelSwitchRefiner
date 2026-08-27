@@ -1763,7 +1763,7 @@ class TestTheFilePicker:
         assert [kind for kind, _kwargs in built["folders"]._callbacks] == ["input"]
 
     def test_the_panel_carries_a_picker_for_each_path_box(self, store):
-        """Three boxes, three pickers, and ids that are this extension's."""
+        """Four boxes, four pickers, and ids that are this extension's."""
         import mc_llm_browse
         import mc_llm_ui as ui
 
@@ -1780,7 +1780,7 @@ class TestTheFilePicker:
         finally:
             mc_llm_browse.attach = original
 
-        assert built == ["runtime", "model", "mmproj"]
+        assert built == ["runtime", "model", "mmproj", "dflash"]
         assert ui.ident("browse", "model") == "mc-llm-browse-model"
 
 

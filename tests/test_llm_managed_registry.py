@@ -63,14 +63,13 @@ def entry_document(**overrides) -> dict:
 
 class TestTheShippedCatalogue:
     def test_every_shipped_backbone_is_present_and_in_order(self):
-        """Six from the original design intent plus the three 26B quant tiers.
+        """Six from the original design intent, plus two groups of three.
 
-        The order is asserted because it is the order Setup draws, and the quant
-        tiers' own design intent asks for one: quality, then the recommended
-        balance, then the low-memory tier, then the Q4_K_M entry this extension
-        is known to behave a certain way on. Losing the last one would remove
-        the automated route back to a comparison, which is the whole reason the
-        new tiers can be trusted at all.
+        The order is asserted because it is the order Setup draws, and each
+        group's own design intent asks for one: quality, then the recommended
+        balance, then the smallest. The Q4_K_M 26B entry stays last of all.
+        Losing it would remove the automated route back to a comparison, which
+        is the whole reason any newer tier can be trusted at all.
         """
         found = managed.catalogue()
 
@@ -83,6 +82,9 @@ class TestTheShippedCatalogue:
             "gemma4-26b-a4b-balanced-q4kp",
             "gemma4-26b-a4b-balanced-q3kp",
             "gemma4-26b-a4b-balanced-q2kp",
+            "qwen38-27b-abliterated-q6k",
+            "qwen38-27b-abliterated-q5km",
+            "qwen38-27b-abliterated-q4km",
             "gemma4-26b-a4b-balanced",
         ]
 
@@ -395,6 +397,39 @@ class TestThePinningTool:
         assert updated["models"][0]["model"]["bytes"] == 7_000_000
         assert updated["models"][0]["projector"]["bytes"] == 175_000
         assert len(changes) == 3
+
+    def test_it_pins_the_files_an_accelerator_names_too(self):
+        """The DFlash2 draft is a file in the same repository at the same
+        revision. Leaving it out would leave one artifact in the catalogue
+        whose committed hash nobody had compared against the hub."""
+        tool = load_pin_tool()
+        document = self.document()
+        document["models"][0]["accelerators"] = {
+            "mtp": {"embedded": True, "draft_tokens": 3},
+            "dflash2": {"filename": "draft.gguf", "sha256": "d" * 64, "bytes": None},
+        }
+        resolver = self.resolver(files={
+            "weights.gguf": (7_000_000, "a" * 64),
+            "mmproj.gguf": (175_000, "b" * 64),
+            "draft.gguf": (3_860_000_000, "d" * 64)})
+
+        updated, changes = tool.pin(document, resolver)
+
+        assert updated["models"][0]["accelerators"]["dflash2"]["bytes"] == 3_860_000_000
+        assert any("draft.gguf" in line for line in changes)
+
+    def test_a_draft_whose_hash_moved_refuses_the_whole_run(self):
+        tool = load_pin_tool()
+        document = self.document()
+        document["models"][0]["accelerators"] = {
+            "dflash2": {"filename": "draft.gguf", "sha256": "d" * 64, "bytes": None}}
+        resolver = self.resolver(files={
+            "weights.gguf": (7_000_000, "a" * 64),
+            "mmproj.gguf": (175_000, "b" * 64),
+            "draft.gguf": (3_860_000_000, "e" * 64)})
+
+        with pytest.raises(tool.PinError, match="draft.gguf"):
+            tool.pin(document, resolver)
 
     def test_it_never_writes_the_hubs_hash_over_the_committed_one(self):
         """The checked-in SHA-256 is the trust root for the whole feature. A

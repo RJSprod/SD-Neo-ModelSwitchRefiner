@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "registry_version": "2026.08.21-1",
+  "registry_version": "2026.08.27-1",
   "models": [
     {
       "id": "gemma4-12b-qat-balanced",
@@ -200,6 +200,144 @@
         "sha256": "9422eeb070cc7f6e412d34d03e2fb4693bb90dcdba4a0294150de28a04f4e12c",
         "bytes": null,
         "display_size": "1.19 GB"
+      }
+    },
+    {
+      "id": "qwen38-27b-abliterated-q6k",
+      "label": "Qwen 3.8 27B Abliterated — High",
+      "role": "High quality",
+      "group": "Qwen 3.8 27B",
+      "family": "Qwen 3.8",
+      "profile": "qwen38-27b-prompt-author",
+      "multimodal": true,
+      "source_url": "https://huggingface.co/Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF",
+      "license_url": "https://huggingface.co/Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF",
+      "repo_id": "Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF",
+      "revision": "994bb4e69663ec880a4d9a61604e6debc3a49b9a",
+      "model": {
+        "filename": "Qwen3.8-27B-ABLITERATED-Q6_K.gguf",
+        "sha256": "34264197c0188b1b09da05692fcdd4625b7d2231d40b07a4b29836bdb7b4d2a1",
+        "bytes": null,
+        "display_size": "~22.4 GB"
+      },
+      "projector": {
+        "filename": "mmproj-Qwen3.8-27B-ABLITERATED-F16.gguf",
+        "sha256": "2284099ce864f1023d721e6ef5eaef32bb56abdbc1dc561c6d91300f12ef2e4b",
+        "bytes": null,
+        "display_size": "928 MB"
+      },
+      "accelerators": {
+        "mtp": {
+          "embedded": true,
+          "draft_tokens": 3
+        },
+        "dflash2": {
+          "filename": "dflash-Qwen3.8-27B-ABLITERATED-BF16.gguf",
+          "sha256": "ca6dacc0bba87332b4eae6f103fa4c0c800ca871657e83d2aed658351b2c4fb3",
+          "bytes": null,
+          "display_size": "3.86 GB",
+          "runtime_family": "qwen38-dflash2",
+          "requires_full_target_gpu": true,
+          "requires_full_draft_gpu": true,
+          "same_gpu_as_target": true,
+          "draft_tokens": 3,
+          "draft_min_tokens": 0,
+          "draft_p_min": 0.0,
+          "draft_kv_type_k": "f16",
+          "draft_kv_type_v": "f16"
+        }
+      }
+    },
+    {
+      "id": "qwen38-27b-abliterated-q5km",
+      "label": "Qwen 3.8 27B Abliterated — Medium",
+      "role": "Recommended 27B",
+      "group": "Qwen 3.8 27B",
+      "family": "Qwen 3.8",
+      "profile": "qwen38-27b-prompt-author",
+      "multimodal": true,
+      "source_url": "https://huggingface.co/Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF",
+      "license_url": "https://huggingface.co/Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF",
+      "repo_id": "Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF",
+      "revision": "994bb4e69663ec880a4d9a61604e6debc3a49b9a",
+      "model": {
+        "filename": "Qwen3.8-27B-ABLITERATED-Q5_K_M.gguf",
+        "sha256": "37e02edc312a35e73eca50ae26d72458f341e17427eeb1724d9927723256c49c",
+        "bytes": null,
+        "display_size": "~19.5 GB"
+      },
+      "projector": {
+        "filename": "mmproj-Qwen3.8-27B-ABLITERATED-F16.gguf",
+        "sha256": "2284099ce864f1023d721e6ef5eaef32bb56abdbc1dc561c6d91300f12ef2e4b",
+        "bytes": null,
+        "display_size": "928 MB"
+      },
+      "accelerators": {
+        "mtp": {
+          "embedded": true,
+          "draft_tokens": 3
+        },
+        "dflash2": {
+          "filename": "dflash-Qwen3.8-27B-ABLITERATED-BF16.gguf",
+          "sha256": "ca6dacc0bba87332b4eae6f103fa4c0c800ca871657e83d2aed658351b2c4fb3",
+          "bytes": null,
+          "display_size": "3.86 GB",
+          "runtime_family": "qwen38-dflash2",
+          "requires_full_target_gpu": true,
+          "requires_full_draft_gpu": true,
+          "same_gpu_as_target": true,
+          "draft_tokens": 3,
+          "draft_min_tokens": 0,
+          "draft_p_min": 0.0,
+          "draft_kv_type_k": "f16",
+          "draft_kv_type_v": "f16"
+        }
+      }
+    },
+    {
+      "id": "qwen38-27b-abliterated-q4km",
+      "label": "Qwen 3.8 27B Abliterated — Low",
+      "role": "24 GB DFlash2 tier",
+      "group": "Qwen 3.8 27B",
+      "family": "Qwen 3.8",
+      "profile": "qwen38-27b-prompt-author",
+      "multimodal": true,
+      "source_url": "https://huggingface.co/Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF",
+      "license_url": "https://huggingface.co/Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF",
+      "repo_id": "Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF",
+      "revision": "994bb4e69663ec880a4d9a61604e6debc3a49b9a",
+      "model": {
+        "filename": "Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf",
+        "sha256": "5d53637a59cfcd3a4d8354e254ffd44943e5a693da2405a3e228c62962355509",
+        "bytes": null,
+        "display_size": "~16.8 GB"
+      },
+      "projector": {
+        "filename": "mmproj-Qwen3.8-27B-ABLITERATED-F16.gguf",
+        "sha256": "2284099ce864f1023d721e6ef5eaef32bb56abdbc1dc561c6d91300f12ef2e4b",
+        "bytes": null,
+        "display_size": "928 MB"
+      },
+      "accelerators": {
+        "mtp": {
+          "embedded": true,
+          "draft_tokens": 3
+        },
+        "dflash2": {
+          "filename": "dflash-Qwen3.8-27B-ABLITERATED-BF16.gguf",
+          "sha256": "ca6dacc0bba87332b4eae6f103fa4c0c800ca871657e83d2aed658351b2c4fb3",
+          "bytes": null,
+          "display_size": "3.86 GB",
+          "runtime_family": "qwen38-dflash2",
+          "requires_full_target_gpu": true,
+          "requires_full_draft_gpu": true,
+          "same_gpu_as_target": true,
+          "draft_tokens": 3,
+          "draft_min_tokens": 0,
+          "draft_p_min": 0.0,
+          "draft_kv_type_k": "f16",
+          "draft_kv_type_v": "f16"
+        }
       }
     },
     {

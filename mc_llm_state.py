@@ -44,6 +44,13 @@ PROMPT_HISTORY_FILE = "prompt-studio-history.json"
 MINIMAX_HISTORY_FILE = "minimax-history.json"
 KREA_HISTORY_FILE = "krea-history.json"
 
+ROLES_SECTION = "roles"
+"""``mc_llm_roles.SECTION``, restated rather than imported.
+
+This module is the bottom of the LLM half's import graph -- see the note on
+:func:`_resolve` -- and the one place the two could disagree is asserted in the
+tests instead."""
+
 HISTORY_LIMIT = 200
 """Entries kept per mode history.
 
@@ -191,6 +198,15 @@ DEFAULTS: dict = {
     # the price of persisting them rather than a nicety on top of it.
     "krea_literal_positive": "",
     "krea_literal_negative": "",
+    # How the language model decodes, and who owns the card while it does. Two
+    # settings rather than one, and both defaulted to what every build before
+    # them did: no accelerator asked for by name, and no image residency ever
+    # released for the LLM. See mc_llm_accel, which owns their vocabulary --
+    # they are listed here because this file's DEFAULTS is the whitelist a
+    # stored key has to be in to survive a read.
+    "llm_performance_preset": "normal",
+    "llm_accelerator": "auto",
+    "llm_memory_priority": "cooperative",
 }
 
 
@@ -221,10 +237,71 @@ def preferences() -> dict:
     stored = _read(PREFERENCES_FILE, {})
     merged = dict(DEFAULTS)
     for key, value in stored.items():
-        if key in merged or key == "version":
+        if key in merged or key in _KEPT:
             merged[key] = value
     merged.update(_hosted(merged))
     return merged
+
+
+_KEPT = ("version", ROLES_SECTION)
+"""Keys that survive a read without being in :data:`DEFAULTS`.
+
+``version`` always has. The role section is the fix for a layer that was
+written to be read and never was: :func:`mc_llm_runtime.config` asks
+:mod:`mc_llm_roles` to lay a role's overrides over these preferences, and
+:func:`mc_llm_roles.overrides` looks for them under this key -- which the
+filter above used to drop, because a section holding two roles' settings is
+not itself a setting and so was never in ``DEFAULTS``. A role could therefore
+be given its own context size and would silently run at the installation's.
+"""
+
+
+def remember_for(role: str, **values) -> dict:
+    """Update ``role``'s own preferences, or the installation's when it has none.
+
+    The counterpart of :func:`mc_llm_setup.record`'s role handling, for the
+    file that holds context, cache and performance rather than hardware.
+    ``role`` empty writes the shared values exactly as :func:`remember` does --
+    which is not a special case but the common one, since a role that has never
+    been split has nothing of its own and inherits what is written there.
+
+    Nothing here is hosted on the Settings page, so nothing is published to it:
+    :func:`remember` handles the five keys that are, and a role-specific value
+    could not be published to a per-installation setting in any case.
+    """
+    import mc_llm_roles
+
+    chosen = mc_llm_roles.named(role)
+    if not chosen:
+        return remember(**values)
+
+    with _lock:
+        document = _read(PREFERENCES_FILE, {})
+        if not isinstance(document, dict):
+            document = {}
+        mc_llm_roles.apply(document, chosen,
+                           {key: value for key, value in values.items() if value is not None},
+                           keys=mc_llm_roles.PREFS_FIELDS)
+        document["version"] = SCHEMA_VERSION
+        _write(PREFERENCES_FILE, document)
+    return preferences()
+
+
+def forget_role(role: str) -> dict:
+    """Drop ``role``'s preference overrides, so it follows the installation again."""
+    import mc_llm_roles
+
+    chosen = mc_llm_roles.named(role)
+    if not chosen:
+        return preferences()
+    with _lock:
+        document = _read(PREFERENCES_FILE, {})
+        if not isinstance(document, dict):
+            document = {}
+        mc_llm_roles.clear(document, chosen)
+        document["version"] = SCHEMA_VERSION
+        _write(PREFERENCES_FILE, document)
+    return preferences()
 
 
 def _hosted(current: dict) -> dict:

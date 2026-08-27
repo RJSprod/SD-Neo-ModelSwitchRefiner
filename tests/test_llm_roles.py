@@ -1023,7 +1023,7 @@ class TestTheServerIsStartedFromTheRoleSConfiguration:
         class Reached(RuntimeError):
             """Far enough: the configuration is decided by now."""
 
-        def capture(configuration, placement, projector):
+        def capture(configuration, placement, projector, plan=None):
             launched.append(configuration)
             raise Reached()
 
@@ -1049,7 +1049,7 @@ class TestTheServerIsStartedFromTheRoleSConfiguration:
         class Reached(RuntimeError):
             pass
 
-        def capture(configuration, placement, projector):
+        def capture(configuration, placement, projector, plan=None):
             launched.append(configuration)
             raise Reached()
 

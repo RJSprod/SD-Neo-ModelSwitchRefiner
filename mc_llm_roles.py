@@ -80,8 +80,18 @@ STATE_FIELDS = (
 
 PREFS_FIELDS = (
     "context_mode", "context_size", "context_buffer_gb", "kv_type_k", "kv_type_v",
+    # Spelled exactly as mc_llm_accel writes them, for the same reason the
+    # managed-selection keys above are spelled as mc_llm_managed_models writes
+    # them: that module reads its own settings straight out of the layered
+    # preferences, and a role that renamed these would be a role whose
+    # performance mode silently reverted to the installation's.
+    "llm_performance_preset", "llm_accelerator", "llm_memory_priority",
 )
-"""Context and cache settings, which live in the preferences file."""
+"""Context, cache and performance settings, which live in the preferences file.
+
+The performance pair is here rather than beside the hardware fields because a
+role's acceleration is a question about how much room *that role's* card has,
+and a machine with a 3090 and a 5090 in it can reasonably answer it twice."""
 
 FIELDS = (*STATE_FIELDS, *PREFS_FIELDS)
 
