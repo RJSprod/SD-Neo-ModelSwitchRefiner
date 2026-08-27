@@ -63,14 +63,13 @@ def entry_document(**overrides) -> dict:
 
 class TestTheShippedCatalogue:
     def test_every_shipped_backbone_is_present_and_in_order(self):
-        """Six from the original design intent plus the three 26B quant tiers.
+        """Six from the original design intent, plus two groups of three.
 
-        The order is asserted because it is the order Setup draws, and the quant
-        tiers' own design intent asks for one: quality, then the recommended
-        balance, then the low-memory tier, then the Q4_K_M entry this extension
-        is known to behave a certain way on. Losing the last one would remove
-        the automated route back to a comparison, which is the whole reason the
-        new tiers can be trusted at all.
+        The order is asserted because it is the order Setup draws, and each
+        group's own design intent asks for one: quality, then the recommended
+        balance, then the smallest. The Q4_K_M 26B entry stays last of all.
+        Losing it would remove the automated route back to a comparison, which
+        is the whole reason any newer tier can be trusted at all.
         """
         found = managed.catalogue()
 
@@ -83,6 +82,9 @@ class TestTheShippedCatalogue:
             "gemma4-26b-a4b-balanced-q4kp",
             "gemma4-26b-a4b-balanced-q3kp",
             "gemma4-26b-a4b-balanced-q2kp",
+            "qwen38-27b-abliterated-q6k",
+            "qwen38-27b-abliterated-q5km",
+            "qwen38-27b-abliterated-q4km",
             "gemma4-26b-a4b-balanced",
         ]
 

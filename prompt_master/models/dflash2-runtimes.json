@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "_note": "The DFlash2 llama.cpp family, which is not an upstream release. Each entry names the exact llama.cpp commit the archive was built from; an entry with a null url or sha256 is one nobody has published a build of yet, and mc_llm_setup refuses to fetch it rather than guessing. Point Setup at a locally built runtime directory instead — it is verified and recorded the same way.",
+  "commit": "1deefcca395743049c3820ab8f9b15043f3e9446",
+  "pull_request": "https://github.com/ggml-org/llama.cpp/pull/27342",
+  "families": [
+    {
+      "family": "qwen38-dflash2",
+      "component_id": "llama-runtime-cuda13-dflash2-qwen38",
+      "label": "DFlash2 (CUDA 13.3)",
+      "cuda": "13.3",
+      "compute_architectures": [86, 120],
+      "requires_component": "llama-runtime-cuda13",
+      "url": null,
+      "sha256": null,
+      "size": null,
+      "archive": "llama-dflash2-1deefcc-bin-win-cuda-13.3-x64.zip"
+    },
+    {
+      "family": "qwen38-dflash2",
+      "component_id": "llama-runtime-cuda12-dflash2-qwen38",
+      "label": "DFlash2 (CUDA 12.4, Ampere only)",
+      "cuda": "12.4",
+      "compute_architectures": [86],
+      "requires_component": "llama-runtime-cuda12",
+      "url": null,
+      "sha256": null,
+      "size": null,
+      "archive": "llama-dflash2-1deefcc-bin-win-cuda-12.4-x64.zip"
+    }
+  ]
+}

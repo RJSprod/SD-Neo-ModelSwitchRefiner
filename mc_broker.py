@@ -954,6 +954,106 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
     return result
 
 
+def release_for_llm(needed_bytes: int, *, card: int | None = None, reason: str = "",
+                    margin: int | None = None) -> Reclaim:
+    """The one door out of :func:`_victim_order`'s rule, and the user opens it.
+
+    Every other path in this module keeps the asymmetry that module's docstring
+    argues for: an image residency is never demoted for the language model,
+    because the image model is the workload and the LLM is the helper writing a
+    prompt for it. That rule is right as a *default* and wrong as an absolute,
+    and the case it is wrong in is the one somebody states explicitly -- "on
+    this card, right now, I would rather have the fast language model".
+
+    So this exists, it is reached only from an accelerator plan whose memory
+    priority the user set to LLM priority, and it is narrower than
+    :func:`request_vram` in three ways that are the whole point:
+
+    **It is scoped to one physical card.** ``card`` is the GPU the language
+    model is being placed on, and image residency anywhere else is not touched
+    and not even asked about. A Creative Writer on a 3090 gains nothing by
+    emptying a 5090 -- the bytes it needs are on the 3090 -- so a reclaim that
+    crossed cards would cost an image generation its checkpoint and buy the
+    language model precisely nothing. Section 10 of the design intent gives
+    that case three times, in both directions.
+
+    **It asks for the deficit and no more.** Never a sweep. Exclusive mode's
+    take-the-whole-card behaviour is a promise about *image* ownership and has
+    no counterpart here: this is a request for enough room, and enough is
+    exactly what it asks for.
+
+    **It re-measures.** What comes back is a reading taken after the release,
+    not the arithmetic that was hoped for -- so a caller that goes on to launch
+    is deciding against what the driver says is there, which is the only number
+    llama.cpp will agree with.
+
+    Returns a :class:`Reclaim` whose ``deficit`` is what is *still* missing, so
+    the caller can refuse rather than launch something that will not fit. It
+    never launches, never places, and never decides that a plan is acceptable.
+    """
+    needed = max(int(needed_bytes), 0)
+    reserve = safety_margin_bytes() if margin is None else int(margin)
+    target = needed + reserve
+    free = device_free_vram_bytes(card)
+    if free <= 0:
+        # The card could not be queried. Evicting on no evidence is the one
+        # thing this module exists not to do, in this direction most of all.
+        return Reclaim(needed, free, 0, max(target - max(free, 0), 0), ())
+    if free >= target:
+        return Reclaim(needed, free, 0, 0, ())
+
+    deficit = target - free
+    if not _same_card_as_the_image_side(card):
+        note(FAMILY_LLM,
+             f"{reason or 'the LLM'} is short {deficit / _GB:.1f} GB on GPU {card}, and the "
+             f"image residency is on another card — nothing was released, because releasing "
+             f"a card this model is not being placed on would not free a byte of the one it "
+             f"is")
+        return Reclaim(needed, free, 0, deficit, ())
+
+    released = _release(FAMILY_IMAGE, deficit,
+                        reason or "the LLM, which the user has given priority on this card")
+    after = device_free_vram_bytes(card)
+    # The measurement wins over the arithmetic. ``_release`` reports what the
+    # image side believes it handed back, and what matters to the launch that
+    # follows is what the driver now says is free.
+    remaining = max(target - max(after, free), 0)
+    result = Reclaim(needed, free, released.freed, remaining, released.actions)
+    if released.actions:
+        note(FAMILY_LLM,
+             f"released {released.freed / _GB:.1f} GB of image VRAM on GPU {card} for "
+             f"{reason or 'the LLM'} ({free / _GB:.1f} GB -> {after / _GB:.1f} GB free): "
+             f"{result.describe()}")
+    elif remaining > 0:
+        note(FAMILY_LLM,
+             f"{reason or 'the LLM'} is short {remaining / _GB:.1f} GB on GPU {card} and the "
+             f"image side had nothing evictable to give{_unaccounted_note()}")
+    return result
+
+
+def _same_card_as_the_image_side(card: int | None) -> bool:
+    """Whether releasing image residency could help a placement on ``card``.
+
+    Unanswerable questions are answered **no** here, which is the opposite of
+    :func:`mc_llm_runtime.shares_the_image_card` and is the same caution
+    pointing the other way. There, an unknown card is treated as the image card
+    so the language model sizes itself conservatively and the cost of being
+    wrong is a smaller model. Here, the cost of being wrong is an evicted
+    checkpoint -- so an unknown card releases nothing.
+    """
+    if card is None:
+        return False
+    try:
+        image = image_device_index()
+    except Exception:
+        logger.debug("Model Chain: could not ask which card the image side is on",
+                     exc_info=True)
+        return False
+    if image < 0 or int(card) < 0:
+        return False
+    return int(card) == int(image)
+
+
 def unaccounted_bytes() -> int:
     """VRAM in use that neither family admits to holding.
 

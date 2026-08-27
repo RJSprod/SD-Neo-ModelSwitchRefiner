@@ -1734,11 +1734,11 @@ class TestRetryingASmallerPlacement:
         attempts: list = []
         real = managed._launch
 
-        def launch(configuration, placement, projector=None):
+        def launch(configuration, placement, projector=None, plan=None):
             attempts.append(placement)
             if len(attempts) <= failures:
                 raise runtime._StartFailed("out of memory", out_of_memory=True)
-            return real(configuration, placement, projector)
+            return real(configuration, placement, projector, plan)
 
         monkeypatch.setattr(managed, "_launch", launch)
         return attempts
@@ -1777,7 +1777,7 @@ class TestRetryingASmallerPlacement:
         set_free(monkeypatch, 20)
         attempts: list = []
 
-        def launch(configuration, placement, projector=None):
+        def launch(configuration, placement, projector=None, plan=None):
             attempts.append(placement)
             raise runtime._StartFailed("the model file is corrupt")
 

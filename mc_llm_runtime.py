@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING
 
 import mc_broker
 import mc_gguf
+import mc_llm_accel
 import mc_llm_context
 import mc_llm_paths
 import mc_llm_state
@@ -120,6 +121,15 @@ class Config:
     """``"managed"`` when the model came from the catalogue, ``"manual"`` when
     the user pointed at a GGUF themselves. See :mod:`mc_llm_managed_models`."""
     managed_id: str = ""
+    accelerator: str = "auto"
+    memory_priority: str = "cooperative"
+    """The two performance axes, resolved for this role. See :mod:`mc_llm_accel`.
+
+    On the configuration rather than passed per call because they are settings
+    like every other field here -- and because a change to either has to
+    invalidate a warm server, which is a question :func:`_identity` answers by
+    reading this object and nothing else.
+    """
     profile: "ManagedProfile | None" = None
     """The hidden quality profile in force, or ``None`` on a manual install.
 
@@ -270,6 +280,8 @@ def config(role: str = "") -> Config:
         context_size, context_mode = int(profile.context), "fixed"
         kv_type_k, kv_type_v = str(profile.kv_type_k), str(profile.kv_type_v)
 
+    performance = mc_llm_accel.settings(role)
+
     return Config(
         runtime=runtime,
         model=located("model"),
@@ -287,6 +299,8 @@ def config(role: str = "") -> Config:
         mode=str(state.get("mode", "gpu")),
         source=source,
         managed_id=managed_id,
+        accelerator=performance.accelerator,
+        memory_priority=performance.memory_priority,
         profile=profile,
     )
 
@@ -649,7 +663,8 @@ def shares_the_image_card(card: int | None) -> bool:
     return int(card) == image
 
 
-def _spendable(already_ours: int = 0, card: int | None = None) -> int:
+def _spendable(already_ours: int = 0, card: int | None = None, *,
+               image_budget: bool = True) -> int:
     """What this placement may actually spend, which is not the same as what is free.
 
     Free VRAM is a reading of one instant. A generation is not one instant: the
@@ -681,6 +696,21 @@ def _spendable(already_ours: int = 0, card: int | None = None) -> int:
     every path had before plans existed.
     """
     free = _free_vram(already_ours, card)
+    if not image_budget:
+        # LLM priority, on the card the user gave it priority on. The plan's
+        # budget is the *image* side's reservation, and overriding that
+        # reservation on one card is the entire content of what was asked for
+        # -- capping by it here would make the setting unable to do the one
+        # thing it says it does. The learned cap below is not lifted with it:
+        # that one records an allocation the driver actually refused, and no
+        # amount of permission makes a refused allocation succeed.
+        try:
+            import mc_plan
+
+            learned = mc_plan.learned_cap_bytes() if shares_the_image_card(card) else 0
+        except Exception:
+            return free
+        return max(min(free, learned) if learned > 0 else free, 0)
     try:
         import mc_plan
 
@@ -1105,6 +1135,63 @@ def read_offload(text: str) -> Offload:
 
 
 @dataclass(frozen=True)
+class Speculation:
+    """How much of the draft was accepted, when llama.cpp said.
+
+    The number that decides whether speculative decoding was worth its VRAM.
+    Drafted tokens cost the draft model's forward pass whether or not they are
+    kept; accepted ones are the target's forward passes that did not have to
+    happen. A low acceptance rate is a DFlash2 run that is slower than ordinary
+    decoding, and it is invisible without this.
+
+    Absent rather than zero when the log said nothing, which is a distinction
+    the panel needs: "no drafted tokens were accepted" and "this build does not
+    report acceptance" are not the same news.
+    """
+
+    drafted: int = 0
+    accepted: int = 0
+    known: bool = False
+
+    @property
+    def acceptance(self) -> float:
+        """Accepted over drafted, or zero when nothing was drafted."""
+        return self.accepted / self.drafted if self.drafted > 0 else 0.0
+
+    def describe(self) -> str:
+        if not self.known or self.drafted <= 0:
+            return ""
+        return (f"{self.accepted:,} of {self.drafted:,} drafted tokens accepted "
+                f"({self.acceptance * 100:.0f}%)")
+
+
+_SPECULATION = re.compile(
+    r"n_draft(?:ed)?\s*[=:]\s*(\d+)[^\n]*?n_accept(?:ed)?\s*[=:]\s*(\d+)"
+    r"|draft\s+acceptance[^\n]*?(\d+)\s*/\s*(\d+)",
+    re.IGNORECASE)
+"""Both shapes llama.cpp has printed speculative counters in.
+
+Two alternatives rather than one, and neither is load-bearing: a build that
+prints a third shape reports :attr:`Speculation.known` as False, the panel says
+the runtime did not report acceptance, and nothing else changes. Parsing a log
+is the only way to get this figure from another process, and a parser that
+*failed loudly* when a log format moved would break generation for a statistic.
+"""
+
+
+def read_speculation(text: str) -> Speculation:
+    """Drafted and accepted token counts from a slice of llama-server's log."""
+    found = None
+    for match in _SPECULATION.finditer(text or ""):
+        found = match
+    if found is None:
+        return Speculation()
+    if found.group(1) is not None:
+        return Speculation(int(found.group(1)), int(found.group(2)), True)
+    return Speculation(int(found.group(4)), int(found.group(3)), True)
+
+
+@dataclass(frozen=True)
 class Failure:
     """Why a start failed, and whether a smaller placement would help."""
 
@@ -1312,6 +1399,430 @@ def accelerator_flags(configuration: Config, placement) -> list[str]:
     return flags
 
 
+# --------------------------------------------------------------------------- #
+# Acceleration: what is available, then whether it fits
+# --------------------------------------------------------------------------- #
+#
+# Two stages, and they are separated because they cost different things and are
+# asked at different moments.
+#
+# The *choice* is a question about files and records -- does this backbone
+# advertise an accelerator, is its draft on disk, is a DFlash2 runtime
+# installed, did that runtime pass its smoke test. Nothing in it reads free
+# VRAM, so its answer does not change between two requests a second apart, and
+# that stability is what lets it go into the warm server's identity: a warm
+# turn compares it and reuses the server, exactly as it compares the model and
+# the device.
+#
+# The *plan* is the fit, and it reads the card. Section 9 asks for it only on a
+# path that is really going to start something, for the same reason
+# ``Runtime.client`` stopped re-negotiating placements on warm turns: a number
+# that is different every time it is read will restart a server every time it
+# is read.
+
+
+def accelerator_choice(configuration: Config,
+                       needs_vision: bool = False) -> mc_llm_accel.Plan:
+    """Which mechanism this configuration can use, before any VRAM is measured.
+
+    Returns a plan with no fit figures on it. A *forced* request that cannot be
+    met at all -- no draft, no runtime, no proof -- comes back with
+    :attr:`~mc_llm_accel.Plan.refusal` set, because those are conditions no
+    amount of free VRAM would fix and telling somebody about them before a
+    twenty-second model load is simply kinder. A request that could only fail
+    on memory is left for :func:`accelerator_plan` to decide.
+
+    An *automatic* choice never refuses. It steps down -- DFlash2, then the
+    backbone's own MTP heads, then ordinary decoding -- and the mechanism it
+    lands on is reported rather than assumed, which is section 9's requirement
+    that the status name what actually ran.
+    """
+    requested = mc_llm_accel._named(configuration.accelerator, mc_llm_accel.ACCELERATORS,
+                                    mc_llm_accel.ACCEL_AUTO)
+    priority = mc_llm_accel._named(configuration.memory_priority, mc_llm_accel.PRIORITIES,
+                                   mc_llm_accel.PRIORITY_COOPERATIVE)
+    ordinary = mc_llm_accel.Plan(requested=requested, accelerator=mc_llm_accel.ACCEL_NONE,
+                                 memory_priority=priority)
+    if requested == mc_llm_accel.ACCEL_NONE:
+        return ordinary
+
+    accelerators = _advertised_accelerators(configuration)
+
+    if requested in (mc_llm_accel.ACCEL_DFLASH2, mc_llm_accel.ACCEL_AUTO):
+        chosen = _dflash_choice(configuration, accelerators, priority, requested, needs_vision)
+        if chosen is not None and not chosen.refused:
+            return chosen
+        if requested == mc_llm_accel.ACCEL_DFLASH2:
+            return chosen if chosen is not None else dataclasses_replace(
+                ordinary, refusal=mc_llm_accel.no_sidecar(_backbone_label(configuration)))
+
+    if requested in (mc_llm_accel.ACCEL_MTP, mc_llm_accel.ACCEL_AUTO):
+        multitoken = accelerators.mtp if accelerators is not None else None
+        if multitoken is not None and multitoken.embedded:
+            return mc_llm_accel.Plan(requested=requested,
+                                     accelerator=mc_llm_accel.ACCEL_MTP,
+                                     memory_priority=priority)
+        if requested == mc_llm_accel.ACCEL_MTP:
+            # Not a refusal. Section 3 defines Fast LLM as "MTP when supported,
+            # otherwise ordinary decoding" -- so a backbone without the heads
+            # decodes as it always has, keeps the memory priority the preset
+            # also carries, and says which of the two it got.
+            return mc_llm_accel.Plan(
+                requested=requested, accelerator=mc_llm_accel.ACCEL_NONE,
+                memory_priority=priority,
+                notes=(f"{_backbone_label(configuration)} has no multi-token prediction "
+                       f"heads, so this runs at ordinary decoding speed.",))
+
+    return ordinary
+
+
+def _dflash_choice(configuration: Config, accelerators, priority: str, requested: str,
+                   needs_vision: bool):
+    """The DFlash2 half of :func:`accelerator_choice`, or ``None`` for "no such thing".
+
+    ``None`` and a refusal are different answers on purpose. ``None`` means this
+    backbone has no DFlash2 entry in the catalogue at all, which for an
+    automatic choice is simply the next mechanism's turn; a refusal means it has
+    one and something installable is missing, which is a sentence somebody can
+    act on.
+    """
+    speculator = getattr(accelerators, "dflash2", None) if accelerators is not None else None
+    if speculator is None:
+        return None
+
+    label = _backbone_label(configuration)
+    refused = mc_llm_accel.Plan(requested=requested, accelerator=mc_llm_accel.ACCEL_NONE,
+                                memory_priority=priority)
+
+    draft = _installed_draft(configuration)
+    if draft is None:
+        return dataclasses_replace(refused, refusal=mc_llm_accel.no_sidecar(label))
+
+    try:
+        import mc_llm_dflash
+
+        component = _dflash_component(speculator.runtime_family)
+        server = mc_llm_dflash.executable(component) if component else None
+    except Exception:
+        logger.debug("Model Chain: could not read the DFlash2 runtime family", exc_info=True)
+        component, server = "", None
+    if server is None:
+        return dataclasses_replace(refused, refusal=mc_llm_accel.no_runtime(label))
+
+    capability = mc_llm_dflash.capability(component)
+    if not capability.text:
+        return dataclasses_replace(refused, refusal=mc_llm_accel.not_validated(component))
+    if needs_vision and not capability.vision:
+        return dataclasses_replace(refused,
+                                   refusal=mc_llm_accel.vision_not_validated(component))
+
+    return mc_llm_accel.Plan(
+        requested=requested, accelerator=mc_llm_accel.ACCEL_DFLASH2,
+        memory_priority=priority, runtime_family=speculator.runtime_family,
+        runtime=server, draft=draft)
+
+
+def _dflash_component(family: str) -> str:
+    """Which installed DFlash2 component id serves ``family``, or ``""``."""
+    import mc_llm_dflash
+
+    wanted = str(family or "")
+    for build in mc_llm_dflash.builds():
+        if wanted and build.family != wanted:
+            continue
+        if mc_llm_dflash.executable(build.component_id) is not None:
+            return build.component_id
+    return ""
+
+
+def _advertised_accelerators(configuration: Config):
+    """What the catalogue says this backbone can be accelerated with, if anything.
+
+    ``None`` for a manual GGUF, and that is not a gap to be filled by probing:
+    an accelerator claim is a statement about a specific file, and this
+    extension knows which file a *managed* backbone is because its hash is
+    pinned. Somebody's own GGUF gets ordinary decoding, which is what it has
+    always got.
+    """
+    if not configuration.managed_id:
+        return None
+    try:
+        import mc_llm_managed_models
+
+        return mc_llm_managed_models.entry(configuration.managed_id).accelerators
+    except Exception:
+        logger.debug("Model Chain: could not read %s's accelerators",
+                     configuration.managed_id, exc_info=True)
+        return None
+
+
+def _installed_draft(configuration: Config) -> Path | None:
+    """The speculative sidecar on disk for this backbone, verified by hash at install."""
+    if not configuration.managed_id:
+        return None
+    try:
+        import mc_llm_managed_models
+
+        model = mc_llm_managed_models.entry(configuration.managed_id)
+        bundle = mc_llm_managed_models.installed(model.identifier)
+        if bundle is None or not bundle.drafts(model):
+            return None
+        return bundle.draft
+    except Exception:
+        logger.debug("Model Chain: could not read %s's draft model",
+                     configuration.managed_id, exc_info=True)
+        return None
+
+
+def _backbone_label(configuration: Config) -> str:
+    """What to call the model in a sentence a user reads."""
+    if configuration.managed_id:
+        try:
+            import mc_llm_managed_models
+
+            return mc_llm_managed_models.entry(configuration.managed_id).label
+        except Exception:
+            pass
+    if configuration.model is not None:
+        return Path(configuration.model).stem
+    return "this backbone"
+
+
+def dataclasses_replace(plan, **changes):
+    """``dataclasses.replace``, imported where it is used rather than at module scope."""
+    from dataclasses import replace
+
+    return replace(plan, **changes)
+
+
+def accelerator_plan(configuration: Config, gguf: mc_gguf.Gguf | None = None, *,
+                     needs_vision: bool = False, already_ours: int = 0,
+                     extra_reserve: int = 0, chosen: mc_llm_accel.Plan | None = None,
+                     reclaim: bool = True) -> mc_llm_accel.Plan:
+    """The complete accelerator decision, fit included, for one start.
+
+    Only ever called on a path that is about to launch. It reads free VRAM,
+    and on an LLM-priority plan it may ask the broker to release image
+    residency *on this card* -- neither of which belongs on a warm turn.
+
+    The DFlash2 requirement is section 8's, in full and without softening:
+
+    * the target wholly resident on one CUDA GPU, every layer, every expert;
+    * the draft wholly resident on that same GPU;
+    * the requested context, the hybrid model's recurrent state and the
+      compute buffers all fitting beside them;
+    * the projector's allowance too, when *this request* carries an image;
+    * and a safety margin, because a plan that fits exactly does not.
+
+    There is no rung below that. A DFlash2 plan does not shrink its context,
+    does not move experts and does not drop blocks -- section 6 forbids
+    reporting a partially offloaded run as Lightning, and the honest answer
+    when the arithmetic says no is :attr:`~mc_llm_accel.Plan.refusal`.
+
+    ``reclaim=False`` is what the estimator passes: it answers "would this fit"
+    without moving anything, which is the same guarantee :func:`negotiate`
+    makes for the same reason.
+    """
+    plan = chosen if chosen is not None else accelerator_choice(configuration, needs_vision)
+    if plan.refused:
+        return plan
+    if plan.accelerator == mc_llm_accel.ACCEL_MTP:
+        multitoken = getattr(_advertised_accelerators(configuration), "mtp", None)
+        flags = mc_llm_accel.mtp_flags(
+            multitoken, supports=lambda flag: runtime_supports(flag, configuration))
+        if not flags:
+            return dataclasses_replace(
+                plan, accelerator=mc_llm_accel.ACCEL_NONE, flags=(),
+                notes=(*plan.notes,
+                       "This llama.cpp build does not accept the multi-token prediction "
+                       "options, so the backbone's own draft heads are not used. Update the "
+                       "runtime in Setup to get them."))
+        return dataclasses_replace(plan, flags=flags)
+    if not plan.speculative:
+        return plan
+
+    described = gguf if gguf is not None else mc_gguf.describe(configuration.model)
+    card = card_of(configuration)
+    if card is None:
+        return dataclasses_replace(plan, accelerator=mc_llm_accel.ACCEL_NONE, refusal=(
+            "DFlash2 is a CUDA path and this configuration runs on the processor. Choose a "
+            "card in Setup, or a performance mode that does not need one."))
+
+    placement = _requested_placement(configuration, described, already_ours)
+    if not placement.on_gpu or placement.gpu_layers != mc_llm_context.ALL_LAYERS \
+            or placement.cpu_experts:
+        return dataclasses_replace(plan, accelerator=mc_llm_accel.ACCEL_NONE, refusal=(
+            "DFlash2 needs every layer of the backbone resident on the card, and this "
+            "configuration is set to keep part of it in system RAM. Choose GPU / VRAM Only "
+            "in Setup, or a performance mode that does not need full residency."))
+
+    speculator = plan_speculator(configuration)
+    if speculator is None or plan.draft is None:
+        return dataclasses_replace(plan, accelerator=mc_llm_accel.ACCEL_NONE,
+                                   refusal=mc_llm_accel.no_sidecar(
+                                       _backbone_label(configuration)))
+
+    target = mc_llm_context.estimate(configuration.model, placement, described)
+    draft, draft_placement = _draft_estimate(speculator, plan.draft, placement)
+    margin = mc_broker.safety_margin_bytes() + max(int(extra_reserve), 0)
+    projector = projector_bytes(configuration, needs_vision)
+    required = target.total_bytes + draft.total_bytes + projector + margin
+
+    cooperative = plan.memory_priority != mc_llm_accel.PRIORITY_LLM
+    spendable = _spendable(already_ours, card, image_budget=cooperative)
+    reclaimed = 0
+    if spendable < required and not cooperative and reclaim:
+        # Only here, only on this card, and only for the deficit. Everything
+        # about that narrowness is in mc_broker.release_for_llm; what this
+        # end owes it is to re-read the card afterwards rather than to add up
+        # what it was told, which is why ``spendable`` is measured again.
+        released = mc_broker.release_for_llm(
+            required, card=card, margin=0,
+            reason=f"DFlash2 for {_backbone_label(configuration)}")
+        reclaimed = int(released.freed)
+        spendable = _spendable(already_ours, card, image_budget=False)
+
+    if spendable < required:
+        return dataclasses_replace(
+            plan, accelerator=mc_llm_accel.ACCEL_NONE,
+            required_bytes=required, spendable_bytes=spendable, reclaimed_bytes=reclaimed,
+            draft_bytes=draft.total_bytes,
+            refusal=mc_llm_accel.does_not_fit(required, spendable, _device_label(configuration),
+                                              reclaimed))
+
+    special = _with_runtime(configuration, plan.runtime)
+    flags = mc_llm_accel.dflash2_flags(
+        speculator, plan.draft,
+        supports=lambda flag: runtime_supports(flag, special),
+        flash_attention=_flash_attention_flags(special))
+    if not flags:
+        return dataclasses_replace(plan, accelerator=mc_llm_accel.ACCEL_NONE, refusal=(
+            f"The DFlash2 runtime installed here does not accept the speculative draft "
+            f"options, so it cannot start {_backbone_label(configuration)} with a draft "
+            f"model. Re-install it in Setup and verify it again."))
+
+    return dataclasses_replace(
+        plan, flags=flags, draft_bytes=draft.total_bytes, required_bytes=required,
+        spendable_bytes=spendable, reclaimed_bytes=reclaimed,
+        notes=(*plan.notes, _dflash_note(target, draft, draft_placement)))
+
+
+def plan_speculator(configuration: Config):
+    """The registry's DFlash2 policy for this backbone, or ``None``."""
+    return getattr(_advertised_accelerators(configuration), "dflash2", None)
+
+
+def _draft_estimate(speculator, draft: Path, placement: mc_llm_context.Placement):
+    """What the draft model costs the card, sized from its own header.
+
+    Its own header and its own cache types, both. The draft is a different
+    model -- a BF16 sidecar next to a quantised 27B -- so charging it the
+    target's bytes-per-token would be arithmetic about the wrong file, and the
+    publisher's tested contract runs its cache at f16 whatever the target's is,
+    which is what the registry's ``draft_kv_type_k``/``_v`` record.
+
+    The context is the target's, because that is what the draft is asked to
+    speculate over: the two models step through the same sequence.
+    """
+    draft_placement = mc_llm_context.Placement(
+        gpu_layers=mc_llm_context.ALL_LAYERS, context=placement.context,
+        kv_type_k=getattr(speculator, "draft_kv_type_k", "") or mc_llm_context.DEFAULT_KV_TYPE,
+        kv_type_v=getattr(speculator, "draft_kv_type_v", "") or mc_llm_context.DEFAULT_KV_TYPE,
+        on_gpu=True)
+    return mc_llm_context.estimate(draft, draft_placement), draft_placement
+
+
+def _dflash_note(target: mc_llm_context.Estimate, draft: mc_llm_context.Estimate,
+                 draft_placement: mc_llm_context.Placement) -> str:
+    """One sentence naming both halves of what is about to be resident."""
+    return (f"DFlash2: {target.weights_bytes / _GB:.1f} GB of backbone weights and "
+            f"{draft.weights_bytes / _GB:.1f} GB of draft weights, both wholly on the card, "
+            f"with {(target.kv_bytes + target.state_bytes + draft.kv_bytes) / _GB:.1f} GB of "
+            f"cache and state at {draft_placement.context:,} tokens")
+
+
+def _with_runtime(configuration: Config, runtime: Path | None) -> Config:
+    """``configuration`` as it would be with ``runtime`` as its executable.
+
+    Capabilities are cached per executable, and the DFlash2 build is a
+    different executable from the configured one -- so asking what *it*
+    advertises means asking about it rather than about the ordinary runtime
+    that happens to be recorded in the state file.
+    """
+    if runtime is None or runtime == configuration.runtime:
+        return configuration
+    return dataclasses_replace(configuration, runtime=runtime)
+
+
+def _flash_attention_flags(configuration: Config) -> tuple[str, ...]:
+    """``--flash-attn``, in whichever of its two spellings this build has."""
+    if not runtime_supports(FLASH_ATTENTION_FLAG, configuration):
+        return ()
+    if _flash_attention_takes_a_value(configuration):
+        return (FLASH_ATTENTION_FLAG, "on")
+    return (FLASH_ATTENTION_FLAG,)
+
+
+def _launch_flags(configuration: Config, placement: mc_llm_context.Placement,
+                  plan: mc_llm_accel.Plan | None) -> list[str]:
+    """Every extra flag one start needs: the placement's, then the accelerator's.
+
+    Both sets are gated against the executable that is *actually* going to run,
+    which for a DFlash2 launch is not the one in the state file -- capabilities
+    are cached per binary, and asking the ordinary runtime what the special one
+    supports would be asking the wrong program.
+
+    ``--flash-attn`` can be produced by both halves, and llama.cpp takes the
+    last spelling it is given -- but a switch-style build passed the flag twice
+    is a build passed an argument it will try to parse as a value. So the
+    accelerator's flags are filtered against what the placement's already
+    carry, rather than the two being concatenated and hoped about.
+    """
+    special = _with_runtime(configuration, plan.runtime if plan is not None else None)
+    flags = accelerator_flags(special, placement)
+    if plan is None or not plan.flags:
+        return flags
+    extra = list(plan.flags)
+    if FLASH_ATTENTION_FLAG in flags:
+        extra = _without_flash_attention(extra)
+    return flags + extra
+
+
+def _without_flash_attention(flags: list[str]) -> list[str]:
+    """``flags`` with ``--flash-attn`` and any value beside it removed."""
+    kept, skip = [], False
+    for position, flag in enumerate(flags):
+        if skip:
+            skip = False
+            continue
+        if flag == FLASH_ATTENTION_FLAG:
+            following = flags[position + 1] if position + 1 < len(flags) else ""
+            skip = following in ("on", "off", "auto")
+            continue
+        kept.append(flag)
+    return kept
+
+
+def _speculative_negotiation(configuration: Config, plan: mc_llm_accel.Plan,
+                             needs_vision: bool, already_ours: int = 0) -> "Negotiation":
+    """The placement a DFlash2 launch uses, which the ladder never touches.
+
+    :func:`negotiate` exists to make a model fit by giving things up -- context
+    first, then experts, then whole blocks. Every one of those rungs is
+    forbidden here: :func:`accelerator_plan` has already proved that the
+    *complete* plan fits, and a placement that had been shrunk on the way to
+    this line would be a different plan from the one that was proved.
+
+    So this builds the requested placement and nothing else, and reports
+    ``fits=True`` because the fit was established against a stricter test than
+    :func:`_fits` applies -- one that also charged for the draft model.
+    """
+    described = mc_gguf.describe(configuration.model)
+    placement = _requested_placement(configuration, described, already_ours)
+    estimate = mc_llm_context.estimate(configuration.model, placement, described)
+    return Negotiation(placement, estimate, tuple(plan.notes), True)
+
+
 def conservative_flags(configuration: Config) -> list[str]:
     """What Mixed Conservative asks for beyond zero layers, where the build has it.
 
@@ -1455,11 +1966,41 @@ def placement_token(placement=None) -> str:
         return ""
 
 
+def measurement_token(placement=None, accelerator: str = "", card: int | None = None) -> str:
+    """One key-safe word naming everything a decode rate actually depends on.
+
+    Section 17: key learned speed by backbone, quantisation, physical GPU,
+    placement and accelerator -- and never average a DFlash rate together with
+    an ordinary one. The backbone and its quantisation are the identity half of
+    the key; this is the other three.
+
+    Both suffixes are omitted when they would say nothing, so every rate this
+    machine has already measured keeps the key it was written under: ordinary
+    decoding on an unknown card is ``gpu``, exactly as it always was, and only
+    a run that really used an accelerator or really knows its card writes
+    somewhere new.
+    """
+    token = placement if isinstance(placement, str) else placement_token(placement)
+    if not token:
+        return ""
+    if accelerator and accelerator not in (mc_llm_accel.ACCEL_NONE, mc_llm_accel.ACCEL_AUTO):
+        token = f"{token}-{accelerator}"
+    if card is not None and int(card) >= 0:
+        token = f"{token}-cuda{int(card)}"
+    return token
+
+
 PLACEMENT_WORDS = {
     "gpu": "all layers on the GPU",
     "cpu": "in system RAM",
     "cpu-moe": "experts in system RAM",
 }
+
+ACCELERATOR_WORDS = {
+    "dflash2": "DFlash2",
+    "mtp": "MTP",
+}
+"""How :func:`describe_placement_token` reads the suffix back out."""
 
 
 def describe_placement_token(token: str) -> str:
@@ -1474,6 +2015,8 @@ def describe_placement_token(token: str) -> str:
     token = str(token or "").strip()
     if not token:
         return ""
+    token, card = _split_suffix(token, ("cuda",))
+    token, accelerator = _split_suffix(token, ACCELERATOR_WORDS)
     head, _, layers = token.partition("-l")
     said = PLACEMENT_WORDS.get(head)
     if said is None and head.startswith("ncmoe-"):
@@ -1483,7 +2026,29 @@ def describe_placement_token(token: str) -> str:
         said = head
     if layers:
         said = f"{said}, {layers} layers on the GPU"
+    if accelerator:
+        said = f"{said}, {ACCELERATOR_WORDS.get(accelerator, accelerator)}"
+    if card:
+        said = f"{said}, GPU {card[len('cuda'):]}"
     return said
+
+
+def _split_suffix(token: str, known) -> tuple[str, str]:
+    """``token`` with a trailing ``-<suffix>`` removed, and that suffix.
+
+    ``known`` is either the exact suffixes to recognise or a prefix tuple for
+    ones carrying a number. Anything unrecognised is left on the token and
+    printed as it is -- an unfamiliar word beside a rate is a smaller failure
+    than a rate whose placement is not stated at all.
+    """
+    head, separator, tail = token.rpartition("-")
+    if not separator:
+        return token, ""
+    if isinstance(known, tuple):
+        if any(tail.startswith(prefix) and tail[len(prefix):].isdigit() for prefix in known):
+            return head, tail
+        return token, ""
+    return (head, tail) if tail in known else (token, "")
 
 
 def _key_safe(name) -> str:
@@ -2146,7 +2711,16 @@ def _identity(configuration: Config, projector=None) -> tuple:
             # about. Without this, a switch between two models that happened to
             # want the same context and cache types would have reused the
             # server that was already up -- still holding the previous weights.
-            str(configuration.profile_id))
+            str(configuration.profile_id),
+            # The two performance axes, because both are start-time facts. A
+            # DFlash2 server has a second model loaded and a different
+            # executable running it; an MTP one has neither. Section 16 asks
+            # for a change from one to the other to restart the server, and this
+            # is where a change to the *setting* does that. What is actually
+            # running is compared beside it -- see :meth:`Runtime.client` and
+            # :attr:`mc_llm_accel.Plan.identity` -- because ``auto`` can resolve
+            # differently once a draft model appears on disk.
+            str(configuration.accelerator), str(configuration.memory_priority))
 
 
 def _offloaded_layers(placement: mc_llm_context.Placement, total: int) -> int:
@@ -2222,6 +2796,15 @@ class Report:
     fits: bool = True
     offload: Offload = field(default_factory=Offload)
     """What llama.cpp said it did, as opposed to what it was asked to do."""
+    plan: mc_llm_accel.Plan = field(default_factory=mc_llm_accel.Plan)
+    """Which accelerator actually ran, and what it was measured to need.
+
+    Section 14 asks the status line to name the mechanism rather than the
+    preset, and section 9 says the same thing about ``auto``: "status must name
+    the mechanism actually used". This is that, kept beside the placement it
+    was decided with so the two cannot be reported out of step."""
+    speculation: "Speculation" = field(default_factory=lambda: Speculation())
+    """Drafted and accepted token counts, where llama.cpp reported them."""
 
 
 SYSTEM_RAM_MARGIN = 1.15
@@ -2307,17 +2890,27 @@ a step that only trimmed the context would ask the driver for the same
 allocation that had just been refused."""
 
 
-def _signature_of(configuration: Config, projector, placement) -> tuple:
+def _signature_of(configuration: Config, projector, placement,
+                  plan: mc_llm_accel.Plan | None = None) -> tuple:
     """What a running server would have to be restarted to change.
 
     The expert split is in it because it is a start-time argument like the
     other two: a placement that moved two more blocks' experts is a different
     command line, and a signature that could not tell the two apart would hand
     back the server that had just run out of memory.
+
+    The accelerator is in it for the same reason and one more. ``--spec-draft-
+    model`` is a start-time argument, so a server started without one cannot be
+    given one later; and the executable itself changes, because DFlash2 runs on
+    a different llama.cpp. A signature blind to that would hand back an ordinary
+    server for a request that had just been promised Lightning.
     """
-    return (configuration.runtime, configuration.model, projector,
+    return (plan.runtime if plan is not None and plan.runtime is not None
+            else configuration.runtime,
+            configuration.model, projector,
             configuration.gpu_index, configuration.device,
-            placement.context, placement.gpu_layers, placement.cpu_expert_layers)
+            placement.context, placement.gpu_layers, placement.cpu_expert_layers,
+            plan.identity if plan is not None else ())
 
 
 def _next_expert_floor(placement) -> int:
@@ -2345,6 +2938,15 @@ class Runtime:
         self._process = None
         self._signature: tuple | None = None
         self._identity: tuple | None = None
+        self._accelerator: tuple = ()
+        """The accelerator identity the running server was started with.
+
+        Beside ``_identity`` rather than inside it, because the two answer
+        different questions. ``_identity`` is what the *user chose*, and a
+        change to it is a setting change. This is what was *resolved* from that
+        choice against the files on disk -- so installing a draft model turns
+        an ``auto`` configuration from ordinary decoding into DFlash2 without
+        any setting having changed, and the warm server has to be replaced."""
         self._placement: mc_llm_context.Placement | None = None
         self._log: tuple | None = None
         """``(path, offset)`` of the running server's slice of the log."""
@@ -2484,8 +3086,18 @@ class Runtime:
             # attached, which is a trade worth making the other way round.
             projector = configuration.mmproj if needs_vision else None
 
+            # Which mechanism this request can use, before anything is measured
+            # and before anything is stopped. A forced accelerator that is
+            # simply not installed refuses here, in a sentence, rather than
+            # after a twenty-second model load -- and an automatic one has
+            # already stepped down to whatever it can prove is available.
+            chosen = accelerator_choice(configuration, needs_vision)
+            if chosen.refused:
+                raise RuntimeError(chosen.refusal)
+
             ours = self.resident_bytes()
             if (self._running and self._identity == _identity(configuration, projector)
+                    and self._accelerator == chosen.identity
                     and not self._outgrown(configuration, ours)):
                 self._touch(configuration, ours)
                 return self._client(configuration)
@@ -2501,13 +3113,26 @@ class Runtime:
                 logger.info("Model Chain: returned %.1f GB of cached VRAM to the driver before "
                             "placing the LLM", recovered / _GB)
 
-            negotiated = negotiate(configuration, already_ours=ours, vision=needs_vision,
-                                   extra_reserve=reserve)
+            # The fit, and the only place image residency can be released for
+            # the language model -- on the card it is being placed on, only
+            # when the user set LLM priority, and only for the deficit. See
+            # :func:`accelerator_plan` and :func:`mc_broker.release_for_llm`.
+            plan = accelerator_plan(configuration, already_ours=ours,
+                                    needs_vision=needs_vision, extra_reserve=reserve,
+                                    chosen=chosen)
+            if plan.refused:
+                raise RuntimeError(plan.refusal)
+
+            negotiated = (_speculative_negotiation(configuration, plan, needs_vision, ours)
+                          if plan.speculative
+                          else negotiate(configuration, already_ours=ours, vision=needs_vision,
+                                         extra_reserve=reserve))
             placement = negotiated.placement
-            signature = _signature_of(configuration, projector, placement)
+            signature = _signature_of(configuration, projector, placement, plan)
 
             if self._running and signature == self._signature:
                 self._identity = _identity(configuration, projector)
+                self._accelerator = plan.identity
                 self._touch(configuration, ours)
                 return self._client(configuration)
 
@@ -2529,12 +3154,27 @@ class Runtime:
                                            extra_reserve=reserve + penalty,
                                            vision=needs_vision, expert_floor=expert_floor)
                     placement = negotiated.placement
-                    signature = _signature_of(configuration, projector, placement)
+                    signature = _signature_of(configuration, projector, placement, plan)
                 try:
                     process, observed, offload = self._launch(configuration, placement,
-                                                              projector)
+                                                              projector, plan)
                     break
                 except _StartFailed as failure:
+                    # A speculative plan has no smaller rung. Every retry below
+                    # asks for less of the card -- a shorter context, then
+                    # experts in system RAM, then fewer blocks -- and every one
+                    # of those breaks the promise DFlash2 was started under.
+                    # Section 6: a forced DFlash2 run that cannot hold the whole
+                    # plan reports that rather than partially offloading and
+                    # still calling itself Lightning.
+                    if plan.speculative:
+                        raise RuntimeError(
+                            f"DFlash2 could not start {_backbone_label(configuration)} with "
+                            f"its draft model on {_device_label(configuration)}: {failure}. "
+                            f"It was not retried with part of the model in system RAM, "
+                            f"because that is not DFlash2. Free VRAM, reduce the context, "
+                            f"or use a smaller quantization."
+                        ) from None
                     if not failure.out_of_memory or attempt == START_ATTEMPTS - 1:
                         raise RuntimeError(str(failure)) from None
                     penalty += RETRY_HEADROOM
@@ -2556,7 +3196,8 @@ class Runtime:
 
             self._process, self._signature, self._placement = process, signature, placement
             self._identity = _identity(configuration, projector)
-            self._record(configuration, negotiated, observed, offload)
+            self._accelerator = plan.identity
+            self._record(configuration, negotiated, observed, offload, plan)
             # Which plan this placement answers. Everything after this point
             # compares against it rather than against free VRAM, so the server
             # survives every phase of the generation it was started for.
@@ -2572,7 +3213,7 @@ class Runtime:
             return prepared
 
     def _launch(self, configuration: Config, placement: mc_llm_context.Placement,
-                projector=None):
+                projector=None, plan: mc_llm_accel.Plan | None = None):
         """One llama-server, started and waited for. Returns it, its VRAM and its report.
 
         Raises :class:`_StartFailed` carrying llama.cpp's own reason rather
@@ -2588,6 +3229,12 @@ class Runtime:
         # unrelated numbers.
         before = mc_broker.device_free_vram_bytes(card_of(configuration))
         layers = _layers_argument(placement, mc_gguf.describe(configuration.model))
+        # The DFlash2 family is a different program in a different directory,
+        # and this is the one line that decides which one is started. Nothing
+        # about the ordinary runtime is changed to get here -- it is still
+        # recorded, still installed and still what every other start uses.
+        executable = plan.runtime if plan is not None and plan.runtime is not None \
+            else configuration.runtime
         paths = mc_llm_paths.app_paths()
         paths.logs.mkdir(parents=True, exist_ok=True)
         log_path = paths.logs / "llama-server.log"
@@ -2597,13 +3244,15 @@ class Runtime:
 
         logger.info(
             "Model Chain: %sstarting llama-server — %s on %s, %s, %s token context, "
-            "%.1f GB free",
+            "%.1f GB free%s",
             self._said_for(),
             configuration.quantization or Path(configuration.model).stem,
             _device_label(configuration),
             placement.describe(),
             f"{placement.context:,}",
             before / _GB,
+            "" if plan is None or plan.accelerator == mc_llm_accel.ACCEL_NONE
+            else f", {mc_llm_accel.short_label(plan.accelerator)}",
         )
         # Said every time, and said in full. llama-server's own log is where the
         # answer lives when a placement and a reply speed disagree, and a log
@@ -2617,9 +3266,13 @@ class Runtime:
         process = self._new_process()
         from_system_ram = (configuration.device.casefold() == CPU_DEVICE
                            or layers == NO_OFFLOAD)
-        _arm_flags(accelerator_flags(configuration, placement))
+        # The accelerator's flags go on last, so a build that spells
+        # ``--flash-attn`` as a switch does not get it twice: the ordinary set
+        # adds it for a resident placement, and ``dflash2_flags`` only carries
+        # it when it was asked for one that had none. See ``_launch_flags``.
+        _arm_flags(_launch_flags(configuration, placement, plan))
         try:
-            process.start(configuration.runtime, configuration.model, projector,
+            process.start(executable, configuration.model, projector,
                           configuration.gpu_index, configuration.device, placement.context,
                           log_path, gpu_layers=layers,
                           **_profile_arguments(configuration, placement))
@@ -2894,12 +3547,14 @@ class Runtime:
             return self._placement if self._running else None
 
     def _record(self, configuration: Config, negotiated: Negotiation, observed: int,
-                offload: Offload | None = None) -> None:
+                offload: Offload | None = None,
+                plan: mc_llm_accel.Plan | None = None) -> None:
         self.report = Report(
             placement=negotiated.placement, estimate=negotiated.estimate,
             notes=negotiated.notes, observed_bytes=observed, started_at=time.time(),
             model=Path(configuration.model).name if configuration.model else "",
             fits=negotiated.fits, offload=offload or Offload(),
+            plan=plan or mc_llm_accel.Plan(),
         )
         for text in negotiated.notes:
             mc_broker.note(mc_broker.FAMILY_LLM, text)
@@ -3146,9 +3801,38 @@ class Runtime:
         prompt, reply = self.speed()
         if reply <= 0:
             return ""
-        remember_speed(prompt, reply, placement=self._placement)
+        remember_speed(prompt, reply, placement=self.measurement_token())
         measured = f"llama.cpp measured {reply:.1f} tokens/s"
-        return f"{measured}, prompt at {prompt:.0f} tokens/s" if prompt > 0 else measured
+        said = f"{measured}, prompt at {prompt:.0f} tokens/s" if prompt > 0 else measured
+        accepted = self.speculation().describe()
+        return f"{said}, {accepted}" if accepted else said
+
+    def measurement_token(self) -> str:
+        """The key this server's measured rates belong under.
+
+        Composed from the running placement, the accelerator that is actually
+        running and the physical card -- so a DFlash2 rate on a 5090 and an
+        ordinary rate on a 3090 are two measurements of two things rather than
+        one average of neither.
+        """
+        with self._lock:
+            configuration = self.configuration()
+            return measurement_token(self._placement, self.report.plan.accelerator,
+                                     card_of(configuration))
+
+    def speculation(self) -> Speculation:
+        """What llama.cpp reported about drafted and accepted tokens, if anything.
+
+        Empty for an ordinary run, which is not a missing measurement -- there
+        was nothing to draft. Empty too for a speculative run on a build that
+        does not print the counters, and the two are told apart by
+        :attr:`Speculation.known` rather than by a zero.
+        """
+        with self._lock:
+            if self._log is None or not self._running or not self.report.plan.speculative:
+                return Speculation()
+            path, offset = self._log
+        return read_speculation(_text_since(path, offset, tail=_TIMING_TAIL))
 
     def describe(self) -> str:
         return self._label(self.configuration())
@@ -3178,6 +3862,12 @@ class Runtime:
         process, self._process = self._process, None
         held = self.report.observed_bytes if self._placement is not None else 0
         self._signature, self._identity, self._placement = None, None, None
+        # Cleared with the rest of the running server's identity. A stale
+        # accelerator tuple surviving a stop is how a DFlash flag comes to be
+        # believed about a server that is not running -- and section 16 asks
+        # for the opposite guarantee, that no such flag reaches an ordinary
+        # start.
+        self._accelerator = ()
         self._log = None
         mc_broker.retire(self.residency_key)
         self._forget_placement_plan()
@@ -3210,6 +3900,10 @@ class Runtime:
                 "placement": self._placement,
                 "report": self.report,
                 "resident_bytes": self.resident_bytes(),
+                "accelerator": self.report.plan.accelerator,
+                "runtime_family": self.report.plan.runtime_family,
+                "drafted": self.report.plan.draft is not None,
+                "memory_priority": configuration.memory_priority,
             }
 
 

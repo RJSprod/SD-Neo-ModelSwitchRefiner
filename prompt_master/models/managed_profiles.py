@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-VERSION = "2"
+VERSION = "3"
 """Bumped when any value below changes.
 
 Recorded in the setup state beside the model id, so an installation can say
@@ -153,6 +153,29 @@ PROFILES: dict[str, ManagedProfile] = {
     "qwen35-4b-aggressive": ManagedProfile(
         profile_id="qwen35-4b-aggressive",
         sampling={"top_k": 20, "min_p": 0.00, "repeat_penalty": 1.00},
+    ),
+
+    # -- Qwen 3.8 ----------------------------------------------------------- #
+    #
+    # One profile for all three weights of the 27B, which is the same rule the
+    # 26B tiers follow and for the same reason: what changes between High,
+    # Medium and Low is how many bits a weight has, and adding a behaviour
+    # difference on top of that would leave nobody able to say which of the two
+    # a worse caption came from.
+    #
+    # The values are Qwen's own published anchors for non-thinking use -- top-k
+    # 20, no min-p floor, a neutral repetition penalty -- and one deliberate
+    # departure. Qwen recommends a presence penalty of around 1.5 for generic
+    # instruct chat and says in the same breath that a higher one can cost
+    # performance and language stability. This workload is not generic instruct
+    # chat: an image prompt repeats its subject, its colours, its materials and
+    # its constraints on purpose, and a novelty penalty is a model being pushed
+    # off the nouns the picture is about. So presence and frequency are both
+    # written out at zero -- a decision recorded, not a default nobody reached.
+    "qwen38-27b-prompt-author": ManagedProfile(
+        profile_id="qwen38-27b-prompt-author",
+        sampling={"top_k": 20, "min_p": 0.00, "repeat_penalty": 1.00,
+                  "presence_penalty": 0.00, "frequency_penalty": 0.00},
     ),
 
     # -- The baseline ------------------------------------------------------- #

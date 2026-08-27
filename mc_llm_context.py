@@ -297,19 +297,24 @@ class Estimate:
     placement: Placement
     detail: str = ""
     """Why the numbers are what they are, or why they are coarse."""
+    state_bytes: int = 0
+    """Recurrent state, for a hybrid model that keeps any. See
+    :func:`recurrent_bytes`. Zero for every ordinary transformer, which is
+    every model this catalogue held before Qwen 3.8."""
 
     @property
     def total_bytes(self) -> int:
-        return int(self.weights_bytes + self.kv_bytes + self.compute_bytes)
+        return int(self.weights_bytes + self.kv_bytes + self.state_bytes
+                   + self.compute_bytes)
 
     @property
     def resident_bytes(self) -> int:
-        """What stays on the card between requests: weights and cache.
+        """What stays on the card between requests: weights, cache and state.
 
         The compute buffer is allocated too, so this is not the whole footprint
         -- it is the part that a fit decision must assume persists.
         """
-        return int(self.weights_bytes + self.kv_bytes)
+        return int(self.weights_bytes + self.kv_bytes + self.state_bytes)
 
     @property
     def capped(self) -> bool:
@@ -365,6 +370,69 @@ def kv_bytes_per_token(gguf: mc_gguf.Gguf, placement: Placement) -> float:
         offloaded = max(min(int(placement.gpu_layers), len(per_block)), 0)
         per_block = per_block[len(per_block) - offloaded:] if offloaded else []
     return float(sum(per_block))
+
+
+RECURRENT_STATE_BYTES = 4
+"""Bytes per element of recurrent state. llama.cpp keeps it in f32.
+
+Not quantisable the way a key/value cache is, and not asked to be: the cache
+types a placement carries are the *attention* cache's, and a recurrent state is
+a different tensor with a different lifetime -- one slot per sequence, written
+in place, never grown.
+"""
+
+RECURRENT_FALLBACK_BYTES = 8 * _MB
+"""What one recurrent block is charged when the header will not size it.
+
+A number rather than nothing, and deliberately on the generous side of what a
+27B hybrid's Gated DeltaNet block actually holds. The two ways to be wrong here
+are not symmetrical: over-charging costs a slightly smaller context on a card
+that had the room, and under-charging costs a model that reports as fitting and
+then cannot allocate. The measured footprint recorded after a real load
+supersedes it for any placement actually run -- see :func:`record_observation`.
+"""
+
+
+def recurrent_bytes(gguf: mc_gguf.Gguf, placement: Placement) -> int:
+    """VRAM the recurrent blocks' state takes under this placement.
+
+    Independent of the context, which is the whole reason it is its own term:
+    the attention cache is bytes-per-token multiplied by tokens, and this is a
+    fixed slot per sequence that is the same size at 2K as it is at 8K. Adding
+    it to the cache term would make it scale with a number it does not follow,
+    and leaving it out entirely would report a hybrid model as cheaper than it
+    is on a card that is already close to full.
+
+    Only offloaded blocks are charged, and llama.cpp offloads the last
+    ``--n-gpu-layers`` of them -- the same rule :func:`kv_bytes_per_token`
+    uses, and prorated the same way, because the two are describing the two
+    halves of the same interleaved stack.
+    """
+    # Read through ``getattr`` for the reason ``expert_fraction_moved`` does:
+    # a header object is whatever :func:`mc_gguf.describe` handed over, and an
+    # older or stubbed one that cannot answer a question this module has only
+    # just learned to ask should mean "no recurrent state" rather than a
+    # traceback in front of somebody choosing a model.
+    if not placement.on_gpu or gguf is None:
+        return 0
+    blocks = int(getattr(gguf, "recurrent_blocks", 0) or 0)
+    if blocks <= 0:
+        return 0
+    if placement.gpu_layers != ALL_LAYERS:
+        offloaded = max(min(int(placement.gpu_layers),
+                            int(getattr(gguf, "block_count", 0) or 0)), 0)
+        if offloaded <= 0:
+            return 0
+        # Which of the offloaded blocks are the recurrent ones is a question
+        # the header answers per block, so it is counted rather than scaled.
+        recurrent = [heads <= 0 for heads in getattr(gguf, "head_counts_kv", ())]
+        blocks = sum(recurrent[len(recurrent) - offloaded:])
+    if blocks <= 0:
+        return 0
+    elements = int(getattr(gguf, "recurrent_state_elements", 0) or 0)
+    if elements <= 0:
+        return blocks * RECURRENT_FALLBACK_BYTES
+    return blocks * elements * RECURRENT_STATE_BYTES
 
 
 def expert_fraction_moved(gguf: mc_gguf.Gguf, placement: Placement) -> float:
@@ -463,16 +531,22 @@ def estimate(model: str | Path, placement: Placement,
     weights = weights_bytes(described, placement)
     overhead, calibrated = _overhead(described, placement)
     kv = int(per_token * max(int(placement.context), 0))
+    state = recurrent_bytes(described, placement)
 
     detail = ""
     if placement.gpu_layers not in (ALL_LAYERS,) and placement.on_gpu:
         detail = ("Partial offload: the weight figure is prorated per block and does not "
                   "model the embedding and output tensors exactly.")
+    if state and not getattr(described, "recurrent_state_described", False):
+        said = ("This model interleaves blocks that keep a recurrent state with blocks that "
+                "keep a key/value cache, and its header does not give that state's shape, so "
+                "a conservative allowance is charged for it until a real load measures one.")
+        detail = f"{detail} {said}".strip()
     return Estimate(
         model=path, context=int(placement.context), ceiling=described.context_length,
         weights_bytes=weights, kv_bytes=kv, compute_bytes=int(overhead),
         kv_bytes_per_token=per_token, calibrated=calibrated, placement=placement,
-        detail=detail,
+        detail=detail, state_bytes=state,
     )
 
 

@@ -246,6 +246,82 @@ class Gguf:
         ordinary transformer and smaller for a hybrid one."""
         return sum(1 for heads in self.head_counts_kv if heads > 0)
 
+    # -- the other half of a hybrid model's memory ------------------------ #
+    #
+    # A block that keeps no key/value cache is not a block that keeps nothing.
+    # Qwen 3.8 interleaves Gated DeltaNet blocks with periodic full attention:
+    # the attending blocks grow a cache with the context, and the rest hold a
+    # fixed recurrent state per sequence that does not grow at all. Counting
+    # only the first half reports a hybrid 27B as cheaper than it is, and the
+    # error goes the wrong way -- it is an out-of-memory error at load rather
+    # than an avoidable eviction.
+    #
+    # The keys below are llama.cpp's own, written for every state-space and
+    # linear-attention architecture it supports. Where a build writes none of
+    # them the state is unknown rather than zero, and
+    # ``mc_llm_context.recurrent_bytes`` charges a conservative allowance
+    # instead -- see :attr:`recurrent_blocks`.
+
+    @property
+    def state_size(self) -> int:
+        """Width of one recurrent state slot, ``ssm.state_size`` in the header."""
+        return _whole(self._arch("ssm.state_size", 0))
+
+    @property
+    def convolution_kernel(self) -> int:
+        """``ssm.conv_kernel``: how many steps the short convolution remembers."""
+        return _whole(self._arch("ssm.conv_kernel", 0))
+
+    @property
+    def inner_size(self) -> int:
+        """``ssm.inner_size``: the width the recurrent path runs at."""
+        return _whole(self._arch("ssm.inner_size", 0))
+
+    @property
+    def group_count(self) -> int:
+        """``ssm.group_count``, or one group when the header does not say."""
+        return _whole(self._arch("ssm.group_count", 0)) or 1
+
+    @property
+    def recurrent_blocks(self) -> int:
+        """Blocks holding a recurrent state rather than a key/value cache.
+
+        Derived from the per-block attention array rather than from a count of
+        its own, because that array is where llama.cpp already records the
+        difference: a Gated DeltaNet block is written with zero key/value
+        heads, which is the same fact :attr:`attending_blocks` reads from the
+        other side.
+        """
+        return max(self.block_count - self.attending_blocks, 0)
+
+    @property
+    def recurrent(self) -> bool:
+        """Whether any block keeps a recurrent state at all."""
+        return self.recurrent_blocks > 0
+
+    @property
+    def recurrent_state_described(self) -> bool:
+        """Whether the header carried enough to size that state exactly."""
+        return bool(self.recurrent and self.state_size and self.inner_size
+                    and self.convolution_kernel)
+
+    @property
+    def recurrent_state_elements(self) -> int:
+        """Elements of state one recurrent block holds, per sequence.
+
+        llama.cpp's own arithmetic, in its own terms: a convolution window of
+        ``conv_kernel - 1`` steps over the inner width and the two group
+        projections beside it, plus the recurrent state itself at
+        ``state_size x inner_size``. Zero when the header does not describe it,
+        which is a question for the caller rather than a licence to assume the
+        state is free.
+        """
+        if not self.recurrent_state_described:
+            return 0
+        convolution = (self.convolution_kernel - 1) * (
+            self.inner_size + 2 * self.group_count * self.state_size)
+        return max(convolution, 0) + self.state_size * self.inner_size
+
     @property
     def uniform_attention(self) -> bool:
         """Whether every block is shaped the same, which decides only how the
