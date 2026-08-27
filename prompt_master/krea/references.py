@@ -39,6 +39,19 @@ class Reference:
 
     ui_index: int
     path: str = ""
+    """Where the picture came from, when it came from a file at all.
+
+    Empty when the UI handed over a decoded picture instead of a path, which is
+    what the reference slots now ask for -- see :attr:`picture`. Kept because it
+    is where :attr:`name` comes from, and a file that does have a name should
+    still be called by it in a history."""
+    picture: object = None
+    """The picked image itself, when the slot handed one over rather than a path.
+
+    Untyped on purpose: this package is imported by the prompt engine and by the
+    tests, and neither should have to have Pillow installed to describe a
+    reference. What consumes it -- ``mc_llm_krea_panel._encoded`` -- already
+    depends on Pillow through the vendored preprocessor."""
     data_url: str = ""
     caption: str = ""
     semantic_role: str = ""
@@ -49,6 +62,17 @@ class Reference:
     semantic loss this whole package is arranged to prevent. The field is here
     because a future backend needs somewhere to put a role the *user* declared.
     """
+
+    @property
+    def source(self):
+        """What to read this reference's pixels from: the picture, or the path.
+
+        One property rather than the same conditional at every call site. Which
+        of the two a slot hands over is a fact about the UI component and about
+        nothing else -- see ``mc_llm_krea_panel.build`` -- and no caller of this
+        package should have to know it.
+        """
+        return self.picture if self.picture is not None else self.path
 
     @property
     def name(self) -> str:

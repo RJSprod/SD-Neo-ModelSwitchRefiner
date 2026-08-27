@@ -3525,3 +3525,55 @@ projector, upgrades once for an embedded image, and then requires the *same
 process* to answer a text follow-up. Upstream multimodal regressions have
 shipped in builds where the request schema and the projector configuration were
 both correct, and only a real binary can catch that.
+
+### 33.6 The picture never got past Gradio (27 August 2026)
+
+Reported after the above shipped: attaching an image to a conversation still
+produced a text-only reply, and the console carried three copies of
+
+```
+File "gradio/components/image.py", line 197, in preprocess
+File "gradio/image_utils.py", line 30, in format_image
+    path = processing_utils.save_pil_to_cache(im, cache_dir=cache_dir, name=name, format=format)
+TypeError: save_pil_to_file() got an unexpected keyword argument 'name'
+```
+
+Nothing in this extension appears in that traceback, and nothing in it needed
+to. Gradio 4.40's `format_image` preprocesses a `type="filepath"` image by
+calling `processing_utils.save_pil_to_cache(im, cache_dir=…, name=…, format=…)`.
+The WebUI replaces that function — `modules/ui_tempdir`, so that saved images
+carry their PNG info — with one whose signature is
+`(pil_image, cache_dir=None, format="png")`. It predates the `name` parameter.
+
+So *every* `gr.Image(type="filepath")` input in this host raises inside
+`preprocess_data`, before any handler runs. The four image inputs LLM
+Studio owns — the Conversation attachment, Prompt Studio's start frame,
+MiniMax's reference frame and Krea's four reference slots — were all of them
+that kind, which is the whole of "vision does not work" as a user experiences
+it. The llama-server log for the reported session confirms it from the other
+end: two text prompts, 290 and 377 tokens, no projector, no image.
+
+The fix is not to patch the host. `format_image` returns the decoded image
+immediately for `type="pil"` and never reaches the replaced function, so the
+four inputs ask for the picture instead of a path. That is also the better
+answer independent of the bug: one decode rather than a second copy of
+somebody's photograph written into a cache and read straight back, and the
+bytes never touch the disk on the way to a local model.
+
+Output is unaffected and was never broken — `save_image`, which postprocesses a
+component's value, does not pass `name`.
+
+What it costs is the filename. Gradio consumes the upload's original name
+inside its own decode (`im.convert(self.image_mode)` returns a new image, and
+`PIL` does not carry `filename` across that), so a handler receiving a picture
+receives no name for it. `ui.picked_name` answers `"attached image"` there
+rather than an empty string, because empty would take the `*[…]*` marker out of
+the transcript and leave nothing on screen to say a picture had been attached
+at all. A path still contributes its basename, and never the path itself.
+
+`ui.data_url` now takes either shape, `prompt_master.imaging.preprocess.encode`
+is the half that works on an already-decoded picture, and Krea's `Reference`
+grew a `picture` field beside `path` so a slot can carry either without the
+numbering contract in §4 knowing which. A test asserts no image input in the
+extension asks Gradio for a filepath again, and a second one asserts the inputs
+still exist — because deleting them is the other way to make the first pass.

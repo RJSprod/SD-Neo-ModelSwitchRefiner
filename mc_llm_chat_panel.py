@@ -239,7 +239,15 @@ def build() -> dict:
             # a panel.
             with gr.Row(visible=False, elem_id=ui.ident("chat", "attachment"),
                         elem_classes=ui.classes("attachment")) as attachment_row:
-                attachment = gr.Image(label="Next message", type="filepath", height=96,
+                # type="pil" and not "filepath": Gradio's filepath preprocess
+                # calls ``processing_utils.save_pil_to_cache`` with a ``name``
+                # argument, and this WebUI replaces that function with an older
+                # one that has no such parameter -- so every filepath image
+                # input in the host raises ``TypeError`` before a handler is
+                # ever reached. Attaching a picture to a message did nothing
+                # but write a traceback to the console. Asking for the picture
+                # itself skips that call entirely.
+                attachment = gr.Image(label="Next message", type="pil", height=96,
                                       show_label=False, scale=1,
                                       elem_id=ui.ident("chat", "image"))
                 remove_attachment = gr.Button("Remove", size="sm", scale=0, min_width=88)
@@ -1277,12 +1285,12 @@ def _take_back(who, conversation, index, filter_text):
     copy is what gets edited: the thread it came from keeps this message and
     every one that followed, whole and reachable in the thread list.
 
-    A picture cannot come back with it. The composer's attachment is a file on
-    disk and a saved one is a data URL inside the thread, and inventing a
-    temporary file to bridge that is a great deal of machinery for the rarest
-    path here. So an attachment is said out loud rather than silently dropped --
-    and in the branching case it is not lost at all, because the thread it came
-    from still has it.
+    A picture cannot come back with it. The composer's attachment is a decoded
+    picture the browser uploaded and a saved one is a JPEG data URL inside the
+    thread, and reconstructing the first from the second is a great deal of
+    machinery for the rarest path here. So an attachment is said out loud rather
+    than silently dropped -- and in the branching case it is not lost at all,
+    because the thread it came from still has it.
     """
     message = conversation.messages[index]
     lifted, attached = message.text, bool(message.image)
@@ -1397,33 +1405,31 @@ def _delete_from(who, identifier, index):
 # --------------------------------------------------------------------------- #
 
 
-def _send(who, identifier, text, image_path, temperature, top_p, reply_tokens, seed):
+def _send(who, identifier, text, picture, temperature, top_p, reply_tokens, seed):
     """Add your message to the thread, then stream the reply to it."""
     from prompt_master.chat.history import ASSISTANT, USER
 
     conversation = _load(who, identifier)
     if conversation is None:
-        yield _idle(None, text, image_path, "Choose a character and a thread first.", "warn")
+        yield _idle(None, text, gr.update(), "Choose a character and a thread first.", "warn")
         return
-    if not (text or "").strip() and not image_path:
-        yield _idle(conversation, text, image_path, "Write a message first.", "warn")
+    if not (text or "").strip() and picture is None:
+        yield _idle(conversation, text, gr.update(), "Write a message first.", "warn")
         return
 
     attachment, attachment_name = "", ""
-    if image_path:
+    if picture is not None:
         if not mc_llm_runtime.config().sees:
-            yield _idle(conversation, text, image_path,
+            yield _idle(conversation, text, gr.update(),
                         "The model running has no vision projector, so the attached image "
                         "cannot be sent to it. Choose one in Setup, or remove the image.",
                         "error")
             return
         try:
-            attachment = ui.data_url(image_path) or ""
-            # Path, not a string split on "/": a Windows temporary file arrives
-            # with backslashes and the whole path would end up as the caption.
-            attachment_name = Path(image_path).name
+            attachment = ui.data_url(picture) or ""
+            attachment_name = ui.picked_name(picture)
         except Exception as exc:
-            yield _idle(conversation, text, image_path, ui.failure(exc), "error")
+            yield _idle(conversation, text, gr.update(), ui.failure(exc), "error")
             return
 
     conversation.append(USER, (text or "").strip(), attachment, attachment_name)
@@ -1590,10 +1596,18 @@ BUSY = (gr.update(visible=False, interactive=False), gr.update(visible=True, int
 IDLE = (gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False))
 
 
-def _idle(conversation, text, image_path, note: str, kind: str = "info") -> tuple:
-    """One yield that changes nothing and says why."""
+def _idle(conversation, text, attachment, note: str, kind: str = "info") -> tuple:
+    """One yield that changes nothing and says why.
+
+    ``attachment`` is what the picture slot should become: ``None`` to empty it,
+    and ``gr.update()`` to leave whatever is in it alone. The second is what a
+    refusal wants -- the user is about to fix the message and press Send again,
+    and taking their picture away while telling them why the message could not
+    be sent would make them attach it twice. It is also the cheap answer: the
+    slot holds a decoded image now, and handing one back is a full re-encode.
+    """
     rows, positions = _view(conversation)
-    return (None, rows, positions, text, image_path, ui.notice(note, kind)) + IDLE
+    return (None, rows, positions, text, attachment, ui.notice(note, kind)) + IDLE
 
 
 def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
