@@ -1197,6 +1197,18 @@ class Failure:
 
     text: str = ""
     out_of_memory: bool = False
+    bad_argument: str = ""
+    """The option llama.cpp refused, when it died at argument parsing.
+
+    A different kind of failure from every other one here, and the difference
+    is who is at fault. Out of memory is a fact about the machine and the
+    answer is to ask for less of it; an argument llama.cpp will not take is a
+    fact about *this extension* -- a flag added on the strength of a help text
+    that said less than it seemed to -- and the answer is to stop adding it.
+    Nothing about the model is wrong, so nothing about the model should be
+    given up over it."""
+    bad_value: str = ""
+    """The value it refused, where the message named one."""
 
     def __bool__(self) -> bool:
         return bool(self.text)
@@ -1289,8 +1301,39 @@ the full context for every block. So the reserve does not move; reality merely
 stops being cheaper than the arithmetic that placed it.
 """
 
+OPTIONAL_FLAGS = frozenset({
+    CPU_MOE_FLAG, N_CPU_MOE_FLAG, FLASH_ATTENTION_FLAG, NO_MMAP_FLAG,
+    NO_KV_OFFLOAD_FLAG, OP_OFFLOAD_FLAG, FULL_ATTENTION_WINDOW_FLAG,
+    mc_llm_accel.SPEC_MODEL_FLAG, mc_llm_accel.SPEC_TYPE_FLAG,
+    mc_llm_accel.SPEC_MAX_FLAG, mc_llm_accel.SPEC_MIN_FLAG,
+    mc_llm_accel.SPEC_P_MIN_FLAG, mc_llm_accel.SPEC_TYPE_K_FLAG,
+    mc_llm_accel.SPEC_TYPE_V_FLAG, mc_llm_accel.DRAFT_LAYERS_FLAG,
+})
+"""Every flag this extension *chooses* to append, and none that it must.
+
+The list matters because it decides who is blamed for a start that died at
+argument parsing. A flag on this list being refused means the help text
+promised more than the build delivers, the flag can simply be left off, and
+nothing about the model is wrong. ``--device``, ``--model`` and the rest of the
+vendored launcher's fixed line are deliberately absent: those are not optional,
+a refusal of one is a real misconfiguration, and each already has a diagnosis
+of its own that says far more than this branch could.
+"""
+
+
+_BAD_ARGUMENT = re.compile(
+    r'error while handling argument "(--[a-z0-9-]+)"\s*:\s*([^\n]+)', re.IGNORECASE)
+_BAD_VALUE = re.compile(r"unknown [a-z ]*type:\s*(\S+)", re.IGNORECASE)
+"""llama.cpp's own words when it will not take an option, and the value it named.
+
+Both are best-effort and neither is load-bearing: a message these do not match
+is an ordinary start failure, reported as one. What they buy is the difference
+between "this backbone would not start" -- which is what the user saw, and is
+false -- and "this flag was wrong", which is actionable and true.
+"""
+
 _HELP_TIMEOUT = 20
-_capabilities: dict[tuple, frozenset] = {}
+_capabilities: dict[tuple, str] = {}
 _capabilities_lock = threading.Lock()
 
 
@@ -1308,28 +1351,53 @@ def runtime_capabilities(configuration: Config | None = None) -> frozenset:
     Cached per executable and modification time, so adopting a new build asks
     again and an ordinary start asks nothing.
     """
+    text = _capability_text(configuration)
+    if not text:
+        return frozenset()
+    return frozenset(re.findall(r"(--[a-z0-9][a-z0-9-]+)", text))
+
+
+def _runtime_stamp(configuration: Config | None = None):
+    """``(path, mtime)`` for the executable in force, or ``None``.
+
+    The cache key everything in this section is filed under. Adopting a new
+    build changes the modification time, so a replaced runtime asks again
+    rather than inheriting what the previous one said.
+    """
     try:
         configuration = configuration or config()
         executable = configuration.runtime
         if executable is None or not Path(executable).is_file():
-            return frozenset()
-        stamp = (str(executable), Path(executable).stat().st_mtime)
+            return None
+        return (str(executable), Path(executable).stat().st_mtime)
     except Exception:
-        return frozenset()
+        return None
 
+
+def _capability_text(configuration: Config | None = None) -> str:
+    """``llama-server --help``, whole, cached per executable.
+
+    The text rather than the parsed flag set, because two questions are asked
+    of it now: which long options exist, and which *values* an enumerated
+    option lists. Parsing it twice from one subprocess run is free; running the
+    subprocess twice is twenty seconds on a cold start.
+    """
+    stamp = _runtime_stamp(configuration)
+    if stamp is None:
+        return ""
     with _capabilities_lock:
         found = _capabilities.get(stamp)
     if found is not None:
         return found
 
-    found = _read_capabilities(executable)
+    found = _read_capabilities(stamp[0])
     with _capabilities_lock:
         _capabilities[stamp] = found
     return found
 
 
-def _read_capabilities(executable) -> frozenset:
-    """``llama-server --help``, reduced to the set of long options it lists."""
+def _read_capabilities(executable) -> str:
+    """``llama-server --help``, as one string. Empty when it cannot be asked."""
     try:
         finished = subprocess.run(
             [str(executable), "--help"], capture_output=True, text=True,
@@ -1338,17 +1406,82 @@ def _read_capabilities(executable) -> frozenset:
     except Exception:
         logger.debug("Model Chain: could not ask llama-server what it supports",
                      exc_info=True)
-        return frozenset()
+        return ""
     text = f"{finished.stdout or ''}\n{finished.stderr or ''}"
-    flags = frozenset(re.findall(r"(--[a-z0-9][a-z0-9-]+)", text))
-    if flags:
-        logger.debug("Model Chain: llama-server advertises %d options", len(flags))
-    return flags
+    logger.debug("Model Chain: llama-server's help is %d characters", len(text))
+    return text
 
 
 def runtime_supports(flag: str, configuration: Config | None = None) -> bool:
     """Whether this build advertises ``flag``. False when it cannot be asked."""
     return flag in runtime_capabilities(configuration)
+
+
+_rejected: dict[tuple, set] = {}
+"""Enumerated values a build printed in its help and then refused at startup.
+
+Session-scoped, keyed the way :data:`_capabilities` is. It exists because the
+help text can be *wrong by omission*: an option's usage line lists the values
+that build takes, and a build whose list this module misread -- or which takes
+the value only in combination with something else -- rejects it at startup and
+exits. Without this, every subsequent start would make the same doomed attempt
+and pay the same three seconds for it.
+
+Not persisted. Relearning it once per session costs one failed start, and a
+file on disk claiming a runtime cannot do something would outlive the runtime
+being replaced.
+"""
+
+
+def runtime_accepts(flag: str, value: str, configuration: Config | None = None) -> bool:
+    """Whether this build takes ``value`` for ``flag``, as far as it will say.
+
+    A second question, and the one whose absence cost a user their model
+    switch. ``--spec-type`` has been in llama.cpp since the speculative
+    framework landed, so :func:`runtime_supports` answers yes for it on every
+    build in the wild; *which types* it accepts is an enumeration that has
+    grown release by release, and a build handed one it does not have prints
+    ``error while handling argument "--spec-type": unknown speculative type``
+    and exits before it loads a single tensor.
+
+    Matched as a whole word anywhere in the help output rather than by parsing
+    the option's usage block, which is a deliberate looseness: llama.cpp has
+    formatted that block three ways, and the values this is asked about --
+    ``draft-mtp``, ``draft-dflash`` -- are distinctive enough that finding one
+    anywhere in the text means the build knows it. A false negative costs an
+    accelerator that would have worked and is reported; a false positive costs
+    a failed start, which is why the negative cache below exists too.
+    """
+    if not runtime_supports(flag, configuration):
+        return False
+    stamp = _runtime_stamp(configuration)
+    if stamp is not None and (flag, value) in _rejected.get(stamp, ()):
+        return False
+    text = _capability_text(configuration)
+    if not text:
+        return False
+    return bool(re.search(rf"(?<![A-Za-z0-9_-]){re.escape(value)}(?![A-Za-z0-9_-])", text))
+
+
+def note_rejected_value(flag: str, value: str, configuration: Config | None = None) -> None:
+    """Record that this build refused ``value`` for ``flag`` when it started.
+
+    Called from the one place that can know it -- a start that died on an
+    argument error -- so the next start does not repeat it.
+    """
+    stamp = _runtime_stamp(configuration)
+    if stamp is None:
+        return
+    with _capabilities_lock:
+        _rejected.setdefault(stamp, set()).add((flag, value))
+    logger.warning("Model Chain: this llama-server does not accept %s %s, whatever its help "
+                   "text lists; it will not be asked for it again this session", flag, value)
+
+
+def rejected_values(configuration: Config | None = None) -> tuple:
+    """What this build has refused, for a status line and for the tests."""
+    stamp = _runtime_stamp(configuration)
+    return tuple(sorted(_rejected.get(stamp, ()))) if stamp is not None else ()
 
 
 def accelerator_flags(configuration: Config, placement) -> list[str]:
@@ -1663,7 +1796,10 @@ def accelerator_plan(configuration: Config, gguf: mc_gguf.Gguf | None = None, *,
     if plan.accelerator == mc_llm_accel.ACCEL_MTP:
         multitoken = getattr(_advertised_accelerators(configuration), "mtp", None)
         flags = mc_llm_accel.mtp_flags(
-            multitoken, supports=lambda flag: runtime_supports(flag, configuration))
+            multitoken,
+            supports=lambda flag: runtime_supports(flag, configuration),
+            accepts=lambda value: runtime_accepts(mc_llm_accel.SPEC_TYPE_FLAG, value,
+                                                  configuration))
         if not flags:
             return _replaced(
                 plan, accelerator=mc_llm_accel.ACCEL_NONE, flags=(),
@@ -1673,6 +1809,22 @@ def accelerator_plan(configuration: Config, gguf: mc_gguf.Gguf | None = None, *,
                        "runtime in Setup to get them."))
         return _replaced(plan, flags=flags)
     return plan
+
+
+def _without_accelerator(plan: mc_llm_accel.Plan, because: str) -> mc_llm_accel.Plan:
+    """``plan`` with the accelerator taken off and the reason kept.
+
+    Ordinary decoding rather than the next mechanism down, deliberately: what
+    has just been established is that this build rejects an option, and trying
+    a second option built out of the same help text would be guessing twice
+    with one piece of evidence. The next start re-plans from scratch against a
+    capability record that now knows better.
+    """
+    return mc_llm_accel.Plan(
+        requested=plan.requested, accelerator=mc_llm_accel.ACCEL_NONE,
+        memory_priority=plan.memory_priority,
+        notes=(*plan.notes,
+               f"{mc_llm_accel.short_label(plan.accelerator)} was not used: {because}"))
 
 
 def _stepped_down(configuration: Config, plan: mc_llm_accel.Plan,
@@ -1750,12 +1902,15 @@ def _dflash_fit(configuration: Config, plan: mc_llm_accel.Plan, *,
     flags = mc_llm_accel.dflash2_flags(
         speculator, plan.draft,
         supports=lambda flag: runtime_supports(flag, special),
+        accepts=lambda value: runtime_accepts(mc_llm_accel.SPEC_TYPE_FLAG, value, special),
         flash_attention=_flash_attention_flags(special))
     if not flags:
         return _replaced(plan, accelerator=mc_llm_accel.ACCEL_NONE, refusal=(
-            f"The DFlash2 runtime installed here does not accept the speculative draft "
-            f"options, so it cannot start {_backbone_label(configuration)} with a draft "
-            f"model. Re-install it in Setup and verify it again."))
+            f"The DFlash2 runtime installed here does not take the speculative draft "
+            f"options, or does not list {mc_llm_accel.SPEC_TYPE_DFLASH!r} among the "
+            f"speculative types it accepts, so it cannot start "
+            f"{_backbone_label(configuration)} with a draft model. Re-install it in Setup "
+            f"and verify it again."))
 
     return _replaced(
         plan, flags=flags, draft_bytes=draft.total_bytes, required_bytes=required,
@@ -2435,6 +2590,20 @@ def read_failure(text: str) -> Failure:
     failure = _LOAD_FAILED.search(text)
     if failure:
         return Failure(failure.group(0).strip())
+    # Last, and narrowly. "error while handling argument" is llama.cpp's line
+    # for every option it will not take, including ``--device``, which is a
+    # symptom of a card that could not be enumerated and is diagnosed above in
+    # far more useful terms. What is left for this branch is the case that
+    # diagnosis cannot cover: an *optional* flag this extension chose to add,
+    # which the model knows nothing about and should not be blamed for.
+    argument = _BAD_ARGUMENT.search(text)
+    if argument and argument.group(1) in OPTIONAL_FLAGS:
+        flag, complaint = argument.group(1), argument.group(2).strip().rstrip(".")
+        value = _BAD_VALUE.search(complaint)
+        return Failure(
+            f"llama-server would not take {flag}: {complaint}. That is an optional flag this "
+            f"extension adds, not anything about the model itself",
+            bad_argument=flag, bad_value=value.group(1) if value else "")
     return Failure()
 
 
@@ -2911,9 +3080,12 @@ def _warn_about_system_ram(configuration: Config, placement: mc_llm_context.Plac
 class _StartFailed(RuntimeError):
     """A start that did not come up, with llama.cpp's own reason attached."""
 
-    def __init__(self, message: str, out_of_memory: bool = False):
+    def __init__(self, message: str, out_of_memory: bool = False,
+                 bad_argument: str = "", bad_value: str = ""):
         super().__init__(message)
         self.out_of_memory = out_of_memory
+        self.bad_argument = bad_argument
+        self.bad_value = bad_value
 
 
 START_ATTEMPTS = 3
@@ -3208,6 +3380,7 @@ class Runtime:
             # more headroom than the last, and every one of them says so.
             penalty = 0
             expert_floor = mc_llm_context.NO_EXPERTS
+            dropped_accelerator = False
             for attempt in range(START_ATTEMPTS):
                 if penalty or expert_floor:
                     negotiated = negotiate(configuration, already_ours=ours,
@@ -3220,6 +3393,27 @@ class Runtime:
                                                               projector, plan)
                     break
                 except _StartFailed as failure:
+                    # An option llama.cpp will not take is this extension's
+                    # mistake, not the model's, and the model must not be what
+                    # pays for it. Without this the start died at argument
+                    # parsing, the switch that asked for it rolled back, and
+                    # what the user read was "this backbone was downloaded but
+                    # would not start" about a backbone that was perfectly fine.
+                    if failure.bad_argument and plan.flags and not dropped_accelerator:
+                        dropped_accelerator = True
+                        if failure.bad_value:
+                            note_rejected_value(failure.bad_argument, failure.bad_value,
+                                                _with_runtime(configuration, plan.runtime))
+                        logger.warning("Model Chain: %s. It has been left off and the "
+                                       "start tried again.", failure)
+                        plan = _without_accelerator(plan, str(failure))
+                        negotiated = negotiate(configuration, already_ours=ours,
+                                               extra_reserve=reserve + penalty,
+                                               vision=needs_vision,
+                                               expert_floor=expert_floor)
+                        placement = negotiated.placement
+                        signature = _signature_of(configuration, projector, placement, plan)
+                        continue
                     # A speculative plan has no smaller rung. Every retry below
                     # asks for less of the card -- a shorter context, then
                     # experts in system RAM, then fewer blocks -- and every one
@@ -3227,7 +3421,7 @@ class Runtime:
                     # Section 6: a forced DFlash2 run that cannot hold the whole
                     # plan reports that rather than partially offloading and
                     # still calling itself Lightning.
-                    if plan.speculative:
+                    if plan.speculative and not failure.bad_argument:
                         raise RuntimeError(
                             f"DFlash2 could not start {_backbone_label(configuration)} with "
                             f"its draft model on {_device_label(configuration)}: {failure}. "
@@ -3340,7 +3534,8 @@ class Runtime:
         except Exception as exc:
             process.stop()
             said = read_failure(_text_since(log_path, written_before))
-            raise _StartFailed(said.text or str(exc), said.out_of_memory) from exc
+            raise _StartFailed(said.text or str(exc), said.out_of_memory,
+                               said.bad_argument, said.bad_value) from exc
 
         observed = self._observed_residency(before, placement)
         return process, observed, _await_offload(log_path, written_before)
