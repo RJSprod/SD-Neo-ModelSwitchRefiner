@@ -2638,3 +2638,229 @@ placement when the entry is the running backbone and otherwise reports the
 fastest on record. Either way the line names it: *measured here: 31.4 tokens/s
 (8 expert layers in RAM)*, rather than a number that reads as a property of the
 model.
+
+## 28. Qwen 3.8, and an accelerator that is not a memory setting (27 August 2026)
+
+Design intent: `DESIGN_INTENT_QWEN38_DFLASH2.txt`, with the developer package
+beside it (`IMPLEMENTATION_MAP`, `VRAM_AND_PLACEMENT_MATRIX`, `TEST_PLAN`).
+
+The feature is one backbone family and one accelerator, and the interesting
+part of it is a shape decision that the obvious implementation gets wrong.
+
+### 28.1 The switch that would have cost people VRAM
+
+The natural way to ship speculative decoding is one control — call it
+*Lightning* — meaning **use the fast decoder and empty the card for it**. It
+reads well and it is two facts stapled together:
+
+* an accelerator is a *decoding mechanism*. MTP and DFlash2 produce the same
+  tokens as ordinary decoding and produce more of them per step. Neither is a
+  quality setting and neither is a memory setting.
+* a memory priority is a statement about *ownership of one card*.
+
+Stapled, they produce a machine whose backbone and draft model already fit
+having to evict a checkpoint to get a decoder it could have had for nothing.
+And on a two-card machine they produce something worse: a Creative Writer on a
+3090 selecting Lightning and emptying a 5090 it was never going to be placed
+on, which frees not one byte of the card that is short.
+
+So `mc_llm_accel` holds two settings —
+
+    accelerator      auto | none | mtp | dflash2
+    memory priority  cooperative | llm_priority
+
+— and the presets are a mapping over them, in `PRESET_AXES`, computed in one
+direction and reversed rather than written down twice. `Settings.preset` is
+*derived*: the advanced controls are authoritative, and a stored preset that
+disagrees with them is a stale label. The combination no preset names is the
+one the design intent calls mandatory and is the reason for all of this:
+
+> **DFlash2 + cooperative** — the fast decoder, with nothing released to get
+> it, whenever the complete plan already fits.
+
+`custom` is a state the panel *reports* and not one it offers, because picking
+it from a menu would mean nothing: the values it would apply are the ones
+already in force.
+
+The defaults are `auto` and `cooperative`, which is exactly what every earlier
+build did. An upgrade does not begin releasing image VRAM because a feature
+exists.
+
+### 28.2 Two stages, because they cost different things
+
+`Runtime.client` reaches the accelerator twice.
+
+`accelerator_choice` asks about *files and records*: does the catalogue entry
+advertise anything, is the draft on disk, is a DFlash2 runtime installed, did
+it pass its smoke test. Nothing in it reads free VRAM, so its answer does not
+change between two requests a second apart — which is what lets it into the
+warm server's identity. A forced request that fails here fails before a
+twenty-second model load, with a sentence naming the missing piece.
+
+`accelerator_plan` is the fit, and it is the only place image residency can be
+released for the language model. It runs on a path that is really going to
+start something, for the reason `client` stopped re-negotiating placements on
+warm turns: a number that is different every time it is read restarts a server
+every time it is read.
+
+The split shows up again in the warm comparison. `_identity` carries the
+*chosen* axes — a setting change restarts the server — and `Runtime._accelerator`
+carries the *resolved* plan beside it, because `auto` legitimately turns from
+ordinary decoding into DFlash2 the moment a draft model appears on disk, with
+no setting having changed at all.
+
+### 28.3 There is no smaller DFlash2
+
+`negotiate` exists to make a model fit by giving things up: context first, then
+experts, then whole blocks, then system RAM. Every one of those rungs is
+forbidden under DFlash2, and not as a matter of taste — a Lightning run that
+quietly became a partial offload is *slower than the Normal run it replaced*
+and says the opposite on screen.
+
+So a speculative plan does not go through the ladder at all.
+`_speculative_negotiation` builds the requested placement and nothing else, and
+`accelerator_plan` has already proved the complete thing fits:
+
+    target weights + target cache + recurrent state
+  + draft weights + draft cache + compute
+  + projector allowance, when *this request* carries an image
+  + safety margin
+
+against what is spendable on **one** CUDA card. If it does not fit, the plan is
+refused with both numbers in the sentence and a note saying whether any image
+VRAM was released. The retry loop in `client` is also cut off for a speculative
+plan: every attempt in it asks for less of the card, which is precisely the
+outcome that must not be labelled Lightning.
+
+### 28.4 Reclaim, scoped to a card
+
+`mc_broker._victim_order` returns nothing for an LLM request, and that stays
+true. `release_for_llm` is a second door, reached only from a plan whose memory
+priority the user set, and it is narrower than `request_vram` in three ways
+that are the whole point: it is scoped to one physical card, it asks for the
+deficit and never sweeps, and it **re-measures** afterwards so the launch
+decides against what the driver says rather than against what it hoped.
+
+`_same_card_as_the_image_side` answers *no* to an unanswerable question, which
+is the opposite of `mc_llm_runtime.shares_the_image_card` and is the same
+caution pointing the other way: there, an unknown card costs a smaller language
+model; here it would cost an evicted checkpoint.
+
+One asymmetry is deliberate and worth naming. Under LLM priority, `_spendable`
+is asked with `image_budget=False`, so `mc_plan`'s reservation for the image
+side stops capping the fit — overriding that reservation on one card is the
+entire content of what the user asked for. The *learned* cap is not lifted with
+it: that one records an allocation a driver actually refused, and no amount of
+permission makes a refused allocation succeed.
+
+### 28.5 A hybrid model keeps memory in two places
+
+Qwen 3.8 interleaves Gated DeltaNet blocks with periodic full attention.
+`mc_gguf` already read `attention.head_count_kv` as a per-block array — llama.cpp
+writes a zero for every block that keeps no cache — so the cache half was
+already right. The other half was missing entirely: those blocks hold a fixed
+recurrent state per sequence, and a planner that charged nothing for it reports
+a 27B as cheaper than it is, in the direction that ends in an allocation
+failure rather than an avoidable eviction.
+
+`Gguf.recurrent_state_elements` is llama.cpp's own arithmetic in its own terms —
+a convolution window of `conv_kernel - 1` over the inner width plus the two
+group projections, plus `state_size × inner_size` — and `recurrent_bytes` is a
+separate term in `Estimate` rather than folded into the cache, because it does
+**not** grow with the context and putting it in the cache term would make it
+scale with a number it does not follow. A header that does not describe the
+shape is charged `RECURRENT_FALLBACK_BYTES` per block instead of zero, and the
+measured footprint recorded after a real load supersedes it.
+
+### 28.6 Help text is not proof
+
+Upstream llama.cpp already carries DFlash terminology, so a build that has
+never heard of pull request 27342 can advertise `--spec-type` and print
+`draft-dflash` in its help. `mc_llm_dflash` therefore treats the help text as a
+*necessary* condition asked first because it is free, and writes the capability
+record only from a real load of the real target with the real Blackfrost
+sidecar answering a question with one right answer.
+
+`dflash2_text` and `dflash2_vision` are two fields because the pull request's
+multimodal work moved separately from its text path. Writing a text result
+always clears the vision one — in both directions, because a fresh verification
+that never sent an image must not leave "vision verified" on screen. The record
+carries the executable's size and mtime, and a record whose fingerprint no
+longer matches is treated as absent, so dropping a different build into the
+same directory does not inherit the previous one's proof.
+
+The family lives under the same `runtime*` naming as every other, because it is
+installed by the same staged-then-swapped mechanism — `stage_build`, `swap_in`
+and `server_in` were named for it. It is excluded from `runtime_families` and
+`detect` by its provenance marker, so a machine whose ordinary runtime is
+missing cannot silently adopt an unmerged pull request as the runtime for every
+model, every role and every mode.
+
+There is no published archive to download. `dflash2-runtimes.json` describes
+the two builds with a null URL and a null digest, and `download` refuses an
+unpublished entry rather than guessing at one — there is no route through the
+module that fetches bytes this repository does not name. The route that works
+today is `adopt`: build the branch at the pinned commit, point Setup at the
+directory, verify it.
+
+### 28.7 The sidecar is its own transaction
+
+A managed download is finished by a directory rename, which is why its failure
+modes are boring. Adding a 3.86 GB draft to a bundle that exists and is in use
+has no directory to rename, so `install_draft` does the smallest thing that
+cannot half-succeed: stage and verify exactly as any other artifact,
+`os.replace` into the bundle, and **only then** rewrite `installed.json`.
+
+A crash before the rewrite leaves a bundle that does not know about a file,
+which `installed` reads as a bundle with no sidecar — which is what it had a
+minute earlier. A crash after it leaves a complete one. There is no ordering
+that leaves a bundle claiming a draft it has not got, and a manifest write that
+fails takes the file back out rather than leaving one.
+
+`Installed.matches` deliberately does not look at the draft: an absent sidecar
+is the normal state of a current bundle, and asking for it there would report
+every ordinary install as superseded. `drafts()` is the separate question, and
+it is false both for "no sidecar" and for "a sidecar the catalogue has moved
+off" — the second being a bundle that would start DFlash2 against a draft
+nobody tested with these weights.
+
+The staging directory is `<id>~draft`, and `~` is a character `_ID` does not
+allow. Two directories rather than one because `_prepare_staging` discards a
+staging directory whose expectations have changed, and sharing one would have
+fetching a 3.86 GB sidecar throw away nine tenths of an interrupted 22 GB
+download.
+
+### 28.8 What the numbers are keyed by
+
+Section 17 of the intent asks for learned speed keyed by backbone, quantisation,
+physical GPU, placement **and** accelerator, and forbids averaging a DFlash rate
+with an ordinary one. `measurement_token` composes the last three onto the
+placement token, omitting each suffix when it would say nothing — so ordinary
+decoding on an unknown card is still `gpu`, exactly as it was, and every rate a
+machine has already measured keeps answering.
+
+`read_speculation` parses the drafted and accepted counters out of the log,
+accepting both shapes llama.cpp has printed them in, and reports `known=False`
+rather than zero when it recognises neither: *no drafted tokens were accepted*
+and *this build does not report acceptance* are different news. Nothing about a
+generation depends on it — parsing a log is the only way to get the figure from
+another process, and a parser that failed loudly when a format moved would
+break generation for a statistic.
+
+### 28.9 What is not here
+
+**No published DFlash2 archive.** The manifest entries carry the shape, the
+commit, the CUDA version and the compute architectures, and null bytes. Filling
+them in is building the branch, hashing the archive and editing one file; until
+somebody does, the `adopt` route is the whole of it and the panel says so.
+
+**No cross-device split.** llama.cpp exposes draft-device controls and v1 does
+not use them. Target and draft go on one card or the plan is refused: splitting
+them complicates the performance contract for a path this product does not
+need.
+
+**No Q8_0 tier.** It is about 29 GB, which leaves a 32 GB card too little for a
+draft model, 8K of state, compute buffers and a projector. Q6_K is the highest
+sensible managed weight and Q5_K_M is the recommended one, and promoting Q6
+past it is a decision for the project's own prompt-quality corpus rather than
+for a file size.

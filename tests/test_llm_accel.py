@@ -657,6 +657,26 @@ class TestLLMPriority:
         assert plan.accelerator == accel.ACCEL_DFLASH2
         assert plan.reclaimed_bytes > 0
 
+    def test_releasing_what_there_was_and_still_being_short_says_so(
+            self, install, tmp_path, monkeypatch, registry, image):
+        """Lightning may reclaim, and must still refuse visibly when the whole
+        plan does not fit afterwards -- never a partial offload under the name."""
+        install_bundle(install, tmp_path)
+        install_dflash_runtime(install)
+        with_flags(monkeypatch)
+        set_free(monkeypatch, 0.001)
+        configuration = configure(monkeypatch, install, tmp_path,
+                                  accelerator=accel.ACCEL_DFLASH2,
+                                  memory_priority=accel.PRIORITY_LLM)
+        image.holds = 1 * _MB
+
+        plan = runtime.accelerator_plan(configuration)
+
+        assert plan.refused
+        assert image.calls, "LLM priority never asked"
+        assert "still short" in plan.refusal
+        assert plan.reclaimed_bytes > 0
+
     def test_a_creative_writer_on_one_card_never_empties_the_other(
             self, install, tmp_path, monkeypatch, registry, image):
         """Section 10, example A: the image side is on the 5090 and the writer
@@ -761,6 +781,35 @@ class TestAuto:
         configuration = configure(monkeypatch, install, tmp_path)
 
         assert not runtime.accelerator_plan(configuration).refused
+
+    def test_a_card_too_full_for_dflash2_steps_down_rather_than_stopping(
+            self, install, tmp_path, monkeypatch, registry, image):
+        """Everything for DFlash2 is installed and the card has no room. Section
+        18 says auto falls back and names what it used; only a *forced* request
+        refuses."""
+        install_bundle(install, tmp_path)
+        install_dflash_runtime(install)
+        with_flags(monkeypatch)
+        set_free(monkeypatch, 0.001)
+        configuration = configure(monkeypatch, install, tmp_path)
+
+        plan = runtime.accelerator_plan(configuration)
+
+        assert not plan.refused
+        assert plan.accelerator == accel.ACCEL_MTP
+        assert any("DFlash2 was not used" in note for note in plan.notes)
+        assert image.calls == [], "cooperative memory released something"
+
+    def test_the_same_conditions_forced_are_a_refusal(
+            self, install, tmp_path, monkeypatch, registry, image):
+        install_bundle(install, tmp_path)
+        install_dflash_runtime(install)
+        with_flags(monkeypatch)
+        set_free(monkeypatch, 0.001)
+        configuration = configure(monkeypatch, install, tmp_path,
+                                  accelerator=accel.ACCEL_DFLASH2)
+
+        assert runtime.accelerator_plan(configuration).refused
 
     def test_a_manual_gguf_gets_the_decoding_it_has_always_had(
             self, install, tmp_path, monkeypatch, registry, image):
@@ -1304,3 +1353,108 @@ class TestTheDFlashRuntimeFamily:
         for name in ("q6k", "q5km", "q4km"):
             found = managed.entry(f"qwen38-27b-abliterated-{name}")
             assert found.accelerators.dflash2.runtime_family in families
+
+
+# --------------------------------------------------------------------------- #
+# Through the runtime, where a refusal has to stop a start (test plan M)
+# --------------------------------------------------------------------------- #
+
+
+class TestThroughTheRuntime:
+    @pytest.fixture
+    def quiet(self, monkeypatch):
+        """A runtime that will not prime a prompt cache or wait for a driver."""
+        monkeypatch.setattr(runtime, "_prime_prompt_cache", lambda client: None)
+        monkeypatch.setattr(runtime, "RESIDENCY_SETTLE_SECONDS", 0.0)
+        for family in (mc_broker.FAMILY_IMAGE, mc_broker.FAMILY_LLM):
+            mc_broker.unregister_reclaimer(family)
+        yield runtime.Runtime()
+
+    def test_a_forced_request_that_cannot_run_never_starts_a_server(
+            self, install, tmp_path, monkeypatch, registry, quiet):
+        install_bundle(install, tmp_path, draft=False)
+        with_flags(monkeypatch)
+        set_free(monkeypatch, 24)
+        configure(monkeypatch, install, tmp_path, accelerator=accel.ACCEL_DFLASH2)
+        launched: list = []
+        monkeypatch.setattr(quiet, "_launch",
+                            lambda *args, **kwargs: launched.append(args))
+
+        with pytest.raises(RuntimeError, match="draft model, which has not been downloaded"):
+            quiet.client()
+
+        assert launched == [], "a server was started for a request that was refused"
+
+    def test_a_plan_that_does_not_fit_never_starts_a_smaller_one(
+            self, install, tmp_path, monkeypatch, registry, quiet):
+        """The retry ladder asks for less of the card on every attempt, which is
+        exactly the outcome that may not be labelled Lightning."""
+        install_bundle(install, tmp_path)
+        install_dflash_runtime(install)
+        with_flags(monkeypatch)
+        set_free(monkeypatch, 0.001)
+        configure(monkeypatch, install, tmp_path, accelerator=accel.ACCEL_DFLASH2)
+        launched: list = []
+        monkeypatch.setattr(quiet, "_launch",
+                            lambda *args, **kwargs: launched.append(args))
+
+        with pytest.raises(RuntimeError, match="wholly resident"):
+            quiet.client()
+
+        assert launched == []
+
+    def test_the_planned_runtime_and_flags_are_what_reaches_the_launch(
+            self, install, tmp_path, monkeypatch, registry, quiet):
+        install_bundle(install, tmp_path)
+        server = install_dflash_runtime(install)
+        with_flags(monkeypatch)
+        set_free(monkeypatch, 24)
+        configure(monkeypatch, install, tmp_path, accelerator=accel.ACCEL_DFLASH2)
+        seen: list = []
+
+        class Reached(RuntimeError):
+            pass
+
+        def capture(configuration, placement, projector=None, plan=None):
+            seen.append((runtime._launch_flags(configuration, placement, plan), plan))
+            raise Reached()
+
+        monkeypatch.setattr(quiet, "_launch", capture)
+        with pytest.raises(Reached):
+            quiet.client()
+
+        flags, plan = seen[0]
+        assert plan.runtime == server
+        assert "--spec-draft-model" in flags
+        assert flags.count("--flash-attn") == 1
+
+    def test_an_ordinary_start_afterwards_carries_no_speculative_flag(
+            self, install, tmp_path, monkeypatch, registry, quiet):
+        """Section 16: a DFlash flag must never leak into a later ordinary start."""
+        install_bundle(install, tmp_path)
+        install_dflash_runtime(install)
+        with_flags(monkeypatch)
+        set_free(monkeypatch, 24)
+        configure(monkeypatch, install, tmp_path, accelerator=accel.ACCEL_DFLASH2)
+        seen: list = []
+
+        class Reached(RuntimeError):
+            pass
+
+        def capture(configuration, placement, projector=None, plan=None):
+            runtime._arm_flags(runtime._launch_flags(configuration, placement, plan))
+            seen.append(runtime.with_extra_flags(
+                ["llama-server", "--model", "m.gguf", "--ctx-size", "8192"]))
+            raise Reached()
+
+        monkeypatch.setattr(quiet, "_launch", capture)
+        with pytest.raises(Reached):
+            quiet.client()
+
+        configure(monkeypatch, install, tmp_path, accelerator=accel.ACCEL_NONE)
+        with pytest.raises(Reached):
+            quiet.client()
+
+        assert "--spec-draft-model" in seen[0]
+        assert "--spec-draft-model" not in seen[1]
+        assert "--spec-type" not in seen[1]

@@ -520,13 +520,19 @@ def adopt(source: str | Path, component_id: str = "") -> tuple[Path, str]:
         )
 
     directory = found.resolve().parent
-    build = build_for(component_id) if component_id else None
-    if build is None:
+    if component_id:
+        build = build_for(component_id)
+        if build is None:
+            raise DFlashError(
+                f"{component_id!r} is not a DFlash2 runtime family this extension knows "
+                f"about, so there is nowhere to install one. The ordinary runtime is "
+                f"unaffected.")
+    else:
         build = _default_build()
-    if build is None:
-        raise DFlashError("This extension's DFlash2 manifest names no runtime families, so "
-                          "there is nowhere to install one. The ordinary runtime is "
-                          "unaffected.")
+        if build is None:
+            raise DFlashError("This extension's DFlash2 manifest names no runtime families, "
+                              "so there is nowhere to install one. The ordinary runtime is "
+                              "unaffected.")
 
     destination = runtime_directory(build.component_id)
     incoming = destination.with_name(f".{destination.name}.incoming")

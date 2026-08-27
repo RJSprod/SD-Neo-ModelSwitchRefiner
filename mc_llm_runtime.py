@@ -1453,7 +1453,7 @@ def accelerator_choice(configuration: Config,
         if chosen is not None and not chosen.refused:
             return chosen
         if requested == mc_llm_accel.ACCEL_DFLASH2:
-            return chosen if chosen is not None else dataclasses_replace(
+            return chosen if chosen is not None else _replaced(
                 ordinary, refusal=mc_llm_accel.no_sidecar(_backbone_label(configuration)))
 
     if requested in (mc_llm_accel.ACCEL_MTP, mc_llm_accel.ACCEL_AUTO):
@@ -1496,7 +1496,7 @@ def _dflash_choice(configuration: Config, accelerators, priority: str, requested
 
     draft = _installed_draft(configuration)
     if draft is None:
-        return dataclasses_replace(refused, refusal=mc_llm_accel.no_sidecar(label))
+        return _replaced(refused, refusal=mc_llm_accel.no_sidecar(label))
 
     try:
         import mc_llm_dflash
@@ -1507,13 +1507,13 @@ def _dflash_choice(configuration: Config, accelerators, priority: str, requested
         logger.debug("Model Chain: could not read the DFlash2 runtime family", exc_info=True)
         component, server = "", None
     if server is None:
-        return dataclasses_replace(refused, refusal=mc_llm_accel.no_runtime(label))
+        return _replaced(refused, refusal=mc_llm_accel.no_runtime(label))
 
     capability = mc_llm_dflash.capability(component)
     if not capability.text:
-        return dataclasses_replace(refused, refusal=mc_llm_accel.not_validated(component))
+        return _replaced(refused, refusal=mc_llm_accel.not_validated(component))
     if needs_vision and not capability.vision:
-        return dataclasses_replace(refused,
+        return _replaced(refused,
                                    refusal=mc_llm_accel.vision_not_validated(component))
 
     return mc_llm_accel.Plan(
@@ -1588,11 +1588,16 @@ def _backbone_label(configuration: Config) -> str:
     return "this backbone"
 
 
-def dataclasses_replace(plan, **changes):
-    """``dataclasses.replace``, imported where it is used rather than at module scope."""
+def _replaced(value, **changes):
+    """``dataclasses.replace``, imported here rather than at module scope.
+
+    Every ``prompt_master`` and stdlib-adjacent import in this file is done
+    inside a function for the reason the module docstring gives; this one is
+    called often enough from the accelerator paths to be worth naming.
+    """
     from dataclasses import replace
 
-    return replace(plan, **changes)
+    return replace(value, **changes)
 
 
 def accelerator_plan(configuration: Config, gguf: mc_gguf.Gguf | None = None, *,
@@ -1626,41 +1631,78 @@ def accelerator_plan(configuration: Config, gguf: mc_gguf.Gguf | None = None, *,
     plan = chosen if chosen is not None else accelerator_choice(configuration, needs_vision)
     if plan.refused:
         return plan
+    if plan.speculative:
+        fitted = _dflash_fit(configuration, plan, gguf=gguf, needs_vision=needs_vision,
+                             already_ours=already_ours, extra_reserve=extra_reserve,
+                             reclaim=reclaim)
+        if not fitted.refused or plan.forced:
+            return fitted
+        # Automatic, and the card is too full. Section 18: auto steps down --
+        # DFlash unavailable, then MTP, then ordinary decoding -- and names the
+        # mechanism it landed on. The fit refusal travels with it as a note,
+        # because "why is this not Lightning" is the question somebody looking
+        # at the status line is actually asking.
+        return accelerator_plan(
+            configuration, gguf, needs_vision=needs_vision, already_ours=already_ours,
+            extra_reserve=extra_reserve, reclaim=reclaim,
+            chosen=_stepped_down(configuration, plan, fitted.refusal))
     if plan.accelerator == mc_llm_accel.ACCEL_MTP:
         multitoken = getattr(_advertised_accelerators(configuration), "mtp", None)
         flags = mc_llm_accel.mtp_flags(
             multitoken, supports=lambda flag: runtime_supports(flag, configuration))
         if not flags:
-            return dataclasses_replace(
+            return _replaced(
                 plan, accelerator=mc_llm_accel.ACCEL_NONE, flags=(),
                 notes=(*plan.notes,
                        "This llama.cpp build does not accept the multi-token prediction "
                        "options, so the backbone's own draft heads are not used. Update the "
                        "runtime in Setup to get them."))
-        return dataclasses_replace(plan, flags=flags)
-    if not plan.speculative:
-        return plan
+        return _replaced(plan, flags=flags)
+    return plan
 
+
+def _stepped_down(configuration: Config, plan: mc_llm_accel.Plan,
+                  because: str) -> mc_llm_accel.Plan:
+    """The next mechanism after DFlash2, for an automatic plan that did not fit."""
+    multitoken = getattr(_advertised_accelerators(configuration), "mtp", None)
+    return mc_llm_accel.Plan(
+        requested=plan.requested,
+        accelerator=(mc_llm_accel.ACCEL_MTP if multitoken is not None and multitoken.embedded
+                     else mc_llm_accel.ACCEL_NONE),
+        memory_priority=plan.memory_priority,
+        notes=(*plan.notes, f"DFlash2 was not used: {because}"))
+
+
+def _dflash_fit(configuration: Config, plan: mc_llm_accel.Plan, *,
+                gguf: mc_gguf.Gguf | None = None, needs_vision: bool = False,
+                already_ours: int = 0, extra_reserve: int = 0,
+                reclaim: bool = True) -> mc_llm_accel.Plan:
+    """Whether the complete DFlash2 plan fits, and the flags to start it with.
+
+    Split out of :func:`accelerator_plan` so that a *refusal* here is a value
+    rather than an exit: a forced request returns it to the caller and an
+    automatic one steps past it, and both have to be able to look at the same
+    sentence.
+    """
     described = gguf if gguf is not None else mc_gguf.describe(configuration.model)
     card = card_of(configuration)
     if card is None:
-        return dataclasses_replace(plan, accelerator=mc_llm_accel.ACCEL_NONE, refusal=(
+        return _replaced(plan, accelerator=mc_llm_accel.ACCEL_NONE, refusal=(
             "DFlash2 is a CUDA path and this configuration runs on the processor. Choose a "
             "card in Setup, or a performance mode that does not need one."))
 
     placement = _requested_placement(configuration, described, already_ours)
     if not placement.on_gpu or placement.gpu_layers != mc_llm_context.ALL_LAYERS \
             or placement.cpu_experts:
-        return dataclasses_replace(plan, accelerator=mc_llm_accel.ACCEL_NONE, refusal=(
+        return _replaced(plan, accelerator=mc_llm_accel.ACCEL_NONE, refusal=(
             "DFlash2 needs every layer of the backbone resident on the card, and this "
             "configuration is set to keep part of it in system RAM. Choose GPU / VRAM Only "
             "in Setup, or a performance mode that does not need full residency."))
 
     speculator = plan_speculator(configuration)
     if speculator is None or plan.draft is None:
-        return dataclasses_replace(plan, accelerator=mc_llm_accel.ACCEL_NONE,
-                                   refusal=mc_llm_accel.no_sidecar(
-                                       _backbone_label(configuration)))
+        return _replaced(plan, accelerator=mc_llm_accel.ACCEL_NONE,
+                         refusal=mc_llm_accel.no_sidecar(_backbone_label(configuration)))
 
     target = mc_llm_context.estimate(configuration.model, placement, described)
     draft, draft_placement = _draft_estimate(speculator, plan.draft, placement)
@@ -1683,7 +1725,7 @@ def accelerator_plan(configuration: Config, gguf: mc_gguf.Gguf | None = None, *,
         spendable = _spendable(already_ours, card, image_budget=False)
 
     if spendable < required:
-        return dataclasses_replace(
+        return _replaced(
             plan, accelerator=mc_llm_accel.ACCEL_NONE,
             required_bytes=required, spendable_bytes=spendable, reclaimed_bytes=reclaimed,
             draft_bytes=draft.total_bytes,
@@ -1696,12 +1738,12 @@ def accelerator_plan(configuration: Config, gguf: mc_gguf.Gguf | None = None, *,
         supports=lambda flag: runtime_supports(flag, special),
         flash_attention=_flash_attention_flags(special))
     if not flags:
-        return dataclasses_replace(plan, accelerator=mc_llm_accel.ACCEL_NONE, refusal=(
+        return _replaced(plan, accelerator=mc_llm_accel.ACCEL_NONE, refusal=(
             f"The DFlash2 runtime installed here does not accept the speculative draft "
             f"options, so it cannot start {_backbone_label(configuration)} with a draft "
             f"model. Re-install it in Setup and verify it again."))
 
-    return dataclasses_replace(
+    return _replaced(
         plan, flags=flags, draft_bytes=draft.total_bytes, required_bytes=required,
         spendable_bytes=spendable, reclaimed_bytes=reclaimed,
         notes=(*plan.notes, _dflash_note(target, draft, draft_placement)))
@@ -1751,7 +1793,7 @@ def _with_runtime(configuration: Config, runtime: Path | None) -> Config:
     """
     if runtime is None or runtime == configuration.runtime:
         return configuration
-    return dataclasses_replace(configuration, runtime=runtime)
+    return _replaced(configuration, runtime=runtime)
 
 
 def _flash_attention_flags(configuration: Config) -> tuple[str, ...]:
@@ -1804,7 +1846,7 @@ def _without_flash_attention(flags: list[str]) -> list[str]:
 
 
 def _speculative_negotiation(configuration: Config, plan: mc_llm_accel.Plan,
-                             needs_vision: bool, already_ours: int = 0) -> "Negotiation":
+                             already_ours: int = 0) -> "Negotiation":
     """The placement a DFlash2 launch uses, which the ladder never touches.
 
     :func:`negotiate` exists to make a model fit by giving things up -- context
@@ -3123,7 +3165,7 @@ class Runtime:
             if plan.refused:
                 raise RuntimeError(plan.refusal)
 
-            negotiated = (_speculative_negotiation(configuration, plan, needs_vision, ours)
+            negotiated = (_speculative_negotiation(configuration, plan, ours)
                           if plan.speculative
                           else negotiate(configuration, already_ours=ours, vision=needs_vision,
                                          extra_reserve=reserve))
