@@ -398,6 +398,39 @@ class TestThePinningTool:
         assert updated["models"][0]["projector"]["bytes"] == 175_000
         assert len(changes) == 3
 
+    def test_it_pins_the_files_an_accelerator_names_too(self):
+        """The DFlash2 draft is a file in the same repository at the same
+        revision. Leaving it out would leave one artifact in the catalogue
+        whose committed hash nobody had compared against the hub."""
+        tool = load_pin_tool()
+        document = self.document()
+        document["models"][0]["accelerators"] = {
+            "mtp": {"embedded": True, "draft_tokens": 3},
+            "dflash2": {"filename": "draft.gguf", "sha256": "d" * 64, "bytes": None},
+        }
+        resolver = self.resolver(files={
+            "weights.gguf": (7_000_000, "a" * 64),
+            "mmproj.gguf": (175_000, "b" * 64),
+            "draft.gguf": (3_860_000_000, "d" * 64)})
+
+        updated, changes = tool.pin(document, resolver)
+
+        assert updated["models"][0]["accelerators"]["dflash2"]["bytes"] == 3_860_000_000
+        assert any("draft.gguf" in line for line in changes)
+
+    def test_a_draft_whose_hash_moved_refuses_the_whole_run(self):
+        tool = load_pin_tool()
+        document = self.document()
+        document["models"][0]["accelerators"] = {
+            "dflash2": {"filename": "draft.gguf", "sha256": "d" * 64, "bytes": None}}
+        resolver = self.resolver(files={
+            "weights.gguf": (7_000_000, "a" * 64),
+            "mmproj.gguf": (175_000, "b" * 64),
+            "draft.gguf": (3_860_000_000, "e" * 64)})
+
+        with pytest.raises(tool.PinError, match="draft.gguf"):
+            tool.pin(document, resolver)
+
     def test_it_never_writes_the_hubs_hash_over_the_committed_one(self):
         """The checked-in SHA-256 is the trust root for the whole feature. A
         publisher whose files have really changed is a review decision."""

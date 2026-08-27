@@ -453,8 +453,8 @@ telling the truth about different moments.
 
 `tests/test_gguf.py`, `test_llm_context.py`, `test_broker.py`,
 `test_llm_runtime.py`, `test_llm_studio.py`, `test_llm_panels.py`,
-`test_llm_files.py` and `test_cross_workload.py`. They run without a GPU, a
-model file or a WebUI.
+`test_llm_files.py`, `test_llm_accel.py` and `test_cross_workload.py`. They run
+without a GPU, a model file or a WebUI.
 
 Three are shaped by their failure modes rather than by their feature size:
 
@@ -470,7 +470,11 @@ Three are shaped by their failure modes rather than by their feature size:
   only reason any of them is worth handling;
 - `test_gguf.py`'s per-block class is written from the format specification
   rather than from a model: the smallest model that would exercise it is 16 GB,
-  and a synthetic six-block header exercises it in a millisecond.
+  and a synthetic six-block header exercises it in a millisecond;
+- `test_llm_accel.py` asserts, more than anything else, a **reclaimer that was
+  never called**. Cooperative memory is not "little was released", it is
+  "nothing was asked for", and a test that checked free VRAM afterwards would
+  pass against an implementation that asked and was refused.
 
 `test_llm_setup.py` has one fixture worth reading before adding to it: the
 install root is a *subdirectory* of `tmp_path`, not `tmp_path` itself, so that a

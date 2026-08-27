@@ -125,6 +125,22 @@ def _sha256(headers: dict) -> str:
     return ""
 
 
+def _accelerator_artifacts(model: dict) -> list[dict]:
+    """The files an entry's accelerators name, in the shape the loop expects.
+
+    The DFlash2 draft is a file in the same repository at the same revision,
+    with the same three fields, and it is downloaded by the same verified path
+    -- so it is checked and pinned by the same run. Leaving it out would mean
+    the one artifact in the catalogue whose committed hash nobody had ever
+    compared against the hub, which is exactly the comparison this tool is for.
+    """
+    accelerators = model.get("accelerators")
+    if not isinstance(accelerators, dict):
+        return []
+    return [entry for entry in accelerators.values()
+            if isinstance(entry, dict) and entry.get("filename")]
+
+
 def pin(document: dict, resolver) -> tuple[dict, list[str]]:
     """Return ``document`` with pins filled in, and a line per change.
 
@@ -136,6 +152,7 @@ def pin(document: dict, resolver) -> tuple[dict, list[str]]:
     changes: list[str] = []
     for model in updated.get("models") or []:
         artifacts = [model[key] for key in ("model", "projector") if model.get(key)]
+        artifacts.extend(_accelerator_artifacts(model))
         names = [artifact["filename"] for artifact in artifacts]
         found = resolver(model["repo_id"], model["revision"], names)
 

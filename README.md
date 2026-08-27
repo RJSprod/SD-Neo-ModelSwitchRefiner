@@ -2826,6 +2826,8 @@ mc_llm_files.py       what a pasted path means, and what is in a folder
 mc_llm_browse.py      the Browse button beside every path box
 mc_llm_native.py      the operating system's own file dialog
 mc_llm_setup.py       getting a llama.cpp runtime in place
+mc_llm_dflash.py      the DFlash2 llama.cpp family: install it apart, prove it apart
+mc_llm_accel.py       acceleration and VRAM priority, as two settings
 mc_llm_managed_models.py   the managed backbone catalogue: verify, install, switch
 mc_llm_state.py       shared preferences + the mode histories
 mc_llm_sessions.py    the run orchestrations, as streaming generators
@@ -2846,6 +2848,7 @@ prompt_master/krea/library.py     loads and validates that package
 prompt_master/krea/director.py    the local Creative Director; no inference
 prompt_master/krea/variation.py   Creativity 0-10, as sampling settings
 prompt_master/models/managed-models.json  the curated backbone registry (data only)
+prompt_master/models/dflash2-runtimes.json  the pinned DFlash2 builds (data only)
 prompt_master/models/managed_profiles.py  the hidden per-backbone quality profiles
 
 scripts/model_chain.py                Script class, UI, orchestration
@@ -2868,6 +2871,8 @@ mc_llm_browse  ->  mc_llm_native        mc_llm_context      mc_memory
 mc_llm_files  <-  mc_llm_setup            mc_gguf
 
 mc_llm_studio  ->  mc_llm_managed_models  ->  mc_llm_paths
+       |
+mc_llm_dflash  ->  mc_llm_setup      mc_llm_runtime  ->  mc_llm_accel
                             |
                    mc_llm_runtime (stop / start / one switch at a time)
 ```
