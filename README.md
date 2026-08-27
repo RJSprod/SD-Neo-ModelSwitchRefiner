@@ -2403,6 +2403,15 @@ back every byte of VRAM. Both are also what happens on their own when you send
 a message or when an image generation needs the card, so the buttons are for
 when you want to decide rather than for making it work.
 
+**A server never outlives the WebUI.** Closing the WebUI, Ctrl+C, and a kill
+from the task manager all stop every llama-server this extension started, and on
+Windows the operating system stops them even if the WebUI is killed in a way
+that runs no Python at all — the servers are put in a job object that ends with
+the process that made it. Any that are somehow still there are found and stopped
+by their command line the next time the extension loads. A model left resident
+after the WebUI has gone is several gigabytes of VRAM you cannot get back
+without noticing it first.
+
 Switching model does not carry the vision projector across, and does not guess
 one from the new model's folder. A projector has to match the model it was made
 for and a filename does not prove that it does; one sitting beside the new model
@@ -2428,6 +2437,14 @@ been given a seed has −1 already. The same boxes are the per-message override
 for the conversation you are in, so **Cancel** in the editor puts them back to
 the selected character's.
 
+The editor also shows **the system prompt this character actually runs with** —
+the whole thing, composed the way it will be sent, not a description of it. It
+follows the name and description as they are typed, so the effect of a change is
+visible before it is saved. **Edit this system prompt** copies what is showing
+into the override box below it, where it becomes this character's own and is
+saved with them; empty it again and the character goes back to the common
+default. It never overwrites an override already written.
+
 ### Conversation, per message
 
 Tap a message in the transcript and the actions for that message open in a
@@ -2437,11 +2454,24 @@ composer, so neither of them moves:
 | Action | What it does |
 | --- | --- |
 | **Edit** | Rewrite the message in place. The version showing is the one changed. |
-| **Regenerate** | Ask for the reply again, keeping the one it had. `◀ 2/3 ▶` pages between attempts, so one that came back worse is undone rather than re-rolled. |
+| **Regenerate** | Ask for the reply again. At the end of a thread it keeps the one it had and `◀ 2/3 ▶` pages between attempts, so one that came back worse is undone rather than re-rolled. In the middle of a thread it **branches**, and the thread it came from keeps every message that followed. |
 | **Continue** | Carry the last reply on from exactly where it stopped. |
 | **Send again from here** | Answer one of your own messages again, dropping everything after it. |
 | **Branch from here** | Copy the thread up to this message into a new one. The thread it came from is untouched. |
 | **Delete message** / **Delete from here** | One message, or that one and everything after it. |
+
+Every reply also carries a small **↻** of its own, at the bottom of the bubble:
+one tap regenerates that reply, without opening the sheet first. It is the same
+action with the same rules — including the branching — and it is drawn in the
+browser, so a theme that replaces Gradio's chat DOM entirely may not show it.
+Regenerate is on the sheet either way.
+
+Regenerating in the middle of a thread makes a branch rather than deleting what
+came after it. Both threads are then in **Threads**: the new one is where the
+new reply is, the original still holds the reply you had *and every message
+after it*, and going back to it loads the whole conversation. Only a reply at
+the end of a thread — where there is nothing after it to lose — keeps its
+attempts as versions on the one message.
 
 Tapping the same message again puts the sheet away; tapping a different one
 moves it there. **Edit** replaces the composer with an *Editing message* row
@@ -2469,7 +2499,10 @@ beside it.
 
 The workspace sizes itself to the window: the header and the composer are
 measured first, the transcript takes whatever is left, and the page does not
-scroll — the thread does. That is the same layout at 320px as on a desktop; what
+scroll — the thread does. The header — **☰**, who you are talking to, and the
+state chip — stays docked at the top while the thread scrolls under it, so the
+menu and the loading state are reachable from anywhere in a long conversation
+without scrolling back. That is the same layout at 320px as on a desktop; what
 changes with the width is that the sheets become a side panel instead of
 covering the screen.
 

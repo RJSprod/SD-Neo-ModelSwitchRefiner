@@ -535,3 +535,220 @@ class TestKeepingAnOpenedSectionInView:
 
     def test_the_sheet_is_wired_once(self):
         assert opened(top=0, height=100)["wired"] == "1"
+
+
+# --------------------------------------------------------------------------- #
+# The regenerate icon on a reply
+# --------------------------------------------------------------------------- #
+#
+# The one feature in this file that reaches into the host's own DOM, because a
+# Gradio 4.40 Chatbot draws its own bubbles and there is nowhere in one to put a
+# component. What it must do is narrow and worth running rather than reading:
+# draw one icon per reply and no more than one, say *which* reply was tapped at
+# the moment of the tap, and put the icons away entirely rather than guess when
+# the bubbles are a shape it does not recognise.
+#
+# The ordinal is the part with a real bug behind it. Captured when the icon is
+# drawn, it names the wrong message the moment anything above it is deleted --
+# and for this particular button, naming the wrong message means rewriting a
+# reply the reader did not point at. So it is read from the live transcript when
+# the icon is pressed, and that is asserted by moving the bubbles underneath it.
+
+TRANSCRIPT = """
+function bubble(name) {
+    return {
+        name,
+        tagName: "DIV",
+        dataset: {},
+        children: [],
+        appendChild(child) { bubble.last = child; this.children.push(child); return child; },
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener() {},
+    };
+}
+
+const bubbles = __BUBBLES__.map(bubble);
+const shown = {list: bubbles};
+
+const transcript = {
+    id: "mc-llm-chat-transcript",
+    tagName: "DIV",
+    dataset: {},
+    scrollHeight: 0,
+    clientHeight: 0,
+    scrollTop: 0,
+    querySelector: () => null,
+    querySelectorAll(selector) {
+        return selector === __SELECTOR__ ? shown.list : [];
+    },
+    addEventListener() {},
+};
+
+const field = {tagName: "TEXTAREA", value: "", events: [],
+               dispatchEvent(event) { field.events.push(event.type); return true; },
+               addEventListener() {}};
+const box = {
+    id: "mc-llm-chat-regenerate-at",
+    tagName: "DIV",
+    dataset: {},
+    querySelector: (selector) => (selector.indexOf("textarea") >= 0 ? field : null),
+    querySelectorAll: () => [],
+    addEventListener() {},
+};
+const presses = [];
+const trigger = {
+    id: "mc-llm-chat-regenerate-now",
+    tagName: "BUTTON",
+    dataset: {},
+    disabled: false,
+    click() { presses.push(field.value); },
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    addEventListener() {},
+};
+
+const elements = {
+    "mc-llm-chat-transcript": transcript,
+    "mc-llm-chat-regenerate-at": box,
+    "mc-llm-chat-regenerate-now": trigger,
+};
+
+const created = [];
+
+globalThis.Event = function (kind) { this.type = kind; };
+globalThis.document = {
+    documentElement: {scrollTop: 0},
+    querySelector: (selector) => elements[selector.replace("#", "")] || null,
+    createElement() {
+        const node = {
+            tagName: "BUTTON",
+            className: "",
+            textContent: "",
+            type: "",
+            title: "",
+            attributes: {},
+            handlers: {},
+            setAttribute(name, value) { node.attributes[name] = value; },
+            addEventListener(kind, fn) { node.handlers[kind] = fn; },
+        };
+        created.push(node);
+        return node;
+    },
+    addEventListener() {},
+    readyState: "complete",
+};
+globalThis.window = globalThis;
+globalThis.innerHeight = 900;
+globalThis.scrollY = 0;
+globalThis.addEventListener = () => {};
+globalThis.setTimeout = (fn) => { fn(); return 0; };
+globalThis.setInterval = () => 0;
+globalThis.MutationObserver = function () { this.observe = () => {}; };
+globalThis.gradioApp = () => globalThis.document;
+
+const loaded = [];
+globalThis.onUiLoaded = (fn) => loaded.push(fn);
+globalThis.onAfterUiUpdate = () => {};
+
+SOURCE
+
+loaded.forEach((fn) => fn());
+
+const stopped = [];
+function tap(which) {
+    const node = bubbles[which].children[0];
+    if (!node || !node.handlers.click) return false;
+    node.handlers.click({
+        preventDefault() { stopped.push("default"); },
+        stopPropagation() { stopped.push("propagation"); },
+    });
+    return true;
+}
+
+__REHEARSAL__
+
+console.log(JSON.stringify({
+    drawn: bubbles.map((one) => one.children.length),
+    label: created.length ? created[0].textContent : "",
+    title: created.length ? created[0].attributes["aria-label"] : "",
+    classes: created.map((one) => one.className),
+    presses,
+    events: field.events,
+    stopped,
+}));
+"""
+
+
+def transcript(bubbles: int = 3, rehearsal: str = "", selector: str = '[data-testid="bot"]'):
+    """Run the script against a transcript of ``bubbles`` replies."""
+    harness = (TRANSCRIPT.replace("SOURCE", SCRIPT.read_text())
+               .replace("__REHEARSAL__", rehearsal)
+               .replace("__BUBBLES__", json.dumps([f"reply {index}" for index in range(bubbles)]))
+               .replace("__SELECTOR__", json.dumps(selector)))
+    result = subprocess.run(["node", "--input-type=module", "-e", harness],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+class TestTheRegenerateIcon:
+    def test_every_reply_gets_one(self):
+        assert transcript(bubbles=3)["drawn"] == [1, 1, 1]
+
+    def test_it_is_the_reload_glyph_and_it_says_what_it_does(self):
+        """A bare icon with no accessible name is a button a screen reader
+        reads out as "button"."""
+        drawn = transcript(bubbles=1)
+
+        assert drawn["label"] == "↻"
+        assert drawn["title"] == "Regenerate this reply"
+        assert drawn["classes"] == ["mc-llm-again"]
+
+    def test_wiring_twice_does_not_draw_it_twice(self):
+        """This runs after every update the host makes, and a transcript that
+        grew a second icon on every streamed chunk would be unreadable within a
+        sentence."""
+        assert transcript(bubbles=2, rehearsal="loaded.forEach((fn) => fn());"
+                                               "loaded.forEach((fn) => fn());")["drawn"] == \
+            [1, 1]
+
+    def test_tapping_one_names_which_reply_it_is(self):
+        drawn = transcript(bubbles=3, rehearsal="tap(2);")
+
+        assert drawn["presses"] == ["2"]
+        # Written *and* announced: Gradio learns a value from the event, and a
+        # box written to without one is a box the server still reads as empty.
+        assert drawn["events"] == ["input"]
+
+    def test_the_tap_never_reaches_the_bubble_under_it(self):
+        """The bubble is wired to the Chatbot's own select event, and a click
+        that reached it would open the action sheet over the reply that is
+        about to start arriving."""
+        assert transcript(bubbles=2, rehearsal="tap(0);")["stopped"] == \
+            ["default", "propagation"]
+
+    def test_which_reply_it_is_is_read_when_it_is_tapped(self):
+        """The bug this is here for: an ordinal captured when the icon was
+        drawn names the wrong message as soon as anything above it goes, and
+        for this button that means rewriting a reply nobody pointed at."""
+        drawn = transcript(
+            bubbles=3,
+            # The first reply is deleted out of the thread, the way deleting a
+            # message renumbers every bubble below it, and *then* the icon on
+            # what is now the second reply is tapped.
+            rehearsal="const kept = [bubbles[1], bubbles[2]];"
+                      "shown.list = kept;"
+                      "tap(2);")
+
+        assert drawn["presses"] == ["1"]
+
+    def test_bubbles_it_cannot_recognise_cost_an_icon_and_nothing_else(self):
+        """A theme that replaces Gradio's DOM wholesale. Regenerate is still on
+        the sheet a tap on the bubble opens, which is where it was before this
+        existed -- so the right behaviour is to draw nothing and carry on, not
+        to guess at an element."""
+        drawn = transcript(bubbles=3, selector=".something-a-theme-invented")
+
+        assert drawn["drawn"] == [0, 0, 0]
+        assert drawn["presses"] == []

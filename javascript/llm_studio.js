@@ -4,13 +4,14 @@
 // JavaScript focused on enhancement, not core business logic. Python should
 // remain authoritative for model state, persistence, inference, and memory
 // decisions." Nothing here talks to a model, stores anything, or decides
-// anything. It does five things a browser is better placed to do than a
+// anything. It does six things a browser is better placed to do than a
 // server round trip:
 //
 //   * Ctrl/Cmd+Enter submits the composer that has focus;
 //   * the transcript follows a streaming reply while the reader is at the end
 //     of it, and holds their place when they are not;
 //   * Escape stops a run;
+//   * every reply in the transcript gets a regenerate icon;
 //   * the conversation workspace is measured against the window, so the layout
 //     can fit the space it actually has rather than a space guessed in a
 //     stylesheet;
@@ -37,12 +38,28 @@
 // a pure-CSS estimate of the same number, so the tab is laid out correctly
 // without this file and exactly with it.
 //
+// The regenerate icon is the one that had to be here rather than in Python, and
+// for a plain reason: a Gradio 4.40 Chatbot draws its own bubbles and there is
+// nowhere in one to put a component. So the icon is drawn here and does exactly
+// one thing when tapped -- it says *which reply* it is on, into a hidden box,
+// and presses a hidden button. Everything after that is Python's: loading the
+// thread, branching it, streaming the reply, saving it. The browser nominates
+// and decides nothing, which is the line this file stays on.
+//
 // Everything is found by this extension's own element ids. Section 5 again:
 // no selector below depends on a class Gradio generated, so a theme that
 // replaces Gradio's internal DOM -- Lobe replaces a great deal of it -- changes
 // how these panels look and cannot stop them working. If an id is missing, the
 // feature it drives is skipped and the rest carry on; the tab is fully usable
 // with this file absent, which is the test of whether it is really polish.
+//
+// The reply bubbles are the single exception, and they are why the paragraph
+// above is worth keeping honest rather than quietly widening. A bubble is the
+// host's element and carries no id of ours, so the shapes Gradio 4 and the
+// themes that reskin it are known to use are tried in turn -- and when none of
+// them matches, no icon is drawn and nothing else changes. Regenerate is still
+// on the sheet a tap on the bubble opens, which is where it was before this
+// existed. A theme this cannot read costs an icon, never an action.
 
 (function () {
     "use strict";
@@ -207,6 +224,100 @@
         // position is already being recorded when the first reply arrives.
         const target = scroller(holder);
         if (target) watch(target);
+    }
+
+    // -- a regenerate icon on every reply ----------------------------------- //
+
+    // The shapes a reply bubble is known to come in, most specific first. Tried
+    // in turn; the first that matches anything wins, and if none does the icons
+    // are not drawn. See the note at the top of this file: this is the one
+    // place that reads the host's DOM, and the cost of failing to read it is an
+    // icon, never an action.
+    const REPLY_SELECTORS = [
+        '[data-testid="bot"]',
+        ".message-row.bot-row",
+        ".bot-row",
+        ".message.bot",
+    ];
+
+    const AGAIN_LABEL = "Regenerate this reply";
+
+    function replyBubbles(holder) {
+        for (let index = 0; index < REPLY_SELECTORS.length; index += 1) {
+            const found = holder.querySelectorAll(REPLY_SELECTORS[index]);
+            if (found && found.length) return found;
+        }
+        return [];
+    }
+
+    // Which reply this is, counted down the transcript, asked at the moment of
+    // the tap rather than remembered from when the icon was drawn. A thread
+    // that has had a message deleted out of the middle of it has renumbered
+    // every bubble below, and an ordinal captured in a closure would name the
+    // wrong one -- which for this particular button means rewriting a reply the
+    // reader did not point at.
+    function ordinalOf(holder, bubble) {
+        const current = replyBubbles(holder);
+        for (let index = 0; index < current.length; index += 1) {
+            if (current[index] === bubble) return index;
+        }
+        return -1;
+    }
+
+    // Hand the ordinal to Python and let go. Nothing is decided here: which
+    // message that is, whether it can be regenerated, and whether doing so
+    // branches the thread are all answered on the other side of this button.
+    function askAgain(ordinal) {
+        const holder = byId("mc-llm-chat-regenerate-at");
+        if (!holder) return false;
+        const field = holder.tagName === "TEXTAREA" || holder.tagName === "INPUT"
+            ? holder : holder.querySelector("textarea, input");
+        if (!field) return false;
+        field.value = String(ordinal);
+        // Gradio learns a value from the event, not from the property: a box
+        // written to without this is a box the server still reads as empty.
+        field.dispatchEvent(new Event("input", {bubbles: true}));
+        // Next tick, so the value is in the host's store before the press that
+        // sends it.
+        window.setTimeout(function () {
+            press("mc-llm-chat-regenerate-now");
+        }, 0);
+        return true;
+    }
+
+    function againButton(holder, bubble) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "mc-llm-again";
+        button.textContent = "\u21bb";
+        button.title = AGAIN_LABEL;
+        button.setAttribute("aria-label", AGAIN_LABEL);
+        button.addEventListener("click", function (event) {
+            // Stopped here, and deliberately: the bubble under this icon is
+            // wired to the Chatbot's own select event, and a click that reached
+            // it would open the action sheet over the reply that is about to
+            // start arriving.
+            event.preventDefault();
+            event.stopPropagation();
+            const ordinal = ordinalOf(holder, bubble);
+            if (ordinal >= 0) askAgain(ordinal);
+        });
+        return button;
+    }
+
+    function wireReplies() {
+        const holder = byId("mc-llm-chat-transcript");
+        if (!holder) return;
+        const bubbles = replyBubbles(holder);
+        for (let index = 0; index < bubbles.length; index += 1) {
+            const bubble = bubbles[index];
+            // Idempotent, because this runs after every update the host makes:
+            // a bubble Gradio re-rendered is a new element without the flag and
+            // gets its icon back, and one it left alone is skipped.
+            if (!bubble.dataset || bubble.dataset.mcLlmAgain === "1") continue;
+            bubble.dataset.mcLlmAgain = "1";
+            bubble.appendChild(againButton(holder, bubble));
+        }
     }
 
     // -- a section that opens stays where it can be read -------------------- //
@@ -437,6 +548,7 @@
         try {
             PANELS.forEach(wireComposer);
             wireTranscript();
+            wireReplies();
             wireSheets();
             watchActivity();
             tick();

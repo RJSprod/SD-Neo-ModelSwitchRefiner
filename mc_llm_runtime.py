@@ -2246,6 +2246,98 @@ def with_extra_flags(command) -> list[str]:
     return argv + extra
 
 
+_job_handle = None
+"""The Windows job object every llama-server this extension starts is put in.
+
+Held for the life of the process on purpose: what makes it work is the handle
+being *closed*, which happens when this process ends however it ends -- exit,
+Ctrl+C, or a kill nothing in here can run a handler for. See
+:func:`_die_with_us`.
+"""
+
+
+def _die_with_us(process) -> None:
+    """Ask the operating system to end ``process`` when this one ends.
+
+    The third exit, and the one no handler can cover: a hard kill runs nothing
+    inside the process being killed, so a llama-server holding twenty gigabytes
+    outlives the WebUI and there is nobody left to stop it. What answers it has
+    to be arranged *before* the kill and enforced by the kernel.
+
+    On Windows that is a job object with ``KILL_ON_JOB_CLOSE``. Every server
+    goes into one job; the last handle to it closes when this process dies, and
+    the kernel ends everything in it. This is also why the vendored launcher's
+    ``CREATE_NEW_PROCESS_GROUP`` is not the answer -- that flag is *why* Ctrl+C
+    never reached the child in the first place.
+
+    On Linux it is ``PR_SET_PDEATHSIG``, which cannot be set from here because
+    it has to run in the child between fork and exec; the ordinary exits are
+    covered by :func:`stop_on_exit` there and a ``kill -9`` of the parent is
+    not, which is stated rather than pretended about.
+
+    Best-effort throughout. Every failure is logged at debug and the server
+    starts anyway: a language model that runs and might outlive its parent is
+    better than one that does not run.
+    """
+    global _job_handle
+
+    if os.name != "nt":
+        return
+    handle = getattr(process, "_handle", None)
+    if handle is None:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        if _job_handle is None:
+            job = kernel.CreateJobObjectW(None, None)
+            if not job:
+                raise ctypes.WinError(ctypes.get_last_error())
+
+            class _Limits(ctypes.Structure):
+                _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
+                            ("PerJobUserTimeLimit", ctypes.c_int64),
+                            ("LimitFlags", wintypes.DWORD),
+                            ("MinimumWorkingSetSize", ctypes.c_size_t),
+                            ("MaximumWorkingSetSize", ctypes.c_size_t),
+                            ("ActiveProcessLimit", wintypes.DWORD),
+                            ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
+                            ("PriorityClass", wintypes.DWORD),
+                            ("SchedulingClass", wintypes.DWORD)]
+
+            class _Extended(ctypes.Structure):
+                _fields_ = [("BasicLimitInformation", _Limits),
+                            ("IoInfo", ctypes.c_byte * 48),
+                            ("ProcessMemoryLimit", ctypes.c_size_t),
+                            ("JobMemoryLimit", ctypes.c_size_t),
+                            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                            ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+            information = _Extended()
+            information.BasicLimitInformation.LimitFlags = JOB_KILL_ON_CLOSE
+            if not kernel.SetInformationJobObject(
+                    job, JOB_EXTENDED_LIMIT_INFORMATION, ctypes.byref(information),
+                    ctypes.sizeof(information)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            _job_handle = job
+            logger.info("Model Chain: llama-server processes will be ended by Windows if "
+                        "this process is killed")
+        if not kernel.AssignProcessToJobObject(_job_handle, int(handle)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    except Exception:
+        logger.debug("Model Chain: could not tie llama-server's lifetime to this process; "
+                     "a hard kill of the WebUI may leave it running", exc_info=True)
+
+
+JOB_KILL_ON_CLOSE = 0x00002000
+"""``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE``."""
+
+JOB_EXTENDED_LIMIT_INFORMATION = 9
+"""``JobObjectExtendedLimitInformation``."""
+
+
 class _Launcher:
     """The vendored launcher's ``subprocess``, with one command rewritten.
 
@@ -2265,8 +2357,14 @@ class _Launcher:
 
     @staticmethod
     def Popen(command, *args, **kwargs):  # noqa: N802 - subprocess's own spelling
-        return subprocess.Popen(
+        started = subprocess.Popen(
             with_extra_flags(without_gpu_selection(command)), *args, **kwargs)
+        # Every server, however it was started -- including the smoke tests and
+        # anything a future path spawns through the vendored launcher. This is
+        # the one place they all pass through, which is exactly why the command
+        # rewrite lives here too.
+        _die_with_us(started)
+        return started
 
 
 def _repair_launcher() -> None:
@@ -2284,6 +2382,9 @@ def _repair_launcher() -> None:
         return
     if not isinstance(getattr(llama_process, "subprocess", None), _Launcher):
         llama_process.subprocess = _Launcher()
+    # The first thing that is really about to start a server is the right
+    # moment to arrange for it to be stopped again.
+    stop_on_exit()
 
 
 def read_failure(text: str) -> Failure:
@@ -4319,8 +4420,113 @@ mc_broker.register_reclaimer(mc_broker.FAMILY_LLM, registry)
 
 
 def shutdown() -> None:
-    """Stop the server. Called from ``on_script_unloaded``."""
-    runtime.stop()
+    """Stop every llama-server this extension started. Never raises.
+
+    *Every* one, not the shared singleton: an installation with the Creative
+    and Spatial roles split has two servers up, and a shutdown that stopped one
+    of them left the other holding twenty gigabytes with nothing left in the
+    process that knew about it.
+
+    The stray sweep after it is the belt to that pair of braces. A server whose
+    Python handle was lost -- a reload, an exception during a start, an
+    extension update in place -- is not in the registry to be stopped and is
+    still very much running, and it is recognisable in the process list by the
+    ``--alias`` every one of ours carries. See :func:`strays`.
+    """
+    for found in registry.all():
+        try:
+            found.stop()
+        except Exception:
+            logger.warning("Model Chain: failed to stop %s", found.describe(), exc_info=True)
+    try:
+        stopped, freed = release_strays()
+    except Exception:
+        logger.debug("Model Chain: the stray sweep failed during shutdown", exc_info=True)
+        return
+    if stopped:
+        logger.info("Model Chain: stopped %d llama-server process%s on shutdown, releasing "
+                    "%.1f GB", stopped, "" if stopped == 1 else "es", freed / _GB)
+
+
+_shutdown_registered = False
+_shutdown_lock = threading.Lock()
+
+
+def stop_on_exit() -> None:
+    """Arrange for the servers to be stopped when this process ends.
+
+    The reported symptom: *"if I kill the webui process, there tends to be
+    llama-server.exe running on my system."* Three different exits, and the
+    extension was covered for none of them.
+
+    ``on_script_unloaded`` is Forge asking an extension to tidy up, and it does
+    not fire when somebody closes the window or kills the process -- so it was
+    the one exit already handled and the one exit nobody performs.
+
+    ``atexit`` covers the ordinary ones: the interpreter finishing, and Ctrl+C
+    unwinding out of the top of it. It is registered once, from the first thing
+    that touches the runtime, rather than at import -- an installation that
+    never starts a language model should not register a hook to stop one.
+
+    The hard kill is the third, and no handler inside a process that is being
+    killed can run at all. That one is answered where the child is started
+    instead -- see :func:`_die_with_us`.
+    """
+    global _shutdown_registered
+
+    with _shutdown_lock:
+        if _shutdown_registered:
+            return
+        _shutdown_registered = True
+    import atexit
+
+    atexit.register(_at_exit)
+    for name in ("SIGTERM", "SIGINT"):
+        _relay_signal(name)
+
+
+def _at_exit() -> None:
+    """``shutdown``, with every failure swallowed. Nothing may raise here."""
+    try:
+        shutdown()
+    except Exception:
+        logger.debug("Model Chain: the shutdown hook failed", exc_info=True)
+
+
+def _relay_signal(name: str) -> None:
+    """Stop the servers on ``name``, then do whatever was going to happen.
+
+    Chained rather than replaced: the WebUI installs its own handlers and a
+    handler of ours that swallowed the signal would leave a window nobody can
+    close. What this adds is a stop in front of whatever was already there.
+
+    Only from the main thread, because that is the only one Python will let
+    install a handler, and only where the signal exists.
+    """
+    import signal
+
+    number = getattr(signal, name, None)
+    if number is None:
+        return
+    try:
+        previous = signal.getsignal(number)
+    except (OSError, ValueError):
+        return
+
+    def handler(received, frame):
+        _at_exit()
+        if callable(previous) and previous not in (signal.SIG_IGN, signal.SIG_DFL):
+            previous(received, frame)
+        elif previous == signal.SIG_DFL:
+            signal.signal(received, signal.SIG_DFL)
+            signal.raise_signal(received)
+
+    try:
+        signal.signal(number, handler)
+    except (OSError, ValueError):
+        # Not the main thread, or a platform without it. The atexit hook and
+        # the job object below both still apply.
+        logger.debug("Model Chain: could not chain the %s handler", name, exc_info=True)
 
 
 # --------------------------------------------------------------------------- #

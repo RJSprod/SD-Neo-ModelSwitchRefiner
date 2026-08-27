@@ -879,12 +879,36 @@
     overflow: hidden;
 }
 
+/* Docked, and stated twice on purpose.
+
+   `flex: 0 0 auto` in a column that owns the viewport height already keeps the
+   header at the top: the transcript scrolls and the header does not move,
+   because nothing above it can grow. That is true right up until the *page*
+   scrolls rather than the transcript — a narrow window, a theme with its own
+   padding, a browser zoom, anything that makes the workspace taller than the
+   space it was given — and then the whole column moves and the header goes up
+   with it. Reported as exactly that: the bar with the menu, the character name
+   and the state chip scrolling away.
+
+   `position: sticky` costs nothing when the first rule is already holding and
+   is the whole fix when it is not: whatever the scrolling box turns out to be,
+   the header stops at the top of it. It needs three things to work at all —
+   an opaque background, because sticky content sits *over* what scrolls under
+   it; a `top`, because `sticky` with no offset is `static`; and a stacking
+   order above the transcript. The background is the host's own token rather
+   than a colour, so a theme decides what the bar looks like. */
 #mc-llm-studio .mc-llm-chat-header {
     align-items: center;
+    background: var(--background-fill-primary, var(--body-background-fill, inherit));
     flex: 0 0 auto;
     flex-wrap: nowrap;
     gap: 0.4em;
     min-width: 0;
+    position: sticky;
+    top: 0;
+    /* Above the transcript and below the sheets, which are the panel's own
+       overlays and are meant to cover it. */
+    z-index: 3;
 }
 
 #mc-llm-studio .mc-llm-chat-title {
@@ -969,6 +993,49 @@
 #mc-llm-studio .mc-llm-transcript .message.user {
     background: var(--background-fill-secondary, var(--background-fill-primary, transparent));
     color: var(--body-text-color, inherit);
+}
+
+/* The regenerate icon on a reply, drawn into the bubble by
+   javascript/llm_studio.js. Styled here rather than there so that a theme can
+   override it the ordinary way, and so the script stays a script.
+
+   Quiet until the reply is pointed at: at rest it is faint, and it comes up on
+   hover or focus. A transcript's job is to be read, and an icon that shouts on
+   every paragraph is the reason there is no copy button under every message
+   either. It keeps its full contrast on :focus-visible, because a keyboard is
+   how somebody who cannot hover reaches it at all. */
+#mc-llm-studio .mc-llm-transcript .mc-llm-again {
+    background: transparent;
+    border: 0;
+    border-radius: 4px;
+    color: inherit;
+    cursor: pointer;
+    display: block;
+    font-size: 0.95em;
+    line-height: 1;
+    margin-left: auto;
+    margin-top: 0.35em;
+    opacity: 0.35;
+    padding: 0.15em 0.35em;
+    transition: opacity 0.12s ease-in-out;
+    /* Never part of the text somebody selects and copies out of a reply. */
+    user-select: none;
+    width: max-content;
+}
+
+#mc-llm-studio .mc-llm-transcript .mc-llm-again:hover,
+#mc-llm-studio .mc-llm-transcript .mc-llm-again:focus-visible {
+    background: var(--background-fill-secondary, transparent);
+    opacity: 1;
+}
+
+/* A pointer is not the only way in. On a touch screen there is no hover at
+   all, so the icon is simply legible: a control that only appears under a
+   mouse is a control a phone does not have. */
+@media (hover: none) {
+    #mc-llm-studio .mc-llm-transcript .mc-llm-again {
+        opacity: 0.7;
+    }
 }
 
 /* One line, the same height whether it says "Ready." or nothing anybody needs
