@@ -510,7 +510,14 @@ def selftest() -> int:
         report["provider"] = str(getattr(config, "provider", "") or "cpu")
         report["ok"] = report["provider"] == "cpu"
     except Exception as exc:
-        report["error"] = exc.__class__.__name__
+        # The message, not just the class. This is the one place in this file
+        # where an exception's own words are worth repeating: they are about
+        # package and library names, never about anything anybody said, and
+        # "ModuleNotFoundError" on its own does not say *which* module -- which
+        # cost a round trip the first time this failed on somebody's machine.
+        report["error"] = f"{exc.__class__.__name__}: {exc}"
+        report["prefix"] = sys.prefix
+        report["path"] = [entry for entry in sys.path if entry]
     sys.stdout.write(json.dumps(report) + "\n")
     sys.stdout.flush()
     return 0 if report["ok"] else 1

@@ -64,6 +64,7 @@ import threading
 import time
 import urllib.request
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1044,7 +1045,7 @@ def _digest(path: Path) -> str:
     return found.hexdigest()
 
 
-def install_engine(on_status=None, on_progress=None) -> Status:
+def install_engine(on_status=None, on_progress=None, folder=None) -> Status:
     """Install the speech engine on its own, as a button somebody can press.
 
     Ordinarily the engine is an implementation detail of the two models and is
@@ -1059,13 +1060,53 @@ def install_engine(on_status=None, on_progress=None) -> Status:
     say = _narrator("runtime", on_status)
     tick = _ticker("runtime", on_progress)
     with _claim("runtime", say):
-        install_runtime(on_status=say, on_progress=tick)
+        install_runtime(on_status=say, on_progress=tick, folder=folder)
         say("The voice engine is installed.")
         return status()
 
 
-def install_runtime(on_status=None, on_progress=None) -> None:
-    """Download the pinned wheel closure and build the isolated environment.
+def runtime_sources() -> list[dict]:
+    """The wheels this platform needs, for somebody fetching them by hand."""
+    chosen = runtime_platform()
+    if chosen is None:
+        return []
+    return [{"filename": item.filename, "url": item.url, "save_as": item.local_name,
+             "archive": False, "bytes": item.approximate_bytes}
+            for item in chosen.artifacts]
+
+
+def _adopt_wheels(chosen: RuntimePlatform, folder: Path, wheels: Path, say) -> None:
+    """Take the pinned wheels from a folder instead of downloading them.
+
+    Better verified than the model bundles, not worse: these artifacts *are*
+    pinned in this repository, so a wheel somebody downloaded by hand is checked
+    against the same committed SHA-256 the download would have been. A file
+    under the right name with the wrong contents is refused exactly as a bad
+    download is.
+    """
+    for item in chosen.artifacts:
+        found = _find(folder, [item.local_name, item.filename])
+        if found is None:
+            raise VoiceError(f"{folder} does not have {item.filename}. Nothing was installed.")
+        say(f"Checking {found.name}…")
+        digest = _digest(found)
+        if item.sha256 and digest != item.sha256:
+            raise VoiceError(
+                f"{found.name} is not the file this extension's manifest describes — its "
+                f"contents do not match the committed SHA-256. Nothing was installed.")
+        shutil.copy2(found, wheels / item.local_name)
+        logger.info("Model Chain: Voice Chat adopted %s from %s; digest matched this "
+                    "extension's manifest", item.filename, folder)
+
+
+def install_runtime(on_status=None, on_progress=None, folder=None) -> None:
+    """Provision the isolated CPU runtime from the pinned wheel closure.
+
+    ``folder`` takes the wheels from a directory on this machine instead of
+    downloading them -- the same escape hatch the models have, and here the
+    stronger one: these artifacts are pinned in this repository, so a
+    hand-supplied wheel is checked against a committed hash rather than against
+    the publisher.
 
     Returns quietly when the runtime already matches the manifest, which is what
     makes :func:`install` safe to call for the second model.
@@ -1084,18 +1125,28 @@ def install_runtime(on_status=None, on_progress=None) -> None:
         tick(1.0)
         return
     logger.info("Model Chain: Voice Chat is provisioning its CPU runtime — sherpa-onnx %s "
-                "for %s, %s of wheels", spec["runtime_version"], chosen.identifier,
-                _bytes_label(sum(a.approximate_bytes for a in chosen.artifacts)))
+                "for %s, %s of wheels%s", spec["runtime_version"], chosen.identifier,
+                _bytes_label(sum(a.approximate_bytes for a in chosen.artifacts)),
+                f", from {folder}" if folder else "")
 
     staging = paths.staging_for("runtime", uuid.uuid4().hex[:8])
     wheels = staging / "wheels"
     try:
-        _make_room(chosen.artifacts, staging)
         wheels.mkdir(parents=True, exist_ok=True)
-        # The wheels are always pinned in this repository, so this resolves to
-        # the committed values without a request being made.
-        _fetch_all(chosen.artifacts, wheels, say, tick, budget=0.7,
-                   expectations=_expectations(chosen.artifacts, say))
+        if folder:
+            source = Path(str(folder).strip().strip('"')).expanduser()
+            if source.is_file():
+                source = source.parent
+            if not source.is_dir():
+                raise VoiceError(f"There is no folder at {source}.")
+            _adopt_wheels(chosen, source, wheels, say)
+            tick(0.7)
+        else:
+            _make_room(chosen.artifacts, staging)
+            # The wheels are always pinned in this repository, so this resolves
+            # to the committed values without a request being made.
+            _fetch_all(chosen.artifacts, wheels, say, tick, budget=0.7,
+                       expectations=_expectations(chosen.artifacts, say))
 
         say("Creating the isolated voice runtime…")
         _build_environment(staging, wheels, chosen)
@@ -1381,20 +1432,101 @@ def _expand(archive: Path, destination: Path, artifact: Artifact) -> None:
                 shutil.copyfileobj(source, handle)
 
 
-def _build_environment(staging: Path, wheels: Path, chosen: RuntimePlatform) -> None:
-    """A venv, and the verified wheels installed into it with no index at all.
+def site_packages(environment: Path) -> Path:
+    """Where an interpreter in ``environment`` imports third-party code from."""
+    if os.name == "nt":
+        return environment / "Lib" / "site-packages"
+    found = sorted((environment / "lib").glob("python*/site-packages"))
+    return found[0] if found else (environment / "lib" / "site-packages")
 
-    ``--no-index`` removes PyPI. ``--no-deps`` removes the resolver: each wheel
-    is named by its path on this disk, in an order the manifest already fixed,
-    so pip does no dependency work and has nothing to look anything up for.
-    The environment variables restate it for a pip configured through a global
-    ``pip.conf`` -- a machine with an index URL in its user configuration should
-    not be able to widen what this installs.
+
+WHEEL_SKIP = ("scripts", "headers", "data")
+"""Parts of a wheel's ``.data`` directory this installer has no use for.
+
+``purelib`` and ``platlib`` are the code and are moved into site-packages, which
+is what an installer does with them. The rest are console entry points and C
+headers for building against the library -- neither of which a speech worker
+that is only ever launched by path will use.
+"""
+
+
+def _unpack_wheel(wheel: Path, destination: Path) -> list[str]:
+    """Install one wheel by unpacking it. Returns the top-level names it added.
+
+    A wheel is a zip with a defined layout, and installing one that needs no
+    build step is unpacking it into site-packages. Doing that directly rather
+    than through pip is the correction to a real failure: pip reported success,
+    exited zero, and the module was not importable afterwards -- because a
+    machine can carry ``PIP_TARGET``, ``PIP_USER``, ``PIP_PREFIX`` or a
+    ``pip.ini`` that sends an install somewhere else entirely, and pip is
+    perfectly happy about that. There is no package manager in this path now, so
+    there is nothing left to redirect it.
+
+    It also makes R2-2 trivially true rather than carefully arranged: an
+    installer that resolves nothing cannot resolve something from an index.
+    """
+    added: list[str] = []
+    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(wheel) as bundle:
+            names = bundle.namelist()
+            data_root = next((n.split("/")[0] for n in names
+                              if n.split("/")[0].endswith(".data")), "")
+            for name in names:
+                if name.endswith("/"):
+                    continue
+                parts = name.split("/")
+                if data_root and parts[0] == data_root:
+                    # <name>.data/<category>/<path…>
+                    if len(parts) < 3 or parts[1] in WHEEL_SKIP:
+                        continue
+                    relative = "/".join(parts[2:])
+                else:
+                    relative = name
+                if not relative or relative.startswith(("/", "\\")) or ".." in relative.split("/"):
+                    logger.warning("Model Chain: Voice Chat refused a wheel member that would "
+                                   "have been written outside the runtime")
+                    continue
+                where = (destination / relative).resolve()
+                try:
+                    where.relative_to(destination.resolve())
+                except ValueError:
+                    logger.warning("Model Chain: Voice Chat refused a wheel member that would "
+                                   "have been written outside the runtime")
+                    continue
+                where.parent.mkdir(parents=True, exist_ok=True)
+                with bundle.open(name) as source, open(where, "wb") as handle:
+                    shutil.copyfileobj(source, handle)
+                top = relative.split("/")[0]
+                if top not in added:
+                    added.append(top)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise VoiceError(f"{wheel.name} is not a readable wheel ({exc.__class__.__name__}). "
+                         f"Nothing was installed.") from None
+    return added
+
+
+def _build_environment(staging: Path, wheels: Path, chosen: RuntimePlatform) -> None:
+    """An interpreter of its own, and the verified wheels unpacked into it.
+
+    Two deliberate simplifications, both of them removing a failure this feature
+    actually hit.
+
+    The virtual environment is built *without* pip. ``ensurepip`` is one of the
+    likelier things to be missing or broken on the embedded and relocated
+    Pythons a WebUI is often launched from, and it was being installed only to
+    be used once. Skipping it is faster and takes a whole class of failure away.
+
+    The wheels are then unpacked rather than installed by a package manager. See
+    :func:`_unpack_wheel`: a pip that exits zero having installed into somebody's
+    user site or a ``PIP_TARGET`` directory is a pip that has "succeeded" and
+    left the runtime empty, which is exactly what happened and exactly what
+    ``ModuleNotFoundError`` in the self-test meant.
     """
     import venv
 
     environment = staging / "env"
-    builder = venv.EnvBuilder(with_pip=True, clear=True, symlinks=(os.name != "nt"))
+    builder = venv.EnvBuilder(with_pip=False, clear=True, symlinks=(os.name != "nt"))
     try:
         builder.create(environment)
     except Exception as exc:
@@ -1409,23 +1541,22 @@ def _build_environment(staging: Path, wheels: Path, chosen: RuntimePlatform) -> 
     if not interpreter.exists():
         raise VoiceError("The isolated Voice Chat runtime was created without an interpreter.")
 
-    command = [str(interpreter), "-m", "pip", "install", "--no-index", "--no-deps",
-               "--no-cache-dir", "--disable-pip-version-check", "--no-build-isolation"]
-    command += [str(wheels / item.local_name) for item in chosen.artifacts]
-    environ = dict(os.environ)
-    environ.update({"PIP_NO_INDEX": "1", "PIP_NO_CACHE_DIR": "1", "PIP_RETRIES": "0",
-                    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-                    "PIP_INDEX_URL": "", "PIP_EXTRA_INDEX_URL": "",
-                    "PIP_CONFIG_FILE": os.devnull})
-    result = subprocess.run(command, capture_output=True, text=True, env=environ, timeout=900)
-    if result.returncode != 0:
-        logger.warning("Model Chain: Voice Chat could not install its wheels (exit %s).\n"
-                       "  interpreter: %s\n  stderr: %s\n  stdout: %s",
-                       result.returncode, interpreter, _quote(result.stderr) or "(nothing)",
-                       _quote(result.stdout) or "(nothing)")
-        raise VoiceError("The pinned Voice Chat wheels could not be installed into the isolated "
-                         "runtime. Nothing was changed. The installer's own output is in the "
-                         "console and in model_chain.log.")
+    target = site_packages(environment)
+    for item in chosen.artifacts:
+        wheel = wheels / item.local_name
+        if not wheel.is_file():
+            raise VoiceError(f"{item.filename} is missing from the staged download. Nothing "
+                             f"was installed.")
+        added = _unpack_wheel(wheel, target)
+        logger.info("Model Chain: Voice Chat unpacked %s into the isolated runtime (%s)",
+                    item.filename, ", ".join(added[:6]) or "nothing")
+
+    # Checked rather than assumed, because "the installer said it worked" is
+    # precisely the claim that turned out to be worthless.
+    engine = manifest()["runtime_import"]
+    if not (target / engine).exists() and not list(target.glob(engine + "*")):
+        raise VoiceError(f"The Voice Chat wheels were unpacked but {engine} is not in "
+                         f"{target}. Nothing was installed.")
 
 
 def _quote(output: str, limit: int = 1200) -> str:

@@ -409,6 +409,10 @@ def _sources() -> dict:
             found[kind] = models.sources(kind)
         except Exception:
             found[kind] = []
+    try:
+        found["runtime"] = models.runtime_sources()
+    except Exception:
+        found["runtime"] = []
     return found
 
 
@@ -490,7 +494,7 @@ def provision(kind: str, folder: str = "") -> dict:
     def run():
         try:
             if kind == "runtime":
-                models.install_engine()
+                models.install_engine(folder=manual or None)
             elif manual:
                 models.install_from(kind, manual)
             else:

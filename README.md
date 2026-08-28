@@ -2945,6 +2945,11 @@ no third "download the engine" button to find. Everything is staged under
 into place in one rename — a failed or interrupted download leaves whatever you
 had before running exactly as it was.
 
+Pressing either button also installs the shared CPU engine, so there is normally
+no third thing to think about. It has a row of its own anyway, because installing
+both models from files you already have downloads nothing — and then the engine
+is still missing with no model button left to press.
+
 Both models have to be installed before the microphone will record, even though
 dictation technically only needs the first. That is on purpose: a microphone
 that transcribes and then cannot answer aloud is a half-installed feature that
@@ -2966,7 +2971,18 @@ vouching, because there are two answers and they are not equally strong.
 
 **The runtime wheels are pinned in this repository** — sixteen of them, real
 sizes and SHA-256s committed in `voice/managed-voice-models.json` and reviewed
-like any other source file. A byte that does not match is discarded.
+like any other source file. A byte that does not match is discarded. They are
+installed by *unpacking* rather than by a package manager: a wheel that needs no
+build step is a zip, and installing one is unzipping it into the runtime. That
+is not only simpler, it is the fix for a real failure — pip can exit zero having
+installed somewhere else entirely, because `PIP_TARGET`, `PIP_USER`, `PIP_PREFIX`
+and a stray `pip.ini` all redirect it and it is perfectly happy about that. There
+is no package manager left in that path, so there is nothing to redirect, and
+"the installer resolves nothing" stops being carefully arranged and becomes
+trivially true. The isolated environment is built without pip for the same
+reason: `ensurepip` is one of the likelier things to be broken on the embedded
+Pythons a WebUI is launched from, and it was being installed only to be used
+once.
 
 **The model bundles are resolved from the publisher at install time.** Pinning
 those means fetching several hundred megabytes and hashing them, which is a
@@ -2993,12 +3009,15 @@ machine that can reach the publishers does the same resolution ahead of time and
 writes the same overlay, so the first install is checked against a recorded
 constant too.
 
-**Or install from files you fetch yourself.** Each row in Settings → Voice Chat
-has an *Or install from files you download yourself* section listing the exact
-addresses, a box for the folder you put them in, and a button. It is there for a
-machine that cannot reach the publishers at all — no Internet, or a proxy that
-will not pass a large binary. The original filenames are fine; nothing needs
-renaming, and an archive works either packed or already extracted.
+**Or install from files you fetch yourself.** All three rows — the engine and
+both models — have an *Or install from files you download yourself* section
+listing the exact addresses, a box for the folder you put them in, and a button.
+It is there for a machine that cannot reach the publishers at all, and for the
+day an automatic install fails for a reason nobody has got to the bottom of yet.
+The original filenames are fine; nothing needs renaming, and an archive works
+either packed or already extracted. The engine's wheels are pinned here, so a
+hand-supplied wheel is checked against a committed hash — better verified than
+the models, not worse.
 
 What is different about that path is stated on screen rather than glossed over.
 There is no committed hash for a file this repository has never seen, so the
