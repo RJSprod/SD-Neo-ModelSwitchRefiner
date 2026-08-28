@@ -556,6 +556,42 @@ def _read_json(path: Path):
 # --------------------------------------------------------------------------- #
 
 
+def refusal(kind: str) -> str:
+    """Why ``kind`` cannot be installed right now, or an empty string.
+
+    Asked *before* anything is started, and separately from starting it, because
+    the two questions have different audiences. This one answers a browser that
+    is waiting for a reply and needs a sentence it can put on screen; the
+    transaction below answers a log. Splitting them is what stops a refusal
+    happening on a background thread where the only place it can go is a warning
+    nobody is reading.
+    """
+    if kind not in paths.KINDS:
+        return "Voice Chat installs a speech-to-text or a text-to-speech model."
+    try:
+        entry = default_model(kind)
+    except VoiceError as exc:
+        return str(exc)
+
+    # Ordered by how specific the answer is, not by how cheap the check is. A
+    # download that is already running is the most specific thing that can be
+    # true, and answering "this build cannot install that" to somebody watching
+    # it install would be a true sentence about the wrong thing.
+    with _lock:
+        if (_progress.get(kind) or {}).get("running"):
+            return f"The {kind.upper()} model is already being installed."
+    if runtime_platform() is None:
+        system, machine, python_version = current_platform()
+        return (f"Voice Chat has no tested CPU runtime for {system}/{machine} on Python "
+                f"{python_version}, so it cannot be installed here.")
+    if not entry.pinned:
+        return (f"{entry.label} cannot be installed by this build: its artifacts are not "
+                f"pinned in voice/managed-voice-models.json. A maintainer pins them by "
+                f"running tools/pin_voice_models.py on a machine that can reach the "
+                f"publishers; nothing is downloaded until they do.")
+    return ""
+
+
 def install(kind: str, on_status=None, on_progress=None) -> Status:
     """Provision the runtime if needed, then install ``kind``'s default bundle.
 
@@ -569,13 +605,22 @@ def install(kind: str, on_status=None, on_progress=None) -> Status:
     last step is a directory rename. A failure anywhere leaves the installation
     exactly as it was, which for somebody who already had a working Voice Chat
     means it still works.
+
+    Every step says what it is doing, twice: into :data:`_progress`, which is
+    what the Settings row and the status route read, and into the log, which is
+    what somebody reads afterwards when the row has moved on. That is not
+    decoration. A download of several hundred megabytes with one static line of
+    text in front of it is indistinguishable from a download that has hung, and
+    the first version of this shipped exactly that -- ``on_status`` defaulted to
+    a function that discarded its argument, so every sentence below was written
+    and thrown away.
     """
     if kind not in paths.KINDS:
         raise VoiceError(f"{kind!r} is not a Voice Chat model kind.")
-    say = on_status or (lambda _text: None)
-    tick = on_progress or (lambda _fraction: None)
+    say = _narrator(kind, on_status)
+    tick = _ticker(kind, on_progress)
 
-    with _claim(kind):
+    with _claim(kind, say):
         entry = default_model(kind)
         if not entry.pinned:
             raise VoiceError(
@@ -583,20 +628,24 @@ def install(kind: str, on_status=None, on_progress=None) -> Status:
                 f"pinned in voice/managed-voice-models.json. A maintainer pins them with "
                 f"tools/pin_voice_models.py; nothing is downloaded until they do."
             )
-        _publish(kind, "Checking the voice runtime…", 0.0)
-        say("Checking the voice runtime…")
-        install_runtime(on_status=say,
-                        on_progress=lambda f: _report(kind, tick, f * 0.5))
+        logger.info("Model Chain: Voice Chat is installing the %s bundle %s (%s, about %s)",
+                    kind.upper(), entry.identifier, entry.label,
+                    _bytes_label(entry.total_bytes))
 
-        current = _model_state(entry)
-        if current[0]:
+        say("Checking the voice runtime…")
+        install_runtime(on_status=say, on_progress=lambda f: tick(f * 0.5))
+
+        if _model_state(entry)[0]:
             say(f"{entry.label} is already installed.")
-            _report(kind, tick, 1.0)
+            tick(1.0)
             return status()
 
-        _install_model(entry, say, lambda f: _report(kind, tick, 0.5 + f * 0.5))
-        _report(kind, tick, 1.0)
-        logger.info("Model Chain: Voice Chat installed the %s bundle %s", kind, entry.identifier)
+        _install_model(entry, say, lambda f: tick(0.5 + f * 0.5))
+        tick(1.0)
+        say(f"{entry.label} installed.")
+        logger.info("Model Chain: Voice Chat installed the %s bundle %s at %s",
+                    kind.upper(), entry.identifier,
+                    paths.bundle_root(entry.kind, entry.identifier))
         return status()
 
 
@@ -616,8 +665,12 @@ def install_runtime(on_status=None, on_progress=None) -> None:
         raise VoiceError(f"Voice Chat has no tested CPU runtime for {system}/{machine} on "
                          f"Python {python_version}, so it cannot be installed here.")
     if _runtime_state(spec, chosen)[0]:
+        say("The voice runtime is already installed.")
         tick(1.0)
         return
+    logger.info("Model Chain: Voice Chat is provisioning its CPU runtime — sherpa-onnx %s "
+                "for %s, %s of wheels", spec["runtime_version"], chosen.identifier,
+                _bytes_label(sum(a.approximate_bytes for a in chosen.artifacts)))
 
     staging = paths.staging_for("runtime", uuid.uuid4().hex[:8])
     wheels = staging / "wheels"
@@ -632,6 +685,7 @@ def install_runtime(on_status=None, on_progress=None) -> None:
 
         say("Checking the runtime can run on the CPU…")
         report = _smoke_test(staging, spec)
+        say("Installing the voice runtime…")
         _write_json(staging / paths.INSTALLED_FILENAME, {
             "schema": SCHEMA,
             "runtime_version": spec["runtime_version"],
@@ -664,6 +718,7 @@ def _install_model(entry: VoiceModel, say, tick) -> None:
                 (staging / item.local_name).unlink(missing_ok=True)
         tick(0.9)
 
+        say(f"Checking {entry.label} is complete…")
         for name in entry.wanted_paths:
             if not (staging / name).exists():
                 raise VoiceError(f"{entry.label} downloaded and verified, but {name} is not in "
@@ -681,6 +736,7 @@ def _install_model(entry: VoiceModel, say, tick) -> None:
             "artifacts": {item.local_name: item.sha256 for item in entry.artifacts},
             "installed_at": time.time(),
         })
+        say("Installing…")
         _promote(staging, target)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -689,14 +745,23 @@ def _install_model(entry: VoiceModel, say, tick) -> None:
 def _fetch_all(artifacts, destination: Path, say, tick, budget: float) -> None:
     total = max(sum(item.approximate_bytes for item in artifacts), 1)
     done = 0
-    for item in artifacts:
-        say(f"Downloading {item.filename}…")
+    for index, item in enumerate(artifacts, start=1):
+        # Named, numbered and sized. "Downloading…" on its own is what a hung
+        # download looks like; "Downloading 2 of 3 — decoder.onnx (262 MB)" is
+        # something somebody can wait for.
+        say(f"Downloading {index} of {len(artifacts)} — {item.filename} "
+            f"({_bytes_label(item.approximate_bytes)})")
         base, share = done, max(item.approximate_bytes, 1)
 
         def report(received, base=base, share=share):
             tick(min((base + min(received, share)) / total, 1.0) * budget)
 
+        started = time.monotonic()
         _download(item, destination / item.local_name, report)
+        elapsed = max(time.monotonic() - started, 0.001)
+        logger.info("Model Chain: Voice Chat fetched %s — %s in %.1fs (%.1f MB/s), hash "
+                    "verified", item.filename, _bytes_label(item.approximate_bytes),
+                    elapsed, item.approximate_bytes / elapsed / (1024 * 1024))
         done += share
         tick(min(done / total, 1.0) * budget)
 
@@ -974,39 +1039,86 @@ def _bytes_label(value: int) -> str:
 
 
 @contextlib.contextmanager
-def _claim(kind: str):
+def _claim(kind: str, say=None):
     """One install per model at a time, and a status line while it runs.
 
     Two presses of the same button is the ordinary case -- a row that says
     "Downloading…" invites a second click -- and two transactions writing the
     same staging tree is not something atomic promotion protects against,
     because they would each promote half of the other's work.
+
+    The failure branch is the important one. It leaves the reason in
+    :data:`_progress` where the Settings row will draw it, and puts it in the
+    log at warning level, because "the button went back to how it was" is not
+    an answer to "what happened".
     """
     with _lock:
         if kind in _progress and _progress[kind].get("running"):
             raise VoiceError(f"The {kind.upper()} model is already being installed.")
-        _progress[kind] = {"running": True, "text": "Starting…", "fraction": 0.0}
+        _progress[kind] = {"running": True, "text": "Starting…", "fraction": 0.0,
+                           "failed": False}
     try:
         yield
     except Exception as exc:
+        reason = str(exc) or exc.__class__.__name__
         with _lock:
-            _progress[kind] = {"running": False, "text": str(exc), "failed": True,
+            _progress[kind] = {"running": False, "text": reason, "failed": True,
                                "fraction": 0.0}
+        logger.warning("Model Chain: Voice Chat could not install the %s model — %s",
+                       kind.upper(), reason)
         raise
     else:
         with _lock:
-            _progress[kind] = {"running": False, "text": "Installed.", "fraction": 1.0}
+            _progress[kind] = {"running": False, "text": "Installed.", "fraction": 1.0,
+                               "failed": False}
 
 
-def _publish(kind: str, text: str, fraction: float) -> None:
-    with _lock:
-        current = _progress.setdefault(kind, {"running": True})
-        current.update({"text": text, "fraction": fraction})
+def _narrator(kind: str, on_status=None):
+    """A ``say`` that reaches the Settings row, the log, and any caller.
+
+    Three destinations because they answer three different questions and none of
+    them substitutes for another: the row is what somebody is watching *now*,
+    the log is what they read when it went wrong ten minutes ago, and the
+    callback is for a caller that wants to do something else with it.
+    """
+
+    def say(text: str) -> None:
+        text = str(text or "")
+        with _lock:
+            current = _progress.setdefault(kind, {"running": True, "fraction": 0.0})
+            current["text"] = text
+        logger.info("Model Chain: Voice Chat %s — %s", kind.upper(), text)
+        if on_status is not None:
+            try:
+                on_status(text)
+            except Exception:
+                logger.debug("Model Chain: a Voice Chat status callback failed",
+                             exc_info=True)
+
+    return say
 
 
-def _report(kind: str, tick, fraction: float) -> None:
-    _publish(kind, _progress.get(kind, {}).get("text", ""), fraction)
-    tick(fraction)
+def _ticker(kind: str, on_progress=None):
+    """A ``tick`` that records the fraction without narrating it.
+
+    Separate from :func:`_narrator` because a percentage moves hundreds of times
+    per download and a sentence does not. Logging every tick would bury the
+    lines that matter in a progress bar nobody can read.
+    """
+
+    def tick(fraction: float) -> None:
+        value = min(max(float(fraction or 0.0), 0.0), 1.0)
+        with _lock:
+            current = _progress.setdefault(kind, {"running": True, "text": ""})
+            current["fraction"] = value
+        if on_progress is not None:
+            try:
+                on_progress(value)
+            except Exception:
+                logger.debug("Model Chain: a Voice Chat progress callback failed",
+                             exc_info=True)
+
+    return tick
 
 
 def _busy_label() -> str:

@@ -578,3 +578,107 @@ class TestTheIsolatedRuntime:
         assert seen["env"]["PIP_INDEX_URL"] == ""
         # No requirement name anywhere: every installable is a path on this disk.
         assert not any(part == "sherpa-onnx" for part in command)
+
+
+# --------------------------------------------------------------------------- #
+# Saying what it is doing
+# --------------------------------------------------------------------------- #
+
+
+class TestItSaysWhatItIsDoing:
+    """A several-hundred-megabyte download with one static line in front of it
+    is indistinguishable from a download that has hung. It shipped that way:
+    ``on_status`` defaulted to a function that discarded its argument, so every
+    sentence the installer wrote went nowhere and the row never moved."""
+
+    def test_a_status_line_reaches_the_progress_record_and_the_log(self, caplog):
+        import logging
+
+        caplog.set_level(logging.INFO, logger="model_chain")
+        say = models._narrator("stt")
+        say("Downloading 2 of 3 — decoder.onnx (262 MB)")
+
+        assert models.progress()["stt"]["text"] == "Downloading 2 of 3 — decoder.onnx (262 MB)"
+        assert any("decoder.onnx" in record.getMessage() for record in caplog.records)
+
+    def test_a_caller_that_wants_the_line_gets_it_too(self):
+        seen = []
+        models._narrator("tts", seen.append)("Expanding…")
+        assert seen == ["Expanding…"]
+
+    def test_a_callback_that_raises_does_not_stop_the_install(self):
+        def explode(_text):
+            raise RuntimeError("the row is gone")
+
+        models._narrator("stt", explode)("still fine")
+        assert models.progress()["stt"]["text"] == "still fine"
+
+    def test_a_fraction_is_recorded_without_a_log_line_per_tick(self, caplog):
+        import logging
+
+        caplog.set_level(logging.INFO, logger="model_chain")
+        tick = models._ticker("stt")
+        for step in range(20):
+            tick(step / 20.0)
+
+        assert models.progress()["stt"]["fraction"] == pytest.approx(0.95)
+        assert not caplog.records, "the progress bar was written to the log"
+
+    def test_a_fraction_is_clamped(self):
+        tick = models._ticker("tts")
+        tick(-3)
+        assert models.progress()["tts"]["fraction"] == 0.0
+        tick(9)
+        assert models.progress()["tts"]["fraction"] == 1.0
+
+    def test_a_failed_install_records_its_reason_and_logs_it(self, caplog):
+        import logging
+
+        caplog.set_level(logging.WARNING, logger="model_chain")
+        with pytest.raises(models.VoiceError):
+            with models._claim("stt"):
+                raise models.VoiceError("decoder.onnx failed its hash check.")
+
+        state = models.progress()["stt"]
+        assert state["failed"] is True
+        assert state["running"] is False
+        assert state["text"] == "decoder.onnx failed its hash check."
+        assert any("failed its hash check" in record.getMessage()
+                   for record in caplog.records)
+
+    def test_a_second_install_of_the_same_kind_is_refused_while_one_runs(self):
+        with models._claim("stt"):
+            with pytest.raises(models.VoiceError, match="already being installed"):
+                with models._claim("stt"):
+                    pass
+
+
+class TestRefusingBeforeStarting:
+    """Everything that can be decided before a thread starts is decided in front
+    of the caller, so a browser waiting on the answer gets one."""
+
+    def test_an_unpinned_bundle_is_refused_by_name(self):
+        reason = models.refusal("stt")
+        assert "pinned" in reason
+        assert "tools/pin_voice_models.py" in reason
+
+    def test_an_unknown_kind_is_refused(self):
+        assert models.refusal("../etc") 
+        assert models.refusal("speech")
+
+    def test_an_unsupported_platform_is_refused(self, monkeypatch):
+        monkeypatch.setattr(models, "current_platform", lambda: ("haiku", "vax", "3.11"))
+        assert "no tested CPU runtime" in models.refusal("stt")
+
+    def test_a_running_install_is_refused(self, monkeypatch):
+        monkeypatch.setitem(models._progress, "tts", {"running": True})
+        assert "already being installed" in models.refusal("tts")
+
+    def test_a_pinned_and_idle_bundle_is_not_refused(self, tmp_path, monkeypatch):
+        def pin(spec):
+            for index, entry in enumerate(spec["models"]["whisper-small-int8"]["files"]):
+                entry["sha256"] = f"{index:064x}"
+                entry["bytes"] = 10
+
+        rewrite(tmp_path, monkeypatch, pin)
+        assert models.refusal("stt") == ""

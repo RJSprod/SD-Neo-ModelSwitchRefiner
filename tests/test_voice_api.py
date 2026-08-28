@@ -187,6 +187,65 @@ class TestThePageToken:
         assert client.post(api.STATUS_ROUTE, headers=headers).status_code == 200
 
 
+class TestSayingWhyItRefused:
+    """A 403 with nothing in the log is a bug report nobody can answer.
+
+    This is the diagnostic gap that made the frozen Settings row impossible to
+    explain from the outside: the browser saw a refusal it discarded, and the
+    server wrote nothing at all. Each gate now names itself, in words, with no
+    content in the line.
+    """
+
+    def test_a_missing_token_says_so(self, client, caplog, installed):
+        import logging
+
+        caplog.set_level(logging.DEBUG, logger="model_chain")
+        assert client.post(api.STATUS_ROUTE).status_code == 403
+        written = " ".join(record.getMessage() for record in caplog.records)
+        assert "no page token was sent" in written
+        assert api.STATUS_ROUTE in written
+
+    def test_a_wrong_token_says_something_different(self, client, caplog, installed):
+        import logging
+
+        caplog.set_level(logging.DEBUG, logger="model_chain")
+        client.post(api.STT_ROUTE, headers={api.TOKEN_HEADER: "stale"}, content=b"x")
+        written = " ".join(record.getMessage() for record in caplog.records)
+        assert "did not match this WebUI process" in written
+
+    def test_a_foreign_origin_says_so(self, client, key, caplog, installed):
+        import logging
+
+        caplog.set_level(logging.DEBUG, logger="model_chain")
+        headers = dict(key)
+        headers["Origin"] = "https://somewhere-else.example"
+        client.post(api.STATUS_ROUTE, headers=headers)
+        written = " ".join(record.getMessage() for record in caplog.records)
+        assert "Origin header did not match" in written
+
+    def test_an_unauthenticated_caller_says_so(self, app, key, caplog, installed):
+        import logging
+
+        caplog.set_level(logging.DEBUG, logger="model_chain")
+        app.auth = {"someone": "hunter2"}
+        app.tokens = {}
+        with TestClient(app) as client:
+            client.post(api.STATUS_ROUTE, headers=key)
+        written = " ".join(record.getMessage() for record in caplog.records)
+        assert "not signed in" in written
+
+    def test_no_refusal_line_carries_the_token_that_was_offered(self, client, caplog,
+                                                               installed):
+        """A log that echoed the credential it rejected would be a log that
+        leaks one."""
+        import logging
+
+        caplog.set_level(logging.DEBUG, logger="model_chain")
+        client.post(api.STATUS_ROUTE, headers={api.TOKEN_HEADER: "SECRET-XYZ"})
+        for record in caplog.records:
+            assert "SECRET-XYZ" not in record.getMessage()
+
+
 class TestAuthenticationParity:
     def test_an_unauthenticated_caller_is_refused_when_the_webui_has_a_login(
             self, app, key, installed):
@@ -385,20 +444,27 @@ class TestSpeakingAReply:
         assert api.take_reply(token) == "", "a consumed target was put back"
 
 
+@pytest.fixture
+def installable(monkeypatch):
+    """A build where the manifest is pinned, so an install may actually start."""
+    import mc_voice_models
+
+    monkeypatch.setattr(mc_voice_models, "refusal", lambda kind: "")
+    return mc_voice_models
+
+
 class TestInstalling:
     def test_only_the_two_kinds_are_accepted(self, client, key):
         answered = client.post(api.INSTALL_ROUTE, headers=key,
                                json={"kind": "../../etc/passwd"})
         assert answered.status_code == 400
 
-    def test_a_url_cannot_be_supplied_by_the_browser(self, client, key, monkeypatch):
+    def test_a_url_cannot_be_supplied_by_the_browser(self, client, key, monkeypatch,
+                                                     installable):
         """Section 38: only ids from the checked-in manifest may be installed,
         and the route takes a *kind*, so there is not even an id to smuggle."""
         asked = []
-        import mc_voice_models
-
-        monkeypatch.setattr(mc_voice_models, "install",
-                            lambda kind, **kw: asked.append(kind))
+        monkeypatch.setattr(installable, "install", lambda kind, **kw: asked.append(kind))
         client.post(api.INSTALL_ROUTE, headers=key,
                     json={"kind": "stt", "url": "https://evil.example/x.onnx"})
         for _ in range(50):
@@ -406,6 +472,101 @@ class TestInstalling:
                 break
             time.sleep(0.02)
         assert asked == ["stt"]
+
+    def test_a_build_that_cannot_install_refuses_in_the_reply(self, client, key,
+                                                              monkeypatch):
+        """The defect this fixes. The first version started a thread whatever
+        the answer was, the thread discovered on the other side that this build
+        has nothing to install, and the browser -- already told "started" --
+        sat on "Starting…" indefinitely."""
+        started = []
+        import mc_voice_models
+
+        monkeypatch.setattr(mc_voice_models, "install",
+                            lambda *a, **k: started.append(a))
+        answered = client.post(api.INSTALL_ROUTE, headers=key, json={"kind": "stt"})
+
+        assert answered.status_code == 409
+        payload = answered.json()
+        assert payload["ok"] is False
+        assert "pinned" in payload["error"]
+        time.sleep(0.1)
+        assert started == [], "a refused install still started a download thread"
+
+    def test_the_refusal_is_a_sentence_and_not_a_status_code(self, client, key,
+                                                             monkeypatch):
+        import mc_voice_models
+
+        monkeypatch.setattr(mc_voice_models, "refusal",
+                            lambda kind: "Voice Chat has no tested CPU runtime here.")
+        payload = client.post(api.INSTALL_ROUTE, headers=key,
+                              json={"kind": "tts"}).json()
+        assert payload["error"] == "Voice Chat has no tested CPU runtime here."
+
+    def test_a_second_press_while_one_is_running_is_not_an_error(self, client, key,
+                                                                 monkeypatch,
+                                                                 installable):
+        import mc_voice_models
+
+        monkeypatch.setitem(mc_voice_models._progress, "stt", {"running": True,
+                                                               "text": "Downloading…",
+                                                               "fraction": 0.3})
+        payload = client.post(api.INSTALL_ROUTE, headers=key, json={"kind": "stt"}).json()
+        assert payload == {"ok": True, "already": True}
+
+
+class TestWhatAnInstallSays:
+    def test_progress_reaches_the_status_route(self, client, key, monkeypatch,
+                                               installable):
+        """The other half of the same defect: every sentence the installer wrote
+        was passed to a callback that discarded it, so the row had nothing to
+        show but its own initial text."""
+        import mc_voice_models
+
+        seen = []
+
+        def install(kind, on_status=None, on_progress=None):
+            say = mc_voice_models._narrator(kind, on_status)
+            tick = mc_voice_models._ticker(kind, on_progress)
+            with mc_voice_models._claim(kind, say):
+                say("Downloading 1 of 3 — encoder.onnx (112 MB)")
+                tick(0.25)
+                seen.append(client.post(api.STATUS_ROUTE, headers=key).json())
+
+        monkeypatch.setattr(mc_voice_models, "install", install)
+        client.post(api.INSTALL_ROUTE, headers=key, json={"kind": "stt"})
+        for _ in range(100):
+            if seen:
+                break
+            time.sleep(0.02)
+
+        assert seen, "the install never ran"
+        progress = seen[0]["progress"]["stt"]
+        assert progress["running"] is True
+        assert progress["text"] == "Downloading 1 of 3 — encoder.onnx (112 MB)"
+        assert progress["fraction"] == 0.25
+
+    def test_a_failure_leaves_its_reason_where_the_row_will_draw_it(self, client, key,
+                                                                    monkeypatch,
+                                                                    installable):
+        import mc_voice_models
+
+        def install(kind, on_status=None, on_progress=None):
+            say = mc_voice_models._narrator(kind, on_status)
+            with mc_voice_models._claim(kind, say):
+                raise mc_voice_models.VoiceError("decoder.onnx failed its hash check.")
+
+        monkeypatch.setattr(mc_voice_models, "install", install)
+        client.post(api.INSTALL_ROUTE, headers=key, json={"kind": "stt"})
+
+        for _ in range(100):
+            progress = client.post(api.STATUS_ROUTE, headers=key).json()["progress"]
+            if progress.get("stt", {}).get("failed"):
+                break
+            time.sleep(0.02)
+        assert progress["stt"]["failed"] is True
+        assert progress["stt"]["text"] == "decoder.onnx failed its hash check."
+        assert progress["stt"]["running"] is False
 
 
 class TestNothingIsWrittenDown:

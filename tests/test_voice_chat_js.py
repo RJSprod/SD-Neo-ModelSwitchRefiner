@@ -126,10 +126,44 @@ elements["mc-llm-chat-voice-key"].inner.value = "PAGE-TOKEN";
 // Hidden: Send is showing, Stop is not, which is the idle composer.
 elements["mc-llm-chat-stop"].offsetParent = null;
 
+// The Settings page row, which is drawn by Python and made live by this script.
+// Its own little DOM because it is not inside the Conversation panel and is
+// found by class rather than by id.
+const settingsParts = {
+    runtime: element("runtime"),
+    sttLine: element("stt-line"),
+    ttsLine: element("tts-line"),
+    sttButton: element("stt-button", "BUTTON"),
+    ttsButton: element("tts-button", "BUTTON"),
+};
+settingsParts.sttButton.textContent = "Download default STT";
+settingsParts.ttsButton.textContent = "Download default TTS";
+settingsParts.sttButton["data-mc-voice-install"] = "stt";
+settingsParts.ttsButton["data-mc-voice-install"] = "tts";
+
+const settingsRow = element("settings");
+settingsRow["data-mc-voice-key"] = "PAGE-TOKEN";
+settingsRow.querySelector = function (selector) {
+    if (selector === ".mc-voice-runtime") return settingsParts.runtime;
+    if (selector === '[data-mc-voice-status="stt"]') return settingsParts.sttLine;
+    if (selector === '[data-mc-voice-status="tts"]') return settingsParts.ttsLine;
+    if (selector === '[data-mc-voice-install="stt"]') return settingsParts.sttButton;
+    if (selector === '[data-mc-voice-install="tts"]') return settingsParts.ttsButton;
+    return null;
+};
+settingsRow.querySelectorAll = function (selector) {
+    if (selector === "[data-mc-voice-install]") {
+        return [settingsParts.sttButton, settingsParts.ttsButton];
+    }
+    return [];
+};
+
 globalThis.document = {
     documentElement: element("html"),
     querySelector(selector) {
         if (selector.charAt(0) === "#") return elements[selector.slice(1)] || null;
+        if (selector === ".mc-voice-settings") return SETTINGS_PRESENT ? settingsRow : null;
+        if (selector === "[data-mc-voice-key]") return SETTINGS_PRESENT ? settingsRow : null;
         return null;
     },
     createElement(tag) { return element("created", tag.toUpperCase()); },
@@ -319,6 +353,16 @@ function report(extra) {
         pendingTimers: pending(),
         consoleErrors,
         listeners: Object.keys(mic.handlers).map((k) => [k, mic.handlers[k].length]),
+        settings: {
+            runtime: settingsParts.runtime.textContent,
+            sttLine: settingsParts.sttLine.textContent,
+            ttsLine: settingsParts.ttsLine.textContent,
+            sttButton: settingsParts.sttButton.textContent,
+            ttsButton: settingsParts.ttsButton.textContent,
+            sttDisabled: settingsParts.sttButton.disabled,
+            ttsDisabled: settingsParts.ttsButton.disabled,
+            sttFailed: settingsParts.sttLine.classList.contains("mc-voice-failed"),
+        },
     }, extra || {});
 }
 
@@ -329,6 +373,7 @@ SCENARIO
 
 
 DEFAULTS = {
+    "SETTINGS_PRESENT": "false",
     "SECURE": "true",
     "MICROPHONE": "true",
     "PERMISSION": "true",
@@ -348,8 +393,16 @@ DEFAULTS = {
         "voice/stt": {"json": {"ok": True, "text": "the quick brown fox",
                                "auto_send": False}},
         "voice/tts": {"audio": None},
+        "voice/install": {"json": {"ok": True, "already": False}},
     }),
 }
+
+
+def status_answer(**changes):
+    """The status payload, with a few fields changed."""
+    answers = json.loads(DEFAULTS["ANSWERS"])
+    answers["voice/status"]["json"].update(changes)
+    return answers
 
 
 def run(scenario: str, **overrides) -> dict:
@@ -832,3 +885,176 @@ class TestIdempotentWiring:
             console.log(JSON.stringify(report()));
         """)
         assert found["consoleErrors"] == []
+
+
+# --------------------------------------------------------------------------- #
+# The Settings page row
+# --------------------------------------------------------------------------- #
+
+
+class TestTheSettingsRow:
+    """The row that shipped able to freeze on "Starting…" with nothing to say.
+
+    Every test here is one of the ways it could stop moving. The rule they all
+    check is the same: whatever happens, the row says something and the button
+    comes back — a control that disabled itself on the way into a request it
+    never got an answer to is a control somebody sits and watches.
+    """
+
+    def test_it_draws_what_is_installed_on_the_first_pass(self):
+        found = run("await tick(); console.log(JSON.stringify(report()));",
+                    SETTINGS_PRESENT="true")
+        assert found["settings"]["runtime"] == "Installed"
+        assert found["settings"]["sttButton"] == "Installed"
+        assert found["settings"]["sttDisabled"] is True
+
+    def test_a_pressed_button_that_is_refused_says_why_and_comes_back(self):
+        """The reported bug, as a test. The build cannot install anything, the
+        route says so in its reply, and the row has to show that rather than
+        sitting on "Starting…"."""
+        answers = status_answer(stt_ready=False, tts_ready=False, ready=False,
+                                stt_message="Not installed")
+        answers["voice/install"] = {"status": 409, "json": {
+            "ok": False,
+            "error": "Whisper Small cannot be installed by this build: its artifacts are "
+                     "not pinned.",
+        }}
+        found = run("""
+            await tick();
+            settingsParts.sttButton.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+
+        assert "not pinned" in found["settings"]["sttLine"]
+        assert found["settings"]["sttFailed"] is True
+        assert found["settings"]["sttButton"] == "Download default STT"
+        assert found["settings"]["sttDisabled"] is False
+        assert any("could not start" in line for line in found["consoleErrors"])
+
+    def test_a_dropped_connection_on_the_press_says_so_and_comes_back(self):
+        answers = status_answer(stt_ready=False, ready=False)
+        answers["voice/install"] = {"reject": True}
+        found = run("""
+            await tick();
+            settingsParts.sttButton.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+
+        assert "Could not reach this WebUI" in found["settings"]["sttLine"]
+        assert found["settings"]["sttDisabled"] is False
+
+    def test_a_status_route_that_refuses_is_reported_rather_than_swallowed(self):
+        """This is what actually froze the row: `refreshStatus` resolved with
+        null on any failure and every caller quietly did nothing."""
+        answers = status_answer()
+        answers["voice/status"] = {"status": 403, "json": {
+            "ok": False, "error": "This page is out of date with the WebUI. Reload it."}}
+        found = run("await tick(); console.log(JSON.stringify(report()));",
+                    SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+
+        assert "out of date" in found["settings"]["runtime"]
+        assert "out of date" in found["settings"]["sttLine"]
+        assert found["settings"]["sttFailed"] is True
+        assert found["settings"]["sttDisabled"] is False
+        assert any("status refused" in line for line in found["consoleErrors"])
+
+    def test_an_unreachable_status_route_is_reported_too(self):
+        answers = status_answer()
+        answers["voice/status"] = {"reject": True}
+        found = run("await tick(); console.log(JSON.stringify(report()));",
+                    SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+
+        assert "Could not reach this WebUI" in found["settings"]["runtime"]
+        assert found["settings"]["sttDisabled"] is False
+
+    def test_progress_is_drawn_while_a_download_runs(self):
+        """The other half of the same defect: the installer wrote a sentence for
+        every step and the route was never given anywhere to put it, so the row
+        had nothing but its own initial text for the length of a 375 MB
+        download."""
+        answers = status_answer(stt_ready=False, ready=False, progress={
+            "stt": {"running": True, "fraction": 0.41,
+                    "text": "Downloading 2 of 3 — decoder.onnx (262 MB)"}})
+        found = run("await tick(); console.log(JSON.stringify(report()));",
+                    SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+
+        assert "decoder.onnx" in found["settings"]["sttLine"]
+        assert "41%" in found["settings"]["sttLine"]
+        assert found["settings"]["sttButton"] == "Downloading…"
+        assert found["settings"]["sttDisabled"] is True
+
+    def test_a_failed_install_keeps_its_reason_on_screen(self):
+        answers = status_answer(stt_ready=False, ready=False, progress={
+            "stt": {"running": False, "failed": True, "fraction": 0.0,
+                    "text": "decoder.onnx failed its hash check."}})
+        found = run("await tick(); console.log(JSON.stringify(report()));",
+                    SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+
+        assert found["settings"]["sttLine"] == "decoder.onnx failed its hash check."
+        assert found["settings"]["sttFailed"] is True
+        assert found["settings"]["sttDisabled"] is False, (
+            "a failed download left its button disabled, so it cannot be retried")
+
+    def test_a_finished_install_clears_the_failure_styling(self):
+        answers = status_answer(progress={"stt": {"running": False, "failed": False,
+                                                  "fraction": 1.0, "text": "Installed."}})
+        found = run("""
+            await tick();
+            settingsParts.sttLine.classList.add("mc-voice-failed");
+            intervals.forEach((fn) => fn());
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+        assert found["settings"]["sttFailed"] is False
+
+    def test_the_press_carries_the_kind_and_nothing_else(self):
+        found = run("""
+            await tick();
+            settingsParts.sttButton.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+        posts = [r for r in found["requests"] if r.get("url", "").endswith("/install")]
+        assert len(posts) == 1
+        assert json.loads(posts[0]["bodyText"]) == {"kind": "stt"}
+
+    def test_the_row_is_wired_once_however_many_updates_arrive(self):
+        found = run("""
+            await tick();
+            updated.forEach((fn) => fn());
+            updated.forEach((fn) => fn());
+            settingsParts.sttButton.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+        posts = [r for r in found["requests"] if r.get("url", "").endswith("/install")]
+        assert len(posts) == 1, "one press sent the install request more than once"
+
+    def test_a_page_without_the_row_is_not_an_error(self):
+        found = run("await tick(); console.log(JSON.stringify(report()));")
+        assert found["consoleErrors"] == []
+
+    def test_the_row_reads_its_own_token_and_not_the_conversation_panel_s(self):
+        """The Settings page is not the Conversation panel, and a row that got
+        its token from a hidden component in another tab is a row that sends an
+        empty token -- and is refused 403 -- whenever that component is not
+        there or has not been hydrated yet."""
+        found = run("""
+            await tick();
+            // The Conversation panel is gone and the row's own token is the
+            // only one left. Requests from before this point are not the
+            // subject, so they are cleared.
+            delete elements["mc-llm-chat-voice-key"];
+            settingsRow["data-mc-voice-key"] = "SETTINGS-TOKEN";
+            requests.length = 0;
+            settingsParts.sttButton.fire("click");
+            intervals.forEach((fn) => fn());
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+        posts = [r for r in found["requests"] if r.get("url")]
+        assert posts, "the row made no request at all"
+        for request in posts:
+            assert request["headers"]["X-Model-Chain-Voice"] == "SETTINGS-TOKEN"
