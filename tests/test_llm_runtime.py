@@ -2655,14 +2655,14 @@ class TestAZeroResidencyIsNotBelievedStraightAway:
         self.card(monkeypatch, [20 * _GB, 20 * _GB, 6 * _GB])
         placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
 
-        assert runtime.Runtime()._observed_residency(20 * _GB, placement) == 14 * _GB
+        assert runtime.Runtime()._observed_residency(20 * _GB, placement, None) == 14 * _GB
 
     def test_a_reading_that_is_right_first_time_is_not_waited_for(self, placed,
                                                                  monkeypatch):
         self.card(monkeypatch, [6 * _GB])
         placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
 
-        assert runtime.Runtime()._observed_residency(20 * _GB, placement) == 14 * _GB
+        assert runtime.Runtime()._observed_residency(20 * _GB, placement, None) == 14 * _GB
 
     def test_a_placement_with_nothing_on_the_card_reports_zero_at_once(
             self, placed, monkeypatch):
@@ -2673,7 +2673,7 @@ class TestAZeroResidencyIsNotBelievedStraightAway:
         self.card(monkeypatch, [20 * _GB])
         placement = ctx.Placement(gpu_layers=ctx.NO_LAYERS, on_gpu=True)
 
-        assert runtime.Runtime()._observed_residency(20 * _GB, placement) == 0
+        assert runtime.Runtime()._observed_residency(20 * _GB, placement, None) == 0
         assert not waited
 
     def test_a_card_that_never_settles_gives_up_and_says_zero(self, placed,
@@ -2681,12 +2681,12 @@ class TestAZeroResidencyIsNotBelievedStraightAway:
         self.card(monkeypatch, [20 * _GB])
         placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
 
-        assert runtime.Runtime()._observed_residency(20 * _GB, placement) == 0
+        assert runtime.Runtime()._observed_residency(20 * _GB, placement, None) == 0
 
     def test_an_unmeasurable_card_is_not_retried(self, placed, monkeypatch):
         waited = []
         monkeypatch.setattr(runtime.time, "sleep", lambda s: waited.append(s))
         placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True)
 
-        assert runtime.Runtime()._observed_residency(0, placement) == 0
+        assert runtime.Runtime()._observed_residency(0, placement, None) == 0
         assert not waited

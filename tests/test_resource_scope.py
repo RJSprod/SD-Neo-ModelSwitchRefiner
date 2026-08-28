@@ -2022,3 +2022,222 @@ class TestTwoNamespacesForOneSetOfCards:
         assert mc_broker._reclaim_for_image(3 * _GB, reason="the Stage 1 pass") == 0
         assert away.up
         assert away.holds == 19 * _GB
+
+
+# --------------------------------------------------------------------------- #
+# Three copies of one model on one card
+# --------------------------------------------------------------------------- #
+
+
+class TestOneModelInMemory:
+    """A 32 GB card with three llama-servers on it, from the second report.
+
+    The user's expectation was the right one: LLM Studio, Creative and Spatial
+    all pointing at the same model should be *one* copy of the weights with
+    three things talking to it. What the log showed instead was a conversation
+    holding twenty gigabytes while the two roles took turns in the eleven that
+    were left -- twenty-five of sixty-five layers each, four tokens a second,
+    and a model load on every switch.
+    """
+
+    def test_residency_is_measured_on_the_card_the_server_is_on(self, scoped,
+                                                                monkeypatch):
+        """`llama-server ready — 8.7 GB VRAM` about a model holding twenty.
+
+        31.4 GB free on the 5090 before, 22.7 GB free on the 3090 after, and
+        the difference between two different cards reported as one card's
+        residency. It also produced a warning that llama.cpp had left the model
+        in system RAM, about a server answering at 92 tokens a second.
+        """
+        import mc_llm_context as ctx
+
+        readings = {IMAGE_CARD: 22.7, OTHER_CARD: 31.4}
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes",
+                            lambda index=None: int(readings[
+                                IMAGE_CARD if index is None else int(index)] * _GB))
+        before = int(readings[OTHER_CARD] * _GB)
+        readings[OTHER_CARD] = 11.4  # the server took 20 GB of the card it is on
+
+        observed = runtime.Runtime._observed_residency(
+            before, ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True), card=OTHER_CARD)
+
+        assert observed == pytest.approx(20 * _GB, rel=0.01)
+        # And the figure the bug produced, so a regression is recognisable:
+        # one card's free VRAM minus another's.
+        assert observed != pytest.approx(int(31.4 * _GB) - int(22.7 * _GB), rel=0.01)
+
+    def test_an_unnamed_card_still_answers_for_the_image_side(self, scoped,
+                                                              monkeypatch):
+        """The single-card installation, unchanged: ``None`` is the image card,
+        and the difference is one card from itself."""
+        import mc_llm_context as ctx
+
+        monkeypatch.setattr(mc_broker, "device_free_vram_bytes",
+                            lambda index=None: int(4 * _GB))
+
+        observed = runtime.Runtime._observed_residency(
+            int(20 * _GB), ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True), None)
+
+        assert observed == 16 * _GB
+
+    def test_the_card_has_to_be_said(self):
+        """No default, because the default was the bug.
+
+        A caller that forgot which card it was measuring got the image card's
+        free VRAM silently subtracted from another card's, which is a wrong
+        number rather than an error and reads perfectly plausibly in a log. It
+        is a ``TypeError`` now, at the call site, immediately.
+        """
+        import inspect
+
+        card = inspect.signature(runtime.Runtime._observed_residency).parameters["card"]
+
+        assert card.default is inspect.Parameter.empty
+
+
+class TestTakeTurnsMeansAllOfOurServers:
+    """`stood the other role's llama-server down — 1.0 GB` while 20 GB stayed up.
+
+    ``make_room_for`` skipped any runtime serving no role, and the runtime
+    serving no role is the *shared* one -- the server Conversation, Prompt
+    Studio, MiniMax and LLM Studio all use, and routinely the largest thing on
+    the card. "Serves no role other than mine" and "serves no role at all" read
+    identically to the test that used to be there.
+    """
+
+    @pytest.fixture
+    def roles(self, scoped, tmp_path, monkeypatch, host):
+        from modules import shared
+
+        shared.opts.model_chain_llm_role_processes = runtime.PROCESSES_SEPARATE
+        shared.opts.model_chain_llm_role_sharing = runtime.SHARE_TAKE_TURNS
+        settings = configuration_on(tmp_path, card=OTHER_CARD)
+        monkeypatch.setattr(runtime, "config", lambda role="": settings)
+        found = runtime.RuntimeRegistry()
+        return found, settings
+
+    def test_the_shared_server_is_stood_down_too(self, roles):
+        """The one the log never mentioned, holding the memory the roles then
+        fought over."""
+        import mc_llm_roles
+
+        found, settings = roles
+        conversation = hold(found, Server(card=OTHER_CARD, holds=20 * _GB), "shared")
+
+        freed = found.make_room_for(mc_llm_roles.CREATIVE, settings)
+
+        assert conversation.stopped
+        assert freed == 20 * _GB
+
+    def test_a_role_server_is_still_stood_down(self, roles):
+        """The case that already worked, which the fix must not lose."""
+        import mc_llm_roles
+
+        found, settings = roles
+        spatial = hold(found, Server(card=OTHER_CARD, holds=6 * _GB), "spatial")
+        spatial.roles = (mc_llm_roles.SPATIAL,)
+
+        found.make_room_for(mc_llm_roles.CREATIVE, settings)
+
+        assert spatial.stopped
+
+    def test_a_roles_own_server_is_never_its_own_victim(self, roles):
+        """Making room for a role by stopping that role's own server is not a
+        policy, it is a reload."""
+        import mc_llm_roles
+
+        found, settings = roles
+        mine = Server(card=OTHER_CARD, holds=6 * _GB)
+        mine.roles = (mc_llm_roles.CREATIVE,)
+        found._runtimes[found.key_for(mc_llm_roles.CREATIVE, settings)] = mine
+
+        found.make_room_for(mc_llm_roles.CREATIVE, settings)
+
+        assert not mine.stopped
+
+    def test_a_server_in_another_pool_is_left_alone(self, roles, tmp_path, monkeypatch):
+        """A role on the processor and a role on a card are not competing, and
+        take turns has never meant otherwise."""
+        import mc_llm_roles
+
+        found, settings = roles
+        elsewhere = hold(found, Server(cpu=True, holds=0), "processor")
+        elsewhere.roles = (mc_llm_roles.SPATIAL,)
+        processor = configuration_on(tmp_path, card=None, mode="cpu", name="cpu.gguf")
+        monkeypatch.setattr(runtime, "config",
+                            lambda role="": processor if role == mc_llm_roles.SPATIAL
+                            else settings)
+
+        found.make_room_for(mc_llm_roles.CREATIVE, settings)
+
+        assert not elsewhere.stopped
+
+    def test_sharing_one_server_stands_nothing_down_at_all(
+            self, roles, monkeypatch, host):
+        """And the setting the user actually wants: identical roles resolve to
+        one runtime, so there is never a second one to stop."""
+        import mc_llm_roles
+        from modules import shared
+
+        shared.opts.model_chain_llm_role_processes = runtime.PROCESSES_SHARED
+        found, settings = roles
+        # Filed under the identity rather than under a role, which is the whole
+        # of what sharing is: every role resolves to this one key, so the server
+        # a role would have stood down *is* the server it is about to use.
+        key = found.key_for(mc_llm_roles.CREATIVE, settings)
+        assert key == found.key_for(mc_llm_roles.SPATIAL, settings)
+        conversation = Server(card=OTHER_CARD, holds=20 * _GB)
+        found._runtimes[key] = conversation
+
+        found.make_room_for(mc_llm_roles.CREATIVE, settings)
+
+        assert not conversation.stopped
+        assert conversation.holds == 20 * _GB
+
+
+class TestWhoFilledTheCard:
+    """`Free VRAM on this card` is advice for a card somebody else filled."""
+
+    def test_it_names_our_own_servers_and_the_setting(self, scoped, tmp_path,
+                                                      monkeypatch):
+        import mc_llm_context as ctx
+        import mc_gguf
+
+        found = runtime.RuntimeRegistry()
+        hold(found, Server(card=OTHER_CARD, holds=20 * _GB), "shared")
+        monkeypatch.setattr(runtime, "registry", found)
+        settings = configuration_on(tmp_path, card=OTHER_CARD)
+        described = mc_gguf.describe(settings.model)
+
+        said = runtime._unsatisfied(settings, ctx.Placement(gpu_layers=8, on_gpu=True),
+                                    described)
+
+        assert said
+        assert "20.0 GB of it is held by 1 other llama-server" in said[0]
+        assert "One server" in said[0]
+
+    def test_it_says_nothing_when_nothing_of_ours_is_on_the_card(self, scoped, tmp_path,
+                                                                 monkeypatch):
+        """Then the advice really is "free VRAM", and adding a sentence about
+        servers that are not there would be worse than saying nothing."""
+        import mc_llm_context as ctx
+        import mc_gguf
+
+        monkeypatch.setattr(runtime, "registry", runtime.RuntimeRegistry())
+        settings = configuration_on(tmp_path, card=OTHER_CARD)
+
+        said = runtime._unsatisfied(settings, ctx.Placement(gpu_layers=8, on_gpu=True),
+                                    mc_gguf.describe(settings.model))
+
+        assert said
+        assert "held by" not in said[0]
+
+    def test_a_satisfied_placement_says_nothing(self, scoped, tmp_path, monkeypatch):
+        import mc_llm_context as ctx
+        import mc_gguf
+
+        settings = configuration_on(tmp_path, card=OTHER_CARD)
+
+        assert runtime._unsatisfied(
+            settings, ctx.Placement(gpu_layers=ctx.ALL_LAYERS, on_gpu=True),
+            mc_gguf.describe(settings.model)) == []

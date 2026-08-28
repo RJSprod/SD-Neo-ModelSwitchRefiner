@@ -112,6 +112,47 @@ its conclusion, and `test_end_to_end_through_the_real_translation` runs with
 nothing about the card stubbed.
 
 
+## 2b. Three copies of one model, and a phantom eight gigabytes
+
+The second live run fixed the namespace and exposed three more things, all on
+the language-model side of the card.
+
+**A residency figure measured across two cards.** `_observed_residency`
+subtracts two free-VRAM readings, and only one of them named a card: `before`
+came from the card being placed on, `after` from `device_free_vram_bytes()`
+with no argument, which is the image card. A 5090 with 31.4 GB free and a 3090
+with 22.7 GB produced "llama-server ready — 8.7 GB VRAM" about a model holding
+roughly twenty, a warning that llama.cpp had left the rest in system RAM about
+a server answering at 92 tokens a second, and 8.7 GB of phantom residency
+declared to the broker. `card` has no default now: the default was the bug, and
+a caller that forgets is a `TypeError` rather than a plausible-looking number.
+
+**Take turns that skipped the biggest server.** `make_room_for` had
+
+```python
+if not any(name != chosen for name in _roles_of(other)):
+    continue
+```
+
+which reads "serves no role other than mine" and also matches "serves no role
+at all" — and the runtime serving no role is the *shared* one, the server
+Conversation, Prompt Studio, MiniMax and LLM Studio all use. It is routinely
+the largest thing on the card. In the log a conversation left 20 GB up while
+the two roles took turns in the 11 GB remaining, each getting 25 of 65 layers,
+four tokens a second, and a model load per switch. Take turns has to mean all
+of our servers or it does not mean anything.
+
+**A message that blamed the user for our own memory.** "Free VRAM on this card"
+is advice for a card somebody else filled. `_who_filled_the_card` now names the
+holders when they are ours and points at the setting that collapses them into
+one.
+
+None of this makes "One each" wrong — on a card with room for two servers it is
+exactly right, and it is why the setting exists. What it was doing on a 32 GB
+card with a 18.2 GB model was fitting one copy and then two more into what was
+left.
+
+
 ## 3. §7.1 — `ANY_CARD`, and why a sentinel rather than `None`
 
 A card filter has three states — every card, one card, the card nobody could
