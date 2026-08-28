@@ -19,7 +19,6 @@ The two things that make it safe are tested hardest:
 
 from __future__ import annotations
 
-import types
 
 import pytest
 
@@ -332,22 +331,62 @@ class TestABuildThatWillNotTakeThem:
 
         assert negotiated.placement.slots == 1
 
-    def test_a_value_refused_at_startup_is_not_asked_for_again(self, card, monkeypatch,
-                                                               tmp_path, host):
+    def test_a_count_refused_at_startup_is_halved_rather_than_abandoned(
+            self, card, monkeypatch, tmp_path, host):
+        """A build that would not take six caches may take three, and the extra
+        attempt is argument parsing rather than a model load."""
+        from modules import shared
+
+        shared.opts.model_chain_llm_prompt_caches = "6"
+        configuration = configure(monkeypatch, tmp_path)
+        set_free(monkeypatch, 24)
+        monkeypatch.setattr(
+            runtime, "runtime_refused",
+            lambda flag, value, configuration=None: str(value) == "6")
+
+        negotiated = runtime.negotiate(configuration, reclaim=False)
+
+        assert negotiated.placement.slots == 3
+
+    def test_every_count_refused_keeps_one_cache_and_the_accelerator(
+            self, card, monkeypatch, tmp_path, host):
         """The accelerator wins that trade: it is a setting the user chose and
         it pays back on every token, where a cache is worth one prompt."""
+        from modules import shared
+
+        shared.opts.model_chain_llm_prompt_caches = "4"
+        configuration = configure(monkeypatch, tmp_path)
+        set_free(monkeypatch, 24)
+        monkeypatch.setattr(
+            runtime, "runtime_refused",
+            lambda flag, value, configuration=None: flag == runtime.PARALLEL_FLAG)
+
+        negotiated = runtime.negotiate(configuration, reclaim=False)
+
+        assert negotiated.placement.slots == 1
+
+    def test_a_number_is_not_asked_of_the_help_text(self, card, monkeypatch, tmp_path,
+                                                    host):
+        """The bug this shipped with. ``runtime_accepts`` decides by finding the
+        value as a whole word in ``--help``, which is right for ``--spec-type
+        draft-mtp`` and nonsense for ``--parallel 6``: llama.cpp's help has no
+        reason to contain a bare "6", so every count read as unsupported and the
+        feature disabled itself with a sentence about a start that never
+        happened."""
         from modules import shared
 
         shared.opts.model_chain_llm_prompt_caches = "3"
         configuration = configure(monkeypatch, tmp_path)
         set_free(monkeypatch, 24)
+        asked: list = []
         monkeypatch.setattr(
             runtime, "runtime_accepts",
-            lambda flag, value, configuration=None: flag != runtime.PARALLEL_FLAG)
+            lambda flag, value, configuration=None: (asked.append((flag, value)), False)[1])
 
         negotiated = runtime.negotiate(configuration, reclaim=False)
 
-        assert negotiated.placement.slots == 1
+        assert negotiated.placement.slots == 3
+        assert not [pair for pair in asked if pair[0] == runtime.PARALLEL_FLAG]
 
     def test_the_placement_and_the_command_line_agree(self, card, monkeypatch,
                                                       tmp_path, host):

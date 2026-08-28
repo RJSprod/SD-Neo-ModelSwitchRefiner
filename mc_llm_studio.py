@@ -832,6 +832,17 @@ def _activity_text(status) -> str:
     return "; ".join(entry.describe() for entry in running)
 
 
+def _armed_text() -> str:
+    """Whether the next generation would have to load anything. See :mod:`mc_arm`."""
+    try:
+        import mc_arm
+
+        return mc_arm.readiness().describe()
+    except Exception:
+        logger.debug("Model Chain: could not read the pipeline's readiness", exc_info=True)
+        return "unknown"
+
+
 def _residency_html() -> str:
     """The detailed residency view (section 14), kept out of the main UI."""
     try:
@@ -896,6 +907,7 @@ def _residency_table() -> str:
         # "Active workload" line could not say that, and saying it is part of
         # the requirement rather than a nicety (section 14.1).
         f"<li>Active: {ui.escape(_activity_text(status))}</li>",
+        f"<li>Pipeline: {ui.escape(_armed_text())}</li>",
         # Where the file is, always, whether or not anything has gone wrong
         # with it. It is the one thing in this panel that a user has to be
         # able to find on a day when the panel itself is not enough.
