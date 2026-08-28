@@ -604,6 +604,7 @@ def install(_demo=None, app=None) -> bool:
                 "served — they carry no login of their own and need no account anywhere")
     logger.info("Model Chain: Voice Chat routes registered at %s", ", ".join(ROUTES))
     logger.info("Model Chain: Voice Chat data directory is %s", paths.data_root())
+    logger.info("Model Chain: Voice Chat host — %s", models.describe_host())
     logger.info("Model Chain: Voice Chat status — runtime %s, speech-to-text %s, "
                 "text-to-speech %s", found.runtime_message, found.stt_message,
                 found.tts_message)

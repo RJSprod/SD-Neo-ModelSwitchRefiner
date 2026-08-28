@@ -280,10 +280,13 @@ def settings_html() -> str:
                 for item in addresses)
             parts.append(
                 f'<details class="mc-voice-manual">'
-                f'<summary>Install from files you download yourself</summary>'
-                f'<p>Download these into one folder, then give Voice Chat that folder. '
-                f'The original filenames are fine — nothing needs renaming, and no '
-                f'account or access token is needed for either site.</p>'
+                f'<summary>Or install from files you download yourself</summary>'
+                f'<p>The button above does all of this for you. This is here for a '
+                f'machine that cannot reach the publishers — no Internet, or a proxy '
+                f'that will not pass a large binary. Download these into one folder, '
+                f'then give Voice Chat that folder. The original filenames are fine — '
+                f'nothing needs renaming, and no account or access token is needed for '
+                f'either site.</p>'
                 f'<ul class="mc-voice-links">{links}</ul>'
                 f'<div class="mc-voice-folder-row">'
                 f'<input type="text" class="mc-voice-folder" '
