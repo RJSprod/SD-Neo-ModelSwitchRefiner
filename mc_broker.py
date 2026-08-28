@@ -520,6 +520,7 @@ def clear() -> None:
         _register.clear()
     with _decision_lock:
         _decisions.clear()
+    _said_independence.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -918,6 +919,29 @@ def inside_host_job() -> bool:
     return getattr(_host_job, "depth", 0) > 0
 
 
+_said_independence: set[tuple[str, str]] = set()
+
+
+def _say_independence(domain: ExecutionDomain) -> None:
+    """Say once, per pair of processors, that two workloads are not competing.
+
+    Section 21.3 asks for positive non-interference to be observable, and asks
+    for it not to be printed per token or per chunk. So it is said at the one
+    boundary where it is decided -- an image generation about to start beside a
+    language model already running -- and said once for each pair of
+    processors, because the interesting fact is "these two are independent",
+    which does not become more true the twentieth time.
+    """
+    others = {entry.domain for entry in active_workloads() if entry.family == FAMILY_LLM}
+    for other in others:
+        pair = (domain.describe(), other.describe())
+        if pair in _said_independence:
+            continue
+        _said_independence.add(pair)
+        logger.info("Model Chain: image generation is on %s and the LLM is on %s — they use "
+                    "different processors and run at the same time", *pair)
+
+
 def conflicting_llm(domain: ExecutionDomain | None) -> Active | None:
     """An active LLM workload competing with ``domain`` for a processor.
 
@@ -960,6 +984,8 @@ def await_idle(timeout: float = 120.0, *, domain: ExecutionDomain | None = None)
             if not first:
                 logger.info("Model Chain: the LLM on %s has finished; generating",
                             domain.describe() if domain is not None else "the card")
+            elif domain is not None:
+                _say_independence(domain)
             return True
         if time.monotonic() >= deadline:
             note(FAMILY_IMAGE,
@@ -1446,6 +1472,14 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
        (section 8).
     3. Only then is the deficit -- and only the deficit -- freed, from the
        family that gives ground for this one (section 9).
+
+    ``card`` is the physical GPU the request is about, and it runs through
+    every one of those branches. It is what makes the sweep in (1) a sweep of
+    Forge's card rather than of every GPU in the machine, the reading in (2) a
+    reading of that card, and the release in (3) unable to reach residency
+    that could not add a byte to it -- invariants I-2 and I-3. Left
+    unspecified, an image request resolves it to the image card and everything
+    else falls back to the machine-wide behaviour this function has always had.
     """
     needed = max(int(needed_bytes), 0)
     reserve = safety_margin_bytes() if margin is None else int(margin)

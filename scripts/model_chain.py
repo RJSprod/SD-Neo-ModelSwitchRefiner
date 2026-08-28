@@ -2050,22 +2050,37 @@ class ScriptModelChain(scripts.Script):
             errors.report("Model Chain: could not build this generation's plan",
                           exc_info=True)
 
-        # An LLM turn already in flight gets to finish before this generation
-        # touches the card (section 15). This waits; it does not take a lock,
-        # because there is no hook paired with this one that is guaranteed to
-        # run afterwards and a lock left held here would block LLM Studio until
-        # the WebUI restarted. Bounded, so a wedged runtime delays a generation
-        # rather than preventing one.
-        mc_broker.await_idle()
-        # Claim VRAM ownership for the image family. The number is zero on
-        # purpose: in Hybrid mode a generation starting is not a reason to move
-        # anything, so this does nothing at all, and the real demotion happens
-        # later, from make_vram_room, only if the pass actually does not fit.
-        # In Exclusive mode it is the handover -- ownership there is a promise
-        # rather than an optimisation, so the LLM leaves VRAM whether or not
-        # this generation would have needed the room (sections 8 and 10).
+        # Which card this generation is about. Everything below is scoped to
+        # it, because everything below is a statement about one physical GPU:
+        # who has to wait for whom, and whose VRAM the image family is claiming.
+        image_card = mc_broker.image_device_index()
+        image_domain = mc_broker.image_execution_domain()
+
+        # An LLM turn already in flight on *this card* gets to finish before
+        # this generation touches it (section 12.3). This waits; it does not
+        # take a lock, because there is no hook paired with this one that is
+        # guaranteed to run afterwards and a lock left held here would block
+        # LLM Studio until the WebUI restarted. Bounded, so a wedged runtime
+        # delays a generation rather than preventing one.
+        #
+        # A conversation on another card, or on the processor, is not waited
+        # for at all -- it is not using this GPU and never was, and the wait it
+        # used to cause was a pure loss on both sides.
+        mc_broker.await_idle(domain=image_domain)
+        # Claim VRAM ownership for the image family, on the image card. The
+        # number is zero on purpose: in Hybrid mode a generation starting is
+        # not a reason to move anything, so this does nothing at all, and the
+        # real demotion happens later, from make_vram_room, only if the pass
+        # actually does not fit. In Exclusive mode it is the handover --
+        # ownership there is a promise rather than an optimisation, so the LLM
+        # leaves VRAM whether or not this generation would have needed the room
+        # (sections 8 and 10). Ownership of *this* card: "the image family owns
+        # the GPU" has never meant every GPU in the machine, and a sweep that
+        # crossed to a second one would stop a language model to free memory
+        # this generation cannot reach (section 9.2).
         mc_broker.request_vram(mc_broker.FAMILY_IMAGE, 0,
-                               reason="an image generation started", margin=0)
+                               reason="an image generation started", margin=0,
+                               card=image_card if image_card >= 0 else mc_broker.ANY_CARD)
 
         # Always reinstate a checkpoint we ourselves left swapped out, even when
         # the extension has since been disabled -- that is cleanup of our own

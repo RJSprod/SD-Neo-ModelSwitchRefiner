@@ -2598,7 +2598,15 @@ def _llm_residency_bytes() -> int:
     try:
         import mc_broker
 
-        return max(int(mc_broker.reported_bytes(mc_broker.FAMILY_LLM)), 0)
+        # On the image card, because that is the card the pass was short on.
+        # A reserve miss filed with a second card's llama-server in it would
+        # tell the panel -- and Auto's learned cap -- that nineteen gigabytes
+        # of language model were in the way of a pass that could never have
+        # reached them (design intent T19).
+        index = mc_broker.image_device_index()
+        return max(int(mc_broker.reported_bytes(
+            mc_broker.FAMILY_LLM,
+            card=index if index >= 0 else mc_broker.ANY_CARD)), 0)
     except Exception:
         return 0
 

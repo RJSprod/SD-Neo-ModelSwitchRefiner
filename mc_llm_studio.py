@@ -807,6 +807,31 @@ def _log_path() -> str:
         return "unknown"
 
 
+def _where(card: int | None) -> str:
+    """A physical card as a display name, or ``""`` when there is nothing to name.
+
+    Empty rather than "the card" on purpose: on the ordinary single-GPU
+    installation there is one card and naming it adds nothing, so the lines
+    below read exactly as they always did. On a two-card machine the name is
+    the most important word in the sentence.
+    """
+    return f"GPU {card}" if card is not None else ""
+
+
+def _activity_text(status) -> str:
+    """Everything running, as one sentence naming each processor.
+
+    "Image generation on GPU 0; a conversation reply on GPU 1" -- which is the
+    state the target machine was assembled to produce, and which the panel
+    could not previously say, because there was one active workload and it was
+    whichever of the two happened to hold the broker's lock.
+    """
+    running = status.activities or ((status.active,) if status.active else ())
+    if not running:
+        return "nothing"
+    return "; ".join(entry.describe() for entry in running)
+
+
 def _residency_html() -> str:
     """The detailed residency view (section 14), kept out of the main UI."""
     try:
@@ -827,13 +852,22 @@ def _residency_table() -> str:
         rows.append(
             f"<tr><td>{ui.escape(entry.label)}</td>"
             f"<td>{ui.escape(entry.family)}</td>"
+            f"<td>{ui.escape(_where(entry.card) or '—')}</td>"
             f"<td>{ui.gigabytes(entry.bytes)}</td>"
             f"<td>{ui.escape(mc_broker.RANK_LABELS.get(entry.effective_rank, '?'))}</td></tr>")
     if not rows:
-        rows.append('<tr><td colspan="4">Nothing is registered as VRAM-resident.</td></tr>')
+        rows.append('<tr><td colspan="5">Nothing is registered as VRAM-resident.</td></tr>')
 
-    running = status.active
     owners = ", ".join(status.owners) or "nothing"
+    named = _where(status.card)
+    # Shown only when there is one, because on a single-card machine the line
+    # would be a permanent "0.0 GB elsewhere" about a card that does not exist.
+    elsewhere = ((f"<li>LLM VRAM on other cards: "
+                  f"{ui.gigabytes(status.llm_bytes_elsewhere)} — not part of this card's "
+                  f"budget and not a candidate for its reclaim</li>",)
+                 if status.llm_bytes_elsewhere > 0 else ())
+    warm = (f"; {ui.gigabytes(status.image_warm_ram)} held as warm image cache"
+            if status.image_warm_ram > 0 else "")
     summary = [
         # First, and spelled out: the top bar's chip says "Loaded" and this is
         # where "loaded as what?" is answered. The chip's tooltip carries the
@@ -844,10 +878,24 @@ def _residency_table() -> str:
         # LLM is never the reason a checkpoint leaves the card.
         "<li>Placement rule: <b>the image model keeps its VRAM; the LLM uses what is "
         "spare</b></li>",
-        f"<li>VRAM: {ui.gigabytes(status.free_vram)} free of "
-        f"{ui.gigabytes(status.total_vram)}, {ui.gigabytes(status.reserve)} reserved</li>",
-        f"<li>VRAM owners: {ui.escape(owners)}</li>",
-        f"<li>Active workload: {ui.escape(running.label) if running else 'none'}</li>",
+        # Named, because on a two-card machine an unlabelled "VRAM: 4.2 GB
+        # free" beside "LLM: 19 GB" describes a card that is over-subscribed by
+        # fifteen gigabytes and a machine where neither card is short of
+        # anything (section 21.1). Every physical-memory figure here says which
+        # pool it is about.
+        f"<li>{ui.escape(f'{named} ' if named else '')}VRAM: "
+        f"{ui.gigabytes(status.free_vram)} free of {ui.gigabytes(status.total_vram)}, "
+        f"{ui.gigabytes(status.reserve)} reserved</li>",
+        f"<li>VRAM owners{ui.escape(f' on {named}' if named else '')}: "
+        f"{ui.escape(owners)}</li>",
+        *elsewhere,
+        f"<li>Host RAM: {ui.gigabytes(status.free_ram)} available, "
+        f"{ui.gigabytes(status.ram_reserve)} reserved{warm}</li>",
+        # A list, because two things really can be running at once now: an
+        # image generation on one card and a conversation on another. A single
+        # "Active workload" line could not say that, and saying it is part of
+        # the requirement rather than a nicety (section 14.1).
+        f"<li>Active: {ui.escape(_activity_text(status))}</li>",
         # Where the file is, always, whether or not anything has gone wrong
         # with it. It is the one thing in this panel that a user has to be
         # able to find on a day when the panel itself is not enough.
@@ -859,7 +907,11 @@ def _residency_table() -> str:
     measured = _measured_speed()
     if measured:
         summary.append(f"<li>Last reply: <b>{ui.escape(measured)}</b></li>")
-    stray = mc_broker.unaccounted_bytes()
+    # The image card's, matching the free/total figures above it. Asking about
+    # the machine and printing the answer under one card's heading is exactly
+    # the mix-up section 21.1 asks the panel to stop making.
+    stray = mc_broker.unaccounted_bytes(
+        card=status.card if status.card is not None else mc_broker.ANY_CARD)
     if stray > 0:
         # Named here as well as in the console, because this is the panel
         # somebody opens when a placement makes no sense, and VRAM held by
@@ -881,7 +933,8 @@ def _residency_table() -> str:
         f'<div class="{ui.PREFIX}-residency">'
         f'<ul>{"".join(summary)}</ul>'
         f'<table class="{ui.PREFIX}-table"><thead><tr><th>Resident</th><th>Family</th>'
-        f'<th>VRAM</th><th>Rank</th></tr></thead><tbody>{"".join(rows)}</tbody></table>'
+        f'<th>Device</th><th>VRAM</th><th>Rank</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table>'
         f'<h4>Recent decisions</h4><ul>{decisions or "<li>No decisions yet.</li>"}</ul>'
         f'</div>'
     )

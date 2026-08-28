@@ -168,20 +168,58 @@ def _streamed(work):
 class _Gpu:
     """The workload lock, acquired with something to say while it waits."""
 
-    def __init__(self, label: str, cancel: Cancellation):
-        self.label, self.cancel = label, cancel
+    def __init__(self, label: str, cancel: Cancellation, role: str = ""):
+        self.label, self.cancel, self.role = label, cancel, role
         self._held = None
         self._workload = None
 
+    def _domain(self):
+        """Where the server that will answer this request executes.
+
+        Resolved from the role's *current* configuration, every time it is
+        asked, which is what makes the post-lock re-check in :meth:`acquire`
+        able to see a setting the user changed while this request was queued
+        (section 16.4).
+        """
+        try:
+            import mc_llm_runtime
+
+            return mc_llm_runtime.execution_domain(mc_llm_runtime.config(self.role))
+        except Exception:
+            logger.debug("Model Chain: could not resolve which device will serve this "
+                         "request", exc_info=True)
+            return mc_broker.UNKNOWN_CUDA_EXECUTION
+
+    @staticmethod
+    def _blocked_by_the_image_job(domain) -> bool:
+        """Whether a running image generation is competing with ``domain``.
+
+        The narrowing this whole change set is for. "The host is busy" used to
+        be the whole predicate, which on a two-card machine meant a
+        conversation on the 5090 waited for every 3090 generation for no reason
+        anybody could have named -- the two share no processor, and the
+        language model's tokens would have cost the image pass nothing.
+
+        Still conservative where it must be: an unresolved card waits, and so
+        does an image job whose card cannot be read, because being wrong that
+        way costs some throughput and being wrong the other way puts two jobs
+        on one card with neither expecting the other (invariants I-1 and I-10).
+        """
+        if not mc_broker.host_busy():
+            return False
+        return domain.conflicts_with(mc_broker.image_execution_domain())
+
     def acquire(self):
-        """Generator: yields status events until the GPU is ours.
+        """Generator: yields status events until this request may begin.
 
         Two conditions, not one. The lock keeps LLM turns from overlapping each
-        other; ``host_busy`` keeps a turn from starting on top of an image
-        generation the host is running, which no lock this extension holds
-        could see. The second is re-checked after the lock is taken, because
-        the check and the acquisition are not atomic and the point of checking
-        is to be right at the moment work actually begins.
+        other; the image check keeps a turn from starting on top of an image
+        generation *it would actually contend with*, which no lock this
+        extension holds could see. The second is re-checked after the lock is
+        taken, because the check and the acquisition are not atomic and the
+        point of checking is to be right at the moment work actually begins --
+        and because a configuration changed while this request was queued must
+        not start on stale scope (section 16.4).
 
         The second condition has one exception, and it is
         ``mc_broker.inside_host_job()``: a turn the image generation is itself
@@ -198,15 +236,37 @@ class _Gpu:
             if self.cancel.is_set():
                 return False
             ours = mc_broker.inside_host_job()
-            if mc_broker.host_busy() and not ours:
-                announced = yield from self._announce(started, announced, "image generation")
+            domain = self._domain()
+            if not ours and self._blocked_by_the_image_job(domain):
+                # Named only when the name adds something. On the ordinary
+                # single-card machine "image generation" is the whole truth and
+                # "image generation on an unidentified GPU" is alarming prose
+                # about a card that was never in doubt; on a two-card machine
+                # the card is exactly what somebody wants to know, because it
+                # is why this request is waiting at all.
+                where = mc_broker.image_execution_domain()
+                announced = yield from self._announce(
+                    started, announced,
+                    f"image generation on {where.describe()}" if where.known
+                    else "image generation")
                 time.sleep(WAIT_POLL_SECONDS)
                 continue
             self._workload = mc_broker.workload(mc_broker.FAMILY_LLM, self.label,
-                                                timeout=WAIT_POLL_SECONDS, required=False)
+                                                timeout=WAIT_POLL_SECONDS, required=False,
+                                                domain=domain)
             self._held = self._workload.__enter__()
             if self._held:
-                if ours or not mc_broker.host_busy():
+                # Re-resolved rather than reused. A request queued for GPU 1
+                # that the user moved to GPU 0 while it waited must not start
+                # on top of the generation running there, and the recorded
+                # domain must describe where this turn really executes --
+                # everything on the image side reads it to decide whether to
+                # wait for this one.
+                again = self._domain()
+                if again != domain:
+                    self.release()
+                    continue
+                if ours or not self._blocked_by_the_image_job(again):
                     return True
                 self.release()
                 continue
@@ -650,7 +710,7 @@ def _krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=N
 
     references = list(references or [])
     profile = creativity_profile(resolve(creativity))
-    gpu = _Gpu("a Krea prompt", cancel)
+    gpu = _Gpu("a Krea prompt", cancel, mc_llm_roles.CREATIVE)
     try:
         acquired = yield from gpu.acquire()
         if not acquired:
@@ -747,7 +807,7 @@ def _compose(source: str, scene: str, layout, ratio: str, seed: int,
     """
     from prompt_master.krea import composer
 
-    gpu = _Gpu("the spatial composition", cancel)
+    gpu = _Gpu("the spatial composition", cancel, mc_llm_roles.SPATIAL)
     try:
         acquired = yield from gpu.acquire()
         if not acquired:

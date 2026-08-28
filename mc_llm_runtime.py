@@ -4344,7 +4344,8 @@ class Runtime:
                                      mc_llm_context.NO_LAYERS))
         if wanted > 0 and not mc_broker.host_ram_fits(wanted):
             admission = mc_broker.admit_host_ram(
-                wanted, reason=f"moving {self._backbone()} out of VRAM")
+                wanted,
+                reason=f"moving {_backbone_label(configuration)} out of VRAM")
             if not admission.fits:
                 mc_broker.note(
                     mc_broker.FAMILY_LLM,

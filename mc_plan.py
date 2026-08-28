@@ -965,21 +965,50 @@ def _log_derivation() -> None:
     try:
         import mc_broker
 
-        ours = int(mc_broker.reported_bytes(mc_broker.FAMILY_LLM))
+        # The image card's language-model bytes, not the machine's. A budget
+        # line that subtracted a second card's llama-server from this card's
+        # obtainable VRAM would be describing a shortage that does not exist,
+        # and every number after it would inherit the error (invariant I-2).
+        ours = int(mc_broker.reported_bytes(mc_broker.FAMILY_LLM, card=_image_card()))
         total = int(mc_broker.total_vram_bytes())
+        elsewhere = max(int(mc_broker.held_bytes(mc_broker.FAMILY_LLM)) - ours, 0)
     except Exception:
         return
     obtainable = usable_vram_bytes(ours)
     protected = image_protected_bytes()
     allowance = persistent_llm_budget(ours)
     logger.info(
-        "Model Chain: memory budget — %.1f GB obtainable of %.1f GB on the card, "
-        "%.1f GB protected for the image plan, %.1f GB for the LLM (%s)%s",
-        obtainable / _GB, total / _GB, protected / _GB,
+        "Model Chain: memory budget — %.1f GB obtainable of %.1f GB on %s, "
+        "%.1f GB protected for the image plan, %.1f GB for the LLM (%s)%s%s",
+        obtainable / _GB, total / _GB, _image_card_name(), protected / _GB,
         max(allowance, 0) / _GB, cap_mode(),
         f"; a learned ceiling of {learned_cap_bytes() / _GB:.1f} GB is in force"
         if learned_cap_bytes() > 0 else "",
+        f"; a further {elsewhere / _GB:.1f} GB of language model is resident on another "
+        f"card and is none of this plan's business" if elsewhere > 0 else "",
     )
+
+
+def _image_card():
+    """The card this plan is about, as a broker card filter.
+
+    Every VRAM figure in this module describes Forge's image card. Where that
+    card cannot be resolved the machine-wide answer is the honest one and is
+    what this module has always used, so the sentinel comes back instead of a
+    guessed index (section 16.1).
+    """
+    import mc_broker
+
+    try:
+        index = int(mc_broker.image_device_index())
+    except Exception:
+        return mc_broker.ANY_CARD
+    return index if index >= 0 else mc_broker.ANY_CARD
+
+
+def _image_card_name() -> str:
+    card = _image_card()
+    return f"GPU {card}" if isinstance(card, int) else "the card"
 
 
 def current() -> Plan | None:
@@ -1129,7 +1158,8 @@ def usable_vram_bytes(already_ours: int = 0) -> int:
         if obtainable <= 0:
             return total
         obtainable += max(int(already_ours), 0)
-        obtainable += max(int(mc_broker.held_bytes(mc_broker.FAMILY_IMAGE)), 0)
+        obtainable += max(int(mc_broker.held_bytes(mc_broker.FAMILY_IMAGE,
+                                                   card=_image_card())), 0)
     except Exception:
         logger.debug("Model Chain: could not measure the obtainable VRAM", exc_info=True)
         return total
@@ -1190,7 +1220,7 @@ def llm_reserve_bytes() -> int:
     try:
         import mc_broker
 
-        held = max(int(mc_broker.held_bytes(mc_broker.FAMILY_IMAGE)), 0)
+        held = max(int(mc_broker.held_bytes(mc_broker.FAMILY_IMAGE, card=_image_card())), 0)
         margin = max(int(mc_broker.safety_margin_bytes()), 0)
     except Exception:
         logger.debug("Model Chain: could not read the image family's residency",
