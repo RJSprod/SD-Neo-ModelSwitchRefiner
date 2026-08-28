@@ -1,0 +1,381 @@
+"""Voice Chat's controls in Conversation, and the switch behind each of them.
+
+Two kinds of test. The first kind builds the Conversation panel and reads what
+came out of it: a Voice chip in the header, a microphone in the composer row, a
+fourth overlay in the panel's existing one-at-a-time surface machinery, and --
+the one that matters most -- a success-only continuation on every single one of
+the six ways a reply can be produced.
+
+That last one is worth saying plainly. ``.then()`` runs whether or not the
+event before it raised. ``.success()`` runs only after one that did not. If the
+speech marker were attached with ``then``, a generation that failed would still
+reach it, and Voice Chat would read a failure aloud. So the test walks the built
+panel's recorded callbacks and asserts the marker is on ``success`` and on all
+six -- not five.
+
+The second kind drives the handlers directly: what the flyout says when nothing
+is installed, that a switch writes through to the host's own options store
+immediately, and that the marker refuses in each of the four ways it has to.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+import mc_llm_chat_panel
+import mc_llm_paths
+import mc_voice_api
+import mc_voice_models
+import mc_voice_state
+import mc_voice_ui
+
+
+@pytest.fixture(autouse=True)
+def store(tmp_path, monkeypatch, host):
+    monkeypatch.setattr(mc_llm_paths, "data_root", lambda: tmp_path)
+    yield tmp_path
+
+
+@pytest.fixture
+def installed(monkeypatch):
+    ready = mc_voice_models.Status(True, True, True, "Installed", "Installed", "Installed",
+                                  True, "whisper-small-int8", "kokoro-multi-lang-v1-cpu",
+                                  "af_heart")
+    monkeypatch.setattr(mc_voice_models, "status", lambda: ready)
+    return ready
+
+
+def callbacks(component):
+    return getattr(component, "_callbacks", [])
+
+
+def build():
+    return mc_llm_chat_panel.build()
+
+
+def find(root, elem_id):
+    """The component carrying ``elem_id``, from everything the build created.
+
+    Gradio's own components are the only record of what a panel built, and the
+    stub keeps every one of them: walking them is how a test asks "is the
+    microphone in the composer" without a browser.
+    """
+    for component in _COMPONENTS:
+        if getattr(component, "elem_id", None) == elem_id:
+            return component
+    return None
+
+
+_COMPONENTS = []
+
+
+@pytest.fixture(autouse=True)
+def _collect(monkeypatch):
+    """Remember every component Gradio was asked to make during a build."""
+    import gradio as gr
+
+    _COMPONENTS.clear()
+    original = gr.components.Component.__init__
+
+    def record(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        _COMPONENTS.append(self)
+
+    monkeypatch.setattr(gr.components.Component, "__init__", record)
+    yield
+    _COMPONENTS.clear()
+
+
+class TestTheControlsAreThere:
+    def test_the_header_has_a_voice_chip(self):
+        build()
+        assert find(None, "mc-llm-chat-to-voice") is not None
+
+    def test_the_composer_has_a_microphone(self):
+        build()
+        mic = find(None, "mc-llm-chat-voice-mic")
+        assert mic is not None
+        # The same touch target the paperclip beside it establishes.
+        assert mic.__dict__.get("min_width") == 44
+
+    def test_the_microphone_is_never_disabled(self):
+        """Section 14: pressing it with nothing installed is how somebody finds
+        out what is wrong. A dead control is one that gets pressed three times
+        and then reported as broken."""
+        build()
+        mic = find(None, "mc-llm-chat-voice-mic")
+        assert mic.__dict__.get("interactive") is not False
+        assert mic.__dict__.get("visible") is not False
+
+    def test_voice_is_one_of_the_panel_s_own_surfaces(self):
+        """Not a new mechanism. Everything that follows from being in SCREENS is
+        what a flyout needs: no room when closed, closed when another opens, and
+        put away by the menu button with the rest."""
+        assert mc_voice_ui.SCREEN in mc_llm_chat_panel.SCREENS
+        answered = mc_llm_chat_panel._screens("voice")
+        shown = [update.get("visible")
+                 for update in answered[1:1 + len(mc_llm_chat_panel.SCREENS)]]
+        assert shown.count(True) == 1
+        assert shown[mc_llm_chat_panel.SCREENS.index("voice")] is True
+
+    def test_the_flyout_has_both_switches(self):
+        build()
+        assert find(None, "mc-llm-chat-voice-auto-send") is not None
+        assert find(None, "mc-llm-chat-voice-auto-speak") is not None
+
+    def test_the_switches_listen_to_the_tap_and_not_to_the_refill(self):
+        """``change`` also fires when the server puts a value in, and opening
+        the flyout puts both stored values in -- so listening to it would write
+        the settings file every time somebody looked at the menu."""
+        build()
+        for elem_id in ("mc-llm-chat-voice-auto-send", "mc-llm-chat-voice-auto-speak"):
+            kinds = {kind for kind, _kwargs in callbacks(find(None, elem_id))}
+            assert kinds == {"input"}, f"{elem_id} listens to {sorted(kinds)}"
+
+    def test_the_page_token_reaches_the_page_and_the_reply_token_starts_empty(self):
+        build()
+        key = find(None, "mc-llm-chat-voice-key")
+        token = find(None, "mc-llm-chat-voice-token")
+        assert key.value == mc_voice_api.session_token()
+        assert token.value == ""
+        assert token.__dict__.get("visible") is False
+
+
+class TestSuccessOnlySpeech:
+    """R2-1, checked against the wiring rather than against a docstring."""
+
+    def test_the_marker_is_attached_with_success_and_never_with_then(self):
+        """The whole distinction. ``then`` runs after a run that raised."""
+        import conftest
+
+        recorded = []
+        original = conftest._Dependency._chain
+
+        def watch(self, kind, kwargs):
+            recorded.append((kind, kwargs.get("fn")))
+            return original(self, kind, kwargs)
+
+        conftest._Dependency._chain = watch
+        try:
+            build()
+        finally:
+            conftest._Dependency._chain = original
+
+        markers = [(kind, fn) for kind, fn in recorded
+                   if getattr(fn, "__name__", "") == "marker"]
+        assert len(markers) == 6, (
+            f"expected the speech marker on all six reply paths, found {len(markers)}")
+        assert all(kind == "success" for kind, _fn in markers), (
+            "the speech marker is attached with .then(), which runs after a run that "
+            "failed — a failed generation would be read aloud")
+
+    def test_the_six_paths_share_one_marker_object(self):
+        """Section 49: the registration must be structurally shared, so fixing
+        one path cannot leave another silently unspoken."""
+        import conftest
+
+        recorded = []
+        original = conftest._Dependency._chain
+
+        def watch(self, kind, kwargs):
+            recorded.append(kwargs.get("fn"))
+            return original(self, kind, kwargs)
+
+        conftest._Dependency._chain = watch
+        try:
+            build()
+        finally:
+            conftest._Dependency._chain = original
+
+        markers = {id(fn) for fn in recorded if getattr(fn, "__name__", "") == "marker"}
+        assert len(markers) == 1, "the six paths were wired with six different handlers"
+
+
+class TestWhatTheRunLeftBehind:
+    def test_a_completed_reply_is_recorded_and_consumed_once(self):
+        mc_llm_chat_panel._begin_run()
+        mc_llm_chat_panel._completed_reply("the reply that finished")
+        assert mc_llm_chat_panel.take_completed_reply() == "the reply that finished"
+        assert mc_llm_chat_panel.take_completed_reply() == ""
+
+    def test_a_new_run_clears_what_the_last_one_left(self):
+        """The mechanism that makes a failed run unable to inherit the previous
+        run's answer, which is half of what makes speech success-only."""
+        mc_llm_chat_panel._completed_reply("an older reply")
+        mc_llm_chat_panel._begin_run()
+        assert mc_llm_chat_panel.take_completed_reply() == ""
+
+    def test_only_the_completed_branch_records_anything(self, store, monkeypatch):
+        """Driven through the real streaming handler: a run that is Stopped and
+        a run that fails both save the text they had and neither becomes
+        something to speak."""
+        import mc_llm_sessions as sessions
+        from prompt_master.chat.characters import Character, CharacterStore
+        from prompt_master.chat.history import ASSISTANT, ChatStore, USER
+
+        CharacterStore(store / "characters").save(Character(name="Ada", context="c"))
+        chats = ChatStore(store / "chats")
+
+        def run(events):
+            conversation = chats.new("Ada")
+            conversation.append(USER, "ask")
+            conversation.append(ASSISTANT, "")
+            chats.save(conversation)
+            monkeypatch.setattr(sessions, "conversation",
+                                lambda request, cancel: iter(events))
+            list(mc_llm_chat_panel._stream("Ada", conversation,
+                                           len(conversation.messages) - 1,
+                                           0.7, 0.9, 256, -1))
+            return mc_llm_chat_panel.take_completed_reply()
+
+        chunk = sessions.Event(sessions.CHUNK, "half a reply")
+
+        assert run([chunk, sessions.Event(sessions.DONE, "a whole reply")])
+        assert run([chunk, sessions.Event(sessions.CANCELLED, "")]) == "", (
+            "a run the reader Stopped produced something to read aloud")
+        assert run([chunk, sessions.Event(sessions.FAILED, "the server died")]) == "", (
+            "a failed run produced something to read aloud")
+
+
+class TestTheMarker:
+    def test_it_creates_a_target_when_everything_is_right(self, installed, host,
+                                                          monkeypatch):
+        monkeypatch.setattr(mc_voice_state, "auto_speak", lambda: True)
+        marker = mc_voice_ui.speech_marker(lambda: "the reply that completed")
+        token = marker()
+        assert token
+        assert mc_voice_api.take_reply(token) == "the reply that completed"
+
+    def test_it_creates_nothing_when_the_run_left_nothing(self, installed, monkeypatch):
+        monkeypatch.setattr(mc_voice_state, "auto_speak", lambda: True)
+        assert mc_voice_ui.speech_marker(lambda: "")() == ""
+        assert mc_voice_ui.speech_marker(lambda: "   ")() == ""
+
+    def test_it_creates_nothing_when_the_switch_is_off(self, installed, monkeypatch):
+        monkeypatch.setattr(mc_voice_state, "auto_speak", lambda: False)
+        assert mc_voice_ui.speech_marker(lambda: "a whole reply")() == ""
+
+    def test_it_creates_nothing_when_the_voice_is_not_installed(self, monkeypatch):
+        """Section 44: an attempt to speak without TTS fails visibly and does
+        not alter the setting, so intent can be chosen before the download
+        finishes."""
+        monkeypatch.setattr(mc_voice_state, "auto_speak", lambda: True)
+        missing = mc_voice_models.Status(True, True, False, "i", "i", "no", True)
+        monkeypatch.setattr(mc_voice_models, "status", lambda: missing)
+        assert mc_voice_ui.speech_marker(lambda: "a whole reply")() == ""
+
+    def test_a_broken_voice_stack_cannot_break_a_finished_reply(self, monkeypatch):
+        """I-8 and section 64: TTS failing must not cancel a reply that has
+        already arrived."""
+        def explode():
+            raise RuntimeError("everything is on fire")
+
+        assert mc_voice_ui.speech_marker(explode)() == ""
+
+    def test_each_completed_reply_gets_its_own_token(self, installed, monkeypatch):
+        monkeypatch.setattr(mc_voice_state, "auto_speak", lambda: True)
+        marker = mc_voice_ui.speech_marker(lambda: "the same words every time")
+        assert marker() != marker()
+
+
+class TestTheFlyout:
+    def test_it_says_what_is_missing(self, monkeypatch):
+        missing = mc_voice_models.Status(False, False, False, "n", "n", "n", True)
+        monkeypatch.setattr(mc_voice_models, "status", lambda: missing)
+        line = mc_voice_ui.readiness_notice()
+        assert "Settings" in line
+        assert "warn" in line
+
+    def test_it_says_ready_when_it_is(self, installed):
+        assert "Ready." in mc_voice_ui.readiness_notice()
+
+    def test_it_names_the_half_that_is_missing(self, monkeypatch):
+        half = mc_voice_models.Status(True, True, False, "i", "i", "n", True)
+        monkeypatch.setattr(mc_voice_models, "status", lambda: half)
+        line = mc_voice_ui.readiness_notice()
+        assert "text to speech" in line
+        assert "speech to text" not in line
+
+    def test_it_opens_on_what_is_stored_rather_than_on_what_it_last_drew(
+            self, host, installed):
+        """Settings may have changed either switch since the panel was built,
+        and a flyout showing a stale value is a flyout that turns a setting off
+        by being tapped."""
+        host.shared.opts.set(mc_voice_state.OPT_AUTO_SPEAK, True)
+        answered = mc_voice_ui.open_sheet(mc_llm_chat_panel._screens)
+        assert answered[-1].get("value") is True
+        assert answered[-2].get("value") is False
+
+    def test_a_switch_is_written_through_immediately(self, host):
+        """Section 43. Somebody who turns on "speak replies" while talking to a
+        character expects the next reply to be spoken, not to be told to visit
+        Settings and press Apply."""
+        saved = []
+        host.shared.opts.save = lambda *args, **kwargs: saved.append(True)
+
+        mc_voice_ui.set_auto_speak(True)
+        assert mc_voice_state.auto_speak() is True
+        assert saved, "the option was set but never written to the config file"
+
+        mc_voice_ui.set_auto_speak(False)
+        assert mc_voice_state.auto_speak() is False
+
+    def test_a_write_the_host_refuses_snaps_the_box_back(self, host, monkeypatch):
+        """Answered from the store rather than echoed, so a failed write shows
+        rather than lies."""
+        def refuse(name, value):
+            raise RuntimeError("no")
+
+        monkeypatch.setattr(host.shared.opts, "set", refuse)
+        assert mc_voice_ui.set_auto_send(True).get("value") is False
+
+
+class TestTheSettingsSection:
+    def test_the_two_switches_are_registered_and_default_off(self, host):
+        import model_chain  # noqa: F401  (registers the section on import)
+
+        for name in mc_voice_state.OPTIONS:
+            option = host.shared.options_templates[name]
+            assert option.default is False
+            assert option.section == ("model_chain_voice", "Voice Chat")
+
+    def test_the_section_is_its_own_and_not_a_corner_of_model_chain(self, host):
+        import model_chain  # noqa: F401
+
+        sections = {host.shared.options_templates[name].section
+                    for name in mc_voice_state.OPTIONS}
+        assert sections == {("model_chain_voice", "Voice Chat")}
+        assert model_chain.SETTINGS_SECTION != model_chain.VOICE_SECTION
+
+    def test_every_registered_voice_option_is_one_this_module_reads(self, host):
+        import model_chain  # noqa: F401
+
+        registered = {name for name in host.shared.options_templates
+                      if name.startswith("model_chain_voice_")}
+        import mc_voice_paths
+
+        known = set(mc_voice_state.OPTIONS) | {mc_voice_paths.OPT_ROOT,
+                                               "model_chain_voice_status"}
+        assert registered == known, (
+            "a voice option is registered and never read, or read and never registered")
+
+    def test_download_is_not_a_persisted_boolean(self, host):
+        import model_chain  # noqa: F401
+
+        for name in host.shared.options_templates:
+            if name.startswith("model_chain_voice"):
+                assert "download" not in name
+
+    def test_the_status_row_carries_the_page_token_and_both_buttons(self):
+        markup = mc_voice_ui.settings_html()
+        assert mc_voice_api.session_token() in markup
+        assert 'data-mc-voice-install="stt"' in markup
+        assert 'data-mc-voice-install="tts"' in markup
+
+    def test_the_status_row_is_not_saved_to_the_config_file(self, host):
+        import model_chain  # noqa: F401
+
+        option = host.shared.options_templates.get("model_chain_voice_status")
+        if option is None:
+            pytest.skip("this host build has no HTML settings component")
+        assert getattr(option, "do_not_save", False) is True

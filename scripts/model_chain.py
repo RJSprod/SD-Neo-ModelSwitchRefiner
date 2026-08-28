@@ -40,6 +40,11 @@ import mc_profile_state
 import mc_progress
 import mc_references
 import mc_styles
+import mc_voice_api
+import mc_voice_paths
+import mc_voice_runtime
+import mc_voice_state
+import mc_voice_ui
 from modules import errors, images, processing, scripts, shared
 from modules.processing import (
     StableDiffusionProcessingImg2Img,
@@ -539,6 +544,101 @@ shared.options_templates.update(
         },
     )
 )
+
+VOICE_SECTION = ("model_chain_voice", "Voice Chat")
+"""Its own section, not a corner of Model Chain's.
+
+Voice is an install-level capability: somebody who has decided to try dictation
+needs a stable place to provision two speech models, and burying that under a
+heading about image model chaining would make it findable only by people who
+already knew it was there. The two switches live with it because a settings page
+that can install a feature and not turn it on is a settings page somebody has to
+be told about twice.
+"""
+
+
+def _voice_row():
+    """The install row, as a settings component the host will actually draw.
+
+    Forge's settings system stores *options*; it has no general way to host a
+    Gradio button with a Python handler. ``OptionHTML`` is the supported escape
+    hatch where a build has it, and a read-only HTML option is the fallback where
+    it does not. Either way the buttons are wired by ``javascript/voice_chat.js``
+    to the install route -- which is the design intent's own recommendation, and
+    which keeps "download" from becoming a fake persistent boolean that a
+    restored settings backup would re-trigger.
+
+    Never fatal: a section that cannot draw its status row still draws its two
+    switches, and Voice Chat is still installable from them plus the flyout.
+    """
+    try:
+        markup = mc_voice_ui.settings_html()
+    except Exception:
+        errors.report("Model Chain: could not build the Voice Chat settings row",
+                      exc_info=True)
+        return None
+    html_option = getattr(shared, "OptionHTML", None)
+    if html_option is not None:
+        try:
+            return html_option(markup)
+        except Exception:
+            errors.report("Model Chain: could not build the Voice Chat settings row",
+                          exc_info=True)
+    try:
+        option = shared.OptionInfo(markup, "", gr.HTML)
+        # Not a value anybody stores. Without this the markup would be written
+        # into config.json as the "saved setting", and a settings backup would
+        # restore last month's status line over this month's installation.
+        option.do_not_save = True
+        return option
+    except Exception:
+        errors.report("Model Chain: could not build the Voice Chat settings row",
+                      exc_info=True)
+        return None
+
+
+_voice_status_row = _voice_row()
+
+_VOICE_OPTIONS = {}
+if _voice_status_row is not None:
+    # First, because it is what the section is for: what is installed, and the
+    # two buttons that install it. The switches under it are what to do with it.
+    _VOICE_OPTIONS["model_chain_voice_status"] = _voice_status_row
+
+_VOICE_OPTIONS.update({
+    mc_voice_state.OPT_AUTO_SEND: shared.OptionInfo(
+        False,
+        "Automatically send dictation",
+    ).info(
+        "off by default, so dictation fills the message box and you decide when to send. "
+        "On, a successful transcription presses Send for you — through the same Send the "
+        "keyboard uses, so attachments, threads and Stop all behave as they always do"
+    ),
+    mc_voice_state.OPT_AUTO_SPEAK: shared.OptionInfo(
+        False,
+        "Speak replies automatically",
+    ).info(
+        "off by default. On, each completed reply is read aloud by the local voice on this "
+        "PC. A reply you stopped, or one that failed, is never spoken. The same switch is in "
+        "Conversation's Voice menu"
+    ),
+    mc_voice_paths.OPT_ROOT: shared.OptionInfo(
+        "",
+        "Voice data directory",
+        gr.Textbox,
+    ).info(
+        "where the CPU speech runtime and the two speech models are kept. Empty uses a "
+        "model_chain_voice folder in your WebUI data directory. Separate from the LLM data "
+        "directory on purpose: speech models have their own lifecycle and are not language "
+        "models"
+    ),
+})
+
+try:
+    shared.options_templates.update(shared.options_section(VOICE_SECTION, _VOICE_OPTIONS))
+except Exception:
+    errors.report("Model Chain: could not register the Voice Chat settings section",
+                  exc_info=True)
 
 mc_progress.install()
 """Wrap the host's progress endpoint while rebinding it still takes effect.
@@ -3422,6 +3522,15 @@ class ScriptModelChain(scripts.Script):
 
 
 def _on_script_unloaded():
+    # First, and in a try of its own. Voice has nothing to do with VRAM, the
+    # broker or the residency register, and invariant I-3 is not only about the
+    # import graph: a speech worker that survived because releasing an image
+    # model raised would be exactly the coupling this feature was designed
+    # without.
+    try:
+        mc_voice_runtime.shutdown()
+    except Exception:
+        errors.report("Model Chain: failed to stop the voice runtime", exc_info=True)
     mc_memory.release_all()
     # The LLM lives in another process, so releasing our own references would
     # leave it running and holding VRAM after the extension has gone. It is
@@ -3454,5 +3563,9 @@ try:
     script_callbacks.on_app_started(mc_arm.on_app_started)
     script_callbacks.on_app_started(mc_logfile.attach)
     script_callbacks.on_app_started(mc_literal_report.install)
+    # The Voice Chat browser routes. Registered here rather than at import for
+    # the reason every other route in this file is: there is no FastAPI app to
+    # add anything to until the host has one.
+    script_callbacks.on_app_started(mc_voice_api.install)
 except Exception:
     errors.report("Model Chain: failed to register the extension callbacks", exc_info=True)

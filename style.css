@@ -4048,3 +4048,127 @@
 .mc-literal-cfg-collapsed {
     display: none !important;
 }
+
+/* -- Voice Chat -----------------------------------------------------------
+   Two surfaces and one button. Everything below uses the host's own custom
+   properties for colour, exactly as the rest of this file does, so a theme
+   decides what "recording" looks like rather than this stylesheet hard-coding
+   a red that will be wrong on half of them.
+
+   The microphone is the one control here with rules that are not decoration.
+   `touch-action: none` is what makes a press-and-hold on Android a press and
+   not a scroll gesture the browser steals halfway through; without it a finger
+   that moves two pixels during a recording cancels the pointer sequence and the
+   utterance ends where nobody let go. The two `user-select` rules stop the long
+   press from selecting the glyph and raising the text-selection callout over
+   the composer, which on iOS Safari covers Send. */
+
+#mc-llm-studio .mc-llm-voice-mic,
+#mc-llm-studio .mc-llm-voice-mic button {
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+}
+
+/* The same 44px the paperclip beside it establishes: the size a finger can be
+   relied on to hit, and the size the composer row is already built around. A
+   smaller microphone would be a smaller target on the one surface that has to
+   work while somebody is walking. */
+#mc-llm-studio .mc-llm-voice-mic button {
+    min-height: 2.6em;
+    min-width: 44px;
+    transition: box-shadow 0.12s ease-out, background-color 0.12s ease-out;
+}
+
+/* Recording. A ring rather than a fill, so the glyph stays legible and the
+   button does not change size -- a control that grows when it is pressed moves
+   the composer, and the composer is the thing that must not move. */
+#mc-llm-studio .mc-llm-voice-mic.mc-llm-voice-recording button,
+#mc-llm-studio button.mc-llm-voice-recording {
+    box-shadow: 0 0 0 3px var(--error-500, #dc2626);
+    background: var(--error-100, var(--background-fill-secondary, transparent));
+}
+
+#mc-llm-studio .mc-llm-voice-mic.mc-llm-voice-working button,
+#mc-llm-studio button.mc-llm-voice-working {
+    opacity: 0.6;
+}
+
+#mc-llm-studio .mc-llm-voice-mic.mc-llm-voice-error button,
+#mc-llm-studio button.mc-llm-voice-error {
+    box-shadow: 0 0 0 2px var(--error-500, #dc2626);
+}
+
+/* Reduced motion covers the transition above; the states themselves are colour
+   and are kept, because they are the only signal that a recording is running. */
+@media (prefers-reduced-motion: reduce) {
+    #mc-llm-studio .mc-llm-voice-mic button {
+        transition: none;
+    }
+}
+
+/* -- the Voice Chat row on the Settings page ------------------------------
+   Not under #mc-llm-studio: this one is drawn by Forge's own settings page,
+   which is a different part of the document. Scoped by this extension's own
+   class names instead, which is the same guarantee reached the other way. */
+
+.mc-voice-settings {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6em;
+    margin: 0.4em 0 0.8em;
+}
+
+.mc-voice-runtime,
+.mc-voice-note {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 0.9em;
+}
+
+.mc-voice-row {
+    align-items: center;
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5em 0.8em;
+    padding: 0.6em 0.8em;
+}
+
+.mc-voice-heading {
+    font-weight: 600;
+    /* Never the flex item that shrinks: the words "Speech to text" are what
+       tells somebody which of the two rows they are looking at. */
+    flex: 0 0 auto;
+}
+
+.mc-voice-default {
+    color: var(--body-text-color-subdued, inherit);
+    flex: 1 1 12em;
+    min-width: 0;
+}
+
+.mc-voice-status {
+    flex: 1 1 14em;
+    min-width: 0;
+    /* A status that has become a paragraph -- a hash mismatch says a great deal
+       -- wraps rather than pushing the button off the row. */
+    overflow-wrap: anywhere;
+}
+
+.mc-voice-install {
+    background: var(--button-secondary-background-fill, transparent);
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    color: inherit;
+    cursor: pointer;
+    flex: 0 0 auto;
+    min-height: 2.4em;
+    padding: 0.35em 0.9em;
+}
+
+.mc-voice-install[disabled] {
+    cursor: default;
+    opacity: 0.55;
+}

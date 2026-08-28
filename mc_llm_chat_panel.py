@@ -92,6 +92,7 @@ that carries one is refused with a sentence rather than quietly sent blind.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 
 import gradio as gr
@@ -102,6 +103,7 @@ import mc_llm_runtime
 import mc_llm_sessions as sessions
 import mc_llm_state
 import mc_llm_ui as ui
+import mc_voice_ui
 
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
@@ -109,7 +111,7 @@ logger = logging.getLogger("model_chain")
 NO_SELECTION = -1
 """What ``selected`` holds when the action sheet applies to nothing."""
 
-SCREENS = ("threads", "character", "persona")
+SCREENS = ("threads", "character", "persona", "voice")
 """The overlay surfaces, in the order :func:`_screens` returns them.
 
 One at a time, always. They occupy the same space -- the whole conversation
@@ -123,6 +125,11 @@ of every one of them: they are buttons in the header now, and the header wraps
 on a narrow display rather than folding back into a menu. What ``\u2630`` opens
 is the shell's own workspace chooser, which is what it opens in every other
 mode -- one button, one behaviour, everywhere in LLM Studio.
+
+Voice is the fourth and joined the tuple rather than inventing a mechanism of
+its own. Everything that follows from being in this list is exactly what a voice
+flyout needs: it takes no room when closed, it closes when another opens, and
+``\u2630`` puts it away with the rest.
 """
 
 SELECTION_ORDER = ("sheet", "heading", "back", "pager", "forward", "drop",
@@ -221,6 +228,12 @@ def build() -> dict:
                 to_persona = gr.Button("You", size="sm", scale=0, min_width=0,
                                        elem_id=ui.ident("chat", "to-persona"),
                                        elem_classes=ui.classes("chip-button"))
+                # Voice sits with the other secondary surfaces because that is
+                # what it is: two switches and a readiness line, behind a tap.
+                # The row wraps on a narrow display exactly as it already does
+                # -- losing a little of the title is a smaller loss than a chip
+                # that is not there.
+                to_voice = mc_voice_ui.chip()
                 # The runtime, as one tappable word. What it opens -- the model
                 # chooser, Load, Unload, the route to Setup -- is the shell's,
                 # and the shell wires this button to it: Conversation is not
@@ -322,6 +335,15 @@ def build() -> dict:
                     label=None, lines=1, max_lines=6, show_label=False, container=False,
                     scale=1, placeholder="Message…  Enter sends, Shift+Enter for a new line.",
                     elem_id=ui.ident("chat", "message"))
+                # Press and hold to dictate. Everything it does happens in
+                # the browser -- the gesture, the capture, the encoding -- so
+                # there is no click handler here at all: a Gradio round trip to
+                # start a recording would put a network hop between the press
+                # and the microphone opening.
+                # Built and not held: everything it does happens in the
+                # browser, so there is no Python handler to wire it to and
+                # nothing here needs a reference to it afterwards.
+                mc_voice_ui.microphone()
                 # Send and Stop are one control in two states, in one place.
                 # Two components rather than one because a single button cannot
                 # carry two click handlers without both of them firing; only
@@ -501,6 +523,15 @@ def build() -> dict:
                                              value=initial_persona.description)
             save_persona = gr.Button("Save", variant="primary", size="sm")
 
+        # -- VOICE_SCREEN --------------------------------------------------- #
+
+        voice = mc_voice_ui.sheet()
+        # Two hidden boxes rather than a component with a value anybody can
+        # read: one carries this process's page token into the page, and the
+        # other carries an opaque one-shot handle to a reply that has finished.
+        # Neither ever holds a transcript or a reply.
+        voice_plumbing = mc_voice_ui.plumbing()
+
         # -- MESSAGE_ACTION_SHEET ------------------------------------------- #
 
         actions = _action_sheet()
@@ -524,7 +555,7 @@ def build() -> dict:
     sampling = [temperature, top_p, reply_tokens, seed]
     # The State first, then one visibility per surface: the order
     # :func:`_screens` answers in.
-    screens = [surface, threads_screen, character_screen, persona_screen]
+    screens = [surface, threads_screen, character_screen, persona_screen, voice["screen"]]
 
     # -- getting about ---------------------------------------------------- #
 
@@ -534,7 +565,7 @@ def build() -> dict:
     # same thing in Conversation as it does in every other mode.
     menu.click(fn=_leave, inputs=[character, thread_state],
                outputs=screens + view, queue=False)
-    for control in (threads_back, character_back, persona_back):
+    for control in (threads_back, character_back, persona_back, voice["back"]):
         control.click(fn=_close_screens, outputs=screens, queue=False)
 
     to_threads.click(fn=_open_threads, inputs=[character, search],
@@ -544,6 +575,23 @@ def build() -> dict:
     to_persona.click(fn=_open_persona,
                      outputs=screens + [persona_name, persona_description, persona_face],
                      queue=False)
+
+    # -- voice ------------------------------------------------------------- #
+    #
+    # The two switches are Forge settings and are written the moment they are
+    # tapped, so the flyout and Settings -> Voice Chat are two views of one
+    # value rather than two values that have to be kept in step.
+    to_voice.click(fn=lambda: mc_voice_ui.open_sheet(_screens),
+                   outputs=screens + [voice["readiness"], voice["auto_send"],
+                                      voice["auto_speak"]], queue=False)
+    # ``input`` and not ``change``, for the reason the thread list gives above:
+    # ``change`` also fires when the server puts a value in, and opening the
+    # flyout puts both stored values in. Listening to it would write the
+    # settings file every time somebody looked at the menu.
+    voice["auto_send"].input(fn=mc_voice_ui.set_auto_send, inputs=[voice["auto_send"]],
+                             outputs=[voice["auto_send"]], queue=False)
+    voice["auto_speak"].input(fn=mc_voice_ui.set_auto_speak, inputs=[voice["auto_speak"]],
+                              outputs=[voice["auto_speak"]], queue=False)
 
     # -- threads ---------------------------------------------------------- #
 
@@ -698,6 +746,12 @@ def build() -> dict:
         control.click(fn=lambda: gr.update(visible=False), outputs=[actions["sheet"]],
                       queue=False)
 
+    # Built once and attached to every run below, so a seventh way of producing
+    # a reply cannot be added without either joining this loop or being visibly
+    # absent from it. Section 49's requirement is exactly that the registration
+    # be structurally shared.
+    speech_marker = mc_voice_ui.speech_marker(take_completed_reply)
+
     for run in (replying, submitted, regenerating, again, continuing, resending):
         # The thread list is refreshed because an untitled thread has just been
         # named, and the selection is dropped because the message it pointed at
@@ -705,6 +759,14 @@ def build() -> dict:
         run.then(fn=lambda person, text: gr.update(choices=_thread_choices(person, text)),
                  inputs=[character, search], outputs=[threads])
         run.then(fn=_close_selection, inputs=[character, thread_state], outputs=view)
+        # ``success`` and deliberately not ``then``. Gradio runs a ``then``
+        # continuation whether or not the event before it raised, which would
+        # make "the run reached its terminal callback" the trigger for speaking
+        # -- and a run that failed reaches it too. ``success`` runs only after
+        # an event that did not raise, and the handler still checks what the run
+        # actually left behind, because a nominally successful terminal callback
+        # is not the same claim as a whole reply.
+        run.success(fn=speech_marker, outputs=[voice_plumbing["token"]])
 
     stop.click(fn=_cancel, inputs=[cancellation], outputs=[status, send, stop],
                cancels=[replying, submitted, regenerating, again, continuing, resending],
@@ -1778,6 +1840,50 @@ BUSY = (gr.update(visible=False, interactive=False), gr.update(visible=True, int
 IDLE = (gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False))
 
 
+_completed: dict = {}
+_completed_lock = threading.Lock()
+"""What the run that just finished produced, if it produced anything.
+
+The one authoritative answer to "did this run leave a completed new assistant
+reply, and what was its text". Written by :func:`_stream` and nowhere else, and
+read exactly once by :func:`take_completed_reply`.
+
+It is a *snapshot*, and that is the whole point of it (R2-5). By the time
+anything reads this, the reader may have edited that message, regenerated it,
+branched away, or opened another thread -- so the answer to "what did this run
+say" cannot be a message index, a thread id, or anything else that is re-resolved
+later. It is the string, copied at the moment the run reached its completed
+branch.
+
+Cleared at the start of every run, so a run that fails, is Stopped, or raises
+cannot inherit the previous run's answer -- which is one of the two mechanisms
+that make automatic speech success-only. The other is that this dictionary is
+only ever *filled in* by the branch that reached a whole reply.
+"""
+
+
+def _begin_run() -> None:
+    with _completed_lock:
+        _completed.clear()
+
+
+def _completed_reply(text: str) -> None:
+    """Record a reply that finished. Only ever called on the completed path."""
+    with _completed_lock:
+        _completed["text"] = str(text or "")
+
+
+def take_completed_reply() -> str:
+    """The completed reply, consumed. Empty when the last run produced none.
+
+    Consumed rather than read, so one run can produce at most one of whatever
+    is downstream of it -- a duplicate terminal callback, which a host is
+    entitled to deliver, gets nothing the second time.
+    """
+    with _completed_lock:
+        return _completed.pop("text", "")
+
+
 def _with_pictures(messages):
     """Read the attached stills back for the request about to be built.
 
@@ -1833,6 +1939,9 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
 
     busy, idle = BUSY, IDLE
     store = _chats()
+    # Whatever the previous run left behind stops being true here. See
+    # :data:`_completed`.
+    _begin_run()
 
     try:
         character = _characters().load(who)
@@ -1912,6 +2021,11 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
                 whole = event.text if event.kind == sessions.DONE and not opening else streamed
                 message.text = clean_reply(whole or streamed, character, persona)
                 keep()
+                if event.kind == sessions.DONE:
+                    # The one line that makes a reply eligible to be spoken, in
+                    # the one branch that means the reply is whole. Stopped goes
+                    # to the same place on screen and deliberately not to here.
+                    _completed_reply(message.text)
                 note = "Stopped." if event.kind == sessions.CANCELLED else "Reply complete."
                 rows, positions = _view(conversation)
                 yield (cancel, rows, positions, "", None,
@@ -1951,6 +2065,9 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
         if not kept:
             keep()
 
+    # The event stream ended without a terminal event, which is the other way
+    # a reply finishes whole: everything that arrived, arrived.
+    _completed_reply(message.text)
     rows, positions = _view(conversation)
     yield cancel, rows, positions, "", SENT, ui.notice("Reply complete."), *idle
 

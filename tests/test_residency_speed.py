@@ -962,9 +962,22 @@ class TestSettingsRegistration:
             if name.startswith("model_chain_")
         ]
         assert ours, "no Model Chain settings were registered at all"
+        # Two sections, deliberately. Voice Chat is an install-level capability
+        # with two downloads behind it, and burying it under a heading about
+        # image model chaining would make it findable only by somebody who
+        # already knew it was there.
+        known = {model_chain.SETTINGS_SECTION, model_chain.VOICE_SECTION}
         for option in ours:
-            assert option.section == model_chain.SETTINGS_SECTION
+            assert option.section in known, (
+                f"{option.label} is in {option.section}, which is neither of this "
+                f"extension's settings sections")
             assert option.section[0] is not None, f"{option.label} would never be drawn"
+
+    def test_the_two_sections_are_distinct_and_both_drawn(self, host):
+        import model_chain  # noqa: F401
+
+        assert model_chain.SETTINGS_SECTION != model_chain.VOICE_SECTION
+        assert model_chain.VOICE_SECTION[0] is not None
 
     def test_the_host_value_wins_over_the_fallback(self, host):
         """Otherwise opting in to the preload could not turn it on."""

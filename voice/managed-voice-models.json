@@ -1,0 +1,279 @@
+{
+  "schema": 1,
+  "version": 1,
+  "runtime": {
+    "version": "1.13.6",
+    "package": "sherpa-onnx",
+    "import_name": "sherpa_onnx",
+    "provider": "cpu",
+    "license": "Apache-2.0 (sherpa-onnx, k2-fsa)",
+    "platforms": [
+      {
+        "id": "windows-x86_64-cp310",
+        "system": "windows",
+        "machines": [
+          "amd64",
+          "x86_64"
+        ],
+        "python": "3.10",
+        "artifacts": [
+          {
+            "filename": "sherpa_onnx-1.13.6-cp310-cp310-win_amd64.whl",
+            "local_name": "sherpa_onnx-1.13.6-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/55/78/db65c11ea646033ddec022649e9533fc04594c57e374f71d9557ae8e4eb6/sherpa_onnx-1.13.6-cp310-cp310-win_amd64.whl",
+            "bytes": 2274361,
+            "sha256": "f090d500c65594220ff2b7a9613803bde589d9ec2e18f778cdd2f002c689eb16"
+          },
+          {
+            "filename": "sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
+            "local_name": "sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/81/61/d32923b9f6fa039271760e1c642ffd496b8e2b3340e084bd9b0c7b568448/sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
+            "bytes": 16522526,
+            "sha256": "9e7ac522b4f108412f6a1173c0e512c65e98d4714d9d9aa0002279d588d2e699"
+          }
+        ]
+      },
+      {
+        "id": "windows-x86_64-cp311",
+        "system": "windows",
+        "machines": [
+          "amd64",
+          "x86_64"
+        ],
+        "python": "3.11",
+        "artifacts": [
+          {
+            "filename": "sherpa_onnx-1.13.6-cp311-cp311-win_amd64.whl",
+            "local_name": "sherpa_onnx-1.13.6-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/37/1f/2bff44104837261ec0683ba28a64a5ab0d8ecce65e30d467216cc9fb9662/sherpa_onnx-1.13.6-cp311-cp311-win_amd64.whl",
+            "bytes": 2274704,
+            "sha256": "2cfdcff8a6db07afbf929a1468d5fdeb1908c4ce20582746244ede01e9319628"
+          },
+          {
+            "filename": "sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
+            "local_name": "sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/81/61/d32923b9f6fa039271760e1c642ffd496b8e2b3340e084bd9b0c7b568448/sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
+            "bytes": 16522526,
+            "sha256": "9e7ac522b4f108412f6a1173c0e512c65e98d4714d9d9aa0002279d588d2e699"
+          }
+        ]
+      },
+      {
+        "id": "windows-x86_64-cp312",
+        "system": "windows",
+        "machines": [
+          "amd64",
+          "x86_64"
+        ],
+        "python": "3.12",
+        "artifacts": [
+          {
+            "filename": "sherpa_onnx-1.13.6-cp312-cp312-win_amd64.whl",
+            "local_name": "sherpa_onnx-1.13.6-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/bc/8f/1510c5b78a933e5ed7caf61001c6018516f9b0c736cc9ffc60cdb252fed3/sherpa_onnx-1.13.6-cp312-cp312-win_amd64.whl",
+            "bytes": 2279376,
+            "sha256": "1b7b57cfd99767031b9bae9d1007094b6c14f85d4176b422438ae76312840e89"
+          },
+          {
+            "filename": "sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
+            "local_name": "sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/81/61/d32923b9f6fa039271760e1c642ffd496b8e2b3340e084bd9b0c7b568448/sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
+            "bytes": 16522526,
+            "sha256": "9e7ac522b4f108412f6a1173c0e512c65e98d4714d9d9aa0002279d588d2e699"
+          }
+        ]
+      },
+      {
+        "id": "windows-x86_64-cp313",
+        "system": "windows",
+        "machines": [
+          "amd64",
+          "x86_64"
+        ],
+        "python": "3.13",
+        "artifacts": [
+          {
+            "filename": "sherpa_onnx-1.13.6-cp313-cp313-win_amd64.whl",
+            "local_name": "sherpa_onnx-1.13.6-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/cd/04/a5cd9dd2a6e5073ca5fb8df28a95ecb49df71a8b3ff822aa57f294dec985/sherpa_onnx-1.13.6-cp313-cp313-win_amd64.whl",
+            "bytes": 2280022,
+            "sha256": "3387c754668578612aaf7795f894b631faefb71fd7d7df20c2aa41aa2dbc59a2"
+          },
+          {
+            "filename": "sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
+            "local_name": "sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/81/61/d32923b9f6fa039271760e1c642ffd496b8e2b3340e084bd9b0c7b568448/sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
+            "bytes": 16522526,
+            "sha256": "9e7ac522b4f108412f6a1173c0e512c65e98d4714d9d9aa0002279d588d2e699"
+          }
+        ]
+      },
+      {
+        "id": "linux-x86_64-cp310",
+        "system": "linux",
+        "machines": [
+          "amd64",
+          "x86_64"
+        ],
+        "python": "3.10",
+        "artifacts": [
+          {
+            "filename": "sherpa_onnx-1.13.6-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "local_name": "sherpa_onnx-1.13.6-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "url": "https://files.pythonhosted.org/packages/d9/2b/4597a443afff41f70f7cb02fee135cab894877b0415aff5c199223430f73/sherpa_onnx-1.13.6-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "bytes": 4390951,
+            "sha256": "ac9b6aef468098b7afe3a88aa20f3b5eb2b4098f0dbc12329b334250b1896363"
+          },
+          {
+            "filename": "sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
+            "local_name": "sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
+            "url": "https://files.pythonhosted.org/packages/fa/0a/6f64568ebb230b200c30c465eb002113944705fa36c734838ea46f2e1802/sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
+            "bytes": 10371677,
+            "sha256": "9c1260ae150ebd4f658854fd8d8ca8477828afa5bebf66c1b2f6132f1f704a21"
+          }
+        ]
+      },
+      {
+        "id": "linux-x86_64-cp311",
+        "system": "linux",
+        "machines": [
+          "amd64",
+          "x86_64"
+        ],
+        "python": "3.11",
+        "artifacts": [
+          {
+            "filename": "sherpa_onnx-1.13.6-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "local_name": "sherpa_onnx-1.13.6-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "url": "https://files.pythonhosted.org/packages/4d/0f/2c90dc06bdd75c69ef26ad92cf29754593a3fcd5e9678c06ffab4079f117/sherpa_onnx-1.13.6-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "bytes": 4391476,
+            "sha256": "b780bd4c8aae35fff9e5183b982e5594f833138479daf4047a38b06cb75aed26"
+          },
+          {
+            "filename": "sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
+            "local_name": "sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
+            "url": "https://files.pythonhosted.org/packages/fa/0a/6f64568ebb230b200c30c465eb002113944705fa36c734838ea46f2e1802/sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
+            "bytes": 10371677,
+            "sha256": "9c1260ae150ebd4f658854fd8d8ca8477828afa5bebf66c1b2f6132f1f704a21"
+          }
+        ]
+      },
+      {
+        "id": "linux-x86_64-cp312",
+        "system": "linux",
+        "machines": [
+          "amd64",
+          "x86_64"
+        ],
+        "python": "3.12",
+        "artifacts": [
+          {
+            "filename": "sherpa_onnx-1.13.6-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "local_name": "sherpa_onnx-1.13.6-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "url": "https://files.pythonhosted.org/packages/75/8c/3a4bcdc71f9ea22b9ce77e2e562324a010be96b855a4cd4a73f83dc6b646/sherpa_onnx-1.13.6-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "bytes": 4390408,
+            "sha256": "02d0ba3b257e1c74b30c7975ec466cac8e01e1b4599d0657ea4afa076fc49d37"
+          },
+          {
+            "filename": "sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
+            "local_name": "sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
+            "url": "https://files.pythonhosted.org/packages/fa/0a/6f64568ebb230b200c30c465eb002113944705fa36c734838ea46f2e1802/sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
+            "bytes": 10371677,
+            "sha256": "9c1260ae150ebd4f658854fd8d8ca8477828afa5bebf66c1b2f6132f1f704a21"
+          }
+        ]
+      },
+      {
+        "id": "linux-x86_64-cp313",
+        "system": "linux",
+        "machines": [
+          "amd64",
+          "x86_64"
+        ],
+        "python": "3.13",
+        "artifacts": [
+          {
+            "filename": "sherpa_onnx-1.13.6-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "local_name": "sherpa_onnx-1.13.6-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "url": "https://files.pythonhosted.org/packages/fe/3e/c3a60cf13301363210e7a0cc72a901ae6a56e313e1d912df0017e24e6e79/sherpa_onnx-1.13.6-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "bytes": 4391526,
+            "sha256": "5212391170d5ac2fdd02109b313cc1120393ededc2a06dd9eed731a4ca24f068"
+          },
+          {
+            "filename": "sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
+            "local_name": "sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
+            "url": "https://files.pythonhosted.org/packages/fa/0a/6f64568ebb230b200c30c465eb002113944705fa36c734838ea46f2e1802/sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
+            "bytes": 10371677,
+            "sha256": "9c1260ae150ebd4f658854fd8d8ca8477828afa5bebf66c1b2f6132f1f704a21"
+          }
+        ]
+      }
+    ]
+  },
+  "defaults": {
+    "stt": "whisper-small-int8",
+    "tts": "kokoro-multi-lang-v1-cpu"
+  },
+  "models": {
+    "whisper-small-int8": {
+      "kind": "stt",
+      "label": "Whisper Small (multilingual, INT8, CPU)",
+      "engine": "sherpa-onnx-offline-whisper",
+      "language": "",
+      "repo": "csukuangfj/sherpa-onnx-whisper-small",
+      "revision": "main",
+      "license": "MIT (OpenAI Whisper code and weights)",
+      "attribution": "Whisper by OpenAI (MIT). ONNX export by csukuangfj for sherpa-onnx.",
+      "files": [
+        {
+          "filename": "small-encoder.int8.onnx",
+          "local_name": "encoder.onnx",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-small/resolve/main/small-encoder.int8.onnx",
+          "bytes": null,
+          "sha256": null
+        },
+        {
+          "filename": "small-decoder.int8.onnx",
+          "local_name": "decoder.onnx",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-small/resolve/main/small-decoder.int8.onnx",
+          "bytes": null,
+          "sha256": null
+        },
+        {
+          "filename": "small-tokens.txt",
+          "local_name": "tokens.txt",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-small/resolve/main/small-tokens.txt",
+          "bytes": null,
+          "sha256": null
+        }
+      ]
+    },
+    "kokoro-multi-lang-v1-cpu": {
+      "kind": "tts",
+      "label": "Kokoro-82M v1.0 (CPU)",
+      "engine": "sherpa-onnx-offline-tts-kokoro",
+      "voice": "af_heart",
+      "speaker_id": 0,
+      "license": "Apache-2.0 (Kokoro-82M weights); bundled espeak-ng data is GPL-3.0-or-later",
+      "attribution": "Kokoro-82M by hexgrad (Apache-2.0). sherpa-onnx bundle by k2-fsa. Includes espeak-ng phonemiser data, which is GPL-3.0-or-later and is redistributed unmodified under that licence.",
+      "files": [
+        {
+          "filename": "kokoro-multi-lang-v1_0.tar.bz2",
+          "local_name": "kokoro-multi-lang-v1_0.tar.bz2",
+          "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2",
+          "bytes": null,
+          "sha256": null,
+          "archive": "tar.bz2",
+          "strip_root": "kokoro-multi-lang-v1_0"
+        }
+      ],
+      "required_paths": [
+        "model.onnx",
+        "voices.bin",
+        "tokens.txt",
+        "lexicon-us-en.txt",
+        "espeak-ng-data"
+      ]
+    }
+  }
+}
