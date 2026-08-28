@@ -527,8 +527,48 @@ def _unsatisfied(configuration: Config, placement, gguf) -> list[str]:
     where = ("none of it is on the card" if placement.gpu_layers == mc_llm_context.NO_LAYERS
              else f"only {placement.gpu_layers} of {total or '?'} layers are")
     return [f"GPU / VRAM Only was chosen and could not be satisfied — {where}. "
-            f"Free VRAM on this card, pick a smaller quantization, or choose Mixed "
-            f"Aggressive, which is this fallback as a deliberate setting"]
+            f"{_who_filled_the_card(configuration)}Free VRAM on this card, pick a smaller "
+            f"quantization, or choose Mixed Aggressive, which is this fallback as a "
+            f"deliberate setting"]
+
+
+def _who_filled_the_card(configuration: Config) -> str:
+    """Name our own other servers when *they* are what left no room.
+
+    "Free VRAM on this card" is advice for a card somebody else filled. It is
+    unactionable, and slightly insulting, when what filled it is two more copies
+    of the same model this extension started a minute ago -- which is what a
+    user's log showed: a conversation holding twenty gigabytes while the two
+    roles took turns in the eleven that were left, at four tokens a second.
+
+    So the sentence says which, and names the setting that collapses them into
+    one. It costs a registry walk on a path that has already read a GGUF header
+    and started a process, and it is only ever reached when a placement has
+    already been degraded.
+    """
+    card = card_of(configuration)
+    if card is None:
+        return ""
+    try:
+        held = 0
+        servers = 0
+        for found in registry.running(card=card):
+            bytes_held = _held_by(found, card)
+            if bytes_held <= 0:
+                continue
+            held += bytes_held
+            servers += 1
+        if servers <= 0 or held <= 0:
+            return ""
+    except Exception:
+        logger.debug("Model Chain: could not ask what else of ours is on the card",
+                     exc_info=True)
+        return ""
+    return (f"{held / _GB:.1f} GB of it is held by {servers} other llama-server"
+            f"{'' if servers == 1 else 's'} this extension started — under "
+            f"“When Creative and Spatial are configured identically”, "
+            f"“{mc_broker.label_for(PROCESS_MODES, PROCESSES_SHARED)}” gives identically "
+            f"configured roles one server and one copy of the weights. ")
 
 
 def _requested_placement(configuration: Config, gguf: mc_gguf.Gguf | None,
@@ -3771,12 +3811,32 @@ class Runtime:
             raise _StartFailed(said.text or str(exc), said.out_of_memory,
                                said.bad_argument, said.bad_value) from exc
 
-        observed = self._observed_residency(before, placement)
+        observed = self._observed_residency(before, placement, card_of(configuration))
         return process, observed, _await_offload(log_path, written_before)
 
     @staticmethod
-    def _observed_residency(before: int, placement: mc_llm_context.Placement) -> int:
-        """How much VRAM the server that just started actually took.
+    def _observed_residency(before: int, placement: mc_llm_context.Placement,
+                            card: int | None) -> int:
+        """How much VRAM the server that just started actually took, on ``card``.
+
+        ``card`` has no default, deliberately: the default *was* the bug. The
+        measurement is a difference of
+        two free-VRAM readings, and a difference is only meaningful when both
+        readings are of the same card -- which they were not: ``before`` came
+        from the card the server is being placed on and ``after`` came from
+        whichever card the image side is using, because it was read with no
+        argument at all.
+
+        On one card that subtracts a number from itself an instant later and is
+        very nearly right. On two it subtracts one card from another and is
+        nonsense: from a user's log, a 5090 with 31.4 GB free and a 3090 with
+        22.7 GB produced "8.7 GB VRAM" for a model that had taken about twenty,
+        a warning that llama.cpp had "left the rest in system RAM" about a
+        server running at 92 tokens a second, and 8.7 GB of phantom residency
+        declared to the broker.
+
+        ``None`` still means the image card, and is right for a placement that
+        is on it. What it must not be is what a caller gets for saying nothing.
 
         A difference of two free-VRAM readings, which is the only measurement
         available from outside another process -- and which came back as *zero*
@@ -3796,7 +3856,11 @@ class Runtime:
         """
         if before <= 0:
             return 0
-        observed = max(before - mc_broker.device_free_vram_bytes(), 0)
+
+        def reading() -> int:
+            return mc_broker.device_free_vram_bytes(card)
+
+        observed = max(before - reading(), 0)
         if observed > 0 or not getattr(placement, "on_gpu", False):
             return observed
         if placement.gpu_layers == mc_llm_context.NO_LAYERS:
@@ -3804,7 +3868,7 @@ class Runtime:
 
         for _attempt in range(RESIDENCY_SETTLE_ATTEMPTS):
             time.sleep(RESIDENCY_SETTLE_SECONDS)
-            observed = max(before - mc_broker.device_free_vram_bytes(), 0)
+            observed = max(before - reading(), 0)
             if observed > 0:
                 return observed
 
@@ -4977,23 +5041,39 @@ class RuntimeRegistry:
                 return 0
         mine = self.key_for(chosen, configuration)
         freed = 0
+        stood_down = 0
         for other in self.all():
             if other is self._runtimes.get(mine) or not other.running():
                 continue
-            if not any(name != chosen for name in _roles_of(other)):
-                continue
+            serves = _roles_of(other)
+            if serves and not [name for name in serves if name != chosen]:
+                continue  # this role's own server, under another key
             try:
-                if pool(config(_roles_of(other)[0])) != where:
+                # A runtime nobody has claimed is the *shared* one -- the server
+                # Conversation, Prompt Studio, MiniMax and LLM Studio all use --
+                # and it was being skipped, because "serves no role other than
+                # mine" and "serves no role at all" read the same way to the
+                # test that used to be here.
+                #
+                # It is also, routinely, the largest thing on the card. From a
+                # user's log: a conversation left a 20 GB server up, and the two
+                # roles then took turns in the 11 GB that was left, each getting
+                # 25 of 65 layers and four tokens a second, stopping and
+                # reloading a model on every switch. Take turns has to mean all
+                # of our servers or it does not mean anything.
+                elsewhere = next((name for name in serves if name != chosen), "")
+                if pool(config(elsewhere)) != where:
                     continue
                 freed += int(other.release(0, f"the {mc_llm_roles.label(chosen)} runtime "
                                               f"needs the same memory") or 0)
+                stood_down += 1
             except Exception:
-                logger.debug("Model Chain: could not stand down the other role's runtime",
+                logger.debug("Model Chain: could not stand down the other runtime",
                              exc_info=True)
-        if freed:
-            logger.info("Model Chain: %sstood the other role's llama-server down — %.1f GB, "
-                        "both roles are configured for the same memory",
-                        mc_llm_roles.prefix(chosen), freed / _GB)
+        if stood_down:
+            logger.info("Model Chain: %sstood %d other llama-server(s) down — %.1f GB, "
+                        "they are configured for the same memory",
+                        mc_llm_roles.prefix(chosen), stood_down, freed / _GB)
         return freed
 
     def _can_coexist_in_ram(self, role: str, configuration: Config) -> bool:
