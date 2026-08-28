@@ -223,7 +223,7 @@ class TestSayingWhyItRefused:
         caplog.set_level(logging.DEBUG, logger="model_chain")
         client.post(api.STT_ROUTE, headers={api.TOKEN_HEADER: "stale"}, content=b"x")
         written = " ".join(record.getMessage() for record in caplog.records)
-        assert "did not match this WebUI process" in written
+        assert "from a previous run of this WebUI" in written
 
     def test_a_foreign_origin_says_so(self, client, key, caplog, installed):
         import logging
@@ -234,17 +234,6 @@ class TestSayingWhyItRefused:
         client.post(api.STATUS_ROUTE, headers=headers)
         written = " ".join(record.getMessage() for record in caplog.records)
         assert "Origin header did not match" in written
-
-    def test_an_unauthenticated_caller_says_so(self, app, key, caplog, installed):
-        import logging
-
-        caplog.set_level(logging.DEBUG, logger="model_chain")
-        app.auth = {"someone": "hunter2"}
-        app.tokens = {}
-        with TestClient(app) as client:
-            client.post(api.STATUS_ROUTE, headers=key)
-        written = " ".join(record.getMessage() for record in caplog.records)
-        assert "not signed in" in written
 
     def test_no_refusal_line_carries_the_token_that_was_offered(self, client, caplog,
                                                                installed):
@@ -258,98 +247,69 @@ class TestSayingWhyItRefused:
             assert "SECRET-XYZ" not in record.getMessage()
 
 
-class TestAuthenticationParity:
-    def test_an_unauthenticated_caller_is_refused_when_the_webui_has_a_login(
+class TestThereIsNoSignInGate:
+    """Voice Chat has no login of its own and does not re-check the WebUI's.
+
+    A cookie check used to sit here and it locked legitimate users out twice:
+    once by mistaking an unrelated attribute for a login, and then on an
+    installation that really does pass ``--gradio-auth`` and whose user was, of
+    course, already signed in by the time they reached the page. Reaching a page
+    the WebUI served is the proof of access; asking for it again only produced a
+    way to fail.
+    """
+
+    def test_a_webui_with_a_login_still_serves_a_page_that_has_the_token(
             self, app, key, installed):
-        """The test that stops "it is on the same app, so it must be protected"
-        from being the whole security review."""
-        app.auth = {"someone": "hunter2"}
-        app.tokens = {"a-real-session": "someone"}
-        with TestClient(app) as client:
-            answered = client.post(api.STATUS_ROUTE, headers=key)
-            assert answered.status_code == 401
-
-    def test_an_authenticated_caller_is_served(self, app, key, installed):
-        app.auth = {"someone": "hunter2"}
-        app.tokens = {"a-real-session": "someone"}
-        with TestClient(app) as client:
-            client.cookies.set("access-token", "a-real-session")
-            assert client.post(api.STATUS_ROUTE, headers=key).status_code == 200
-
-    def test_the_page_token_does_not_get_past_the_login(self, app, key, installed):
-        """The page token is request coordination, never a second login. A
-        caller holding it and no session is still not signed in."""
+        """The reported blocker, as a test. Credentials are configured, the
+        caller has no session cookie this module can see, and the routes work --
+        because the page they came from was served by that WebUI."""
         app.auth = {"someone": "hunter2"}
         app.tokens = {}
         with TestClient(app) as client:
-            assert client.post(api.STT_ROUTE, headers=key, content=b"x").status_code == 401
-
-    def test_a_login_it_cannot_check_falls_back_to_the_page_token(self, app, key,
-                                                                  installed, caplog):
-        """The correction to a guess that failed closed on the common case.
-
-        A login this module cannot verify used to refuse everybody. It now
-        allows and says so once, because the page token is only ever served
-        inside a page the login served -- an unauthenticated caller has no way
-        to obtain one, so refusing on top of that bought nothing and cost an
-        installation that worked."""
-        import logging
-
-        caplog.set_level(logging.DEBUG, logger="model_chain")
-        app.auth = {"someone": "hunter2"}
-        app.tokens = None
-        with TestClient(app) as client:
             assert client.post(api.STATUS_ROUTE, headers=key).status_code == 200
+            assert client.post(api.INSTALL_ROUTE, headers=key,
+                               json={"kind": "stt"}).status_code in (200, 409)
 
-        written = " ".join(record.getMessage() for record in caplog.records)
-        assert "cannot check against" in written
-
-    def test_a_login_it_cannot_check_still_needs_the_page_token(self, app, installed):
-        """Which is the whole reason allowing is safe."""
-        app.auth = {"someone": "hunter2"}
-        app.tokens = None
-        with TestClient(app) as client:
-            assert client.post(api.STATUS_ROUTE).status_code == 403
-
-
-class TestWhatCountsAsALogin:
-    """The bug that blocked a working installation, as five cases.
-
-    ``getattr(app, "auth", None)`` being truthy is not evidence of a login. On a
-    real Forge build it was true with nothing configured, and Voice Chat refused
-    every request it received -- including its own status poll, at better than
-    one a second, for as long as the Settings page was open.
-    """
-
-    def test_nothing_configured_is_not_a_login(self, app, host):
-        assert api.login_kind(app) == ""
-
-    def test_an_auth_attribute_of_an_unrecognised_shape_is_not_a_login(self, app, host):
-        app.auth = object()
-        assert api.login_kind(app) == ""
-        app.auth = True
-        assert api.login_kind(app) == ""
-
-    def test_an_empty_account_mapping_is_not_a_login(self, app, host):
-        app.auth = {}
-        assert api.login_kind(app) == ""
-
-    def test_accounts_are_a_login(self, app, host):
-        app.auth = {"someone": "hunter2"}
-        assert "accounts" in api.login_kind(app)
-        app.auth = [("someone", "hunter2")]
-        assert "accounts" in api.login_kind(app)
-
-    def test_credentials_on_the_command_line_are_a_login(self, app, host, monkeypatch):
+    def test_command_line_credentials_do_not_gate_it_either(self, client, key, installed,
+                                                            host, monkeypatch):
+        """``--gradio-auth`` on the command line was what actually blocked the
+        reported installation."""
         monkeypatch.setattr(host.shared.cmd_opts, "gradio_auth", "someone:hunter2",
                             raising=False)
-        assert "command line" in api.login_kind(app)
+        assert client.post(api.STATUS_ROUTE, headers=key).status_code == 200
 
-    def test_an_unconfigured_installation_is_served(self, app, key, installed):
-        """The reported symptom, as a test: no login anywhere, so the routes
-        answer."""
-        with TestClient(app) as client:
-            assert client.post(api.STATUS_ROUTE, headers=key).status_code == 200
+    def test_no_route_can_answer_401(self, client, key, installed, silent_wav):
+        """There is no code path left that asks anybody to sign in."""
+        answered = [
+            client.post(api.STATUS_ROUTE, headers=key),
+            client.post(api.STT_ROUTE, headers=key, content=silent_wav(1.0)),
+            client.post(api.TTS_ROUTE, headers=key, json={"token": "nope"}),
+            client.post(api.INSTALL_ROUTE, headers=key, json={"kind": "stt"}),
+        ]
+        assert all(response.status_code != 401 for response in answered)
+
+    def test_the_module_has_no_sign_in_text_left_anywhere(self):
+        """Not even in a message. A sentence telling somebody to sign in is a
+        sentence that will be shown to somebody who already has."""
+        from pathlib import Path as _Path
+
+        source = _Path(api.__file__).read_text(encoding="utf-8")
+        body = source.split('"""', 2)[-1]
+        assert "Sign in to" not in body
+
+    def test_the_page_token_is_still_the_gate(self, client, installed):
+        """Which is what makes removing the cookie check safe: the token only
+        exists inside a page the WebUI served."""
+        for route in api.ROUTES:
+            assert client.post(route, json={"kind": "stt"}).status_code == 403
+
+    def test_a_stale_token_says_reload_and_not_sign_in(self, client, installed):
+        answered = client.post(api.STATUS_ROUTE,
+                               headers={api.TOKEN_HEADER: "from-a-previous-run"})
+        assert answered.status_code == 403
+        error = answered.json()["error"]
+        assert "Reload it" in error
+        assert "sign in" in error.lower(), "the message should say what it is *not* asking"
 
 
 class TestTheLogDoesNotScroll:

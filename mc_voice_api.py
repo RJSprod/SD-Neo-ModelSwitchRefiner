@@ -13,22 +13,24 @@ microphone requires -- and these routes ride on it:
 these where the app is mounted, and ``javascript/voice_chat.js`` builds its URLs
 from the deployment root Gradio publishes rather than from ``location.origin``.
 What *is* this module's problem is proving they are no more reachable than the
-rest of the WebUI, and there are three separate reasons for that:
-
-Authentication parity
-    Sharing a FastAPI app is not the same as inheriting Gradio's login. Gradio
-    protects its own endpoints with a dependency it does not apply to routes an
-    extension adds, so an extension route on an authenticated WebUI is an open
-    route unless somebody makes it otherwise. :func:`_authorised` is that
-    somebody: when the host has auth configured, a caller must present a session
-    cookie Gradio itself issued, or it gets 401.
+rest of the WebUI. There is exactly one mechanism for that, and it is not a
+login:
 
 The page token
-    A per-process random value the page is given by Python and sends back in
-    ``X-Model-Chain-Voice``. It is not a login and does not pretend to be one --
-    it makes a cross-site page unable to drive these routes with the user's
-    cookies, and it makes a stale tab from before a restart fail cleanly rather
-    than confusingly.
+    A per-process random value Python puts into the two pages that need it --
+    the Settings row and the Conversation panel -- and which the browser sends
+    back in ``X-Model-Chain-Voice``. Both of those pages are served by the
+    WebUI, behind whatever login it has, so a caller who cannot get past that
+    login never receives a token; it is 24 random bytes, so they cannot guess
+    one. It also stops a cross-site page from driving these routes with the
+    user's cookies, and makes a tab left open across a restart fail with "reload
+    the page" rather than confusingly.
+
+    There is deliberately no second check. A cookie check used to sit behind
+    this one and it locked legitimate users out twice -- reaching a page the
+    WebUI served is the proof of access, and asking for it again only produced a
+    way to fail. Nor does anything here ask for an account on any other service:
+    the model artifacts are public files and this extension holds no API key.
 
 Speech targets
     The TTS route takes a token, never text. What it speaks is an immutable
@@ -239,72 +241,6 @@ def validate_wav(data: bytes) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def login_kind(app) -> str:
-    """What login this WebUI has, in words, or "" when it has none.
-
-    Deliberately narrow, and narrow because of a bug. The first version asked
-    ``getattr(app, "auth", None)`` and treated *anything truthy* as "there is a
-    login here" -- which on a real Forge build was true on an installation
-    nobody had ever been asked to sign in to. Voice Chat then refused every
-    request it received, including its own status poll, and the feature could
-    not be installed at all. A guess that fails closed is still a guess, and
-    this one failed closed on the common case.
-
-    So only the two things a WebUI actually builds a login out of count:
-    credentials on the command line, and a populated account mapping on the
-    app. An ``auth`` attribute of some other shape is not evidence of a login
-    and is no longer treated as one.
-    """
-    if _command_line_auth():
-        return "credentials on the command line"
-    found = getattr(app, "auth", None)
-    if isinstance(found, dict) and found:
-        return "accounts configured on the WebUI"
-    if isinstance(found, (list, tuple)) and found:
-        return "accounts configured on the WebUI"
-    if callable(found):
-        return "an authentication function on the WebUI"
-    return ""
-
-
-def _authorised(request) -> bool:
-    """Whether this caller is one the WebUI itself would have served.
-
-    No login -> everybody, exactly as the rest of the WebUI. A login this
-    module can check -> a Gradio session cookie the app issued, looked up in
-    the app's own token table. Deliberately Gradio's table and not a second
-    one: a Voice Chat that maintained its own idea of who is signed in would be
-    a second login system, and the design intent says in as many words that the
-    page token is not that.
-
-    A login it *cannot* check is the interesting case, and the answer is now
-    "allow, and say so once" rather than "refuse everything". The page token is
-    not a login, but it is only ever delivered inside a page that the WebUI's
-    own login served: an unauthenticated caller cannot obtain one, so it
-    already carries the provenance this check was reaching for. Refusing on top
-    of that bought nothing and cost an installation that worked.
-    """
-    app = getattr(request, "app", None)
-    login = login_kind(app)
-    if not login:
-        return True
-
-    tokens = getattr(app, "tokens", None)
-    if isinstance(tokens, dict):
-        cookies = getattr(request, "cookies", None) or {}
-        for name in ("access-token", "access-token-unsecure"):
-            value = cookies.get(name)
-            if value and value in tokens:
-                return True
-        return False
-
-    _once("unverifiable-login",
-          "Model Chain: this WebUI has a login (%s) that Voice Chat cannot check against, so "
-          "its routes are relying on the page token — which is only ever served inside a "
-          "signed-in page" % login)
-    return True
-
-
 _said: dict[str, float] = {}
 _said_lock = threading.Lock()
 
@@ -334,16 +270,6 @@ def forget_repeats() -> None:
     """Drop the throttle's memory. For the tests, and for a UI reload."""
     with _said_lock:
         _said.clear()
-
-
-def _command_line_auth():
-    try:
-        from modules import shared
-
-        return getattr(shared.cmd_opts, "gradio_auth", None) or getattr(
-            shared.cmd_opts, "gradio_auth_path", None)
-    except Exception:
-        return None
 
 
 def _same_origin(request) -> bool:
@@ -387,27 +313,41 @@ def _matches_token(offered: str) -> bool:
 
 
 def _checked(request, route: str = "") -> None:
-    """Every gate one voice route passes, in the order they cost.
+    """Every gate one voice route passes. There is no sign-in among them.
 
-    Each refusal names *which* gate closed, in the log. Without that a 403 is
-    indistinguishable from a 401 from a route that is not there, and the only
-    way to tell them apart is to open the browser's developer tools -- which is
-    the answer this repository has already decided is not an answer (see
-    :mod:`mc_literal_report`). One line per refusal, no content in it, and the
-    reason is one of three words chosen here.
+    **Voice Chat has no login of its own and does not re-check the WebUI's.**
+    That is a deliberate reversal. A cookie check used to live here, reasoning
+    that a route an extension adds is not automatically covered by Gradio's own
+    authentication dependency -- which is true -- and it locked people out
+    twice: once by mistaking an unrelated attribute for a login, and then on an
+    installation that really does pass ``--gradio-auth`` and whose user was, of
+    course, already signed in by the time they reached the page.
+
+    The page token provides the parity, and more simply. It is minted per WebUI
+    process and delivered in exactly two places, both inside pages the WebUI
+    itself served: the Settings row and the Conversation panel. Somebody who
+    cannot get past the WebUI's login never receives one, and it is 24 random
+    bytes, so they cannot guess one. Reaching the page *is* the proof of access,
+    and asking for it a second time only ever produced a way to fail.
+
+    The gap that leaves, stated rather than hidden: a token already handed to a
+    browser stays usable until the WebUI restarts, so revoking an account
+    mid-session does not close a page that is already open. For a local speech
+    feature on a single-user WebUI that is the right trade.
+
+    Nothing here asks for an account anywhere else either. The model artifacts
+    are public files, and Voice Chat holds no API key and has nowhere to put one.
     """
     headers = getattr(request, "headers", {}) or {}
     offered = headers.get(TOKEN_HEADER)
     if not _matches_token(offered):
         _refused(route, "no page token was sent" if not offered
-                 else "the page token did not match this WebUI process")
-        raise Refused(403, "This page is out of date with the WebUI. Reload it.")
+                 else "the page token is from a previous run of this WebUI")
+        raise Refused(403, "This page was loaded before the WebUI restarted. Reload it — "
+                           "you are not being asked to sign in to anything.")
     if not _same_origin(request):
         _refused(route, "the Origin header did not match this WebUI's host")
         raise Refused(403, "That request did not come from this WebUI.")
-    if not _authorised(request):
-        _refused(route, "the caller is not signed in to the WebUI")
-        raise Refused(401, "Sign in to the WebUI to use Voice Chat.")
 
 
 def _refused(route: str, reason: str) -> None:
@@ -658,14 +598,10 @@ def install(_demo=None, app=None) -> bool:
         return False
     _installed = True
     found = models.status()
-    login = login_kind(app)
-    # Said at start-up rather than left to be inferred from a refusal: "are my
-    # voice routes protected" is a question an operator should be able to answer
-    # from the log, and the first version answered it only by refusing people.
-    logger.info("Model Chain: Voice Chat routes are %s",
-                f"behind the WebUI's login ({login})" if login
-                else "open to the same callers the rest of this WebUI is, because it has no "
-                     "login configured")
+    # Said at start-up rather than left to be inferred from a refusal. There is
+    # one gate, it is not a login, and the honest line says so.
+    logger.info("Model Chain: Voice Chat routes are reachable from any page this WebUI "
+                "served — they carry no login of their own and need no account anywhere")
     logger.info("Model Chain: Voice Chat routes registered at %s", ", ".join(ROUTES))
     logger.info("Model Chain: Voice Chat data directory is %s", paths.data_root())
     logger.info("Model Chain: Voice Chat status — runtime %s, speech-to-text %s, "
