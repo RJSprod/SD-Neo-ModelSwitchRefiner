@@ -244,7 +244,27 @@ def settings_html() -> str:
     found = models.status()
     parts = [f'<div class="mc-voice-settings" '
              f'data-mc-voice-key="{ui.escape(api.session_token())}">']
-    parts.append(f'<div class="mc-voice-runtime">{ui.escape(found.runtime_message)}</div>')
+    # The engine gets a row of its own with a button of its own. It used to be
+    # a line of text, on the reasoning that it is an implementation detail of
+    # the two models and is installed by whichever is downloaded first -- which
+    # is true right up until somebody installs both models from files they
+    # already had. Then nothing was downloaded, the engine is still missing,
+    # both model buttons read "Installed", and there is nothing left to press.
+    parts.append(
+        f'<div class="mc-voice-row" data-mc-voice-kind="runtime">'
+        f'<div class="mc-voice-head">'
+        f'<div class="mc-voice-heading">Voice engine</div>'
+        f'<div class="mc-voice-default">sherpa-onnx, CPU only</div>'
+        f'<div class="mc-voice-status" data-mc-voice-status="runtime">'
+        f'{ui.escape(found.runtime_message)}</div>'
+        f'<button type="button" class="mc-voice-install" '
+        f'data-mc-voice-install="runtime">Install voice engine</button>'
+        f'</div>'
+        f'<div class="mc-voice-note">Downloaded from PyPI and installed into a folder of '
+        f'its own. Both models need it, and downloading either one installs it too — this '
+        f'button is for when you installed the models from your own files.</div>'
+        f'</div>')
+    parts.append(f'<div class="mc-voice-runtime">{ui.escape(found.summary)}</div>')
 
     for kind, heading in (("stt", "Speech to text"), ("tts", "Text to speech")):
         label, addresses = "", []

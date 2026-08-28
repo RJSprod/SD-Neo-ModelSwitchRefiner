@@ -512,6 +512,24 @@ class Status:
         """
         return self.runtime_ready and self.stt_ready and self.tts_ready
 
+    @property
+    def summary(self) -> str:
+        """One line naming what is still missing, or saying it is ready.
+
+        Because three separate "Not installed" lines and a feature that does not
+        work is a puzzle, and this is the sentence that solves it.
+        """
+        if self.ready:
+            return "Voice Chat is ready."
+        if not self.platform_supported:
+            return self.runtime_message
+        missing = [name for name, ok in (("the voice engine", self.runtime_ready),
+                                         ("the speech-to-text model", self.stt_ready),
+                                         ("the text-to-speech model", self.tts_ready))
+                   if not ok]
+        return ("Voice Chat is not ready yet — still to install: "
+                + ", ".join(missing) + ".")
+
 
 def status() -> Status:
     """Read the disk and say what is installed. Never raises, never downloads."""
@@ -735,12 +753,14 @@ def refusal(kind: str, manual: bool = False) -> str:
     happening on a background thread where the only place it can go is a warning
     nobody is reading.
     """
-    if kind not in paths.KINDS:
-        return "Voice Chat installs a speech-to-text or a text-to-speech model."
+    if kind not in paths.KINDS and kind != "runtime":
+        return ("Voice Chat installs the voice engine, a speech-to-text model or a "
+                "text-to-speech model.")
     try:
         # Not for its value -- for the exception. A catalogue this build cannot
         # read is the one thing here that is still a refusal.
-        default_model(kind)
+        if kind != "runtime":
+            default_model(kind)
     except VoiceError as exc:
         return str(exc)
 
@@ -1022,6 +1042,26 @@ def _digest(path: Path) -> str:
         for block in iter(lambda: handle.read(CHUNK), b""):
             found.update(block)
     return found.hexdigest()
+
+
+def install_engine(on_status=None, on_progress=None) -> Status:
+    """Install the speech engine on its own, as a button somebody can press.
+
+    Ordinarily the engine is an implementation detail of the two models and is
+    provisioned by whichever one is downloaded first, which is why there is no
+    third button in the ordinary case. There is one now because that reasoning
+    has a hole in it, and somebody fell in: install both models from files you
+    already had -- which downloads nothing -- and the engine is still missing,
+    both model buttons say "Installed", and there is no longer anything to press.
+    A dead end reached by following the instructions is a dead end this feature
+    put there.
+    """
+    say = _narrator("runtime", on_status)
+    tick = _ticker("runtime", on_progress)
+    with _claim("runtime", say):
+        install_runtime(on_status=say, on_progress=tick)
+        say("The voice engine is installed.")
+        return status()
 
 
 def install_runtime(on_status=None, on_progress=None) -> None:
@@ -1358,7 +1398,11 @@ def _build_environment(staging: Path, wheels: Path, chosen: RuntimePlatform) -> 
     try:
         builder.create(environment)
     except Exception as exc:
-        raise VoiceError(f"The isolated Voice Chat runtime could not be created ({exc}).") from None
+        logger.warning("Model Chain: Voice Chat could not create a virtual environment at %s "
+                       "using %s — %s: %s", environment, sys.executable,
+                       exc.__class__.__name__, exc)
+        raise VoiceError(f"The isolated Voice Chat runtime could not be created "
+                         f"({exc.__class__.__name__}: {exc}).") from None
 
     interpreter = ((environment / "Scripts" / "python.exe") if os.name == "nt"
                    else (environment / "bin" / "python"))
@@ -1375,36 +1419,101 @@ def _build_environment(staging: Path, wheels: Path, chosen: RuntimePlatform) -> 
                     "PIP_CONFIG_FILE": os.devnull})
     result = subprocess.run(command, capture_output=True, text=True, env=environ, timeout=900)
     if result.returncode != 0:
+        logger.warning("Model Chain: Voice Chat could not install its wheels (exit %s).\n"
+                       "  interpreter: %s\n  stderr: %s\n  stdout: %s",
+                       result.returncode, interpreter, _quote(result.stderr) or "(nothing)",
+                       _quote(result.stdout) or "(nothing)")
         raise VoiceError("The pinned Voice Chat wheels could not be installed into the isolated "
                          "runtime. Nothing was changed. The installer's own output is in the "
-                         "console.")
+                         "console and in model_chain.log.")
+
+
+def _quote(output: str, limit: int = 1200) -> str:
+    """A subprocess's own words, trimmed, for a log line.
+
+    Trimmed from the *end*, because a Python traceback puts the sentence that
+    matters on its last line and the first twenty frames are the ones nobody
+    needs.
+    """
+    text = (output or "").strip()
+    if len(text) <= limit:
+        return text
+    return "…" + text[-limit:]
+
+
+def _run_staged(interpreter: Path, arguments: list, what: str, timeout: float = 300):
+    """Run something in the staged runtime and say what happened when it fails.
+
+    The failure this exists for was mine: the smoke test ran a subprocess,
+    checked its return code, and threw the output away -- so an installation
+    that failed on somebody else's machine reported "could not import its speech
+    engine" and there was no way to learn *why* short of asking them to run
+    Python by hand. A captured stderr is the difference between one round trip
+    and four.
+    """
+    try:
+        result = subprocess.run([str(interpreter)] + [str(a) for a in arguments],
+                                capture_output=True, text=True,
+                                env={**os.environ, **worker_environment()}, timeout=timeout)
+    except Exception as exc:
+        logger.warning("Model Chain: Voice Chat could not run %s (%s: %s) — interpreter %s",
+                       what, exc.__class__.__name__, exc, interpreter)
+        raise VoiceError(f"The staged Voice Chat runtime could not be started "
+                         f"({exc.__class__.__name__}). Nothing was installed.") from None
+    if result.returncode != 0:
+        logger.warning("Model Chain: Voice Chat's %s failed with exit code %s.\n"
+                       "  interpreter: %s\n  stderr: %s\n  stdout: %s",
+                       what, result.returncode, interpreter,
+                       _quote(result.stderr) or "(nothing)",
+                       _quote(result.stdout) or "(nothing)")
+    return result
 
 
 def _smoke_test(staging: Path, spec: dict) -> dict:
-    """Prove the staged runtime imports and can be configured for CPU only.
+    """Prove the staged runtime runs, imports, and can be asked for the CPU.
 
     Before promotion, so an environment that builds and cannot run never becomes
     the installed one. Run through the worker's own ``--selftest``, which is the
     same file that will do the inference: a smoke test that imports something
     else is a smoke test of something else.
+
+    Two steps, not one, because they fail for entirely different reasons and
+    used to produce the same sentence. A venv whose interpreter will not start
+    is a broken environment -- which is a real outcome when the WebUI is running
+    on an embedded or relocated Python. A venv that starts and cannot import
+    sherpa-onnx is a broken package for this platform. Telling them apart is the
+    difference between "reinstall Python" and "this build is wrong for your
+    machine".
     """
     interpreter = ((staging / "env" / "Scripts" / "python.exe") if os.name == "nt"
                    else (staging / "env" / "bin" / "python"))
-    environ = dict(os.environ)
-    environ.update(worker_environment())
-    try:
-        result = subprocess.run(
-            [str(interpreter), str(paths.worker_script()), "--selftest"],
-            capture_output=True, text=True, env=environ, timeout=300)
-    except Exception as exc:
-        raise VoiceError(f"The staged Voice Chat runtime could not be started ({exc}). Nothing "
-                         f"was installed.") from None
+    if not interpreter.exists():
+        raise VoiceError(f"The isolated Voice Chat runtime has no interpreter at "
+                         f"{interpreter}. Nothing was installed.")
+
+    alive = _run_staged(interpreter, ["-c", "import sys; print(sys.version)"],
+                        "check that the isolated interpreter runs", timeout=120)
+    if alive.returncode != 0:
+        raise VoiceError(
+            "The isolated Voice Chat runtime was created but its interpreter will not run. "
+            "That usually means this WebUI is running on an embedded or relocated Python "
+            "that cannot make a working virtual environment. The interpreter's own error is "
+            "in the console. Nothing was installed.")
+    logger.info("Model Chain: Voice Chat's isolated interpreter reports %s",
+                _quote(alive.stdout, 200))
+
+    result = _run_staged(interpreter, [paths.worker_script(), "--selftest"],
+                         "speech engine self-test")
     if result.returncode != 0:
-        raise VoiceError("The staged Voice Chat runtime could not import its speech engine, so "
-                         "it was not installed. Voice Chat is unchanged.")
+        raise VoiceError(
+            "The isolated Voice Chat runtime could not import its speech engine. Its own "
+            "error is in the console and in model_chain.log. Nothing was installed and "
+            "Voice Chat is unchanged.")
     try:
         report = json.loads((result.stdout or "").strip().splitlines()[-1])
     except (ValueError, IndexError):
+        logger.warning("Model Chain: the Voice Chat self-test printed %s",
+                       _quote(result.stdout) or "(nothing)")
         raise VoiceError("The staged Voice Chat runtime did not report what it is. Nothing was "
                          "installed.") from None
     if report.get("provider") != "cpu":

@@ -467,8 +467,9 @@ def provision(kind: str, folder: str = "") -> dict:
     and the row sat on "Starting…" for as long as somebody was willing to watch
     it. A refusal a caller is waiting for belongs in the reply to that caller.
     """
-    if kind not in ("stt", "tts"):
-        raise Refused(400, "Voice Chat installs a speech-to-text or a text-to-speech model.")
+    if kind not in ("stt", "tts", "runtime"):
+        raise Refused(400, "Voice Chat installs the voice engine, a speech-to-text model or "
+                           "a text-to-speech model.")
 
     already = models.progress().get(kind) or {}
     if already.get("running"):
@@ -488,7 +489,9 @@ def provision(kind: str, folder: str = "") -> dict:
 
     def run():
         try:
-            if manual:
+            if kind == "runtime":
+                models.install_engine()
+            elif manual:
                 models.install_from(kind, manual)
             else:
                 models.install(kind)
