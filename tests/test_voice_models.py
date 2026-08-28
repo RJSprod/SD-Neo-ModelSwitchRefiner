@@ -1167,3 +1167,133 @@ def types_namespace(**values):
     import types as _types
 
     return _types.SimpleNamespace(**values)
+
+
+class TestTheEngineOnItsOwn:
+    """Installing both models from files you already have downloads nothing, so
+    the engine that both of them need is still missing and there is no model
+    button left to press. It gets a button."""
+
+    def test_the_engine_is_an_installable_kind(self):
+        assert models.refusal("runtime") == ""
+
+    def test_an_unsupported_platform_still_refuses_it(self, monkeypatch):
+        monkeypatch.setattr(models, "current_platform", lambda: ("haiku", "vax", "3.11"))
+        assert "no tested CPU runtime" in models.refusal("runtime")
+
+    def test_installing_it_provisions_only_the_runtime(self, voice_root, monkeypatch):
+        called = []
+        monkeypatch.setattr(models, "install_runtime",
+                            lambda on_status=None, on_progress=None: called.append(True))
+        models.install_engine()
+        assert called == [True]
+
+    def test_it_narrates_into_the_progress_record(self, voice_root, monkeypatch, caplog):
+        import logging
+
+        caplog.set_level(logging.INFO, logger="model_chain")
+        monkeypatch.setattr(models, "install_runtime",
+                            lambda on_status=None, on_progress=None:
+                            on_status and on_status("Creating the isolated voice runtime…"))
+        models.install_engine()
+
+        state = models.progress()["runtime"]
+        assert state["running"] is False
+        assert state["failed"] is False
+        assert state["text"] == "Installed."
+        assert any("Creating the isolated voice runtime" in record.getMessage()
+                   for record in caplog.records), "the row was never told what it was doing"
+
+    def test_a_failure_leaves_its_reason_where_the_row_draws_it(self, voice_root,
+                                                                monkeypatch):
+        def explode(on_status=None, on_progress=None):
+            raise models.VoiceError("The isolated interpreter will not run.")
+
+        monkeypatch.setattr(models, "install_runtime", explode)
+        with pytest.raises(models.VoiceError):
+            models.install_engine()
+        assert models.progress()["runtime"]["failed"] is True
+        assert "will not run" in models.progress()["runtime"]["text"]
+
+
+class TestTheSummaryLine:
+    def test_it_names_every_missing_piece(self):
+        found = models.Status(False, False, False, "n", "n", "n", True)
+        assert "the voice engine" in found.summary
+        assert "the speech-to-text model" in found.summary
+        assert "the text-to-speech model" in found.summary
+
+    def test_it_names_only_what_is_missing(self):
+        """The reported confusion: both models installed from files, engine not,
+        and three "Not installed" lines that do not say which one matters."""
+        found = models.Status(False, True, True, "n", "i", "i", True)
+        assert found.summary == ("Voice Chat is not ready yet — still to install: "
+                                 "the voice engine.")
+
+    def test_it_says_ready_when_it_is(self):
+        assert models.Status(True, True, True, "i", "i", "i", True).summary == (
+            "Voice Chat is ready.")
+
+    def test_an_unsupported_platform_says_that_instead(self):
+        found = models.Status(False, False, False, "no runtime here", "n", "n", False)
+        assert found.summary == "no runtime here"
+
+
+class TestWhenTheStagedRuntimeWillNotRun:
+    """The failure that stopped a real installation, and reported nothing.
+
+    The smoke test ran a subprocess, checked its return code and discarded its
+    output, so "could not import its speech engine" was the whole of what
+    anybody could learn."""
+
+    def test_a_broken_interpreter_is_told_apart_from_a_broken_engine(self, tmp_path,
+                                                                     monkeypatch):
+        staging = tmp_path / "staging"
+        binary = staging / ("env/Scripts/python.exe" if models.os.name == "nt"
+                            else "env/bin/python")
+        binary.parent.mkdir(parents=True)
+        binary.write_text("", encoding="utf-8")
+
+        class Result:
+            returncode = 1
+            stdout = ""
+            stderr = "No module named 'encodings'"
+
+        monkeypatch.setattr(models.subprocess, "run", lambda *a, **k: Result())
+        with pytest.raises(models.VoiceError, match="interpreter will not run"):
+            models._smoke_test(staging, models.manifest())
+
+    def test_the_subprocess_output_reaches_the_log(self, tmp_path, monkeypatch, caplog):
+        import logging
+
+        caplog.set_level(logging.WARNING, logger="model_chain")
+        staging = tmp_path / "staging"
+        binary = staging / ("env/Scripts/python.exe" if models.os.name == "nt"
+                            else "env/bin/python")
+        binary.parent.mkdir(parents=True)
+        binary.write_text("", encoding="utf-8")
+
+        class Result:
+            returncode = 1
+            stdout = ""
+            stderr = "ImportError: DLL load failed while importing _sherpa_onnx"
+
+        monkeypatch.setattr(models.subprocess, "run", lambda *a, **k: Result())
+        with pytest.raises(models.VoiceError):
+            models._smoke_test(staging, models.manifest())
+
+        written = " ".join(record.getMessage() for record in caplog.records)
+        assert "DLL load failed" in written, (
+            "the subprocess said why it failed and nobody wrote it down")
+
+    def test_a_missing_interpreter_names_the_path(self, tmp_path):
+        with pytest.raises(models.VoiceError, match="no interpreter at"):
+            models._smoke_test(tmp_path / "staging", models.manifest())
+
+    def test_a_long_traceback_is_trimmed_from_the_front(self):
+        """The sentence that matters is the last line of a traceback; the first
+        twenty frames are the ones nobody needs."""
+        text = "\n".join(f"  frame {i}" for i in range(500)) + "\nValueError: the real reason"
+        trimmed = models._quote(text)
+        assert trimmed.endswith("ValueError: the real reason")
+        assert len(trimmed) < len(text)

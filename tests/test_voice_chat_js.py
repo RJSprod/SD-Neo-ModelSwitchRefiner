@@ -146,11 +146,18 @@ settingsParts.sttLocal["data-mc-voice-local"] = "stt";
 settingsParts.ttsLocal["data-mc-voice-local"] = "tts";
 settingsParts.sttFolder = element("stt-folder", "INPUT");
 settingsParts.ttsFolder = element("tts-folder", "INPUT");
+settingsParts.runtimeLine = element("runtime-line");
+settingsParts.runtimeButton = element("runtime-button", "BUTTON");
+settingsParts.runtimeButton["data-mc-voice-install"] = "runtime";
 
 const settingsRow = element("settings");
 settingsRow["data-mc-voice-key"] = "PAGE-TOKEN";
 settingsRow.querySelector = function (selector) {
     if (selector === ".mc-voice-runtime") return settingsParts.runtime;
+    if (selector === '[data-mc-voice-status="runtime"]') return settingsParts.runtimeLine;
+    if (selector === '[data-mc-voice-install="runtime"]') return settingsParts.runtimeButton;
+    if (selector === '[data-mc-voice-local="stt"]') return settingsParts.sttLocal;
+    if (selector === '[data-mc-voice-local="tts"]') return settingsParts.ttsLocal;
     if (selector === '[data-mc-voice-status="stt"]') return settingsParts.sttLine;
     if (selector === '[data-mc-voice-status="tts"]') return settingsParts.ttsLine;
     if (selector === '[data-mc-voice-install="stt"]') return settingsParts.sttButton;
@@ -161,7 +168,7 @@ settingsRow.querySelector = function (selector) {
 };
 settingsRow.querySelectorAll = function (selector) {
     if (selector === "[data-mc-voice-install]") {
-        return [settingsParts.sttButton, settingsParts.ttsButton];
+        return [settingsParts.runtimeButton, settingsParts.sttButton, settingsParts.ttsButton];
     }
     if (selector === "[data-mc-voice-local]") {
         return [settingsParts.sttLocal, settingsParts.ttsLocal];
@@ -382,6 +389,10 @@ function report(extra) {
             ttsDisabled: settingsParts.ttsButton.disabled,
             sttFailed: settingsParts.sttLine.classList.contains("mc-voice-failed"),
             sttLocalDisabled: settingsParts.sttLocal.disabled,
+            sttLocalLabel: settingsParts.sttLocal.textContent,
+            runtimeLine: settingsParts.runtimeLine.textContent,
+            runtimeButton: settingsParts.runtimeButton.textContent,
+            runtimeDisabled: settingsParts.runtimeButton.disabled,
         },
     }, extra || {});
 }
@@ -409,6 +420,7 @@ DEFAULTS = {
                                   "tts_ready": True, "runtime_ready": True,
                                   "auto_send": False, "auto_speak": False,
                                   "progress": {}, "runtime_message": "Installed",
+                                  "summary": "Voice Chat is ready.",
                                   "stt_message": "Installed", "tts_message": "Installed",
                                   "not_ready_message": "Voice Chat is not set up."}},
         "voice/stt": {"json": {"ok": True, "text": "the quick brown fox",
@@ -925,7 +937,8 @@ class TestTheSettingsRow:
     def test_it_draws_what_is_installed_on_the_first_pass(self):
         found = run("await tick(); console.log(JSON.stringify(report()));",
                     SETTINGS_PRESENT="true")
-        assert found["settings"]["runtime"] == "Installed"
+        assert found["settings"]["runtime"] == "Voice Chat is ready."
+        assert found["settings"]["runtimeLine"] == "Installed"
         assert found["settings"]["sttButton"] == "Installed"
         assert found["settings"]["sttDisabled"] is True
 
@@ -1197,3 +1210,91 @@ class TestThePollingStops:
             console.log(JSON.stringify(report({polls: requests.length})));
         """, SETTINGS_PRESENT="true", HIDDEN="true")
         assert found["polls"] == 0, "a hidden tab kept polling the WebUI"
+
+
+class TestTheEngineRow:
+    """The engine has a button of its own, because the reasoning that it did not
+    need one had a hole and somebody fell in.
+
+    Install both models from files you already had — which downloads nothing —
+    and the engine is still missing, both model buttons read "Installed", and
+    there is nothing left to press."""
+
+    def test_it_is_drawn_and_can_be_pressed(self):
+        answers = status_answer(runtime_ready=False, ready=False,
+                                runtime_message="Not installed",
+                                stt_ready=True, tts_ready=True,
+                                summary="Voice Chat is not ready yet — still to install: "
+                                        "the voice engine.")
+        found = run("""
+            await tick();
+            requests.length = 0;
+            settingsParts.runtimeButton.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+
+        posts = [r for r in found["requests"] if r.get("url", "").endswith("/install")]
+        assert json.loads(posts[0]["bodyText"]) == {"kind": "runtime"}
+
+    def test_the_summary_names_what_is_still_missing(self):
+        """Three separate "Not installed" lines and a feature that does not work
+        is a puzzle. One sentence solves it."""
+        answers = status_answer(runtime_ready=False, ready=False,
+                                stt_ready=True, tts_ready=True,
+                                runtime_message="Not installed",
+                                summary="Voice Chat is not ready yet — still to install: "
+                                        "the voice engine.")
+        found = run("await tick(); console.log(JSON.stringify(report()));",
+                    SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+        assert "the voice engine" in found["settings"]["runtime"]
+        assert found["settings"]["runtimeButton"] == "Install voice engine"
+        assert found["settings"]["runtimeDisabled"] is False
+
+    def test_an_installed_engine_disables_its_button(self):
+        found = run("await tick(); console.log(JSON.stringify(report()));",
+                    SETTINGS_PRESENT="true")
+        assert found["settings"]["runtimeButton"] == "Installed"
+        assert found["settings"]["runtimeDisabled"] is True
+
+
+class TestTheFolderButtonComesBack:
+    """The second stuck button. `paintSettings` repainted the primary install
+    button and never the "Install from this folder" one beside it, so a folder
+    install left that button saying "Starting…" for good."""
+
+    def test_it_is_restored_after_a_folder_install_finishes(self):
+        answers = status_answer()
+        found = run("""
+            await tick();
+            settingsParts.sttFolder.value = "C:\\\\Roots\\\\downloads";
+            settingsParts.sttLocal.fire("click");
+            await tick();
+            await repaint();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+
+        assert found["settings"]["sttLocalDisabled"] is False
+        assert found["settings"]["sttLocalLabel"] != "Starting…"
+
+    def test_an_installed_bundle_offers_to_reinstall_rather_than_going_dead(self):
+        found = run("await tick(); console.log(JSON.stringify(report()));",
+                    SETTINGS_PRESENT="true")
+        assert found["settings"]["sttLocalLabel"] == "Reinstall from a folder"
+        assert found["settings"]["sttLocalDisabled"] is False
+
+    def test_it_shows_progress_while_one_runs(self):
+        answers = status_answer(stt_ready=False, ready=False, progress={
+            "stt": {"running": True, "fraction": 0.5, "text": "Copying encoder.onnx…"}})
+        found = run("await tick(); console.log(JSON.stringify(report()));",
+                    SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+        assert found["settings"]["sttLocalLabel"] == "Installing…"
+        assert found["settings"]["sttLocalDisabled"] is True
+
+    def test_a_failure_frees_it_too(self):
+        answers = status_answer(stt_ready=False, ready=False, progress={
+            "stt": {"running": False, "failed": True, "fraction": 0.0,
+                    "text": "tokens.txt is missing."}})
+        found = run("await tick(); console.log(JSON.stringify(report()));",
+                    SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+        assert found["settings"]["sttLocalDisabled"] is False

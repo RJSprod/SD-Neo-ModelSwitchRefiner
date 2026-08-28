@@ -771,10 +771,13 @@
 
     // -- the Settings page row ------------------------------------------------ //
 
-    const KINDS = ["stt", "tts"];
+    // The engine is a row too, and is painted by the same loop. It has no
+    // "install from a folder" half -- it comes from PyPI or not at all.
+    const KINDS = ["runtime", "stt", "tts"];
 
     function installLabel(kind) {
-        return "Download default " + kind.toUpperCase();
+        return kind === "runtime" ? "Install voice engine"
+            : "Download default " + kind.toUpperCase();
     }
 
     function settingsLine(holder, kind) {
@@ -783,6 +786,10 @@
 
     function installButton(holder, kind) {
         return holder.querySelector('[data-mc-voice-install="' + kind + '"]');
+    }
+
+    function localButton(holder, kind) {
+        return holder.querySelector('[data-mc-voice-local="' + kind + '"]');
     }
 
     function sayInRow(holder, kind, text, bad) {
@@ -795,14 +802,22 @@
         }
     }
 
-    // Whatever went wrong, the button comes back. A control that disabled
+    // Whatever went wrong, *both* buttons come back. A control that disabled
     // itself on the way into a request it never got an answer to is a control
-    // somebody sits and watches -- which is exactly what happened, for minutes.
+    // somebody sits and watches -- which is exactly what happened, for minutes,
+    // twice: the second time because this only ever repainted the primary
+    // button and left "Install from this folder" saying "Starting…" forever.
     function releaseButton(holder, kind, ready) {
         const button = installButton(holder, kind);
-        if (!button) return;
-        button.disabled = !!ready;
-        button.textContent = ready ? "Installed" : installLabel(kind);
+        if (button) {
+            button.disabled = !!ready;
+            button.textContent = ready ? "Installed" : installLabel(kind);
+        }
+        const local = localButton(holder, kind);
+        if (local) {
+            local.disabled = false;
+            local.textContent = ready ? "Reinstall from a folder" : "Install from this folder";
+        }
     }
 
     function wireSettings() {
@@ -934,11 +949,13 @@
                 });
                 return payload;
             }
-            if (runtime) runtime.textContent = payload.runtime_message || "";
+            if (runtime) runtime.textContent = payload.summary || "";
             KINDS.forEach(function (kind) {
                 const progress = (payload.progress || {})[kind] || {};
-                const ready = kind === "stt" ? payload.stt_ready : payload.tts_ready;
-                const message = kind === "stt" ? payload.stt_message : payload.tts_message;
+                const ready = kind === "runtime" ? payload.runtime_ready
+                    : kind === "stt" ? payload.stt_ready : payload.tts_ready;
+                const message = kind === "runtime" ? payload.runtime_message
+                    : kind === "stt" ? payload.stt_message : payload.tts_message;
                 const button = installButton(holder, kind);
 
                 if (progress.running) {
@@ -948,6 +965,11 @@
                     if (button) {
                         button.disabled = true;
                         button.textContent = "Installing…";
+                    }
+                    const busy = localButton(holder, kind);
+                    if (busy) {
+                        busy.disabled = true;
+                        busy.textContent = "Installing…";
                     }
                     return;
                 }
