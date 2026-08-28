@@ -181,6 +181,11 @@ class ExecutionDomain:
 
     kind: str = EXEC_CUDA_UNKNOWN
     card: int | None = None
+    uuid: str = ""
+    """The card's UUID, when it can be had. Survives every renumbering."""
+    name: str = ""
+    """What the driver calls the card. The weaker identity, and the one that is
+    available when neither of the others is."""
 
     @property
     def is_cpu(self) -> bool:
@@ -196,7 +201,29 @@ class ExecutionDomain:
         return self.kind == EXEC_CPU or (self.kind == EXEC_CUDA and self.card is not None)
 
     def conflicts_with(self, other: "ExecutionDomain | None") -> bool:
-        """Whether two active workloads are competing for one processor."""
+        """Whether two active workloads are competing for one processor.
+
+        Identity before arithmetic, and that ordering is the correction. A
+        card index is only meaningful inside the namespace that issued it:
+        ``nvidia-smi`` numbers by PCI bus, the CUDA runtime numbers by
+        ``CUDA_DEVICE_ORDER`` (fastest first, by default), and a process under
+        ``CUDA_VISIBLE_DEVICES`` numbers from zero over what it can see. Two
+        cards can therefore both be "card 0" and be different cards, which is
+        exactly what happened on the machine this was reported from: the
+        language model was configured for physical 0, a 5090, and Forge
+        reported device 0 with 24 GB, a 3090.
+
+        So the ladder is:
+
+        1. **Both UUIDs known** -- the answer, in both directions. Nothing else
+           is consulted.
+        2. **Both names known and different** -- different cards. A negative
+           only: two model names that differ cannot describe one card, while
+           two that match may be two identical cards.
+        3. **Otherwise, the indices** -- which is right whenever they come from
+           one namespace, and is what a single-GPU installation has always
+           done.
+        """
         if other is None:
             return False
         if self.is_cpu or other.is_cpu:
@@ -204,6 +231,14 @@ class ExecutionDomain:
             # processor workload and a CUDA one do not, whatever else they
             # share (invariant I-1).
             return self.is_cpu and other.is_cpu
+        if self.uuid and other.uuid:
+            return self.uuid == other.uuid
+        if self.name and other.name and self.name != other.name:
+            # Established even when neither card could be numbered. An
+            # unresolved *index* is not an unresolved *card*, and refusing to
+            # notice a 3090 beside a 5090 would keep the conservative wait for
+            # a machine that has just told us it does not need one.
+            return False
         if self.kind == EXEC_CUDA and other.kind == EXEC_CUDA:
             return self.card == other.card
         return True  # at least one unresolved CUDA card
@@ -223,20 +258,24 @@ UNKNOWN_CUDA_EXECUTION = ExecutionDomain(EXEC_CUDA_UNKNOWN)
 """CUDA, card unresolved. Conservative against every CUDA domain."""
 
 
-def cuda_execution(card: int | None) -> ExecutionDomain:
+def cuda_execution(card: int | None, *, uuid: str = "", name: str = "") -> ExecutionDomain:
     """The execution domain of a CUDA workload on ``card``.
 
-    ``None`` or a negative index is :data:`UNKNOWN_CUDA_EXECUTION` and is
-    emphatically *not* the processor -- that is the collapse invariant I-10
-    forbids.
+    ``None`` or a negative index is unknown-CUDA and is emphatically *not* the
+    processor -- that is the collapse invariant I-10 forbids. It may still
+    carry a ``uuid`` or a ``name``, and usually does: a card whose *index*
+    could not be translated between namespaces is still a card somebody can
+    identify, and :meth:`ExecutionDomain.conflicts_with` will use whichever
+    identity it has.
     """
-    if card is None:
-        return UNKNOWN_CUDA_EXECUTION
+    identity = {"uuid": str(uuid or ""), "name": str(name or "")}
     try:
-        index = int(card)
+        index = None if card is None else int(card)
     except (TypeError, ValueError):
-        return UNKNOWN_CUDA_EXECUTION
-    return ExecutionDomain(EXEC_CUDA, index) if index >= 0 else UNKNOWN_CUDA_EXECUTION
+        index = None
+    if index is None or index < 0:
+        return ExecutionDomain(EXEC_CUDA_UNKNOWN, None, **identity)
+    return ExecutionDomain(EXEC_CUDA, index, **identity)
 
 
 def image_execution_domain() -> ExecutionDomain:
@@ -246,8 +285,34 @@ def image_execution_domain() -> ExecutionDomain:
     cannot be resolved is unresolved rather than absent. Answering "processor"
     for an unreadable index would tell every CUDA language model it was
     independent of a generation it may well be sitting on top of.
+
+    Carries the card's identity as well as its index, because the index alone
+    has proved not to be enough: it is a *physical* index now, translated from
+    Forge's own ordinal, and a machine where that translation is not possible
+    can still usually say which card this is by name.
     """
-    return cuda_execution(image_device_index())
+    return cuda_execution(image_device_index(), uuid=image_device_uuid(),
+                          name=image_device_name())
+
+
+def image_device_uuid() -> str:
+    """The UUID of Forge's card, or ``""``. See :func:`mc_memory.image_device_uuid`."""
+    try:
+        import mc_memory
+
+        return str(mc_memory.image_device_uuid() or "")
+    except Exception:
+        return ""
+
+
+def image_device_name() -> str:
+    """What the driver calls Forge's card, or ``""``."""
+    try:
+        import mc_memory
+
+        return str(mc_memory.image_device_name() or "")
+    except Exception:
+        return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -1611,7 +1676,7 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
 
 
 def release_for_llm(needed_bytes: int, *, card: int | None = None, reason: str = "",
-                    margin: int | None = None) -> Reclaim:
+                    margin: int | None = None, uuid: str = "", name: str = "") -> Reclaim:
     """The one door out of :func:`_victim_order`'s rule, and the user opens it.
 
     Every other path in this module keeps the asymmetry that module's docstring
@@ -1659,7 +1724,7 @@ def release_for_llm(needed_bytes: int, *, card: int | None = None, reason: str =
         return Reclaim(needed, free, 0, 0, ())
 
     deficit = target - free
-    if not _same_card_as_the_image_side(card):
+    if not _same_card_as_the_image_side(card, uuid=uuid, name=name):
         note(FAMILY_LLM,
              f"{reason or 'the LLM'} is short {deficit / _GB:.1f} GB on GPU {card}, and the "
              f"image residency is on another card — nothing was released, because releasing "
@@ -1688,7 +1753,8 @@ def release_for_llm(needed_bytes: int, *, card: int | None = None, reason: str =
     return result
 
 
-def _same_card_as_the_image_side(card: int | None) -> bool:
+def _same_card_as_the_image_side(card: int | None, *, uuid: str = "",
+                                 name: str = "") -> bool:
     """Whether releasing image residency could help a placement on ``card``.
 
     Unanswerable questions are answered **no** here, which is the opposite of
@@ -1697,18 +1763,32 @@ def _same_card_as_the_image_side(card: int | None) -> bool:
     so the language model sizes itself conservatively and the cost of being
     wrong is a smaller model. Here, the cost of being wrong is an evicted
     checkpoint -- so an unknown card releases nothing.
+
+    That caution was in place and was not enough, because the comparison
+    underneath it was between two different namespaces. A language model
+    configured for physical card 0 and an image side reporting *ordinal* 0
+    matched, and a 3090's checkpoint was thrown off the card to make room for a
+    model going onto a 5090: thirteen gigabytes evicted, nothing gained, and the
+    generation that followed reloaded every byte. The comparison is by identity
+    now, and it is the same ladder :meth:`ExecutionDomain.conflicts_with`
+    climbs.
     """
     if card is None:
         return False
     try:
-        image = image_device_index()
+        mine = cuda_execution(card, uuid=uuid, name=name)
+        image = image_execution_domain()
     except Exception:
         logger.debug("Model Chain: could not ask which card the image side is on",
                      exc_info=True)
         return False
-    if image < 0 or int(card) < 0:
+    if mine.uuid and image.uuid:
+        return mine.uuid == image.uuid
+    if mine.name and image.name and mine.name != image.name:
         return False
-    return int(card) == int(image)
+    if not mine.known or not image.known:
+        return False
+    return mine.card == image.card
 
 
 def unaccounted_bytes(*, card=ANY_CARD) -> int:

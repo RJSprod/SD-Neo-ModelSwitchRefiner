@@ -1007,8 +1007,24 @@ def _image_card():
 
 
 def _image_card_name() -> str:
+    """The image card, named as well as numbered.
+
+    Both, because the number alone is what made a two-card machine impossible
+    to debug from a log: "24.0 GB on GPU 0" beside a language model the panel
+    said was on a 5090 reads as one card contradicting itself, when it was two
+    cards being given the same number by two different namespaces. The model
+    name settles it at a glance.
+    """
     card = _image_card()
-    return f"GPU {card}" if isinstance(card, int) else "the card"
+    if not isinstance(card, int):
+        return "the card"
+    try:
+        import mc_memory
+
+        name = mc_memory.physical_card_name(card) or mc_memory.image_device_name()
+    except Exception:
+        name = ""
+    return f"GPU {card} ({name})" if name else f"GPU {card}"
 
 
 def current() -> Plan | None:

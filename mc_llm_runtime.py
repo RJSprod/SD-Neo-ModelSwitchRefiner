@@ -117,6 +117,32 @@ class Config:
     kv_type_v: str
     quantization: str = ""
     device_name: str = ""
+    gpu_uuid: str = ""
+    """The card's UUID, recorded at setup beside ``gpu_index``.
+
+    The identity that survives renumbering, and the reason this field exists:
+    ``gpu_index`` is ``nvidia-smi``'s number for the card, Forge's device index
+    is the CUDA runtime's, and the two namespaces are not the same. Comparing
+    them as though they were is how a 5090's language model came to be judged
+    against a 3090's image plan. See :func:`shares_the_image_card`.
+    """
+    gpu_name: str = ""
+    """``nvidia-smi``'s name for the card, e.g. "NVIDIA GeForce RTX 5090".
+
+    Beside :attr:`device_name` rather than replacing it, because they come from
+    different places and only one of them is comparable. ``device_name`` is
+    llama.cpp's own device string and carries a snapshot of that moment's free
+    VRAM inside it; this is the driver's name for the hardware, in the same
+    form ``torch.cuda.get_device_name`` returns -- which is what makes the two
+    halves of the machine able to recognise the same card.
+    """
+
+    @property
+    def card_name(self) -> str:
+        """The card's model name for comparison, from whichever field has one."""
+        name = self.gpu_name or self.device_name
+        head, _, _ = str(name or "").partition(" (")
+        return head.strip()
     mode: str = "gpu"
     source: str = "manual"
     """``"managed"`` when the model came from the catalogue, ``"manual"`` when
@@ -297,6 +323,8 @@ def config(role: str = "") -> Config:
         kv_type_v=kv_type_v,
         quantization=str(state.get("quantization", "")),
         device_name=str(state.get("gpu_device_name", state.get("gpu_name", ""))),
+        gpu_uuid=str(state.get("gpu_uuid", "")),
+        gpu_name=str(state.get("gpu_name", "")),
         mode=str(state.get("mode", "gpu")),
         source=source,
         managed_id=managed_id,
@@ -452,7 +480,7 @@ def negotiate(configuration: Config | None = None,
                + projector_bytes(configuration, vision))
     estimate = mc_llm_context.estimate(configuration.model, wanted, described)
 
-    if _fits(estimate, reserve, already_ours, card_of(configuration)):
+    if _fits(estimate, reserve, already_ours, card_of(configuration), configuration):
         return Negotiation(wanted, estimate, (), True)
 
     placement = wanted
@@ -460,7 +488,7 @@ def negotiate(configuration: Config | None = None,
                                                   already_ours)
     if shrunk:
         notes.append(shrunk)
-    if _fits(estimate, reserve, already_ours, card_of(configuration)):
+    if _fits(estimate, reserve, already_ours, card_of(configuration), configuration):
         return Negotiation(placement, estimate, tuple(notes), True)
 
     placement, estimate, offloaded = _shrink_offload(configuration, placement, described, reserve,
@@ -468,7 +496,7 @@ def negotiate(configuration: Config | None = None,
     if offloaded:
         notes.append(offloaded)
 
-    fits = _fits(estimate, reserve, already_ours, card_of(configuration))
+    fits = _fits(estimate, reserve, already_ours, card_of(configuration), configuration)
     notes.extend(_unsatisfied(configuration, placement, described))
     return Negotiation(placement, estimate, tuple(notes), fits)
 
@@ -546,7 +574,8 @@ def _requested_placement(configuration: Config, gguf: mc_gguf.Gguf | None,
         # context, rather than whatever number the state file happens to hold.
         weights = mc_llm_context.weights_bytes(gguf, placement) if gguf is not None else 0
         budget = mc_llm_context.automatic_buffer_bytes(
-            _spendable(already_ours, card_of(configuration)), weights,
+            _spendable(already_ours, card_of(configuration), configuration=configuration),
+            weights,
             mc_broker.safety_margin_bytes())
         sized = mc_llm_context.context_for_budget(configuration.model, placement, budget)
         if sized >= MINIMUM_CONTEXT:
@@ -671,7 +700,14 @@ def execution_domain(configuration: Config | None) -> mc_broker.ExecutionDomain:
         logger.debug("Model Chain: could not read the runtime's compute device",
                      exc_info=True)
         return mc_broker.UNKNOWN_CUDA_EXECUTION
-    return mc_broker.cuda_execution(card_of(configuration))
+    # ``getattr`` because this is also reached with stand-ins for a
+    # configuration -- a role's settings object in a test, a partially built
+    # one during setup. A stand-in that cannot name its card should fall back
+    # to the index it does have, not to "unknown", which would put every such
+    # caller behind the conservative wait.
+    return mc_broker.cuda_execution(card_of(configuration),
+                                    uuid=getattr(configuration, "gpu_uuid", ""),
+                                    name=getattr(configuration, "card_name", ""))
 
 
 def host_ram_demand(configuration: Config | None,
@@ -730,7 +766,7 @@ def host_ram_demand(configuration: Config | None,
     return int(size * (total - placed) / total)
 
 
-def shares_the_image_card(card: int | None) -> bool:
+def shares_the_image_card(card: int | None, configuration: Config | None = None) -> bool:
     """Whether a placement on ``card`` is competing with the image model.
 
     The question the plan's protection is really about. Every figure in
@@ -738,26 +774,44 @@ def shares_the_image_card(card: int | None) -> bool:
     to a different one neither takes from that budget nor is limited by it --
     which is the whole reason somebody puts a second card in the machine.
 
+    ``configuration`` carries the card's UUID and name, and passing it is what
+    makes the answer trustworthy. Without it this compares indices, and an
+    index is only meaningful inside the namespace that issued it: ``gpu_index``
+    is ``nvidia-smi``'s, Forge's is the CUDA runtime's, and on the machine that
+    reported this both said "0" about different cards. Every caller that has a
+    configuration passes it.
+
     Unanswerable questions are answered *yes*, and deliberately: treating an
     unknown card as the image card keeps the placement conservative, and the
     cost of being wrong that way is a smaller language model rather than an
-    image generation that runs out of memory.
+    image generation that runs out of memory. What has changed is how rarely
+    the question is unanswerable -- a UUID settles it outright, and two
+    different card names settle it in the negative even when no index can be
+    translated at all.
     """
-    if card is None:
+    if card is None and configuration is None:
         return True
     try:
-        image = mc_broker.image_device_index()
+        mine = mc_broker.cuda_execution(
+            card,
+            uuid=getattr(configuration, "gpu_uuid", "") if configuration else "",
+            name=getattr(configuration, "card_name", "") if configuration else "")
+        image = mc_broker.image_execution_domain()
     except Exception:
         logger.debug("Model Chain: could not ask which card the image side is on",
                      exc_info=True)
         return True
-    if image < 0 or int(card) < 0:
+    if mine.uuid and image.uuid:
+        return mine.uuid == image.uuid
+    if mine.name and image.name and mine.name != image.name:
+        return False
+    if not mine.known or not image.known:
         return True
-    return int(card) == image
+    return mine.card == image.card
 
 
 def _spendable(already_ours: int = 0, card: int | None = None, *,
-               image_budget: bool = True) -> int:
+               image_budget: bool = True, configuration: "Config | None" = None) -> int:
     """What this placement may actually spend, which is not the same as what is free.
 
     Free VRAM is a reading of one instant. A generation is not one instant: the
@@ -800,7 +854,8 @@ def _spendable(already_ours: int = 0, card: int | None = None, *,
         try:
             import mc_plan
 
-            learned = mc_plan.learned_cap_bytes() if shares_the_image_card(card) else 0
+            learned = (mc_plan.learned_cap_bytes()
+                       if shares_the_image_card(card, configuration) else 0)
         except Exception:
             return free
         return max(min(free, learned) if learned > 0 else free, 0)
@@ -818,9 +873,10 @@ def _spendable(already_ours: int = 0, card: int | None = None, *,
         # what it is protecting, so its budget is not this placement's ceiling
         # -- capping here is what made a role on an idle second card negotiate
         # itself down to the leftovers of the card it was never going to touch.
+        here = shares_the_image_card(card, configuration)
         budget = (mc_plan.persistent_llm_budget(already_ours)
-                  if mc_plan.current() is not None and shares_the_image_card(card) else -1)
-        learned = mc_plan.learned_cap_bytes() if shares_the_image_card(card) else 0
+                  if mc_plan.current() is not None and here else -1)
+        learned = mc_plan.learned_cap_bytes() if here else 0
     except Exception:
         logger.debug("Model Chain: could not read the active plan's budget", exc_info=True)
         return free
@@ -834,14 +890,15 @@ def _spendable(already_ours: int = 0, card: int | None = None, *,
 
 
 def _fits(estimate: mc_llm_context.Estimate, reserve: int, already_ours: int = 0,
-          card: int | None = None) -> bool:
-    return _spendable(already_ours, card) >= estimate.total_bytes + reserve
+          card: int | None = None, configuration: "Config | None" = None) -> bool:
+    return (_spendable(already_ours, card, configuration=configuration)
+            >= estimate.total_bytes + reserve)
 
 
 def _shrink_context(configuration: Config, placement, gguf, reserve: int,
                     already_ours: int = 0):
     """Lower the context until the cache fits what is free, or hit the floor."""
-    free = _spendable(already_ours, card_of(configuration))
+    free = _spendable(already_ours, card_of(configuration), configuration=configuration)
     estimate = mc_llm_context.estimate(configuration.model, placement, gguf)
     per_token = estimate.kv_bytes_per_token
     if per_token <= 0:
@@ -901,7 +958,7 @@ def _shrink_offload(configuration: Config, placement, gguf, reserve: int,
         return placement, mc_llm_context.estimate(configuration.model, placement, gguf), ""
 
     total = gguf.block_count
-    free = _spendable(already_ours, card_of(configuration))
+    free = _spendable(already_ours, card_of(configuration), configuration=configuration)
     notes: list[str] = []
 
     placement, estimate, spilled = _spill_experts(configuration, placement, gguf, reserve,
@@ -1826,8 +1883,9 @@ def _make_room_for_the_llm(configuration: Config, already_ours: int = 0,
     needed = (wanted.total_bytes + projector_bytes(configuration, needs_vision)
               + max(int(extra_reserve), 0))
     released = mc_broker.release_for_llm(
-        needed, card=card, reason=f"{_backbone_label(configuration)}, which has been given "
-                                  f"priority on this card")
+        needed, card=card, uuid=configuration.gpu_uuid, name=configuration.card_name,
+        reason=f"{_backbone_label(configuration)}, which has been given "
+               f"priority on this card")
     if released.freed:
         logger.info("Model Chain: released %.1f GB of image VRAM on GPU %d — this "
                     "configuration is set to LLM priority", released.freed / _GB, card)
@@ -3506,7 +3564,7 @@ class Runtime:
                              "allocator's cached VRAM was left where it is")
                 return 0
             card = card_of(configuration)
-            if card is not None and not shares_the_image_card(card):
+            if card is not None and not shares_the_image_card(card, configuration):
                 logger.info("Model Chain: llama-server is being placed on GPU %d and the image "
                             "allocator's cache is on %s — it was left alone, because a block "
                             "cached on one card cannot be handed to a process on another",
@@ -3925,7 +3983,7 @@ class Runtime:
                          exc_info=True)
             return True
         card = self._card if self._card is not None else card_of(settings)
-        return shares_the_image_card(card)
+        return shares_the_image_card(card, settings)
 
     def _boundary_moved(self) -> bool:
         """Whether the plan has changed since *this* server was placed under one.
