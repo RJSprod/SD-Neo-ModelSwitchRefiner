@@ -1030,11 +1030,16 @@ class TestRefusalTracking:
 class FakeTorch:
     """Just enough torch to answer the two memory questions."""
 
-    def __init__(self, device_free, cached=0, per_card=None):
+    def __init__(self, device_free, cached=0, per_card=None, uuids=None):
         self.device_free = device_free
         self.cached = cached
         self.emptied = 0
         self.per_card = dict(per_card or {})
+        # Ordinal -> UUID, which is how a card is identified across the two
+        # namespaces. Defaulted to one card, because that is what almost every
+        # installation has and what every test here assumed before the
+        # translation existed.
+        self.uuids = dict(uuids or {0: "GPU-0000"})
 
         self.asked: list = []
         outer = self
@@ -1052,6 +1057,14 @@ class FakeTorch:
                 return outer.current
 
             @staticmethod
+            def device_count():
+                return len(outer.uuids)
+
+            @staticmethod
+            def get_device_properties(ordinal):
+                return types.SimpleNamespace(uuid=outer.uuids[ordinal])
+
+            @staticmethod
             def empty_cache():
                 outer.emptied += 1
                 outer.device_free += outer.cached
@@ -1065,6 +1078,40 @@ class FakeTorch:
         return _Device(kind, index)
 
 
+def install_topology(monkeypatch, cards=None, free_mb=None):
+    """Make ``nvidia-smi`` report ``cards``, and forget any cached map.
+
+    ``cards`` is ``{physical_index: (uuid, name)}`` in nvidia-smi's numbering.
+    ``None`` means nvidia-smi answers nothing at all, which is a real state --
+    a machine without it, or a driver that failed to reply -- and the one where
+    the two namespaces cannot be reconciled.
+    """
+    import prompt_master.inference.device_detection as detection
+
+    detected = [
+        types.SimpleNamespace(physical_index=index, uuid=uuid, name=name,
+                              memory_free_mb=(free_mb or {}).get(index, 0))
+        for index, (uuid, name) in sorted((cards or {}).items())
+    ]
+
+    def detect_gpus(timeout=15):
+        if cards is None:
+            raise RuntimeError("nvidia-smi is not available")
+        return list(detected)
+
+    monkeypatch.setattr(detection, "detect_gpus", detect_gpus)
+    mc_memory.forget_topology()
+    monkeypatch.setattr(mc_memory, "_topology", None, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_topology():
+    """The card map is built once per session, so it is dropped between tests."""
+    mc_memory.forget_topology()
+    yield
+    mc_memory.forget_topology()
+
+
 class _Device:
     """torch.device('cuda', n), as much of it as this module touches."""
 
@@ -1074,13 +1121,21 @@ class _Device:
 
 
 class TestDriverFreeVram:
-    def _install(self, monkeypatch, torch, free_total):
+    def _install(self, monkeypatch, torch, free_total, cards=None):
+        """Install ``torch`` and, optionally, the machine nvidia-smi reports.
+
+        ``cards`` is ``{physical_index: (uuid, name)}``. Given, the two
+        namespaces are reconciled by UUID exactly as they are on a live
+        machine; omitted, nothing is enumerated and the single-visible-card
+        path answers, which is what an installation without nvidia-smi gets.
+        """
         from backend import memory_management
 
         monkeypatch.setitem(sys.modules, "torch", torch)
         device = types.SimpleNamespace(type="cuda")
         monkeypatch.setattr(memory_management, "get_torch_device", lambda: device)
         monkeypatch.setattr(memory_management, "get_free_memory", lambda dev=None: free_total)
+        install_topology(monkeypatch, cards)
 
     def test_the_allocator_s_cache_is_free_to_the_host_and_to_nobody_else(
             self, host, monkeypatch):
@@ -1109,23 +1164,68 @@ class TestDriverFreeVram:
         llama.cpp reported CUDA0 with 30.2 GB free and CUDA1 with 22.8 GB.
         Every figure came from whichever card Forge generates on, so a language
         model pinned to the idle one was sized against a card it never touched.
+
+        The indices here are **physical** -- nvidia-smi's, which is what the
+        language-model side records -- and they are translated to this
+        process's ordinals before torch is asked.
         """
-        torch = FakeTorch(device_free=4 * GB, per_card={0: 30 * GB, 1: 22 * GB})
-        self._install(monkeypatch, torch, free_total=20 * GB)
+        torch = FakeTorch(device_free=4 * GB, per_card={0: 30 * GB, 1: 22 * GB},
+                          uuids={0: "GPU-aaaa", 1: "GPU-bbbb"})
+        self._install(monkeypatch, torch, free_total=20 * GB,
+                      cards={0: ("GPU-aaaa", "NVIDIA GeForce RTX 5090"),
+                             1: ("GPU-bbbb", "NVIDIA GeForce RTX 3090")})
 
         assert mc_memory.device_free_vram_bytes(0) == 30 * GB
         assert mc_memory.device_free_vram_bytes(1) == 22 * GB
         assert mc_memory.device_free_vram_bytes() == 4 * GB
 
-    def test_the_image_card_is_named_by_index(self, host, monkeypatch):
-        torch = FakeTorch(device_free=4 * GB)
+    def test_the_two_namespaces_are_reconciled_rather_than_assumed_equal(
+            self, host, monkeypatch):
+        """The machine that reported this. nvidia-smi calls the 5090 card 0;
+        the CUDA runtime, ordering by speed, calls the 3090 ordinal 0. Both are
+        "card 0" and they are not the same card.
+
+        Asking for physical 0 must reach the 5090's 30 GB, not the ordinal-0
+        3090's 22 GB, and the reverse for physical 1.
+        """
+        torch = FakeTorch(device_free=4 * GB, per_card={0: 22 * GB, 1: 30 * GB},
+                          uuids={0: "GPU-3090", 1: "GPU-5090"})
+        self._install(monkeypatch, torch, free_total=20 * GB,
+                      cards={0: ("GPU-5090", "NVIDIA GeForce RTX 5090"),
+                             1: ("GPU-3090", "NVIDIA GeForce RTX 3090")})
+
+        assert mc_memory.torch_ordinal_of(0) == 1
+        assert mc_memory.torch_ordinal_of(1) == 0
+        assert mc_memory.device_free_vram_bytes(0) == 30 * GB
+        assert mc_memory.device_free_vram_bytes(1) == 22 * GB
+
+    def test_the_image_card_is_reported_in_the_physical_namespace(
+            self, host, monkeypatch):
+        """What ``image_device_index`` is for: a number comparable with the one
+        the language model recorded at setup. Forge's ordinal 0 is the 3090,
+        which nvidia-smi calls card 1, and 1 is the answer."""
+        torch = FakeTorch(device_free=4 * GB, uuids={0: "GPU-3090", 1: "GPU-5090"})
+        self._install(monkeypatch, torch, free_total=20 * GB,
+                      cards={0: ("GPU-5090", "NVIDIA GeForce RTX 5090"),
+                             1: ("GPU-3090", "NVIDIA GeForce RTX 3090")})
+        from backend import memory_management
+
+        monkeypatch.setattr(memory_management, "get_torch_device",
+                            lambda: _Device("cuda", 0))
+
+        assert mc_memory.image_torch_ordinal() == 0
+        assert mc_memory.image_device_index() == 1
+
+    def test_the_ordinal_is_still_read_from_the_device_forge_names(
+            self, host, monkeypatch):
+        torch = FakeTorch(device_free=4 * GB, uuids={0: "GPU-a", 1: "GPU-b"})
         self._install(monkeypatch, torch, free_total=20 * GB)
         from backend import memory_management
 
         monkeypatch.setattr(memory_management, "get_torch_device",
                             lambda: _Device("cuda", 1))
 
-        assert mc_memory.image_device_index() == 1
+        assert mc_memory.image_torch_ordinal() == 1
 
     def test_a_device_with_no_index_means_the_current_card_not_card_zero(
             self, host, monkeypatch):
@@ -1133,7 +1233,7 @@ class TestDriverFreeVram:
         zero. Reading the missing index as 0 is how a language model pinned to
         a 5090 was told it shared the image model's card, and capped by a plan
         protecting a 3090 it was never going to touch."""
-        torch = FakeTorch(device_free=4 * GB)
+        torch = FakeTorch(device_free=4 * GB, uuids={0: "GPU-a", 1: "GPU-b"})
         torch.current = 1
         self._install(monkeypatch, torch, free_total=20 * GB)
         from backend import memory_management
@@ -1141,7 +1241,41 @@ class TestDriverFreeVram:
         monkeypatch.setattr(memory_management, "get_torch_device",
                             lambda: _Device("cuda", None))
 
-        assert mc_memory.image_device_index() == 1
+        assert mc_memory.image_torch_ordinal() == 1
+
+    def test_one_visible_card_needs_no_map_at_all(self, host, monkeypatch):
+        """The ordinary installation. There is one ordinal it could be, so the
+        translation answers without nvidia-smi having to agree -- which is what
+        keeps every single-GPU machine behaving exactly as it did."""
+        torch = FakeTorch(device_free=4 * GB, per_card={0: 9 * GB})
+        self._install(monkeypatch, torch, free_total=20 * GB)
+
+        assert mc_memory.torch_ordinal_of(0) == 0
+        assert mc_memory.device_free_vram_bytes(0) == 9 * GB
+
+    def test_a_card_this_process_cannot_see_is_asked_of_the_driver(
+            self, host, monkeypatch):
+        """Forge pinned to one GPU with ``CUDA_VISIBLE_DEVICES`` cannot address
+        the other one through torch at all. nvidia-smi still can, and a real
+        reading of the right card beats this process's opinion about a
+        different one."""
+        torch = FakeTorch(device_free=4 * GB, uuids={0: "GPU-3090"})
+        self._install(monkeypatch, torch, free_total=20 * GB,
+                      cards={0: ("GPU-5090", "NVIDIA GeForce RTX 5090"),
+                             1: ("GPU-3090", "NVIDIA GeForce RTX 3090")})
+        import prompt_master.inference.device_detection as detection
+
+        monkeypatch.setattr(detection, "detect_gpus", lambda timeout=15: [
+            types.SimpleNamespace(physical_index=0, uuid="GPU-5090",
+                                  name="NVIDIA GeForce RTX 5090",
+                                  memory_free_mb=30 * 1024),
+            types.SimpleNamespace(physical_index=1, uuid="GPU-3090",
+                                  name="NVIDIA GeForce RTX 3090",
+                                  memory_free_mb=4 * 1024),
+        ])
+
+        assert mc_memory.torch_ordinal_of(0) == -1
+        assert mc_memory.device_free_vram_bytes(0) == 30 * GB
 
     def test_a_processor_install_has_no_image_card(self, host, monkeypatch):
         from backend import memory_management

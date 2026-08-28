@@ -28,7 +28,7 @@ import pytest
 import mc_broker
 import mc_llm_runtime as runtime
 import mc_llm_sessions as sessions
-import mc_memory
+import mc_memory  # noqa: F401  -- imported for the end-to-end translation test
 
 from test_llm_context import build_model
 
@@ -626,9 +626,11 @@ class _Plan:
 
 
 class _Settings:
-    def __init__(self, cpu=False, card=IMAGE_CARD):
+    def __init__(self, cpu=False, card=IMAGE_CARD, uuid="", name=""):
         self.uses_cuda_compute = not cpu
         self.gpu_index = 0 if card is None else card
+        self.gpu_uuid = uuid
+        self.card_name = name
 
 
 class _Unparseable:
@@ -1738,3 +1740,285 @@ class TestTheHostRamRegression:
                                 domain=mc_broker.CPU_EXECUTION):
             assert mc_broker.await_idle(timeout=1.0,
                                         domain=mc_broker.cuda_execution(IMAGE_CARD))
+
+
+# --------------------------------------------------------------------------- #
+# The machine that reported this
+# --------------------------------------------------------------------------- #
+
+
+class TestTwoNamespacesForOneSetOfCards:
+    """The failure every test above stipulated away.
+
+    Both halves of this extension say "card 0" and mean different cards.
+    ``nvidia-smi`` numbers by PCI bus and is what the language-model side
+    records at setup; the CUDA runtime numbers by ``CUDA_DEVICE_ORDER``, which
+    defaults to fastest-first, and a process under ``CUDA_VISIBLE_DEVICES``
+    numbers from zero over whatever it can see. On the reported machine
+    physical 0 is the 5090 and Forge's ordinal 0 is the 3090.
+
+    Every fixture in this file used to *state* that the two agreed -- image
+    card 0, language model card 1 -- so none of them could have caught it. From
+    the user's log, with the old comparison in place:
+
+        Waiting for image generation on GPU 0…
+        re-placing llama-server — it holds 19.3 GB where the active plan leaves 4.1 GB
+        released 13.1 GB of image VRAM on GPU 0 for Qwen 3.8 27B …
+        5 layers on the GPU … 17.2 GB free
+
+    A wait that was not needed, a plan that did not apply, a checkpoint evicted
+    from a card the model was not going to, and a placement sized against the
+    wrong GPU's free VRAM. One equality, four consequences.
+    """
+
+    IMAGE_UUID = "3090aaaa"
+    LLM_UUID = "5090bbbb"
+    IMAGE_NAME = "NVIDIA GeForce RTX 3090"
+    LLM_NAME = "NVIDIA GeForce RTX 5090"
+
+    @pytest.fixture
+    def machine(self, scoped, monkeypatch):
+        """Forge on the 3090, which nvidia-smi calls card 1 and torch calls 0.
+
+        Built on ``scoped`` rather than beside it, and that is not tidiness: a
+        sibling fixture would have been ordered against the one it is meant to
+        override, and this class's whole subject is an image card that is *not*
+        card 0. A version of this that quietly ran after ``scoped`` reset the
+        card would have passed while testing nothing.
+        """
+        # Physical 1, not 0: the point is that this is not the number the
+        # language model recorded, even though both processes would say "0" if
+        # asked for their own ordinal.
+        monkeypatch.setattr(mc_broker, "image_device_index", lambda: 1)
+        monkeypatch.setattr(mc_broker, "image_device_uuid", lambda: self.IMAGE_UUID)
+        monkeypatch.setattr(mc_broker, "image_device_name", lambda: self.IMAGE_NAME)
+        yield
+
+    def llm(self, tmp_path, *, card=0):
+        """The language model as the user has it: physical card 0, the 5090."""
+        settings = configuration_on(tmp_path, card=card, name="qwen.gguf")
+        object.__setattr__(settings, "gpu_uuid", self.LLM_UUID)
+        object.__setattr__(settings, "gpu_name", self.LLM_NAME)
+        return settings
+
+    # -- the comparison itself -------------------------------------------- #
+
+    def test_the_same_number_is_not_the_same_card(self, machine, tmp_path):
+        """Physical 0 and image ordinal 0. The old comparison said yes."""
+        settings = self.llm(tmp_path)
+
+        assert not runtime.shares_the_image_card(0, settings)
+
+    def test_the_uuid_is_what_answers_it(self, machine, tmp_path, monkeypatch):
+        """Not the name, and not the index: with both UUIDs known nothing else
+        is consulted, so a machine with two identically named cards is still
+        answered correctly."""
+        settings = self.llm(tmp_path)
+        monkeypatch.setattr(mc_broker, "image_device_name", lambda: self.LLM_NAME)
+
+        assert not runtime.shares_the_image_card(0, settings)
+
+    def test_a_placement_really_on_the_image_card_is_still_recognised(
+            self, machine, tmp_path):
+        """The rule has to work in both directions or it is not a rule. Physical
+        1 *is* the image card here, whatever either process calls it."""
+        settings = self.llm(tmp_path, card=1)
+        object.__setattr__(settings, "gpu_uuid", self.IMAGE_UUID)
+        object.__setattr__(settings, "gpu_name", self.IMAGE_NAME)
+
+        assert runtime.shares_the_image_card(1, settings)
+
+    def test_end_to_end_through_the_real_translation(self, host, tmp_path, monkeypatch):
+        """The reported machine, with nothing about the card stubbed.
+
+        Every other test in this class patches ``image_device_index`` to the
+        answer. This one builds the machine -- nvidia-smi reporting the 5090 as
+        card 0 and the 3090 as card 1, the CUDA runtime ordering them the other
+        way -- and lets the real code work it out. It is the only test here
+        that would have failed for the original reason: both halves called
+        their card 0, and the comparison agreed with them.
+        """
+        from test_memory import FakeTorch, install_topology
+
+        mc_broker.clear()
+        monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
+        # Forge's ordinal 0 is the 3090; nvidia-smi calls that card 1.
+        torch = FakeTorch(device_free=4 * _GB, uuids={0: "GPU-3090", 1: "GPU-5090"})
+        install_topology(monkeypatch, cards={0: ("GPU-5090", self.LLM_NAME),
+                                             1: ("GPU-3090", self.IMAGE_NAME)})
+        import sys
+        import types as _types
+
+        monkeypatch.setitem(sys.modules, "torch", torch)
+        torch.get_device_name = lambda ordinal: {0: self.IMAGE_NAME,
+                                                 1: self.LLM_NAME}[ordinal]
+        torch.cuda.get_device_name = torch.get_device_name
+        from backend import memory_management
+
+        monkeypatch.setattr(memory_management, "get_torch_device",
+                            lambda: _types.SimpleNamespace(type="cuda", index=0))
+        monkeypatch.setattr(memory_management, "get_total_memory", lambda dev=None: 24 * _GB)
+
+        # What the two sides each call their own card, before anything compares
+        # them: the collision the whole failure was made of.
+        assert mc_memory.image_torch_ordinal() == 0
+        assert self.llm(tmp_path).gpu_index == 0
+
+        # And what they are actually on.
+        assert mc_broker.image_device_index() == 1
+        assert not runtime.shares_the_image_card(0, self.llm(tmp_path))
+        assert not runtime.execution_domain(self.llm(tmp_path)).conflicts_with(
+            mc_broker.image_execution_domain())
+
+        mc_broker.clear()
+
+    def test_the_uuid_settles_it_when_no_index_can_be_translated(
+            self, machine, tmp_path, monkeypatch):
+        """nvidia-smi unavailable, so there is no physical index to compare --
+        and the UUIDs are still there, and still decisive."""
+        monkeypatch.setattr(mc_broker, "image_device_index", lambda: -1)
+        settings = self.llm(tmp_path)
+
+        assert not runtime.shares_the_image_card(0, settings)
+        assert not runtime.execution_domain(settings).conflicts_with(
+            mc_broker.image_execution_domain())
+
+    def test_the_uuid_also_says_when_they_are_the_same_card(
+            self, machine, tmp_path, monkeypatch):
+        """Both directions again. An untranslatable index is not a licence to
+        call two workloads independent -- only a matching identity is, and a
+        matching identity says they are not."""
+        monkeypatch.setattr(mc_broker, "image_device_index", lambda: -1)
+        settings = self.llm(tmp_path)
+        object.__setattr__(settings, "gpu_uuid", self.IMAGE_UUID)
+
+        assert runtime.shares_the_image_card(0, settings)
+        assert runtime.execution_domain(settings).conflicts_with(
+            mc_broker.image_execution_domain())
+
+    def test_two_different_names_settle_it_without_any_uuid(
+            self, machine, tmp_path, monkeypatch):
+        """An older torch exposes no UUID and a machine without nvidia-smi has
+        no index to translate. Two different card models are still two cards."""
+        settings = self.llm(tmp_path)
+        object.__setattr__(settings, "gpu_uuid", "")
+        monkeypatch.setattr(mc_broker, "image_device_uuid", lambda: "")
+        monkeypatch.setattr(mc_broker, "image_device_index", lambda: -1)
+
+        assert not runtime.shares_the_image_card(0, settings)
+
+    def test_nothing_identifiable_at_all_stays_conservative(
+            self, machine, tmp_path, monkeypatch):
+        """The cost of being wrong this way is a smaller language model. The
+        cost of the other way is a generation that runs out of VRAM."""
+        settings = self.llm(tmp_path)
+        object.__setattr__(settings, "gpu_uuid", "")
+        object.__setattr__(settings, "gpu_name", "")
+        object.__setattr__(settings, "device_name", "")
+        monkeypatch.setattr(mc_broker, "image_device_uuid", lambda: "")
+        monkeypatch.setattr(mc_broker, "image_device_name", lambda: "")
+        monkeypatch.setattr(mc_broker, "image_device_index", lambda: -1)
+
+        assert runtime.shares_the_image_card(0, settings)
+
+    # -- the four consequences from the log ------------------------------- #
+
+    def test_the_conversation_does_not_wait_for_the_generation(
+            self, machine, tmp_path, monkeypatch):
+        """`Waiting for image generation on GPU 0…` — for a model on the 5090."""
+        monkeypatch.setattr(sessions, "WAIT_NOTICE_SECONDS", 0.0)
+        monkeypatch.setattr(sessions, "WAIT_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(mc_broker, "host_busy", lambda: True)
+        settings = self.llm(tmp_path)
+        monkeypatch.setattr(runtime, "config", lambda role="": settings)
+        gpu = sessions._Gpu("a conversation reply", sessions.Cancellation())
+
+        acquired, events = take(gpu)
+        gpu.release()
+
+        assert acquired
+        assert waiting_texts(events) == []
+
+    def test_the_generation_does_not_wait_for_the_conversation(self, machine, tmp_path):
+        """`waiting for the LLM on GPU 0 to finish before generating on GPU 0`."""
+        settings = self.llm(tmp_path)
+        with mc_broker.workload(mc_broker.FAMILY_LLM, "a conversation reply",
+                                domain=runtime.execution_domain(settings)):
+            started = time.monotonic()
+
+            assert mc_broker.await_idle(timeout=5.0,
+                                        domain=mc_broker.image_execution_domain())
+            assert time.monotonic() - started < 1.0
+
+    def test_the_image_plan_does_not_apply_to_it(self, machine, tmp_path, monkeypatch):
+        """`re-placing llama-server — it holds 19.3 GB where the active plan
+        leaves 4.1 GB`. The plan describes the 3090. The server is on the 5090.
+        """
+        import mc_plan
+
+        monkeypatch.setattr(mc_plan, "current", lambda: _Plan(("stage-1",)))
+        monkeypatch.setattr(mc_plan, "persistent_llm_budget", lambda ours=0: 4 * _GB)
+        settings = self.llm(tmp_path)
+        held = runtime.Runtime()
+        held._card = 0
+        held.configuration = lambda: settings
+
+        assert not held._plan_applies()
+        assert held._allowance(19 * _GB) == -1
+        assert not held._overspending(19 * _GB)
+
+    def test_it_does_not_evict_the_checkpoint_from_the_other_card(
+            self, machine, tmp_path, monkeypatch):
+        """`released 13.1 GB of image VRAM on GPU 0 for Qwen…` — thirteen
+        gigabytes off a card the language model was never going to touch, and
+        every byte of it reloaded for the generation that followed."""
+        image = ImageSide(holds=13 * _GB)
+        mc_broker.register_reclaimer(mc_broker.FAMILY_IMAGE, image)
+        free_on(monkeypatch, gpu0=0.5, gpu1=4.2)
+        settings = self.llm(tmp_path)
+        assert mc_broker.image_device_index() == 1, "the image card was reset"
+
+        released = mc_broker.release_for_llm(
+            8 * _GB, card=0, uuid=settings.gpu_uuid, name=settings.card_name,
+            reason="the writer, which has been given priority on this card")
+
+        assert released.freed == 0
+        assert image.calls == []
+        assert image.holds == 13 * _GB
+
+    def test_llm_priority_still_works_on_the_card_it_was_given_for(
+            self, machine, tmp_path, monkeypatch):
+        """And the setting still does what it says when the model really is on
+        the image card -- otherwise this would be a fix that removed a feature.
+        """
+        image = ImageSide(holds=13 * _GB)
+        mc_broker.register_reclaimer(mc_broker.FAMILY_IMAGE, image)
+        free_on(monkeypatch, gpu0=0.5, gpu1=0.5)
+        settings = self.llm(tmp_path, card=1)
+        object.__setattr__(settings, "gpu_uuid", self.IMAGE_UUID)
+        object.__setattr__(settings, "gpu_name", self.IMAGE_NAME)
+
+        released = mc_broker.release_for_llm(
+            8 * _GB, card=1, uuid=settings.gpu_uuid, name=settings.card_name,
+            reason="the writer, which has been given priority on this card")
+
+        assert released.freed == 13 * _GB
+
+    def test_the_allocator_cache_on_the_other_card_is_left_alone(
+            self, machine, tmp_path, monkeypatch):
+        emptied: list = []
+        monkeypatch.setattr(mc_broker, "release_cached_vram",
+                            lambda: (emptied.append(1), 2 * _GB)[1])
+        held = runtime.Runtime()
+
+        assert held._release_the_image_cache_if_it_helps(self.llm(tmp_path)) == 0
+        assert emptied == []
+
+    def test_a_reserve_miss_on_the_image_card_leaves_the_other_server_alone(
+            self, registry, machine, monkeypatch):
+        free_on(monkeypatch, gpu0=22.7, gpu1=0.5)
+        away = hold(registry, Server(card=0, holds=19 * _GB), "the 5090 server")
+
+        assert mc_broker._reclaim_for_image(3 * _GB, reason="the Stage 1 pass") == 0
+        assert away.up
+        assert away.holds == 19 * _GB

@@ -1213,7 +1213,7 @@ class TestAModeThatCouldNotBeCarriedOut:
         panel and the console print rather than only on a helper."""
         monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
         monkeypatch.setattr(runtime, "_free_vram", lambda ours=0, card=None: 0)
-        monkeypatch.setattr(runtime, "_spendable", lambda ours=0, card=None: 0)
+        monkeypatch.setattr(runtime, "_spendable", lambda ours=0, card=None, **_: 0)
         configuration = configured(tmp_path, mode="gpu")
 
         negotiated = runtime.negotiate(configuration, _BigHeader(), reclaim=False)
@@ -1226,7 +1226,7 @@ class TestAModeThatCouldNotBeCarriedOut:
                                                                 monkeypatch):
         monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
         monkeypatch.setattr(runtime, "_free_vram", lambda ours=0, card=None: 0)
-        monkeypatch.setattr(runtime, "_spendable", lambda ours=0, card=None: 0)
+        monkeypatch.setattr(runtime, "_spendable", lambda ours=0, card=None, **_: 0)
         configuration = configured(tmp_path, mode="mixed_aggressive")
 
         negotiated = runtime.negotiate(configuration, _BigHeader(), reclaim=False)

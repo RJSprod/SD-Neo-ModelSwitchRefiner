@@ -1044,13 +1044,259 @@ def free_vram_bytes() -> int:
         return 0
 
 
-def image_device_index() -> int:
-    """Which CUDA card the image side is on, or -1 when there is no card.
+# --------------------------------------------------------------------------- #
+# Two namespaces for one set of cards
+# --------------------------------------------------------------------------- #
+#
+# A machine with two GPUs has two ways of numbering them and they do not have
+# to agree. ``nvidia-smi`` orders by PCI bus; the CUDA runtime orders by
+# ``CUDA_DEVICE_ORDER``, which defaults to fastest-first; and a process started
+# with ``CUDA_VISIBLE_DEVICES`` renumbers from zero over the subset it can see.
+# The language-model side records the first kind at setup time and Forge speaks
+# the second, so the only honest way to ask "are these the same card" is to
+# compare something that survives renumbering.
+#
+# That something is the UUID. Both sides can produce one -- nvidia-smi reports
+# it per card and ``torch.cuda.get_device_properties`` carries it -- and the
+# maps below are built once, because a machine does not gain a GPU while it is
+# running.
 
-    The one card every existing figure in this module is about. It stops being
-    the only card that matters the moment a language-model role is pointed at a
-    different one: the image plan protects VRAM *here*, and a server placed on
-    another card is neither helped nor hindered by that protection.
+
+def _uuid_key(value) -> str:
+    """A GPU UUID reduced to the part both sources agree on.
+
+    nvidia-smi writes ``GPU-6a1f...``; torch hands back a ``uuid.UUID``. The
+    hex digits are the same and everything around them is not, so the hex is
+    what is compared.
+    """
+    text = str(value or "").strip().casefold()
+    if not text:
+        return ""
+    return "".join(character for character in text if character in "0123456789abcdef")
+
+
+_topology: dict | None = None
+_topology_lock = threading.Lock()
+
+
+def _cards() -> dict:
+    """The machine's cards, keyed both ways, built once per session.
+
+    Returns ``{"by_uuid": {uuid_key: physical_index},
+               "ordinals": {physical_index: torch_ordinal},
+               "names": {physical_index: name},
+               "count": physical card count}``.
+
+    Empty on any failure, and empty is a state every caller handles: it means
+    the two namespaces cannot be reconciled, which is a reason to be careful
+    rather than a reason to guess.
+    """
+    global _topology
+
+    with _topology_lock:
+        if _topology is not None:
+            return _topology
+        _topology = _read_topology()
+        return _topology
+
+
+def _read_topology() -> dict:
+    found = {"by_uuid": {}, "ordinals": {}, "names": {}, "count": 0}
+    try:
+        from prompt_master.inference.device_detection import detect_gpus
+
+        physical = detect_gpus()
+    except Exception:
+        logger.debug("Model Chain: could not enumerate the machine's GPUs", exc_info=True)
+        physical = []
+    for card in physical:
+        key = _uuid_key(getattr(card, "uuid", ""))
+        if key:
+            found["by_uuid"][key] = int(card.physical_index)
+        found["names"][int(card.physical_index)] = str(getattr(card, "name", "") or "")
+    found["count"] = len(physical)
+
+    try:
+        import torch
+
+        for ordinal in range(int(torch.cuda.device_count())):
+            key = _uuid_key(getattr(torch.cuda.get_device_properties(ordinal), "uuid", ""))
+            index = found["by_uuid"].get(key)
+            if index is not None:
+                found["ordinals"][index] = ordinal
+    except Exception:
+        logger.debug("Model Chain: could not read the CUDA devices' identities",
+                     exc_info=True)
+
+    if not found["ordinals"] and found["count"] == 1:
+        # One card. There is nothing to confuse it with, and refusing to say so
+        # would give every ordinary single-GPU installation the cautious
+        # multi-card behaviour for no reason at all.
+        only = next(iter(found["names"]), 0)
+        found["ordinals"][only] = 0
+    if found["ordinals"]:
+        logger.info("Model Chain: GPU topology — %s",
+                    "; ".join(f"physical {index} ({found['names'].get(index, '?')}) "
+                              f"= CUDA ordinal {ordinal}"
+                              for index, ordinal in sorted(found["ordinals"].items())))
+    return found
+
+
+def forget_topology() -> None:
+    """Re-read the card map. For tests, and for a driver that came back."""
+    global _topology, _smi_readings
+
+    with _topology_lock:
+        _topology = None
+    _smi_readings = (0.0, {})
+
+
+def _physical_index_of(ordinal: int) -> int:
+    """The nvidia-smi index of the card this process calls ``ordinal``, or -1."""
+    for index, mapped in _cards()["ordinals"].items():
+        if mapped == ordinal:
+            return int(index)
+    return -1
+
+
+def torch_ordinal_of(physical_index: int) -> int:
+    """The ordinal this process uses for physical card ``physical_index``, or -1.
+
+    -1 also means "visible to nvidia-smi and not to us", which is a real state
+    rather than a failure: Forge started with ``CUDA_VISIBLE_DEVICES`` pinned to
+    one card genuinely cannot address the other one through torch, and the
+    honest answer is to say so and let the caller ask the driver instead.
+
+    One card and *nothing known about the machine* is answered without any of
+    that: there is exactly one ordinal it could be, so zero is the answer, and
+    every ordinary single-GPU installation therefore behaves precisely as it
+    did before any of this existed.
+
+    That shortcut is deliberately not taken when the map does know something.
+    A machine whose two cards nvidia-smi can see and this process can address
+    only one of is the ``CUDA_VISIBLE_DEVICES`` case, and there the one visible
+    ordinal is emphatically *not* the answer for the card that was hidden --
+    saying it was is the same mistaken equality this whole function exists to
+    stop making.
+    """
+    found = _cards()
+    try:
+        mapped = found["ordinals"].get(int(physical_index))
+    except (TypeError, ValueError):
+        return -1
+    if mapped is not None:
+        return int(mapped)
+    if found["ordinals"] or found["count"] > 1:
+        return -1
+    try:
+        import torch
+
+        if int(torch.cuda.device_count()) == 1:
+            return 0
+    except Exception:
+        logger.debug("Model Chain: could not count the visible CUDA devices", exc_info=True)
+    return -1
+
+
+def physical_card_name(physical_index: int) -> str:
+    """What ``nvidia-smi`` calls physical card ``physical_index``, or ``""``."""
+    try:
+        return str(_cards()["names"].get(int(physical_index), ""))
+    except (TypeError, ValueError):
+        return ""
+
+
+_SMI_READING_SECONDS = 0.5
+"""How long a driver reading may be reused.
+
+Short enough that it is still a live figure -- a placement decision that spans
+a second is deciding against something that was true within it -- and long
+enough that one negotiation asking the same question four times costs one
+subprocess rather than four. nvidia-smi is tens of milliseconds each time, and
+the negotiation ladder is a loop.
+"""
+
+_smi_readings: tuple[float, dict] = (0.0, {})
+
+
+def physical_free_vram_bytes(physical_index: int) -> int:
+    """Free VRAM on a physical card this process cannot address, via nvidia-smi.
+
+    The slow path, and the only one there is for a card outside
+    ``CUDA_VISIBLE_DEVICES``: torch cannot report on a device it was not given,
+    and the driver can.
+    """
+    global _smi_readings
+
+    now = time.monotonic()
+    when, readings = _smi_readings
+    if now - when > _SMI_READING_SECONDS or not readings:
+        try:
+            from prompt_master.inference.device_detection import detect_gpus
+
+            readings = {int(card.physical_index): max(int(card.memory_free_mb), 0) * 1024 * 1024
+                        for card in detect_gpus()}
+            _smi_readings = (now, readings)
+        except Exception:
+            logger.debug("Model Chain: could not ask nvidia-smi for free VRAM on GPU %s",
+                         physical_index, exc_info=True)
+            return 0
+    try:
+        return int(readings.get(int(physical_index), 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def image_device_uuid() -> str:
+    """The UUID of the card the image side is on, or ``""``.
+
+    The identity that survives both renumberings, and the one the
+    language-model side already records at setup. When both halves can produce
+    it, "are these the same card" stops being a question about indices at all.
+    """
+    ordinal = image_torch_ordinal()
+    if ordinal < 0:
+        return ""
+    try:
+        import torch
+
+        return _uuid_key(getattr(torch.cuda.get_device_properties(ordinal), "uuid", ""))
+    except Exception:
+        logger.debug("Model Chain: could not read the image card's UUID", exc_info=True)
+        return ""
+
+
+def image_device_name() -> str:
+    """What the driver calls the card the image side is on, or ``""``.
+
+    The weaker identity, and worth having because it is available when the
+    other two are not: an older torch exposes no UUID and a machine without
+    nvidia-smi has no physical index to translate to, but a device name is
+    there in both cases. Two *different* model names cannot be one card, which
+    is enough to establish independence even when nothing can establish
+    equality.
+    """
+    ordinal = image_torch_ordinal()
+    if ordinal < 0:
+        return ""
+    try:
+        import torch
+
+        return str(torch.cuda.get_device_name(ordinal) or "").strip()
+    except Exception:
+        logger.debug("Model Chain: could not read the image card's name", exc_info=True)
+        return ""
+
+
+def image_torch_ordinal() -> int:
+    """Forge's CUDA device as *this process* numbers it, or -1.
+
+    A torch ordinal, and that is the whole of what it is. It indexes
+    ``torch.cuda`` and nothing else: it is not comparable with a card index
+    from ``nvidia-smi``, it is not stable across processes, and on a machine
+    where Forge was started with ``CUDA_VISIBLE_DEVICES`` it is not even a
+    number the rest of the system has heard of. Everything that needs to
+    *compare* cards asks :func:`image_device_index` instead.
     """
     try:
         import torch
@@ -1064,14 +1310,48 @@ def image_device_index() -> int:
             return int(index)
         # ``torch.device("cuda")`` carries no index and does not mean card
         # zero -- it means whichever card is current, which on a two-card
-        # machine is very often not card zero. Reading the missing index as 0
-        # is how a language model pinned to a 5090 was told it was sharing the
-        # image model's card, and capped by a plan protecting the 3090.
+        # machine is very often not card zero.
         return int(torch.cuda.current_device())
     except Exception:
         logger.debug("Model Chain: could not ask which card the image side is on",
                      exc_info=True)
         return -1
+
+
+def image_device_index() -> int:
+    """Which *physical* card the image side is on, or -1 when it cannot be said.
+
+    Physical means the index ``nvidia-smi`` gives, because that is the number
+    the language-model side records at setup time (``GpuInfo.physical_index``,
+    written into the state file beside the card's UUID and name). This function
+    exists to be compared with that number, and for a while it returned
+    something else entirely.
+
+    What it returned was the *torch ordinal* -- the index this process uses --
+    and the two namespaces are genuinely different:
+
+    * ``nvidia-smi`` numbers cards by PCI bus order;
+    * the CUDA runtime numbers them by ``CUDA_DEVICE_ORDER``, which defaults to
+      fastest-first, so a 5090 beside a 3090 is ordinal 0 whatever the bus says;
+    * and a process started with ``CUDA_VISIBLE_DEVICES`` renumbers from zero
+      over whatever it can see, so its ordinal 0 is any card at all.
+
+    From a user's log: the language model was configured for physical card 0,
+    named "NVIDIA GeForce RTX 5090"; Forge reported device 0 with 24.0 GB total,
+    which is a 3090. Both were "card 0", they were not the same card, and every
+    decision built on that equality was wrong in the same direction -- the
+    3090's image plan resized the 5090's server, a 3090 shortfall evicted the
+    checkpoint to make room on a card the model was not going to, and an image
+    generation waited for a language model it shared nothing with.
+
+    So the ordinal is translated, by UUID, into the physical namespace. -1 when
+    that cannot be done, which every caller already treats as "unknown" and
+    handles conservatively.
+    """
+    ordinal = image_torch_ordinal()
+    if ordinal < 0:
+        return -1
+    return _physical_index_of(ordinal)
 
 
 def device_free_vram_bytes(index: int | None = None) -> int:
@@ -1091,24 +1371,51 @@ def device_free_vram_bytes(index: int | None = None) -> int:
     still better than no placement at all, and it is the number this extension
     used for its whole first year.
 
-    ``index`` asks about one specific card rather than the image side's. A
-    machine with two cards has two answers to "how much is free", and answering
-    the second card's question with the first card's number is how a role
-    pinned to an otherwise idle 5090 gets placed against a 3090 that the image
-    model has nearly filled.
+    ``index`` is a **physical** card index -- the one ``nvidia-smi`` gives and
+    the one the language-model side records at setup. It is translated to this
+    process's ordinal before torch is asked, and that translation is the fix
+    for a real failure: an index of 0 meaning "the 5090" was being handed
+    straight to ``torch.device("cuda", 0)``, which in Forge's process is
+    whichever card the CUDA runtime calls zero. On the machine that reported
+    this, that was the 3090 -- so a placement destined for one card was sized
+    against the free VRAM of another, and shrank to five of sixty-five layers
+    because the *image* model had just filled the card it was reading.
+
+    A card this process cannot address at all -- Forge pinned to one GPU with
+    ``CUDA_VISIBLE_DEVICES`` -- is asked of the driver through nvidia-smi
+    instead. Slower, and the only honest answer available: torch cannot report
+    on a device it was not given.
+
+    A machine with two cards has two answers to "how much is free", and
+    answering the second card's question with the first card's number is how a
+    role pinned to an otherwise idle 5090 gets placed against a 3090 that the
+    image model has nearly filled.
     """
+    ordinal = None
+    if index is not None:
+        if int(index) < 0:
+            return free_vram_bytes()
+        ordinal = torch_ordinal_of(int(index))
+        if ordinal < 0:
+            # Not addressable from here. nvidia-smi still sees it, and a
+            # reading from the driver is better than this process's opinion
+            # about a different card.
+            reading = physical_free_vram_bytes(int(index))
+            if reading > 0:
+                return reading
+            logger.debug("Model Chain: GPU %s could not be read from this process or "
+                         "from nvidia-smi", index)
+            return 0
     try:
         import torch
         from backend import memory_management
 
-        if index is None:
+        if ordinal is None:
             device = memory_management.get_torch_device()
             if getattr(device, "type", "") != "cuda":
                 return free_vram_bytes()
-        elif int(index) < 0:
-            return free_vram_bytes()
         else:
-            device = torch.device("cuda", int(index))
+            device = torch.device("cuda", ordinal)
         free, _total = torch.cuda.mem_get_info(device)
         return int(free)
     except Exception:

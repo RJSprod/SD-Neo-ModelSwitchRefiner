@@ -52,6 +52,66 @@ to be a reclaim victim.** False serialisation costs some throughput. False
 reclaim destroys a prompt cache and can free zero bytes where they were wanted.
 
 
+## 2a. The correction that came from a live machine
+
+The first version of this compared card indices, and that was wrong in a way no
+test in it could have caught, because every fixture stated that the two sides
+agreed.
+
+**A card index only means something inside the namespace that issued it.**
+`nvidia-smi` numbers by PCI bus and is what `mc_llm_setup` records at setup
+(`GpuInfo.physical_index` → `state["gpu_index"]`). The CUDA runtime numbers by
+`CUDA_DEVICE_ORDER`, which defaults to *fastest first*. And a process launched
+with `CUDA_VISIBLE_DEVICES` numbers from zero over whatever it can see. Three
+schemes, and no reason for any two of them to agree.
+
+From the machine that reported it: the language model was configured for
+physical card 0, named "NVIDIA GeForce RTX 5090"; Forge reported device 0 with
+24.0 GB total, which is a 3090. Both were "card 0". One equality, four
+consequences, all in one log:
+
+```
+Waiting for image generation on GPU 0…
+re-placing llama-server — it holds 19.3 GB where the active plan leaves 4.1 GB
+released 13.1 GB of image VRAM on GPU 0 for Qwen 3.8 27B …
+5 layers on the GPU … 17.2 GB free
+```
+
+A wait that was not needed; the 3090's image plan resizing the 5090's server; a
+checkpoint evicted from a card the model was not going to; and a placement sized
+against the wrong GPU's free VRAM, because `device_free_vram_bytes` was handed
+an nvidia-smi index and passed it to `torch.device("cuda", …)`.
+
+Two fixes, and they are separate:
+
+**`image_device_index()` now answers in the physical namespace.** It translates
+Forge's ordinal by UUID against `detect_gpus()`, so it is comparable with
+`gpu_index` — which is what every caller already assumed it was.
+`image_torch_ordinal()` keeps the old meaning for the one thing that needs it,
+indexing `torch.cuda`. `device_free_vram_bytes(physical)` translates the other
+way, and falls back to nvidia-smi for a card this process cannot address at all
+— which is a real state, not a failure: Forge pinned to one GPU genuinely
+cannot query the other through torch.
+
+**Identity beats the index where the index cannot be translated.** An
+`ExecutionDomain` carries a UUID and a card name, and `conflicts_with` climbs a
+ladder: both UUIDs known settles it outright; two *different* model names settle
+it in the negative (a negative only — two matching names may be two identical
+cards); otherwise the indices, which is right whenever they share a namespace
+and is what every single-GPU installation has always done.
+
+The single-GPU path is deliberately untouched by all of it: one visible CUDA
+device resolves to ordinal 0 without consulting anything, because there is only
+one ordinal it could be.
+
+What this cost in trust is worth recording. The acceptance matrix in §19 was
+written against fixtures that *stipulated* `image_device_index() → 0` and
+`gpu_index = 1`, so the suite could not have found this and did not.
+`TestTwoNamespacesForOneSetOfCards` now builds the machine instead of asserting
+its conclusion, and `test_end_to_end_through_the_real_translation` runs with
+nothing about the card stubbed.
+
+
 ## 3. §7.1 — `ANY_CARD`, and why a sentinel rather than `None`
 
 A card filter has three states — every card, one card, the card nobody could
