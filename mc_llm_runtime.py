@@ -478,12 +478,32 @@ def negotiate(configuration: Config | None = None,
 
     reserve = (mc_broker.safety_margin_bytes() + max(int(extra_reserve), 0)
                + projector_bytes(configuration, vision))
+    # A count the user typed is part of what was *asked for*, so it goes on the
+    # placement before anything is measured -- which is what puts it on the
+    # ladder, where the first rung can sell it back one cache at a time. Only
+    # Automatic waits until after the fit, because Automatic is defined as
+    # spending the leftovers and there are no leftovers until something fits.
+    explicit = _wanted_slots()
+    if explicit > 1:
+        wanted = wanted.with_slots(_slots_for(configuration, wanted.with_slots(explicit)))
     estimate = mc_llm_context.estimate(configuration.model, wanted, described)
 
     if _fits(estimate, reserve, already_ours, card_of(configuration), configuration):
+        # It fits as asked. Only now are extra caches considered, and only out
+        # of what is left over -- so the answer to "how many caches" can never
+        # be the reason the answer to "does it fit" changed.
+        wanted, estimate = _add_slots(configuration, wanted, described, reserve,
+                                      already_ours)
         return Negotiation(wanted, estimate, (), True)
 
     placement = wanted
+    placement, estimate, given = _drop_slots(configuration, placement, described, reserve,
+                                             already_ours)
+    if given:
+        notes.append(given)
+    if _fits(estimate, reserve, already_ours, card_of(configuration), configuration):
+        return Negotiation(placement, estimate, tuple(notes), True)
+
     placement, estimate, shrunk = _shrink_context(configuration, placement, described, reserve,
                                                   already_ours)
     if shrunk:
@@ -499,6 +519,116 @@ def negotiate(configuration: Config | None = None,
     fits = _fits(estimate, reserve, already_ours, card_of(configuration), configuration)
     notes.extend(_unsatisfied(configuration, placement, described))
     return Negotiation(placement, estimate, tuple(notes), fits)
+
+
+PARALLEL_FLAG = "--parallel"
+
+
+def _wanted_slots() -> int:
+    """The slot count the user asked for, or 0 for Automatic."""
+    chosen = mc_broker.resolve(mc_broker.option(OPT_LLM_SLOTS, SLOTS_AUTOMATIC),
+                               SLOT_MODES, SLOTS_AUTOMATIC)
+    if chosen == SLOTS_AUTOMATIC:
+        return 0
+    try:
+        return max(min(int(chosen), SLOT_CEILING), 1)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _slots_that_fit(configuration: Config, placement: mc_llm_context.Placement,
+                    gguf, reserve: int, already_ours: int = 0) -> int:
+    """How many warm caches Automatic may take, which is only ever the spare.
+
+    The rule that makes Automatic safe to leave on: **a slot is bought with
+    VRAM that is left over after the placement already fits, and with nothing
+    else.** It is worked out from the *un-degraded* placement -- the one the
+    ladder has not touched -- so an extra cache can never be the reason a
+    context shrank, an expert moved, or a layer left the card. If the model
+    only just fits, the answer is one.
+
+    That ordering is the whole trade. A cache costs one prompt re-read when it
+    is missing; every other rung of the ladder costs speed on every token from
+    then on. So caches are the last thing bought and, in :func:`negotiate`, the
+    first thing sold.
+
+    Capped by the number of modes that actually have a system prompt of their
+    own, because a slot nothing routes to is a key/value cache doing nothing.
+    """
+    if not placement.on_gpu or placement.slots > 1:
+        return 1
+    estimate = mc_llm_context.estimate(configuration.model, placement, gguf)
+    per_slot = int(estimate.kv_bytes + estimate.state_bytes)
+    if per_slot <= 0:
+        return 1
+    spare = (_spendable(already_ours, card_of(configuration), configuration=configuration)
+             - estimate.total_bytes - reserve)
+    if spare <= 0:
+        return 1
+    return max(min(1 + int(spare // per_slot), DISTINCT_PROMPTS, SLOT_CEILING), 1)
+
+
+DISTINCT_PROMPTS = 6
+"""Modes that open with a system prompt of their own.
+
+Conversation, Prompt Studio, MiniMax, the Krea writer, the Spatial Composer,
+and the prompt-cache prime. Automatic never asks for more caches than there are
+prompts to put in them.
+"""
+
+
+def _add_slots(configuration: Config, placement: mc_llm_context.Placement, gguf,
+               reserve: int, already_ours: int = 0):
+    """Spend leftover VRAM on warm caches. Returns ``(placement, estimate)``.
+
+    Automatic only. A count the user typed is already on the placement by the
+    time this is reached -- :func:`negotiate` puts it there before the fit, so
+    that the ladder can sell it back -- and honouring it again here would grow
+    past what was asked for.
+
+    No note either way. A note is what :attr:`Negotiation.degraded` is made of,
+    and gaining a warm cache is not a degradation -- how many there are is said
+    on the ready line, through :meth:`mc_llm_context.Placement.describe`, where
+    every other fact about the placement is already reported.
+    """
+    if _wanted_slots():
+        return placement, mc_llm_context.estimate(configuration.model, placement, gguf)
+    slots = _slots_for(configuration, placement.with_slots(
+        _slots_that_fit(configuration, placement, gguf, reserve, already_ours)))
+    if slots <= 1:
+        return placement, mc_llm_context.estimate(configuration.model, placement, gguf)
+    grown = placement.with_slots(slots)
+    estimate = mc_llm_context.estimate(configuration.model, grown, gguf)
+    if not _fits(estimate, reserve, already_ours, card_of(configuration), configuration):
+        # Only reachable if the arithmetic and the fit disagree at the margin.
+        # The placement that was known to fit wins.
+        return placement, mc_llm_context.estimate(configuration.model, placement, gguf)
+    return grown, estimate
+
+
+def _drop_slots(configuration: Config, placement: mc_llm_context.Placement, gguf,
+                reserve: int, already_ours: int = 0):
+    """Sell warm caches back until the placement fits, cheapest thing first.
+
+    The first rung, because it is the cheapest thing on the ladder to give up.
+    A cache that is not there costs one prompt re-read the next time that mode
+    runs; a context that is not there costs conversation length, an expert in
+    system RAM costs speed on every token that consults it, and a layer that is
+    not on the card costs speed on every token full stop.
+    """
+    if placement.slots <= 1:
+        return placement, mc_llm_context.estimate(configuration.model, placement, gguf), ""
+    started = placement.slots
+    while placement.slots > 1:
+        smaller = placement.with_slots(placement.slots - 1)
+        estimate = mc_llm_context.estimate(configuration.model, smaller, gguf)
+        placement = smaller
+        if _fits(estimate, reserve, already_ours, card_of(configuration), configuration):
+            break
+    estimate = mc_llm_context.estimate(configuration.model, placement, gguf)
+    return placement, estimate, (f"warm prompt caches reduced from {started} to "
+                                 f"{placement.slots} to make the model fit; the modes that "
+                                 f"share a cache will re-read each other's prompts")
 
 
 def _unsatisfied(configuration: Config, placement, gguf) -> list[str]:
@@ -2919,6 +3049,71 @@ EVERY_LAYER = 999
 """What to ask for when the model's own layer count could not be read."""
 
 
+def _slots_for(configuration: Config, placement: mc_llm_context.Placement) -> int:
+    """The slot count this start may actually ask for.
+
+    Asked in two places on purpose -- once by :func:`_add_slots`, so the
+    estimate is of the placement that will really run, and once by the launch
+    itself as the last word before the command line is built. A footprint
+    priced for three caches and a server started with one would be two
+    descriptions of one placement, which is the mistake
+    :func:`_profile_arguments` already refuses to make about cache types.
+    """
+    slots = max(int(getattr(placement, "slots", 1)), 1)
+    if slots <= 1:
+        return 1
+    if not runtime_supports(PARALLEL_FLAG, configuration):
+        logger.info("Model Chain: this llama.cpp build does not advertise %s, so it keeps "
+                    "one prompt cache; the modes that use different system prompts will "
+                    "re-read each other's", PARALLEL_FLAG)
+        return 1
+    if not runtime_accepts(PARALLEL_FLAG, str(slots), configuration):
+        # Refused at startup on an earlier attempt, which is where a build that
+        # will not combine warm caches with an accelerator says so. Keeping the
+        # accelerator is the user's stated choice: it is a setting they picked,
+        # it pays back on every token, and a warm cache is worth one prompt
+        # re-read. So the caches go and the accelerator stays.
+        logger.info("Model Chain: this llama.cpp build refused %s %d on an earlier start, "
+                    "so it keeps one prompt cache and its accelerator",
+                    PARALLEL_FLAG, slots)
+        return 1
+    return slots
+
+
+_SLOT_REPORT = re.compile(r"n_slots\s*=\s*(\d+).*?n_ctx_slot\s*=\s*(\d+)", re.S)
+
+
+def _check_slots(log_path, offset: int, placement: mc_llm_context.Placement) -> None:
+    """Read back what llama.cpp actually built, and say so when it differs.
+
+    ``--ctx-size`` is a *total* that llama.cpp divides among its slots, and the
+    one way to get this wrong is silent: a per-slot number passed as the total
+    gives every slot a fraction of the context asked for and truncates prompts
+    to it without an error. llama.cpp prints what it decided --
+    ``n_slots = 3, n_ctx_slot = 8192`` -- so the arithmetic is checked against
+    the server rather than trusted.
+
+    Never raises and never fails a start. A log line that could not be read is
+    a diagnostic that did not happen, not a placement that is wrong.
+    """
+    try:
+        found = _SLOT_REPORT.search(_text_since(log_path, offset))
+        if found is None:
+            return
+        slots, per_slot = int(found.group(1)), int(found.group(2))
+    except Exception:
+        logger.debug("Model Chain: could not read the slot report", exc_info=True)
+        return
+    if slots == placement.slots and per_slot >= placement.context:
+        return
+    logger.warning(
+        "Model Chain: llama.cpp built %d slot(s) of %s tokens where this placement asked "
+        "for %d of %s. Prompts longer than %s tokens will be truncated — the context on "
+        "the command line is a total divided among the slots, and this start's arithmetic "
+        "did not survive it.",
+        slots, f"{per_slot:,}", placement.slots, f"{placement.context:,}", f"{per_slot:,}")
+
+
 def _profile_arguments(configuration: Config,
                        placement: mc_llm_context.Placement) -> dict:
     """The llama-server flags a managed profile adds, and none at all without one.
@@ -3195,6 +3390,10 @@ def _signature_of(configuration: Config, projector, placement,
             configuration.model, projector,
             configuration.gpu_index, configuration.device,
             placement.context, placement.gpu_layers, placement.cpu_expert_layers,
+            # A start-time argument like the other three: --parallel and
+            # --ctx-size are fixed when the process starts, so a server holding
+            # one cache cannot be given three without being replaced.
+            placement.slots,
             plan.identity if plan is not None else ())
 
 
@@ -3520,6 +3719,22 @@ class Runtime:
                     # parsing, the switch that asked for it rolled back, and
                     # what the user read was "this backbone was downloaded but
                     # would not start" about a backbone that was perfectly fine.
+                    if failure.bad_argument == PARALLEL_FLAG and placement.slots > 1:
+                        # The caches, not the accelerator. A build that will not
+                        # take --parallel beside a draft model is refusing the
+                        # optimisation, and the accelerator is the setting: it
+                        # was chosen, and it pays back on every token rather
+                        # than once per prompt.
+                        note_rejected_value(PARALLEL_FLAG, str(placement.slots),
+                                            _with_runtime(configuration, plan.runtime))
+                        logger.warning("Model Chain: %s. The accelerator was kept and the "
+                                       "warm prompt caches were given up instead.", failure)
+                        negotiated = negotiate(configuration, already_ours=ours,
+                                               extra_reserve=reserve + penalty,
+                                               vision=vision, expert_floor=expert_floor)
+                        placement = negotiated.placement
+                        signature = _signature_of(configuration, projector, placement, plan)
+                        continue
                     if failure.bad_argument and plan.flags and not dropped_accelerator:
                         dropped_accelerator = True
                         if failure.bad_value:
@@ -3781,6 +3996,13 @@ class Runtime:
         # nobody can find is a log nobody reads. It is one line per start, and
         # starts are rare.
         logger.info("Model Chain: llama-server log — %s", log_path)
+        # Asked for only when this build advertises the flag. A runtime too old
+        # for --parallel is not a reason to refuse to start; it is a reason to
+        # run the one cache it has always run, and to say so once rather than
+        # to fail a start on an argument it will not parse.
+        asked = _slots_for(configuration, placement)
+        if asked != placement.slots:
+            placement = placement.with_slots(asked)
         _warn_about_an_idle_card(configuration, layers)
         # Ahead of the warning, and it is the same subject seen from a step
         # earlier: the warning says the machine is short of RAM for this model,
@@ -3802,7 +4024,7 @@ class Runtime:
         try:
             process.start(executable, configuration.model, projector,
                           configuration.gpu_index, configuration.device, placement.context,
-                          log_path, gpu_layers=layers,
+                          log_path, gpu_layers=layers, slots=asked,
                           **_profile_arguments(configuration, placement))
             process.wait_ready(CPU_READY_TIMEOUT if from_system_ram else GPU_READY_TIMEOUT)
         except Exception as exc:
@@ -3812,6 +4034,7 @@ class Runtime:
                                said.bad_argument, said.bad_value) from exc
 
         observed = self._observed_residency(before, placement, card_of(configuration))
+        _check_slots(log_path, written_before, placement)
         return process, observed, _await_offload(log_path, written_before)
 
     @staticmethod
@@ -4705,6 +4928,34 @@ class Runtime:
 # --------------------------------------------------------------------------- #
 # Role-specific runtimes (design intent sections 9, 10 and 17)
 # --------------------------------------------------------------------------- #
+
+OPT_LLM_SLOTS = "model_chain_llm_prompt_caches"
+
+SLOTS_AUTOMATIC = "auto"
+
+SLOT_MODES = (
+    (SLOTS_AUTOMATIC, "Automatic — as many as the card has room for once the model fits"),
+    ("1", "One — every mode shares a single cache, as before"),
+    ("2", "Two"),
+    ("3", "Three — a cache each for Conversation, the Krea writer and the Composer"),
+    ("4", "Four"),
+    ("6", "Six — a cache for every mode that has its own system prompt"),
+)
+"""How many warm prompt caches llama.cpp keeps (``--parallel``).
+
+Each mode here opens with a different system prompt -- Conversation, Prompt
+Studio, MiniMax, the Krea writer, the Spatial Composer -- and with one cache
+between them every switch re-reads a prefix the previous one had just cached.
+With a cache each, llama.cpp routes an incoming prompt to the slot whose cached
+prefix matches best and none of them evicts another. One process, one copy of
+the weights, several caches.
+
+The cost is a key/value cache per slot, which is why Automatic is defined the
+way it is: see :func:`_slots_that_fit`.
+"""
+
+SLOT_CEILING = 8
+"""Most caches anybody may ask for. Past this the cache is not the bottleneck."""
 
 OPT_ROLE_PROCESSES = "model_chain_llm_role_processes"
 

@@ -171,6 +171,42 @@ class Placement:
     Only meaningful for a model with experts, and only when the runtime
     understands the corresponding flag; both are checked before this is set.
     """
+    slots: int = 1
+    """How many warm prompt caches this placement asks llama.cpp to keep.
+
+    llama.cpp's ``--parallel``. Each slot holds its own key/value cache across
+    requests and the server routes an incoming prompt to the slot whose cached
+    prefix matches it best, so the modes that use different system prompts --
+    Conversation, Prompt Studio, MiniMax, the Krea writer, the Spatial Composer
+    -- stop evicting each other's. One copy of the weights, one process, and a
+    cache each.
+
+    ``context`` stays **per slot** whatever this is, because that is what the
+    number means to the person who typed it: 8192 is how long one conversation
+    may get, not how much is left after it is divided up. llama.cpp's own
+    ``--ctx-size`` is the *total* and is divided by the slot count, so the
+    multiplication happens at the command line and nowhere else. Getting that
+    backwards would truncate every prompt to a third of what was asked for and
+    would do it silently, which is why the start reads ``n_ctx_slot`` back out
+    of llama.cpp's log rather than assuming.
+
+    The cost is a key/value cache per slot, and it is the *first* thing given
+    up when the card is short: a lost cache costs one prompt re-read, and every
+    other rung of the ladder costs speed on every token afterwards.
+    """
+
+    def with_slots(self, slots: int) -> "Placement":
+        from dataclasses import replace
+
+        return replace(self, slots=max(int(slots), 1))
+
+    @property
+    def total_context(self) -> int:
+        """What llama.cpp is asked for on ``--ctx-size``: every slot's share.
+
+        The one place the multiplication is allowed to happen.
+        """
+        return max(int(self.context), 0) * max(int(self.slots), 1)
 
     def with_context(self, context: int) -> "Placement":
         from dataclasses import replace
@@ -256,15 +292,26 @@ class Placement:
 
     def describe(self, total_layers: int = 0) -> str:
         experts = self._describe_experts(total_layers)
+        caches = self._describe_caches()
         if not self.on_gpu:
-            return "system RAM (no GPU offload)"
+            return f"system RAM (no GPU offload){caches}"
         if self.gpu_layers == ALL_LAYERS:
-            return f"all layers on the GPU{experts}"
+            return f"all layers on the GPU{experts}{caches}"
         if self.gpu_layers <= 0:
-            return "no layers on the GPU (weights in system RAM)"
+            return f"no layers on the GPU (weights in system RAM){caches}"
         if total_layers:
-            return f"{self.gpu_layers} of {total_layers} layers on the GPU{experts}"
-        return f"{self.gpu_layers} layers on the GPU{experts}"
+            return f"{self.gpu_layers} of {total_layers} layers on the GPU{experts}{caches}"
+        return f"{self.gpu_layers} layers on the GPU{experts}{caches}"
+
+    def _describe_caches(self) -> str:
+        """", 3 warm prompt caches" -- and nothing at all for the ordinary one.
+
+        Said on the ready line rather than as a negotiation note, because a
+        note is what "this placement was degraded" is made of and gaining a
+        cache is the opposite of that. Silent at one, so every installation
+        that has not asked for more reads exactly the line it always read.
+        """
+        return "" if self.slots <= 1 else f", {self.slots} warm prompt caches"
 
     def _describe_experts(self, total_layers: int = 0) -> str:
         if self.cpu_expert_layers == NO_EXPERTS:
@@ -530,8 +577,14 @@ def estimate(model: str | Path, placement: Placement,
     per_token = kv_bytes_per_token(described, placement)
     weights = weights_bytes(described, placement)
     overhead, calibrated = _overhead(described, placement)
-    kv = int(per_token * max(int(placement.context), 0))
-    state = recurrent_bytes(described, placement)
+    # Every slot gets its own cache, so the context cost is the per-slot
+    # context multiplied by how many of them there are. ``total_context`` is
+    # that multiplication, kept in one place so this and the command line
+    # cannot disagree about it.
+    kv = int(per_token * placement.total_context)
+    # And its own recurrent state: llama.cpp keeps one per sequence, which is
+    # what a slot is. A hybrid model with three slots holds three of them.
+    state = recurrent_bytes(described, placement) * max(int(placement.slots), 1)
 
     detail = ""
     if placement.gpu_layers not in (ALL_LAYERS,) and placement.on_gpu:
@@ -559,6 +612,11 @@ def capacity(model: str | Path, placement: Placement, budget_bytes: int,
     before any tokens are counted. Keeping them apart is section 11's whole
     point: a user who raises the context buffer expects to buy context with it,
     not to discover the increase went on scratch space.
+
+    The context this answers with is **per slot**, like every other context
+    figure. A buffer that buys 24K tokens across three warm caches buys each of
+    them 8K, and telling somebody they can have 24K when a conversation will
+    stop at 8K would be answering a different question from the one asked.
     """
     described = gguf if gguf is not None else mc_gguf.describe(Path(model).expanduser())
     per_token = kv_bytes_per_token(described, placement) if described is not None else 0.0
@@ -568,6 +626,7 @@ def capacity(model: str | Path, placement: Placement, budget_bytes: int,
         return Capacity(int(budget_bytes), 0, 0, ceiling, False, False)
 
     _, calibrated = _overhead(described, placement)
+    per_token *= max(int(placement.slots), 1)
     theoretical = int(max(int(budget_bytes), 0) / per_token)
     recommended = int(theoretical * SAFE_FRACTION) // CONTEXT_GRANULARITY * CONTEXT_GRANULARITY
     limited = bool(ceiling) and recommended > ceiling

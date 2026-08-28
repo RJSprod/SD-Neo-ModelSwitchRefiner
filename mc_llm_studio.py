@@ -923,7 +923,8 @@ def _residency_table() -> str:
     if report is not None and report.placement is not None:
         summary.append(
             f"<li>LLM placement: {ui.escape(report.placement.describe())}, "
-            f"{ui.tokens(report.placement.context)} token context</li>")
+            f"{ui.tokens(report.placement.context)} token context"
+            f"{' each' if report.placement.slots > 1 else ''}</li>")
     for text in (report.notes if report is not None else ()):
         summary.append(f"<li>Reported change: {ui.escape(text)}</li>")
 

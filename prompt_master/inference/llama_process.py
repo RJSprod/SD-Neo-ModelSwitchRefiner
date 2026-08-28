@@ -8,7 +8,7 @@ import httpx
 class LlamaProcess:
     def __init__(self): self.process: subprocess.Popen | None = None; self.port = 0; self.api_key = ""; self._log = None
 
-    def start(self, executable: Path, model: Path, mmproj: Path | None, gpu_index: int, device: str, context_size: int, log_path: Path, gpu_layers: str = "all", cache_type_k: str | None = None, cache_type_v: str | None = None, jinja: bool = False) -> None:
+    def start(self, executable: Path, model: Path, mmproj: Path | None, gpu_index: int, device: str, context_size: int, log_path: Path, gpu_layers: str = "all", cache_type_k: str | None = None, cache_type_v: str | None = None, jinja: bool = False, slots: int = 1) -> None:
         # gpu_layers is llama.cpp's --n-gpu-layers. It stays "all" for every card
         # that fits its quantization, which is what the 3090 and 5090 pinned
         # builds always used; a smaller card can record a layer count at setup
@@ -33,10 +33,23 @@ class LlamaProcess:
         # first is something to tell llama.cpp: a manual GGUF whose install has
         # never been asked about cache types keeps the exact command line it has
         # always been started with.
+        #
+        # slots is llama.cpp's --parallel: how many independent key/value caches
+        # the server keeps, so that requests with different system prompts stop
+        # evicting each other's. It defaults to 1, which is exactly the single
+        # cache this has always started.
+        #
+        # context_size is per slot, and --ctx-size is llama.cpp's *total* --
+        # divided among the slots. So the multiplication happens here, once, in
+        # the one place that talks to the command line. Passing the per-slot
+        # number with --parallel 3 would give each slot a third of what was
+        # asked for, and would do it silently: llama.cpp reports the result as
+        # n_ctx_slot in its log and truncates prompts to it without an error.
+        slots = max(int(slots), 1)
         self.stop(); self.port = self._free_port(); self.api_key = secrets.token_urlsafe(32)
         command = [str(executable),"--model",str(model)]
         if mmproj is not None: command += ["--mmproj",str(mmproj)]
-        command += ["--alias","prompt-master","--host","127.0.0.1","--port",str(self.port),"--api-key",self.api_key,"--no-webui","--device",device,"--split-mode","none","--main-gpu","0","--n-gpu-layers",str(gpu_layers),"--ctx-size",str(context_size),"--parallel","1","--reasoning","off","--reasoning-budget","0","--timeout","600"]
+        command += ["--alias","prompt-master","--host","127.0.0.1","--port",str(self.port),"--api-key",self.api_key,"--no-webui","--device",device,"--split-mode","none","--main-gpu","0","--n-gpu-layers",str(gpu_layers),"--ctx-size",str(int(context_size) * slots),"--parallel",str(slots),"--reasoning","off","--reasoning-budget","0","--timeout","600"]
         if cache_type_k: command += ["--cache-type-k",str(cache_type_k)]
         if cache_type_v: command += ["--cache-type-v",str(cache_type_v)]
         if jinja: command += ["--jinja"]
