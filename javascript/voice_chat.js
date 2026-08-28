@@ -154,15 +154,28 @@
         return appRoot() + "/" + route;
     }
 
-    function pageKey() {
+    // Python puts this process's page token in two places, because the two
+    // surfaces that need it are in different parts of the document: a hidden
+    // component inside Conversation, and an attribute on the Settings row.
+    // `scope` names the one to read first, so the Settings row never depends on
+    // the Conversation panel having been built and hydrated — it reads the
+    // attribute sitting on its own container. Without a token every request is
+    // refused with a 403, which is a failure worth not depending on the wrong
+    // element for.
+    function pageKey(scope) {
+        if (scope && scope.getAttribute) {
+            const own = scope.getAttribute("data-mc-voice-key");
+            if (own) return own;
+        }
         const fromPanel = fieldValue(IDS.key);
         if (fromPanel) return fromPanel;
-        const holder = document.querySelector("[data-mc-voice-key]");
+        const holder = document.querySelector("[data-mc-voice-key]")
+            || root().querySelector("[data-mc-voice-key]");
         return holder ? (holder.getAttribute("data-mc-voice-key") || "") : "";
     }
 
-    function headers(extra) {
-        const found = {"X-Model-Chain-Voice": pageKey()};
+    function headers(extra, scope) {
+        const found = {"X-Model-Chain-Voice": pageKey(scope)};
         if (extra) Object.keys(extra).forEach(function (name) { found[name] = extra[name]; });
         return found;
     }
@@ -204,22 +217,44 @@
     let readiness = null;
     let readinessAt = 0;
 
-    function refreshStatus(force) {
+    // Always resolves, and always with something that has an `ok` and, when it
+    // is false, an `error` somebody can read. The first version resolved with
+    // null on every failure, which meant each caller quietly did nothing --
+    // and the visible result of that was a Settings row frozen on "Starting…"
+    // with nothing anywhere to say why. A status check that cannot report its
+    // own failure is worse than no status check.
+    function refreshStatus(force, scope) {
         const now = Date.now();
         if (!force && readiness && now - readinessAt < 5000) {
             return Promise.resolve(readiness);
         }
         return fetch(url(ROUTES.status), {
-            method: "POST", credentials: "same-origin", headers: headers(),
+            method: "POST", credentials: "same-origin", headers: headers(null, scope),
         }).then(function (response) {
-            return response.json();
-        }).then(function (payload) {
-            readiness = payload;
-            readinessAt = Date.now();
-            return payload;
-        }).catch(function () {
+            return response.json().catch(function () {
+                return {ok: false, error: "The WebUI answered HTTP " + response.status
+                                          + " with something this page cannot read."};
+            }).then(function (payload) {
+                if (!payload || typeof payload !== "object") {
+                    payload = {ok: false, error: "The WebUI sent an empty answer."};
+                }
+                if (!response.ok && payload.ok === undefined) payload.ok = false;
+                if (payload.ok) {
+                    readiness = payload;
+                    readinessAt = Date.now();
+                } else {
+                    readiness = null;
+                    console.error("Model Chain: Voice Chat status refused (HTTP "
+                                  + response.status + ") — " + (payload.error || ""));
+                }
+                return payload;
+            });
+        }).catch(function (error) {
             readiness = null;
-            return null;
+            console.error("Model Chain: Voice Chat could not reach its status route", error);
+            return {ok: false,
+                    error: "Could not reach this WebUI to read the Voice Chat status ("
+                           + ((error && error.message) || "network error") + ")."};
         });
     }
 
@@ -574,7 +609,10 @@
             if (holding !== session) return null;
             if (!found || !found.ok) {
                 holding = null;
-                refuse(MESSAGES.failed);
+                // The route's own sentence, not a generic one: "This page is out
+                // of date with the WebUI. Reload it." is actionable and
+                // "Voice transcription failed" is not.
+                refuse((found && found.error) || MESSAGES.failed);
                 return null;
             }
             if (!found.ready) {
@@ -729,51 +767,129 @@
 
     // -- the Settings page row ------------------------------------------------ //
 
+    const KINDS = ["stt", "tts"];
+
+    function installLabel(kind) {
+        return "Download default " + kind.toUpperCase();
+    }
+
+    function settingsLine(holder, kind) {
+        return holder.querySelector('[data-mc-voice-status="' + kind + '"]');
+    }
+
+    function installButton(holder, kind) {
+        return holder.querySelector('[data-mc-voice-install="' + kind + '"]');
+    }
+
+    function sayInRow(holder, kind, text, bad) {
+        const line = settingsLine(holder, kind);
+        if (!line) return;
+        line.textContent = text;
+        if (line.classList) {
+            if (bad) line.classList.add("mc-voice-failed");
+            else line.classList.remove("mc-voice-failed");
+        }
+    }
+
+    // Whatever went wrong, the button comes back. A control that disabled
+    // itself on the way into a request it never got an answer to is a control
+    // somebody sits and watches -- which is exactly what happened, for minutes.
+    function releaseButton(holder, kind, ready) {
+        const button = installButton(holder, kind);
+        if (!button) return;
+        button.disabled = !!ready;
+        button.textContent = ready ? "Installed" : installLabel(kind);
+    }
+
     function wireSettings() {
-        const holder = document.querySelector(".mc-voice-settings");
+        const holder = document.querySelector(".mc-voice-settings")
+            || root().querySelector(".mc-voice-settings");
         if (!holder || holder.dataset.mcVoiceWired === "1") return;
         holder.dataset.mcVoiceWired = "1";
         const buttons = holder.querySelectorAll("[data-mc-voice-install]");
         Array.prototype.forEach.call(buttons, function (button) {
             button.addEventListener("click", function (event) {
                 if (event.preventDefault) event.preventDefault();
-                const kind = button.getAttribute("data-mc-voice-install");
-                button.disabled = true;
-                button.textContent = "Starting…";
-                fetch(url(ROUTES.install), {
-                    method: "POST",
-                    credentials: "same-origin",
-                    headers: headers({"Content-Type": "application/json"}),
-                    body: JSON.stringify({kind: kind}),
-                }).catch(function () { /* the row below reports it */ });
+                startInstall(holder, button.getAttribute("data-mc-voice-install"), button);
             });
         });
         window.setInterval(function () { paintSettings(holder); }, SETTINGS_POLL_MS);
         paintSettings(holder);
     }
 
+    function startInstall(holder, kind, button) {
+        button.disabled = true;
+        button.textContent = "Starting…";
+        sayInRow(holder, kind, "Starting…", false);
+
+        const failed = function (text) {
+            sayInRow(holder, kind, text, true);
+            releaseButton(holder, kind, false);
+            console.error("Model Chain: Voice Chat could not start the " + kind
+                          + " download — " + text);
+        };
+
+        fetch(url(ROUTES.install), {
+            method: "POST",
+            credentials: "same-origin",
+            headers: headers({"Content-Type": "application/json"}, holder),
+            body: JSON.stringify({kind: kind}),
+        }).then(function (response) {
+            return response.json().catch(function () {
+                return {ok: false, error: "The WebUI answered HTTP " + response.status
+                                          + " with something this page cannot read."};
+            });
+        }).then(function (payload) {
+            // The answer is read, not discarded. A build that cannot install
+            // anything says so in this reply, and saying so is the difference
+            // between a row that explains itself and a row that never moves.
+            if (!payload || !payload.ok) {
+                failed((payload && payload.error)
+                       || "Voice Chat could not start that download.");
+                return;
+            }
+            paintSettings(holder);
+        }).catch(function (error) {
+            failed("Could not reach this WebUI to start the download ("
+                   + ((error && error.message) || "network error") + ").");
+        });
+    }
+
     function paintSettings(holder) {
-        refreshStatus(true).then(function (payload) {
-            if (!payload || !payload.ok) return;
+        refreshStatus(true, holder).then(function (payload) {
             const runtime = holder.querySelector(".mc-voice-runtime");
+            if (!payload || !payload.ok) {
+                // The failure is drawn rather than swallowed. This is where the
+                // row used to give up silently and leave both buttons disabled.
+                const text = (payload && payload.error)
+                    || "Voice Chat could not read its own status.";
+                if (runtime) runtime.textContent = text;
+                KINDS.forEach(function (kind) {
+                    sayInRow(holder, kind, text, true);
+                    releaseButton(holder, kind, false);
+                });
+                return;
+            }
             if (runtime) runtime.textContent = payload.runtime_message || "";
-            ["stt", "tts"].forEach(function (kind) {
-                const line = holder.querySelector('[data-mc-voice-status="' + kind + '"]');
-                const button = holder.querySelector('[data-mc-voice-install="' + kind + '"]');
+            KINDS.forEach(function (kind) {
                 const progress = (payload.progress || {})[kind] || {};
                 const ready = kind === "stt" ? payload.stt_ready : payload.tts_ready;
-                if (line) {
-                    line.textContent = progress.running
-                        ? (progress.text || "Downloading…") + " "
-                          + Math.round((progress.fraction || 0) * 100) + "%"
-                        : (kind === "stt" ? payload.stt_message : payload.tts_message);
+                const message = kind === "stt" ? payload.stt_message : payload.tts_message;
+                const button = installButton(holder, kind);
+
+                if (progress.running) {
+                    sayInRow(holder, kind,
+                             (progress.text || "Working…") + "  "
+                             + Math.round((progress.fraction || 0) * 100) + "%", false);
+                    if (button) {
+                        button.disabled = true;
+                        button.textContent = "Downloading…";
+                    }
+                    return;
                 }
-                if (button) {
-                    button.disabled = !!progress.running || !!ready;
-                    button.textContent = ready
-                        ? "Installed"
-                        : "Download default " + kind.toUpperCase();
-                }
+                sayInRow(holder, kind, progress.failed ? progress.text : message,
+                         !!progress.failed);
+                releaseButton(holder, kind, ready);
             });
         });
     }

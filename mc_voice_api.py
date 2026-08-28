@@ -54,6 +54,7 @@ import threading
 import time
 
 import mc_voice_models as models
+import mc_voice_paths as paths
 import mc_voice_runtime as runtime
 import mc_voice_state as state
 
@@ -320,15 +321,33 @@ def _matches_token(offered: str) -> bool:
         return False
 
 
-def _checked(request) -> None:
-    """Every gate one non-status route passes, in the order they cost."""
+def _checked(request, route: str = "") -> None:
+    """Every gate one voice route passes, in the order they cost.
+
+    Each refusal names *which* gate closed, in the log. Without that a 403 is
+    indistinguishable from a 401 from a route that is not there, and the only
+    way to tell them apart is to open the browser's developer tools -- which is
+    the answer this repository has already decided is not an answer (see
+    :mod:`mc_literal_report`). One line per refusal, no content in it, and the
+    reason is one of three words chosen here.
+    """
     headers = getattr(request, "headers", {}) or {}
-    if not _matches_token(headers.get(TOKEN_HEADER)):
+    offered = headers.get(TOKEN_HEADER)
+    if not _matches_token(offered):
+        _refused(route, "no page token was sent" if not offered
+                 else "the page token did not match this WebUI process")
         raise Refused(403, "This page is out of date with the WebUI. Reload it.")
     if not _same_origin(request):
+        _refused(route, "the Origin header did not match this WebUI's host")
         raise Refused(403, "That request did not come from this WebUI.")
     if not _authorised(request):
+        _refused(route, "the caller is not signed in to the WebUI")
         raise Refused(401, "Sign in to the WebUI to use Voice Chat.")
+
+
+def _refused(route: str, reason: str) -> None:
+    logger.warning("Model Chain: Voice Chat refused a request to %s — %s",
+                   route or "a voice route", reason)
 
 
 # --------------------------------------------------------------------------- #
@@ -407,19 +426,39 @@ def provision(kind: str) -> dict:
     takes minutes is a request a phone's browser will give up on. The row polls
     :func:`status_payload` for the rest, which is also what makes the Settings
     page and the Voice flyout agree without either of them owning the download.
+
+    Everything that can be decided *before* the thread starts is decided here
+    and answered in the response. That is the correction to the first version,
+    which started a thread unconditionally and let it discover on the other side
+    that this build cannot install anything -- so the browser was told "started"
+    and the row sat on "Starting…" for as long as somebody was willing to watch
+    it. A refusal a caller is waiting for belongs in the reply to that caller.
     """
     if kind not in ("stt", "tts"):
         raise Refused(400, "Voice Chat installs a speech-to-text or a text-to-speech model.")
-    started = models.progress().get(kind) or {}
-    if started.get("running"):
+
+    already = models.progress().get(kind) or {}
+    if already.get("running"):
+        logger.info("Model Chain: Voice Chat was asked to install the %s model again while "
+                    "it is already installing", kind.upper())
         return {"ok": True, "already": True}
+
+    refusal = models.refusal(kind)
+    if refusal:
+        logger.warning("Model Chain: Voice Chat refused to install the %s model — %s",
+                       kind.upper(), refusal)
+        raise Refused(409, refusal)
+
+    logger.info("Model Chain: Voice Chat install requested for the %s model", kind.upper())
 
     def run():
         try:
             models.install(kind)
-        except Exception as exc:
-            logger.warning("Model Chain: Voice Chat could not install the %s model — %s",
-                           kind, exc)
+        except Exception:
+            # Already logged with its reason, and already recorded where the
+            # Settings row will draw it -- see mc_voice_models._claim.
+            logger.debug("Model Chain: the Voice Chat install thread ended on an error",
+                         exc_info=True)
 
     threading.Thread(target=run, name=f"mc-voice-install-{kind}", daemon=True).start()
     return {"ok": True, "already": False}
@@ -459,14 +498,14 @@ def install(_demo=None, app=None) -> bool:
 
     async def voice_status(request: Request):
         try:
-            _checked(request)
+            _checked(request, STATUS_ROUTE)
         except Refused as exc:
             return _refusal(exc)
         return JSONResponse(status_payload())
 
     async def voice_stt(request: Request):
         try:
-            _checked(request)
+            _checked(request, STT_ROUTE)
             body = await request.body()
             return JSONResponse(transcribe(body))
         except Refused as exc:
@@ -479,7 +518,7 @@ def install(_demo=None, app=None) -> bool:
 
     async def voice_tts(request: Request):
         try:
-            _checked(request)
+            _checked(request, TTS_ROUTE)
             payload = await request.json()
             audio = speak(str((payload or {}).get("token") or ""))
         except Refused as exc:
@@ -500,7 +539,7 @@ def install(_demo=None, app=None) -> bool:
 
     async def voice_install(request: Request):
         try:
-            _checked(request)
+            _checked(request, INSTALL_ROUTE)
             payload = await request.json()
             return JSONResponse(provision(str((payload or {}).get("kind") or "")))
         except Refused as exc:
@@ -519,5 +558,10 @@ def install(_demo=None, app=None) -> bool:
         logger.debug("Model Chain: could not register the Voice Chat routes", exc_info=True)
         return False
     _installed = True
-    logger.info("Model Chain: Voice Chat routes registered")
+    found = models.status()
+    logger.info("Model Chain: Voice Chat routes registered at %s", ", ".join(ROUTES))
+    logger.info("Model Chain: Voice Chat data directory is %s", paths.data_root())
+    logger.info("Model Chain: Voice Chat status — runtime %s, speech-to-text %s, "
+                "text-to-speech %s", found.runtime_message, found.stt_message,
+                found.tts_message)
     return True

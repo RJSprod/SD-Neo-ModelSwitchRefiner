@@ -3063,6 +3063,37 @@ one of them is a sentence in the status line and a chat window that works
 exactly as it did. A synthesis that fails cannot cancel a reply that has already
 arrived, and nothing in the voice half can reach the image half's memory.
 
+**Everything it does says so.** Voice lines go to the console and to
+`<LLM data root>/logs/model_chain.log`, beside the rest of the extension's log —
+there is no second log file to find. On start-up it writes where the voice
+folder is and what is installed; a download writes a line per artifact with its
+size, the transfer rate and the fact that its hash was verified; a failure
+writes its reason at warning level; and a refused browser request writes *which
+gate refused it* — no page token, a stale page token, a mismatched Origin, or a
+caller that is not signed in. That last one exists because a 403 with nothing in
+the log is a bug report nobody can answer:
+
+```
+Model Chain: Voice Chat routes registered at /model-chain/voice/status, …
+Model Chain: Voice Chat data directory is C:\Roots\Neo3\model_chain_voice
+Model Chain: Voice Chat status — runtime Not installed, speech-to-text …
+Model Chain: Voice Chat install requested for the STT model
+Model Chain: Voice Chat STT — Downloading 2 of 3 — decoder.onnx (262 MB)
+Model Chain: Voice Chat fetched decoder.onnx — 262.0 MB in 41.3s (6.3 MB/s), hash verified
+Model Chain: Voice Chat refused a request to /model-chain/voice/status — no page token was sent
+```
+
+What never appears is anything anybody said. The lines carry file names, byte
+counts, durations, model ids and error reasons; transcripts, messages and
+replies do not reach them, and `tests/test_voice_privacy.py` puts a sentinel
+phrase through both directions to keep that honest.
+
+The Settings row reports itself the same way. A download that is refused says
+why in the row and re-enables its button, a download in flight shows the file it
+is on and a percentage, and a status check that cannot reach the WebUI says
+that rather than leaving the row frozen — which is what the first version did,
+because every failure path in it resolved to nothing at all.
+
 ## Layout
 
 ```

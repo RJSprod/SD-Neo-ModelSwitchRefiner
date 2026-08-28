@@ -4172,3 +4172,12 @@
     cursor: default;
     opacity: 0.55;
 }
+
+/* A status line reporting a failure rather than a state. Coloured from the
+   host's own error token so a theme decides what wrong looks like, and only
+   ever added to the line that is actually wrong -- a row where both models
+   failed for different reasons should say both. */
+.mc-voice-status.mc-voice-failed {
+    color: var(--error-text-color, var(--body-text-color, inherit));
+    font-weight: 600;
+}
