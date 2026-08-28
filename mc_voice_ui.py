@@ -218,6 +218,41 @@ def speech_marker(take_reply):
 # --------------------------------------------------------------------------- #
 
 
+def _manual_section(kind: str, addresses: list, blurb: str, placeholder: str) -> str:
+    """The "or install from files you download yourself" half of a row.
+
+    Every row has one now, the engine included: the failure that made the engine
+    row necessary in the first place was an automatic install that could not be
+    completed, and an escape hatch that covers two of the three things a person
+    needs is not an escape hatch.
+    """
+    if not addresses:
+        return ""
+    links = "".join(
+        f'<li><a href="{ui.escape(item["url"])}" target="_blank" rel="noreferrer">'
+        f'{ui.escape(item["filename"])}</a>'
+        + ("" if item.get("archive") or item["filename"] == item["save_as"]
+           else f' <span class="mc-voice-rename">→ save as '
+                f'{ui.escape(item["save_as"])}</span>')
+        + "</li>"
+        for item in addresses)
+    return (
+        f'<details class="mc-voice-manual">'
+        f'<summary>Or install from files you download yourself</summary>'
+        f'<p>{blurb}</p>'
+        f'<ul class="mc-voice-links">{links}</ul>'
+        f'<div class="mc-voice-folder-row">'
+        f'<input type="text" class="mc-voice-folder" '
+        f'data-mc-voice-folder="{kind}" spellcheck="false" '
+        f'placeholder="{ui.escape(placeholder)}" />'
+        f'<button type="button" class="mc-voice-install-local" '
+        f'data-mc-voice-local="{kind}">Install from this folder</button>'
+        f'</div>'
+        f'<p class="mc-voice-note">Nothing is installed on trust: a file under the right '
+        f'name with the wrong contents is refused exactly as a bad download is.</p>'
+        f'</details>')
+
+
 def settings_html() -> str:
     """The Voice Chat install row, as static HTML the browser makes live.
 
@@ -229,13 +264,14 @@ def settings_html() -> str:
     becoming a fake persistent boolean that a settings backup would restore as
     an instruction to download something.
 
-    Each row has two ways in, because one of them is not always available. The
-    button downloads the pinned artifacts. The folder box installs from files
-    somebody already has -- which is the answer for a build whose artifacts are
-    not pinned, a proxy that will not pass a 300 MB binary, and an air-gapped
-    machine. The addresses are printed beside it rather than left for somebody
-    to search for: "a Whisper small ONNX export" describes several files and
-    only one of them is the one this runtime wants.
+    Three rows -- the engine and the two models -- and every one of them has two
+    ways in. The button fetches the pinned artifacts. The folder box installs
+    from files somebody already has, which is the answer for a proxy that will
+    not pass a large binary, an air-gapped machine, and an automatic install
+    that failed for a reason nobody has got to the bottom of yet. The addresses
+    are printed beside it rather than left for somebody to search for: "a
+    Whisper small ONNX export" describes several files and only one of them is
+    the one this runtime wants.
 
     The page token is an attribute on the container because this row is not
     inside Conversation and has no hidden Gradio component of its own to read
@@ -244,12 +280,18 @@ def settings_html() -> str:
     found = models.status()
     parts = [f'<div class="mc-voice-settings" '
              f'data-mc-voice-key="{ui.escape(api.session_token())}">']
+
     # The engine gets a row of its own with a button of its own. It used to be
     # a line of text, on the reasoning that it is an implementation detail of
     # the two models and is installed by whichever is downloaded first -- which
     # is true right up until somebody installs both models from files they
     # already had. Then nothing was downloaded, the engine is still missing,
     # both model buttons read "Installed", and there is nothing left to press.
+    try:
+        wheels = models.runtime_sources()
+    except Exception:
+        logger.debug("Model Chain: could not describe the voice engine", exc_info=True)
+        wheels = []
     parts.append(
         f'<div class="mc-voice-row" data-mc-voice-kind="runtime">'
         f'<div class="mc-voice-head">'
@@ -260,10 +302,14 @@ def settings_html() -> str:
         f'<button type="button" class="mc-voice-install" '
         f'data-mc-voice-install="runtime">Install voice engine</button>'
         f'</div>'
-        f'<div class="mc-voice-note">Downloaded from PyPI and installed into a folder of '
-        f'its own. Both models need it, and downloading either one installs it too — this '
-        f'button is for when you installed the models from your own files.</div>'
-        f'</div>')
+        + _manual_section(
+            "runtime", wheels,
+            "Two wheels from PyPI, unpacked into a folder of their own. Both models need "
+            "them, and downloading either model installs them too. Put both files in one "
+            "folder and give Voice Chat that folder — they are pinned in this extension, "
+            "so what you supply is checked against a hash committed here.",
+            "C:\\Users\\you\\Downloads\\voice-engine")
+        + '</div>')
     parts.append(f'<div class="mc-voice-runtime">{ui.escape(found.summary)}</div>')
 
     for kind, heading in (("stt", "Speech to text"), ("tts", "Text to speech")):
@@ -288,38 +334,14 @@ def settings_html() -> str:
             f'<button type="button" class="mc-voice-install" '
             f'data-mc-voice-install="{kind}">Download default {kind.upper()}</button>'
             f'</div>')
-
-        if addresses:
-            links = "".join(
-                f'<li><a href="{ui.escape(item["url"])}" target="_blank" rel="noreferrer">'
-                f'{ui.escape(item["filename"])}</a>'
-                + ("" if item["archive"] or item["filename"] == item["save_as"]
-                   else f' <span class="mc-voice-rename">→ save as '
-                        f'{ui.escape(item["save_as"])}</span>')
-                + "</li>"
-                for item in addresses)
-            parts.append(
-                f'<details class="mc-voice-manual">'
-                f'<summary>Or install from files you download yourself</summary>'
-                f'<p>The button above does all of this for you. This is here for a '
-                f'machine that cannot reach the publishers — no Internet, or a proxy '
-                f'that will not pass a large binary. Download these into one folder, '
-                f'then give Voice Chat that folder. The original filenames are fine — '
-                f'nothing needs renaming, and no account or access token is needed for '
-                f'either site.</p>'
-                f'<ul class="mc-voice-links">{links}</ul>'
-                f'<div class="mc-voice-folder-row">'
-                f'<input type="text" class="mc-voice-folder" '
-                f'data-mc-voice-folder="{kind}" spellcheck="false" '
-                f'placeholder="C:\\Users\\you\\Downloads\\voice-{kind}" />'
-                f'<button type="button" class="mc-voice-install-local" '
-                f'data-mc-voice-local="{kind}">Install from this folder</button>'
-                f'</div>'
-                f'<p class="mc-voice-note">Files you supply are checked for shape and '
-                f'completeness, not against a hash in this repository — there is none '
-                f'for them. Voice Chat records what it installed so later changes still '
-                f'show.</p>'
-                f'</details>')
+        parts.append(_manual_section(
+            kind, addresses,
+            "The button above does all of this for you. This is here for a machine that "
+            "cannot reach the publishers — no Internet, or a proxy that will not pass a "
+            "large binary. Download these into one folder, then give Voice Chat that "
+            "folder. The original filenames are fine — nothing needs renaming, and no "
+            "account or access token is needed for either site.",
+            f"C:\\Users\\you\\Downloads\\voice-{kind}"))
         parts.append("</div>")
 
     parts.append(

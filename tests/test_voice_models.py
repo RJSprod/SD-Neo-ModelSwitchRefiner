@@ -9,13 +9,14 @@ becomes "installed" only when a manifest written after verification says so; and
 an entry that has not been pinned yet cannot be installed at all rather than
 being installed on trust.
 
-The second is that installing the runtime performs no dependency resolution.
-That is a different property from "the wheels are hashed", and losing it would
-be invisible: pip would quietly reach an index, resolve something nobody
-reviewed, and every hash in this repository would still be correct about the two
-files it does describe. So there is a test that runs a real ``pip install`` with
-a recording HTTP server standing in for the package index, and asserts the
-server is never asked for anything.
+The second is that installing the runtime resolves nothing. That used to be a
+carefully arranged property -- pip, run with ``--no-index`` and a sanitised
+environment -- and it failed on a real machine in the way carefully arranged
+properties do: pip exited zero having installed into somewhere else entirely,
+and the self-test found no module. There is no package manager in that path any
+more. The wheels are unpacked, which is what installing a wheel that needs no
+build step *is*, and an installer that resolves nothing cannot resolve something
+from an index.
 """
 
 from __future__ import annotations
@@ -652,389 +653,176 @@ class RecordingIndex:
 
 @pytest.mark.skipif(shutil.which(sys.executable) is None, reason="no interpreter to clone")
 class TestTheIsolatedRuntime:
-    def test_installing_the_runtime_never_asks_a_package_index(self, tmp_path, monkeypatch):
-        """R2-2, proved rather than asserted.
+    """Built without pip, and filled by unpacking rather than by installing.
 
-        A real venv, a real ``pip install``, and a real HTTP server configured as
-        the index pip would use if it were allowed to use one. If a single
-        request arrives, the offline guarantee is not one.
-        """
-        index = RecordingIndex()
-        monkeypatch.setenv("PIP_INDEX_URL", index.url)
-        monkeypatch.setenv("PIP_EXTRA_INDEX_URL", index.url)
-        try:
-            wheels = tmp_path / "wheels"
-            wheels.mkdir()
-            wheel = build_wheel(wheels)
-            platform = models.RuntimePlatform(
-                identifier="test", system="linux", machines=("x86_64",), python="3.11",
-                artifacts=(artifact_for(b"x", filename=wheel.name, local_name=wheel.name),))
+    Both are corrections to a real failure. The self-test on a user's machine
+    reported ``ModuleNotFoundError`` after a pip run that had exited zero --
+    which is exactly what ``PIP_TARGET``, ``PIP_USER``, ``PIP_PREFIX`` or a
+    ``pip.ini`` produce, and pip is perfectly happy about all of them. There is
+    no package manager in this path any more, so there is nothing left to
+    redirect; and R2-2 stops being carefully arranged and becomes trivially
+    true, because an installer that resolves nothing cannot resolve something
+    from an index.
+    """
 
-            staging = tmp_path / "staging"
-            staging.mkdir()
-            models._build_environment(staging, wheels, platform)
-
-            interpreter = staging / "env" / "bin" / "python"
-            assert interpreter.exists()
-            import subprocess
-
-            proof = subprocess.run([str(interpreter), "-c",
-                                    "import mcvoicetest; print(mcvoicetest.VALUE)"],
-                                   capture_output=True, text=True, timeout=120)
-            assert proof.returncode == 0, proof.stderr
-            assert proof.stdout.strip() == "1"
-        finally:
-            index.close()
-
-        assert index.asked == [], (
-            f"the runtime installation reached a package index: {index.asked}")
-
-    def test_the_install_command_disables_the_index_and_the_resolver(self, tmp_path,
-                                                                     monkeypatch):
-        """The flags, checked separately from the behaviour above, because a
-        future change that kept the behaviour by accident is a change that will
-        stop keeping it."""
-        seen = {}
-
-        class Result:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
-        def record(command, **kwargs):
-            seen["command"] = command
-            seen["env"] = kwargs.get("env") or {}
-            return Result()
-
-        import venv
-
-        monkeypatch.setattr(models.subprocess, "run", record)
-        monkeypatch.setattr(venv.EnvBuilder, "create", lambda self, where: None)
-
+    def test_it_unpacks_a_wheel_into_the_runtime(self, tmp_path):
         wheels = tmp_path / "wheels"
         wheels.mkdir()
         wheel = build_wheel(wheels)
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        # Unpacked directly: the shipped manifest asks for sherpa_onnx and this
+        # wheel provides a stand-in, so the "did the engine actually land"
+        # check is exercised on its own below.
+        models._unpack_wheel(wheel, models.site_packages(staging / "env"))
+
+        target = models.site_packages(staging / "env")
+        assert (target / "mcvoicetest" / "__init__.py").is_file()
+        assert (target / "mcvoicetest-1.0.dist-info" / "METADATA").is_file()
+
+    def test_no_package_manager_is_invoked_at_all(self, tmp_path, monkeypatch):
+        """The strongest form of "it never reaches an index": there is nothing
+        that could."""
+        def explode(*args, **kwargs):
+            raise AssertionError("the runtime installer ran a subprocess")
+
+        monkeypatch.setattr(models.subprocess, "run", explode)
+
+        wheels = tmp_path / "wheels"
+        wheels.mkdir()
+        wheel = build_wheel(wheels, name="sherpa_onnx")
         platform = models.RuntimePlatform(
             identifier="test", system="linux", machines=("x86_64",), python="3.11",
             artifacts=(artifact_for(b"x", filename=wheel.name, local_name=wheel.name),))
         staging = tmp_path / "staging"
-        (staging / "env" / "bin").mkdir(parents=True)
-        (staging / "env" / "bin" / "python").write_text("", encoding="utf-8")
+        staging.mkdir()
+
+        models._build_environment(staging, wheels, platform)
+        assert (models.site_packages(staging / "env") / "sherpa_onnx").is_dir()
+
+    def test_the_environment_is_built_without_pip(self, tmp_path, monkeypatch):
+        """``ensurepip`` is one of the likelier things to be broken on the
+        embedded and relocated Pythons a WebUI is launched from, and it was
+        being installed only to be used once."""
+        import venv
+
+        seen = {}
+        original = venv.EnvBuilder.__init__
+
+        def record(self, *args, **kwargs):
+            seen.update(kwargs)
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(venv.EnvBuilder, "__init__", record)
+
+        wheels = tmp_path / "wheels"
+        wheels.mkdir()
+        wheel = build_wheel(wheels, name="sherpa_onnx")
+        platform = models.RuntimePlatform(
+            identifier="test", system="linux", machines=("x86_64",), python="3.11",
+            artifacts=(artifact_for(b"x", filename=wheel.name, local_name=wheel.name),))
+        staging = tmp_path / "staging"
+        staging.mkdir()
         models._build_environment(staging, wheels, platform)
 
-        command = seen["command"]
-        assert "--no-index" in command
-        assert "--no-deps" in command
-        assert str(wheels / wheel.name) in command
-        assert seen["env"]["PIP_NO_INDEX"] == "1"
-        assert seen["env"]["PIP_INDEX_URL"] == ""
-        # No requirement name anywhere: every installable is a path on this disk.
-        assert not any(part == "sherpa-onnx" for part in command)
+        assert seen.get("with_pip") is False
+
+    def test_an_unpack_that_leaves_the_engine_missing_is_refused(self, tmp_path):
+        """"The installer said it worked" is precisely the claim that turned out
+        to be worthless, so it is checked."""
+        wheels = tmp_path / "wheels"
+        wheels.mkdir()
+        wheel = build_wheel(wheels, name="somethingelse")
+        platform = models.RuntimePlatform(
+            identifier="test", system="linux", machines=("x86_64",), python="3.11",
+            artifacts=(artifact_for(b"x", filename=wheel.name, local_name=wheel.name),))
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        with pytest.raises(models.VoiceError, match="is not in"):
+            models._build_environment(staging, wheels, platform)
+
+    def test_a_missing_wheel_is_named(self, tmp_path):
+        wheels = tmp_path / "wheels"
+        wheels.mkdir()
+        platform = models.RuntimePlatform(
+            identifier="test", system="linux", machines=("x86_64",), python="3.11",
+            artifacts=(artifact_for(b"x", filename="gone.whl", local_name="gone.whl"),))
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        with pytest.raises(models.VoiceError, match="gone.whl is missing"):
+            models._build_environment(staging, wheels, platform)
+
+    def test_a_wheel_member_that_would_escape_is_refused(self, tmp_path):
+        wheel = tmp_path / "evil-1.0-py3-none-any.whl"
+        with zipfile.ZipFile(wheel, "w") as bundle:
+            bundle.writestr("sherpa_onnx/__init__.py", "")
+            bundle.writestr("../escaped.txt", "no")
+        target = tmp_path / "site"
+        models._unpack_wheel(wheel, target)
+        assert (target / "sherpa_onnx" / "__init__.py").is_file()
+        assert not (tmp_path / "escaped.txt").exists()
+
+    def test_console_scripts_and_headers_are_not_installed(self, tmp_path):
+        """A speech worker launched by path has no use for either, and a
+        ``.data/scripts`` entry landing in site-packages is just litter."""
+        wheel = tmp_path / "thing-1.0-py3-none-any.whl"
+        with zipfile.ZipFile(wheel, "w") as bundle:
+            bundle.writestr("sherpa_onnx/__init__.py", "")
+            bundle.writestr("thing-1.0.data/scripts/sherpa-onnx-cli", "#!/bin/sh")
+            bundle.writestr("thing-1.0.data/purelib/extra/__init__.py", "")
+        target = tmp_path / "site"
+        models._unpack_wheel(wheel, target)
+
+        assert (target / "sherpa_onnx" / "__init__.py").is_file()
+        assert (target / "extra" / "__init__.py").is_file(), "purelib is code and belongs"
+        assert not (target / "sherpa-onnx-cli").exists()
 
 
-# --------------------------------------------------------------------------- #
-# Saying what it is doing
-# --------------------------------------------------------------------------- #
-
-
-class TestItSaysWhatItIsDoing:
-    """A several-hundred-megabyte download with one static line in front of it
-    is indistinguishable from a download that has hung. It shipped that way:
-    ``on_status`` defaulted to a function that discarded its argument, so every
-    sentence the installer wrote went nowhere and the row never moved."""
-
-    def test_a_status_line_reaches_the_progress_record_and_the_log(self, caplog):
-        import logging
-
-        caplog.set_level(logging.INFO, logger="model_chain")
-        say = models._narrator("stt")
-        say("Downloading 2 of 3 — decoder.onnx (262 MB)")
-
-        assert models.progress()["stt"]["text"] == "Downloading 2 of 3 — decoder.onnx (262 MB)"
-        assert any("decoder.onnx" in record.getMessage() for record in caplog.records)
-
-    def test_a_caller_that_wants_the_line_gets_it_too(self):
-        seen = []
-        models._narrator("tts", seen.append)("Expanding…")
-        assert seen == ["Expanding…"]
-
-    def test_a_callback_that_raises_does_not_stop_the_install(self):
-        def explode(_text):
-            raise RuntimeError("the row is gone")
-
-        models._narrator("stt", explode)("still fine")
-        assert models.progress()["stt"]["text"] == "still fine"
-
-    def test_a_fraction_is_recorded_without_a_log_line_per_tick(self, caplog):
-        import logging
-
-        caplog.set_level(logging.INFO, logger="model_chain")
-        tick = models._ticker("stt")
-        for step in range(20):
-            tick(step / 20.0)
-
-        assert models.progress()["stt"]["fraction"] == pytest.approx(0.95)
-        assert not caplog.records, "the progress bar was written to the log"
-
-    def test_a_fraction_is_clamped(self):
-        tick = models._ticker("tts")
-        tick(-3)
-        assert models.progress()["tts"]["fraction"] == 0.0
-        tick(9)
-        assert models.progress()["tts"]["fraction"] == 1.0
-
-    def test_a_failed_install_records_its_reason_and_logs_it(self, caplog):
-        import logging
-
-        caplog.set_level(logging.WARNING, logger="model_chain")
-        with pytest.raises(models.VoiceError):
-            with models._claim("stt"):
-                raise models.VoiceError("decoder.onnx failed its hash check.")
-
-        state = models.progress()["stt"]
-        assert state["failed"] is True
-        assert state["running"] is False
-        assert state["text"] == "decoder.onnx failed its hash check."
-        assert any("failed its hash check" in record.getMessage()
-                   for record in caplog.records)
-
-    def test_a_second_install_of_the_same_kind_is_refused_while_one_runs(self):
-        with models._claim("stt"):
-            with pytest.raises(models.VoiceError, match="already being installed"):
-                with models._claim("stt"):
-                    pass
-
-
-class TestRefusingBeforeStarting:
-    """Everything that can be decided before a thread starts is decided in front
-    of the caller, so a browser waiting on the answer gets one."""
-
-    def test_an_unpinned_bundle_is_not_refused_at_all(self):
-        """The blocker that shipped, as a test. Nothing about this repository's
-        own pinning state may stand between a user and the Download button."""
-        assert models.refusal("stt") == ""
-        assert models.refusal("tts") == ""
-
-    def test_an_unknown_kind_is_refused(self):
-        assert models.refusal("../etc") 
-        assert models.refusal("speech")
-
-    def test_an_unsupported_platform_is_refused(self, monkeypatch):
-        monkeypatch.setattr(models, "current_platform", lambda: ("haiku", "vax", "3.11"))
-        assert "no tested CPU runtime" in models.refusal("stt")
-
-    def test_a_running_install_is_refused(self, monkeypatch):
-        monkeypatch.setitem(models._progress, "tts", {"running": True})
-        assert "already being installed" in models.refusal("tts")
-
-    def test_a_pinned_and_idle_bundle_is_not_refused(self, tmp_path, monkeypatch):
-        def pin(spec):
-            for index, entry in enumerate(spec["models"]["whisper-small-int8"]["files"]):
-                entry["sha256"] = f"{index:064x}"
-                entry["bytes"] = 10
-
-        rewrite(tmp_path, monkeypatch, pin)
-        assert models.refusal("stt") == ""
-
-
-# --------------------------------------------------------------------------- #
-# Installing from files somebody already has
-# --------------------------------------------------------------------------- #
-
-
-def onnx_file(path: Path, megabytes: int = 2) -> Path:
-    """Something that passes for an ONNX model: the protobuf first byte, and
-    enough of it to not look like an error page saved under the wrong name."""
-    path.write_bytes(b"\x08" + b"\0" * (megabytes * 1024 * 1024))
-    return path
-
-
-class TestInstallingFromAFolder:
-    """The escape hatch, and it earns its place beyond one unpinned build: a
-    machine with no route to huggingface.co, a proxy that refuses large
-    binaries, an air-gapped install, or somebody who already has these files."""
+class TestInstallingTheEngineFromAFolder:
+    """The same escape hatch the models have. Better verified, not worse: these
+    artifacts *are* pinned here, so a hand-supplied wheel is checked against a
+    committed hash rather than against the publisher."""
 
     @pytest.fixture
-    def downloaded(self, tmp_path):
+    def downloaded(self, tmp_path, monkeypatch, voice_root):
         folder = tmp_path / "Downloads"
         folder.mkdir()
-        onnx_file(folder / "small-encoder.int8.onnx")
-        onnx_file(folder / "small-decoder.int8.onnx")
-        (folder / "small-tokens.txt").write_text("a\nb\nc\n", encoding="utf-8")
-        return folder
+        chosen = models.runtime_platform()
+        if chosen is None:
+            pytest.skip("no runtime platform for this machine")
+        payloads = {}
+        for item in chosen.artifacts:
+            body = b"PK-not-really" + item.filename.encode()
+            (folder / item.filename).write_bytes(body)
+            payloads[item.filename] = body
+        return folder, chosen, payloads
 
-    def test_it_installs_under_the_names_the_worker_uses(self, voice_root, downloaded):
-        """Tolerant about the names coming in, strict about the names going out.
-        Telling somebody to rename a publisher's file is this extension making
-        its own internal spelling their problem."""
-        found = models.install_from("stt", downloaded)
+    def test_a_wheel_whose_contents_are_wrong_is_refused(self, downloaded, tmp_path):
+        folder, chosen, _payloads = downloaded
+        wheels = tmp_path / "staged"
+        wheels.mkdir()
+        with pytest.raises(models.VoiceError, match="committed SHA-256"):
+            models._adopt_wheels(chosen, folder, wheels, lambda _t: None)
 
-        assert found.stt_ready is True
-        root = paths.bundle_root("stt", models.default_id("stt"))
-        assert (root / "encoder.onnx").is_file()
-        assert (root / "decoder.onnx").is_file()
-        assert (root / "tokens.txt").is_file()
+    def test_a_missing_wheel_is_named(self, downloaded, tmp_path):
+        folder, chosen, _payloads = downloaded
+        (folder / chosen.artifacts[0].filename).unlink()
+        wheels = tmp_path / "staged"
+        wheels.mkdir()
+        with pytest.raises(models.VoiceError, match=chosen.artifacts[0].filename):
+            models._adopt_wheels(chosen, folder, wheels, lambda _t: None)
 
-    def test_it_says_the_files_were_yours(self, voice_root, downloaded):
-        """The honest claim. There is no committed hash for these, so the status
-        must not read as though the manifest verified them."""
-        models.install_from("stt", downloaded)
-        assert "from files you supplied" in models.status().stt_message
-
-    def test_it_records_a_hash_so_later_tampering_still_shows(self, voice_root,
-                                                              downloaded):
-        models.install_from("stt", downloaded)
-        root = paths.bundle_root("stt", models.default_id("stt"))
-        record = json.loads((root / paths.INSTALLED_FILENAME).read_text(encoding="utf-8"))
-        assert record["source"] == "local"
-        assert len(record["artifacts"]["encoder.onnx"]) == 64
-
-    def test_a_file_that_is_not_an_onnx_model_is_refused(self, voice_root, downloaded):
-        """The mistake somebody actually makes: a saved HTML error page, or the
-        LFS pointer that a plain `git clone` leaves behind."""
-        (downloaded / "small-encoder.int8.onnx").write_bytes(
-            b"version https://git-lfs.github.com/spec/v1\n" + b"x" * (2 * 1024 * 1024))
-        with pytest.raises(models.VoiceError, match="not an ONNX model"):
-            models.install_from("stt", downloaded)
-        assert not models.status().stt_ready
-
-    def test_a_file_far_too_small_to_be_a_model_is_refused(self, voice_root, downloaded):
-        (downloaded / "small-decoder.int8.onnx").write_bytes(b"\x08" + b"\0" * 200)
-        with pytest.raises(models.VoiceError, match="too small"):
-            models.install_from("stt", downloaded)
-
-    def test_a_missing_file_is_named(self, voice_root, downloaded):
-        (downloaded / "small-tokens.txt").unlink()
-        with pytest.raises(models.VoiceError, match="tokens.txt"):
-            models.install_from("stt", downloaded)
+    def test_the_addresses_are_offered_for_this_platform(self):
+        found = models.runtime_sources()
+        assert len(found) == 2
+        for item in found:
+            assert item["url"].startswith("https://files.pythonhosted.org/")
+            assert item["filename"].endswith(".whl")
 
     def test_a_folder_that_is_not_there_says_so(self, voice_root, tmp_path):
-        with pytest.raises(models.VoiceError, match="nothing at"):
-            models.install_from("stt", tmp_path / "nowhere")
-
-    def test_an_empty_path_is_refused(self, voice_root):
-        with pytest.raises(models.VoiceError, match="Give the folder"):
-            models.install_from("stt", "   ")
-
-    def test_a_file_inside_the_folder_is_taken_as_the_folder(self, voice_root,
-                                                             downloaded):
-        """What people paste. Refusing it would be pedantry."""
-        models.install_from("stt", downloaded / "small-tokens.txt")
-        assert models.status().stt_ready is True
-
-    def test_the_names_this_extension_uses_are_accepted_too(self, voice_root, tmp_path):
-        folder = tmp_path / "already-renamed"
-        folder.mkdir()
-        onnx_file(folder / "encoder.onnx")
-        onnx_file(folder / "decoder.onnx")
-        (folder / "tokens.txt").write_text("a\n", encoding="utf-8")
-        assert models.install_from("stt", folder).stt_ready is True
-
-    def test_files_one_level_down_are_found(self, voice_root, tmp_path, downloaded):
-        """An archive extracted with its own top-level directory is what a
-        double-click produces, not somebody's mistake."""
-        outer = tmp_path / "outer"
-        outer.mkdir()
-        downloaded.rename(outer / "sherpa-onnx-whisper-small")
-        assert models.install_from("stt", outer).stt_ready is True
-
-    def test_a_failed_install_leaves_a_working_one_alone(self, voice_root, downloaded,
-                                                         tmp_path):
-        models.install_from("stt", downloaded)
-        assert models.status().stt_ready is True
-
-        broken = tmp_path / "broken"
-        broken.mkdir()
-        (broken / "encoder.onnx").write_bytes(b"nope")
-        with pytest.raises(models.VoiceError):
-            models.install_from("stt", broken)
-        assert models.status().stt_ready is True, (
-            "a bad folder took away an installation that was working")
-
-    def test_it_leaves_no_staging_directory_behind(self, voice_root, downloaded):
-        models.install_from("stt", downloaded)
-        staging = paths.staging_root()
-        assert not staging.exists() or not any(staging.iterdir())
-
-    def test_a_manual_install_is_not_refused_either(self):
-        """There is nothing to download, so there is nothing for a committed
-        hash to be about."""
-        assert models.refusal("stt", manual=True) == ""
-
-    def test_an_unpacked_kokoro_tree_is_accepted(self, voice_root, tmp_path):
-        folder = tmp_path / "kokoro-multi-lang-v1_0"
-        folder.mkdir()
-        onnx_file(folder / "model.onnx")
-        (folder / "voices.bin").write_bytes(b"\0" * 4096)
-        (folder / "tokens.txt").write_text("a\n", encoding="utf-8")
-        (folder / "lexicon-us-en.txt").write_text("a a\n", encoding="utf-8")
-        (folder / "espeak-ng-data").mkdir()
-        (folder / "espeak-ng-data" / "phontab").write_bytes(b"\0" * 16)
-
-        assert models.install_from("tts", folder.parent).tts_ready is True
-        root = paths.bundle_root("tts", models.default_id("tts"))
-        assert (root / "espeak-ng-data" / "phontab").is_file()
-
-
-class TestTheLocalPinOverlay:
-    """Pins a maintainer filled in, kept out of the tracked manifest.
-
-    A checked-in file edited in place turns every later pull into a merge
-    conflict, and the first thing anybody does with a conflict in a file full of
-    hashes is take one side at random."""
-
-    def test_an_overlay_fills_in_a_missing_hash(self, tmp_path, monkeypatch):
-        manifest_path = tmp_path / "managed-voice-models.json"
-        manifest_path.write_text(paths.manifest_path().read_text(encoding="utf-8"),
-                                 encoding="utf-8")
-        (tmp_path / models.LOCAL_PINS_FILENAME).write_text(json.dumps({
-            "artifacts": {
-                "small-encoder.int8.onnx": {"sha256": "a" * 64, "bytes": 117000000},
-            }}), encoding="utf-8")
-        monkeypatch.setattr(paths, "manifest_path", lambda: manifest_path)
-
-        models.manifest(refresh=True)
-        artifact = models.default_model("stt").artifacts[0]
-        assert artifact.sha256 == "a" * 64
-        assert artifact.size == 117000000
-
-    def test_it_cannot_change_a_hash_this_repository_committed(self, tmp_path,
-                                                               monkeypatch):
-        """An overlay that could rewrite a committed hash is an overlay that
-        defeats the trust root it is extending."""
-        manifest_path = tmp_path / "managed-voice-models.json"
-        manifest_path.write_text(paths.manifest_path().read_text(encoding="utf-8"),
-                                 encoding="utf-8")
-        wheel = models.manifest()["platforms"][0].artifacts[0]
-        (tmp_path / models.LOCAL_PINS_FILENAME).write_text(json.dumps({
-            "artifacts": {wheel.filename: {"sha256": "b" * 64, "bytes": 99}}}),
-            encoding="utf-8")
-        monkeypatch.setattr(paths, "manifest_path", lambda: manifest_path)
-
-        models.manifest(refresh=True)
-        assert models.manifest()["platforms"][0].artifacts[0].sha256 == wheel.sha256
-
-    def test_a_malformed_overlay_is_ignored_rather_than_fatal(self, tmp_path,
-                                                              monkeypatch):
-        manifest_path = tmp_path / "managed-voice-models.json"
-        manifest_path.write_text(paths.manifest_path().read_text(encoding="utf-8"),
-                                 encoding="utf-8")
-        (tmp_path / models.LOCAL_PINS_FILENAME).write_text("{ not json",
-                                                           encoding="utf-8")
-        monkeypatch.setattr(paths, "manifest_path", lambda: manifest_path)
-        assert models.manifest(refresh=True)["runtime_version"]
-
-    def test_a_hash_of_the_wrong_shape_is_ignored(self, tmp_path, monkeypatch):
-        manifest_path = tmp_path / "managed-voice-models.json"
-        manifest_path.write_text(paths.manifest_path().read_text(encoding="utf-8"),
-                                 encoding="utf-8")
-        (tmp_path / models.LOCAL_PINS_FILENAME).write_text(json.dumps({
-            "artifacts": {"small-encoder.int8.onnx": {"sha256": "nope", "bytes": 5}}}),
-            encoding="utf-8")
-        monkeypatch.setattr(paths, "manifest_path", lambda: manifest_path)
-
-        models.manifest(refresh=True)
-        assert models.default_model("stt").artifacts[0].sha256 is None
+        with pytest.raises(models.VoiceError, match="no folder at"):
+            models.install_runtime(folder=tmp_path / "nowhere")
 
 
 class TestOneClickInstall:
@@ -1184,16 +972,17 @@ class TestTheEngineOnItsOwn:
     def test_installing_it_provisions_only_the_runtime(self, voice_root, monkeypatch):
         called = []
         monkeypatch.setattr(models, "install_runtime",
-                            lambda on_status=None, on_progress=None: called.append(True))
+                            lambda on_status=None, on_progress=None, folder=None:
+                            called.append(folder))
         models.install_engine()
-        assert called == [True]
+        assert called == [None]
 
     def test_it_narrates_into_the_progress_record(self, voice_root, monkeypatch, caplog):
         import logging
 
         caplog.set_level(logging.INFO, logger="model_chain")
         monkeypatch.setattr(models, "install_runtime",
-                            lambda on_status=None, on_progress=None:
+                            lambda on_status=None, on_progress=None, folder=None:
                             on_status and on_status("Creating the isolated voice runtime…"))
         models.install_engine()
 
@@ -1206,7 +995,7 @@ class TestTheEngineOnItsOwn:
 
     def test_a_failure_leaves_its_reason_where_the_row_draws_it(self, voice_root,
                                                                 monkeypatch):
-        def explode(on_status=None, on_progress=None):
+        def explode(on_status=None, on_progress=None, folder=None):
             raise models.VoiceError("The isolated interpreter will not run.")
 
         monkeypatch.setattr(models, "install_runtime", explode)
