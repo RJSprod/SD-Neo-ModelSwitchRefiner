@@ -140,6 +140,12 @@ settingsParts.sttButton.textContent = "Download default STT";
 settingsParts.ttsButton.textContent = "Download default TTS";
 settingsParts.sttButton["data-mc-voice-install"] = "stt";
 settingsParts.ttsButton["data-mc-voice-install"] = "tts";
+settingsParts.sttLocal = element("stt-local", "BUTTON");
+settingsParts.ttsLocal = element("tts-local", "BUTTON");
+settingsParts.sttLocal["data-mc-voice-local"] = "stt";
+settingsParts.ttsLocal["data-mc-voice-local"] = "tts";
+settingsParts.sttFolder = element("stt-folder", "INPUT");
+settingsParts.ttsFolder = element("tts-folder", "INPUT");
 
 const settingsRow = element("settings");
 settingsRow["data-mc-voice-key"] = "PAGE-TOKEN";
@@ -149,11 +155,16 @@ settingsRow.querySelector = function (selector) {
     if (selector === '[data-mc-voice-status="tts"]') return settingsParts.ttsLine;
     if (selector === '[data-mc-voice-install="stt"]') return settingsParts.sttButton;
     if (selector === '[data-mc-voice-install="tts"]') return settingsParts.ttsButton;
+    if (selector === '[data-mc-voice-folder="stt"]') return settingsParts.sttFolder;
+    if (selector === '[data-mc-voice-folder="tts"]') return settingsParts.ttsFolder;
     return null;
 };
 settingsRow.querySelectorAll = function (selector) {
     if (selector === "[data-mc-voice-install]") {
         return [settingsParts.sttButton, settingsParts.ttsButton];
+    }
+    if (selector === "[data-mc-voice-local]") {
+        return [settingsParts.sttLocal, settingsParts.ttsLocal];
     }
     return [];
 };
@@ -169,6 +180,7 @@ globalThis.document = {
     createElement(tag) { return element("created", tag.toUpperCase()); },
     addEventListener() {},
     readyState: "complete",
+    hidden: HIDDEN,
 };
 globalThis.gradioApp = () => globalThis.document;
 globalThis.window = globalThis;
@@ -327,6 +339,13 @@ function feed(samples) {
     }
 }
 
+// The row schedules its next poll with setTimeout rather than a fixed
+// interval, so "poll again" is "move the clock and run what is due".
+async function repaint() {
+    NOW += 60000;
+    await tick();
+}
+
 async function hold(ms, sampleCount) {
     mic.fire("pointerdown", {pointerId: 7});
     await tick();
@@ -362,6 +381,7 @@ function report(extra) {
             sttDisabled: settingsParts.sttButton.disabled,
             ttsDisabled: settingsParts.ttsButton.disabled,
             sttFailed: settingsParts.sttLine.classList.contains("mc-voice-failed"),
+            sttLocalDisabled: settingsParts.sttLocal.disabled,
         },
     }, extra || {});
 }
@@ -374,6 +394,7 @@ SCENARIO
 
 DEFAULTS = {
     "SETTINGS_PRESENT": "false",
+    "HIDDEN": "false",
     "SECURE": "true",
     "MICROPHONE": "true",
     "PERMISSION": "true",
@@ -982,7 +1003,7 @@ class TestTheSettingsRow:
 
         assert "decoder.onnx" in found["settings"]["sttLine"]
         assert "41%" in found["settings"]["sttLine"]
-        assert found["settings"]["sttButton"] == "Downloading…"
+        assert found["settings"]["sttButton"] == "Installing…"
         assert found["settings"]["sttDisabled"] is True
 
     def test_a_failed_install_keeps_its_reason_on_screen(self):
@@ -1003,8 +1024,7 @@ class TestTheSettingsRow:
         found = run("""
             await tick();
             settingsParts.sttLine.classList.add("mc-voice-failed");
-            intervals.forEach((fn) => fn());
-            await tick();
+            await repaint();
             console.log(JSON.stringify(report()));
         """, SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
         assert found["settings"]["sttFailed"] is False
@@ -1050,11 +1070,130 @@ class TestTheSettingsRow:
             settingsRow["data-mc-voice-key"] = "SETTINGS-TOKEN";
             requests.length = 0;
             settingsParts.sttButton.fire("click");
-            intervals.forEach((fn) => fn());
-            await tick();
+            await repaint();
             console.log(JSON.stringify(report()));
         """, SETTINGS_PRESENT="true")
         posts = [r for r in found["requests"] if r.get("url")]
         assert posts, "the row made no request at all"
         for request in posts:
             assert request["headers"]["X-Model-Chain-Voice"] == "SETTINGS-TOKEN"
+
+
+class TestInstallingFromAFolder:
+    """The second way in, for a build that cannot download the models itself."""
+
+    def test_the_folder_is_sent_with_the_kind(self):
+        found = run("""
+            await tick();
+            settingsParts.sttFolder.value = "C:\\\\Users\\\\me\\\\Downloads\\\\whisper";
+            requests.length = 0;
+            settingsParts.sttLocal.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+        posts = [r for r in found["requests"] if r.get("url", "").endswith("/install")]
+        assert len(posts) == 1
+        assert json.loads(posts[0]["bodyText"]) == {
+            "kind": "stt", "folder": "C:\\Users\\me\\Downloads\\whisper"}
+
+    def test_an_empty_folder_box_asks_for_one_rather_than_posting(self):
+        found = run("""
+            await tick();
+            requests.length = 0;
+            settingsParts.sttLocal.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+        assert not any(r.get("url", "").endswith("/install") for r in found["requests"])
+        assert "Type the folder" in found["settings"]["sttLine"]
+
+    def test_surrounding_space_is_trimmed(self):
+        found = run("""
+            await tick();
+            settingsParts.sttFolder.value = "   /home/me/voice   ";
+            requests.length = 0;
+            settingsParts.sttLocal.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+        posts = [r for r in found["requests"] if r.get("url", "").endswith("/install")]
+        assert json.loads(posts[0]["bodyText"])["folder"] == "/home/me/voice"
+
+    def test_a_refused_folder_install_says_why_and_frees_the_button(self):
+        answers = status_answer(stt_ready=False, ready=False)
+        answers["voice/install"] = {"status": 409, "json": {
+            "ok": False, "error": "C:\\\\nope does not have everything Whisper Small needs "
+                                  "— tokens.txt is missing."}}
+        found = run("""
+            await tick();
+            settingsParts.sttFolder.value = "C:\\\\nope";
+            settingsParts.sttLocal.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+        assert "tokens.txt is missing" in found["settings"]["sttLine"]
+        assert found["settings"]["sttFailed"] is True
+        assert found["settings"]["sttLocalDisabled"] is False
+
+
+class TestThePollingStops:
+    """A route a page polls forever is a log that scrolls forever. It did."""
+
+    def test_an_idle_row_polls_slowly(self):
+        found = run("""
+            await tick();
+            requests.length = 0;
+            NOW += 5000;
+            await tick();
+            const soon = requests.length;
+            NOW += 25000;
+            await tick();
+            console.log(JSON.stringify(report({soon, later: requests.length})));
+        """, SETTINGS_PRESENT="true")
+        assert found["soon"] == 0, "an idle row polled again within five seconds"
+        assert found["later"] >= 1
+
+    def test_a_running_install_polls_quickly(self):
+        answers = status_answer(stt_ready=False, ready=False, progress={
+            "stt": {"running": True, "fraction": 0.2, "text": "Downloading…"}})
+        found = run("""
+            await tick();
+            requests.length = 0;
+            NOW += 2000;
+            await tick();
+            console.log(JSON.stringify(report({polls: requests.length})));
+        """, SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+        assert found["polls"] >= 1, "a running download was not being watched"
+
+    def test_repeated_failures_back_off_rather_than_hammering(self):
+        answers = status_answer()
+        answers["voice/status"] = {"status": 401, "json": {
+            "ok": False, "error": "Sign in to the WebUI to use Voice Chat."}}
+        found = run("""
+            await tick();
+            const gaps = [];
+            for (let i = 0; i < 6; i += 1) {
+                const before = requests.length;
+                let waited = 0;
+                while (requests.length === before && waited < 300000) {
+                    NOW += 1000;
+                    await tick(2);
+                    waited += 1000;
+                }
+                gaps.push(waited);
+            }
+            console.log(JSON.stringify(report({gaps})));
+        """, SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+
+        gaps = found["gaps"]
+        assert gaps[0] < gaps[-1], f"the failing poll did not back off: {gaps}"
+        assert max(gaps) <= 61000, f"the back-off ran past its cap: {gaps}"
+
+    def test_a_background_tab_is_not_polled(self):
+        found = run("""
+            await tick();
+            requests.length = 0;
+            for (let i = 0; i < 10; i += 1) { NOW += 30000; await tick(); }
+            console.log(JSON.stringify(report({polls: requests.length})));
+        """, SETTINGS_PRESENT="true", HIDDEN="true")
+        assert found["polls"] == 0, "a hidden tab kept polling the WebUI"

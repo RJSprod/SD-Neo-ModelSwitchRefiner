@@ -2958,10 +2958,43 @@ Point *Voice data directory* somewhere else if that drive is full.
 > **This build ships unpinned.** The runtime wheels are pinned exactly — sixteen
 > of them, real sizes and hashes read from PyPI. The two model bundles are not:
 > pinning a hash means fetching the artifact and hashing it, which is a
-> maintainer's job on a machine that can reach huggingface.co. Until somebody
-> runs `python tools/pin_voice_models.py`, Settings reports both models as *not
-> available in this build* and the download buttons refuse rather than fetching
-> something nobody checked.
+> maintainer's job on a machine that can reach huggingface.co. Until that has
+> happened the download buttons refuse rather than fetching something nobody
+> checked. There are two ways past it, and both are below.
+
+### When the download button will not fetch
+
+Either because this build is unpinned, or because the machine cannot reach the
+publishers — a proxy that will not pass a 300 MB binary, or no Internet at all.
+
+**Pin it once.** On a machine that can reach huggingface.co and github.com:
+
+```
+python tools/pin_voice_models.py
+```
+
+It downloads each declared artifact once, hashes it, and writes the sizes and
+hashes into `voice/managed-voice-models.local.json`. That file is untracked, so
+the pins survive a `git pull` and never turn into a merge conflict in a file
+full of hashes — and it can only *fill in* a hash, never change one this
+repository committed. Restart the WebUI and the download buttons work normally,
+with every guarantee intact.
+
+**Or install from files you fetch yourself.** Each row in Settings → Voice Chat
+has an *Install from files you download yourself* section listing the exact
+addresses, a box for the folder you put them in, and a button. The original
+filenames are fine; nothing needs renaming, and an archive works either packed
+or already extracted.
+
+What is different about that path is stated on screen rather than glossed over.
+There is no committed hash for a file this repository has never seen, so the
+checks are the ones that can honestly be made: every required file present,
+none of them empty, each ONNX file really an ONNX file (which catches the two
+mistakes people actually make — a saved error page, and the LFS pointer a plain
+`git clone` leaves behind), and the token list really text. A hash is computed
+and recorded at install time, so later tampering still shows, and the status
+line reads *installed from files you supplied* rather than claiming a
+verification that did not happen.
 
 ### From an Android phone
 
@@ -3063,6 +3096,17 @@ one of them is a sentence in the status line and a chat window that works
 exactly as it did. A synthesis that fails cannot cancel a reply that has already
 arrived, and nothing in the voice half can reach the image half's memory.
 
+**Are the voice routes protected?** The log says so at start-up, in one line,
+rather than leaving it to be inferred from a refusal. With no login configured
+they are open to exactly the callers the rest of the WebUI is. With one, a
+request must carry a session cookie the WebUI itself issued — and if this
+extension cannot read that build's session table, it says so and falls back to
+the page token, which is only ever delivered inside a page the login served. It
+does *not* refuse everything in that case: an earlier version did, on a build
+whose `auth` attribute was truthy with no login configured, and the result was a
+feature that could not be installed on an installation nobody had ever been
+asked to sign in to.
+
 **Everything it does says so.** Voice lines go to the console and to
 `<LLM data root>/logs/model_chain.log`, beside the rest of the extension's log —
 there is no second log file to find. On start-up it writes where the voice
@@ -3093,6 +3137,13 @@ why in the row and re-enables its button, a download in flight shows the file it
 is on and a percentage, and a status check that cannot reach the WebUI says
 that rather than leaving the row frozen — which is what the first version did,
 because every failure path in it resolved to nothing at all.
+
+And it stops. The row polls quickly only while an install is running, slowly
+when nothing is, backs off to a minute when the WebUI is refusing it, and not at
+all while the tab is in the background; the log throttles a repeated refusal to
+one line with a count of the rest. A fixed poll that logged every failure turned
+one configuration problem into a hundred and thirty-six identical warnings in
+three minutes, which buried the line that explained it.
 
 ## Layout
 

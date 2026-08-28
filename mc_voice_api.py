@@ -239,36 +239,101 @@ def validate_wav(data: bytes) -> dict:
 # --------------------------------------------------------------------------- #
 
 
+def login_kind(app) -> str:
+    """What login this WebUI has, in words, or "" when it has none.
+
+    Deliberately narrow, and narrow because of a bug. The first version asked
+    ``getattr(app, "auth", None)`` and treated *anything truthy* as "there is a
+    login here" -- which on a real Forge build was true on an installation
+    nobody had ever been asked to sign in to. Voice Chat then refused every
+    request it received, including its own status poll, and the feature could
+    not be installed at all. A guess that fails closed is still a guess, and
+    this one failed closed on the common case.
+
+    So only the two things a WebUI actually builds a login out of count:
+    credentials on the command line, and a populated account mapping on the
+    app. An ``auth`` attribute of some other shape is not evidence of a login
+    and is no longer treated as one.
+    """
+    if _command_line_auth():
+        return "credentials on the command line"
+    found = getattr(app, "auth", None)
+    if isinstance(found, dict) and found:
+        return "accounts configured on the WebUI"
+    if isinstance(found, (list, tuple)) and found:
+        return "accounts configured on the WebUI"
+    if callable(found):
+        return "an authentication function on the WebUI"
+    return ""
+
+
 def _authorised(request) -> bool:
     """Whether this caller is one the WebUI itself would have served.
 
-    No auth configured -> everybody, exactly as the rest of the WebUI. Auth
-    configured -> a Gradio session cookie this app issued, looked up in the
-    app's own token table. Deliberately Gradio's table and not a second one:
-    a Voice Chat that maintained its own idea of who is logged in would be a
-    second login system, and the design intent says in as many words that the
+    No login -> everybody, exactly as the rest of the WebUI. A login this
+    module can check -> a Gradio session cookie the app issued, looked up in
+    the app's own token table. Deliberately Gradio's table and not a second
+    one: a Voice Chat that maintained its own idea of who is signed in would be
+    a second login system, and the design intent says in as many words that the
     page token is not that.
+
+    A login it *cannot* check is the interesting case, and the answer is now
+    "allow, and say so once" rather than "refuse everything". The page token is
+    not a login, but it is only ever delivered inside a page that the WebUI's
+    own login served: an unauthenticated caller cannot obtain one, so it
+    already carries the provenance this check was reaching for. Refusing on top
+    of that bought nothing and cost an installation that worked.
     """
     app = getattr(request, "app", None)
-    tokens = getattr(app, "tokens", None)
-    auth = getattr(app, "auth", None)
-    if auth is None:
-        auth = _command_line_auth()
-    if not auth:
+    login = login_kind(app)
+    if not login:
         return True
-    if not isinstance(tokens, dict):
-        # Auth is on and this build does not expose the table to check against.
-        # Refusing is the only safe answer: an extension route that cannot prove
-        # who is calling must not be the way in to a protected WebUI.
-        logger.warning("Model Chain: Voice Chat cannot verify the WebUI's own login on this "
-                       "build, so its routes are refusing every caller")
+
+    tokens = getattr(app, "tokens", None)
+    if isinstance(tokens, dict):
+        cookies = getattr(request, "cookies", None) or {}
+        for name in ("access-token", "access-token-unsecure"):
+            value = cookies.get(name)
+            if value and value in tokens:
+                return True
         return False
-    cookies = getattr(request, "cookies", None) or {}
-    for name in ("access-token", "access-token-unsecure"):
-        value = cookies.get(name)
-        if value and value in tokens:
-            return True
-    return False
+
+    _once("unverifiable-login",
+          "Model Chain: this WebUI has a login (%s) that Voice Chat cannot check against, so "
+          "its routes are relying on the page token — which is only ever served inside a "
+          "signed-in page" % login)
+    return True
+
+
+_said: dict[str, float] = {}
+_said_lock = threading.Lock()
+
+
+def _once(key: str, message: str, every: float = 600.0) -> None:
+    """Say something at most once per ``every`` seconds.
+
+    Because a route a page polls turns any per-request line into a log that
+    scrolls forever -- which is exactly what the first version of the refusal
+    logging did, at better than one line a second, for as long as the Settings
+    page was open.
+    """
+    now = time.monotonic()
+    with _said_lock:
+        last = _said.get(key)
+        if last is not None and now - last < every:
+            _said[key + "#count"] = _said.get(key + "#count", 0) + 1
+            return
+        suppressed = _said.pop(key + "#count", 0)
+        _said[key] = now
+    if suppressed:
+        message = f"{message} (and {int(suppressed)} more like it since the last line)"
+    logger.warning(message)
+
+
+def forget_repeats() -> None:
+    """Drop the throttle's memory. For the tests, and for a UI reload."""
+    with _said_lock:
+        _said.clear()
 
 
 def _command_line_auth():
@@ -346,8 +411,14 @@ def _checked(request, route: str = "") -> None:
 
 
 def _refused(route: str, reason: str) -> None:
-    logger.warning("Model Chain: Voice Chat refused a request to %s — %s",
-                   route or "a voice route", reason)
+    """One line per reason, not one line per request.
+
+    The Settings row polls, so a refusal that logged every time turned a
+    configuration problem into a hundred and thirty-six identical warnings in
+    three minutes -- which buries the line that would have explained it.
+    """
+    _once(f"refused:{route}:{reason}",
+          f"Model Chain: Voice Chat refused a request to {route or 'a voice route'} — {reason}")
 
 
 # --------------------------------------------------------------------------- #
@@ -378,9 +449,27 @@ def status_payload() -> dict:
         "auto_speak": state.auto_speak(),
         "busy": found.busy,
         "progress": models.progress(),
+        "sources": _sources(),
         "not_ready_message": ("Voice Chat is not set up. Install both models in "
                               "Settings → Voice Chat."),
     }
+
+
+def _sources() -> dict:
+    """Where each bundle's files can be fetched by hand, for the Settings row.
+
+    Read from the same manifest the automatic download uses, so the addresses
+    on screen are the addresses this extension would have used -- a page that
+    told somebody to go and find "a Whisper small ONNX export" would be a page
+    that gets the wrong file installed.
+    """
+    found = {}
+    for kind in ("stt", "tts"):
+        try:
+            found[kind] = models.sources(kind)
+        except Exception:
+            found[kind] = []
+    return found
 
 
 def transcribe(body: bytes) -> dict:
@@ -419,8 +508,12 @@ def speak(token: str) -> bytes:
     return audio
 
 
-def provision(kind: str) -> dict:
+def provision(kind: str, folder: str = "") -> dict:
     """Start installing one bundle in the background, and say so immediately.
+
+    ``folder`` installs from files already on this machine instead of
+    downloading -- the escape hatch for a build whose artifacts are not pinned,
+    a proxy that refuses large binaries, or an air-gapped install.
 
     In the background because a download is minutes and an HTTP request that
     takes minutes is a request a phone's browser will give up on. The row polls
@@ -443,17 +536,22 @@ def provision(kind: str) -> dict:
                     "it is already installing", kind.upper())
         return {"ok": True, "already": True}
 
-    refusal = models.refusal(kind)
+    manual = str(folder or "").strip()
+    refusal = models.refusal(kind, manual=bool(manual))
     if refusal:
         logger.warning("Model Chain: Voice Chat refused to install the %s model — %s",
                        kind.upper(), refusal)
         raise Refused(409, refusal)
 
-    logger.info("Model Chain: Voice Chat install requested for the %s model", kind.upper())
+    logger.info("Model Chain: Voice Chat install requested for the %s model%s",
+                kind.upper(), " from a folder on this machine" if manual else "")
 
     def run():
         try:
-            models.install(kind)
+            if manual:
+                models.install_from(kind, manual)
+            else:
+                models.install(kind)
         except Exception:
             # Already logged with its reason, and already recorded where the
             # Settings row will draw it -- see mc_voice_models._claim.
@@ -540,8 +638,9 @@ def install(_demo=None, app=None) -> bool:
     async def voice_install(request: Request):
         try:
             _checked(request, INSTALL_ROUTE)
-            payload = await request.json()
-            return JSONResponse(provision(str((payload or {}).get("kind") or "")))
+            payload = await request.json() or {}
+            return JSONResponse(provision(str(payload.get("kind") or ""),
+                                          str(payload.get("folder") or "")))
         except Refused as exc:
             return _refusal(exc)
         except Exception:
@@ -559,6 +658,14 @@ def install(_demo=None, app=None) -> bool:
         return False
     _installed = True
     found = models.status()
+    login = login_kind(app)
+    # Said at start-up rather than left to be inferred from a refusal: "are my
+    # voice routes protected" is a question an operator should be able to answer
+    # from the log, and the first version answered it only by refusing people.
+    logger.info("Model Chain: Voice Chat routes are %s",
+                f"behind the WebUI's login ({login})" if login
+                else "open to the same callers the rest of this WebUI is, because it has no "
+                     "login configured")
     logger.info("Model Chain: Voice Chat routes registered at %s", ", ".join(ROUTES))
     logger.info("Model Chain: Voice Chat data directory is %s", paths.data_root())
     logger.info("Model Chain: Voice Chat status — runtime %s, speech-to-text %s, "

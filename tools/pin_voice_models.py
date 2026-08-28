@@ -11,14 +11,15 @@ What it is for
 -- sixteen wheels, real sizes, real hashes, read from PyPI -- and with the two
 *model* bundles carrying ``"bytes": null`` and ``"sha256": null``. That is not
 a shortcut, it is the safe state: :mod:`mc_voice_models` refuses to download an
-unpinned artifact at all, so an unpinned build is one where Voice Chat says
-"not available in this build" rather than one where it fetches something nobody
-checked.
+unpinned artifact at all, so an unpinned build is one where Voice Chat offers
+the manual install instead of fetching something nobody checked.
 
 This turns that into a pinned build. It downloads each declared artifact once,
-hashes it, and writes the size and the hash back into the manifest. That is
-Gate 0 of the design intent: the artifacts are not pinned until somebody has
-actually fetched them and looked.
+hashes it, and writes the size and the hash into
+``voice/managed-voice-models.local.json`` -- an untracked overlay beside the
+manifest, so the pins survive a ``git pull`` and never turn into a merge
+conflict in a file full of hashes. That is Gate 0 of the design intent: the
+artifacts are not pinned until somebody has actually fetched them and looked.
 
     python tools/pin_voice_models.py             # write the pins
     python tools/pin_voice_models.py --check     # report, change nothing
@@ -47,6 +48,7 @@ import urllib.request
 from pathlib import Path
 
 MANIFEST = Path(__file__).resolve().parent.parent / "voice" / "managed-voice-models.json"
+OVERLAY = MANIFEST.with_name("managed-voice-models.local.json")
 
 TIMEOUT = 120.0
 CHUNK = 1024 * 256
@@ -84,8 +86,14 @@ def measure(url: str, say) -> tuple[int, str]:
     return total, digest.hexdigest()
 
 
-def pin(manifest: dict, check_only: bool, say) -> tuple[int, list[str]]:
-    """Fill in what is missing. Returns ``(changed, disagreements)``."""
+def pin(manifest: dict, pins: dict, check_only: bool, say) -> tuple[int, list[str]]:
+    """Fill in what is missing. Returns ``(changed, disagreements)``.
+
+    Writes into ``pins`` -- the overlay -- rather than into ``manifest``. The
+    manifest is a tracked file, and a tracked file edited in place turns every
+    later ``git pull`` into a merge conflict in a file full of hashes, which is
+    the worst possible place to resolve one by picking a side.
+    """
     changed = 0
     disagreements: list[str] = []
 
@@ -96,22 +104,30 @@ def pin(manifest: dict, check_only: bool, say) -> tuple[int, list[str]]:
             name = artifact.get("filename", url)
             if not url:
                 raise PinError(f"{identifier}: {name} has no URL")
+
+            committed = (artifact.get("sha256") or "").strip().casefold()
+            recorded = ((pins.get(name) or {}).get("sha256") or "").strip().casefold()
             size, digest = measure(url, say)
 
-            existing = (artifact.get("sha256") or "").strip().casefold()
-            if existing and existing != digest:
+            if committed and committed != digest:
                 # Reported, never overwritten. See the module docstring.
                 disagreements.append(
-                    f"{identifier}/{name}: checked in {existing}, published {digest}")
+                    f"{identifier}/{name}: checked in {committed}, published {digest}")
                 continue
-            if existing == digest and artifact.get("bytes") == size:
-                say(f"  {name} is already pinned and still matches")
+            if committed:
+                say(f"  {name} is pinned in the manifest and still matches")
+                continue
+            if recorded and recorded != digest:
+                disagreements.append(
+                    f"{identifier}/{name}: pinned locally as {recorded}, published {digest}")
+                continue
+            if recorded == digest and (pins.get(name) or {}).get("bytes") == size:
+                say(f"  {name} is already pinned locally and still matches")
                 continue
 
             say(f"  {name}: {size} bytes, {digest}")
             if not check_only:
-                artifact["bytes"] = size
-                artifact["sha256"] = digest
+                pins[name] = {"sha256": digest, "bytes": size}
             changed += 1
     return changed, disagreements
 
@@ -121,6 +137,8 @@ def main(argv=None) -> int:
     parser.add_argument("--check", action="store_true",
                         help="report what would be pinned and change nothing")
     parser.add_argument("--manifest", type=Path, default=MANIFEST)
+    parser.add_argument("--overlay", type=Path, default=None,
+                        help="where to write the pins (default: beside the manifest)")
     arguments = parser.parse_args(argv)
 
     def say(text):
@@ -132,8 +150,16 @@ def main(argv=None) -> int:
         print(f"{arguments.manifest} could not be read ({exc})", file=sys.stderr)
         return 2
 
+    overlay = arguments.overlay or arguments.manifest.with_name(OVERLAY.name)
     try:
-        changed, disagreements = pin(manifest, arguments.check, say)
+        pins = (json.loads(overlay.read_text(encoding="utf-8")).get("artifacts") or {}
+                if overlay.exists() else {})
+    except (OSError, ValueError) as exc:
+        print(f"{overlay} could not be read ({exc})", file=sys.stderr)
+        return 2
+
+    try:
+        changed, disagreements = pin(manifest, pins, arguments.check, say)
     except PinError as exc:
         print(f"\n{exc}", file=sys.stderr)
         return 2
@@ -152,9 +178,11 @@ def main(argv=None) -> int:
         return 1 if changed else 0
 
     if changed:
-        arguments.manifest.write_text(json.dumps(manifest, indent=2) + "\n",
-                                      encoding="utf-8")
-        print(f"\nPinned {changed} artifact(s) into {arguments.manifest}.")
+        overlay.write_text(json.dumps({"schema": 1, "artifacts": pins}, indent=2) + "\n",
+                           encoding="utf-8")
+        print(f"\nPinned {changed} artifact(s) into {overlay}.")
+        print("That file is not tracked by git, so it survives a pull and never "
+              "conflicts. Voice Chat reads it on the next WebUI start.")
     else:
         print("\nEverything is already pinned.")
     return 0

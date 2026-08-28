@@ -183,7 +183,9 @@ class TestReadiness:
         this build, so the honest status is "not available" and the honest
         response to a Download press is a refusal, not a hopeful GET."""
         found = models.status()
-        assert "not been pinned" in found.stt_message
+        assert "not pinned" in found.stt_message
+        assert "files you download yourself" in found.stt_message, (
+            "a build that cannot fetch the models should say what can be done instead")
         with pytest.raises(models.VoiceError, match="pinned"):
             models.install("stt")
 
@@ -682,3 +684,204 @@ class TestRefusingBeforeStarting:
 
         rewrite(tmp_path, monkeypatch, pin)
         assert models.refusal("stt") == ""
+
+
+# --------------------------------------------------------------------------- #
+# Installing from files somebody already has
+# --------------------------------------------------------------------------- #
+
+
+def onnx_file(path: Path, megabytes: int = 2) -> Path:
+    """Something that passes for an ONNX model: the protobuf first byte, and
+    enough of it to not look like an error page saved under the wrong name."""
+    path.write_bytes(b"\x08" + b"\0" * (megabytes * 1024 * 1024))
+    return path
+
+
+class TestInstallingFromAFolder:
+    """The escape hatch, and it earns its place beyond one unpinned build: a
+    machine with no route to huggingface.co, a proxy that refuses large
+    binaries, an air-gapped install, or somebody who already has these files."""
+
+    @pytest.fixture
+    def downloaded(self, tmp_path):
+        folder = tmp_path / "Downloads"
+        folder.mkdir()
+        onnx_file(folder / "small-encoder.int8.onnx")
+        onnx_file(folder / "small-decoder.int8.onnx")
+        (folder / "small-tokens.txt").write_text("a\nb\nc\n", encoding="utf-8")
+        return folder
+
+    def test_it_installs_under_the_names_the_worker_uses(self, voice_root, downloaded):
+        """Tolerant about the names coming in, strict about the names going out.
+        Telling somebody to rename a publisher's file is this extension making
+        its own internal spelling their problem."""
+        found = models.install_from("stt", downloaded)
+
+        assert found.stt_ready is True
+        root = paths.bundle_root("stt", models.default_id("stt"))
+        assert (root / "encoder.onnx").is_file()
+        assert (root / "decoder.onnx").is_file()
+        assert (root / "tokens.txt").is_file()
+
+    def test_it_says_the_files_were_yours(self, voice_root, downloaded):
+        """The honest claim. There is no committed hash for these, so the status
+        must not read as though the manifest verified them."""
+        models.install_from("stt", downloaded)
+        assert "from files you supplied" in models.status().stt_message
+
+    def test_it_records_a_hash_so_later_tampering_still_shows(self, voice_root,
+                                                              downloaded):
+        models.install_from("stt", downloaded)
+        root = paths.bundle_root("stt", models.default_id("stt"))
+        record = json.loads((root / paths.INSTALLED_FILENAME).read_text(encoding="utf-8"))
+        assert record["source"] == "local"
+        assert len(record["artifacts"]["encoder.onnx"]) == 64
+
+    def test_a_file_that_is_not_an_onnx_model_is_refused(self, voice_root, downloaded):
+        """The mistake somebody actually makes: a saved HTML error page, or the
+        LFS pointer that a plain `git clone` leaves behind."""
+        (downloaded / "small-encoder.int8.onnx").write_bytes(
+            b"version https://git-lfs.github.com/spec/v1\n" + b"x" * (2 * 1024 * 1024))
+        with pytest.raises(models.VoiceError, match="not an ONNX model"):
+            models.install_from("stt", downloaded)
+        assert not models.status().stt_ready
+
+    def test_a_file_far_too_small_to_be_a_model_is_refused(self, voice_root, downloaded):
+        (downloaded / "small-decoder.int8.onnx").write_bytes(b"\x08" + b"\0" * 200)
+        with pytest.raises(models.VoiceError, match="too small"):
+            models.install_from("stt", downloaded)
+
+    def test_a_missing_file_is_named(self, voice_root, downloaded):
+        (downloaded / "small-tokens.txt").unlink()
+        with pytest.raises(models.VoiceError, match="tokens.txt"):
+            models.install_from("stt", downloaded)
+
+    def test_a_folder_that_is_not_there_says_so(self, voice_root, tmp_path):
+        with pytest.raises(models.VoiceError, match="nothing at"):
+            models.install_from("stt", tmp_path / "nowhere")
+
+    def test_an_empty_path_is_refused(self, voice_root):
+        with pytest.raises(models.VoiceError, match="Give the folder"):
+            models.install_from("stt", "   ")
+
+    def test_a_file_inside_the_folder_is_taken_as_the_folder(self, voice_root,
+                                                             downloaded):
+        """What people paste. Refusing it would be pedantry."""
+        models.install_from("stt", downloaded / "small-tokens.txt")
+        assert models.status().stt_ready is True
+
+    def test_the_names_this_extension_uses_are_accepted_too(self, voice_root, tmp_path):
+        folder = tmp_path / "already-renamed"
+        folder.mkdir()
+        onnx_file(folder / "encoder.onnx")
+        onnx_file(folder / "decoder.onnx")
+        (folder / "tokens.txt").write_text("a\n", encoding="utf-8")
+        assert models.install_from("stt", folder).stt_ready is True
+
+    def test_files_one_level_down_are_found(self, voice_root, tmp_path, downloaded):
+        """An archive extracted with its own top-level directory is what a
+        double-click produces, not somebody's mistake."""
+        outer = tmp_path / "outer"
+        outer.mkdir()
+        downloaded.rename(outer / "sherpa-onnx-whisper-small")
+        assert models.install_from("stt", outer).stt_ready is True
+
+    def test_a_failed_install_leaves_a_working_one_alone(self, voice_root, downloaded,
+                                                         tmp_path):
+        models.install_from("stt", downloaded)
+        assert models.status().stt_ready is True
+
+        broken = tmp_path / "broken"
+        broken.mkdir()
+        (broken / "encoder.onnx").write_bytes(b"nope")
+        with pytest.raises(models.VoiceError):
+            models.install_from("stt", broken)
+        assert models.status().stt_ready is True, (
+            "a bad folder took away an installation that was working")
+
+    def test_it_leaves_no_staging_directory_behind(self, voice_root, downloaded):
+        models.install_from("stt", downloaded)
+        staging = paths.staging_root()
+        assert not staging.exists() or not any(staging.iterdir())
+
+    def test_a_manual_install_is_not_refused_for_being_unpinned(self):
+        """The whole point: there is nothing to download, so there is nothing
+        for a committed hash to be about."""
+        assert models.refusal("stt") != ""
+        assert models.refusal("stt", manual=True) == ""
+
+    def test_an_unpacked_kokoro_tree_is_accepted(self, voice_root, tmp_path):
+        folder = tmp_path / "kokoro-multi-lang-v1_0"
+        folder.mkdir()
+        onnx_file(folder / "model.onnx")
+        (folder / "voices.bin").write_bytes(b"\0" * 4096)
+        (folder / "tokens.txt").write_text("a\n", encoding="utf-8")
+        (folder / "lexicon-us-en.txt").write_text("a a\n", encoding="utf-8")
+        (folder / "espeak-ng-data").mkdir()
+        (folder / "espeak-ng-data" / "phontab").write_bytes(b"\0" * 16)
+
+        assert models.install_from("tts", folder.parent).tts_ready is True
+        root = paths.bundle_root("tts", models.default_id("tts"))
+        assert (root / "espeak-ng-data" / "phontab").is_file()
+
+
+class TestTheLocalPinOverlay:
+    """Pins a maintainer filled in, kept out of the tracked manifest.
+
+    A checked-in file edited in place turns every later pull into a merge
+    conflict, and the first thing anybody does with a conflict in a file full of
+    hashes is take one side at random."""
+
+    def test_an_overlay_fills_in_a_missing_hash(self, tmp_path, monkeypatch):
+        manifest_path = tmp_path / "managed-voice-models.json"
+        manifest_path.write_text(paths.manifest_path().read_text(encoding="utf-8"),
+                                 encoding="utf-8")
+        (tmp_path / models.LOCAL_PINS_FILENAME).write_text(json.dumps({
+            "artifacts": {
+                "small-encoder.int8.onnx": {"sha256": "a" * 64, "bytes": 117000000},
+            }}), encoding="utf-8")
+        monkeypatch.setattr(paths, "manifest_path", lambda: manifest_path)
+
+        models.manifest(refresh=True)
+        artifact = models.default_model("stt").artifacts[0]
+        assert artifact.sha256 == "a" * 64
+        assert artifact.size == 117000000
+
+    def test_it_cannot_change_a_hash_this_repository_committed(self, tmp_path,
+                                                               monkeypatch):
+        """An overlay that could rewrite a committed hash is an overlay that
+        defeats the trust root it is extending."""
+        manifest_path = tmp_path / "managed-voice-models.json"
+        manifest_path.write_text(paths.manifest_path().read_text(encoding="utf-8"),
+                                 encoding="utf-8")
+        wheel = models.manifest()["platforms"][0].artifacts[0]
+        (tmp_path / models.LOCAL_PINS_FILENAME).write_text(json.dumps({
+            "artifacts": {wheel.filename: {"sha256": "b" * 64, "bytes": 99}}}),
+            encoding="utf-8")
+        monkeypatch.setattr(paths, "manifest_path", lambda: manifest_path)
+
+        models.manifest(refresh=True)
+        assert models.manifest()["platforms"][0].artifacts[0].sha256 == wheel.sha256
+
+    def test_a_malformed_overlay_is_ignored_rather_than_fatal(self, tmp_path,
+                                                              monkeypatch):
+        manifest_path = tmp_path / "managed-voice-models.json"
+        manifest_path.write_text(paths.manifest_path().read_text(encoding="utf-8"),
+                                 encoding="utf-8")
+        (tmp_path / models.LOCAL_PINS_FILENAME).write_text("{ not json",
+                                                           encoding="utf-8")
+        monkeypatch.setattr(paths, "manifest_path", lambda: manifest_path)
+        assert models.manifest(refresh=True)["runtime_version"]
+
+    def test_a_hash_of_the_wrong_shape_is_ignored(self, tmp_path, monkeypatch):
+        manifest_path = tmp_path / "managed-voice-models.json"
+        manifest_path.write_text(paths.manifest_path().read_text(encoding="utf-8"),
+                                 encoding="utf-8")
+        (tmp_path / models.LOCAL_PINS_FILENAME).write_text(json.dumps({
+            "artifacts": {"small-encoder.int8.onnx": {"sha256": "nope", "bytes": 5}}}),
+            encoding="utf-8")
+        monkeypatch.setattr(paths, "manifest_path", lambda: manifest_path)
+
+        models.manifest(refresh=True)
+        assert models.default_model("stt").artifacts[0].sha256 is None

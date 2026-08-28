@@ -79,6 +79,10 @@
     const STATUS_HOLD_MS = 2600;
     const TOKEN_POLL_MS = 400;
     const SETTINGS_POLL_MS = 1500;
+    // Nothing is happening most of the time, and a status route polled every
+    // second and a half for the life of a browser tab is a cost with no reader.
+    const SETTINGS_IDLE_MS = 20000;
+    const SETTINGS_POLL_MAX_MS = 60000;
 
     const MESSAGES = {
         notReady: "Voice Chat is not set up. Install both models in Settings → Voice Chat.",
@@ -806,18 +810,76 @@
             || root().querySelector(".mc-voice-settings");
         if (!holder || holder.dataset.mcVoiceWired === "1") return;
         holder.dataset.mcVoiceWired = "1";
-        const buttons = holder.querySelectorAll("[data-mc-voice-install]");
-        Array.prototype.forEach.call(buttons, function (button) {
-            button.addEventListener("click", function (event) {
-                if (event.preventDefault) event.preventDefault();
-                startInstall(holder, button.getAttribute("data-mc-voice-install"), button);
+
+        Array.prototype.forEach.call(
+            holder.querySelectorAll("[data-mc-voice-install]"), function (button) {
+                button.addEventListener("click", function (event) {
+                    if (event.preventDefault) event.preventDefault();
+                    startInstall(holder, button.getAttribute("data-mc-voice-install"),
+                                 button, "");
+                });
             });
-        });
-        window.setInterval(function () { paintSettings(holder); }, SETTINGS_POLL_MS);
-        paintSettings(holder);
+
+        // The other way in: files somebody already has. Same route, same row,
+        // one extra field.
+        Array.prototype.forEach.call(
+            holder.querySelectorAll("[data-mc-voice-local]"), function (button) {
+                button.addEventListener("click", function (event) {
+                    if (event.preventDefault) event.preventDefault();
+                    const kind = button.getAttribute("data-mc-voice-local");
+                    const box = holder.querySelector(
+                        '[data-mc-voice-folder="' + kind + '"]');
+                    const folder = box ? (box.value || "").trim() : "";
+                    if (!folder) {
+                        sayInRow(holder, kind, "Type the folder the downloaded files are "
+                                 + "in, then press this again.", true);
+                        return;
+                    }
+                    startInstall(holder, kind, button, folder);
+                });
+            });
+
+        schedulePaint(holder, 0);
     }
 
-    function startInstall(holder, kind, button) {
+    // The poll used to be a fixed 1.5 seconds, forever, whatever happened. On a
+    // WebUI that was refusing the request that meant a warning a second in the
+    // console for as long as the page stayed open -- a hundred and thirty-six
+    // of them in three minutes, burying the one line that explained it. So the
+    // cadence follows what is actually happening: fast while a download is
+    // running, slow when nothing is, backing off when it is failing, and not at
+    // all while the tab is in the background.
+    let paintTimer = 0;
+    let paintFailures = 0;
+
+    function nextPaintDelay(payload) {
+        if (!payload || !payload.ok) {
+            paintFailures += 1;
+            return Math.min(SETTINGS_POLL_MS * Math.pow(2, paintFailures),
+                            SETTINGS_POLL_MAX_MS);
+        }
+        paintFailures = 0;
+        const progress = payload.progress || {};
+        const busy = KINDS.some(function (kind) {
+            return (progress[kind] || {}).running;
+        });
+        return busy ? SETTINGS_POLL_MS : SETTINGS_IDLE_MS;
+    }
+
+    function schedulePaint(holder, delay) {
+        if (paintTimer) window.clearTimeout(paintTimer);
+        paintTimer = window.setTimeout(function () {
+            if (document.hidden) {
+                schedulePaint(holder, SETTINGS_IDLE_MS);
+                return;
+            }
+            paintSettings(holder).then(function (payload) {
+                schedulePaint(holder, nextPaintDelay(payload));
+            });
+        }, delay);
+    }
+
+    function startInstall(holder, kind, button, folder) {
         button.disabled = true;
         button.textContent = "Starting…";
         sayInRow(holder, kind, "Starting…", false);
@@ -825,15 +887,16 @@
         const failed = function (text) {
             sayInRow(holder, kind, text, true);
             releaseButton(holder, kind, false);
+            button.disabled = false;
             console.error("Model Chain: Voice Chat could not start the " + kind
-                          + " download — " + text);
+                          + " install — " + text);
         };
 
         fetch(url(ROUTES.install), {
             method: "POST",
             credentials: "same-origin",
             headers: headers({"Content-Type": "application/json"}, holder),
-            body: JSON.stringify({kind: kind}),
+            body: JSON.stringify(folder ? {kind: kind, folder: folder} : {kind: kind}),
         }).then(function (response) {
             return response.json().catch(function () {
                 return {ok: false, error: "The WebUI answered HTTP " + response.status
@@ -845,18 +908,19 @@
             // between a row that explains itself and a row that never moves.
             if (!payload || !payload.ok) {
                 failed((payload && payload.error)
-                       || "Voice Chat could not start that download.");
+                       || "Voice Chat could not start that install.");
                 return;
             }
-            paintSettings(holder);
+            paintFailures = 0;
+            schedulePaint(holder, 0);
         }).catch(function (error) {
-            failed("Could not reach this WebUI to start the download ("
+            failed("Could not reach this WebUI to start the install ("
                    + ((error && error.message) || "network error") + ").");
         });
     }
 
     function paintSettings(holder) {
-        refreshStatus(true, holder).then(function (payload) {
+        return refreshStatus(true, holder).then(function (payload) {
             const runtime = holder.querySelector(".mc-voice-runtime");
             if (!payload || !payload.ok) {
                 // The failure is drawn rather than swallowed. This is where the
@@ -868,7 +932,7 @@
                     sayInRow(holder, kind, text, true);
                     releaseButton(holder, kind, false);
                 });
-                return;
+                return payload;
             }
             if (runtime) runtime.textContent = payload.runtime_message || "";
             KINDS.forEach(function (kind) {
@@ -883,7 +947,7 @@
                              + Math.round((progress.fraction || 0) * 100) + "%", false);
                     if (button) {
                         button.disabled = true;
-                        button.textContent = "Downloading…";
+                        button.textContent = "Installing…";
                     }
                     return;
                 }
@@ -891,6 +955,7 @@
                          !!progress.failed);
                 releaseButton(holder, kind, ready);
             });
+            return payload;
         });
     }
 
