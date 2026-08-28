@@ -36,12 +36,32 @@ import mc_voice_paths as paths
 
 
 @pytest.fixture(autouse=True)
-def _fresh_manifest():
-    """The manifest is cached, and several tests here replace it."""
+def _fresh_manifest(tmp_path, monkeypatch):
+    """A manifest of this test's own, cached state cleared around it.
+
+    Copied into ``tmp_path`` rather than read from the repository, because a
+    successful install writes its pins into an overlay *beside the manifest* --
+    and a test that recorded them beside the real one would leave a file in the
+    working tree and pin the next test's fixture behind its back. Which it did.
+    """
+    private = tmp_path / "voice-manifest"
+    private.mkdir()
+    copy = private / paths.MANIFEST_FILENAME
+    copy.write_text(paths.manifest_path().read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(paths, "manifest_path", lambda: copy)
+
+    models._manifest_cache = None
     models.manifest(refresh=True)
     yield
     models._manifest_cache = None
     models._progress.clear()
+
+
+def test_the_repository_has_no_pin_overlay_checked_in():
+    """The overlay is a machine's own record and is gitignored. One in the tree
+    is a test that wrote outside its temporary directory."""
+    assert not (paths.extension_root() / paths.MANIFEST_DIRNAME
+                / models.LOCAL_PINS_FILENAME).exists()
 
 
 def rewrite(tmp_path, monkeypatch, change) -> Path:
@@ -177,17 +197,19 @@ class TestReadiness:
         assert not found.ready
         assert not found.runtime_ready
 
-    def test_an_unpinned_bundle_reports_that_rather_than_offering_a_download(self,
-                                                                            voice_root):
-        """Gate 0 in code. The Whisper and Kokoro artifacts are not pinned in
-        this build, so the honest status is "not available" and the honest
-        response to a Download press is a refusal, not a hopeful GET."""
+    def test_an_unpinned_bundle_is_still_installable(self, voice_root):
+        """The correction to a design that shipped a Download button which
+        refused to download.
+
+        Whether this repository managed to pin an artifact is a fact about the
+        machine the release was cut on, and it has no business appearing in
+        front of somebody who has an Internet connection and pressed a button.
+        The bundle installs; what changes is who attests to the bytes, which is
+        reported rather than hidden."""
         found = models.status()
-        assert "not pinned" in found.stt_message
-        assert "files you download yourself" in found.stt_message, (
-            "a build that cannot fetch the models should say what can be done instead")
-        with pytest.raises(models.VoiceError, match="pinned"):
-            models.install("stt")
+        assert found.stt_message == "Not installed"
+        assert models.refusal("stt") == "", (
+            "a bundle this build did not pin is no longer a refusal")
 
     def test_files_on_disk_are_not_an_installation(self, voice_root):
         """Section 11: installed means the manifest identity and hashes match,
@@ -279,53 +301,181 @@ def artifact_for(payload: bytes, **overrides) -> models.Artifact:
     return models.Artifact(**fields)
 
 
+def expect(payload: bytes, sha256=..., size=..., source="this extension's manifest"):
+    import hashlib as _hashlib
+
+    return models.Expected(
+        size=len(payload) if size is ... else size,
+        sha256=_hashlib.sha256(payload).hexdigest() if sha256 is ... else sha256,
+        source=source)
+
+
 class TestTheDownloader:
-    def test_a_matching_artifact_is_kept(self, tmp_path, monkeypatch):
+    @pytest.fixture
+    def landing(self, tmp_path):
+        """A directory of this test's own, so "nothing was left behind" is a
+        statement about the download rather than about the fixtures."""
+        where = tmp_path / "landing"
+        where.mkdir()
+        return where
+
+    def test_a_matching_artifact_is_kept(self, landing, tmp_path, monkeypatch):
         payload = b"the bytes this repository describes"
         served = Served(payload)
         monkeypatch.setattr(models.urllib.request, "urlopen", served.open)
-        models._download(artifact_for(payload), tmp_path / "thing.onnx", lambda _n: None)
-        assert (tmp_path / "thing.onnx").read_bytes() == payload
+        models._download(artifact_for(payload), landing / "thing.onnx", lambda _n: None,
+                         expect(payload))
+        assert (landing / "thing.onnx").read_bytes() == payload
 
-    def test_a_bad_hash_leaves_nothing_behind(self, tmp_path, monkeypatch):
+    def test_it_reports_the_digest_of_what_arrived(self, landing, tmp_path, monkeypatch):
+        """Which is what lets an unpinned bundle be recorded, so the *second*
+        install of it is checked against a constant."""
+        import hashlib as _hashlib
+
+        payload = b"whatever the publisher served"
+        served = Served(payload)
+        monkeypatch.setattr(models.urllib.request, "urlopen", served.open)
+        found = models._download(artifact_for(payload, sha256=None), tmp_path / "x",
+                                 lambda _n: None,
+                                 expect(payload, sha256=None, source="a byte count only"))
+        assert found == _hashlib.sha256(payload).hexdigest()
+
+    def test_a_bad_hash_leaves_nothing_behind(self, landing, tmp_path, monkeypatch):
         payload = b"something else entirely"
         served = Served(payload)
         monkeypatch.setattr(models.urllib.request, "urlopen", served.open)
-        artifact = artifact_for(payload, sha256="a" * 64)
-        with pytest.raises(models.VoiceError, match="not what this extension"):
-            models._download(artifact, tmp_path / "thing.onnx", lambda _n: None)
-        assert list(tmp_path.iterdir()) == []
+        with pytest.raises(models.VoiceError, match="not what"):
+            models._download(artifact_for(payload), landing / "thing.onnx",
+                             lambda _n: None, expect(payload, sha256="a" * 64))
+        assert list(landing.iterdir()) == []
 
-    def test_a_short_file_is_refused(self, tmp_path, monkeypatch):
+    def test_a_hash_from_the_publisher_is_enforced_just_as_hard(self, landing, tmp_path,
+                                                                monkeypatch):
+        """The whole basis for allowing an unpinned bundle to install: a digest
+        the publisher gave us is still a digest, and still throws the download
+        away when it does not match."""
+        payload = b"not what the hub said"
+        served = Served(payload)
+        monkeypatch.setattr(models.urllib.request, "urlopen", served.open)
+        with pytest.raises(models.VoiceError, match="the publisher"):
+            models._download(artifact_for(payload, sha256=None), landing / "x",
+                             lambda _n: None,
+                             expect(payload, sha256="b" * 64,
+                                    source="the publisher, over HTTPS"))
+        assert list(landing.iterdir()) == []
+
+    def test_a_short_file_is_refused(self, landing, tmp_path, monkeypatch):
         payload = b"truncated"
         served = Served(payload)
         monkeypatch.setattr(models.urllib.request, "urlopen", served.open)
-        artifact = artifact_for(payload, size=len(payload) + 100)
         with pytest.raises(models.VoiceError, match="bytes"):
-            models._download(artifact, tmp_path / "thing.onnx", lambda _n: None)
-        assert list(tmp_path.iterdir()) == []
+            models._download(artifact_for(payload), landing / "thing.onnx",
+                             lambda _n: None,
+                             expect(payload, sha256=None, size=len(payload) + 100))
+        assert list(landing.iterdir()) == []
 
-    def test_a_file_longer_than_declared_is_cut_off_rather_than_swallowed(self, tmp_path,
-                                                                         monkeypatch):
+    def test_an_empty_answer_is_refused(self, landing, tmp_path, monkeypatch):
+        """A 200 with no body is what a CDN outage looks like, and it would
+        otherwise be promoted as a zero-byte model."""
+        served = Served(b"")
+        monkeypatch.setattr(models.urllib.request, "urlopen", served.open)
+        with pytest.raises(models.VoiceError, match="empty file"):
+            models._download(artifact_for(b""), landing / "x", lambda _n: None,
+                             models.Expected(None, None, "nothing"))
+        assert list(landing.iterdir()) == []
+
+    def test_a_file_far_longer_than_expected_is_cut_off(self, landing, tmp_path, monkeypatch):
         """A declared size is a budget as well as a checksum input: a URL that
         started answering with a hundred gigabytes should not fill somebody's
         disk before the hash disagrees."""
         payload = b"x" * 10000
         served = Served(payload)
         monkeypatch.setattr(models.urllib.request, "urlopen", served.open)
-        artifact = artifact_for(payload, size=100)
-        with pytest.raises(models.VoiceError, match="larger than"):
-            models._download(artifact, tmp_path / "thing.onnx", lambda _n: None)
-        assert list(tmp_path.iterdir()) == []
+        with pytest.raises(models.VoiceError, match="far larger"):
+            models._download(artifact_for(payload), landing / "thing.onnx",
+                             lambda _n: None, expect(payload, sha256=None, size=100))
+        assert list(landing.iterdir()) == []
 
-    def test_an_unpinned_artifact_is_never_fetched(self, tmp_path, monkeypatch):
+
+class TestAskingThePublisherFirst:
+    """An artifact this repository has not pinned is resolved before it is
+    fetched, rather than refused.
+
+    Shipping a Download button that refuses to download is not a security
+    posture; it is a broken feature. What replaces the committed hash is the
+    publisher's own digest, read from a HEAD over TLS -- weaker, and labelled
+    as weaker everywhere it is reported."""
+
+    class Head:
+        def __init__(self, headers, status=200):
+            self.headers = headers
+            self.status = status
+            self.asked = []
+
+        def open(self, request, timeout=None):
+            self.asked.append(getattr(request, "get_method", lambda: "GET")())
+            outer = self
+
+            class Answer:
+                status = outer.status
+                headers = outer.headers
+
+                def close(self):
+                    pass
+
+            return Answer()
+
+    def test_a_committed_hash_is_used_without_asking_anybody(self, monkeypatch):
         def explode(*args, **kwargs):
-            raise AssertionError("an unpinned artifact was requested")
+            raise AssertionError("a pinned artifact was resolved over the network")
 
         monkeypatch.setattr(models.urllib.request, "urlopen", explode)
-        artifact = artifact_for(b"x", sha256=None)
-        with pytest.raises(models.VoiceError, match="not pinned"):
-            models._download(artifact, tmp_path / "thing.onnx", lambda _n: None)
+        found = models._resolve(artifact_for(b"x" * 32))
+        assert found.verified
+        assert found.source == "this extension's manifest"
+
+    def test_the_hubs_lfs_etag_is_taken_as_the_digest(self, monkeypatch):
+        """Which is the same fact ``tools/pin_managed_models.py`` reads to pin
+        the LLM catalogue — read here at install time instead."""
+        head = self.Head({"x-linked-size": "117000000",
+                          "x-linked-etag": '"' + "c" * 64 + '"'})
+        monkeypatch.setattr(models.urllib.request, "urlopen", head.open)
+        found = models._resolve(artifact_for(b"x", sha256=None, size=None))
+        assert found.sha256 == "c" * 64
+        assert found.size == 117000000
+        assert "publisher" in found.source
+        assert head.asked == ["HEAD"], "resolving should not download the file"
+
+    def test_a_sha256_prefixed_etag_is_understood(self, monkeypatch):
+        head = self.Head({"content-length": "10", "etag": "sha256:" + "d" * 64})
+        monkeypatch.setattr(models.urllib.request, "urlopen", head.open)
+        assert models._resolve(artifact_for(b"x", sha256=None, size=None)).sha256 == "d" * 64
+
+    def test_an_etag_that_is_not_a_digest_is_not_mistaken_for_one(self, monkeypatch):
+        """A release asset on another host answers with an S3-style etag. Saying
+        "no digest" is better than pretending one was offered."""
+        head = self.Head({"content-length": "4096", "etag": '"abc123-7"'})
+        monkeypatch.setattr(models.urllib.request, "urlopen", head.open)
+        found = models._resolve(artifact_for(b"x", sha256=None, size=None))
+        assert found.sha256 is None
+        assert found.verified is False
+        assert found.size == 4096
+        assert "byte count" in found.source
+
+    def test_a_publisher_that_will_not_answer_does_not_stop_the_install(self,
+                                                                       monkeypatch):
+        def refuse(*args, **kwargs):
+            raise OSError("the network is down")
+
+        monkeypatch.setattr(models.urllib.request, "urlopen", refuse)
+        found = models._resolve(artifact_for(b"x", sha256=None, size=None))
+        assert found.sha256 is None
+        assert "did not answer" in found.source
+
+    def test_an_http_error_is_reported_and_not_fatal(self, monkeypatch):
+        head = self.Head({}, status=404)
+        monkeypatch.setattr(models.urllib.request, "urlopen", head.open)
+        assert "404" in models._resolve(artifact_for(b"x", sha256=None, size=None)).source
 
 
 class TestPromotion:
@@ -659,10 +809,11 @@ class TestRefusingBeforeStarting:
     """Everything that can be decided before a thread starts is decided in front
     of the caller, so a browser waiting on the answer gets one."""
 
-    def test_an_unpinned_bundle_is_refused_by_name(self):
-        reason = models.refusal("stt")
-        assert "pinned" in reason
-        assert "tools/pin_voice_models.py" in reason
+    def test_an_unpinned_bundle_is_not_refused_at_all(self):
+        """The blocker that shipped, as a test. Nothing about this repository's
+        own pinning state may stand between a user and the Download button."""
+        assert models.refusal("stt") == ""
+        assert models.refusal("tts") == ""
 
     def test_an_unknown_kind_is_refused(self):
         assert models.refusal("../etc") 
@@ -805,10 +956,9 @@ class TestInstallingFromAFolder:
         staging = paths.staging_root()
         assert not staging.exists() or not any(staging.iterdir())
 
-    def test_a_manual_install_is_not_refused_for_being_unpinned(self):
-        """The whole point: there is nothing to download, so there is nothing
-        for a committed hash to be about."""
-        assert models.refusal("stt") != ""
+    def test_a_manual_install_is_not_refused_either(self):
+        """There is nothing to download, so there is nothing for a committed
+        hash to be about."""
         assert models.refusal("stt", manual=True) == ""
 
     def test_an_unpacked_kokoro_tree_is_accepted(self, voice_root, tmp_path):
@@ -885,3 +1035,135 @@ class TestTheLocalPinOverlay:
 
         models.manifest(refresh=True)
         assert models.default_model("stt").artifacts[0].sha256 is None
+
+
+class TestOneClickInstall:
+    """Press the button, get the models. No manual step, no precondition about
+    what this repository's release machine could reach."""
+
+    @pytest.fixture
+    def hub(self, tmp_path, monkeypatch, voice_root):
+        """A publisher that answers a HEAD with a digest and a GET with bytes."""
+        import hashlib as _hashlib
+        import io as _io
+
+        files = {}
+        for name, body in (("small-encoder.int8.onnx", b"\x08" + b"E" * 4096),
+                           ("small-decoder.int8.onnx", b"\x08" + b"D" * 4096),
+                           ("small-tokens.txt", b"a\nb\n")):
+            files[name] = body
+
+        asked = []
+
+        def open_url(request, timeout=None):
+            url = getattr(request, "full_url", str(request))
+            method = request.get_method() if hasattr(request, "get_method") else "GET"
+            name = url.rsplit("/", 1)[-1]
+            body = files.get(name)
+            asked.append((method, name))
+            if body is None:
+                raise OSError(f"no such file {name}")
+            if method == "HEAD":
+                headers = {"x-linked-size": str(len(body)),
+                           "x-linked-etag": _hashlib.sha256(body).hexdigest()}
+
+                class Answer:
+                    status = 200
+
+                    def close(self):
+                        pass
+
+                Answer.headers = headers
+                return Answer()
+            return _io.BytesIO(body)
+
+        monkeypatch.setattr(models.urllib.request, "urlopen", open_url)
+        monkeypatch.setattr(models, "install_runtime",
+                            lambda on_status=None, on_progress=None: None)
+        return types_namespace(files=files, asked=asked)
+
+    def test_pressing_download_installs_an_unpinned_bundle(self, hub, voice_root):
+        found = models.install("stt")
+
+        assert found.stt_ready is True
+        root = paths.bundle_root("stt", models.default_id("stt"))
+        assert (root / "encoder.onnx").is_file()
+        assert (root / "tokens.txt").is_file()
+
+    def test_it_asks_the_publisher_before_it_downloads(self, hub, voice_root):
+        models.install("stt")
+        methods = [method for method, _name in hub.asked]
+        assert methods[0] == "HEAD", "the first thing it did was download"
+        assert "GET" in methods
+
+    def test_what_arrived_is_recorded_so_the_next_install_is_pinned(self, hub,
+                                                                    voice_root):
+        """A bundle this repository could not pin is checked against the
+        publisher the first time and against a constant every time after."""
+        import hashlib as _hashlib
+
+        models.install("stt")
+
+        overlay = json.loads(models.local_pins_path().read_text(encoding="utf-8"))
+        recorded = overlay["artifacts"]["small-encoder.int8.onnx"]
+        assert recorded["sha256"] == _hashlib.sha256(
+            hub.files["small-encoder.int8.onnx"]).hexdigest()
+        assert recorded["bytes"] == len(hub.files["small-encoder.int8.onnx"])
+
+        models.manifest(refresh=True)
+        assert models.default_model("stt").artifacts[0].pinned is True
+
+    def test_the_installed_record_says_who_vouched_for_each_file(self, hub, voice_root):
+        models.install("stt")
+        root = paths.bundle_root("stt", models.default_id("stt"))
+        record = json.loads((root / paths.INSTALLED_FILENAME).read_text(encoding="utf-8"))
+        assert "publisher" in record["verified_by"]["small-encoder.int8.onnx"]
+
+    def test_a_publisher_digest_that_does_not_match_stops_the_install(self, hub,
+                                                                      voice_root,
+                                                                      monkeypatch):
+        real = models._resolve
+
+        def lie(artifact):
+            found = real(artifact)
+            return models.Expected(found.size, "f" * 64, found.source)
+
+        monkeypatch.setattr(models, "_resolve", lie)
+        with pytest.raises(models.VoiceError, match="not what"):
+            models.install("stt")
+        assert models.status().stt_ready is False
+
+    def test_a_publisher_that_offers_no_digest_still_installs(self, hub, voice_root,
+                                                              monkeypatch):
+        """A release asset on a host with no content digest. Size is checked,
+        the file is opened, and what arrived is recorded."""
+        real = models._resolve
+        monkeypatch.setattr(models, "_resolve",
+                            lambda a: models.Expected(real(a).size, None,
+                                                      "the publisher's byte count only"))
+        assert models.install("stt").stt_ready is True
+
+    def test_a_failed_download_installs_nothing(self, hub, voice_root, monkeypatch):
+        def refuse(*args, **kwargs):
+            raise OSError("the network went away")
+
+        monkeypatch.setattr(models.urllib.request, "urlopen", refuse)
+        with pytest.raises(models.VoiceError):
+            models.install("stt")
+
+        assert models.status().stt_ready is False
+        assert not paths.bundle_root("stt", models.default_id("stt")).exists()
+
+    def test_installing_an_installed_bundle_downloads_nothing(self, hub, voice_root):
+        """Nothing should be able to spend somebody's connection re-fetching a
+        bundle that is already on their disk, whichever route asked."""
+        models.install("stt")
+        hub.asked.clear()
+        assert models.install("stt").stt_ready is True
+        assert hub.asked == []
+
+
+def types_namespace(**values):
+    import types as _types
+
+    return _types.SimpleNamespace(**values)

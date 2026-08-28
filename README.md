@@ -2955,39 +2955,50 @@ own, not a corner of the LLM one, because speech models have a different
 lifecycle from language models and should keep working across changes to either.
 Point *Voice data directory* somewhere else if that drive is full.
 
-> **This build ships unpinned.** The runtime wheels are pinned exactly — sixteen
-> of them, real sizes and hashes read from PyPI. The two model bundles are not:
-> pinning a hash means fetching the artifact and hashing it, which is a
-> maintainer's job on a machine that can reach huggingface.co. Until that has
-> happened the download buttons refuse rather than fetching something nobody
-> checked. There are two ways past it, and both are below.
+No account is needed for any of it. The sherpa-onnx wheels come from PyPI and
+the two model bundles from their publishers as public files — no Hugging Face
+token, no GitHub login, nothing to sign up for.
 
-### When the download button will not fetch
+### Who vouches for the bytes
 
-Either because this build is unpinned, or because the machine cannot reach the
-publishers — a proxy that will not pass a 300 MB binary, or no Internet at all.
+Every artifact is checked before it is installed, and the row says who did the
+vouching, because there are two answers and they are not equally strong.
 
-Neither route needs an account. The Whisper export and the Kokoro bundle are
-public files; no Hugging Face token, no GitHub login, nothing to sign up for.
+**The runtime wheels are pinned in this repository** — sixteen of them, real
+sizes and SHA-256s committed in `voice/managed-voice-models.json` and reviewed
+like any other source file. A byte that does not match is discarded.
 
-**Pin it once.** On a machine that can reach huggingface.co and github.com:
+**The model bundles are resolved from the publisher at install time.** Pinning
+those means fetching several hundred megabytes and hashing them, which is a
+maintainer's job on a machine that can reach huggingface.co — and this build was
+cut on one that could not. So the installer asks first: a HEAD to the hub
+returns the LFS object's own digest, and that digest is enforced exactly as a
+committed one is. It is the publisher's attestation read over TLS rather than a
+constant somebody reviewed, which is weaker, and that is why it is labelled
+rather than blurred: the install record names the source for every file.
 
-```
-python tools/pin_voice_models.py
-```
+What arrived is then written into `voice/managed-voice-models.local.json` — an
+untracked overlay that survives a `git pull` and can only *fill in* a hash,
+never change one this repository committed. So the second install of a bundle is
+checked against a constant, and a file that changes under you afterwards is a
+refusal rather than a substitution.
 
-It downloads each declared artifact once, hashes it, and writes the sizes and
-hashes into `voice/managed-voice-models.local.json`. That file is untracked, so
-the pins survive a `git pull` and never turn into a merge conflict in a file
-full of hashes — and it can only *fill in* a hash, never change one this
-repository committed. Restart the WebUI and the download buttons work normally,
-with every guarantee intact.
+An earlier version refused to download anything it could not pin. That was the
+wrong trade: whether this repository's release machine could reach a publisher
+is a fact about that machine, and it has no business standing between a user
+with an Internet connection and a Download button.
+
+**Pin it up front if you prefer.** `python tools/pin_voice_models.py` on a
+machine that can reach the publishers does the same resolution ahead of time and
+writes the same overlay, so the first install is checked against a recorded
+constant too.
 
 **Or install from files you fetch yourself.** Each row in Settings → Voice Chat
-has an *Install from files you download yourself* section listing the exact
-addresses, a box for the folder you put them in, and a button. The original
-filenames are fine; nothing needs renaming, and an archive works either packed
-or already extracted.
+has an *Or install from files you download yourself* section listing the exact
+addresses, a box for the folder you put them in, and a button. It is there for a
+machine that cannot reach the publishers at all — no Internet, or a proxy that
+will not pass a large binary. The original filenames are fine; nothing needs
+renaming, and an archive works either packed or already extracted.
 
 What is different about that path is stated on screen rather than glossed over.
 There is no committed hash for a file this repository has never seen, so the
@@ -3134,12 +3145,21 @@ the log is a bug report nobody can answer:
 ```
 Model Chain: Voice Chat routes registered at /model-chain/voice/status, …
 Model Chain: Voice Chat data directory is C:\Roots\Neo3\model_chain_voice
-Model Chain: Voice Chat status — runtime Not installed, speech-to-text …
+Model Chain: Voice Chat host — windows/amd64, Python 3.11 (3.11.9), runtime platform
+             windows-x86_64-cp311, pinned sherpa-onnx 1.13.6, isolated interpreter absent,
+             voice root C:\Roots\Neo3\model_chain_voice, local pins absent
 Model Chain: Voice Chat install requested for the STT model
-Model Chain: Voice Chat STT — Downloading 2 of 3 — decoder.onnx (262 MB)
-Model Chain: Voice Chat fetched decoder.onnx — 262.0 MB in 41.3s (6.3 MB/s), hash verified
+Model Chain: Voice Chat expects small-decoder.int8.onnx to be 262.0 MB with digest
+             3f1c… — according to the publisher, over HTTPS
+Model Chain: Voice Chat STT — Downloading 2 of 3 — small-decoder.int8.onnx (262 MB)
+Model Chain: Voice Chat fetched small-decoder.int8.onnx — 262.0 MB in 41.3s (6.3 MB/s);
+             digest matched the publisher, over HTTPS
 Model Chain: Voice Chat refused a request to /model-chain/voice/status — no page token was sent
 ```
+
+That host line is written at start-up *and* again whenever an install fails, so
+diagnosing one is reading a log rather than a round of questions about which
+Python, which architecture, and what is already on disk.
 
 What never appears is anything anybody said. The lines carry file names, byte
 counts, durations, model ids and error reasons; transcripts, messages and

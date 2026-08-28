@@ -440,6 +440,32 @@ def current_platform() -> tuple[str, str, str]:
     return system, machine, f"{sys.version_info.major}.{sys.version_info.minor}"
 
 
+def describe_host() -> str:
+    """Everything a failed install would otherwise have to be asked for.
+
+    One line, no paths from anybody's home directory beyond the voice root this
+    feature owns, and no content of any kind. It is here so that "share your
+    log" is the whole of the next question rather than the first of five.
+    """
+    system, machine, python_version = current_platform()
+    try:
+        chosen = runtime_platform()
+    except Exception:
+        chosen = None
+    try:
+        spec = manifest()
+        wanted = spec["runtime_version"]
+    except Exception:
+        wanted = "unreadable manifest"
+    interpreter = runtime_python()
+    return (f"{system}/{machine}, Python {python_version} ({sys.version.split()[0]}), "
+            f"runtime platform {chosen.identifier if chosen else 'NONE MATCHED'}, "
+            f"pinned sherpa-onnx {wanted}, "
+            f"isolated interpreter {'present' if interpreter else 'absent'}, "
+            f"voice root {paths.data_root()}, "
+            f"local pins {'present' if local_pins_path().exists() else 'absent'}")
+
+
 def runtime_platform() -> RuntimePlatform | None:
     """The wheel closure for this machine, or ``None`` if there is not one.
 
@@ -568,20 +594,21 @@ def _model_state(entry: VoiceModel) -> tuple[bool, str]:
                 return False, (f"{entry.label} was installed from your own files, but "
                                f"{missing[0]} is no longer there.")
             return True, f"Installed — {entry.label}, from files you supplied"
-        wanted = {item.local_name: item.sha256 for item in entry.artifacts}
-        if record.get("artifacts") != wanted:
-            return False, (f"Installed {entry.label} does not match this extension's "
-                           f"manifest. Download it again.")
+        # Only the artifacts this repository actually pins are compared. A
+        # bundle whose digests came from the publisher records what arrived
+        # rather than a committed constant, and comparing it to ``None`` would
+        # turn every such installation into "download it again" forever.
+        recorded = record.get("artifacts") or {}
+        for item in entry.artifacts:
+            if item.sha256 and recorded.get(item.local_name) != item.sha256:
+                return False, (f"Installed {entry.label} does not match this extension's "
+                               f"manifest. Download it again.")
         if missing:
             return False, f"Installed {entry.label} is missing {missing[0]}."
         return True, f"Installed — {entry.label}"
 
     if record is not None:
         return False, "Installed bundle does not match the catalogue."
-    if not entry.pinned:
-        return False, (f"Not installed. {entry.label} cannot be downloaded automatically by "
-                       f"this build — its artifacts are not pinned — but it can be installed "
-                       f"from files you download yourself.")
     return False, "Not installed"
 
 
@@ -621,12 +648,85 @@ def _read_json(path: Path):
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True)
+class Expected:
+    """What one artifact should turn out to be, and who said so.
+
+    ``sha256`` from this repository is the strongest answer and the one the
+    runtime wheels always have. ``sha256`` from the publisher is the answer for
+    a model bundle nobody has pinned yet: a HEAD to the hub returns the LFS
+    object's own digest, which is the publisher's attestation fetched over TLS
+    rather than a constant somebody reviewed. Weaker, and stated as weaker --
+    but the alternative that shipped was a Download button that refused to
+    download, which is not a security posture, it is a broken feature.
+    """
+
+    size: int | None
+    sha256: str | None
+    source: str
+
+    @property
+    def verified(self) -> bool:
+        return bool(self.sha256)
+
+
+def _resolve(artifact: Artifact) -> Expected:
+    """Ask the publisher what this file is, before fetching a byte of it.
+
+    A HEAD, following redirects. Hugging Face answers for an LFS object with
+    ``x-linked-size`` and ``x-linked-etag``, and that etag *is* the object's
+    SHA-256 -- the same fact ``tools/pin_managed_models.py`` reads to pin the
+    LLM catalogue, read here at install time instead of at review time. A
+    release asset on another host answers with a length and an etag that is not
+    a digest, and saying so is better than pretending: what comes back then is a
+    size, and the checks below it are structural.
+    """
+    if artifact.sha256 and artifact.size:
+        return Expected(artifact.size, artifact.sha256, "this extension's manifest")
+    request = urllib.request.Request(artifact.url, method="HEAD",
+                                     headers={"User-Agent": USER_AGENT})
+    try:
+        with contextlib.closing(urllib.request.urlopen(request, timeout=TIMEOUT)) as answer:
+            headers = {str(k).casefold(): v for k, v in answer.headers.items()}
+            status = getattr(answer, "status", 200)
+    except Exception as exc:
+        logger.warning("Model Chain: Voice Chat could not ask the publisher about %s — %s: %s",
+                       artifact.filename, exc.__class__.__name__, exc)
+        return Expected(artifact.size, artifact.sha256, "nothing (the publisher did not answer)")
+    if status >= 400:
+        logger.warning("Model Chain: Voice Chat asked the publisher about %s and got HTTP %s",
+                       artifact.filename, status)
+        return Expected(artifact.size, artifact.sha256, "nothing (the publisher answered %s)"
+                        % status)
+
+    size = artifact.size
+    for name in ("x-linked-size", "content-length"):
+        raw = str(headers.get(name) or "")
+        if raw.isdigit() and int(raw) > 0:
+            size = int(raw)
+            break
+
+    digest = artifact.sha256
+    if not digest:
+        for name in ("x-linked-etag", "etag"):
+            raw = str(headers.get(name) or "").strip().strip('"')
+            raw = raw[7:] if raw.startswith("sha256:") else raw
+            if len(raw) == 64 and all(c in "0123456789abcdefABCDEF" for c in raw):
+                digest = raw.casefold()
+                break
+
+    return Expected(size, digest,
+                    "this extension's manifest" if artifact.sha256
+                    else "the publisher, over HTTPS" if digest
+                    else "the publisher's byte count only")
+
+
 def refusal(kind: str, manual: bool = False) -> str:
     """Why ``kind`` cannot be installed right now, or an empty string.
 
-    ``manual`` asks the question for an install from a folder on this machine,
-    which does not need pinned artifacts -- there is nothing to download, so
-    there is nothing for a committed hash to be about.
+    ``manual`` is kept for the caller's benefit and no longer changes the
+    answer: an unpinned artifact stopped being a refusal when resolving it
+    against the publisher became part of the download.
 
     Asked *before* anything is started, and separately from starting it, because
     the two questions have different audiences. This one answers a browser that
@@ -638,7 +738,9 @@ def refusal(kind: str, manual: bool = False) -> str:
     if kind not in paths.KINDS:
         return "Voice Chat installs a speech-to-text or a text-to-speech model."
     try:
-        entry = default_model(kind)
+        # Not for its value -- for the exception. A catalogue this build cannot
+        # read is the one thing here that is still a refusal.
+        default_model(kind)
     except VoiceError as exc:
         return str(exc)
 
@@ -653,12 +755,10 @@ def refusal(kind: str, manual: bool = False) -> str:
         system, machine, python_version = current_platform()
         return (f"Voice Chat has no tested CPU runtime for {system}/{machine} on Python "
                 f"{python_version}, so it cannot be installed here.")
-    if not manual and not entry.pinned:
-        return (f"{entry.label} cannot be downloaded automatically by this build: its "
-                f"artifacts are not pinned in voice/managed-voice-models.json. Either run "
-                f"tools/pin_voice_models.py once on a machine that can reach the "
-                f"publishers, or download the files yourself and install them from a "
-                f"folder below.")
+    # An artifact this repository has not pinned is no longer a refusal. It is
+    # resolved against the publisher at install time instead -- see
+    # :func:`_resolve`. A Download button that will not download is not a
+    # security posture.
     return ""
 
 
@@ -692,12 +792,6 @@ def install(kind: str, on_status=None, on_progress=None) -> Status:
 
     with _claim(kind, say):
         entry = default_model(kind)
-        if not entry.pinned:
-            raise VoiceError(
-                f"{entry.label} cannot be installed by this build: its artifacts are not "
-                f"pinned in voice/managed-voice-models.json. A maintainer pins them with "
-                f"tools/pin_voice_models.py; nothing is downloaded until they do."
-            )
         logger.info("Model Chain: Voice Chat is installing the %s bundle %s (%s, about %s)",
                     kind.upper(), entry.identifier, entry.label,
                     _bytes_label(entry.total_bytes))
@@ -958,7 +1052,10 @@ def install_runtime(on_status=None, on_progress=None) -> None:
     try:
         _make_room(chosen.artifacts, staging)
         wheels.mkdir(parents=True, exist_ok=True)
-        _fetch_all(chosen.artifacts, wheels, say, tick, budget=0.7)
+        # The wheels are always pinned in this repository, so this resolves to
+        # the committed values without a request being made.
+        _fetch_all(chosen.artifacts, wheels, say, tick, budget=0.7,
+                   expectations=_expectations(chosen.artifacts, say))
 
         say("Creating the isolated voice runtime…")
         _build_environment(staging, wheels, chosen)
@@ -988,9 +1085,11 @@ def _install_model(entry: VoiceModel, say, tick) -> None:
     staging = paths.staging_for(entry.identifier, uuid.uuid4().hex[:8])
     target = paths.bundle_root(entry.kind, entry.identifier)
     try:
-        _make_room(entry.artifacts, staging)
+        expectations = _expectations(entry.artifacts, say)
+        _make_room(entry.artifacts, staging, expectations)
         staging.mkdir(parents=True, exist_ok=True)
-        _fetch_all(entry.artifacts, staging, say, tick, budget=0.8)
+        digests = _fetch_all(entry.artifacts, staging, say, tick, budget=0.8,
+                             expectations=expectations)
 
         for item in entry.artifacts:
             if item.archive:
@@ -1014,7 +1113,10 @@ def _install_model(entry: VoiceModel, say, tick) -> None:
             "revision": entry.revision,
             "license": entry.license,
             "attribution": entry.attribution,
-            "artifacts": {item.local_name: item.sha256 for item in entry.artifacts},
+            "artifacts": {item.local_name: digests.get(item.filename) or item.sha256
+                          for item in entry.artifacts},
+            "verified_by": {item.filename: expectations[item.local_name].source
+                            for item in entry.artifacts},
             "installed_at": time.time(),
         })
         say("Installing…")
@@ -1022,46 +1124,138 @@ def _install_model(entry: VoiceModel, say, tick) -> None:
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
+    # What arrived, written down where the next install will read it. A bundle
+    # this repository could not pin is checked against the publisher the first
+    # time and against a constant every time after -- so a file that changes
+    # under us later is a refusal rather than a silent substitution.
+    _record_pins(entry, digests, expectations)
 
-def _fetch_all(artifacts, destination: Path, say, tick, budget: float) -> None:
-    total = max(sum(item.approximate_bytes for item in artifacts), 1)
+
+def _record_pins(entry: VoiceModel, digests: dict, expectations: dict) -> None:
+    """Write what was downloaded into the local pin overlay. Never fatal.
+
+    Only for artifacts this repository has not pinned -- a committed hash is the
+    trust root and nothing written at runtime may touch it. An extension folder
+    that is read-only, or on a share, simply does not get the benefit: the next
+    install resolves against the publisher again, exactly as this one did.
+    """
+    if not digests:
+        return
+    wanted = {item.filename: digests.get(item.filename)
+              for item in entry.artifacts if not item.sha256 and digests.get(item.filename)}
+    if not wanted:
+        return
+    path = local_pins_path()
+    try:
+        current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError):
+        current = {}
+    recorded = dict(current.get("artifacts") or {})
+    for item in entry.artifacts:
+        digest = wanted.get(item.filename)
+        if not digest:
+            continue
+        size = (expectations.get(item.local_name) or Expected(None, None, "")).size
+        recorded[item.filename] = {"sha256": digest, "bytes": int(size or 0)}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"schema": 1, "artifacts": recorded}, indent=2) + "\n",
+                        encoding="utf-8")
+    except OSError:
+        logger.debug("Model Chain: Voice Chat could not record what it downloaded to %s",
+                     path, exc_info=True)
+        return
+    _manifest_cache_clear()
+    logger.info("Model Chain: Voice Chat recorded %d artifact digest(s) in %s — the next "
+                "install of this bundle is checked against them", len(wanted), path.name)
+
+
+def _manifest_cache_clear() -> None:
+    global _manifest_cache
+
+    with _lock:
+        _manifest_cache = None
+
+
+def _expectations(artifacts, say) -> dict:
+    """Ask the publisher about every artifact this repository has not pinned.
+
+    Done once, up front, so the byte counts are known before the progress bar
+    starts, and so a host that cannot be reached fails here rather than halfway
+    through a download.
+    """
+    found = {}
+    for item in artifacts:
+        if not (item.sha256 and item.size):
+            say(f"Asking the publisher about {item.filename}…")
+        expected = _resolve(item)
+        found[item.local_name] = expected
+        logger.info("Model Chain: Voice Chat expects %s to be %s with digest %s — according "
+                    "to %s", item.filename, _bytes_label(expected.size or 0),
+                    expected.sha256 or "(none offered)", expected.source)
+    return found
+
+
+def _fetch_all(artifacts, destination: Path, say, tick, budget: float,
+               expectations: dict) -> dict:
+    """Download each artifact. Returns the digest of what actually arrived."""
+    total = max(sum((expectations[item.local_name].size or item.approximate_bytes)
+                    for item in artifacts), 1)
     done = 0
+    digests = {}
     for index, item in enumerate(artifacts, start=1):
+        expected = expectations[item.local_name]
+        size = expected.size or item.approximate_bytes
         # Named, numbered and sized. "Downloading…" on its own is what a hung
         # download looks like; "Downloading 2 of 3 — decoder.onnx (262 MB)" is
         # something somebody can wait for.
         say(f"Downloading {index} of {len(artifacts)} — {item.filename} "
-            f"({_bytes_label(item.approximate_bytes)})")
-        base, share = done, max(item.approximate_bytes, 1)
+            f"({_bytes_label(size)})")
+        base, share = done, max(size, 1)
 
         def report(received, base=base, share=share):
             tick(min((base + min(received, share)) / total, 1.0) * budget)
 
         started = time.monotonic()
-        _download(item, destination / item.local_name, report)
+        digests[item.filename] = _download(item, destination / item.local_name, report,
+                                           expected)
         elapsed = max(time.monotonic() - started, 0.001)
-        logger.info("Model Chain: Voice Chat fetched %s — %s in %.1fs (%.1f MB/s), hash "
-                    "verified", item.filename, _bytes_label(item.approximate_bytes),
-                    elapsed, item.approximate_bytes / elapsed / (1024 * 1024))
+        logger.info("Model Chain: Voice Chat fetched %s — %s in %.1fs (%.1f MB/s); %s",
+                    item.filename, _bytes_label(size), elapsed,
+                    size / elapsed / (1024 * 1024),
+                    f"digest matched {expected.source}" if expected.verified
+                    else "digest recorded (the publisher offered none)")
         done += share
         tick(min(done / total, 1.0) * budget)
+    return digests
 
 
-def _download(artifact: Artifact, destination: Path, report) -> None:
-    """Fetch one artifact and keep it only if it is exactly what was declared.
+def _download(artifact: Artifact, destination: Path, report, expected: "Expected") -> str:
+    """Fetch one artifact, keep it only if it is what was expected, and report
+    the digest of what actually arrived.
 
-    Written into ``.part`` and renamed after the hash matches, so no file with a
-    real name is ever a file that has not been verified. There is no resume:
-    these are megabytes rather than the gigabytes the LLM catalogue deals in,
-    and a restart is cheaper than the class of bug where a stale ``.part`` from a
+    Written into ``.part`` and renamed after the check passes, so no file with a
+    real name is ever a file that was not checked. There is no resume: these are
+    megabytes rather than the gigabytes the LLM catalogue deals in, and a
+    restart is cheaper than the class of bug where a stale ``.part`` from a
     different revision is appended to and lands on exactly the right length.
+
+    What "expected" means depends on who was able to say, and the difference is
+    reported rather than blurred. A digest from this repository or from the
+    publisher is checked, and a mismatch throws the download away. A publisher
+    that offered only a byte count gets the byte count checked -- and the digest
+    of what arrived is returned, so the caller can record it and the *next*
+    install of that bundle is checked against a constant.
     """
-    if not artifact.pinned:
-        raise VoiceError(f"{artifact.filename} is not pinned in this extension's manifest.")
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_name(destination.name + ".part")
     digest = hashlib.sha256()
     received = 0
+    # A declared size is a budget as well as a checksum input: a URL that
+    # started answering with a hundred gigabytes should not fill somebody's disk
+    # before anything disagrees. Twice the expected size, or a flat ceiling when
+    # nothing would say.
+    ceiling = (expected.size or 0) * 2 or (4 * 1024 * 1024 * 1024)
     request = urllib.request.Request(artifact.url, headers={"User-Agent": USER_AGENT})
     try:
         with contextlib.closing(urllib.request.urlopen(request, timeout=TIMEOUT)) as response:
@@ -1073,31 +1267,38 @@ def _download(artifact: Artifact, destination: Path, report) -> None:
                     handle.write(block)
                     digest.update(block)
                     received += len(block)
-                    if received > artifact.size:
+                    if received > ceiling:
                         raise VoiceError(
-                            f"{artifact.filename} is larger than this extension's manifest "
-                            f"says it is. Nothing was installed.")
+                            f"{artifact.filename} is far larger than expected. Nothing was "
+                            f"installed.")
                     report(received)
     except VoiceError:
         partial.unlink(missing_ok=True)
         raise
     except Exception as exc:
         partial.unlink(missing_ok=True)
-        raise VoiceError(f"{artifact.filename} could not be downloaded ({exc}). Nothing was "
-                         f"installed and Voice Chat is unchanged.") from None
+        raise VoiceError(f"{artifact.filename} could not be downloaded "
+                         f"({exc.__class__.__name__}: {exc}). Nothing was installed and "
+                         f"Voice Chat is unchanged.") from None
 
-    if received != artifact.size:
+    found = digest.hexdigest().casefold()
+    if received == 0:
         partial.unlink(missing_ok=True)
-        raise VoiceError(f"{artifact.filename} is {received} bytes; this extension's manifest "
-                         f"says {artifact.size}. Nothing was installed.")
-    if digest.hexdigest().casefold() != artifact.sha256:
+        raise VoiceError(f"{artifact.filename} downloaded as an empty file. Nothing was "
+                         f"installed.")
+    if expected.size and received != expected.size:
+        partial.unlink(missing_ok=True)
+        raise VoiceError(f"{artifact.filename} arrived as {received} bytes; {expected.source} "
+                         f"says {expected.size}. Nothing was installed.")
+    if expected.sha256 and found != expected.sha256:
         partial.unlink(missing_ok=True)
         raise VoiceError(
-            f"{artifact.filename} downloaded, but its contents are not what this extension's "
-            f"manifest says they should be. The published file has changed since this version "
-            f"was released — update the extension rather than retrying. Nothing was installed."
+            f"{artifact.filename} downloaded, but its contents are not what "
+            f"{expected.source} says they should be. Nothing was installed and Voice Chat "
+            f"is unchanged."
         )
     os.replace(partial, destination)
+    return found
 
 
 def _expand(archive: Path, destination: Path, artifact: Artifact) -> None:
@@ -1242,8 +1443,15 @@ def worker_environment() -> dict:
     }
 
 
-def _make_room(artifacts, staging: Path) -> None:
-    wanted = sum(item.approximate_bytes for item in artifacts)
+def _make_room(artifacts, staging: Path, expectations: dict | None = None) -> None:
+    """Refuse before downloading when the disk clearly cannot take it.
+
+    Sized from what the publisher said where this repository has not pinned a
+    byte count, so a bundle nobody pinned still gets the check rather than
+    silently skipping it for want of a number.
+    """
+    wanted = sum(((expectations or {}).get(item.local_name) or Expected(None, None, "")).size
+                 or item.approximate_bytes for item in artifacts)
     if wanted <= 0:
         return
     probe = staging
@@ -1347,6 +1555,11 @@ def _claim(kind: str, say=None):
                                "fraction": 0.0}
         logger.warning("Model Chain: Voice Chat could not install the %s model — %s",
                        kind.upper(), reason)
+        # Everything somebody would have to be asked for, written down without
+        # being asked. An install that failed on one machine is diagnosed from
+        # what that machine is, and a log that omits it costs a round trip.
+        logger.warning("Model Chain: Voice Chat install environment — %s", describe_host())
+        logger.debug("Model Chain: the Voice Chat install failed here", exc_info=True)
         raise
     else:
         with _lock:

@@ -38,6 +38,45 @@ import mc_voice_runtime as runtime  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _no_real_installs(tmp_path, monkeypatch):
+    """No test in this file may download anything or write outside tmp_path.
+
+    Both halves of that are load-bearing and both were learned the hard way: a
+    test that posted to the install route without stubbing the installer started
+    a real thread, fetched eighty-five megabytes of runtime, and left it in the
+    working tree. A test that wants an install to run stubs it and gets its own
+    behaviour; every other test gets an explosion rather than somebody's
+    bandwidth.
+    """
+    import mc_voice_models
+    import mc_voice_paths
+
+    monkeypatch.setattr(mc_voice_paths, "data_root", lambda: tmp_path / "voice")
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a test started a real Voice Chat install")
+
+    monkeypatch.setattr(mc_voice_models, "install", refuse)
+    monkeypatch.setattr(mc_voice_models, "install_from", refuse)
+    monkeypatch.setattr(mc_voice_models, "install_runtime", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _forget_progress():
+    """Install progress is module state, and a test that starts one leaves it.
+
+    Without this, a later test asking to install the same bundle is told it is
+    already installing -- which is correct behaviour reported against the wrong
+    test.
+    """
+    import mc_voice_models
+
+    mc_voice_models._progress.clear()
+    yield
+    mc_voice_models._progress.clear()
+
+
+@pytest.fixture(autouse=True)
 def _forget_repeats():
     """The refusal log is throttled, so its memory is module state.
 
@@ -263,12 +302,16 @@ class TestThereIsNoSignInGate:
         """The reported blocker, as a test. Credentials are configured, the
         caller has no session cookie this module can see, and the routes work --
         because the page they came from was served by that WebUI."""
+        started = []
+        import mc_voice_models
+
+        monkeypatch_install(mc_voice_models, started)
         app.auth = {"someone": "hunter2"}
         app.tokens = {}
         with TestClient(app) as client:
             assert client.post(api.STATUS_ROUTE, headers=key).status_code == 200
             assert client.post(api.INSTALL_ROUTE, headers=key,
-                               json={"kind": "stt"}).status_code in (200, 409)
+                               json={"kind": "stt"}).status_code == 200
 
     def test_command_line_credentials_do_not_gate_it_either(self, client, key, installed,
                                                             host, monkeypatch):
@@ -520,6 +563,16 @@ class TestSpeakingAReply:
         assert api.take_reply(token) == "", "a consumed target was put back"
 
 
+def monkeypatch_install(models_module, recorder):
+    """Replace the installer with something that records and returns.
+
+    Written as a plain function rather than a fixture because the tests that
+    need it are scattered and each wants its own recorder.
+    """
+    models_module.install = lambda *a, **k: recorder.append(a)
+    return recorder
+
+
 @pytest.fixture
 def installable(monkeypatch):
     """A build where the manifest is pinned, so an install may actually start."""
@@ -549,12 +602,12 @@ class TestInstalling:
             time.sleep(0.02)
         assert asked == ["stt"]
 
-    def test_a_build_that_cannot_install_refuses_in_the_reply(self, client, key,
-                                                              monkeypatch):
-        """The defect this fixes. The first version started a thread whatever
-        the answer was, the thread discovered on the other side that this build
-        has nothing to install, and the browser -- already told "started" --
-        sat on "Starting…" indefinitely."""
+    def test_this_build_not_having_pinned_a_bundle_is_not_a_refusal(self, client, key,
+                                                                    monkeypatch):
+        """The blocker that shipped. Whether this repository's release machine
+        could reach the publishers is a fact about that machine, and it has no
+        business appearing in front of somebody who has an Internet connection
+        and pressed a button."""
         started = []
         import mc_voice_models
 
@@ -562,10 +615,29 @@ class TestInstalling:
                             lambda *a, **k: started.append(a))
         answered = client.post(api.INSTALL_ROUTE, headers=key, json={"kind": "stt"})
 
+        assert answered.status_code == 200
+        assert answered.json()["ok"] is True
+        for _ in range(50):
+            if started:
+                break
+            time.sleep(0.02)
+        assert started, "the install was accepted and then never started"
+
+    def test_a_refusal_that_does_exist_is_still_in_the_reply(self, client, key,
+                                                             monkeypatch):
+        """Not every refusal is gone -- an unsupported platform is still one --
+        and the ones that remain are answered to the caller rather than
+        discovered on a background thread it cannot see."""
+        started = []
+        import mc_voice_models
+
+        monkeypatch.setattr(mc_voice_models, "install", lambda *a, **k: started.append(a))
+        monkeypatch.setattr(mc_voice_models, "current_platform",
+                            lambda: ("haiku", "vax", "3.11"))
+        answered = client.post(api.INSTALL_ROUTE, headers=key, json={"kind": "stt"})
+
         assert answered.status_code == 409
-        payload = answered.json()
-        assert payload["ok"] is False
-        assert "pinned" in payload["error"]
+        assert "no tested CPU runtime" in answered.json()["error"]
         time.sleep(0.1)
         assert started == [], "a refused install still started a download thread"
 
