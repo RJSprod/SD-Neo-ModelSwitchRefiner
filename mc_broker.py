@@ -125,6 +125,163 @@ RANK_LABELS = {
     RANK_ACTIVE: "active",
 }
 
+# --------------------------------------------------------------------------- #
+# Resource domains (section 4)
+# --------------------------------------------------------------------------- #
+#
+# The whole of this change set is one correction, and it is worth stating
+# before any of the machinery below: a conflict is between two workloads that
+# want the *same physical thing*. Two workloads are not in conflict because
+# both are "GPU work", or "AI work", or "models". They are in conflict when
+# they want the same processor to execute on, or the same pool of memory that
+# is short of room.
+#
+# So there are two vocabularies here rather than one, because there are two
+# questions:
+#
+#   ExecutionDomain -- "which processor is this request materially using?"
+#   MemoryDomain    -- "if this residency goes away, which pool gains room?"
+#
+# They are deliberately not the same object. A Mixed Conservative llama-server
+# executes on CUDA 1 and keeps its weights in system RAM: it conflicts with an
+# image job on CUDA 1 for execution and with a warm image checkpoint for host
+# RAM, and it is not a source of CUDA 1 VRAM for anybody. One field could not
+# have said that.
+
+EXEC_CPU = "cpu"
+"""Executes on the processor. Positive evidence of no CUDA conflict."""
+EXEC_CUDA = "cuda"
+"""Executes on a *known* physical CUDA card."""
+EXEC_CUDA_UNKNOWN = "cuda?"
+"""Executes on CUDA, on a card that could not be resolved.
+
+Distinct from :data:`EXEC_CPU` and that distinction is the point (invariant
+I-10). Both used to be spelled "no card index", which meant one nullable
+integer was being asked to carry two states needing opposite decisions: a
+processor runtime must *not* wait for an image generation, and a CUDA runtime
+whose card nobody can name must.
+"""
+
+
+@dataclass(frozen=True)
+class ExecutionDomain:
+    """Which processor a workload is materially executing on (section 4.1).
+
+    Conflict is symmetric, and it is conservative in exactly one direction:
+    an unresolved CUDA card conflicts with every CUDA domain, because the cost
+    of being wrong is two jobs sharing a card for a while, whereas the cost of
+    guessing "different card" wrongly is an image generation and a language
+    model fighting over one processor with neither aware of the other.
+
+    A CUDA workload's incidental host-thread activity is not modelled as a
+    second domain. Forge uses CPU threads for every generation; if that made a
+    processor-resident llama-server "conflicting", the CPU case this design
+    exists to unblock would never run.
+    """
+
+    kind: str = EXEC_CUDA_UNKNOWN
+    card: int | None = None
+
+    @property
+    def is_cpu(self) -> bool:
+        return self.kind == EXEC_CPU
+
+    @property
+    def is_cuda(self) -> bool:
+        return self.kind in (EXEC_CUDA, EXEC_CUDA_UNKNOWN)
+
+    @property
+    def known(self) -> bool:
+        """Whether the physical processor is identified."""
+        return self.kind == EXEC_CPU or (self.kind == EXEC_CUDA and self.card is not None)
+
+    def conflicts_with(self, other: "ExecutionDomain | None") -> bool:
+        """Whether two active workloads are competing for one processor."""
+        if other is None:
+            return False
+        if self.is_cpu or other.is_cpu:
+            # Two processor workloads really do share the processor; a
+            # processor workload and a CUDA one do not, whatever else they
+            # share (invariant I-1).
+            return self.is_cpu and other.is_cpu
+        if self.kind == EXEC_CUDA and other.kind == EXEC_CUDA:
+            return self.card == other.card
+        return True  # at least one unresolved CUDA card
+
+    def describe(self) -> str:
+        if self.is_cpu:
+            return "the processor"
+        if self.kind == EXEC_CUDA and self.card is not None:
+            return f"GPU {self.card}"
+        return "an unidentified GPU"
+
+
+CPU_EXECUTION = ExecutionDomain(EXEC_CPU)
+"""The processor. A module-level value because there is only ever one of it."""
+
+UNKNOWN_CUDA_EXECUTION = ExecutionDomain(EXEC_CUDA_UNKNOWN)
+"""CUDA, card unresolved. Conservative against every CUDA domain."""
+
+
+def cuda_execution(card: int | None) -> ExecutionDomain:
+    """The execution domain of a CUDA workload on ``card``.
+
+    ``None`` or a negative index is :data:`UNKNOWN_CUDA_EXECUTION` and is
+    emphatically *not* the processor -- that is the collapse invariant I-10
+    forbids.
+    """
+    if card is None:
+        return UNKNOWN_CUDA_EXECUTION
+    try:
+        index = int(card)
+    except (TypeError, ValueError):
+        return UNKNOWN_CUDA_EXECUTION
+    return ExecutionDomain(EXEC_CUDA, index) if index >= 0 else UNKNOWN_CUDA_EXECUTION
+
+
+def image_execution_domain() -> ExecutionDomain:
+    """Which processor the image side executes on (section 4.1).
+
+    Always CUDA: Forge is fixed to the card it was started on, and a card that
+    cannot be resolved is unresolved rather than absent. Answering "processor"
+    for an unreadable index would tell every CUDA language model it was
+    independent of a generation it may well be sitting on top of.
+    """
+    return cuda_execution(image_device_index())
+
+
+# --------------------------------------------------------------------------- #
+# Memory domains (section 4.2)
+# --------------------------------------------------------------------------- #
+
+MEMORY_VRAM = "vram"
+MEMORY_HOST_RAM = "ram"
+
+
+class _AnyCard:
+    """"Every card", which is not the same question as "the unknown card".
+
+    A card filter has three states and one nullable integer can only carry
+    two, so section 7.1 asks for them to be kept apart: ``card=ANY_CARD`` means
+    *do not filter*, ``card=3`` means card three, and ``card=None`` means the
+    residency whose card nobody could name. Overloading ``None`` for the first
+    and the third is how a query for "LLM bytes on the image card" comes back
+    with a 5090's nineteen gigabytes.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging affordance
+        return "ANY_CARD"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+ANY_CARD = _AnyCard()
+"""Sentinel for "no card filter requested". See :class:`_AnyCard`."""
+
+
 STALE_AFTER_SECONDS = 15 * 60
 """How long a hot residency stays hot without being touched.
 
@@ -232,6 +389,29 @@ class Residency:
     rank: int = RANK_HOT
     pinned: bool = False
     last_used: float = field(default_factory=time.monotonic)
+    card: int | None = None
+    """Which physical card gains room if this residency goes away (section 7.1).
+
+    ``None`` is "not known", never "all of them" and never "the image card".
+    A residency whose card is unknown is a residency nothing may be targeted
+    at: invariant I-11 -- an unidentifiable memory domain never authorises
+    destructive reclaim, because stopping the wrong runtime can free zero bytes
+    where they were needed and destroy a warm prompt cache on the way.
+    """
+    domain: str = MEMORY_VRAM
+    """Which pool this occupies. Everything declared here is VRAM today."""
+
+    def on_card(self, card) -> bool:
+        """Whether releasing this could add room on ``card``.
+
+        ``ANY_CARD`` matches everything, an integer matches only that card,
+        and an unknown card matches only an explicit request for the unknown.
+        """
+        if isinstance(card, _AnyCard):
+            return True
+        if card is None:
+            return self.card is None
+        return self.card is not None and int(self.card) == int(card)
 
     @property
     def effective_rank(self) -> int:
@@ -259,19 +439,37 @@ _register_lock = threading.RLock()
 
 
 def declare(family: str, key: str, label: str, size_bytes: int,
-            rank: int = RANK_HOT, pinned: bool = False) -> Residency:
-    """Record that ``key`` now occupies VRAM, or update what is known about it."""
+            rank: int = RANK_HOT, pinned: bool = False,
+            card: int | None = None) -> Residency:
+    """Record that ``key`` now occupies VRAM, or update what is known about it.
+
+    ``card`` is the physical GPU whose free memory grows if this goes away.
+    Passing it is what makes a reclaim request for one card able to leave the
+    other card's runtime alone (invariant I-3).
+    """
     with _register_lock:
         entry = _register.get(key)
         if entry is None:
             entry = Residency(family=family, key=key, label=label, bytes=int(size_bytes),
-                              rank=rank, pinned=pinned)
+                              rank=rank, pinned=pinned, card=_card_index(card))
             _register[key] = entry
         else:
             entry.family, entry.label = family, label
             entry.bytes, entry.rank, entry.pinned = int(size_bytes), rank, pinned
+            entry.card = _card_index(card)
             entry.touch()
         return entry
+
+
+def _card_index(card) -> int | None:
+    """``card`` as a physical index, or None when it is not one."""
+    if card is None or isinstance(card, _AnyCard):
+        return None
+    try:
+        index = int(card)
+    except (TypeError, ValueError):
+        return None
+    return index if index >= 0 else None
 
 
 def retire(key: str) -> None:
@@ -301,13 +499,19 @@ def pin(key: str, pinned: bool = True) -> None:
             entry.pinned = bool(pinned)
 
 
-def residencies(family: str | None = None) -> list[Residency]:
+def residencies(family: str | None = None, *, card=ANY_CARD) -> list[Residency]:
+    """Everything ``family`` holds, optionally only on one physical card.
+
+    ``card`` defaults to :data:`ANY_CARD` -- no filter -- which is why the
+    sentinel exists rather than a ``None`` default. See :class:`_AnyCard`.
+    """
     with _register_lock:
-        return [e for e in _register.values() if family is None or e.family == family]
+        return [e for e in _register.values()
+                if (family is None or e.family == family) and e.on_card(card)]
 
 
-def resident_bytes(family: str | None = None) -> int:
-    return sum(e.bytes for e in residencies(family))
+def resident_bytes(family: str | None = None, *, card=ANY_CARD) -> int:
+    return sum(e.bytes for e in residencies(family, card=card))
 
 
 def clear() -> None:
@@ -364,6 +568,17 @@ class Active:
     family: str
     label: str
     since: float
+    domain: ExecutionDomain = UNKNOWN_CUDA_EXECUTION
+    """Which processor this workload is materially using (section 12.4).
+
+    Defaulted rather than required so that every existing caller keeps working,
+    and defaulted to *unknown CUDA* rather than to anything convenient: a
+    workload that did not say where it executes is one nothing may be told it
+    is independent of.
+    """
+
+    def describe(self) -> str:
+        return f"{self.label} on {self.domain.describe()}"
 
 
 class _JobLock:
@@ -456,9 +671,48 @@ def active() -> Active | None:
         return _active[-1] if _active else None
 
 
+def active_workloads() -> tuple[Active, ...]:
+    """Every workload holding the lock right now, outermost first.
+
+    A list rather than one value because section 14.1 requires the UI to be
+    able to say "image generating on GPU 0" *and* "conversation generating on
+    GPU 1" at the same time. It does not mean the lock has stopped serialising
+    LLM turns -- it has not -- only that "what is running" is no longer a
+    question with at most one answer.
+    """
+    with _active_lock:
+        return tuple(_active)
+
+
 def active_family() -> str | None:
     running = active()
     return running.family if running is not None else None
+
+
+def image_activity() -> Active | None:
+    """The host's own image job as a workload, when one is running.
+
+    Derived rather than registered: Forge starts its generations itself and
+    takes no lock of ours (see the note above :func:`host_busy`), so the only
+    honest source for "is an image job running" is ``shared.state``. Presented
+    in the same shape as an LLM workload so that :func:`activities` can hand
+    the panel one list.
+    """
+    if not host_busy():
+        return None
+    return Active(FAMILY_IMAGE, "Image generation", 0.0, image_execution_domain())
+
+
+def activities() -> tuple[Active, ...]:
+    """Everything active right now, image job included (section 14.1).
+
+    The one function a status display should ask. ``active()`` answers "which
+    workload holds the broker's lock", which was the same question only for as
+    long as an image generation and an LLM turn could not both be running.
+    """
+    found = [entry for entry in active_workloads() if entry.family != FAMILY_IMAGE]
+    image = image_activity()
+    return (image, *found) if image is not None else tuple(found)
 
 
 class workload:
@@ -473,9 +727,19 @@ class workload:
     """
 
     def __init__(self, family: str, label: str = "", *, timeout: float | None = None,
-                 background: bool = False, required: bool = True):
+                 background: bool = False, required: bool = True,
+                 domain: ExecutionDomain | None = None):
         self.family, self.label = family, label or family
         self.timeout, self.background, self.required = timeout, background, required
+        self.domain = domain or UNKNOWN_CUDA_EXECUTION
+        """Where this workload executes, for the *other* family's conflict check.
+
+        The lock this class takes is still global across LLM turns (section
+        6.5, non-goal N2). What the domain changes is who has to wait for the
+        holder from outside that lock -- an image generation on GPU 0 does not
+        wait for a completion on GPU 1, and did, for as long as "an LLM is
+        active" was the whole of the question.
+        """
         self._held: _Held | None = None
         self._counted = False
         self._entry: Active | None = None
@@ -505,7 +769,7 @@ class workload:
             self._held = _Held(self.family, self.label, False)
             return self._held
 
-        self._entry = Active(self.family, self.label, time.monotonic())
+        self._entry = Active(self.family, self.label, time.monotonic(), self.domain)
         with _active_lock:
             _active.append(self._entry)
         self._held = _Held(self.family, self.label, True)
@@ -654,27 +918,61 @@ def inside_host_job() -> bool:
     return getattr(_host_job, "depth", 0) > 0
 
 
-def await_idle(timeout: float = 120.0) -> bool:
-    """Block until no LLM workload holds the GPU. Returns whether it went idle.
+def conflicting_llm(domain: ExecutionDomain | None) -> Active | None:
+    """An active LLM workload competing with ``domain`` for a processor.
 
-    Called from the image side before a generation. Bounded because an image
-    generation must never be blocked indefinitely by this extension: on
-    timeout it returns False, the caller proceeds, and the two overlap -- which
-    is slow, and is still better than a generation that never starts.
+    The predicate the image side's wait is built on, and the whole of what
+    section 12 narrows. It used to be "is an LLM running"; it is now "is an LLM
+    running *on the thing I am about to use*", which on a two-card machine is a
+    different question with a different answer several times a minute.
+
+    ``None`` keeps the old meaning -- any LLM at all conflicts -- so a caller
+    that cannot say where it executes is no worse off than before.
+    """
+    for entry in active_workloads():
+        if entry.family != FAMILY_LLM:
+            continue
+        if domain is None or domain.conflicts_with(entry.domain):
+            return entry
+    return None
+
+
+def await_idle(timeout: float = 120.0, *, domain: ExecutionDomain | None = None) -> bool:
+    """Block until no *conflicting* LLM workload holds a processor this one needs.
+
+    Called from the image side before a generation, with the image card's
+    execution domain. Returns immediately -- and this is the point of the
+    parameter -- for an LLM executing on another known card or on the
+    processor, because neither of those is competing with a generation on this
+    one (invariant I-1). It still waits for a same-card LLM and for one whose
+    card could not be resolved (section 12.3).
+
+    Bounded because an image generation must never be blocked indefinitely by
+    this extension: on timeout it returns False, the caller proceeds, and the
+    two overlap -- which is slow, and is still better than a generation that
+    never starts.
     """
     deadline = time.monotonic() + max(float(timeout), 0.0)
     first = True
-    while active_family() == FAMILY_LLM:
+    while True:
+        running = conflicting_llm(domain)
+        if running is None:
+            if not first:
+                logger.info("Model Chain: the LLM on %s has finished; generating",
+                            domain.describe() if domain is not None else "the card")
+            return True
         if time.monotonic() >= deadline:
             note(FAMILY_IMAGE,
-                 "an LLM request was still running after the wait expired; the generation "
-                 "starts anyway and the two will share the card briefly")
+                 f"an LLM request on {running.domain.describe()} was still running after the "
+                 f"wait expired; the generation starts anyway and the two will share the "
+                 f"card briefly")
             return False
         if first:
             first = False
-            logger.info("Model Chain: waiting for the LLM to finish before generating")
+            logger.info("Model Chain: waiting for the LLM on %s to finish before generating "
+                        "on %s", running.domain.describe(),
+                        domain.describe() if domain is not None else "the image card")
         time.sleep(0.05)
-    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -780,6 +1078,25 @@ def device_free_vram_bytes(index: int | None = None) -> int:
         return free_vram_bytes()
 
 
+def cuda_device_count() -> int:
+    """How many CUDA cards this machine has, or 0 when the question cannot be put.
+
+    Asked in exactly one place -- :func:`_reclaim_scope` -- and only to tell two
+    kinds of "the image card is unknown" apart. On a single-card machine an
+    unreadable index changes nothing: everything is on the one card, so an
+    unfiltered reclaim is a card-local reclaim by construction. On a machine
+    with two, the same unreadable index means residency cannot be attributed at
+    all, and stopping a runtime on the strength of that is the guess section
+    16.1 forbids.
+    """
+    try:
+        import torch
+
+        return int(torch.cuda.device_count())
+    except Exception:
+        return 0
+
+
 def release_cached_vram() -> int:
     """Give the image allocator's cached blocks back to the driver, for the LLM."""
     try:
@@ -821,6 +1138,253 @@ def fits(needed_bytes: int, *, margin: int | None = None) -> bool:
     return free_vram_bytes() >= int(needed_bytes) + int(reserve)
 
 
+# --------------------------------------------------------------------------- #
+# Host RAM (section 10)
+# --------------------------------------------------------------------------- #
+#
+# System RAM is in this module for one reason, and it is not tidiness: this
+# repository already uses it as a residency tier. ``mc_memory`` keeps whole
+# checkpoints, their text encoders and their VAEs warm there so a Stage 1 /
+# Stage 2 switch is a pointer swap rather than a disk load, and llama.cpp puts
+# its weights there for every CPU and Mixed Conservative placement. Those are
+# not two budgets. They are one physical pool, and planning them separately
+# fails in exactly the way mixing a 3090's free VRAM with a 5090's residency
+# fails -- arithmetic about different owners of one thing.
+#
+# What is emphatically *not* here: a second image cache, a page-cache manager,
+# or any notion that the broker can pin or account for mmap'd GGUF pages.
+# ``mc_memory`` owns the image cache and is asked; the operating system owns
+# file-backed warmth and is left alone (invariant I-8, non-goal N5). All this
+# module adds is the admission boundary where the two families meet.
+
+
+def free_ram_bytes() -> int:
+    """Physical memory the OS can hand out right now, or 0 if it cannot be asked.
+
+    Deliberately the operating system's *available* figure rather than a sum of
+    process working sets (section 10.5). A working set is a momentary thing
+    full of shared and file-backed pages the OS will trim under pressure;
+    available memory is the answer to the question admission actually asks,
+    which is "how much can this machine give to new demand immediately".
+    """
+    try:
+        import mc_memory
+
+        return max(int(mc_memory.free_ram_bytes()), 0)
+    except Exception:
+        logger.debug("Model Chain: could not read available system RAM", exc_info=True)
+        return 0
+
+
+def total_ram_bytes() -> int:
+    try:
+        import mc_memory
+
+        return max(int(mc_memory.total_ram_bytes()), 0)
+    except Exception:
+        return 0
+
+
+def ram_reserve_bytes() -> int:
+    """Host memory nothing here may intentionally consume (section 10.6).
+
+    ``mc_memory``'s own floor, reused rather than re-invented, so that the
+    image cache and an incoming language model are protecting the same number.
+    Two reserves would mean the second workload could spend the first's.
+    """
+    try:
+        import mc_memory
+
+        return max(int(mc_memory.RAM_RESERVE_BYTES), 0)
+    except Exception:
+        return 2 * _GB
+
+
+def image_warm_ram_bytes() -> int:
+    """Host RAM the image cache is explicitly holding, or 0."""
+    try:
+        import mc_memory
+
+        return max(int(mc_memory.warm_ram_bytes()), 0)
+    except Exception:
+        return 0
+
+
+def reclaimable_image_ram_bytes() -> int:
+    """Of that, what ``mc_memory`` says is safe to drop right now.
+
+    Not the same number, and the difference is invariant I-10 of section 10:
+    a checkpoint the current pass is executing against is host memory the image
+    job *needs*, and is not a victim for anybody's admission arithmetic. Only
+    ``mc_memory`` knows which entries are which, so only ``mc_memory`` is asked.
+    """
+    try:
+        import mc_memory
+
+        return max(int(mc_memory.reclaimable_warm_ram_bytes()), 0)
+    except Exception:
+        return 0
+
+
+def release_image_warm_ram(needed_bytes: int, reason: str = "") -> int:
+    """Ask ``mc_memory`` to give back ``needed_bytes`` of warm cache.
+
+    A request, through ``mc_memory``'s own cache operations. Nothing here
+    touches a model object, knows what a patcher is, or decides which
+    checkpoint is least useful -- invariant I-7, and the same division of
+    labour the VRAM half of this module has always kept.
+    """
+    try:
+        import mc_memory
+
+        return max(int(mc_memory.release_warm_ram(int(needed_bytes), reason=reason)), 0)
+    except Exception:
+        logger.debug("Model Chain: could not release warm image RAM", exc_info=True)
+        return 0
+
+
+def llm_host_ram_bytes() -> int:
+    """Host RAM the running language models materially need, or 0.
+
+    Asked of the LLM family's reclaimer, which is the only thing that knows how
+    each of its servers was placed. A full-GPU llama-server answers zero here
+    even though its mapped GGUF may be warm in the page cache -- that warmth is
+    the operating system's and is reclaimable by it (invariant I-8), and
+    counting the file's whole size as a hard reservation would block image
+    generations that are perfectly safe (section 10.7, test T41).
+    """
+    reclaimer = _reclaimer(FAMILY_LLM)
+    if reclaimer is None:
+        return 0
+    asking = getattr(reclaimer, "host_ram_bytes", None)
+    if not callable(asking):
+        return 0
+    try:
+        return max(int(asking() or 0), 0)
+    except Exception:
+        logger.debug("Model Chain: could not read the LLM's host-RAM demand", exc_info=True)
+        return 0
+
+
+@dataclass(frozen=True)
+class Admission:
+    """Whether a new host-RAM demand can be met, and what it cost to say yes."""
+
+    needed: int
+    reserve: int
+    available_before: int
+    available: int
+    freed: int = 0
+    actions: tuple[str, ...] = ()
+    known: bool = True
+    """False when available RAM could not be read at all (section 16.3)."""
+
+    @property
+    def fits(self) -> bool:
+        """Whether the demand can be admitted above the safety floor.
+
+        True when the question could not be asked, and that is not optimism --
+        it is the existing behaviour preserved. Refusing to start a language
+        model because ``psutil`` is missing would break installations that work
+        today, so an unanswerable question warns and proceeds; what it must not
+        do is *reclaim* on the strength of numbers nobody has.
+        """
+        if not self.known:
+            return True
+        return self.available >= self.needed + self.reserve
+
+    @property
+    def moved_anything(self) -> bool:
+        return bool(self.actions)
+
+    @property
+    def shortfall(self) -> int:
+        if not self.known:
+            return 0
+        return max(self.needed + self.reserve - self.available, 0)
+
+    def describe(self) -> str:
+        if not self.known:
+            return "available system RAM could not be read"
+        head = (f"{self.needed / _GB:.1f} GB wanted, {self.available / _GB:.1f} GB available, "
+                f"{self.reserve / _GB:.1f} GB reserved")
+        if self.actions:
+            return f"{head}; {'; '.join(self.actions)}"
+        return head
+
+
+def host_ram_fits(needed_bytes: int, *, reserve: int | None = None) -> bool:
+    """Whether ``needed_bytes`` fits above the host reserve without moving anything."""
+    available = free_ram_bytes()
+    if available <= 0:
+        return True
+    floor = ram_reserve_bytes() if reserve is None else max(int(reserve), 0)
+    return available >= max(int(needed_bytes), 0) + floor
+
+
+def admit_host_ram(needed_bytes: int, *, reason: str = "",
+                   reserve: int | None = None) -> Admission:
+    """Make room in system RAM for ``needed_bytes``, moving as little as possible.
+
+    Section 10.8's order, and the first step is the one that matters most:
+    **if it already fits, nothing moves.** Sharing a memory domain is not a
+    conflict (invariant I-5). Two processor-resident language models and a warm
+    Stage 2 checkpoint that all fit above the reserve should all stay exactly
+    where they are; a scheduler that emptied the cache merely because somebody
+    else also uses RAM would have turned a capacity-aware design back into
+    evict-on-switch.
+
+    When it does not fit, the *lowest-priority* residency yields first, and
+    that is explicitly managed warm image cache -- state whose only purpose is
+    to make a future switch faster (section 11.3). What comes back is measured
+    afterwards rather than assumed: invariant I-15, because the number that
+    decides whether a llama-server may start is what the OS says is available,
+    not the sum of what a cache believed it was holding.
+
+    Stopping another language model is *not* done here. It is a stronger action
+    than dropping a cache entry, it depends on the user's role-sharing setting,
+    and the runtime layer owns both of those; this returns a shortfall and lets
+    it decide (section 10.8 step 7).
+    """
+    needed = max(int(needed_bytes), 0)
+    floor = ram_reserve_bytes() if reserve is None else max(int(reserve), 0)
+    before = free_ram_bytes()
+    if before <= 0:
+        logger.warning(
+            "Model Chain: available system RAM could not be read, so safe coexistence "
+            "could not be established for %s. Nothing was released — reclaiming on "
+            "invented numbers is worse than not knowing.", reason or "this workload")
+        return Admission(needed, floor, 0, 0, known=False)
+
+    if before >= needed + floor:
+        return Admission(needed, floor, before, before)
+
+    deficit = needed + floor - before
+    reclaimable = reclaimable_image_ram_bytes()
+    actions: list[str] = []
+    if reclaimable <= 0:
+        note(FAMILY_LLM,
+             f"host RAM is {deficit / _GB:.1f} GB short for {reason or 'a new runtime'} "
+             f"({before / _GB:.1f} GB available, {floor / _GB:.1f} GB reserved) and no image "
+             f"warm cache is safe to drop")
+        return Admission(needed, floor, before, before)
+
+    freed = release_image_warm_ram(deficit, reason or "a RAM-backed language model")
+    # The measurement wins over the arithmetic, always. A cache that reports
+    # fourteen gigabytes released has said what it stopped referencing, not
+    # what the operating system has actually made available again.
+    after = free_ram_bytes()
+    if after <= 0:
+        after = before
+    if freed > 0:
+        actions.append(f"released {freed / _GB:.1f} GB of inactive image RAM cache")
+        note(FAMILY_IMAGE,
+             f"released {freed / _GB:.1f} GB of inactive image RAM cache for "
+             f"{reason or 'a RAM-backed language model'}; host RAM is now "
+             f"{after / _GB:.1f} GB available")
+    return Admission(needed, floor, before, after, freed, tuple(actions))
+
+
 def _reason_for(family: str) -> str:
     """What to call a request that did not say what it was for.
 
@@ -830,8 +1394,42 @@ def _reason_for(family: str) -> str:
     return f"the {_named(family)} workload"
 
 
+def _reclaim_scope(family: str, card) -> tuple[object, bool]:
+    """Which card a VRAM request is about, and whether reclaim may act on it.
+
+    Returns ``(filter, allowed)``. The filter is what :func:`residencies` and
+    the family's reclaimer are asked to restrict themselves to; ``allowed`` is
+    whether cross-family reclaim may happen at all.
+
+    Three cases, and the third is the one worth the function:
+
+    * A card was named. That card, and reclaim proceeds -- invariant I-3, and
+      the reclaimer is told the number so residency on any other card is
+      absent from the victim set rather than merely ranked below it.
+    * No card was named and the image side's card can be read. The image card,
+      because a request from the image family is by definition about the card
+      Forge generates on.
+    * No card can be read at all. Then it depends on how many cards there are.
+      One card means the unfiltered answer *is* the card-local answer. More
+      than one means residency cannot be attributed, and section 16.1 is
+      explicit that a guessed GPU is not a reclaim target -- so nothing is
+      taken and the shortfall is reported honestly instead.
+    """
+    named = _card_index(card)
+    if named is not None:
+        return named, True
+    if not isinstance(card, _AnyCard):
+        # An explicit ``None``: the caller knows it cannot name its card.
+        return ANY_CARD, cuda_device_count() <= 1
+    index = image_device_index() if family == FAMILY_IMAGE else -1
+    if index >= 0:
+        return index, True
+    return ANY_CARD, cuda_device_count() <= 1
+
+
 def request_vram(family: str, needed_bytes: int, *, reason: str = "",
-                 margin: int | None = None, exclusive_sweep: bool = True) -> Reclaim:
+                 margin: int | None = None, exclusive_sweep: bool = True,
+                 card=ANY_CARD) -> Reclaim:
     """Make room for ``needed_bytes`` of ``family`` work, moving as little as possible.
 
     The order of the branches below is the policy, so it is worth reading as
@@ -852,11 +1450,22 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
     needed = max(int(needed_bytes), 0)
     reserve = safety_margin_bytes() if margin is None else int(margin)
     target = needed + reserve
+    scope, may_reclaim = _reclaim_scope(family, card)
+    where = scope if isinstance(scope, int) else None
     # Which "free" this is depends on who is asking. An image pass can spend
     # the host allocator's cache; llama.cpp is another process and cannot, so
     # asking on its behalf against the host's figure frees nothing and reports
     # a shortfall that is not there -- or, worse, no shortfall when there is.
-    reading = device_free_vram_bytes if family == FAMILY_LLM else free_vram_bytes
+    # Either way it is *this card's* figure: mixing a reading from one card
+    # with residency bytes from another is invariant I-2's whole subject.
+    if family == FAMILY_LLM:
+        def reading():
+            return device_free_vram_bytes(where)
+    elif where is not None and where != image_device_index():
+        def reading():
+            return device_free_vram_bytes(where)
+    else:
+        reading = free_vram_bytes
     free = reading()
     before = free
     actions: list[str] = []
@@ -871,7 +1480,8 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
     # then the generation two seconds later spent thirteen seconds moving the
     # very same weights back -- every press, on a card that had been holding
     # both of them comfortably. See :func:`_victim_order`.
-    sweeping = exclusive_sweep and family == FAMILY_IMAGE and mode() == MODE_EXCLUSIVE
+    sweeping = (exclusive_sweep and family == FAMILY_IMAGE and mode() == MODE_EXCLUSIVE
+                and may_reclaim)
     swept = False
 
     def say_which_setting_did_this() -> None:
@@ -899,9 +1509,14 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
     # is precisely the unpredictability Exclusive mode exists to remove
     # (sections 10 and 18).
     if sweeping:
+        # Scoped to the image card, and only to it. "The image family owns the
+        # card" is a promise about Forge's physical card; it carries no
+        # authority whatever over a second GPU (section 9.2), and a sweep that
+        # crossed to one would stop a language model to free memory the
+        # generation cannot use.
         released = _release(FAMILY_LLM, target,
                             reason or f"the {_named(family)} workload taking VRAM ownership",
-                            sweep=True)
+                            sweep=True, card=scope)
         freed += released.freed
         actions.extend(released.actions)
         free = reading()
@@ -922,14 +1537,20 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
 
     deficit = target - free
 
-    if not sweeping:
+    if not sweeping and may_reclaim:
         for victim_family in _victim_order(family):
             if freed >= deficit:
                 break
             released = _release(victim_family, deficit - freed,
-                                reason or f"the {_named(family)} workload")
+                                reason or f"the {_named(family)} workload", card=scope)
             freed += released.freed
             actions.extend(released.actions)
+    elif not may_reclaim:
+        note(family,
+             f"{reason or _reason_for(family)} is short {deficit / _GB:.1f} GB, and which "
+             f"card it is short on could not be established on a machine with more than one "
+             f"— nothing was released, because a runtime chosen by guesswork can free every "
+             f"byte it holds and still leave this shortfall exactly where it was")
 
     after = reading()
     remaining = max(target - max(after, free + freed), 0)
@@ -946,9 +1567,10 @@ def request_vram(family: str, needed_bytes: int, *, reason: str = "",
              f"{result.describe()}")
     elif remaining > 0:
         note(family,
-             f"{reason or _reason_for(family)} is short {remaining / _GB:.1f} GB and nothing "
-             f"evictable was found; expect the driver to spill into system memory"
-             f"{_unaccounted_note()}")
+             f"{reason or _reason_for(family)} is short {remaining / _GB:.1f} GB on "
+             f"{cuda_execution(where).describe() if where is not None else 'the card'} and "
+             f"nothing evictable was found there; expect the driver to spill into system "
+             f"memory{_unaccounted_note(scope)}")
 
     say_which_setting_did_this()
     return result
@@ -1012,7 +1634,8 @@ def release_for_llm(needed_bytes: int, *, card: int | None = None, reason: str =
         return Reclaim(needed, free, 0, deficit, ())
 
     released = _release(FAMILY_IMAGE, deficit,
-                        reason or "the LLM, which the user has given priority on this card")
+                        reason or "the LLM, which the user has given priority on this card",
+                        card=card)
     after = device_free_vram_bytes(card)
     # The measurement wins over the arithmetic. ``_release`` reports what the
     # image side believes it handed back, and what matters to the launch that
@@ -1027,7 +1650,7 @@ def release_for_llm(needed_bytes: int, *, card: int | None = None, reason: str =
     elif remaining > 0:
         note(FAMILY_LLM,
              f"{reason or 'the LLM'} is short {remaining / _GB:.1f} GB on GPU {card} and the "
-             f"image side had nothing evictable to give{_unaccounted_note()}")
+             f"image side had nothing evictable to give{_unaccounted_note(card)}")
     return result
 
 
@@ -1054,7 +1677,7 @@ def _same_card_as_the_image_side(card: int | None) -> bool:
     return int(card) == int(image)
 
 
-def unaccounted_bytes() -> int:
+def unaccounted_bytes(*, card=ANY_CARD) -> int:
     """VRAM in use that neither family admits to holding.
 
     The subtraction is the point. The card reports what is free; the image side
@@ -1067,10 +1690,16 @@ def unaccounted_bytes() -> int:
     total = total_vram_bytes()
     if total <= 0:
         return 0
-    accounted = sum(max(resident_bytes(family), reported_bytes(family))
+    # Which card this is about: the one asked for, else the image side's, else
+    # -- when neither can be established -- the machine, which is the answer
+    # this function always gave and is right on the single-card installation it
+    # was written for.
+    named = _card_index(card if not isinstance(card, _AnyCard) else image_device_index())
+    scope = named if named is not None else ANY_CARD
+    accounted = sum(held_bytes(family, card=scope)
                     for family in (FAMILY_IMAGE, FAMILY_LLM))
     return max(total - free_vram_bytes() - accounted - _DRIVER_OVERHEAD
-               - _own_llm_context_bytes(), 0)
+               - _own_llm_context_bytes(scope), 0)
 
 
 _DRIVER_OVERHEAD = 1 * _GB
@@ -1084,20 +1713,28 @@ a whole model somebody cannot see -- still clears it easily.
 """
 
 
-def _own_llm_running() -> bool:
-    """Whether the llama-server this WebUI started is up right now."""
-    asking = getattr(_reclaimer(FAMILY_LLM), "running", None)
-    if not callable(asking):
+def _own_llm_running(card=ANY_CARD) -> bool:
+    """Whether a llama-server this WebUI started is executing on ``card``.
+
+    Executing, not resident. A Mixed Conservative server holds its weights in
+    system RAM and still keeps a CUDA context on the card it names, which is
+    exactly the allowance :func:`_own_llm_context_bytes` exists to make -- and
+    exactly the allowance that must not be made on a *different* card, where
+    the server has nothing at all (section 7.6).
+    """
+    reclaimer = _reclaimer(FAMILY_LLM)
+    if reclaimer is None:
         return False
     try:
-        return bool(asking())
+        answer = _ask(reclaimer, "running", card, spans_cards=True)
     except Exception:
         logger.debug("Model Chain: could not ask whether llama-server is running",
                      exc_info=True)
         return False
+    return bool(answer)
 
 
-def _own_llm_context_bytes() -> int:
+def _own_llm_context_bytes(card=ANY_CARD) -> int:
     """The card our own llama-server holds without holding any weights there.
 
     A server placed in system RAM reports nothing resident and declares
@@ -1113,9 +1750,9 @@ def _own_llm_context_bytes() -> int:
     declared figure, and subtracting it again would hide a gigabyte of real
     residency.
     """
-    if not _own_llm_running():
+    if not _own_llm_running(card):
         return 0
-    if max(resident_bytes(FAMILY_LLM), reported_bytes(FAMILY_LLM)) > 0:
+    if held_bytes(FAMILY_LLM, card=card) > 0:
         return 0
     return _DRIVER_OVERHEAD
 
@@ -1145,7 +1782,7 @@ def stray_explanation() -> str:
             "session. Nothing here can reclaim that; check nvidia-smi")
 
 
-def _unaccounted_note() -> str:
+def _unaccounted_note(card=ANY_CARD) -> str:
     """The other half of "nothing evictable was found", when there is one.
 
     "Nothing evictable" is true and, on its own, misleading: it reads as though
@@ -1154,7 +1791,7 @@ def _unaccounted_note() -> str:
     see at all. Two very different problems, one message -- so the message says
     which.
     """
-    stray = unaccounted_bytes()
+    stray = unaccounted_bytes(card=card)
     if stray <= 0:
         return ""
     return f". {stray / _GB:.1f} GB {stray_explanation()}"
@@ -1190,16 +1827,59 @@ def _victim_order(family: str) -> tuple[str, ...]:
     return (FAMILY_LLM,) if family == FAMILY_IMAGE else ()
 
 
-def _release(family: str, needed: int, reason: str, sweep: bool = False) -> Reclaim:
-    """Ask ``family``'s reclaimer to free ``needed`` bytes (or everything, if sweeping)."""
+def _ask(reclaimer, method: str, card, *args, spans_cards: bool = False):
+    """Call ``reclaimer.method`` with a card filter when it accepts one.
+
+    The registered contract is deliberately small -- ``release(needed, reason)``
+    and optionally ``resident_bytes()`` -- so a reclaimer is free to be
+    card-blind, and one that is must keep working. The keyword is therefore
+    offered and its refusal handled; what happens next depends on whether that
+    reclaimer's family can span cards at all.
+
+    ``spans_cards=False`` (the image family): a card-blind answer *is* the
+    card-scoped answer. Forge generates on one card, everything the image side
+    holds is on it, and the broker only ever targets that card for this family
+    -- so the unfiltered call is used and is exact.
+
+    ``spans_cards=True`` (the LLM family, which can be holding two cards at
+    once): a card-blind answer is a machine-wide answer wearing one card's
+    label, and using it is precisely the mistake invariant I-3 exists to
+    prevent. So it comes back as "nothing eligible" instead, which costs a
+    reclaim that did not happen and never costs the wrong process.
+    """
+    call = getattr(reclaimer, method, None)
+    if not callable(call):
+        return None
+    if isinstance(card, _AnyCard):
+        return call(*args)
+    try:
+        return call(*args, card=card)
+    except TypeError:
+        if spans_cards:
+            logger.debug("Model Chain: %s cannot answer %s about one card, and its family "
+                         "can hold more than one", type(reclaimer).__name__, method)
+            return None
+        return call(*args)
+
+
+def _release(family: str, needed: int, reason: str, sweep: bool = False,
+             card=ANY_CARD) -> Reclaim:
+    """Ask ``family``'s reclaimer to free ``needed`` bytes on ``card``.
+
+    ``card`` is a physical GPU index or :data:`ANY_CARD`. When it is an index,
+    everything below -- the protection check, the sweep's "what does it hold",
+    and the reclaimer call itself -- is about that card and nothing else, which
+    is what makes a shortfall on GPU 0 unable to reach a runtime on GPU 1
+    (invariant I-3).
+    """
     reclaimer = _reclaimer(family)
     if reclaimer is None:
         return Reclaim(needed, 0, 0, needed, ())
 
-    protected = [e for e in residencies(family) if not e.evictable]
+    protected = [e for e in residencies(family, card=card) if not e.evictable]
     if protected and not sweep:
         held = sum(e.bytes for e in protected)
-        available = max(resident_bytes(family) - held, 0)
+        available = max(resident_bytes(family, card=card) - held, 0)
         if available <= 0:
             note(family,
                  f"kept {', '.join(e.label for e in protected)} resident: "
@@ -1213,11 +1893,11 @@ def _release(family: str, needed: int, reason: str, sweep: bool = False) -> Recl
         # second: the register is the broker's own picture and is authoritative
         # when it has one, and a reclaimer that has never declared a residency
         # can still know it is holding something.
-        held = resident_bytes(family)
+        held = resident_bytes(family, card=card)
         if held <= 0:
-            reported = getattr(reclaimer, "resident_bytes", None)
             try:
-                held = int(reported() or 0) if callable(reported) else 0
+                held = max(int(_ask(reclaimer, "resident_bytes", card,
+                                    spans_cards=family == FAMILY_LLM) or 0), 0)
             except Exception:
                 held = 0
         if held <= 0:
@@ -1225,7 +1905,8 @@ def _release(family: str, needed: int, reason: str, sweep: bool = False) -> Recl
         needed = max(needed, held)
 
     try:
-        freed = int(reclaimer.release(needed, reason) or 0)
+        freed = int(_ask(reclaimer, "release", card, needed, reason,
+                         spans_cards=family == FAMILY_LLM) or 0)
     except Exception:
         logger.warning("Model Chain: %s reclaimer failed", family, exc_info=True)
         return Reclaim(needed, 0, 0, needed, ())
@@ -1260,6 +1941,17 @@ def _describe(family: str, reclaimer) -> str:
 
 @dataclass(frozen=True)
 class Status:
+    """One card's picture, plus the machine's, kept apart on purpose.
+
+    ``free_vram``, ``total_vram`` and ``llm_bytes`` are all about the *image*
+    card. That was already true of the first two and was not of the third, and
+    the mismatch is section 7.5's complaint: nineteen gigabytes of 5090
+    language model displayed beside a 3090's four gigabytes free reads as a
+    card that is over-subscribed by fifteen, when in fact neither card is
+    short of anything. Machine-wide figures still exist -- ``llm_bytes_total``
+    -- they are simply no longer the number printed next to one card's total.
+    """
+
     mode: str
     free_vram: int
     total_vram: int
@@ -1268,6 +1960,15 @@ class Status:
     llm_bytes: int
     active: Active | None
     residencies: tuple[Residency, ...]
+    card: int | None = None
+    """The image card these VRAM figures describe, or None if unresolvable."""
+    llm_bytes_total: int = 0
+    """LLM VRAM everywhere in the machine, which is a different question."""
+    activities: tuple[Active, ...] = ()
+    """Everything running, image job included. See :func:`activities`."""
+    free_ram: int = 0
+    ram_reserve: int = 0
+    image_warm_ram: int = 0
 
     @property
     def owners(self) -> tuple[str, ...]:
@@ -1278,27 +1979,35 @@ class Status:
             families.append(_named(FAMILY_LLM))
         return tuple(families)
 
+    @property
+    def llm_bytes_elsewhere(self) -> int:
+        """LLM VRAM on cards other than the image card."""
+        return max(self.llm_bytes_total - self.llm_bytes, 0)
 
-def reported_bytes(family: str) -> int:
-    """What ``family``'s reclaimer says it is holding, or 0.
+
+def reported_bytes(family: str, *, card=ANY_CARD) -> int:
+    """What ``family``'s reclaimer says it is holding on ``card``, or 0.
 
     The register is this module's own picture and only has entries for things
     that were declared. Image checkpoints are not: they are loaded by Forge,
     moved by Forge, and ``mc_memory`` cooperates with that rather than
     announcing every load here. So the honest answer for the image family comes
     from asking it, and :func:`status` asks.
+
+    A ``card`` that the reclaimer cannot answer about comes back as 0 rather
+    than as its machine-wide total: see :func:`_ask`.
     """
     reclaimer = _reclaimer(family)
-    reported = getattr(reclaimer, "resident_bytes", None)
-    if not callable(reported):
+    if reclaimer is None:
         return 0
     try:
-        return max(int(reported() or 0), 0)
+        return max(int(_ask(reclaimer, "resident_bytes", card,
+                            spans_cards=family == FAMILY_LLM) or 0), 0)
     except Exception:
         return 0
 
 
-def held_bytes(family: str) -> int:
+def held_bytes(family: str, *, card=ANY_CARD) -> int:
     """What ``family`` is holding on the card, declared or merely reported.
 
     The one function to ask when the question is "is it already there". The
@@ -1310,15 +2019,17 @@ def held_bytes(family: str) -> int:
     model against 8.7 GB *minus another 13.9 GB*, decided almost nothing fit,
     and ran sixteen of forty-eight blocks from system RAM.
     """
-    return max(resident_bytes(family), reported_bytes(family))
+    return max(resident_bytes(family, card=card), reported_bytes(family, card=card))
 
 
 def status() -> Status:
+    index = image_device_index()
+    scope = index if index >= 0 else ANY_CARD
     entries = list(residencies())
     families = {}
     for family in (FAMILY_IMAGE, FAMILY_LLM):
-        declared = resident_bytes(family)
-        families[family] = held_bytes(family)
+        declared = resident_bytes(family, card=scope)
+        families[family] = held_bytes(family, card=scope)
         if declared <= 0 and families[family] > 0:
             # Nothing declared, but the family says it is holding VRAM. Shown
             # as a synthetic row rather than left out: a residency panel that
@@ -1326,7 +2037,8 @@ def status() -> Status:
             # question from the one it appears to answer (section 14).
             entries.append(Residency(family=family, key=f"{family}:reported",
                                      label=_describe(family, _reclaimer(family)),
-                                     bytes=families[family], rank=RANK_HOT))
+                                     bytes=families[family], rank=RANK_HOT,
+                                     card=index if index >= 0 else None))
 
     return Status(
         mode=mode(),
@@ -1337,6 +2049,12 @@ def status() -> Status:
         llm_bytes=families[FAMILY_LLM],
         active=active(),
         residencies=tuple(sorted(entries, key=lambda e: (-e.effective_rank, -e.bytes))),
+        card=index if index >= 0 else None,
+        llm_bytes_total=held_bytes(FAMILY_LLM),
+        activities=activities(),
+        free_ram=free_ram_bytes(),
+        ram_reserve=ram_reserve_bytes(),
+        image_warm_ram=image_warm_ram_bytes(),
     )
 
 
@@ -1351,16 +2069,34 @@ def status() -> Status:
 
 
 class _ImageReclaimer:
-    """Frees image-model VRAM by asking mc_memory to, and reports what it holds."""
+    """Frees image-model VRAM by asking mc_memory to, and reports what it holds.
 
-    def release(self, needed_bytes: int, reason: str = "") -> int:
+    Card-aware in the only way it can be. Forge generates on one card, so every
+    byte this reclaimer can free is on that card and a filter naming it is
+    satisfied by definition -- while a filter naming any *other* card is
+    answered with nothing, honestly, rather than with the image card's figure
+    under another card's heading (invariant I-2).
+    """
+
+    @staticmethod
+    def _ours(card) -> bool:
+        if isinstance(card, _AnyCard) or card is None:
+            return True
+        index = image_device_index()
+        return index < 0 or int(card) == index
+
+    def release(self, needed_bytes: int, reason: str = "", *, card=ANY_CARD) -> int:
         import mc_memory
 
+        if not self._ours(card):
+            return 0
         return int(mc_memory.release_vram(needed_bytes, reason=reason))
 
-    def resident_bytes(self) -> int:
+    def resident_bytes(self, *, card=ANY_CARD) -> int:
         import mc_memory
 
+        if not self._ours(card):
+            return 0
         try:
             return int(mc_memory.resident_vram_bytes())
         except Exception:
@@ -1398,8 +2134,15 @@ def _reclaim_for_image(shortfall_bytes: int, reason: str = "") -> int:
     shortfall = max(int(shortfall_bytes), 0)
     if shortfall <= 0:
         return 0
+    # Carrying the card is the whole of section 9.1. A pass that is four
+    # gigabytes short on GPU 0 can only be helped by LLM residency on GPU 0,
+    # and a nineteen-gigabyte language model on GPU 1 must survive the request
+    # untouched -- it is not a candidate, not a last resort, and not a
+    # smaller-than-ideal answer. It is simply on the wrong card.
+    index = image_device_index()
     return request_vram(FAMILY_IMAGE, free_vram_bytes() + shortfall, reason=reason,
-                        margin=0, exclusive_sweep=False).freed
+                        margin=0, exclusive_sweep=False,
+                        card=index if index >= 0 else ANY_CARD).freed
 
 
 try:

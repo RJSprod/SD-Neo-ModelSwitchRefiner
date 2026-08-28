@@ -638,6 +638,98 @@ def card_of(configuration: Config) -> int | None:
         return None
 
 
+def execution_domain(configuration: Config | None) -> mc_broker.ExecutionDomain:
+    """Which processor ``configuration`` will materially execute on (section 4.1).
+
+    Built from :attr:`Config.uses_cuda_compute`, never from :attr:`Config.on_gpu`,
+    and the difference is the whole reason both properties exist. Mixed
+    Conservative keeps every weight in system RAM and still names a card on
+    ``--device``: it holds a CUDA context there, it issues CUDA work there, and
+    an image generation on that same card is competing with it for the
+    processor even though its VRAM residency is nil. Asking ``on_gpu`` would
+    have called that runtime independent and let the two fight.
+
+    Three answers, not two:
+
+    ``CPU_EXECUTION``
+        no CUDA device is named. Positive evidence of independence from every
+        image generation, which is what lets a processor-resident conversation
+        run while Forge samples (invariant I-1).
+    ``cuda_execution(n)``
+        a resolved physical card. Independent of an image job on any other.
+    ``UNKNOWN_CUDA_EXECUTION``
+        CUDA, card unresolvable. Conservative against every CUDA domain --
+        false serialisation costs throughput, and being wrong the other way
+        means two jobs on one card each sized as though alone (section 6.4).
+    """
+    if configuration is None:
+        return mc_broker.UNKNOWN_CUDA_EXECUTION
+    try:
+        if not configuration.uses_cuda_compute:
+            return mc_broker.CPU_EXECUTION
+    except Exception:
+        logger.debug("Model Chain: could not read the runtime's compute device",
+                     exc_info=True)
+        return mc_broker.UNKNOWN_CUDA_EXECUTION
+    return mc_broker.cuda_execution(card_of(configuration))
+
+
+def host_ram_demand(configuration: Config | None,
+                    placement: mc_llm_context.Placement | None = None) -> int:
+    """Host RAM this placement materially needs, as an estimate (section 10.7).
+
+    Coarse on purpose, and it says so in the log rather than pretending to
+    measure physical residency. What it must get *right* is the shape:
+
+    * a processor placement, or Mixed Conservative, needs the model in system
+      RAM. That is a real, model-size-scale claim on the host pool and is
+      counted in full;
+    * a partial offload needs the share that is not on the card. Counted in
+      proportion to the layers left behind, which is coarse and is far closer
+      than either extreme;
+    * a full-GPU placement needs *load headroom*, not a permanent reservation.
+      Its GGUF is read through mmap and the pages the OS keeps afterwards are
+      the OS's to reclaim, so counting the file size as hard host residency
+      would block image work that is perfectly safe -- section 10.7 and test
+      T41 are both explicit about this, and it is why this returns zero there.
+
+    Zero when the model cannot be sized. An unknown demand admits nothing and
+    reclaims nothing, which is the only honest answer.
+    """
+    if configuration is None or configuration.model is None:
+        return 0
+    try:
+        size = int(Path(configuration.model).stat().st_size)
+    except (OSError, ValueError, TypeError):
+        return 0
+    if size <= 0:
+        return 0
+
+    if not configuration.uses_cuda_compute or is_conservative(configuration):
+        return size
+
+    if placement is None:
+        # No placement decided yet on a CUDA configuration whose mode is not
+        # Conservative: the weights are going to the card, so the load-headroom
+        # case applies rather than a permanent host claim.
+        return 0
+    if not placement.on_gpu or placement.gpu_layers == mc_llm_context.NO_LAYERS:
+        # Named a card and placed nothing on it. Every weight is in system RAM
+        # and every byte of it is material host demand.
+        return size
+    if placement.gpu_layers == mc_llm_context.ALL_LAYERS:
+        return 0
+    try:
+        described = mc_gguf.describe(configuration.model)
+        total = int(getattr(described, "block_count", 0) or 0)
+    except Exception:
+        return 0
+    placed = int(placement.gpu_layers)
+    if total <= 0 or placed <= 0 or placed >= total:
+        return 0
+    return int(size * (total - placed) / total)
+
+
 def shares_the_image_card(card: int | None) -> bool:
     """Whether a placement on ``card`` is competing with the image model.
 
@@ -2579,6 +2671,25 @@ PRIME_LABEL = "priming the prompt cache"
 _priming: threading.Thread | None = None
 
 
+def _stands_down_for_the_image_job(configuration: Config | None) -> bool:
+    """Whether background priming should give way to a running image job.
+
+    Section 6.6's rule, which is the execution rule and not a new one: a prime
+    on GPU 1 while Forge samples on GPU 0 competes for nothing and may proceed
+    if the workload lock is free; a prime on GPU 0 stands down as it always
+    has; a processor prime is independent of GPU activity altogether.
+    """
+    try:
+        if not mc_broker.host_busy():
+            return False
+        return execution_domain(configuration).conflicts_with(
+            mc_broker.image_execution_domain())
+    except Exception:
+        logger.debug("Model Chain: could not compare the priming device with the image job",
+                     exc_info=True)
+        return True
+
+
 def _prime_prompt_cache(client) -> None:
     """Prefill the writer's standing instruction, on a thread nobody is waiting on.
 
@@ -2609,20 +2720,21 @@ def _prime_prompt_cache(client) -> None:
 
     if _priming is not None and _priming.is_alive():
         return
-    thread = threading.Thread(target=_prime, args=(client,), name="mc-llm-prime",
+    thread = threading.Thread(target=_prime, args=(client, config()), name="mc-llm-prime",
                               daemon=True)
     _priming = thread
     thread.start()
 
 
-def _prime(client) -> None:
+def _prime(client, configuration: Config | None = None) -> None:
     try:
         from prompt_master.krea import enhancer
 
-        if mc_broker.host_busy():
+        if _stands_down_for_the_image_job(configuration):
             return
         with mc_broker.workload(mc_broker.FAMILY_LLM, PRIME_LABEL, timeout=0,
-                                background=True, required=False) as held:
+                                background=True, required=False,
+                                domain=execution_domain(configuration)) as held:
             if not held:
                 return
             started = time.monotonic()
@@ -3056,6 +3168,28 @@ class Runtime:
         """Whose configuration to start from. See :meth:`configuration`."""
         self._key: tuple | None = None
         """The identity the registry filed this runtime under."""
+        self._placed_for: tuple | None = None
+        """Which image-plan boundary *this* server has been reconciled against.
+
+        Per runtime, and that is section 8.3. It used to be one module-level
+        value in :mod:`mc_plan`, which was right for as long as there could
+        only be one llama-server; with two, whichever started last overwrote
+        the other's baseline, so a Creative role on a second card inherited a
+        boundary it had never been evaluated against and was re-placed for a
+        plan that does not describe its card at all.
+
+        None means "never placed under a plan". Cleared whenever the process
+        stops, is replaced, or is demoted, because a baseline describes a
+        placement and there is no longer one to describe.
+        """
+        self._card: int | None = None
+        """The physical card the running process was launched against.
+
+        Read from the configuration at launch rather than re-derived later, so
+        that a reclaim aimed at this runtime is judged against the card it is
+        actually on and not the card its settings currently say -- those can
+        differ for exactly as long as it takes a reconfigured role to restart.
+        """
 
     def _said_for(self) -> str:
         """``"[Creative] "`` or ``""``, for the front of this runtime's own lines.
@@ -3219,7 +3353,14 @@ class Runtime:
             # other -- so it is handed back to the driver first, and the
             # placement below is decided against what llama.cpp will actually
             # be able to allocate.
-            recovered = mc_broker.release_cached_vram()
+            #
+            # Only when this server can actually consume those blocks, which
+            # means the same physical card (section 13). A 5090 llama-server
+            # cannot be handed a cached 3090 block, so emptying the image
+            # allocator for it gives up useful image state -- every one of
+            # those blocks has to be re-obtained from the driver on the next
+            # pass -- and frees nothing at all where the model is going.
+            recovered = self._release_the_image_cache_if_it_helps(configuration)
             if recovered:
                 logger.info("Model Chain: returned %.1f GB of cached VRAM to the driver before "
                             "placing the LLM", recovered / _GB)
@@ -3307,7 +3448,7 @@ class Runtime:
                     # whole difference, because what that start could not find
                     # room for was a CUDA context of a few hundred megabytes,
                     # not the model.
-                    reclaimed = mc_broker.release_cached_vram()
+                    reclaimed = self._release_the_image_cache_if_it_helps(configuration)
                     logger.warning("Model Chain: %s. Trying again with %.1f GB more headroom%s%s",
                                    failure, penalty / _GB,
                                    f" and the experts of at least {expert_floor} layers in "
@@ -3317,6 +3458,11 @@ class Runtime:
 
             self._process, self._signature, self._placement = process, signature, placement
             self._identity = _identity(configuration, projector)
+            # The card this process is actually on, fixed at launch. Read later
+            # from the configuration it would move with a setting change, and a
+            # reclaim aimed at a running server has to be judged against where
+            # the server is rather than where it is next going to be.
+            self._card = card_of(configuration)
             self._projector = Path(projector) if projector is not None else None
             self._accelerator = plan.identity
             if self._projector is not None:
@@ -3329,17 +3475,83 @@ class Runtime:
             self._record(configuration, negotiated, observed, offload, plan)
             # Which plan this placement answers. Everything after this point
             # compares against it rather than against free VRAM, so the server
-            # survives every phase of the generation it was started for.
-            try:
-                import mc_plan
-
-                mc_plan.note_placement(mc_plan.current())
-            except Exception:
-                logger.debug("Model Chain: could not record the plan this server was "
-                             "placed for", exc_info=True)
+            # survives every phase of the generation it was started for -- and
+            # it is recorded on *this runtime*, so a second server on a second
+            # card cannot inherit or overwrite the boundary (section 8.3).
+            self._note_placement()
             prepared = self._client(configuration)
             _prime_prompt_cache(prepared)
             return prepared
+
+    def _release_the_image_cache_if_it_helps(self, configuration: Config) -> int:
+        """Empty Forge's allocator cache, but only for a start that can use it.
+
+        Section 13, and the whole of the rule is "same physical card". The
+        blocks the image allocator is sitting on belong to one GPU's driver:
+        a llama-server being placed on that GPU can have them once they are
+        handed back, and a llama-server anywhere else -- another card, or the
+        processor -- cannot. Emptying it anyway costs the image side every
+        cached block it had ready and buys the language model nothing.
+
+        An unresolvable relation keeps the old behaviour, because the release
+        is harmless when it turns out to be the same card and the reported
+        figure is the image card's either way. What must never happen is
+        reporting image-card bytes as though they had been freed on another
+        target GPU, which is why the release is skipped rather than reported
+        for a card known to be different.
+        """
+        try:
+            if not configuration.uses_cuda_compute:
+                logger.debug("Model Chain: this placement is on the processor; the image "
+                             "allocator's cached VRAM was left where it is")
+                return 0
+            card = card_of(configuration)
+            if card is not None and not shares_the_image_card(card):
+                logger.info("Model Chain: llama-server is being placed on GPU %d and the image "
+                            "allocator's cache is on %s — it was left alone, because a block "
+                            "cached on one card cannot be handed to a process on another",
+                            card, mc_broker.image_execution_domain().describe())
+                return 0
+        except Exception:
+            logger.debug("Model Chain: could not compare the placement card with the image "
+                         "card", exc_info=True)
+        return mc_broker.release_cached_vram()
+
+    def _admit_host_ram(self, configuration: Config,
+                        placement: mc_llm_context.Placement | None = None) -> None:
+        """Make host RAM safe for a materially RAM-backed placement (section 10.8).
+
+        Never a refusal. llama.cpp will make an honest attempt whatever this
+        finds, it is the user's machine, and the existing behaviour has always
+        been to warn -- so what this adds is the step *before* the warning:
+        when the demand does not fit above the host floor, explicitly managed
+        warm image cache is asked to give ground first, because a checkpoint
+        kept warm to shorten a future switch is exactly the thing that should
+        yield to memory an active workload needs to run at all (invariant I-6).
+
+        Nothing happens at all when it already fits, which is the common case
+        and the one worth protecting: two RAM-backed servers and a warm Stage 2
+        checkpoint that all fit above the reserve should all stay put
+        (invariant I-5).
+        """
+        wanted = host_ram_demand(configuration, placement)
+        if wanted <= 0 or mc_broker.host_ram_fits(wanted):
+            return
+        admission = mc_broker.admit_host_ram(
+            wanted, reason=f"{_backbone_label(configuration)} in system RAM")
+        if admission.fits:
+            if admission.moved_anything:
+                logger.info("Model Chain: %s%s before starting llama-server",
+                            self._said_for(), admission.describe())
+            return
+        logger.warning(
+            "Model Chain: %sthis placement needs about %.1f GB of system RAM and only "
+            "%.1f GB is available above the %.1f GB reserve%s. llama.cpp will still try, "
+            "and reads through the page cache, so expect a slow load and slow replies "
+            "until something on this machine gives that memory back.",
+            self._said_for(), wanted / _GB, admission.available / _GB,
+            admission.reserve / _GB,
+            f" (after {admission.describe()})" if admission.moved_anything else "")
 
     def _prepare_vision(self, cancel=None) -> None:
         """Make sure a compatible projector exists on disk. Outside the lock.
@@ -3472,6 +3684,12 @@ class Runtime:
         # starts are rare.
         logger.info("Model Chain: llama-server log — %s", log_path)
         _warn_about_an_idle_card(configuration, layers)
+        # Ahead of the warning, and it is the same subject seen from a step
+        # earlier: the warning says the machine is short of RAM for this model,
+        # and this is the chance to stop being short of it by dropping warm
+        # image cache nobody is executing against (section 10.8). When it
+        # already fits, neither says anything and nothing moves.
+        self._admit_host_ram(configuration, placement)
         _warn_about_system_ram(configuration, placement)
         self._log = (log_path, written_before)
 
@@ -3600,19 +3818,24 @@ class Runtime:
         try:
             import mc_plan
 
-            if mc_plan.current() is not None:
+            if mc_plan.current() is not None and self._plan_applies(configuration):
                 overspending = self._overspending(ours)
-                if not mc_plan.boundary_moved() and not overspending:
+                if not self._boundary_moved() and not overspending:
                     return False
                 # A real boundary. Fall through and let the negotiation below
                 # say whether the new plan is worth a restart; a boundary alone
                 # is permission to ask, not an answer.
-            elif (mc_broker.host_busy()
-                  or mc_broker.active_family() == mc_broker.FAMILY_IMAGE):
+            elif self._image_job_conflicts(configuration):
+                # "The host is busy" is not a fact about this server unless the
+                # host's job is on the processor this server executes on
+                # (section 8.4). A generation on GPU 0 is no reason to decline
+                # to reconsider a placement on GPU 1 -- and it was: the
+                # host-busy branch below is what a second card's role hit on
+                # every request for the whole length of every generation.
                 return False
         except Exception:
             logger.debug("Model Chain: could not check the plan boundary", exc_info=True)
-            if mc_broker.host_busy():
+            if self._image_job_conflicts(configuration):
                 return False
         try:
             described = mc_gguf.describe(configuration.model)
@@ -3655,8 +3878,97 @@ class Runtime:
                     current.describe(described.block_count if described else 0))
         return True
 
-    @staticmethod
-    def _reconciled() -> None:
+    def _image_job_conflicts(self, configuration: Config | None = None) -> bool:
+        """Whether a running image job is competing with this server's processor.
+
+        Replaces a bare ``host_busy()`` in the two places where "busy" was
+        being read as "busy with something that concerns you". It does not
+        concern a runtime on another card or on the processor, and treating it
+        as though it did is what froze a second card's placement decisions for
+        the duration of every generation on the first (section 8.4).
+        """
+        settings = configuration if configuration is not None else self.configuration()
+        try:
+            mine = execution_domain(settings)
+            if not (mc_broker.host_busy()
+                    or mc_broker.active_family() == mc_broker.FAMILY_IMAGE):
+                return False
+            return mine.conflicts_with(mc_broker.image_execution_domain())
+        except Exception:
+            logger.debug("Model Chain: could not compare the image job's device",
+                         exc_info=True)
+            return True
+
+    def _plan_applies(self, configuration: Config | None = None) -> bool:
+        """Whether the active image plan says anything about *this* server.
+
+        Section 8.2, and it is the difference between a language model that
+        survives a generation on a second card and one that is stopped by a
+        budget describing a card it has never touched. The plan is a statement
+        about Forge's image card: how much of *that* card the image side needs
+        and therefore how much of *that* card is left over. A runtime on
+        another card is not competing for either number, and a processor
+        runtime is not competing for VRAM at all.
+
+        Unresolvable relationships answer yes, matching
+        :func:`shares_the_image_card`: the cost of treating an unknown card as
+        the image card is a language model sized more conservatively than it
+        needed to be, and the cost of the opposite is an image generation that
+        runs out of memory.
+        """
+        settings = configuration if configuration is not None else self.configuration()
+        try:
+            if not settings.uses_cuda_compute:
+                return False
+        except Exception:
+            logger.debug("Model Chain: could not read the runtime's compute device",
+                         exc_info=True)
+            return True
+        card = self._card if self._card is not None else card_of(settings)
+        return shares_the_image_card(card)
+
+    def _boundary_moved(self) -> bool:
+        """Whether the plan has changed since *this* server was placed under one.
+
+        The per-runtime half of :func:`mc_plan.boundary_moved`. Same rule --
+        a server placed with no plan in force is not re-placed merely because
+        one has since appeared -- read from this runtime's own baseline, so
+        two servers cannot answer each other's question (section 8.3, T13).
+        """
+        if self._placed_for is None:
+            return False
+        try:
+            import mc_plan
+
+            plan = mc_plan.current()
+        except Exception:
+            logger.debug("Model Chain: could not read the active plan", exc_info=True)
+            return False
+        if plan is None:
+            return False
+        return plan.identity() != self._placed_for
+
+    def _note_placement(self) -> None:
+        """Record the plan this runtime's placement answers.
+
+        Only for a runtime the plan applies to. A different-card server that
+        recorded boundaries would accumulate exactly the state section 8.3 says
+        it must not: a baseline that later "moves", forcing a re-negotiation
+        and a GGUF read for a plan about a card it is not on (T16).
+        """
+        try:
+            import mc_plan
+
+            plan = mc_plan.current() if self._plan_applies() else None
+            self._placed_for = plan.identity() if plan is not None else None
+            if plan is not None:
+                # Kept in step for the panel and for anything still reading the
+                # module-level value; the decision above is this runtime's.
+                mc_plan.note_placement(plan)
+        except Exception:
+            logger.debug("Model Chain: could not record the placement plan", exc_info=True)
+
+    def _reconciled(self) -> None:
         """Record that the running placement has been checked against this plan.
 
         The missing half of :func:`mc_plan.boundary_moved`, and the reason a
@@ -3678,23 +3990,22 @@ class Runtime:
         the check through when a running server holds more than the plan leaves
         it.
         """
+        self._note_placement()
+
+    def _allowance(self, ours: int) -> int:
+        """What the active plan leaves *this* server, or -1 when it says nothing.
+
+        -1 is "not applicable", and it now covers two cases rather than one:
+        no plan is published, or there is one and it does not describe this
+        runtime's card (section 8.2). Both mean the same thing downstream --
+        there is no plan-derived ceiling here -- which is why one value carries
+        them: the alternative would be a second sentinel that every caller had
+        to treat identically.
+        """
         try:
             import mc_plan
 
-            plan = mc_plan.current()
-            if plan is not None:
-                mc_plan.note_placement(plan)
-        except Exception:
-            logger.debug("Model Chain: could not record the reconciled placement plan",
-                         exc_info=True)
-
-    @staticmethod
-    def _allowance(ours: int) -> int:
-        """What the active plan leaves for the language model, or -1 if it says nothing."""
-        try:
-            import mc_plan
-
-            if mc_plan.current() is None:
+            if mc_plan.current() is None or not self._plan_applies():
                 return -1
             return mc_plan.persistent_llm_budget(ours)
         except Exception:
@@ -3741,7 +4052,9 @@ class Runtime:
         estimated = self.report.estimate.resident_bytes if self.report.estimate else 0
         mc_broker.declare(mc_broker.FAMILY_LLM, self.residency_key, self._label(configuration),
                           held or self.report.observed_bytes or estimated,
-                          rank=mc_broker.RANK_HOT)
+                          rank=mc_broker.RANK_HOT,
+                          card=self._card if self._card is not None
+                          else card_of(configuration))
 
     def _new_process(self):
         from prompt_master.inference.llama_process import LlamaProcess
@@ -3784,13 +4097,19 @@ class Runtime:
         for text in notes:
             mc_broker.note(mc_broker.FAMILY_LLM, text)
 
+        # Which card these bytes are on, recorded with them. A residency the
+        # broker cannot place on a card is a residency it must not target
+        # (invariant I-11), and one it can is the whole reason a shortfall on
+        # GPU 0 can leave a server on GPU 1 alone (invariant I-3).
+        card = self._card if self._card is not None else card_of(configuration)
         if negotiated.placement.on_gpu and observed > 0:
             mc_broker.declare(mc_broker.FAMILY_LLM, self.residency_key, self._label(configuration),
-                              observed, rank=mc_broker.RANK_HOT)
+                              observed, rank=mc_broker.RANK_HOT, card=card)
             mc_llm_context.record_observation(configuration.model, negotiated.placement, observed)
         elif negotiated.placement.on_gpu:
             mc_broker.declare(mc_broker.FAMILY_LLM, self.residency_key, self._label(configuration),
-                              negotiated.estimate.resident_bytes, rank=mc_broker.RANK_HOT)
+                              negotiated.estimate.resident_bytes, rank=mc_broker.RANK_HOT,
+                              card=card)
         else:
             mc_broker.retire(self.residency_key)
 
@@ -3894,7 +4213,48 @@ class Runtime:
 
     # -- the broker's reclaimer ------------------------------------------- #
 
-    def release(self, needed_bytes: int, reason: str = "") -> int:
+    def on_card(self, card) -> bool:
+        """Whether releasing this runtime could add VRAM to ``card``.
+
+        Defence in depth (section 7.4). The registry already filters victims by
+        card, and this is the second lock on the same door: a direct caller, or
+        a filter that regresses, would otherwise be able to stop a language
+        model on GPU 1 to answer a shortage on GPU 0 -- which frees exactly
+        zero bytes where they were wanted and costs a prompt cache, a process
+        start and a model load to do it.
+
+        Three answers rather than two:
+
+        * a known different card is a refusal;
+        * a processor runtime holds no VRAM anywhere, so it is not a VRAM
+          victim for any card;
+        * an unknown card is *also* not a targeted victim -- section 7.3 --
+          because a runtime whose card cannot be named cannot be shown to help.
+        """
+        if isinstance(card, mc_broker._AnyCard):
+            return True
+        mine = self._card
+        if mine is None:
+            settings = self.configuration()
+            try:
+                if not settings.uses_cuda_compute:
+                    return False
+            except Exception:
+                return False
+            mine = card_of(settings)
+        if mine is None or card is None:
+            return False
+        return int(mine) == int(card)
+
+    def host_ram_bytes(self) -> int:
+        """Host RAM this server materially needs, or 0. See :func:`host_ram_demand`."""
+        with self._lock:
+            if not self._running:
+                return 0
+            return host_ram_demand(self.configuration(), self._placement)
+
+    def release(self, needed_bytes: int, reason: str = "", *,
+                card=mc_broker.ANY_CARD) -> int:
         """Give VRAM back. Registered with the broker as the LLM family's reclaimer.
 
         ``needed_bytes`` is honoured in spirit rather than to the byte: a
@@ -3903,6 +4263,13 @@ class Runtime:
         any amount releases the whole of it, which is the only granularity the
         mechanism has -- and is why :func:`negotiate` works hard not to have to
         ask for image VRAM in the first place.
+
+        ``card`` names the physical GPU the caller needs room on. A request for
+        a card this server is not on is refused outright -- see
+        :meth:`on_card` -- and the measurement below is taken on *that* card
+        rather than on the image side's, because a release aimed at GPU 1 whose
+        result was read from GPU 0 would report whatever the image job happened
+        to be doing at the time (section 7.4).
         """
         # Timed rather than blocking, and that is a deliberate asymmetry. The
         # two reclaim paths take their locks in opposite orders -- an LLM load
@@ -3913,6 +4280,15 @@ class Runtime:
         # up costs an eviction that did not happen, which the caller already
         # handles: it is reported as a shortfall and the driver spills. A
         # deadlock would cost the whole WebUI.
+        if not self.on_card(card):
+            logger.info("Model Chain: %sllama-server was not asked to release for %s — it is "
+                        "on %s and the memory is wanted on %s, so stopping it would free "
+                        "nothing where it is needed", self._said_for(),
+                        reason or "another workload",
+                        mc_broker.cuda_execution(self._card).describe(),
+                        mc_broker.cuda_execution(card).describe()
+                        if card is not None else "an unidentified card")
+            return 0
         if not self._lock.acquire(timeout=RELEASE_LOCK_TIMEOUT):
             logger.warning("Model Chain: the LLM runtime was busy and could not release VRAM "
                            "for %s", reason or "another workload")
@@ -3924,13 +4300,16 @@ class Runtime:
             if self._placement is not None and not self._placement.on_gpu:
                 return 0  # already in system RAM; there is nothing on the card to give
 
-            before = mc_broker.free_vram_bytes()
+            where = self._card if self._card is not None else mc_broker._card_index(card)
+            measure = (lambda: mc_broker.device_free_vram_bytes(where)) if where is not None \
+                else mc_broker.free_vram_bytes
+            before = measure()
             if _release_mode() == RELEASE_SYSTEM_RAM:
-                freed = self._restart_in_system_ram(before, reason)
+                freed = self._restart_in_system_ram(before, reason, measure)
                 if freed:
                     return freed
             self._stop_locked(reason or "another workload needed the VRAM")
-            freed = max(mc_broker.free_vram_bytes() - before, 0)
+            freed = max(measure() - before, 0)
             mc_broker.note(
                 mc_broker.FAMILY_LLM,
                 f"stopped llama-server for {reason or 'another workload'}; the weights stay warm "
@@ -3940,14 +4319,42 @@ class Runtime:
         finally:
             self._lock.release()
 
-    def _restart_in_system_ram(self, before: int, reason: str) -> int:
-        """Move the model off the card without losing the loaded server."""
+    def _restart_in_system_ram(self, before: int, reason: str, measure=None) -> int:
+        """Move the model off the card without losing the loaded server.
+
+        Checks the *destination* first, which is section 17.9's whole point and
+        the clearest thing cross-domain awareness buys. This move solves a VRAM
+        shortage by creating a host-RAM demand of roughly the model's size: on
+        a machine with room that is exactly the right trade -- the server keeps
+        answering, more slowly, and its prompt cache survives. On a machine
+        already near its host floor it is not a trade at all, it is swapping a
+        problem the driver can spill around for one that pages the whole
+        desktop, so stopping the server is the safer reclaim and the file pages
+        stay soft-warm in the OS cache for the next start (section 18.11).
+        """
         from prompt_master.inference.device_detection import NO_OFFLOAD
         from prompt_master.inference.service import CPU_READY_TIMEOUT
 
         configuration = self.configuration()
         if not configuration.configured:
             return 0
+
+        wanted = host_ram_demand(configuration,
+                                 (self._placement or mc_llm_context.Placement()).with_layers(
+                                     mc_llm_context.NO_LAYERS))
+        if wanted > 0 and not mc_broker.host_ram_fits(wanted):
+            admission = mc_broker.admit_host_ram(
+                wanted, reason=f"moving {self._backbone()} out of VRAM")
+            if not admission.fits:
+                mc_broker.note(
+                    mc_broker.FAMILY_LLM,
+                    f"llama-server was stopped rather than moved to system RAM for "
+                    f"{reason or 'another workload'}: the move needs about "
+                    f"{wanted / _GB:.1f} GB of host memory and only "
+                    f"{admission.available / _GB:.1f} GB is available above the "
+                    f"{admission.reserve / _GB:.1f} GB reserve. A VRAM shortage is not "
+                    f"worth solving by exhausting system RAM")
+                return 0
         # Read before the stop clears it. This move is a *relocation* of the
         # server that is running, so the capability it comes back with has to
         # be the one it went away with: starting from ``configuration.mmproj``
@@ -3994,14 +4401,27 @@ class Runtime:
                            configuration.gpu_index, configuration.device,
                            placement.context, placement.gpu_layers)
         self._identity = _identity(configuration, projector)
+        # A relocated placement is a new placement, so the boundary it was
+        # reconciled against no longer describes anything (section 8.3).
+        self._placed_for = None
         mc_broker.retire(self.residency_key)
-        freed = max(mc_broker.free_vram_bytes() - before, 0)
+        freed = max((measure() if measure is not None else mc_broker.free_vram_bytes())
+                    - before, 0)
         mc_broker.note(mc_broker.FAMILY_LLM,
                        f"moved the LLM to system RAM for {reason or 'another workload'}; it stays "
                        f"loaded and answering, more slowly")
         return freed or self.report.observed_bytes
 
-    def resident_bytes(self) -> int:
+    def resident_bytes(self, *, card=mc_broker.ANY_CARD) -> int:
+        """VRAM this server holds, on ``card`` when one is named.
+
+        Zero for another card, and that is not a rounding-down -- it is the
+        honest answer to the question asked. Reporting this runtime's bytes
+        under another card's heading is how an image-card budget on a 3090
+        comes to subtract a 5090's nineteen gigabytes (invariant I-2).
+        """
+        if not self.on_card(card):
+            return 0
         with self._lock:
             if not self._running or (self._placement is not None and not self._placement.on_gpu):
                 return 0
@@ -4083,13 +4503,21 @@ class Runtime:
         Called wherever the server stops for a reason that was not a change of
         plan -- an emergency eviction, a demotion to system RAM, a shutdown.
         Without it the plan the dead server was placed for stays recorded, and
-        :func:`mc_plan.boundary_moved` goes on answering "no" about a placement
-        that no longer exists.
+        :meth:`_boundary_moved` goes on answering "no" about a placement that
+        no longer exists.
+
+        This runtime's own baseline always clears (section 8.3: stopping,
+        replacing or demoting clears the applicable baseline). The module-level
+        one clears only when this runtime is the one it describes -- with two
+        servers up, a Creative role stopping is no reason to tell the panel
+        that a Spatial role placed under a plan was not.
         """
+        mine, self._placed_for = self._placed_for, None
         try:
             import mc_plan
 
-            mc_plan.note_placement(None)
+            if mine is None or mc_plan.placed_for() == mine:
+                mc_plan.note_placement(None)
         except Exception:
             logger.debug("Model Chain: could not clear the recorded placement plan",
                          exc_info=True)
@@ -4431,8 +4859,15 @@ class RuntimeRegistry:
                 found.append(runtime)
             return tuple(found)
 
-    def running(self) -> tuple:
-        return tuple(found for found in self.all() if _is_running(found))
+    def running(self, *, card=mc_broker.ANY_CARD) -> tuple:
+        """Every running server, or only those executing on ``card``.
+
+        Executing rather than holding: the broker asks this to decide whether
+        a CUDA context of ours explains VRAM on a card, and a server with its
+        weights in system RAM still has one on the card it names.
+        """
+        return tuple(found for found in self.all()
+                     if _is_running(found) and _executes_on(found, card))
 
     def forget(self) -> None:
         """Drop every entry. Stops nothing -- for tests and for a settings reset."""
@@ -4460,8 +4895,27 @@ class RuntimeRegistry:
         if not chosen:
             return 0
         where = pool(configuration)
-        if resolved_sharing(where) != SHARE_TAKE_TURNS:
-            return 0
+        sharing = resolved_sharing(where)
+        if sharing != SHARE_TAKE_TURNS:
+            if where == POOL_SYSTEM_RAM and not self._can_coexist_in_ram(chosen, configuration):
+                # Section 11.4. "Coexist" is a preference about *warmth*, not a
+                # licence to ignore the host's safety floor -- a second
+                # RAM-backed server admitted below it does not run faster, it
+                # pages, and takes the desktop with it. So the warm image cache
+                # is asked first (inside :meth:`_can_coexist_in_ram`), and only
+                # when that is not enough does this become a contention at all.
+                if _sharing_mode() == SHARE_COEXIST:
+                    logger.warning(
+                        "Model Chain: %sboth roles are configured for system RAM and asked to "
+                        "coexist, but there is not enough of it left above the safety reserve "
+                        "after releasing what warm image cache could be released. The other "
+                        "server is being left up; this one may load slowly or not at all.",
+                        mc_llm_roles.prefix(chosen))
+                    return 0
+                logger.info("Model Chain: %ssystem RAM cannot safely hold both roles' models, "
+                            "so they take turns", mc_llm_roles.prefix(chosen))
+            else:
+                return 0
         mine = self.key_for(chosen, configuration)
         freed = 0
         for other in self.all():
@@ -4483,28 +4937,109 @@ class RuntimeRegistry:
                         mc_llm_roles.prefix(chosen), freed / _GB)
         return freed
 
+    def _can_coexist_in_ram(self, role: str, configuration: Config) -> bool:
+        """Whether this role's model fits in host RAM beside what is already there.
+
+        Asked only when the sharing policy would otherwise have said "coexist",
+        and answered by the same admission path everything else uses: read live
+        available memory, and if the demand does not fit above the reserve, ask
+        the explicitly managed warm image cache to give ground before deciding
+        that two language models are in conflict at all (section 10.8, steps
+        1-6).
+
+        True when the demand cannot be sized, which preserves today's
+        behaviour. A model whose size cannot be read is not evidence of
+        pressure, and inventing pressure would stand a working server down for
+        a number nobody has.
+        """
+        wanted = host_ram_demand(configuration, _requested_placement(configuration, None))
+        if wanted <= 0:
+            return True
+        if mc_broker.host_ram_fits(wanted):
+            return True
+        admission = mc_broker.admit_host_ram(
+            wanted, reason=f"the {role} role's model in system RAM")
+        return admission.fits
+
     # -- the broker's reclaimer, fanned out ------------------------------- #
 
-    def release(self, needed_bytes: int, reason: str = "") -> int:
-        """Give VRAM back from every runtime until ``needed_bytes`` is covered.
+    def release(self, needed_bytes: int, reason: str = "", *,
+                card=mc_broker.ANY_CARD) -> int:
+        """Give VRAM back from every eligible runtime until ``needed_bytes`` is covered.
 
         Ordered by what each is holding, largest first, so the fewest servers
         are stopped for the memory asked for. A request for zero -- which is how
         the broker spells "everything" -- goes to all of them.
+
+        ``card`` narrows "eligible" to runtimes whose reclaimable VRAM is on
+        that card (section 7.3). Runtimes on another known card are *absent*
+        from the victim set rather than ranked last; processor runtimes are
+        absent because they hold no VRAM anywhere; and a runtime whose card
+        cannot be resolved is absent too, because a targeted release has to be
+        able to show that it helps. Every one of those exclusions is
+        invariant I-3 -- a nineteen-gigabyte model on GPU 1 is not a smaller
+        answer to a four-gigabyte shortage on GPU 0, it is not an answer at all.
         """
-        held = sorted(self.running(), key=lambda found: -_held_by(found))
+        eligible = [found for found in self.running() if self._may_release(found, card)]
+        held = sorted(eligible, key=lambda found: -_held_by(found, card))
         freed = 0
+        skipped = [found for found in self.running() if found not in eligible]
+        if skipped and not isinstance(card, mc_broker._AnyCard):
+            logger.info("Model Chain: %d llama-server(s) were not considered for %s — their "
+                        "VRAM is not on %s", len(skipped), reason or "this reclaim",
+                        mc_broker.cuda_execution(card).describe() if card is not None
+                        else "the requested card")
         for found in held:
             if needed_bytes and freed >= needed_bytes:
                 break
             try:
-                freed += int(found.release(max(needed_bytes - freed, 0), reason) or 0)
+                freed += int(self._ask_release(found, max(needed_bytes - freed, 0),
+                                               reason, card) or 0)
             except Exception:
                 logger.debug("Model Chain: a runtime could not release", exc_info=True)
         return freed
 
-    def resident_bytes(self) -> int:
-        return sum(_held_by(found) for found in self.all())
+    @staticmethod
+    def _may_release(found, card) -> bool:
+        if isinstance(card, mc_broker._AnyCard):
+            return True
+        asking = getattr(found, "on_card", None)
+        if callable(asking):
+            try:
+                return bool(asking(card))
+            except Exception:
+                logger.debug("Model Chain: could not ask a runtime which card it is on",
+                             exc_info=True)
+                return False
+        return False
+
+    @staticmethod
+    def _ask_release(found, needed: int, reason: str, card):
+        if isinstance(card, mc_broker._AnyCard):
+            return found.release(needed, reason)
+        try:
+            return found.release(needed, reason, card=card)
+        except TypeError:
+            logger.debug("Model Chain: %s cannot take a card-scoped release",
+                         type(found).__name__)
+            return 0
+
+    def resident_bytes(self, *, card=mc_broker.ANY_CARD) -> int:
+        return sum(_held_by(found, card) for found in self.all())
+
+    def host_ram_bytes(self) -> int:
+        """System RAM the running servers materially need. See :func:`host_ram_demand`."""
+        total = 0
+        for found in self.running():
+            asking = getattr(found, "host_ram_bytes", None)
+            if not callable(asking):
+                continue
+            try:
+                total += max(int(asking() or 0), 0)
+            except Exception:
+                logger.debug("Model Chain: could not read a runtime's host-RAM demand",
+                             exc_info=True)
+        return total
 
     def describe(self) -> str:
         import mc_llm_roles
@@ -4541,9 +5076,44 @@ def _is_running(found) -> bool:
         return False
 
 
-def _held_by(found) -> int:
+def _executes_on(found, card) -> bool:
+    """Whether ``found`` issues CUDA work on ``card``.
+
+    Execution, not residency -- so a Mixed Conservative server with every
+    weight in system RAM counts here for the card it names. That is what makes
+    the CUDA-context allowance in :func:`mc_broker.unaccounted_bytes` land on
+    the right card, and what stops GPU 0's status hiding a gigabyte as "our own
+    LLM context" for a process that is entirely on GPU 1 (section 7.6, T21).
+    """
+    if isinstance(card, mc_broker._AnyCard):
+        return True
     try:
-        return max(int(found.resident_bytes() or 0), 0)
+        settings = found.configuration()
+        if not settings.uses_cuda_compute:
+            return False
+        mine = getattr(found, "_card", None)
+        if mine is None:
+            mine = card_of(settings)
+    except Exception:
+        logger.debug("Model Chain: could not ask a runtime which card it uses", exc_info=True)
+        return False
+    if mine is None or card is None:
+        return False
+    return int(mine) == int(card)
+
+
+def _held_by(found, card=mc_broker.ANY_CARD) -> int:
+    try:
+        if isinstance(card, mc_broker._AnyCard):
+            return max(int(found.resident_bytes() or 0), 0)
+        return max(int(found.resident_bytes(card=card) or 0), 0)
+    except TypeError:
+        # A stand-in that predates card filtering. Answering with its
+        # machine-wide total under one card's heading is exactly the mistake
+        # this parameter exists to prevent, so it answers nothing instead.
+        logger.debug("Model Chain: %s cannot report residency for one card",
+                     type(found).__name__)
+        return 0
     except Exception:
         logger.debug("Model Chain: could not ask a runtime what it holds", exc_info=True)
         return 0

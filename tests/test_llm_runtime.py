@@ -2130,7 +2130,7 @@ class TestPrimingThePromptCache:
         started = threading.Event()
         finish = threading.Event()
         monkeypatch.setattr(runtime, "_prime",
-                            lambda client: (started.set(), finish.wait(5)))
+                            lambda client, configuration=None: (started.set(), finish.wait(5)))
 
         runtime._prime_prompt_cache(object())
         assert started.wait(5)
@@ -2277,6 +2277,21 @@ class TestThePlanCapsWhatAPlacementMaySpend:
         assert first.context != second.context
 
 
+def placed_under_the_current_plan(server):
+    """Record that ``server`` was placed under the plan now in force.
+
+    The baseline moved from :mod:`mc_plan` onto the runtime (design intent
+    section 8.3): with two llama-servers up, one module-level value had each
+    overwriting the other's, so a role on a second card inherited a boundary it
+    had never been evaluated against. The module value is kept in step because
+    the panel still reads it, and because a single-server installation should
+    see exactly what it saw before.
+    """
+    plan = mc_plan.current()
+    server._placed_for = plan.identity() if plan is not None else None
+    mc_plan.note_placement(plan)
+
+
 class TestAPlacementIsReconsideredOnlyAtPlanBoundaries:
     def test_a_phase_transition_inside_one_generation_is_not_one(
             self, placed, tmp_path, monkeypatch):
@@ -2285,8 +2300,8 @@ class TestAPlacementIsReconsideredOnlyAtPlanBoundaries:
         LLM call was going to reuse."""
         configuration = configure(monkeypatch, tmp_path)
         publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
-        mc_plan.note_placement(mc_plan.current())
         server = runtime.Runtime()
+        placed_under_the_current_plan(server)
         server._placement = ctx.Placement(gpu_layers=4, context=8192,
                                           kv_type_k="f16", kv_type_v="f16", on_gpu=True)
         set_free(monkeypatch, 23)
@@ -2311,8 +2326,8 @@ class TestAPlacementIsReconsideredOnlyAtPlanBoundaries:
         the table for no reason."""
         configuration = configure(monkeypatch, tmp_path)
         publish_plan(stage_1_gb=10.0, stage_2_gb=18.0, monkeypatch=monkeypatch)
-        mc_plan.note_placement(mc_plan.current())
         server = runtime.Runtime()
+        placed_under_the_current_plan(server)
         server._placement = ctx.Placement(gpu_layers=4, context=8192,
                                           kv_type_k="f16", kv_type_v="f16", on_gpu=True)
         publish_plan(stage_1_gb=10.0, monkeypatch=monkeypatch)
@@ -2339,8 +2354,8 @@ class TestAPlacementIsReconsideredOnlyAtPlanBoundaries:
         """
         configuration = configure(monkeypatch, tmp_path)
         publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
-        mc_plan.note_placement(mc_plan.current())
         server = runtime.Runtime()
+        placed_under_the_current_plan(server)
         server._placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, context=8192,
                                           kv_type_k="f16", kv_type_v="f16", on_gpu=True)
         set_free(monkeypatch, 23)
@@ -2358,8 +2373,8 @@ class TestAPlacementIsReconsideredOnlyAtPlanBoundaries:
         on it: the re-negotiation begins by parsing the model's whole header."""
         configuration = configure(monkeypatch, tmp_path)
         publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
-        mc_plan.note_placement(mc_plan.current())
         server = runtime.Runtime()
+        placed_under_the_current_plan(server)
         server._placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, context=8192,
                                           kv_type_k="f16", kv_type_v="f16", on_gpu=True)
         set_free(monkeypatch, 23)
@@ -2380,8 +2395,8 @@ class TestAPlacementIsReconsideredOnlyAtPlanBoundaries:
         is recorded is "this plan has been considered", not "stop asking"."""
         configuration = configure(monkeypatch, tmp_path)
         publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
-        mc_plan.note_placement(mc_plan.current())
         server = runtime.Runtime()
+        placed_under_the_current_plan(server)
         server._placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, context=8192,
                                           kv_type_k="f16", kv_type_v="f16", on_gpu=True)
         set_free(monkeypatch, 23)
@@ -2406,8 +2421,8 @@ class TestAPlacementIsReconsideredOnlyAtPlanBoundaries:
         been considered."""
         configuration = configure(monkeypatch, tmp_path)
         publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
-        mc_plan.note_placement(mc_plan.current())
         server = runtime.Runtime()
+        placed_under_the_current_plan(server)
         server._placement = ctx.Placement(gpu_layers=ctx.ALL_LAYERS, context=8192,
                                           kv_type_k="f16", kv_type_v="f16", on_gpu=True)
         set_free(monkeypatch, 23)
@@ -2423,8 +2438,8 @@ class TestAPlacementIsReconsideredOnlyAtPlanBoundaries:
         """Otherwise the plan a dead server was placed for goes on answering
         "no boundary" about a placement that no longer exists."""
         publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
-        mc_plan.note_placement(mc_plan.current())
         server = runtime.Runtime()
+        placed_under_the_current_plan(server)
 
         server._stop_locked("a test")
 
@@ -2474,8 +2489,8 @@ class TestABoundaryStillWinsInsideAHostJob:
             self, placed, tmp_path, monkeypatch):
         configuration = configure(monkeypatch, tmp_path)
         publish_plan(stage_1_gb=10.0, stage_2_gb=18.0, monkeypatch=monkeypatch)
-        mc_plan.note_placement(mc_plan.current())
         server = runtime.Runtime()
+        placed_under_the_current_plan(server)
         server._placement = ctx.Placement(gpu_layers=4, context=8192,
                                           kv_type_k="f16", kv_type_v="f16", on_gpu=True)
         publish_plan(stage_1_gb=10.0, monkeypatch=monkeypatch)
@@ -2488,8 +2503,8 @@ class TestABoundaryStillWinsInsideAHostJob:
             self, placed, tmp_path, monkeypatch):
         configuration = configure(monkeypatch, tmp_path)
         publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
-        mc_plan.note_placement(mc_plan.current())
         server = runtime.Runtime()
+        placed_under_the_current_plan(server)
         server._placement = ctx.Placement(gpu_layers=4, context=8192,
                                           kv_type_k="f16", kv_type_v="f16", on_gpu=True)
         set_free(monkeypatch, 23)
@@ -2548,8 +2563,8 @@ class TestAServerGivesBackWhatThePlanNoLongerAllows:
         must give the difference back before the pass starts."""
         configuration = configure(monkeypatch, tmp_path)
         publish_plan(stage_1_gb=19.3, total_gb=22.1, monkeypatch=monkeypatch)
-        mc_plan.note_placement(mc_plan.current())
         held = self.server(layers=6)
+        placed_under_the_current_plan(held)
         set_free(monkeypatch, 3)
 
         assert not held._outgrown(configuration, int(1.4 * _GB))
@@ -2562,10 +2577,11 @@ class TestAServerGivesBackWhatThePlanNoLongerAllows:
                                                       monkeypatch):
         configuration = configure(monkeypatch, tmp_path)
         publish_plan(stage_1_gb=14.0, monkeypatch=monkeypatch)
-        mc_plan.note_placement(mc_plan.current())
         set_free(monkeypatch, 8)
+        held = self.server(layers=6)
+        placed_under_the_current_plan(held)
 
-        assert not self.server(layers=6)._outgrown(configuration, 2 * _GB)
+        assert not held._outgrown(configuration, 2 * _GB)
 
 
 class TestARestartHasToBeWorthTheCacheItThrowsAway:
