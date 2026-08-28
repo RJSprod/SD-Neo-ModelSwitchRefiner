@@ -196,6 +196,23 @@ class VoiceModel:
         return tuple(item.local_name for item in self.artifacts)
 
 
+LOCAL_PINS_FILENAME = "managed-voice-models.local.json"
+"""Pins a maintainer filled in on a machine that could reach the publishers.
+
+Shipped unpinned is the safe state -- an artifact with no hash is one this
+repository makes no claim about, and :meth:`Artifact.pinned` refuses to fetch
+it. Pinning means downloading each artifact once and hashing it, which needs a
+machine that can reach huggingface.co and github.com.
+
+The pins land in a *separate, untracked* file rather than being written over the
+shipped manifest, for a plain reason: a checked-in file edited in place turns
+every later ``git pull`` into a merge conflict, and the first thing anybody does
+with a merge conflict in a file full of hashes is take one side at random.
+Overlaid by filename, and only onto artifacts that have no hash yet -- a pin
+file cannot change a hash this repository already committed.
+"""
+
+
 def manifest(refresh: bool = False) -> dict:
     """The parsed, validated manifest. Read once and kept.
 
@@ -210,6 +227,26 @@ def manifest(refresh: bool = False) -> dict:
             return _manifest_cache
         _manifest_cache = _read_manifest(paths.manifest_path())
         return _manifest_cache
+
+
+def local_pins_path() -> Path:
+    return paths.manifest_path().with_name(LOCAL_PINS_FILENAME)
+
+
+def _local_pins() -> dict:
+    """``{filename: {"sha256": ..., "bytes": ...}}`` from the overlay, if any."""
+    try:
+        raw = json.loads(local_pins_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    found = {}
+    for name, entry in (raw.get("artifacts") or {}).items():
+        digest = str((entry or {}).get("sha256") or "").strip().casefold()
+        size = (entry or {}).get("bytes")
+        if len(digest) == 64 and all(c in "0123456789abcdef" for c in digest) \
+                and isinstance(size, int) and size > 0:
+            found[str(name)] = {"sha256": digest, "bytes": size}
+    return found
 
 
 def _read_manifest(path: Path) -> dict:
@@ -339,6 +376,16 @@ def _read_artifact(owner: str, entry) -> Artifact:
         raise VoiceError(f"{owner}: {filename} has an unsafe local name.")
     sha = entry.get("sha256")
     sha = str(sha).strip().casefold() if sha else None
+    size_declared = entry.get("bytes")
+    if sha is None or not size_declared:
+        # Only ever fills a blank. An overlay that could rewrite a hash this
+        # repository committed would be an overlay that defeats the trust root
+        # it is extending.
+        pinned = (_local_pins() or {}).get(filename)
+        if pinned:
+            sha = sha or pinned["sha256"]
+            entry = dict(entry)
+            entry["bytes"] = size_declared or pinned["bytes"]
     if sha is not None and (len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha)):
         raise VoiceError(f"{owner}: {filename} has a malformed SHA-256.")
     size = entry.get("bytes")
@@ -501,23 +548,41 @@ def _runtime_state(spec: dict, chosen: RuntimePlatform) -> tuple[bool, str]:
 
 
 def _model_state(entry: VoiceModel) -> tuple[bool, str]:
-    if not entry.pinned:
-        return False, ("Not available in this build — the artifacts for "
-                       f"{entry.label} have not been pinned yet.")
+    """Whether ``entry`` is installed, and one sentence saying so.
+
+    What is installed is asked *before* whether it could be downloaded, which is
+    the order the two questions actually matter in: a bundle somebody put there
+    by hand is installed whatever this build's manifest can or cannot fetch, and
+    reporting "not available in this build" over the top of a working
+    installation would be reporting on the wrong thing.
+    """
     root = paths.bundle_root(entry.kind, entry.identifier)
     record = _read_json(root / paths.INSTALLED_FILENAME)
-    if record is None:
-        return False, "Not installed"
-    if record.get("identifier") != entry.identifier:
+
+    if record is not None and record.get("identifier") == entry.identifier:
+        missing = [name for name in entry.wanted_paths if not (root / name).exists()]
+        if record.get("source") == "local":
+            # No committed hash to check against, so the claim made here is the
+            # weaker one that is actually true. See :func:`install_from`.
+            if missing:
+                return False, (f"{entry.label} was installed from your own files, but "
+                               f"{missing[0]} is no longer there.")
+            return True, f"Installed — {entry.label}, from files you supplied"
+        wanted = {item.local_name: item.sha256 for item in entry.artifacts}
+        if record.get("artifacts") != wanted:
+            return False, (f"Installed {entry.label} does not match this extension's "
+                           f"manifest. Download it again.")
+        if missing:
+            return False, f"Installed {entry.label} is missing {missing[0]}."
+        return True, f"Installed — {entry.label}"
+
+    if record is not None:
         return False, "Installed bundle does not match the catalogue."
-    wanted = {item.local_name: item.sha256 for item in entry.artifacts}
-    if record.get("artifacts") != wanted:
-        return False, (f"Installed {entry.label} does not match this extension's manifest. "
-                       f"Download it again.")
-    for name in entry.wanted_paths:
-        if not (root / name).exists():
-            return False, f"Installed {entry.label} is missing {name}."
-    return True, f"Installed — {entry.label}"
+    if not entry.pinned:
+        return False, (f"Not installed. {entry.label} cannot be downloaded automatically by "
+                       f"this build — its artifacts are not pinned — but it can be installed "
+                       f"from files you download yourself.")
+    return False, "Not installed"
 
 
 def bundle_paths(kind: str) -> dict:
@@ -556,8 +621,12 @@ def _read_json(path: Path):
 # --------------------------------------------------------------------------- #
 
 
-def refusal(kind: str) -> str:
+def refusal(kind: str, manual: bool = False) -> str:
     """Why ``kind`` cannot be installed right now, or an empty string.
+
+    ``manual`` asks the question for an install from a folder on this machine,
+    which does not need pinned artifacts -- there is nothing to download, so
+    there is nothing for a committed hash to be about.
 
     Asked *before* anything is started, and separately from starting it, because
     the two questions have different audiences. This one answers a browser that
@@ -584,11 +653,12 @@ def refusal(kind: str) -> str:
         system, machine, python_version = current_platform()
         return (f"Voice Chat has no tested CPU runtime for {system}/{machine} on Python "
                 f"{python_version}, so it cannot be installed here.")
-    if not entry.pinned:
-        return (f"{entry.label} cannot be installed by this build: its artifacts are not "
-                f"pinned in voice/managed-voice-models.json. A maintainer pins them by "
-                f"running tools/pin_voice_models.py on a machine that can reach the "
-                f"publishers; nothing is downloaded until they do.")
+    if not manual and not entry.pinned:
+        return (f"{entry.label} cannot be downloaded automatically by this build: its "
+                f"artifacts are not pinned in voice/managed-voice-models.json. Either run "
+                f"tools/pin_voice_models.py once on a machine that can reach the "
+                f"publishers, or download the files yourself and install them from a "
+                f"folder below.")
     return ""
 
 
@@ -647,6 +717,217 @@ def install(kind: str, on_status=None, on_progress=None) -> Status:
                     kind.upper(), entry.identifier,
                     paths.bundle_root(entry.kind, entry.identifier))
         return status()
+
+
+def sources(kind: str) -> list[dict]:
+    """Where a person would go to fetch ``kind``'s files by hand.
+
+    The manifest already names every URL, so the Settings row can show them
+    rather than asking somebody to find the right Whisper export themselves.
+    Returned as data rather than markup because the row is not the only thing
+    that will want it.
+    """
+    entry = default_model(kind)
+    return [{"filename": item.filename, "url": item.url, "save_as": item.local_name,
+             "archive": bool(item.archive)}
+            for item in entry.artifacts]
+
+
+def install_from(kind: str, folder, on_status=None, on_progress=None) -> Status:
+    """Install ``kind`` from files already on this machine.
+
+    The escape hatch, and it earns its place beyond the situation that prompted
+    it: a machine with no route to huggingface.co, a corporate proxy that
+    refuses large binaries, an air-gapped install, or somebody who already has
+    these models for another application.
+
+    What is different from the managed path is stated rather than glossed. There
+    is no committed hash to check these against -- this repository makes no
+    claim about a file it has never seen -- so the checks are the ones that can
+    honestly be made: every required file is present, none of them is empty,
+    each ONNX file really is an ONNX file, and the token list really is text.
+    A hash is computed and recorded at install time, so later *tampering* is
+    still detectable even though the original bytes were never vouched for, and
+    :func:`status` says "installed from your own files" rather than claiming a
+    verification that did not happen.
+
+    The transaction is the same one: staged, checked, promoted with a rename.
+    Nothing that was working stops working because a folder turned out to hold
+    the wrong thing.
+    """
+    if kind not in paths.KINDS:
+        raise VoiceError(f"{kind!r} is not a Voice Chat model kind.")
+    say = _narrator(kind, on_status)
+    tick = _ticker(kind, on_progress)
+
+    source = Path(str(folder or "").strip().strip('"')).expanduser()
+    if not str(folder or "").strip():
+        raise VoiceError("Give the folder the downloaded files are in.")
+    if not source.exists():
+        raise VoiceError(f"There is nothing at {source}.")
+    if source.is_file():
+        # A folder is what is asked for, and a file inside one is what people
+        # paste. Taking the parent is kinder than refusing the paste.
+        source = source.parent
+    if not source.is_dir():
+        raise VoiceError(f"{source} is not a folder.")
+
+    with _claim(kind, say):
+        entry = default_model(kind)
+        logger.info("Model Chain: Voice Chat is installing the %s bundle %s from %s",
+                    kind.upper(), entry.identifier, source)
+        say(f"Reading {source}…")
+
+        staging = paths.staging_for(entry.identifier, uuid.uuid4().hex[:8])
+        target = paths.bundle_root(entry.kind, entry.identifier)
+        try:
+            staging.mkdir(parents=True, exist_ok=True)
+            _gather(entry, source, staging, say)
+            tick(0.6)
+
+            say(f"Checking {entry.label} is complete…")
+            missing = [name for name in entry.wanted_paths if not (staging / name).exists()]
+            if missing:
+                raise VoiceError(
+                    f"{source} does not have everything {entry.label} needs — {', '.join(missing)} "
+                    f"{'is' if len(missing) == 1 else 'are'} missing. Nothing was installed.")
+            _sanity_check(entry, staging)
+            tick(0.8)
+
+            say("Recording what was installed…")
+            digests = {}
+            for name in entry.wanted_paths:
+                item = staging / name
+                if item.is_file():
+                    digests[name] = _digest(item)
+            _write_json(staging / paths.INSTALLED_FILENAME, {
+                "schema": SCHEMA,
+                "identifier": entry.identifier,
+                "kind": entry.kind,
+                "label": entry.label,
+                "engine": entry.engine,
+                "voice": entry.voice,
+                "source": "local",
+                "source_folder": str(source),
+                "artifacts": digests,
+                "installed_at": time.time(),
+            })
+            say("Installing…")
+            _promote(staging, target)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+        tick(1.0)
+        say(f"{entry.label} installed from your own files.")
+        logger.info("Model Chain: Voice Chat installed the %s bundle %s from %s at %s",
+                    kind.upper(), entry.identifier, source, target)
+        return status()
+
+
+def _gather(entry: VoiceModel, source: Path, staging: Path, say) -> None:
+    """Copy what ``entry`` needs out of ``source``, under the names it uses.
+
+    Tolerant about the names on the way in and strict about the names on the
+    way out. A publisher calls it ``small-encoder.int8.onnx`` and this feature
+    calls it ``encoder.onnx``; somebody who downloaded the file has the first
+    name, and telling them to rename it would be this extension making its
+    internal spelling somebody else's problem.
+    """
+    for item in entry.artifacts:
+        if item.archive:
+            found = _find(source, [item.filename, item.local_name])
+            if found is not None:
+                say(f"Expanding {found.name}…")
+                _expand(found, staging, item)
+                continue
+            # Already unpacked, which is what somebody who opened the archive
+            # to look inside it has. Take the tree instead.
+            root = source / item.strip_root if item.strip_root else source
+            if not root.is_dir():
+                root = source
+            _copy_tree(root, staging, entry.wanted_paths, say)
+            continue
+
+        found = _find(source, [item.local_name, item.filename])
+        if found is None:
+            continue
+        say(f"Copying {found.name}…")
+        shutil.copy2(found, staging / item.local_name)
+
+
+def _copy_tree(root: Path, staging: Path, wanted, say) -> None:
+    for name in wanted:
+        origin = root / name
+        if not origin.exists():
+            continue
+        destination = staging / name
+        say(f"Copying {name}…")
+        if origin.is_dir():
+            shutil.copytree(origin, destination, dirs_exist_ok=True)
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(origin, destination)
+
+
+def _find(source: Path, names) -> Path | None:
+    """The first of ``names`` in ``source``, matched case-insensitively.
+
+    One level down as well, because an archive extracted with its own top-level
+    directory is what a double-click produces and is not somebody's mistake.
+    """
+    wanted = [name.casefold() for name in names if name]
+    for candidate in sorted(source.iterdir()) if source.is_dir() else []:
+        if candidate.is_file() and candidate.name.casefold() in wanted:
+            return candidate
+    for folder in sorted(source.iterdir()) if source.is_dir() else []:
+        if not folder.is_dir():
+            continue
+        for candidate in sorted(folder.iterdir()):
+            if candidate.is_file() and candidate.name.casefold() in wanted:
+                return candidate
+    return None
+
+
+ONNX_MAGIC = b"\x08"
+"""An ONNX file is a protobuf whose first field is ``ir_version``, so it starts
+with field 1 as a varint. Two bytes of check, and it is the difference between
+"installed" and a worker that dies on its first dictation."""
+
+
+def _sanity_check(entry: VoiceModel, staging: Path) -> None:
+    """The checks that can honestly be made about a file nobody vouched for."""
+    for name in entry.wanted_paths:
+        item = staging / name
+        if item.is_dir():
+            if not any(item.iterdir()):
+                raise VoiceError(f"{name} is an empty folder. Nothing was installed.")
+            continue
+        if not item.is_file():
+            continue
+        size = item.stat().st_size
+        if size == 0:
+            raise VoiceError(f"{name} is empty. Nothing was installed.")
+        if name.endswith(".onnx"):
+            if size < 1024 * 1024:
+                raise VoiceError(f"{name} is only {_bytes_label(size)}, which is far too "
+                                 f"small to be a speech model. Nothing was installed.")
+            with open(item, "rb") as handle:
+                if handle.read(1) != ONNX_MAGIC:
+                    raise VoiceError(f"{name} is not an ONNX model. Nothing was installed.")
+        if name.endswith(".txt"):
+            try:
+                (item).read_text(encoding="utf-8")[:4096]
+            except (OSError, UnicodeDecodeError):
+                raise VoiceError(f"{name} is not a readable text file. Nothing was "
+                                 f"installed.") from None
+
+
+def _digest(path: Path) -> str:
+    found = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(CHUNK), b""):
+            found.update(block)
+    return found.hexdigest()
 
 
 def install_runtime(on_status=None, on_progress=None) -> None:

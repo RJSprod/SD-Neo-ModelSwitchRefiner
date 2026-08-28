@@ -37,6 +37,18 @@ import mc_voice_api as api  # noqa: E402
 import mc_voice_runtime as runtime  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _forget_repeats():
+    """The refusal log is throttled, so its memory is module state.
+
+    Without this, the second test to provoke the same refusal would find the
+    line suppressed and assert against an empty log.
+    """
+    api.forget_repeats()
+    yield
+    api.forget_repeats()
+
+
 @pytest.fixture
 def app():
     built = FastAPI()
@@ -272,14 +284,118 @@ class TestAuthenticationParity:
         with TestClient(app) as client:
             assert client.post(api.STT_ROUTE, headers=key, content=b"x").status_code == 401
 
-    def test_a_build_that_will_not_say_who_is_calling_refuses_everybody(self, app, key,
-                                                                       installed):
-        """Fail closed. A route that cannot check a login must not be the way in
-        to a WebUI that has one."""
+    def test_a_login_it_cannot_check_falls_back_to_the_page_token(self, app, key,
+                                                                  installed, caplog):
+        """The correction to a guess that failed closed on the common case.
+
+        A login this module cannot verify used to refuse everybody. It now
+        allows and says so once, because the page token is only ever served
+        inside a page the login served -- an unauthenticated caller has no way
+        to obtain one, so refusing on top of that bought nothing and cost an
+        installation that worked."""
+        import logging
+
+        caplog.set_level(logging.DEBUG, logger="model_chain")
         app.auth = {"someone": "hunter2"}
         app.tokens = None
         with TestClient(app) as client:
-            assert client.post(api.STATUS_ROUTE, headers=key).status_code == 401
+            assert client.post(api.STATUS_ROUTE, headers=key).status_code == 200
+
+        written = " ".join(record.getMessage() for record in caplog.records)
+        assert "cannot check against" in written
+
+    def test_a_login_it_cannot_check_still_needs_the_page_token(self, app, installed):
+        """Which is the whole reason allowing is safe."""
+        app.auth = {"someone": "hunter2"}
+        app.tokens = None
+        with TestClient(app) as client:
+            assert client.post(api.STATUS_ROUTE).status_code == 403
+
+
+class TestWhatCountsAsALogin:
+    """The bug that blocked a working installation, as five cases.
+
+    ``getattr(app, "auth", None)`` being truthy is not evidence of a login. On a
+    real Forge build it was true with nothing configured, and Voice Chat refused
+    every request it received -- including its own status poll, at better than
+    one a second, for as long as the Settings page was open.
+    """
+
+    def test_nothing_configured_is_not_a_login(self, app, host):
+        assert api.login_kind(app) == ""
+
+    def test_an_auth_attribute_of_an_unrecognised_shape_is_not_a_login(self, app, host):
+        app.auth = object()
+        assert api.login_kind(app) == ""
+        app.auth = True
+        assert api.login_kind(app) == ""
+
+    def test_an_empty_account_mapping_is_not_a_login(self, app, host):
+        app.auth = {}
+        assert api.login_kind(app) == ""
+
+    def test_accounts_are_a_login(self, app, host):
+        app.auth = {"someone": "hunter2"}
+        assert "accounts" in api.login_kind(app)
+        app.auth = [("someone", "hunter2")]
+        assert "accounts" in api.login_kind(app)
+
+    def test_credentials_on_the_command_line_are_a_login(self, app, host, monkeypatch):
+        monkeypatch.setattr(host.shared.cmd_opts, "gradio_auth", "someone:hunter2",
+                            raising=False)
+        assert "command line" in api.login_kind(app)
+
+    def test_an_unconfigured_installation_is_served(self, app, key, installed):
+        """The reported symptom, as a test: no login anywhere, so the routes
+        answer."""
+        with TestClient(app) as client:
+            assert client.post(api.STATUS_ROUTE, headers=key).status_code == 200
+
+
+class TestTheLogDoesNotScroll:
+    def test_one_refusal_line_per_reason_however_many_requests(self, client, caplog,
+                                                               installed):
+        """A route a page polls turns any per-request line into a log that
+        scrolls forever. It did: 136 identical warnings in three minutes."""
+        import logging
+
+        caplog.set_level(logging.DEBUG, logger="model_chain")
+        for _ in range(40):
+            client.post(api.STATUS_ROUTE)
+
+        lines = [r for r in caplog.records if "refused a request" in r.getMessage()]
+        assert len(lines) == 1, f"the refusal was logged {len(lines)} times"
+
+    def test_a_different_reason_still_gets_its_own_line(self, client, caplog, installed,
+                                                        key):
+        import logging
+
+        caplog.set_level(logging.DEBUG, logger="model_chain")
+        client.post(api.STATUS_ROUTE)
+        headers = dict(key)
+        headers["Origin"] = "https://elsewhere.example"
+        client.post(api.STATUS_ROUTE, headers=headers)
+
+        lines = [r.getMessage() for r in caplog.records if "refused a request" in r.getMessage()]
+        assert len(lines) == 2
+
+    def test_the_suppressed_ones_are_counted_when_it_speaks_again(self, client, caplog,
+                                                                  installed, monkeypatch):
+        import logging
+
+        caplog.set_level(logging.DEBUG, logger="model_chain")
+        client.post(api.STATUS_ROUTE)
+        for _ in range(9):
+            client.post(api.STATUS_ROUTE)
+
+        # Time moves on, and the next one speaks again with a count.
+        later = api.time.monotonic() + 3600
+        monkeypatch.setattr(api.time, "monotonic", lambda: later)
+        client.post(api.STATUS_ROUTE)
+
+        lines = [r.getMessage() for r in caplog.records if "refused a request" in r.getMessage()]
+        assert len(lines) == 2
+        assert "9 more like it" in lines[1]
 
     def test_with_no_login_configured_everybody_is_served(self, client, key, installed):
         assert client.post(api.STATUS_ROUTE, headers=key).status_code == 200
@@ -449,7 +565,7 @@ def installable(monkeypatch):
     """A build where the manifest is pinned, so an install may actually start."""
     import mc_voice_models
 
-    monkeypatch.setattr(mc_voice_models, "refusal", lambda kind: "")
+    monkeypatch.setattr(mc_voice_models, "refusal", lambda kind, **kw: "")
     return mc_voice_models
 
 
@@ -498,7 +614,7 @@ class TestInstalling:
         import mc_voice_models
 
         monkeypatch.setattr(mc_voice_models, "refusal",
-                            lambda kind: "Voice Chat has no tested CPU runtime here.")
+                            lambda kind, **kw: "Voice Chat has no tested CPU runtime here.")
         payload = client.post(api.INSTALL_ROUTE, headers=key,
                               json={"kind": "tts"}).json()
         assert payload["error"] == "Voice Chat has no tested CPU runtime here."

@@ -3,3 +3,9 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# Voice Chat artifact pins filled in by tools/pin_voice_models.py. Untracked on
+# purpose: the pins are a property of a machine that could reach the publishers,
+# and editing the tracked manifest in place would turn every later pull into a
+# merge conflict in a file full of hashes.
+voice/managed-voice-models.local.json

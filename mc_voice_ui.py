@@ -222,37 +222,82 @@ def settings_html() -> str:
     """The Voice Chat install row, as static HTML the browser makes live.
 
     Forge's settings system stores options; it does not host arbitrary Gradio
-    controls with handlers. So the two download buttons are ordinary buttons in
-    an HTML block, ``javascript/voice_chat.js`` wires them to the install route,
-    and the same script polls the status route to redraw the two lines. That is
-    the mechanism the design intent recommends, and it has one property worth
-    keeping: "download" never becomes a fake persistent boolean setting that a
-    settings backup would restore as an instruction to download something.
+    controls with handlers. So the buttons are ordinary buttons in an HTML
+    block, ``javascript/voice_chat.js`` wires them to the install route, and the
+    same script polls the status route to redraw the rows. That is the
+    mechanism the design intent recommends, and it keeps "download" from
+    becoming a fake persistent boolean that a settings backup would restore as
+    an instruction to download something.
+
+    Each row has two ways in, because one of them is not always available. The
+    button downloads the pinned artifacts. The folder box installs from files
+    somebody already has -- which is the answer for a build whose artifacts are
+    not pinned, a proxy that will not pass a 300 MB binary, and an air-gapped
+    machine. The addresses are printed beside it rather than left for somebody
+    to search for: "a Whisper small ONNX export" describes several files and
+    only one of them is the one this runtime wants.
 
     The page token is an attribute on the container because this row is not
     inside Conversation and has no hidden Gradio component of its own to read
     it from.
     """
     found = models.status()
-    rows = [
-        ("stt", "Speech to text", found.stt_message,
-         models.default_model("stt").label if found.platform_supported else ""),
-        ("tts", "Text to speech", found.tts_message,
-         models.default_model("tts").label if found.platform_supported else ""),
-    ]
-    parts = [f'<div class="mc-voice-settings" data-mc-voice-key="{ui.escape(api.session_token())}">']
+    parts = [f'<div class="mc-voice-settings" '
+             f'data-mc-voice-key="{ui.escape(api.session_token())}">']
     parts.append(f'<div class="mc-voice-runtime">{ui.escape(found.runtime_message)}</div>')
-    for kind, heading, message, label in rows:
+
+    for kind, heading in (("stt", "Speech to text"), ("tts", "Text to speech")):
+        label, addresses = "", []
+        if found.platform_supported:
+            try:
+                entry = models.default_model(kind)
+                label = entry.label
+                addresses = models.sources(kind)
+            except Exception:
+                logger.debug("Model Chain: could not describe the %s bundle", kind,
+                             exc_info=True)
+        message = found.stt_message if kind == "stt" else found.tts_message
+
+        parts.append(f'<div class="mc-voice-row" data-mc-voice-kind="{kind}">')
         parts.append(
-            f'<div class="mc-voice-row" data-mc-voice-kind="{kind}">'
+            f'<div class="mc-voice-head">'
             f'<div class="mc-voice-heading">{ui.escape(heading)}</div>'
             f'<div class="mc-voice-default">{ui.escape(label)}</div>'
             f'<div class="mc-voice-status" data-mc-voice-status="{kind}">'
             f'{ui.escape(message)}</div>'
             f'<button type="button" class="mc-voice-install" '
-            f'data-mc-voice-install="{kind}">Download default '
-            f'{kind.upper()}</button>'
+            f'data-mc-voice-install="{kind}">Download default {kind.upper()}</button>'
             f'</div>')
+
+        if addresses:
+            links = "".join(
+                f'<li><a href="{ui.escape(item["url"])}" target="_blank" rel="noreferrer">'
+                f'{ui.escape(item["filename"])}</a>'
+                + ("" if item["archive"] or item["filename"] == item["save_as"]
+                   else f' <span class="mc-voice-rename">→ save as '
+                        f'{ui.escape(item["save_as"])}</span>')
+                + "</li>"
+                for item in addresses)
+            parts.append(
+                f'<details class="mc-voice-manual">'
+                f'<summary>Install from files you download yourself</summary>'
+                f'<p>Download these into one folder, then give Voice Chat that folder. '
+                f'The original filenames are fine — nothing needs renaming.</p>'
+                f'<ul class="mc-voice-links">{links}</ul>'
+                f'<div class="mc-voice-folder-row">'
+                f'<input type="text" class="mc-voice-folder" '
+                f'data-mc-voice-folder="{kind}" spellcheck="false" '
+                f'placeholder="C:\\Users\\you\\Downloads\\voice-{kind}" />'
+                f'<button type="button" class="mc-voice-install-local" '
+                f'data-mc-voice-local="{kind}">Install from this folder</button>'
+                f'</div>'
+                f'<p class="mc-voice-note">Files you supply are checked for shape and '
+                f'completeness, not against a hash in this repository — there is none '
+                f'for them. Voice Chat records what it installed so later changes still '
+                f'show.</p>'
+                f'</details>')
+        parts.append("</div>")
+
     parts.append(
         '<div class="mc-voice-note">Voice Chat runs on the CPU and never uses the graphics '
         'card. After these are installed it needs no Internet connection.</div>')
