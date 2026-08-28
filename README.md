@@ -2967,6 +2967,9 @@ Point *Voice data directory* somewhere else if that drive is full.
 Either because this build is unpinned, or because the machine cannot reach the
 publishers — a proxy that will not pass a 300 MB binary, or no Internet at all.
 
+Neither route needs an account. The Whisper export and the Kokoro bundle are
+public files; no Hugging Face token, no GitHub login, nothing to sign up for.
+
 **Pin it once.** On a machine that can reach huggingface.co and github.com:
 
 ```
@@ -3096,16 +3099,27 @@ one of them is a sentence in the status line and a chat window that works
 exactly as it did. A synthesis that fails cannot cancel a reply that has already
 arrived, and nothing in the voice half can reach the image half's memory.
 
-**Are the voice routes protected?** The log says so at start-up, in one line,
-rather than leaving it to be inferred from a refusal. With no login configured
-they are open to exactly the callers the rest of the WebUI is. With one, a
-request must carry a session cookie the WebUI itself issued — and if this
-extension cannot read that build's session table, it says so and falls back to
-the page token, which is only ever delivered inside a page the login served. It
-does *not* refuse everything in that case: an earlier version did, on a build
-whose `auth` attribute was truthy with no login configured, and the result was a
-feature that could not be installed on an installation nobody had ever been
-asked to sign in to.
+**There is no sign-in.** Voice Chat has no login of its own, does not re-check
+the WebUI's, and needs no account, API key or access token anywhere — not for
+this WebUI, and not for the sites the model files come from. If you can reach
+the Settings page, you are past whatever authentication this WebUI has, and that
+is the whole of it.
+
+What guards the routes instead is the page token: a random value minted per
+WebUI process and put into exactly two places, both of them pages the WebUI
+itself served. Somebody who cannot get past the WebUI's login never receives
+one, and it is 24 random bytes, so they cannot guess one. A cookie check used to
+sit behind that and it locked legitimate users out twice — once by mistaking an
+unrelated attribute for a login, and then on an installation that really does
+pass `--gradio-auth`, whose user was of course already signed in. Reaching the
+page is the proof of access; asking for it again only produced a way to fail.
+The one gap that leaves, stated rather than hidden: a token already handed to a
+browser stays usable until the WebUI restarts, so revoking an account
+mid-session does not close a page that is already open.
+
+The failure you can still see is a tab left open across a WebUI restart, whose
+token is from the previous process. It says so, and says to reload — and says
+explicitly that it is *not* asking anybody to sign in to anything.
 
 **Everything it does says so.** Voice lines go to the console and to
 `<LLM data root>/logs/model_chain.log`, beside the rest of the extension's log —
@@ -3413,9 +3427,9 @@ unexpected death and no more; the escalation to `terminate` and then `kill`
 inside a bounded time; and, in two places, that a process which fails after
 `Popen` is stopped before its handle is dropped. `test_voice_api.py` runs the
 routes on a real FastAPI app at the origin root *and* mounted under a subpath,
-refuses a foreign origin, a missing page token and — the one that matters — an
-unauthenticated caller when the WebUI has a login, because sharing an app is not
-the same as sharing Gradio's authentication. `test_voice_ui.py` walks the built
+refuses a foreign origin and a missing page token, and holds the line that there
+is no sign-in gate: a WebUI with `--gradio-auth` configured still serves a page
+that carries the token, and no route can answer 401. `test_voice_ui.py` walks the built
 Conversation panel and asserts the speech marker is attached with `.success()`
 rather than `.then()`, on all six reply paths, as one shared handler.
 `test_voice_independence.py` reads the import graph: no voice module may import

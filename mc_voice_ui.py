@@ -282,7 +282,8 @@ def settings_html() -> str:
                 f'<details class="mc-voice-manual">'
                 f'<summary>Install from files you download yourself</summary>'
                 f'<p>Download these into one folder, then give Voice Chat that folder. '
-                f'The original filenames are fine — nothing needs renaming.</p>'
+                f'The original filenames are fine — nothing needs renaming, and no '
+                f'account or access token is needed for either site.</p>'
                 f'<ul class="mc-voice-links">{links}</ul>'
                 f'<div class="mc-voice-folder-row">'
                 f'<input type="text" class="mc-voice-folder" '
@@ -300,6 +301,8 @@ def settings_html() -> str:
 
     parts.append(
         '<div class="mc-voice-note">Voice Chat runs on the CPU and never uses the graphics '
-        'card. After these are installed it needs no Internet connection.</div>')
+        'card. It has no sign-in of its own and needs no account, API key or access token '
+        '— not for this WebUI, and not for the sites these files come from. After they are '
+        'installed it needs no Internet connection at all.</div>')
     parts.append("</div>")
     return "".join(parts)
