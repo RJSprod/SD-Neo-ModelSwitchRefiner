@@ -14,6 +14,7 @@ are stubs everywhere else.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import types
@@ -127,12 +128,24 @@ class _Dependency:
         self.chained = []
 
     def then(self, **kwargs):
-        dependency = _Dependency(self.component, "then", kwargs)
-        self.chained.append(dependency)
-        return dependency
+        return self._chain("then", kwargs)
 
     def success(self, **kwargs):
-        return self.then(**kwargs)
+        """Gradio 4's success-only continuation.
+
+        Recorded under its own kind rather than folded into ``then``, because
+        the difference is load-bearing and invisible from the outside: Gradio
+        runs a ``then`` whether or not the event before it raised, and runs a
+        ``success`` only after one that did not. Voice Chat's automatic speech
+        hangs off the second, and a stub that made them the same object would
+        let a regression to ``then`` pass every test.
+        """
+        return self._chain("success", kwargs)
+
+    def _chain(self, kind, kwargs):
+        dependency = _Dependency(self.component, kind, kwargs)
+        self.chained.append(dependency)
+        return dependency
 
 
 class _Update(dict):
@@ -398,6 +411,11 @@ def _install_modules() -> None:
 
     shared.options_section = options_section
     shared.cmd_opts = types.SimpleNamespace(disable_console_progressbars=False)
+    # What ``opts.save`` is given. Present because the extension writes settings
+    # through the host's own store -- Voice Chat's two switches are written the
+    # moment they are tapped -- and a missing name here would make every one of
+    # those writes fail into a debug log rather than into a test.
+    shared.config_filename = "config.json"
 
     class FakeTotalTqdm:
         """Enough of TotalTQDM to check the Stage 2 steps are accounted for."""
@@ -904,3 +922,291 @@ def chain(host, style_store, monkeypatch, image_factory):
         refine_calls=refine_calls,
         module=model_chain,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Voice Chat
+# --------------------------------------------------------------------------- #
+
+
+FAKE_VOICE_WORKER = r'''
+"""A Voice Worker that speaks the real protocol and loads no speech engine.
+
+Deliberately a second implementation of the framing rather than an import of
+``voice_worker.worker``: a test in which both ends of a wire protocol are the
+same function proves that the function agrees with itself.
+
+What it does is steered by MC_FAKE_VOICE in the environment, so one script
+covers the ordinary case, a handshake the parent must refuse, a worker that
+ignores a polite shutdown, and one that is inside "native" work when the parent
+is killed.
+"""
+
+import json
+import os
+import struct
+import sys
+import time
+
+PLAN = json.loads(os.environ.get("MC_FAKE_VOICE") or "{}")
+LENGTH = struct.Struct(">I")
+
+
+def _read(stream, count):
+    out = b""
+    while len(out) < count:
+        block = stream.read(count - len(out))
+        if not block:
+            return None
+        out += block
+    return out
+
+
+def read_frame(stream):
+    raw = _read(stream, 4)
+    if raw is None:
+        return None
+    header = _read(stream, LENGTH.unpack(raw)[0])
+    if header is None:
+        return None
+    raw = _read(stream, 4)
+    if raw is None:
+        return None
+    payload = _read(stream, LENGTH.unpack(raw)[0])
+    if payload is None:
+        return None
+    return json.loads(header.decode("utf-8")), payload
+
+
+def write_frame(stream, header, payload=b""):
+    raw = json.dumps(header).encode("utf-8")
+    stream.write(LENGTH.pack(len(raw)))
+    stream.write(raw)
+    stream.write(LENGTH.pack(len(payload)))
+    if payload:
+        stream.write(payload)
+    stream.flush()
+
+
+def note(text):
+    sys.stderr.write("fake-voice-worker: %s\n" % text)
+    sys.stderr.flush()
+
+
+def touch():
+    marker = PLAN.get("alive_marker")
+    if marker:
+        with open(marker, "a", encoding="utf-8") as handle:
+            handle.write("%d\n" % os.getpid())
+
+
+def containment(parent_pid):
+    if sys.platform.startswith("linux"):
+        try:
+            import ctypes
+            import signal
+
+            libc = ctypes.CDLL("libc.so.6", use_errno=True)
+            if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+                return "pipe"
+        except Exception:
+            return "pipe"
+        if parent_pid and os.getppid() != parent_pid:
+            raise SystemExit(0)
+        return "pdeathsig"
+    if os.name == "nt":
+        return "job"
+    return "pipe"
+
+
+def main():
+    stdin, stdout = sys.stdin.buffer, sys.stdout.buffer
+    touch()
+    behaviour = PLAN.get("behaviour", "normal")
+    while True:
+        frame = read_frame(stdin)
+        if frame is None:
+            note("input closed")
+            return 0
+        header, payload = frame
+        operation = header.get("op")
+        request = header.get("id")
+
+        if operation == "init":
+            found = containment(int(header.get("parent_pid") or 0))
+            reply = {
+                "ok": True, "id": request, "protocol_version": 1,
+                "runtime_version": "1.13.6", "provider": "cpu",
+                "parent_death": found, "stt_model_id": "whisper-small-int8",
+                "tts_model_id": "kokoro-multi-lang-v1-cpu",
+                "stt_threads": 4, "tts_threads": 2,
+            }
+            reply.update(PLAN.get("handshake") or {})
+            if behaviour == "silent_handshake":
+                # Never answers. The parent's start has to time out and still
+                # leave no process behind.
+                while True:
+                    time.sleep(0.05)
+            write_frame(stdout, reply)
+            continue
+
+        if operation == "shutdown":
+            if behaviour == "ignore_shutdown":
+                note("ignoring shutdown")
+                while True:
+                    time.sleep(0.05)
+            write_frame(stdout, {"ok": True, "id": request})
+            return 0
+
+        if operation == "stt":
+            if behaviour == "die_on_stt":
+                os._exit(9)
+            if behaviour == "busy_native":
+                # Stands in for a long native inference call: this process is
+                # not waiting on stdin, so pipe EOF cannot be what ends it.
+                touch()
+                while True:
+                    time.sleep(0.05)
+            write_frame(stdout, {"ok": True, "id": request,
+                                 "text": PLAN.get("transcript", ""),
+                                 "audio_seconds": 1.0, "elapsed": 0.1})
+            continue
+
+        if operation == "tts":
+            write_frame(stdout, {"ok": True, "id": request, "sample_rate": 24000,
+                                 "audio_seconds": 1.0, "elapsed": 0.1},
+                        bytes.fromhex(PLAN.get("audio_hex", "")))
+            continue
+
+        write_frame(stdout, {"ok": False, "id": request, "error": "unknown operation"})
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+class VoiceHarness:
+    """A voice installation that is entirely fake and entirely real-shaped."""
+
+    def __init__(self, root, script, plan):
+        self.root = root
+        self.script = script
+        self.plan = plan
+        self.handshake = plan.setdefault("handshake", {})
+        self.transcript = plan.get("transcript", "")
+        self.audio = bytes.fromhex(plan.get("audio_hex", ""))
+        self.wav = _silent_wav()
+
+    def publish(self):
+        """Write the plan where the fake worker will read it."""
+        import os as _os
+
+        _os.environ["MC_FAKE_VOICE"] = json.dumps(self.plan)
+
+
+def _silent_wav(seconds: float = 1.0, rate: int = 16000) -> bytes:
+    """A valid 16 kHz mono PCM16 WAV of the requested length."""
+    import struct as _struct
+
+    frames = int(rate * seconds)
+    body = b"\0\0" * frames
+    return (b"RIFF" + _struct.pack("<I", 36 + len(body)) + b"WAVE"
+            + b"fmt " + _struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+            + b"data" + _struct.pack("<I", len(body)) + body)
+
+
+def pytest_configure(config):
+    """Register the one marker the voice fixtures read.
+
+    Declared rather than left to pytest's "unknown mark" warning, because a
+    misspelled behaviour would otherwise silently fall back to the ordinary
+    worker and the test that asked for a crashing one would pass for the wrong
+    reason.
+    """
+    config.addinivalue_line(
+        "markers",
+        "voice(**plan): how the fake Voice Worker should behave for this test.")
+
+
+@pytest.fixture
+def silent_wav():
+    return _silent_wav
+
+
+@pytest.fixture
+def voice_root(tmp_path, monkeypatch):
+    """Point every voice path at a throwaway directory.
+
+    Autouse would have been wrong: the paths module answers from the host's data
+    directory, and a test that has not asked for a voice installation should see
+    exactly what a fresh machine sees.
+    """
+    import mc_voice_paths
+
+    root = tmp_path / "model_chain_voice"
+    monkeypatch.setattr(mc_voice_paths, "data_root", lambda: root)
+    return root
+
+
+@pytest.fixture
+def fake_worker(tmp_path, monkeypatch, voice_root, request):
+    """A started-on-demand Voice Worker that is a Python script, not a model.
+
+    Parametrise it with ``@pytest.mark.voice(behaviour=..., handshake=...)``.
+    Everything the runtime manager checks -- readiness, the interpreter, the
+    worker path, the model ids -- is answered here, so the tests are about the
+    manager's own behaviour rather than about having a gigabyte of ONNX.
+    """
+    import mc_voice_models
+    import mc_voice_paths
+    import mc_voice_runtime
+
+    marker = request.node.get_closest_marker("voice")
+    plan = dict(marker.kwargs) if marker else {}
+    plan.setdefault("transcript", "the quick brown fox")
+    plan.setdefault("audio_hex", _silent_wav(0.25, 24000).hex())
+    plan.setdefault("alive_marker", str(tmp_path / "worker-alive.txt"))
+
+    script = tmp_path / "fake_voice_worker.py"
+    script.write_text(FAKE_VOICE_WORKER, encoding="utf-8")
+
+    harness = VoiceHarness(voice_root, script, plan)
+    harness.publish()
+
+    ready = mc_voice_models.Status(
+        runtime_ready=True, stt_ready=True, tts_ready=True,
+        runtime_message="Installed", stt_message="Installed", tts_message="Installed",
+        platform_supported=True, stt_id="whisper-small-int8",
+        tts_id="kokoro-multi-lang-v1-cpu", tts_voice="af_heart")
+
+    monkeypatch.setattr(mc_voice_models, "status", lambda: ready)
+    monkeypatch.setattr(mc_voice_models, "runtime_python", lambda: Path(sys.executable))
+    monkeypatch.setattr(mc_voice_paths, "worker_script", lambda: script)
+    monkeypatch.setattr(mc_voice_models, "bundle_paths",
+                        lambda kind: {"id": ready.stt_id if kind == "stt" else ready.tts_id})
+    monkeypatch.setattr(mc_voice_runtime, "CONTAINMENT",
+                        {"windows": "job", "linux": "pdeathsig"})
+
+    yield harness
+
+    mc_voice_runtime.stop("test finished")
+    mc_voice_runtime._failures.clear()
+    os.environ.pop("MC_FAKE_VOICE", None)
+
+
+@pytest.fixture(autouse=True)
+def _forget_voice_targets():
+    """No speech target survives a test.
+
+    Module state, and the kind that would make a later test speak an earlier
+    test's sentence -- which is precisely the confusion the one-shot token
+    exists to prevent in production.
+    """
+    yield
+    try:
+        import mc_voice_api
+
+        mc_voice_api.forget_targets()
+    except Exception:
+        pass

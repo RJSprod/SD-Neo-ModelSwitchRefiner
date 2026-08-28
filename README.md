@@ -2916,6 +2916,153 @@ start is a sentence in the status line; a reclaim that fails costs an eviction,
 not a generation. If you never open LLM Studio, none of it runs — and the
 Settings toggle removes the tab entirely.
 
+## Voice Chat
+
+Hold a button, talk, and read what you said in the message box. Turn on *Speak
+replies automatically* and hear the answer back. Both halves run on this PC, on
+the CPU, from models you downloaded once — after that there is nothing for them
+to reach the Internet for, and nothing about what you said leaves your machines.
+
+It is deliberately two small I/O adapters bolted to the Conversation workspace
+rather than a second AI subsystem. There is no wake word, no open microphone, no
+voice activity detection, no barge-in, no voice chooser and no GPU. Dictation
+fills the composer that was already there, and Send is the Send that was already
+there — so attachments, threads, characters, sampling settings, Stop and every
+per-message action behave exactly as they did.
+
+### Setting it up
+
+**Settings → Voice Chat** has two downloads:
+
+| | |
+| --- | --- |
+| **Speech to text** | Whisper Small, multilingual, INT8, about 375 MB |
+| **Text to speech** | Kokoro-82M v1.0, one fixed voice |
+
+Pressing either one also provisions the shared CPU speech runtime, so there is
+no third "download the engine" button to find. Everything is staged under
+`.downloads`, checked against a SHA-256 committed in this repository, and moved
+into place in one rename — a failed or interrupted download leaves whatever you
+had before running exactly as it was.
+
+Both models have to be installed before the microphone will record, even though
+dictation technically only needs the first. That is on purpose: a microphone
+that transcribes and then cannot answer aloud is a half-installed feature that
+looks finished.
+
+Everything lives in `<WebUI data directory>/model_chain_voice/` — a root of its
+own, not a corner of the LLM one, because speech models have a different
+lifecycle from language models and should keep working across changes to either.
+Point *Voice data directory* somewhere else if that drive is full.
+
+> **This build ships unpinned.** The runtime wheels are pinned exactly — sixteen
+> of them, real sizes and hashes read from PyPI. The two model bundles are not:
+> pinning a hash means fetching the artifact and hashing it, which is a
+> maintainer's job on a machine that can reach huggingface.co. Until somebody
+> runs `python tools/pin_voice_models.py`, Settings reports both models as *not
+> available in this build* and the download buttons refuse rather than fetching
+> something nobody checked.
+
+### From an Android phone
+
+This is the deployment the feature was designed for: the browser is on the
+phone, Forge is on the PC, and they are on the same network.
+
+**The microphone needs HTTPS.** Browsers only expose `getUserMedia` in a secure
+context, and `localhost` is only a secure context for the machine it *is* —
+which, from a phone, is the phone. So `http://192.168.x.x:7860` opened on
+Android is not a supported microphone deployment, and pressing the microphone
+there says so rather than failing silently. Serve Forge over TLS with
+`--tls-keyfile` / `--tls-certfile`, or put it behind a local reverse proxy with
+a certificate Android trusts. Voice Chat does not bring a TLS stack of its own.
+
+Playback follows Android's own media route, so a Bluetooth speaker or a pair of
+headphones gets the reply without anything to configure. Mobile browsers also
+suspend audio until the page has been touched, so the first spoken reply after a
+fresh load may ask you to tap Voice or the microphone once — a persisted setting
+is intent, and only a gesture is permission.
+
+### Using it
+
+Conversation grows a **Voice** chip in its header, next to Threads / Character /
+You / Model, and a microphone beside Send. The chip opens an overlay with the
+same two switches Settings has — they are the same stored values, written the
+moment you tap them, so there is no Apply to remember.
+
+- **Press and hold** the microphone to record; let go to transcribe. Sliding
+  your finger off the button and releasing still ends that recording.
+- Under a quarter of a second is treated as a tap, not an utterance. Sixty
+  seconds is the ceiling, at which point it stops and transcribes what it has.
+- The transcript is **appended** to whatever is already in the box, and is not
+  sent unless *Automatically send dictation* is on.
+- The microphone is unavailable while a reply is generating. Press Stop first.
+- While a reply is being spoken, **holding the microphone stops the speaker** and
+  starts recording. That is the interrupt gesture, and it is also what stops a
+  phone from recording its own loudspeaker.
+- *Speak replies automatically* speaks every reply that **completes**. A reply
+  you Stopped, or one that failed, is never read aloud.
+
+### What is actually private
+
+After the two downloads, speech needs no Internet connection at all: no API key,
+no account, no cloud endpoint, no telemetry, no model-hub call on first use. The
+speech worker has no HTTP client in it — not "does not use one", does not have
+one — and the tests run a full transcribe-and-synthesize round trip with socket
+creation made impossible.
+
+What that does and does not claim, stated precisely, because the honest version
+is more useful than the marketing one:
+
+- Your recording **does** leave your phone. It crosses your own connection to
+  the PC running Forge, the same connection the rest of the WebUI is using.
+- It does not leave that boundary. OpenAI, Google, Microsoft, Hugging Face, the
+  Kokoro authors and the sherpa-onnx project do not receive any of it.
+- Microphone audio and generated speech stay in memory. Nothing is written to
+  the WebUI temp directory, the Gradio cache, the output folder or the
+  conversation attachments — there are no `.wav` files anywhere in normal use.
+- Transcripts, your messages and the model's replies never appear in the console
+  or in `model_chain.log`. Byte counts, durations and model ids do.
+- Once you press Send, the transcript is an ordinary message and is saved in your
+  thread exactly like typed text. That is Conversation's own history and it is
+  the one place any of this is kept.
+
+### On the machine
+
+Speech runs on the CPU, in a process of its own, beside everything else. It does
+not join the GPU broker, does not appear in the residency planner, and does not
+wait for an image job — so you can dictate while a generation is running and
+neither one notices. `CUDA_VISIBLE_DEVICES` is emptied for that process and the
+runtime is refused if it reports anything but a CPU provider, so "CPU only" is
+enforced rather than labelled. Thread counts are conservative and deliberately
+not settings: the point of running beside Forge is lost if speech takes every
+core from the image that is rendering.
+
+The speech process talks to Forge over a private pipe — no port, no local HTTP
+authentication problem, no firewall prompt, and no way to bind to a network
+address by accident. **It cannot outlive the WebUI.** That is a release
+requirement rather than a nicety, and it needed five doors: the extension-unload
+callback, `atexit`, chained SIGINT/SIGTERM handlers, the pipe closing, and — for
+the hard kill that runs no handler at all — a Windows job object with
+`KILL_ON_JOB_CLOSE` and `PR_SET_PDEATHSIG` on Linux. The last one is the only
+answer to being force-quit *while the worker is inside a native inference call*,
+which is exactly when somebody force-quits a WebUI that "has hung", and there is
+a test that does precisely that.
+
+**Supported platforms** are Windows and Linux on x86-64, with Python 3.10 to
+3.13. Those are the platforms with a tested runtime *and* a tested hard-parent-
+death mechanism, and the second half is why the list is not longer: a platform
+where that cannot be proved is not one this feature will claim, so it is not
+offered a runtime rather than being offered one that might leave a process
+behind.
+
+### If it goes wrong
+
+Voice fails smaller than Conversation, always. Models absent, JavaScript
+disabled, microphone refused, HTTPS missing, the speech process crashed — every
+one of them is a sentence in the status line and a chat window that works
+exactly as it did. A synthesis that fails cannot cancel a reply that has already
+arrived, and nothing in the voice half can reach the image half's memory.
+
 ## Layout
 
 ```
@@ -2956,6 +3103,15 @@ mc_llm_chat_panel.py       Conversation workspace
 mc_llm_minimax_panel.py    MiniMax H3 workspace
 mc_llm_krea_panel.py       Krea 2 workspace
 mc_llm_ui.py          shared UI helpers and the element-id contract
+
+mc_voice_paths.py     where Voice Chat keeps its runtime and its two models
+mc_voice_models.py    the voice trust root: manifest, verified install, status
+mc_voice_state.py     the two persisted switches, and the one place they live
+mc_voice_runtime.py   the speech worker process, its pipe, and its five exits
+mc_voice_api.py       the browser routes, their auth parity and speech targets
+mc_voice_ui.py        the Voice chip, overlay and microphone in Conversation
+voice_worker/worker.py     the CPU sidecar: framed stdin/stdout, no network
+voice/managed-voice-models.json  the pinned voice artifact manifest (data only)
 mc_creative_krea.py   Creative Mode: settings, roll history, one roll
 mc_creative_panel.py  the Creative control surface, built once for both surfaces
 mc_creative_profiles.py    named Creative configurations and the chosen default
@@ -2973,7 +3129,7 @@ scripts/model_chain.py                Script class, UI, orchestration
 scripts/model_chain_krea_creative.py  the txt2img Creative Mode panel and its hook
 style.css             progress-bar appearance, LLM Studio, the Image Pipeline
 javascript/           the settings-to-CSS layer, LLM Studio polish, the pipeline,
-                      the two spatial canvases
+                      the two spatial canvases, Voice Chat's capture and playback
 tests/                pytest suite (runs without a WebUI)
 tools/                maintainer scripts; never imported by the extension
 docs/                 revised specifications for the progress and LLM work
@@ -2999,6 +3155,32 @@ mc_llm_studio  ->  mc_llm_managed_models  ->  mc_llm_paths
 inside it, for the reason the catalogue exists at all: downloading a model and
 starting one are separate lifecycles with separate failure modes, and the
 runtime should not grow a network stack to gain a list.
+
+The voice modules stack the same way, and what matters about them is the arrows
+that are *not* there:
+
+```
+scripts/model_chain.py  ->  mc_voice_api  ->  mc_voice_runtime  ->  voice_worker
+mc_llm_chat_panel       ->  mc_voice_ui        mc_voice_models        (a pipe, a
+                                |                     |               CPU sidecar)
+                          mc_voice_state        mc_voice_paths
+
+mc_voice_*   -X->  mc_memory      mc_broker      mc_plan      mc_llm_runtime
+voice_worker -X->  Forge packages     CUDA          the Internet
+```
+
+Voice is not a second model-residency domain. It publishes nothing to the
+broker, asks the planner for nothing, and waits for no image job — which is what
+lets it transcribe while a generation is running. `mc_voice_models` is the only
+module with a network transport in it, so "no Internet after setup" is a property
+of the import graph rather than a promise; `test_voice_independence.py` reads
+that graph and fails on any of the arrows above.
+
+`mc_voice_runtime` duplicates about forty lines of Windows job-object code from
+`mc_llm_runtime` rather than sharing it. That is the deliberate half of the
+trade: a neutral helper would have meant editing the file holding the proven
+llama-server shutdown in order to add a speech feature, which is how a working
+shutdown path acquires a regression.
 
 `mc_memory.py` does not import `mc_broker`, and that is deliberate rather than
 incidental: the image half stays importable, testable and correct on an
@@ -3027,9 +3209,14 @@ Neo loads extensions:
   orchestration code), preset storage, and Stage 2 reference routing.
 - **`tools/` is not `scripts/`.** `tools/pin_managed_models.py` is a
   maintainer's command-line tool that resolves the catalogue's Hugging Face
-  revisions to immutable commits and fills in exact byte counts. It reaches the
-  network, so it must never be one of the files Forge imports when somebody
+  revisions to immutable commits and fills in exact byte counts, and
+  `tools/pin_voice_models.py` does the equivalent for the speech bundles. Both
+  reach the network, so they must never be files Forge imports when somebody
   opens a WebUI.
+- **`voice_worker/` is a package the parent barely imports.** It is run by path,
+  under a different interpreter, in an environment Forge cannot see. The parent
+  imports it for one thing — the frame format — which is why nothing in it may
+  import the speech engine at module level, and why a test asserts that.
 
 `mc_references.py` is the only module that knows ImageStitch exists, and it
 reaches for exactly one thing: the contents of the user's input gallery, read
@@ -3103,6 +3290,61 @@ hand-picked GGUF, and that nothing it contains is nameable anywhere in Setup —
 including that the three 26B quant tiers each get their own profile, that only
 the two smaller ones buy their cache back with q8_0, and that choosing a
 different quantisation moves no sampler.
+
+Voice Chat adds eight files, and the ones worth naming are the three that
+defend an invariant rather than a behaviour.
+
+`test_voice_shutdown.py` is a release gate. Every test in it starts a real parent
+process, which starts a real worker, and then ends the parent one particular way:
+a normal exit, Ctrl+C, SIGTERM, the extension-unload callback, an unload followed
+by a rebuild, and — the one the others cannot stand in for — a `SIGKILL` delivered
+*while the worker is inside a loop standing in for a native inference call*, so
+the closing pipe is not something it will look at. Nothing is mocked on either
+side, because the whole question is what the operating system does when there is
+nothing left to ask, and the answer has to be "no worker" every time. It finishes
+by reading the process list for anything carrying the worker's own marker.
+
+`test_voice_privacy.py` puts a sentinel phrase through a dictation and a
+synthesis, reads back everything the extension logged, and asserts the sentinel
+is not in any of it — twice, once for each direction — while checking the
+diagnostics that *are* written are still there. It snapshots the filesystem
+around a full round trip and asserts nothing appeared, and it runs the worker's
+request loop with `socket.socket` made to raise, proving both operations complete
+with no sockets available at all.
+
+`test_voice_models.py` holds the trust root to its shape — an HTTPS source, a
+full SHA-256 and a byte count on every runtime artifact, a refusal for every id
+that could be read as a path, a complete wheel closure for each of the eight
+supported platform/Python pairs — and then proves the offline claim rather than
+asserting it: a real venv, a real `pip install`, and a recording HTTP server
+configured as the index pip would use if it were allowed one. The server must
+never be asked for anything. It also drives the download transaction against
+every way it can fail, and covers the archive expansion refusing a member that
+would be written outside its bundle.
+
+The other five are ordinary. `test_voice_runtime.py` drives a real subprocess
+speaking the real framed protocol — a fake worker that implements the framing
+independently, so the protocol is checked against something other than itself —
+and covers the handshake refusing a non-CPU provider, a missing parent-death
+mechanism, a mismatched protocol and the wrong models; one restart after an
+unexpected death and no more; the escalation to `terminate` and then `kill`
+inside a bounded time; and, in two places, that a process which fails after
+`Popen` is stopped before its handle is dropped. `test_voice_api.py` runs the
+routes on a real FastAPI app at the origin root *and* mounted under a subpath,
+refuses a foreign origin, a missing page token and — the one that matters — an
+unauthenticated caller when the WebUI has a login, because sharing an app is not
+the same as sharing Gradio's authentication. `test_voice_ui.py` walks the built
+Conversation panel and asserts the speech marker is attached with `.success()`
+rather than `.then()`, on all six reply paths, as one shared handler.
+`test_voice_independence.py` reads the import graph: no voice module may import
+the memory planner, the broker, the execution plan or the LLM runtime at any
+depth, only the model manager may import a network transport, and the worker
+imports nothing but the standard library at module level. `test_voice_chat_js.py`
+runs the browser script under node against a DOM whose clock and timers a test
+controls, and covers the press-and-hold contract, 48 kHz being resampled to 16,
+the composer being appended to rather than replaced, auto-send pressing the
+existing button and only when the setting says so, a token never being spoken
+twice, and a Gradio update never installing a second set of pointer listeners.
 
 Progressive expert offload is covered on both sides of the estimate.
 `test_llm_context.py` holds the arithmetic to the design intent's formula —
