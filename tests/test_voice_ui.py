@@ -352,12 +352,31 @@ class TestTheSettingsSection:
 
         registered = {name for name in host.shared.options_templates
                       if name.startswith("model_chain_voice_")}
+        import mc_voice_clone
         import mc_voice_paths
+        import mc_voice_registry
 
-        known = set(mc_voice_state.OPTIONS) | {mc_voice_paths.OPT_ROOT,
-                                               "model_chain_voice_status"}
+        known = set(mc_voice_state.OPTIONS) | {
+            mc_voice_paths.OPT_ROOT,
+            mc_voice_registry.OPT_VOICE,
+            mc_voice_registry.OPT_TEST_TEXT,
+            mc_voice_clone.OPT_ROOT,
+            "model_chain_voice_status",
+            "model_chain_voice_voices",
+        }
         assert registered == known, (
             "a voice option is registered and never read, or read and never registered")
+
+    def test_the_default_voice_is_a_stable_id_and_not_a_number(self, host):
+        """Section 113. The V1 manifest stored a numeric speaker and a name that
+        disagreed with it. A number is an address in a voice bank that gets
+        rebuilt; a stable id survives that."""
+        import model_chain  # noqa: F401
+        import mc_voice_registry
+
+        option = host.shared.options_templates[mc_voice_registry.OPT_VOICE]
+        assert isinstance(option.default, str)
+        assert option.default.startswith("official:")
 
     def test_download_is_not_a_persisted_boolean(self, host):
         import model_chain  # noqa: F401

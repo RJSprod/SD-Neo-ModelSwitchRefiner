@@ -946,10 +946,13 @@ import json
 import os
 import struct
 import sys
+import threading
 import time
 
 PLAN = json.loads(os.environ.get("MC_FAKE_VOICE") or "{}")
 LENGTH = struct.Struct(">I")
+WRITE = threading.Lock()
+TURNS = {}
 
 
 def _read(stream, count):
@@ -979,13 +982,14 @@ def read_frame(stream):
 
 
 def write_frame(stream, header, payload=b""):
-    raw = json.dumps(header).encode("utf-8")
-    stream.write(LENGTH.pack(len(raw)))
-    stream.write(raw)
-    stream.write(LENGTH.pack(len(payload)))
-    if payload:
-        stream.write(payload)
-    stream.flush()
+    with WRITE:
+        raw = json.dumps(header).encode("utf-8")
+        stream.write(LENGTH.pack(len(raw)))
+        stream.write(raw)
+        stream.write(LENGTH.pack(len(payload)))
+        if payload:
+            stream.write(payload)
+        stream.flush()
 
 
 def note(text):
@@ -1019,6 +1023,38 @@ def containment(parent_pid):
     return "pipe"
 
 
+def speak(stdout, turn):
+    """One streaming turn, on a thread, so a cancel can be read while it runs."""
+    block = bytes.fromhex(PLAN.get("audio_hex", "")) or (b"\x01\x00" * 240)
+    write_frame(stdout, {"op": "tts_ready", "turn": turn["id"], "sample_rate": 24000,
+                         "streaming": "callback"})
+    sequence = 0
+    while True:
+        with turn["lock"]:
+            while not turn["segments"] and not turn["done"] and not turn["cancelled"]:
+                turn["lock"].wait(0.05)
+            if turn["cancelled"]:
+                write_frame(stdout, {"op": "tts_cancelled", "turn": turn["id"],
+                                     "seq": sequence})
+                return
+            if not turn["segments"]:
+                break
+            turn["segments"].pop(0)
+        for _step in range(PLAN.get("blocks_per_segment", 2)):
+            with turn["lock"]:
+                if turn["cancelled"]:
+                    write_frame(stdout, {"op": "tts_cancelled", "turn": turn["id"],
+                                         "seq": sequence})
+                    return
+            sequence += 1
+            write_frame(stdout, {"op": "tts_audio", "turn": turn["id"], "seq": sequence,
+                                 "sample_rate": 24000}, block)
+            time.sleep(PLAN.get("block_delay", 0.0))
+        write_frame(stdout, {"op": "tts_segment_done", "turn": turn["id"], "seq": sequence})
+    write_frame(stdout, {"op": "tts_done", "turn": turn["id"], "seq": sequence,
+                         "samples": sequence * (len(block) // 2)})
+
+
 def main():
     stdin, stdout = sys.stdin.buffer, sys.stdout.buffer
     touch()
@@ -1035,11 +1071,14 @@ def main():
         if operation == "init":
             found = containment(int(header.get("parent_pid") or 0))
             reply = {
-                "ok": True, "id": request, "protocol_version": 1,
+                "ok": True, "id": request, "protocol_version": 2,
                 "runtime_version": "1.13.6", "provider": "cpu",
                 "parent_death": found, "stt_model_id": "whisper-small-int8",
                 "tts_model_id": "kokoro-multi-lang-v1-cpu",
                 "stt_threads": 4, "tts_threads": 2,
+                "num_speakers": PLAN.get("num_speakers", 85),
+                "sample_rate": 24000, "streaming": "callback",
+                "bank_version": PLAN.get("bank_version", ""),
             }
             reply.update(PLAN.get("handshake") or {})
             if behaviour == "silent_handshake":
@@ -1076,6 +1115,35 @@ def main():
             write_frame(stdout, {"ok": True, "id": request, "sample_rate": 24000,
                                  "audio_seconds": 1.0, "elapsed": 0.1},
                         bytes.fromhex(PLAN.get("audio_hex", "")))
+            continue
+
+        if operation == "tts_begin":
+            turn = {"id": header.get("turn"), "sid": int(header.get("sid") or 0),
+                    "cancelled": False, "done": False, "segments": [],
+                    "lock": threading.Condition()}
+            TURNS[turn["id"]] = turn
+            if turn["sid"] >= PLAN.get("num_speakers", 85):
+                write_frame(stdout, {"op": "tts_error", "turn": turn["id"],
+                                     "error": "that voice is not in the installed voice bank"})
+                continue
+            threading.Thread(target=speak, args=(stdout, turn), daemon=True).start()
+            continue
+
+        if operation in ("tts_text", "tts_finish", "tts_cancel"):
+            turn = TURNS.get(header.get("turn"))
+            if turn is None:
+                if operation == "tts_cancel":
+                    write_frame(stdout, {"op": "tts_cancelled",
+                                         "turn": header.get("turn"), "seq": 0})
+                continue
+            with turn["lock"]:
+                if operation == "tts_text":
+                    turn["segments"].append(payload.decode("utf-8", "replace"))
+                elif operation == "tts_finish":
+                    turn["done"] = True
+                else:
+                    turn["cancelled"] = True
+                turn["lock"].notify_all()
             continue
 
         write_frame(stdout, {"ok": False, "id": request, "error": "unknown operation"})
@@ -1193,6 +1261,268 @@ def fake_worker(tmp_path, monkeypatch, voice_root, request):
     mc_voice_runtime.stop("test finished")
     mc_voice_runtime._failures.clear()
     os.environ.pop("MC_FAKE_VOICE", None)
+
+
+@pytest.fixture
+def kokoro_bundle(voice_root, monkeypatch):
+    """A Kokoro bundle that is the right *shape* and weighs nothing.
+
+    The bank tests are about arithmetic, byte layout and transactions, none of
+    which needs 350 MB of ONNX -- but all of which needs a model file whose
+    metadata really parses and a ``voices.bin`` whose float count really
+    matches it. So the model here is a genuine serialized ``ModelProto`` with
+    genuine ``metadata_props``, written by hand: the protobuf this repository's
+    bank builder rewrites is the protobuf it is handed.
+    """
+    import mc_voice_models
+
+    speakers = 53
+    root = voice_root / "bundle"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "model.onnx").write_bytes(
+        _onnx_model({"model_type": "kokoro", "n_speakers": str(speakers),
+                     "style_dim": "510,1,256", "sample_rate": "24000"}))
+    # Deterministic and distinguishable: every speaker's block is filled with
+    # its own id, so a test can assert *which* voice ended up at which offset
+    # rather than only that the size is right.
+    import struct as _struct
+
+    voices = bytearray()
+    for sid in range(speakers):
+        voices += _struct.pack("<f", float(sid)) * (510 * 256)
+    (root / "voices.bin").write_bytes(bytes(voices))
+
+    monkeypatch.setattr(mc_voice_models, "bundle_paths", lambda kind: {
+        "id": "kokoro-multi-lang-v1-cpu", "root": str(root),
+        "model": str(root / "model.onnx"), "voices": str(root / "voices.bin")})
+    return root
+
+
+def _onnx_model(metadata: dict) -> bytes:
+    """A minimal ONNX ``ModelProto`` carrying ``metadata_props``.
+
+    Written with a four-line protobuf encoder rather than with the ``onnx``
+    package, because the extension has no ONNX dependency and a test fixture
+    that added one would be testing a different situation from the one the
+    feature ships into.
+    """
+    def varint(value: int) -> bytes:
+        out = bytearray()
+        while True:
+            byte = value & 0x7F
+            value >>= 7
+            out.append(byte | 0x80 if value else byte)
+            if not value:
+                return bytes(out)
+
+    def field(number: int, raw: bytes) -> bytes:
+        return varint((number << 3) | 2) + varint(len(raw)) + raw
+
+    out = bytearray()
+    out += varint((1 << 3) | 0) + varint(9)                 # ir_version
+    out += field(2, b"model-chain-test")                     # producer_name
+    out += field(7, field(2, b"graph"))                      # graph { name }
+    for key, value in metadata.items():
+        out += field(14, field(1, key.encode()) + field(2, str(value).encode()))
+    return bytes(out)
+
+
+def _voicepack(rows: int, value: float = 0.5) -> bytes:
+    """A Storytime-shaped voicepack: ``[rows, 1, 256]`` little-endian float32."""
+    import struct as _struct
+
+    return _struct.pack("<f", value) * (rows * 256)
+
+
+@pytest.fixture
+def voicepack():
+    """Make a raw clone file of a given row count."""
+    def make(path, rows: int = 510, value: float = 0.5):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(_voicepack(rows, value))
+        return Path(path)
+
+    return make
+
+
+@pytest.fixture
+def voice_registry(kokoro_bundle, monkeypatch):
+    """A registry and bank on a throwaway root, with a runtime that answers.
+
+    The runtime is stubbed rather than started because what these tests are
+    about is the *transaction* -- build, promote, prove, commit, or roll all of
+    it back -- and the proof step's only requirement is that something plausible
+    comes back from a synthesis. ``spoken`` records which speaker id was proved,
+    which is the assertion T-BANK-11 and the clone tests actually want.
+    """
+    import mc_voice_registry
+    import mc_voice_runtime
+
+    spoken = []
+
+    def synthesize(text, sid=0, speed=1.0):
+        spoken.append(int(sid))
+        return b"RIFF" + b"\x00" * 200
+
+    monkeypatch.setattr(mc_voice_runtime, "status", lambda: {"running": False})
+    monkeypatch.setattr(mc_voice_runtime, "stop", lambda *a, **k: None)
+    monkeypatch.setattr(mc_voice_runtime, "ensure_started", lambda: None)
+    monkeypatch.setattr(mc_voice_runtime, "synthesize", synthesize)
+    mc_voice_registry.spoken = spoken
+    return mc_voice_registry
+
+
+FAKE_STORYTIME = r'''#!/usr/bin/env python3
+# A Storytime that has the real CLI shape and does no optimization.
+#
+# Faithful in the four places the supervisor actually depends on: the flags it
+# is launched with, the progress lines it prints, the file it leaves behind, and
+# the fact that SIGINT stops it after the current step with a checkpoint. It also
+# forks a child of its own, because Storytime shells out to espeak-ng on some
+# paths -- and a child that inherits the output pipe is exactly what turns "read
+# until end of output" into a supervisor that never notices the job finished.
+import argparse
+import os
+import signal
+import sys
+import time
+
+if "--version" in sys.argv:
+    print("storytime 0.0.0-test")
+    raise SystemExit(0)
+
+parser = argparse.ArgumentParser()
+parser.add_argument("sub", nargs="?")
+parser.add_argument("--assets")
+parser.add_argument("--ref")
+parser.add_argument("--name")
+parser.add_argument("--steps", type=int, default=10)
+parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--backend")
+known, _rest = parser.parse_known_args()
+
+if os.environ.get("CUDA_VISIBLE_DEVICES") != "":
+    sys.stderr.write("a graphics device was visible to the clone worker\n")
+    raise SystemExit(3)
+
+output = os.path.join(known.assets, "voices", known.name + ".bin")
+temp = output + ".temp"
+stopping = {"now": False}
+signal.signal(signal.SIGINT, lambda *_a: stopping.__setitem__("now", True))
+
+if os.environ.get("MC_FAKE_CLONE_CHILD") == "1" and os.fork() == 0:
+    open(os.path.join(known.assets, "child.pid"), "w").write(str(os.getpid()))
+    while True:
+        time.sleep(0.2)
+
+if os.environ.get("MC_FAKE_CLONE_FAIL") == "1":
+    print("something went wrong")
+    raise SystemExit(4)
+
+delay = float(os.environ.get("MC_FAKE_CLONE_DELAY", "0.01"))
+for step in range(1, known.steps + 1):
+    if stopping["now"]:
+        with open(temp, "wb") as handle:
+            handle.write(b"\x00" * 16)
+        with open(temp + ".json", "w") as handle:
+            handle.write("{}")
+        print("interrupted")
+        raise SystemExit(130)
+    print("step %d/%d  best 0.8%d" % (step, known.steps, step % 10), flush=True)
+    time.sleep(delay)
+
+with open(output, "wb") as handle:
+    handle.write(b"\x00\x00\x80\x3f" * (510 * 256))
+print("done")
+'''
+
+
+@pytest.fixture
+def storytime(tmp_path, monkeypatch):
+    """An installed cloning bundle whose Storytime is a Python script."""
+    import mc_voice_clone
+
+    root = tmp_path / "storytime"
+    (root / "bin").mkdir(parents=True, exist_ok=True)
+    (root / "assets" / "voices").mkdir(parents=True, exist_ok=True)
+    binary = root / "bin" / "storytime"
+    binary.write_text("#!" + sys.executable + chr(10) + FAKE_STORYTIME, encoding="utf-8")
+    binary.chmod(0o755)
+    (root / "assets" / "kokoro.onnx").write_bytes(b"onnx")
+    (root / "assets" / "tokens.json").write_text("{}", encoding="utf-8")
+    (root / "assets" / "spk_encoder.onnx").write_bytes(b"onnx")
+    for index in range(24):
+        (root / "assets" / "voices" / f"v{index}.bin").write_bytes(b"\x00" * 16)
+
+    monkeypatch.setattr(mc_voice_clone, "root", lambda: root)
+    monkeypatch.setattr(mc_voice_clone, "supported", lambda: True)
+    monkeypatch.setenv("MC_FAKE_CLONE_DELAY", "0.005")
+
+    # The pinned step count is 2000, which is a four-hour job on a real CPU and
+    # a slow test suite against a fake one. Reduced here rather than in the fake
+    # so that the *supervisor* still reads its step count from the manifest --
+    # which is the thing being tested.
+    spec = dict(mc_voice_clone._spec())
+    spec["command"] = dict(spec.get("command") or {}, default_steps=12)
+    monkeypatch.setattr(mc_voice_clone, "_spec", lambda: spec)
+
+    yield root
+    mc_voice_clone.shutdown()
+
+
+@pytest.fixture
+def reference_wav():
+    """A PCM16 WAV of a given length, rate and channel count."""
+    def make(seconds: float = 12.0, rate: int = 48000, channels: int = 2) -> bytes:
+        import math
+        import struct as _struct
+
+        frames = int(seconds * rate)
+        body = bytearray()
+        for index in range(frames):
+            value = int(9000 * math.sin(index / 24.0))
+            body += _struct.pack("<" + "h" * channels, *([value] * channels))
+        return (b"RIFF" + _struct.pack("<I", 36 + len(body)) + b"WAVEfmt "
+                + _struct.pack("<IHHIIHH", 16, 1, channels, rate,
+                               rate * 2 * channels, 2 * channels, 16)
+                + b"data" + _struct.pack("<I", len(body)) + bytes(body))
+
+    return make
+
+
+@pytest.fixture(autouse=True)
+def _forget_clone_job():
+    """No clone job survives a test.
+
+    ``mc_voice_clone`` keeps one job in module state on purpose -- there is only
+    ever one -- and a finished one left behind would make the next test's
+    "nothing is running" assertion read somebody else's job.
+    """
+    yield
+    try:
+        import mc_voice_clone
+
+        mc_voice_clone.shutdown()
+        with mc_voice_clone._lock:
+            mc_voice_clone._job.clear()
+    except Exception:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _forget_voice_turns():
+    """No speech turn survives a test.
+
+    A turn owns a thread and a queue, and one left running would go on asking a
+    stubbed speaker for audio while the next test was using it.
+    """
+    yield
+    try:
+        import mc_voice_turn
+
+        mc_voice_turn.forget_all("test finished")
+    except Exception:
+        pass
 
 
 @pytest.fixture(autouse=True)

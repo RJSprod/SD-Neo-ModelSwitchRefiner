@@ -41,7 +41,9 @@ import mc_progress
 import mc_references
 import mc_styles
 import mc_voice_api
+import mc_voice_clone
 import mc_voice_paths
+import mc_voice_registry
 import mc_voice_runtime
 import mc_voice_state
 import mc_voice_ui
@@ -557,8 +559,8 @@ be told about twice.
 """
 
 
-def _voice_row():
-    """The install row, as a settings component the host will actually draw.
+def _voice_row(builder=None):
+    """One HTML settings row, as a component the host will actually draw.
 
     Forge's settings system stores *options*; it has no general way to host a
     Gradio button with a Python handler. ``OptionHTML`` is the supported escape
@@ -572,7 +574,7 @@ def _voice_row():
     switches, and Voice Chat is still installable from them plus the flyout.
     """
     try:
-        markup = mc_voice_ui.settings_html()
+        markup = (builder or mc_voice_ui.settings_html)()
     except Exception:
         errors.report("Model Chain: could not build the Voice Chat settings row",
                       exc_info=True)
@@ -598,12 +600,18 @@ def _voice_row():
 
 
 _voice_status_row = _voice_row()
+_voice_voices_row = _voice_row(mc_voice_ui.voices_html)
 
 _VOICE_OPTIONS = {}
 if _voice_status_row is not None:
     # First, because it is what the section is for: what is installed, and the
     # two buttons that install it. The switches under it are what to do with it.
     _VOICE_OPTIONS["model_chain_voice_status"] = _voice_status_row
+if _voice_voices_row is not None:
+    # Second: which voice speaks, auditioning it, and the optional cloning that
+    # can add one. Below the installer because there is nothing to choose
+    # between until the text-to-speech model is installed.
+    _VOICE_OPTIONS["model_chain_voice_voices"] = _voice_voices_row
 
 _VOICE_OPTIONS.update({
     mc_voice_state.OPT_AUTO_SEND: shared.OptionInfo(
@@ -621,6 +629,31 @@ _VOICE_OPTIONS.update({
         "off by default. On, each completed reply is read aloud by the local voice on this "
         "PC. A reply you stopped, or one that failed, is never spoken. The same switch is in "
         "Conversation's Voice menu"
+    ),
+    mc_voice_registry.OPT_VOICE: shared.OptionInfo(
+        mc_voice_registry.DEFAULT_VOICE,
+        "Default voice",
+        gr.Textbox,
+    ).info(
+        "the stable id of the voice that reads replies aloud — chosen with Set as Default in "
+        "the Voices list above rather than typed. A stable id rather than a speaker number "
+        "on purpose: numbers move when a voice bank is rebuilt and this must not"
+    ),
+    mc_voice_registry.OPT_TEST_TEXT: shared.OptionInfo(
+        mc_voice_registry.DEFAULT_TEST_TEXT,
+        "Voice test text",
+        gr.Textbox,
+    ).info(
+        "what Test says when you audition a voice. Editable here and in the Voices list"
+    ),
+    mc_voice_clone.OPT_ROOT: shared.OptionInfo(
+        "",
+        "Voice cloning folder",
+        gr.Textbox,
+    ).info(
+        "where a prepared Storytime cloning bundle lives, if you have one. Empty looks in a "
+        "cloning folder inside the voice data directory. Cloning is entirely optional — "
+        "Voice Chat speaks without it, and a voice cloned once needs it never again"
     ),
     mc_voice_paths.OPT_ROOT: shared.OptionInfo(
         "",
@@ -3529,6 +3562,10 @@ def _on_script_unloaded():
     # without.
     try:
         mc_voice_runtime.shutdown()
+        # Separately owned, and stopped separately (section 82). A clone is a
+        # long CPU job that has nothing to do with speech residency, and its
+        # process tree must not outlive this one either -- release blocker nine.
+        mc_voice_clone.shutdown()
     except Exception:
         errors.report("Model Chain: failed to stop the voice runtime", exc_info=True)
     mc_memory.release_all()

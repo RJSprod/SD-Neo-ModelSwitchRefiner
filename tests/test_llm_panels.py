@@ -3120,8 +3120,14 @@ class TestStoppingGivesTheControlsBack:
     """
 
     def _restored(self, cancelled):
-        """(submit, stop) interactivity out of a stop handler's return."""
-        _status, submit, stop = cancelled
+        """(submit, stop) interactivity out of a stop handler's return.
+
+        Sliced rather than unpacked whole: Conversation's Stop now also answers
+        with the hidden voice-turn and run-state values, which are appended
+        after the controls precisely so that every existing position keeps its
+        meaning.
+        """
+        _status, submit, stop = cancelled[:3]
         return submit.get("interactive"), stop.get("interactive")
 
     def test_minimax_can_be_asked_for_another_prompt(self):
@@ -3139,6 +3145,26 @@ class TestStoppingGivesTheControlsBack:
 
     def test_conversation_can_be_sent_another_message(self):
         assert self._restored(mc_llm_chat_panel._cancel(None)) == (True, False)
+
+    def test_conversation_stop_also_ends_the_spoken_reply(self):
+        """Section 26. One press, both halves.
+
+        The browser silences the speaker on the same button in the capture
+        phase; this is the half that guarantees the *backend* stops, so a Stop
+        whose browser request never arrived still ends the synthesis.
+        """
+        import mc_voice_turn
+
+        stopped = []
+        turn = mc_voice_turn.create(sid=0, speaker=object())
+        turn.cancel = lambda reason="user": stopped.append(reason) or True
+        try:
+            found = mc_llm_chat_panel._cancel(None)
+        finally:
+            mc_voice_turn.forget_all()
+        assert stopped, "Stop did not cancel the voice turn"
+        assert found[-1] == mc_llm_chat_panel.LLM_IDLE
+        assert found[-2] == "", "a cancelled run left a speech turn for the browser"
 
     def test_the_stop_button_is_wired_to_put_them_back(self):
         """The handler returning them is not enough on its own: the click has

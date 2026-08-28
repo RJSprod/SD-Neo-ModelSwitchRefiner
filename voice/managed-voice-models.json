@@ -210,6 +210,64 @@
       }
     ]
   },
+  "cloning": {
+    "component": "storytime",
+    "upstream": "https://github.com/kuym/storytime",
+    "kokoro": "https://huggingface.co/hexgrad/Kokoro-82M",
+    "license": "See the LICENSES folder inside the cloning bundle.",
+    "note": "Voice cloning is optional and is never needed to use Voice Chat. No pinned Model Chain cloning bundle is published yet, so 'platforms' is deliberately empty and the one-click installer reports that rather than resolving a package at install time: section 78 requires a version, a URL, a byte size and a checksum before anything is downloaded, and inventing one of those would be the trust model this manifest exists to avoid. Prepare a bundle by hand and point Settings at it -- the layout below is what is validated.",
+    "supported_systems": [
+      "linux"
+    ],
+    "layout": {
+      "executable": [
+        "bin/storytime",
+        "bin/storytime.exe"
+      ],
+      "required_files": [
+        "assets/kokoro.onnx",
+        "assets/tokens.json",
+        "assets/spk_encoder.onnx"
+      ],
+      "required_dirs": [
+        "assets/voices"
+      ],
+      "voice_glob": "assets/voices/*.bin",
+      "min_voices": 20
+    },
+    "command": {
+      "note": "Pinned argument arrays for the tested Storytime build, never a shell string. {assets} {reference} {name} {steps} {seed} are substituted with values this extension generated; nothing a browser sent is ever interpolated into an argument.",
+      "version_argv": [
+        "--version"
+      ],
+      "script_argv": [
+        "clone",
+        "--print-script"
+      ],
+      "clone_argv": [
+        "clone",
+        "--assets",
+        "{assets}",
+        "--ref",
+        "{reference}",
+        "--name",
+        "{name}",
+        "--steps",
+        "{steps}",
+        "--seed",
+        "{seed}",
+        "--backend",
+        "onnx"
+      ],
+      "output": "assets/voices/{name}.bin",
+      "checkpoints": [
+        "assets/voices/{name}.bin.temp",
+        "assets/voices/{name}.bin.temp.json"
+      ],
+      "default_steps": 2000
+    },
+    "platforms": []
+  },
   "defaults": {
     "stt": "whisper-small-int8",
     "tts": "kokoro-multi-lang-v1-cpu"
@@ -253,7 +311,62 @@
       "label": "Kokoro-82M v1.0 (CPU)",
       "engine": "sherpa-onnx-offline-tts-kokoro",
       "voice": "af_heart",
-      "speaker_id": 0,
+      "speaker_id": 3,
+      "speakers": [
+        "af_alloy",
+        "af_aoede",
+        "af_bella",
+        "af_heart",
+        "af_jessica",
+        "af_kore",
+        "af_nicole",
+        "af_nova",
+        "af_river",
+        "af_sarah",
+        "af_sky",
+        "am_adam",
+        "am_echo",
+        "am_eric",
+        "am_fenrir",
+        "am_liam",
+        "am_michael",
+        "am_onyx",
+        "am_puck",
+        "am_santa",
+        "bf_alice",
+        "bf_emma",
+        "bf_isabella",
+        "bf_lily",
+        "bm_daniel",
+        "bm_fable",
+        "bm_george",
+        "bm_lewis",
+        "ef_dora",
+        "em_alex",
+        "ff_siwis",
+        "hf_alpha",
+        "hf_beta",
+        "hm_omega",
+        "hm_psi",
+        "if_sara",
+        "im_nicola",
+        "jf_alpha",
+        "jf_gongitsune",
+        "jf_nezumi",
+        "jf_tebukuro",
+        "jm_kumo",
+        "pf_dora",
+        "pm_alex",
+        "pm_santa",
+        "zf_xiaobei",
+        "zf_xiaoni",
+        "zf_xiaoxiao",
+        "zf_xiaoyi",
+        "zm_yunjian",
+        "zm_yunxi",
+        "zm_yunxia",
+        "zm_yunyang"
+      ],
       "license": "Apache-2.0 (Kokoro-82M weights); bundled espeak-ng data is GPL-3.0-or-later",
       "attribution": "Kokoro-82M by hexgrad (Apache-2.0). sherpa-onnx bundle by k2-fsa. Includes espeak-ng phonemiser data, which is GPL-3.0-or-later and is redistributed unmodified under that licence.",
       "files": [

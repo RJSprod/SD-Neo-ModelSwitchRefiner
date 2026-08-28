@@ -760,3 +760,367 @@ class TestStatus:
 
         monkeypatch.setattr(runtime, "ensure_started", explode)
         assert client.post(api.STATUS_ROUTE, headers=key).status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# Streaming speech, cancelling it, and the engine
+# --------------------------------------------------------------------------- #
+
+
+class Speaker:
+    """A worker stand-in that produces a fixed amount of PCM per segment."""
+
+    def __init__(self, blocks: int = 2, samples: int = 1200, rate: int = 24000):
+        self.blocks, self.samples, self.rate = blocks, samples, rate
+        self.segments = []
+        self.cancelled = []
+
+    def begin_turn(self, turn, sid, speed=1.0):
+        turn.sample_rate = self.rate
+        return self.rate
+
+    def send_segment(self, turn, text):
+        self.segments.append(text)
+        for _block in range(self.blocks):
+            turn.offer_audio(b"\x01\x00" * self.samples, self.rate)
+
+    def finish_turn(self, turn):
+        turn.audio_finished()
+
+    def cancel_turn(self, turn):
+        self.cancelled.append(turn.id)
+
+
+@pytest.fixture
+def spoken_turn():
+    """One turn, already fed with two sentences and completed."""
+    import mc_voice_turn as turns
+
+    speaker = Speaker()
+    turn = turns.create(voice_id="official:af_heart", sid=3, speaker=speaker)
+    turn.start()
+    turn.add_text("Hello there, this is the first sentence of the reply. ")
+    turn.complete("Hello there, this is the first sentence of the reply. And a second one.")
+    yield turn, speaker
+    turns.forget_all("test finished")
+
+
+class TestTheStream:
+    def test_t_api_4_it_streams_without_a_content_length(self, client, key, spoken_turn):
+        """Section 19. A live body has no length, and an intermediary given one
+        would wait for it -- which is how streaming quietly becomes buffering."""
+        turn, _speaker = spoken_turn
+        with client.stream("POST", api.STREAM_ROUTE, headers=key,
+                           json={"turn": turn.id}) as response:
+            assert response.status_code == 200
+            assert "content-length" not in {name.lower() for name in response.headers}
+            total = sum(len(chunk) for chunk in response.iter_bytes())
+        assert total > 0
+        assert total % 2 == 0, "a stream ended mid-sample"
+
+    def test_t_api_5_the_headers_say_no_store_no_transform_and_no_buffering(
+            self, client, key, spoken_turn):
+        turn, _speaker = spoken_turn
+        with client.stream("POST", api.STREAM_ROUTE, headers=key,
+                           json={"turn": turn.id}) as response:
+            headers = response.headers
+            assert "no-store" in headers["cache-control"]
+            assert "no-transform" in headers["cache-control"]
+            assert headers["x-accel-buffering"] == "no"
+            assert headers["x-model-chain-voice-rate"] == "24000"
+            assert headers["x-model-chain-voice-turn"] == turn.id
+            response.read()
+
+    def test_the_body_is_raw_pcm_and_not_a_container(self, client, key, spoken_turn):
+        turn, _speaker = spoken_turn
+        with client.stream("POST", api.STREAM_ROUTE, headers=key,
+                           json={"turn": turn.id}) as response:
+            body = b"".join(response.iter_bytes())
+        assert body[:4] != b"RIFF"
+        assert response.headers["content-type"] == "application/octet-stream"
+
+    def test_an_unknown_turn_is_refused_rather_than_synthesised(self, client, key):
+        assert client.post(api.STREAM_ROUTE, headers=key,
+                           json={"turn": "not-a-turn"}).status_code == 404
+
+    def test_t_api_6_a_client_that_goes_away_cancels_the_turn(self, client, key,
+                                                              spoken_turn):
+        """The one condition in which the worker's bounded queue never drains."""
+        turn, _speaker = spoken_turn
+        with client.stream("POST", api.STREAM_ROUTE, headers=key,
+                           json={"turn": turn.id}) as response:
+            next(response.iter_bytes())
+        for _attempt in range(100):
+            if turn.cancelled.is_set():
+                break
+            time.sleep(0.02)
+        assert turn.cancelled.is_set()
+
+    def test_no_assistant_text_is_ever_in_a_request(self, client, key, spoken_turn):
+        """Section 19: never in the URL, never in a header, never in the body."""
+        turn, _speaker = spoken_turn
+        with client.stream("POST", api.STREAM_ROUTE, headers=key,
+                           json={"turn": turn.id}) as response:
+            response.read()
+        assert "Hello there" not in turn.id
+        assert api.STREAM_ROUTE.count("{") == 0
+
+
+class TestCancelling:
+    def test_it_cancels_only_the_turn_it_names(self, client, key):
+        import mc_voice_turn as turns
+
+        turns.create(sid=0, speaker=Speaker())
+        second = turns.create(sid=0, speaker=Speaker())
+        found = client.post(api.CANCEL_ROUTE, headers=key, json={"turn": second.id}).json()
+        assert found == {"ok": True, "cancelled": True, "speaking": False}
+        assert second.cancelled.is_set()
+        turns.forget_all("test")
+
+    def test_cancelling_twice_is_defined_and_harmless(self, client, key):
+        """Section 26: two paths deliberately press Stop."""
+        import mc_voice_turn as turns
+
+        turn = turns.create(sid=0, speaker=Speaker())
+        assert client.post(api.CANCEL_ROUTE, headers=key,
+                           json={"turn": turn.id}).json()["cancelled"] is True
+        assert client.post(api.CANCEL_ROUTE, headers=key,
+                           json={"turn": turn.id}).json()["cancelled"] is False
+        turns.forget_all("test")
+
+    def test_a_stale_token_is_not_an_error(self, client, key):
+        found = client.post(api.CANCEL_ROUTE, headers=key, json={"turn": "gone"}).json()
+        assert found["ok"] is True and found["cancelled"] is False
+
+    def test_it_does_not_stop_the_whole_runtime(self, client, key, monkeypatch):
+        """Section 27. Cancelling a reply happens several times in a
+        conversation and must not cost a model reload."""
+        def explode(*args, **kwargs):
+            raise AssertionError("cancelling a turn stopped the voice runtime")
+
+        monkeypatch.setattr(runtime, "stop", explode)
+        client.post(api.CANCEL_ROUTE, headers=key, json={"turn": "anything"})
+
+
+class TestTheEngineRoute:
+    def test_t_api_9_load_and_unload_go_through_the_route(self, client, key, monkeypatch):
+        loaded = []
+        monkeypatch.setattr(runtime, "load", lambda: loaded.append("load") or {"loaded": True})
+        monkeypatch.setattr(runtime, "unload",
+                            lambda reason="": loaded.append("unload") or {"loaded": False})
+        assert client.post(api.RUNTIME_ROUTE, headers=key,
+                           json={"action": "load"}).json()["engine"]["loaded"] is True
+        assert client.post(api.RUNTIME_ROUTE, headers=key,
+                           json={"action": "unload"}).json()["engine"]["loaded"] is False
+        assert loaded == ["load", "unload"]
+
+    def test_an_unknown_action_is_refused(self, client, key):
+        assert client.post(api.RUNTIME_ROUTE, headers=key,
+                           json={"action": "explode"}).status_code == 400
+
+    def test_a_load_that_fails_says_why(self, client, key, monkeypatch):
+        def refuse():
+            raise runtime.VoiceRuntimeError("Voice Chat is not set up.")
+
+        monkeypatch.setattr(runtime, "load", refuse)
+        response = client.post(api.RUNTIME_ROUTE, headers=key, json={"action": "load"})
+        assert response.status_code == 503
+        assert "not set up" in response.json()["error"]
+
+    def test_the_status_route_carries_live_engine_state(self, client, key, installed):
+        found = client.post(api.STATUS_ROUTE, headers=key).json()
+        assert set(found["engine"]) >= {"loaded", "state", "provider"}
+        assert found["engine"]["loaded"] is False
+        assert "pid" not in json.dumps(found["engine"])
+
+
+class TestVoiceManagement:
+    def test_t_api_10_the_browser_is_never_told_a_speaker_number(self, client, key,
+                                                                 voice_registry,
+                                                                 kokoro_bundle):
+        """Section 56. A number the browser knew could address a reserved slot,
+        and the answer to that is not to validate it harder."""
+        found = client.post(api.VOICES_ROUTE, headers=key, json={}).json()
+        assert found["voices"]
+        assert all("sid" not in entry and "slot" not in entry for entry in found["voices"])
+
+    def test_the_list_groups_official_voices_by_accent(self, client, key, voice_registry,
+                                                       kokoro_bundle):
+        found = client.post(api.VOICES_ROUTE, headers=key, json={}).json()
+        accents = {entry["accent"] for entry in found["voices"]}
+        assert accents == {"American English", "British English"}
+        assert found["default"] == "official:af_heart"
+
+    def test_setting_a_default_takes_and_is_reported_back(self, client, key,
+                                                          voice_registry, kokoro_bundle):
+        found = client.post(api.VOICE_DEFAULT_ROUTE, headers=key,
+                            json={"voice": "official:bf_emma"}).json()
+        assert found["default"] == "official:bf_emma"
+
+    def test_renaming_or_deleting_an_official_voice_is_refused(self, client, key,
+                                                               voice_registry,
+                                                               kokoro_bundle):
+        assert client.post(api.VOICE_RENAME_ROUTE, headers=key,
+                           json={"voice": "official:af_heart",
+                                 "display_name": "Mine"}).status_code == 400
+        assert client.post(api.VOICE_DELETE_ROUTE, headers=key,
+                           json={"voice": "official:af_heart"}).status_code == 400
+
+    def test_a_test_goes_through_the_ordinary_runtime_at_the_resolved_speaker(
+            self, client, key, voice_registry, kokoro_bundle):
+        """Section 45. A Test down a different path could pass for a voice that
+        cannot actually be spoken in a reply."""
+        response = client.post(api.VOICE_TEST_ROUTE, headers=key,
+                               json={"voice": "official:bf_emma", "text": "Hello."})
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "audio/wav"
+        assert "no-store" in response.headers["cache-control"]
+        assert voice_registry.spoken[-1] == 21
+
+    def test_t_api_11_the_test_text_is_bounded_and_persisted(self, client, key,
+                                                             voice_registry,
+                                                             kokoro_bundle):
+        client.post(api.VOICE_TEST_ROUTE, headers=key,
+                    json={"voice": "official:af_heart", "text": "x" * 5000})
+        found = client.post(api.VOICES_ROUTE, headers=key, json={}).json()
+        assert len(found["test_text"]) == voice_registry.MAX_TEST_CHARS
+
+    def test_a_test_for_a_voice_that_is_not_installed_is_refused(self, client, key,
+                                                                 voice_registry,
+                                                                 kokoro_bundle,
+                                                                 monkeypatch):
+        monkeypatch.setattr(voice_registry, "resolve",
+                            lambda voice_id="": (_ for _ in ()).throw(
+                                voice_registry.RegistryError("No voice is installed.")))
+        assert client.post(api.VOICE_TEST_ROUTE, headers=key,
+                           json={"voice": "clone:gone"}).status_code == 404
+
+
+class TestTheNewRoutesAreGuarded:
+    NEW = ("STREAM_ROUTE", "CANCEL_ROUTE", "RUNTIME_ROUTE", "VOICES_ROUTE",
+           "VOICE_DEFAULT_ROUTE", "VOICE_TEST_ROUTE", "VOICE_RENAME_ROUTE",
+           "VOICE_DELETE_ROUTE", "CLONING_INSTALL_ROUTE", "CLONING_STATUS_ROUTE",
+           "CLONING_START_ROUTE", "CLONING_ABORT_ROUTE")
+
+    def test_t_api_2_every_new_route_needs_the_page_token(self, client):
+        for name in self.NEW:
+            route = getattr(api, name)
+            assert client.post(route, json={}).status_code == 403, route
+
+    def test_t_api_3_every_new_route_refuses_a_foreign_origin(self, client, key):
+        headers = dict(key)
+        headers["Origin"] = "https://somewhere-else.example"
+        for name in self.NEW:
+            route = getattr(api, name)
+            assert client.post(route, headers=headers, json={}).status_code == 403, route
+
+    def test_t_api_1_the_routes_register_once(self, installed):
+        app = fastapi.FastAPI()
+        assert api.install(app=app) is True
+        assert api.install(app=app) is True
+        paths = [route.path for route in app.routes if route.path.startswith(api.PREFIX)]
+        assert len(paths) == len(set(paths)) == len(api.ROUTES)
+
+    def test_a_body_bigger_than_a_name_is_refused_before_it_is_parsed(self, client, key):
+        assert client.post(api.VOICE_RENAME_ROUTE, headers=key,
+                           content=b"x" * (api.MAX_JSON_BYTES + 1)).status_code == 413
+
+
+class TestNothingBlocksTheEventLoop:
+    def test_t_api_7_a_long_synthesis_does_not_block_the_status_route(self, client, key,
+                                                                     installed,
+                                                                     monkeypatch):
+        """Section 17. The V1 handlers were ``async def`` and called straight
+        into a runtime that waits for Whisper, so one dictation froze every
+        other request in the WebUI -- including the poll drawing the microphone
+        that was doing it."""
+        import threading
+
+        release = threading.Event()
+
+        def slow(text, sid=0, speed=1.0):
+            release.wait(10)
+            return b"RIFF" + b"\x00" * 100
+
+        monkeypatch.setattr(runtime, "synthesize", slow)
+        token = api.remember_reply("something long")
+        speaking = threading.Thread(
+            target=lambda: client.post(api.TTS_ROUTE, headers=key, json={"token": token}),
+            daemon=True)
+        speaking.start()
+        time.sleep(0.2)
+        try:
+            started = time.monotonic()
+            assert client.post(api.STATUS_ROUTE, headers=key).status_code == 200
+            assert time.monotonic() - started < 3.0, "status waited for the synthesis"
+        finally:
+            release.set()
+            speaking.join(timeout=10)
+
+    def test_t_api_8_a_long_transcription_does_not_block_cancel_or_runtime(
+            self, client, key, installed, monkeypatch, silent_wav):
+        import threading
+
+        release = threading.Event()
+
+        def slow(data):
+            release.wait(10)
+            return {"text": "eventually"}
+
+        monkeypatch.setattr(runtime, "transcribe", slow)
+        listening = threading.Thread(
+            target=lambda: client.post(api.STT_ROUTE, headers=key, content=silent_wav(1.0)),
+            daemon=True)
+        listening.start()
+        time.sleep(0.2)
+        try:
+            started = time.monotonic()
+            assert client.post(api.CANCEL_ROUTE, headers=key, json={}).status_code == 200
+            assert time.monotonic() - started < 3.0, "cancel waited for the transcription"
+        finally:
+            release.set()
+            listening.join(timeout=10)
+
+    def test_the_handlers_hand_their_blocking_half_to_a_thread(self):
+        """Structural, so that a handler added later without ``_offload`` is
+        visible rather than merely slow."""
+        import inspect
+
+        source = inspect.getsource(api.install)
+        for call in ("status_payload", "transcribe", "voices_payload", "cloning_payload",
+                     "set_runtime", "test_voice", "open_stream"):
+            assert f"_offload({call}" in source, call
+
+
+class TestCloningRoutes:
+    def test_the_status_route_answers_without_cloning_installed(self, client, key,
+                                                                voice_root):
+        found = client.post(api.CLONING_STATUS_ROUTE, headers=key, json={}).json()
+        assert found["ok"] is True
+        assert found["state"] in ("not_installed", "unsupported", "invalid")
+        assert found["job"]["status"] == "idle"
+
+    def test_a_one_click_install_with_nothing_pinned_says_so(self, client, key,
+                                                             voice_root):
+        response = client.post(api.CLONING_INSTALL_ROUTE, headers=key, json={})
+        assert response.status_code == 409
+        assert "pinned" in response.json()["error"] or "not offered" in response.json()["error"]
+
+    def test_starting_a_clone_without_a_recording_is_refused(self, client, key,
+                                                             voice_root):
+        """Through the base64 fallback, which is the path a host without
+        ``python-multipart`` takes -- and the one a test can drive without
+        depending on a parser that may not be installed."""
+        response = client.post(api.CLONING_START_ROUTE, headers=key,
+                               json={"name": "Alice", "language": "en-US", "reference": ""})
+        assert response.status_code in (400, 409)
+        assert response.json()["error"]
+
+    def test_a_reference_bigger_than_the_ceiling_never_reaches_a_file(self, client, key,
+                                                                     voice_root):
+        response = client.post(api.CLONING_START_ROUTE, headers=key,
+                               content=b"x" * (api.MAX_REFERENCE_BYTES * 2 + 1))
+        assert response.status_code == 413
+
+    def test_aborting_when_nothing_runs_is_harmless(self, client, key, voice_root):
+        assert client.post(api.CLONING_ABORT_ROUTE, headers=key, json={}).status_code == 200

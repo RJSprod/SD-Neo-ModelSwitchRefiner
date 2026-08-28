@@ -118,9 +118,21 @@ class TestNothingSaidIsLogged:
             def transcribe(self, samples, rate):
                 return DICTATED
 
-            def synthesize(self, text):
+            num_speakers = 85
+            sample_rate = 24000
+            bank_version = ""
+            streaming = "segment"
+
+            def speaker(self, sid):
+                return int(sid or 0)
+
+            def synthesize(self, text, sid=0, speed=1.0):
                 assert SPOKEN in text
                 return [0.0] * 2400, 24000
+
+            def stream(self, text, sid, speed, on_audio):
+                on_audio(worker.pcm16([0.0] * 2400), 24000)
+                return 2400
 
         stdin = io.BytesIO()
         worker.write_frame(stdin, {"id": 1, "op": "init", "parent_pid": 0, "config": {}})
@@ -230,8 +242,20 @@ class TestNoNetwork:
             def transcribe(self, samples, rate):
                 return "offline and working"
 
-            def synthesize(self, text):
+            num_speakers = 85
+            sample_rate = 24000
+            bank_version = ""
+            streaming = "segment"
+
+            def speaker(self, sid):
+                return int(sid or 0)
+
+            def synthesize(self, text, sid=0, speed=1.0):
                 return [0.0] * 480, 24000
+
+            def stream(self, text, sid, speed, on_audio):
+                on_audio(worker.pcm16([0.0] * 480), 24000)
+                return 480
 
         stdin = io.BytesIO()
         worker.write_frame(stdin, {"id": 1, "op": "init", "parent_pid": 0, "config": {}})

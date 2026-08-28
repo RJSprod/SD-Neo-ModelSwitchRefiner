@@ -38,11 +38,42 @@ Warm, lazy, and serialized
 Nothing starts because the extension imported. The first valid transcription or
 synthesis starts the worker, and after that the models stay resident: reading
 four hundred megabytes of ONNX between letting go of the microphone and seeing
-the words is the latency this feature would be judged on. Requests are
-serialized by :data:`_lock` -- one in flight at a time, matching the worker's
-single-threaded loop -- which is a statement about the *worker*, not about
-Forge: an image generation and a transcription run at the same time and neither
-waits for the other.
+the words is the latency this feature would be judged on. Inference is
+serialized *inside the worker*, in its one lane, which is a statement about the
+worker rather than about Forge: an image generation and a transcription run at
+the same time and neither waits for the other.
+
+Two locks, and why it used to be one
+------------------------------------
+V1 had a single ``RLock`` held around a whole request -- start the worker, send
+the frame, wait for the reply. That was correct and it was also the reason
+nothing could be cancelled: Stop, ``status()`` and unload all wanted the same
+lock the waiting thread was holding, and a thread waiting three seconds for
+Kokoro held it for three seconds. Section 15 asks for the responsibilities to
+be split, and they are:
+
+    _state_lock   the process handle, the handshake, the lifecycle flags and
+                  the two registries. Held for microseconds at a time and never
+                  across a wait for anything.
+
+    _write_lock   serializes writes to the worker's stdin, so two frames cannot
+                  interleave inside one length prefix.
+
+Nothing waits while holding either. A request registers a queue of its own
+under ``_pending``, writes its frame, and then waits on *that queue* -- so
+:func:`status`, :func:`cancel_turn`, :func:`unload` and :func:`shutdown` are all
+reachable while another thread is inside a three-second synthesis, which is
+what gate 1 asks to be true and what release blocker one forbids being false.
+
+One reader, two destinations
+----------------------------
+The single thread that reads the worker's stdout is the only thing that ever
+does. It dispatches an ordinary reply to the queue of the request whose id it
+carries -- one queue per request, so two callers cannot receive one another's
+answers even in principle -- and a streaming speech frame to the turn whose
+opaque id it carries. A frame for a turn nobody is listening to any more is
+dropped, which is section 24's late-audio race handled at the one place every
+frame passes through.
 """
 
 from __future__ import annotations
@@ -120,16 +151,50 @@ class Handshake:
     tts_model_id: str
     stt_threads: int
     tts_threads: int
+    num_speakers: int = 0
+    sample_rate: int = 0
+    bank_version: str = ""
+    streaming: str = ""
 
 
-_lock = threading.RLock()
+_state_lock = threading.RLock()
+"""The process handle, the handshake, the lifecycle flags, ``_pending`` and
+``_turns``. Never held across a wait for inference, a stream, a queue or a
+subprocess -- see the module docstring."""
+
+_write_lock = threading.Lock()
+"""One frame at a time down the worker's stdin."""
+
+_start_lock = threading.Lock()
+"""Held only by :func:`ensure_started`, so that two first requests arriving
+together produce one worker rather than two. Separate from ``_state_lock``
+because starting a worker *does* wait -- for a handshake that reads four
+hundred megabytes of ONNX -- and nothing that only wants to read the state
+should be behind that."""
+
 _process = None
 _reader: threading.Thread | None = None
-_replies: "queue.Queue" = queue.Queue()
 _handshake: Handshake | None = None
 _closing = False
 _session = ""
 _next_id = 0
+_generation = 0
+"""Incremented every time a worker is discarded.
+
+The reader thread captures it at start and compares before dispatching, so a
+frame that was already in the pipe when a worker was replaced cannot be
+delivered to a request or a turn belonging to its successor.
+"""
+
+_pending: dict = {}
+"""``request id -> Queue``. One queue per request; see T-RT-9."""
+
+_turns: dict = {}
+"""``turn id -> VoiceTurn``. The streaming destinations."""
+
+_busy = {"stt": 0, "tts": 0}
+_loading = False
+_last_error = ""
 _failures: list[float] = []
 _job_handle = None
 """The Windows job object every Voice Worker is put in.
@@ -151,8 +216,13 @@ def status() -> dict:
     Never raises and never touches the network: this is read by a status route
     a browser polls, and a status call that could start a four-hundred-megabyte
     model load would make polling it an attack on the user's own machine.
+
+    It also never waits. Section 16 names ``runtime.status()`` among the things
+    that must answer while another thread is inside inference, and the reason
+    it can is that ``_state_lock`` is not held by that thread -- the waiting
+    happens on a per-request queue instead.
     """
-    with _lock:
+    with _state_lock:
         running = _process is not None and _process.poll() is None
         return {
             "running": running,
@@ -164,6 +234,47 @@ def status() -> dict:
             "tts_model_id": _handshake.tts_model_id if _handshake else "",
             "session": _session,
         }
+
+
+def engine() -> dict:
+    """The live engine state the Voice flyout draws, without starting anything.
+
+    Section 30. Installation and residency are different questions and the V1
+    flyout could only answer the first: "Text to speech: Installed" says
+    nothing about whether four hundred megabytes of ONNX are in RAM right now.
+    What is deliberately *not* here is anything section 30 forbids -- no pid,
+    no command line, no filesystem path, no speech text.
+    """
+    with _state_lock:
+        running = _process is not None and _process.poll() is None
+        if _loading:
+            state = "loading"
+        elif _closing:
+            state = "stopping"
+        elif not running:
+            state = "error" if _last_error else "unloaded"
+        elif _busy["tts"]:
+            state = "tts"
+        elif _busy["stt"]:
+            state = "stt"
+        else:
+            state = "idle"
+        found = {
+            "loaded": bool(running),
+            "state": state,
+            "provider": (_handshake.provider if _handshake and running else ""),
+            "error": _last_error if state == "error" else "",
+        }
+        if running and _handshake is not None:
+            found.update({
+                "stt_threads": _handshake.stt_threads,
+                "tts_threads": _handshake.tts_threads,
+                "voices": _handshake.num_speakers,
+                "sample_rate": _handshake.sample_rate,
+                "voice_bank_version": _handshake.bank_version,
+                "streaming": _handshake.streaming,
+            })
+        return found
 
 
 def supported_platform() -> bool:
@@ -187,18 +298,28 @@ def transcribe(wav_bytes: bytes) -> dict:
     """
     if not wav_bytes:
         raise VoiceRuntimeError("No audio was received.")
-    reply, _payload = _request({"op": "stt", "format": "wav"}, wav_bytes, STT_TIMEOUT)
+    with _state_lock:
+        _busy["stt"] += 1
+    try:
+        reply, _payload = _request({"op": "stt", "format": "wav"}, wav_bytes, STT_TIMEOUT)
+    finally:
+        with _state_lock:
+            _busy["stt"] = max(0, _busy["stt"] - 1)
     return {"text": str(reply.get("text") or ""),
             "audio_seconds": reply.get("audio_seconds"),
             "elapsed": reply.get("elapsed")}
 
 
-def synthesize(text: str) -> bytes:
-    """One completed reply to a WAV, in memory.
+def synthesize(text: str, sid: int = 0, speed: float = 1.0) -> bytes:
+    """One complete string to a WAV, in memory. Test playback and fallback.
 
     ``text`` is an immutable snapshot the caller already took; nothing here
     re-reads a conversation, and nothing here writes the audio anywhere. The
     return value is the response body.
+
+    ``sid`` is a numeric speaker the *caller* resolved from the registry.
+    Nothing in this module turns a name into a number, and nothing accepts one
+    from a browser -- see :func:`mc_voice_registry.resolve`.
     """
     encoded = (text or "").encode("utf-8")
     if not encoded.strip():
@@ -208,10 +329,100 @@ def synthesize(text: str) -> bytes:
             f"That reply is longer than Voice Chat will read aloud in one go "
             f"({len(encoded)} bytes; the limit is {MAX_TEXT_BYTES}). It was not spoken, and "
             f"nothing was cut short without telling you.")
-    _reply, payload = _request({"op": "tts", "voice": "default"}, encoded, TTS_TIMEOUT)
+    with _state_lock:
+        _busy["tts"] += 1
+    try:
+        _reply, payload = _request({"op": "tts", "sid": int(sid or 0),
+                                    "speed": float(speed or 1.0)}, encoded, TTS_TIMEOUT)
+    finally:
+        with _state_lock:
+            _busy["tts"] = max(0, _busy["tts"] - 1)
     if not payload:
         raise VoiceRuntimeError("The voice runtime produced no audio.")
     return payload
+
+
+# --------------------------------------------------------------------------- #
+# Streaming speech
+# --------------------------------------------------------------------------- #
+
+
+def begin_turn(turn, sid: int = 0, speed: float = 1.0) -> int:
+    """Open one streaming turn on the worker. Returns its sample rate.
+
+    The turn is registered *before* the frame is written, because the worker
+    answers ``tts_ready`` fast enough that a registration afterwards is a real
+    race -- and a ``tts_ready`` for a turn the reader does not know about is a
+    turn that never learns its own sample rate.
+    """
+    ensure_started()
+    with _state_lock:
+        _turns[turn.id] = turn
+        _busy["tts"] += 1
+    try:
+        _write({"op": "tts_begin", "turn": turn.id, "sid": int(sid or 0),
+                "speed": float(speed or 1.0)}, b"")
+    except _WorkerGone:
+        _release_turn(turn)
+        raise VoiceRuntimeError("The voice runtime stopped before it could speak.") from None
+    rate = _await_rate(turn)
+    return rate
+
+
+def _await_rate(turn) -> int:
+    """Wait for ``tts_ready``, or for the turn to end without one."""
+    deadline = time.monotonic() + TTS_TIMEOUT
+    while time.monotonic() < deadline:
+        if turn.sample_rate:
+            return turn.sample_rate
+        if turn.cancelled.is_set() or turn.finished.is_set():
+            return turn.sample_rate or 0
+        time.sleep(0.02)
+    raise VoiceRuntimeError("The voice runtime did not start speaking in time.")
+
+
+def send_segment(turn, text: str) -> None:
+    """Hand one immutable segment to the worker."""
+    encoded = str(text or "").encode("utf-8")
+    if not encoded.strip():
+        return
+    try:
+        _write({"op": "tts_text", "turn": turn.id}, encoded)
+    except _WorkerGone:
+        turn.audio_failed("The voice runtime stopped while it was speaking.")
+
+
+def finish_turn(turn) -> None:
+    try:
+        _write({"op": "tts_finish", "turn": turn.id}, b"")
+    except _WorkerGone:
+        turn.audio_failed("The voice runtime stopped while it was speaking.")
+
+
+def cancel_turn(turn) -> None:
+    """Tell the worker to stop this turn. Never waits, never raises.
+
+    Section 27: this is not ``stop()``. Cancelling a turn is an ordinary thing
+    that happens several times in a conversation, and tearing down a
+    four-hundred-megabyte process to do it would make Stop cost a model reload.
+    """
+    try:
+        _write({"op": "tts_cancel", "turn": turn.id}, b"")
+    except Exception:
+        logger.debug("Model Chain: could not send a Voice cancel", exc_info=True)
+    finally:
+        _release_turn(turn)
+
+
+def _release_turn(turn) -> None:
+    with _state_lock:
+        _turns.pop(getattr(turn, "id", ""), None)
+        _busy["tts"] = max(0, _busy["tts"] - 1)
+
+
+# --------------------------------------------------------------------------- #
+# One round trip
+# --------------------------------------------------------------------------- #
 
 
 def _request(header: dict, payload: bytes, timeout: float) -> tuple[dict, bytes]:
@@ -222,19 +433,21 @@ def _request(header: dict, payload: bytes, timeout: float) -> tuple[dict, bytes]
     antivirus -- and making the user press the microphone again for it would be
     unkind. A worker that vanishes again on the retry is a broken installation,
     and the honest answer to that is an error rather than a third process.
+
+    Note what this function does *not* do any more: hold a lock while it waits.
     """
     for attempt in (1, 2):
-        with _lock:
+        with _state_lock:
             if _closing:
                 raise VoiceRuntimeError("Voice Chat is shutting down.")
-            ensure_started()
-            try:
-                return _exchange(header, payload, timeout)
-            except _WorkerGone:
-                _discard("the voice worker stopped unexpectedly")
-                if attempt == 2:
-                    raise VoiceRuntimeError(
-                        "Voice runtime stopped unexpectedly. Try again.") from None
+        ensure_started()
+        try:
+            return _exchange(header, payload, timeout)
+        except _WorkerGone:
+            stop("the voice worker stopped unexpectedly")
+            if attempt == 2:
+                raise VoiceRuntimeError(
+                    "Voice runtime stopped unexpectedly. Try again.") from None
     raise VoiceRuntimeError("Voice runtime stopped unexpectedly. Try again.")
 
 
@@ -243,39 +456,60 @@ class _WorkerGone(Exception):
 
 
 def _exchange(header: dict, payload: bytes, timeout: float) -> tuple[dict, bytes]:
+    """Write one frame and wait for the reply that carries its id.
+
+    The waiting is on a queue this call owns. Nothing else can be handed an
+    answer from it, which is what makes "two ordinary requests cannot receive
+    one another's replies" structural rather than a check.
+    """
     global _next_id
 
-    _next_id += 1
-    request_id = _next_id
-    outgoing = dict(header)
-    outgoing["id"] = request_id
+    with _state_lock:
+        _next_id += 1
+        request_id = _next_id
+        answers: "queue.Queue" = queue.Queue()
+        _pending[request_id] = answers
+
     try:
-        protocol.write_frame(_process.stdin, outgoing, payload)
+        outgoing = dict(header)
+        outgoing["id"] = request_id
+        _write(outgoing, payload)
+
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _WorkerGone("timed out")
+            try:
+                item = answers.get(timeout=min(remaining, 0.5))
+            except queue.Empty:
+                with _state_lock:
+                    alive = _process is not None and _process.poll() is None
+                if not alive:
+                    raise _WorkerGone("worker exited") from None
+                continue
+            if item is None:
+                raise _WorkerGone("input closed") from None
+            reply, body = item
+            if not reply.get("ok"):
+                raise VoiceRuntimeError(_readable(str(reply.get("error") or "")))
+            return reply, body
+    finally:
+        with _state_lock:
+            _pending.pop(request_id, None)
+
+
+def _write(header: dict, payload: bytes) -> None:
+    """One frame down the worker's stdin, under the write lock and no other."""
+    with _state_lock:
+        process = _process
+    if process is None or process.poll() is not None:
+        raise _WorkerGone("no worker")
+    try:
+        with _write_lock:
+            protocol.write_frame(process.stdin, header, payload)
     except (OSError, ValueError) as exc:
         raise _WorkerGone(str(exc)) from None
-
-    deadline = time.monotonic() + timeout
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _WorkerGone("timed out")
-        try:
-            item = _replies.get(timeout=min(remaining, 1.0))
-        except queue.Empty:
-            if _process is None or _process.poll() is not None:
-                raise _WorkerGone("worker exited") from None
-            continue
-        if item is None:
-            raise _WorkerGone("input closed") from None
-        reply, body = item
-        if reply.get("id") != request_id:
-            # A late answer to a request that already timed out. Dropped rather
-            # than returned: giving one caller another caller's transcript is
-            # the one mistake this feature genuinely must not make.
-            continue
-        if not reply.get("ok"):
-            raise VoiceRuntimeError(_readable(str(reply.get("error") or "")))
-        return reply, body
 
 
 def _readable(reason: str) -> str:
@@ -287,6 +521,9 @@ def _readable(reason: str) -> str:
         "audio is too long": "That recording is longer than Voice Chat accepts.",
         "runtime is not initialised": "The voice runtime is not ready yet.",
         "unknown operation": "Voice Chat asked its runtime for something it does not do.",
+        "that voice is not in the installed voice bank":
+            "That voice is not in the installed voice bank. Choose another voice in "
+            "Settings → Voice Chat.",
     }
     return known.get(reason, "The voice runtime could not complete that request.")
 
@@ -297,20 +534,29 @@ def _readable(reason: str) -> str:
 
 
 def ensure_started() -> None:
-    """Start the worker if it is not running. Idempotent, and holds the lock.
+    """Start the worker if it is not running. Idempotent.
 
     Every failure path below is written so that a process which has been started
     is stopped before its handle is dropped. That is the rule the orphaned
     llama-server broke: ownership begins at ``Popen``, not at the moment the
     handshake succeeds.
-    """
-    global _process, _reader, _handshake, _session, _replies
 
-    with _lock:
+    Held by :data:`_start_lock` rather than by the state lock, because starting
+    a worker waits for a handshake and the state lock is the one thing that must
+    never be held across a wait.
+    """
+    global _process, _reader, _handshake, _session, _generation, _loading, _last_error
+
+    with _state_lock:
         if _process is not None and _process.poll() is None:
             return
-        if _process is not None:
-            _discard("a previous voice worker had already exited")
+
+    with _start_lock:
+        with _state_lock:
+            if _process is not None and _process.poll() is None:
+                return
+            if _process is not None:
+                _discard("a previous voice worker had already exited")
         _guard_crash_loop()
 
         state = models.status()
@@ -326,24 +572,30 @@ def ensure_started() -> None:
         if interpreter is None:
             raise VoiceRuntimeError("The Voice Chat runtime is not installed.")
 
-        _session = uuid.uuid4().hex[:12]
+        session = uuid.uuid4().hex[:12]
         command = [str(interpreter), str(paths.worker_script()), protocol.MARKER,
-                   "--parent-pid", str(os.getpid()), "--session", _session]
+                   "--parent-pid", str(os.getpid()), "--session", session]
         environ = dict(os.environ)
         environ.update(models.worker_environment())
 
         started = None
+        with _state_lock:
+            _loading = True
+            _last_error = ""
+            _session = session
         try:
             started = subprocess.Popen(  # noqa: S603 - a path this module built
                 command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, env=environ, cwd=str(paths.extension_root()),
                 bufsize=0, close_fds=True)
             _die_with_us(started)
-            _process = started
-            # A fresh queue per worker, so a late frame from a process that has
-            # already been discarded cannot be handed to the next one's caller.
-            _replies = queue.Queue()
-            _reader = threading.Thread(target=_read_replies, args=(started, _replies),
+            with _state_lock:
+                _process = started
+                _generation += 1
+                mine = _generation
+                _pending.clear()
+                _turns.clear()
+            _reader = threading.Thread(target=_read_frames, args=(started, mine),
                                        name="mc-voice-reader", daemon=True)
             _reader.start()
             threading.Thread(target=_drain_stderr, args=(started,),
@@ -353,10 +605,12 @@ def ensure_started() -> None:
             # Whatever went wrong, the process this function started is this
             # function's to end. Nothing below this line may leave a handle.
             _note_failure()
-            if started is not None:
-                _process = started
-                _discard("the voice worker failed to start")
-            _handshake = None
+            with _state_lock:
+                if started is not None:
+                    _process = started
+                    _discard("the voice worker failed to start")
+                _handshake = None
+                _last_error = str(exc) if isinstance(exc, VoiceRuntimeError) else ""
             if isinstance(exc, VoiceRuntimeError):
                 raise
             # Everything else becomes a sentence. A caller of this function is a
@@ -372,28 +626,75 @@ def ensure_started() -> None:
             raise VoiceRuntimeError(
                 "The Voice Chat runtime could not be started. Check Settings → Voice "
                 "Chat.") from None
+        finally:
+            with _state_lock:
+                _loading = False
 
         stop_on_exit()
         logger.info("Model Chain: Voice runtime ready — %s provider, STT threads %d, "
-                    "TTS threads %d, containment %s, pid %s",
+                    "TTS threads %d, %d voices, %s streaming, containment %s, pid %s",
                     _handshake.provider, _handshake.stt_threads, _handshake.tts_threads,
+                    _handshake.num_speakers, _handshake.streaming or "no",
                     _handshake.parent_death, started.pid)
+
+
+# --------------------------------------------------------------------------- #
+# Load and unload
+# --------------------------------------------------------------------------- #
+
+
+def load() -> dict:
+    """The Load button. Start and handshake now rather than on first use.
+
+    Section 31 and section 34: lazy start remains the default and nothing is
+    preloaded at WebUI start-up, but a user who knows they are about to talk
+    should be able to pay the model load while they are still typing rather
+    than in the middle of their first sentence.
+
+    Blocking, on purpose, and therefore never called from the event loop --
+    :mod:`mc_voice_api` offloads it. What comes back is the same live engine
+    state the flyout polls, so the caller redraws from the truth.
+    """
+    ensure_started()
+    return engine()
+
+
+def unload(reason: str = "unloaded") -> dict:
+    """The Unload button. Frees the worker's RAM and keeps the installation.
+
+    Not an uninstall and not a persistent disable switch: the next dictation or
+    reply starts it again. What it does do is cancel the active turn first --
+    replacing a speaking process without telling the turn would leave the
+    browser waiting on a stream that will never produce another byte.
+    """
+    try:
+        import mc_voice_turn as turns
+
+        turns.forget_all(reason)
+    except Exception:
+        logger.debug("Model Chain: could not cancel voice turns before unloading",
+                     exc_info=True)
+    stop(reason)
+    return engine()
 
 
 def _handshake_with(started, state) -> Handshake:
     """Send ``init``, then believe nothing that comes back until it is checked.
 
-    Four things are checked and each one is a different bug that has to fail
+    Five things are checked and each one is a different bug that has to fail
     closed: a protocol the parent cannot speak, a provider that is not CPU (I-1
     in the only place it can actually be observed), a containment mechanism this
-    platform's support contract requires (R2-3), and a pair of model ids that
-    are not the pair this installation verified.
+    platform's support contract requires (R2-3), a pair of model ids that are
+    not the pair this installation verified, and a voice bank whose speaker
+    count is smaller than the registry believes -- which is the one that would
+    otherwise make a custom voice speak silently in somebody else's.
     """
     config = {
         "stt": models.bundle_paths("stt"),
-        "tts": models.bundle_paths("tts"),
+        "tts": _tts_config(),
         "stt_threads": STT_THREADS,
         "tts_threads": TTS_THREADS,
+        "bank_version": _bank_version(),
     }
     reply, _payload = _exchange(
         {"op": "init", "parent_pid": os.getpid(), "session": _session, "config": config},
@@ -408,6 +709,10 @@ def _handshake_with(started, state) -> Handshake:
         tts_model_id=str(reply.get("tts_model_id") or ""),
         stt_threads=int(reply.get("stt_threads") or 0),
         tts_threads=int(reply.get("tts_threads") or 0),
+        num_speakers=int(reply.get("num_speakers") or 0),
+        sample_rate=int(reply.get("sample_rate") or 0),
+        bank_version=str(reply.get("bank_version") or ""),
+        streaming=str(reply.get("streaming") or ""),
     )
     if found.protocol_version != protocol.PROTOCOL_VERSION:
         raise VoiceRuntimeError(
@@ -427,15 +732,64 @@ def _handshake_with(started, state) -> Handshake:
     if (found.stt_model_id, found.tts_model_id) != (state.stt_id, state.tts_id):
         raise VoiceRuntimeError("The Voice Chat worker loaded different models from the ones "
                                 "this installation verified.")
+    _check_bank(found)
     return found
 
 
-def _read_replies(started, replies) -> None:
-    """Move frames off the pipe into :data:`_replies` until it ends.
+def _tts_config() -> dict:
+    """Where the worker should read Kokoro and its voice bank from.
+
+    The bundle is the fallback and the bank is the answer whenever one has been
+    built: a custom voice exists only in a Model Chain bank, and an installation
+    that has never cloned anything has no bank and runs from the bundle exactly
+    as V1 did. Both are paths this process built from a manifest and a data
+    root; neither can be influenced from a browser.
+    """
+    found = models.bundle_paths("tts")
+    try:
+        import mc_voice_bank as bank
+
+        live = bank.live_paths()
+    except Exception:
+        logger.debug("Model Chain: could not read the voice bank", exc_info=True)
+        live = None
+    if live:
+        found.update(live)
+    return found
+
+
+def _bank_version() -> str:
+    try:
+        import mc_voice_bank as bank
+
+        return bank.version()
+    except Exception:
+        return ""
+
+
+def _check_bank(found: Handshake) -> None:
+    """Refuse a worker whose bank is smaller than the registry expects."""
+    try:
+        import mc_voice_registry as registry
+
+        wanted = registry.highest_sid()
+    except Exception:
+        return
+    if wanted is None or not found.num_speakers:
+        return
+    if wanted >= found.num_speakers:
+        raise VoiceRuntimeError(
+            "The installed voice bank has fewer voices than Voice Chat expects, so it was "
+            "not used. Open Settings → Voice Chat to rebuild it.")
+
+
+def _read_frames(started, generation: int) -> None:
+    """The one reader. Ordinary replies to their request, speech to its turn.
 
     A thread rather than a blocking read in the requesting thread, so a wedged
     worker costs one request its timeout rather than costing the WebUI a thread
-    forever.
+    forever -- and so that streaming audio has somewhere to arrive when no
+    request is outstanding at all.
     """
     stream = started.stdout
     try:
@@ -443,11 +797,79 @@ def _read_replies(started, replies) -> None:
             frame = protocol.read_frame(stream)
             if frame is None:
                 break
-            replies.put(frame)
+            header, payload = frame
+            with _state_lock:
+                if generation != _generation:
+                    # This worker has been replaced. Everything still in its
+                    # pipe belongs to a conversation that is over.
+                    break
+            operation = str(header.get("op") or "")
+            if operation.startswith("tts_") and header.get("turn") is not None:
+                _dispatch_turn(operation, header, payload)
+                continue
+            with _state_lock:
+                answers = _pending.get(header.get("id"))
+            if answers is not None:
+                answers.put((header, payload))
+            # A reply to a request that already timed out is dropped rather than
+            # kept: giving one caller another caller's transcript is the one
+            # mistake this feature genuinely must not make.
     except Exception:
         logger.debug("Model Chain: the voice worker's pipe ended", exc_info=True)
     finally:
-        replies.put(None)
+        _fail_everything(generation)
+
+
+def _dispatch_turn(operation: str, header: dict, payload: bytes) -> None:
+    """One streaming frame to the turn it names, or nowhere.
+
+    "Or nowhere" is the point. A frame whose turn is not in ``_turns`` belongs
+    to a reply that was cancelled or superseded, and section 24 says what to do
+    with it: nothing at all.
+    """
+    with _state_lock:
+        turn = _turns.get(str(header.get("turn") or ""))
+    if turn is None:
+        return
+    if operation == "tts_audio":
+        rate = int(header.get("sample_rate") or 0)
+        # Blocks while the browser is behind, which is the backpressure that
+        # reaches the worker through the pipe. It never blocks past a
+        # cancellation -- see VoiceTurn.offer_audio.
+        turn.offer_audio(payload, rate)
+    elif operation == "tts_ready":
+        turn.sample_rate = int(header.get("sample_rate") or 0) or turn.sample_rate
+    elif operation == "tts_segment_done":
+        return
+    elif operation == "tts_done":
+        turn.audio_finished()
+        _release_turn(turn)
+    elif operation == "tts_cancelled":
+        turn.cancel("worker")
+        _release_turn(turn)
+    elif operation == "tts_error":
+        turn.audio_failed(_readable(str(header.get("error") or "")))
+        _release_turn(turn)
+
+
+def _fail_everything(generation: int) -> None:
+    """The worker's pipe ended. Wake every waiter rather than leaving them."""
+    with _state_lock:
+        if generation != _generation and _process is not None:
+            return
+        waiting = list(_pending.values())
+        speaking = list(_turns.values())
+        _turns.clear()
+    for answers in waiting:
+        try:
+            answers.put(None)
+        except Exception:
+            pass
+    for turn in speaking:
+        try:
+            turn.audio_failed("The voice runtime stopped while it was speaking.")
+        except Exception:
+            pass
 
 
 def _drain_stderr(started) -> None:
@@ -486,8 +908,12 @@ def _note_failure() -> None:
 
 
 def stop(reason: str = "") -> None:
-    """Stop the worker if one is running. Idempotent, and never raises."""
-    with _lock:
+    """Stop the worker if one is running. Idempotent, and never raises.
+
+    Reachable while another thread is inside inference, which is section 16's
+    requirement and is only true because nothing waiting holds ``_state_lock``.
+    """
+    with _state_lock:
         if _process is None:
             return
         _discard(reason or "Voice Chat stopped")
@@ -504,7 +930,13 @@ def shutdown() -> None:
     global _closing
 
     try:
-        with _lock:
+        try:
+            import mc_voice_turn as turns
+
+            turns.forget_all("shutdown")
+        except Exception:
+            pass
+        with _state_lock:
             _closing = True
             if _process is not None:
                 _discard("WebUI shutdown")
@@ -522,15 +954,34 @@ def _discard(reason: str) -> None:
     close the pipe, wait two seconds, terminate, wait one, kill. Nine steps in
     the design intent and nine steps here, and none of them is "wait for it".
     """
-    global _process, _reader, _handshake
+    global _process, _reader, _handshake, _generation
 
-    started, _process, _reader, _handshake = _process, None, None, None
+    with _state_lock:
+        started, _process, _reader, _handshake = _process, None, None, None
+        _generation += 1
+        waiting = list(_pending.values())
+        speaking = list(_turns.values())
+        _pending.clear()
+        _turns.clear()
+        _busy["stt"] = _busy["tts"] = 0
+    for turn in speaking:
+        try:
+            turn.cancel("unloaded")
+            turn.drain_audio()
+        except Exception:
+            pass
+    for answers in waiting:
+        try:
+            answers.put(None)
+        except Exception:
+            pass
     if started is None:
         return
 
     if started.poll() is None:
         try:
-            protocol.write_frame(started.stdin, {"op": "shutdown", "id": 0})
+            with _write_lock:
+                protocol.write_frame(started.stdin, {"op": "shutdown", "id": 0})
         except Exception:
             pass
     for stream in (started.stdin,):
@@ -558,7 +1009,6 @@ def _discard(reason: str) -> None:
                 stream.close()
         except Exception:
             pass
-    _replies.put(None)
     logger.info("Model Chain: Voice worker stopped — %s", reason or "no reason given")
 
 

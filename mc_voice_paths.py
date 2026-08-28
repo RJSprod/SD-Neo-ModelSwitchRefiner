@@ -16,6 +16,18 @@ been rewritten twice. So they get a root of their own beside
         models/
             stt/<bundle id>/...
             tts/<bundle id>/...
+        bank/
+            manifest.json
+            model.onnx          derived, extended speaker metadata
+            voices.bin          the live Kokoro voice bank
+            .staging/           one build at a time, promoted by rename
+        clones/
+            <uuid>.bin          canonical custom voicepacks
+            registry.json       stable ids, names, slots
+        cloning/
+            bin/ assets/ manifest.json
+        reference/
+            <job>.wav           one clone's input, deleted when it is done
         .downloads/
             <staging only>
 
@@ -25,12 +37,18 @@ Nothing in here creates a directory. An installation that never presses
 
 What is deliberately *not* here
 -------------------------------
-No audio. Invariant I-5 says microphone audio and generated speech stay in
-memory, so there is no ``audio/``, no ``cache/``, and no place under this root
-that a WAV could correctly be written to. :func:`inside` exists to make that
-enforceable rather than merely intended: every path this feature writes is
-built here, and a test can ask whether a candidate is under the one root the
-feature owns.
+No speech audio. Invariant I-5 says microphone audio and generated speech stay
+in memory, so there is no ``audio/``, no ``cache/``, and nowhere under this root
+that a dictation or a spoken reply could correctly be written to.
+:func:`inside` exists to make that enforceable rather than merely intended:
+every path this feature writes is built here, and a test can ask whether a
+candidate is under the one root the feature owns.
+
+``reference/`` is the one audio directory and it is an exception with a name.
+It holds the WAV somebody chose as the input to a voice clone -- their own file,
+copied here because a subprocess has to be able to read it, deleted when the
+job finishes or is abandoned (section 79). It is never a dictation, never a
+generated reply, and never written by anything on the speech path.
 """
 
 from __future__ import annotations
@@ -74,6 +92,24 @@ manifest declares a default for each.
 WORKER_DIRNAME = "voice_worker"
 MANIFEST_DIRNAME = "voice"
 MANIFEST_FILENAME = "managed-voice-models.json"
+
+BANK_DIRNAME = "bank"
+BANK_MANIFEST = "manifest.json"
+BANK_VOICES = "voices.bin"
+BANK_MODEL = "model.onnx"
+BANK_STAGING = ".staging"
+"""The Model Chain voice bank.
+
+A directory of its own rather than files written into the installed Kokoro
+bundle, and that is a rule rather than tidiness: the bundle is verified against
+a manifest hash, and a feature that edited a file inside it would make its own
+installation fail its own integrity check the next time anybody looked.
+"""
+
+CLONES_DIRNAME = "clones"
+REGISTRY_FILENAME = "registry.json"
+CLONING_DIRNAME = "cloning"
+REFERENCE_DIRNAME = "reference"
 
 
 def extension_root() -> Path:
@@ -150,6 +186,86 @@ def worker_script() -> Path:
     version and then blamed on the runtime.
     """
     return extension_root() / WORKER_DIRNAME / "worker.py"
+
+
+def bank_root() -> Path:
+    """Where the built voice bank and its derived model live."""
+    return data_root() / BANK_DIRNAME
+
+
+def bank_manifest() -> Path:
+    return bank_root() / BANK_MANIFEST
+
+
+def bank_voices() -> Path:
+    return bank_root() / BANK_VOICES
+
+
+def bank_model() -> Path:
+    return bank_root() / BANK_MODEL
+
+
+def bank_staging() -> Path:
+    """A sibling of the live bank, so promotion is a rename on one filesystem.
+
+    The atomicity of the whole bank transaction rests on this being a sibling:
+    ``os.replace`` across filesystems is a copy, and a copy is exactly the
+    window in which a half-written ``voices.bin`` can exist -- which release
+    blocker six forbids.
+    """
+    return bank_root() / BANK_STAGING
+
+
+def clones_root() -> Path:
+    """Canonical custom voicepacks, one file per registered clone."""
+    return data_root() / CLONES_DIRNAME
+
+
+def clone_file(identifier: str) -> Path:
+    """``clones/<uuid>.bin`` for a generated internal id.
+
+    ``identifier`` is a UUID this process generated, never a display name and
+    never anything a browser sent -- section 77. It is still checked, because
+    the registry is a file on disk and a corrupted one must not be able to
+    address a path outside this root.
+    """
+    return _contained(clones_root(), f"{_uuid(identifier)}.bin")
+
+
+def registry_path() -> Path:
+    """The voice registry: stable ids, display names, slots and SIDs."""
+    return clones_root() / REGISTRY_FILENAME
+
+
+def cloning_root() -> Path:
+    """Where an installed Storytime cloning bundle lives, if there is one."""
+    return data_root() / CLONING_DIRNAME
+
+
+def reference_root() -> Path:
+    """The managed copy of a clone's reference recording.
+
+    The one place under this root where audio may be written, and it is the
+    documented exception rather than a hole in invariant I-5: a clone needs its
+    reference on disk for a subprocess to read, it is the user's own file, and
+    section 79 deletes it when the job ends either way.
+    """
+    return data_root() / REFERENCE_DIRNAME
+
+
+def reference_file(identifier: str) -> Path:
+    return _contained(reference_root(), f"{_uuid(identifier)}.wav")
+
+
+def _uuid(identifier: str) -> str:
+    """``identifier`` if it is a plain hex/uuid word, else a refusal."""
+    text = str(identifier or "").strip()
+    if not text or len(text) > 64:
+        raise ValueError(f"unsafe voice id: {identifier!r}")
+    for character in text:
+        if not (character.isalnum() or character == "-"):
+            raise ValueError(f"unsafe voice id: {identifier!r}")
+    return text
 
 
 def manifest_path() -> Path:

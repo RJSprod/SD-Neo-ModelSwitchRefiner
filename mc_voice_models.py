@@ -308,6 +308,13 @@ def _read_manifest(path: Path) -> dict:
         "platforms": tuple(platforms),
         "defaults": {kind: defaults[kind] for kind in paths.KINDS},
         "models": models,
+        # Optional and passed through rather than parsed into a dataclass. It
+        # describes a program this extension does not ship and is only read by
+        # ``mc_voice_clone``, which validates every part of it against the disk
+        # before anything is run -- so a second schema here would be a second
+        # place for the same facts to be wrong. Its absence is the ordinary
+        # state of a build with no cloning support at all.
+        "cloning": raw.get("cloning") if isinstance(raw.get("cloning"), dict) else {},
     }
 
 
@@ -358,6 +365,12 @@ def _read_model(identifier: str, entry) -> VoiceModel:
         revision=str(entry.get("revision") or ""),
         license=str(entry.get("license") or ""),
         attribution=str(entry.get("attribution") or ""),
+        # Everything a *particular* bundle carries that is not a property every
+        # bundle has. The Kokoro entry's speaker map lives here, pinned beside
+        # the checksums of the archive those names came out of -- which is the
+        # only place it can be pinned honestly, because which voices exist is a
+        # property of that release rather than of this feature.
+        extra={key: entry[key] for key in ("speakers",) if key in entry},
     )
 
 

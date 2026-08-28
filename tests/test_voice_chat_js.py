@@ -115,12 +115,41 @@ const elements = {};
  "mc-llm-chat-to-voice"].forEach(function (id) {
     elements[id] = element(id, "BUTTON");
 });
-["mc-llm-chat-voice-token", "mc-llm-chat-voice-key",
- "mc-llm-chat-message"].forEach(function (id) {
+["mc-llm-chat-voice-token", "mc-llm-chat-voice-turn", "mc-llm-chat-voice-run-state",
+ "mc-llm-chat-voice-key", "mc-llm-chat-message"].forEach(function (id) {
     elements[id] = field(id);
 });
+elements["mc-llm-chat-voice-run-state"].inner.value = "idle";
 elements["mc-llm-chat-status"] = element("mc-llm-chat-status");
 elements["mc-llm-chat-status"].notice = element("notice");
+
+// The Voice flyout's live engine block, which Python renders and this script
+// repaints. Its parts are found by data attribute, exactly as the real one's
+// are, so a selector typo in the script is a test failure rather than a panel
+// that quietly never updates.
+const enginePanel = element("mc-llm-chat-voice-engine");
+// A closed flyout, which is where a page starts. Section 33: nothing is polled
+// while the overlay is not on screen.
+enginePanel.offsetParent = null;
+enginePanel.button = element("engine-button", "BUTTON");
+enginePanel.button.setAttribute("data-mc-voice-runtime", "load");
+enginePanel.button.closest = (selector) =>
+    selector.indexOf("mc-voice-runtime") !== -1 ? enginePanel.button : null;
+enginePanel.line = element("engine-line");
+enginePanel.voice = element("engine-voice");
+enginePanel.querySelector = (selector) => {
+    if (selector.indexOf("engine-line") !== -1) return enginePanel.line;
+    if (selector.indexOf("mc-voice-runtime") !== -1) return enginePanel.button;
+    if (selector.indexOf("voice-default") !== -1) return enginePanel.voice;
+    return null;
+};
+elements["mc-llm-chat-voice-engine"] = enginePanel;
+
+["mc-llm-chat-voice-auto-send", "mc-llm-chat-voice-auto-speak"].forEach(function (id) {
+    elements[id] = element(id, "INPUT");
+    elements[id].type = "checkbox";
+    elements[id].checked = true;
+});
 
 elements["mc-llm-chat-voice-key"].inner.value = "PAGE-TOKEN";
 // Hidden: Send is showing, Stop is not, which is the idle composer.
@@ -205,7 +234,11 @@ globalThis.clearTimeout = (handle) => {
 globalThis.setInterval = (fn) => { intervals.push(fn); return intervals.length; };
 globalThis.clearInterval = () => {};
 globalThis.Date = class extends Date { static now() { return NOW; } };
-globalThis.addEventListener = () => {};
+const windowHandlers = {};
+globalThis.windowHandlers = windowHandlers;
+globalThis.addEventListener = (name, handler) => {
+    (windowHandlers[name] = windowHandlers[name] || []).push(handler);
+};
 globalThis.console = Object.assign({}, console, {
     error(...args) { consoleErrors.push(args.map(String).join(" ")); },
 });
@@ -234,9 +267,12 @@ function track() {
     return item;
 }
 
+const scheduled = [];
+
 const context = {
     state: CONTEXT_STATE,
     sampleRate: SAMPLE_RATE,
+    currentTime: 0,
     audioWorklet: WORKLET_AVAILABLE ? {addModule: () => Promise.resolve()} : null,
     resume() { context.state = RESUME_WORKS ? "running" : "suspended"; return Promise.resolve(); },
     createMediaStreamSource() { return {connect() {}, disconnect() {}}; },
@@ -246,11 +282,21 @@ const context = {
         return node;
     },
     createGain() { return {gain: {}, connect() {}, disconnect() {}}; },
+    createBuffer(channels, length, rate) {
+        const data = new Float32Array(length);
+        return {
+            numberOfChannels: channels,
+            length,
+            sampleRate: rate,
+            duration: length / rate,
+            getChannelData: () => data,
+        };
+    },
     createBufferSource() {
         const source = {
             buffer: null, onended: null,
             connect() {}, disconnect() {},
-            start() { played.push(source); },
+            start(at) { played.push(source); scheduled.push({source, at: at || 0}); },
             stop() { stopped.push(source); },
         };
         return source;
@@ -280,8 +326,8 @@ Object.defineProperty(globalThis, "navigator", {
             getUserMedia(constraints) {
                 requests.push({kind: "getUserMedia", constraints});
                 if (!PERMISSION) {
-                    const error = new Error("denied");
-                    error.name = "NotAllowedError";
+                    const error = new Error("refused");
+                    error.name = DENIAL;
                     return Promise.reject(error);
                 }
                 return Promise.resolve({getTracks: () => [track()]});
@@ -296,6 +342,54 @@ globalThis.Event = function (type, options) {
 
 // --- fetch ---------------------------------------------------------------- //
 
+// Chunk boundaries are the interesting part of a stream answer: `chunks` is a
+// list of byte arrays that a reader hands over one at a time, exactly as
+// arbitrarily-sized network reads would.
+const readers = [];
+
+function streamBody(chunks, stall) {
+    let index = 0;
+    // A plan rather than a literal: the high-water tests need tens of thousands
+    // of samples, and `node -e` has an argument-length limit that a literal
+    // array of them comfortably exceeds.
+    if (chunks && chunks.plan) {
+        const block = new Array(chunks.plan.bytes).fill(chunks.plan.fill || 0);
+        chunks = new Array(chunks.plan.count).fill(block);
+    }
+    const reader = {
+        cancelled: false,
+        read() {
+            if (reader.cancelled) return Promise.resolve({done: true, value: undefined});
+            if (index >= chunks.length) {
+                // A stream the server has not finished. Held open rather than
+                // ended, so "a reply is still being read aloud" is a state a
+                // test can stand in the middle of.
+                if (stall) return new Promise(() => {});
+                return Promise.resolve({done: true, value: undefined});
+            }
+            const value = Uint8Array.from(chunks[index]);
+            index += 1;
+            return Promise.resolve({done: false, value});
+        },
+        cancel() { reader.cancelled = true; return Promise.resolve(); },
+    };
+    readers.push(reader);
+    return {getReader: () => reader};
+}
+
+globalThis.AbortController = function () {
+    this.signal = {aborted: false};
+    const signal = this.signal;
+    this.abort = function () { signal.aborted = true; aborts.push(1); };
+};
+const aborts = [];
+
+globalThis.MutationObserver = function (fn) {
+    this.observe = function () { observers.push(fn); };
+    this.disconnect = function () {};
+};
+const observers = [];
+
 globalThis.fetch = function (url, options) {
     requests.push({url, options: options || {},
                    body: options && options.body,
@@ -303,9 +397,12 @@ globalThis.fetch = function (url, options) {
     const answer = ANSWERS[Object.keys(ANSWERS).find((k) => url.indexOf(k) !== -1)];
     if (!answer) return Promise.reject(new Error("no route " + url));
     if (answer.reject) return Promise.reject(new Error("network"));
+    const headerBag = answer.headers || {};
     return Promise.resolve({
         ok: answer.status === undefined || answer.status < 400,
         status: answer.status || 200,
+        headers: {get: (name) => headerBag[name] === undefined ? null : headerBag[name]},
+        body: answer.chunks ? streamBody(answer.chunks, answer.stall) : null,
         json: () => Promise.resolve(answer.json),
         arrayBuffer: () => Promise.resolve(answer.audio || new ArrayBuffer(8)),
     });
@@ -333,6 +430,31 @@ const mic = elements["mc-llm-chat-voice-mic"];
 const send = elements["mc-llm-chat-send"];
 const message = elements["mc-llm-chat-message"].inner;
 const token = elements["mc-llm-chat-voice-token"].inner;
+const turnField = elements["mc-llm-chat-voice-turn"].inner;
+const runState = elements["mc-llm-chat-voice-run-state"].inner;
+
+// Move the audio clock forward, which is how "the queue drained" and "playback
+// has caught up" are things a test can make happen.
+function advanceAudio(seconds) {
+    context.currentTime += seconds;
+}
+
+// Everything the page does on its own clock: the poll that notices a new turn
+// and keeps the composer honest, plus whatever timers are due.
+async function pump(times) {
+    for (let i = 0; i < (times || 8); i += 1) {
+        intervals.forEach((fn) => fn());
+        await settle();
+        runTimers();
+        await settle();
+    }
+}
+
+// Give the browser a turn to speak, then let the reader run to completion.
+async function speak(id, times) {
+    turnField.value = id;
+    await pump(times || 30);
+}
 const status = elements["mc-llm-chat-status"];
 
 function feed(samples) {
@@ -376,6 +498,21 @@ function report(extra) {
         played: played.length,
         stopped: stopped.length,
         status: status.notice.textContent,
+        scheduled: scheduled.map(function (item) {
+            const buffer = item.source.buffer;
+            const streamed = buffer && typeof buffer.getChannelData === "function";
+            return {at: item.at,
+                    length: streamed ? buffer.length : 0,
+                    rate: streamed ? buffer.sampleRate : 0,
+                    samples: streamed
+                        ? Array.from(buffer.getChannelData(0).slice(0, 4)) : []};
+        }),
+        aborts: aborts.length,
+        readerCancelled: readers.map((r) => r.cancelled),
+        sendHidden: (elements["mc-llm-chat-send"].classList
+                     .contains("mc-llm-voice-hidden")),
+        stopHidden: (elements["mc-llm-chat-stop"].classList
+                     .contains("mc-llm-voice-hidden")),
         pendingTimers: pending(),
         consoleErrors,
         listeners: Object.keys(mic.handlers).map((k) => [k, mic.handlers[k].length]),
@@ -409,6 +546,7 @@ DEFAULTS = {
     "SECURE": "true",
     "MICROPHONE": "true",
     "PERMISSION": "true",
+    "DENIAL": '"NotAllowedError"',
     "SAMPLE_RATE": "48000",
     "CONTEXT_STATE": '"running"',
     "RESUME_WORKS": "true",
@@ -416,6 +554,24 @@ DEFAULTS = {
     "WORKLET_AVAILABLE": "true",
     "GRADIO_CONFIG": '{"root": ""}',
     "ANSWERS": json.dumps({
+        "voice/tts-stream": {
+            "headers": {"X-Model-Chain-Voice-Rate": "24000",
+                        "X-Model-Chain-Voice-Turn": "T1"},
+            # Three network reads whose boundaries fall wherever they like --
+            # including one that ends on the first byte of a sample.
+            "chunks": [[1, 0, 2, 0, 3], [0, 4, 0], [5, 0, 6, 0]],
+        },
+        "voice/cancel": {"json": {"ok": True, "cancelled": True}},
+        "voice/runtime": {"json": {"ok": True, "engine": {"loaded": True, "state": "idle"}}},
+        "voice/voices": {"json": {"ok": True, "voices": [], "default": "official:af_heart",
+                                  "test_text": "This is a test of voice cloning.",
+                                  "capacity": {"used": 0, "total": 32, "free": 32},
+                                  "warnings": []}},
+        "voice/cloning/status": {"json": {"ok": True, "state": "not_installed",
+                                          "message": "Voice cloning is not installed.",
+                                          "checks": [], "sources": {},
+                                          "capacity": {"free": 32},
+                                          "job": {"status": "idle", "active": False}}},
         "voice/status": {"json": {"ok": True, "ready": True, "stt_ready": True,
                                   "tts_ready": True, "runtime_ready": True,
                                   "auto_send": False, "auto_speak": False,
@@ -585,27 +741,47 @@ class TestPressAndHold:
 
 
 class TestWhenItCannotRecord:
-    def test_an_insecure_context_is_explained_and_nothing_is_opened(self):
-        """From an Android phone, ``http://192.168.x.x`` is not a secure context
-        and ``getUserMedia`` does not exist. Saying so is the whole feature
-        here."""
+    def test_t_js_13_an_insecure_page_is_not_refused_by_this_extension(self):
+        """T-JS-13. The V1 script asked ``isSecureContext`` and refused first.
+
+        Section 39 removes exactly that: Voice Chat may not reject a page for
+        being HTTP. Where the browser has nevertheless exposed getUserMedia --
+        localhost, a tunnel, a browser flag, a future policy -- the microphone
+        is opened and the browser makes the decision that is genuinely its own.
+        """
         found = run("await hold(900); console.log(JSON.stringify(report()));",
                     SECURE="false")
-        assert "HTTPS" in found["status"]
-        assert not any(r.get("kind") == "getUserMedia" for r in found["requests"])
+        assert "HTTPS" not in found["status"], found["status"]
+        opens = [r for r in found["requests"] if r.get("kind") == "getUserMedia"]
+        assert len(opens) == 1, "an insecure page was refused by the extension itself"
 
-    def test_a_browser_without_getusermedia_fails_cleanly(self):
+    def test_t_js_14_a_browser_without_getusermedia_reports_capability(self):
+        """T-JS-14. Not "HTTPS is required" -- that is a claim about a policy
+        this extension no longer has, and it is not reliably the reason
+        either."""
         found = run("await hold(900); console.log(JSON.stringify(report()));",
                     MICROPHONE="false")
-        assert found["status"]
+        assert "did not make microphone capture available" in found["status"]
+        assert "HTTPS" not in found["status"]
         assert found["consoleErrors"] == []
 
     def test_a_denied_permission_says_so_and_does_not_retry(self):
         found = run("await hold(900); console.log(JSON.stringify(report()));",
                     PERMISSION="false")
-        assert "permission was denied" in found["status"]
+        assert "not allowed by the browser or device" in found["status"]
         opens = [r for r in found["requests"] if r.get("kind") == "getUserMedia"]
         assert len(opens) == 1, "a denied permission was asked for again"
+
+    def test_each_browser_failure_maps_to_its_own_sentence(self):
+        """Section 39's map. "There is no microphone" and "permission was
+        refused" have nothing in common except that no audio arrived, and
+        collapsing them costs the user the one thing they could act on."""
+        for name, wanted in (("NotAllowedError", "not allowed by the browser"),
+                             ("NotFoundError", "No microphone is available"),
+                             ("NotReadableError", "could not be opened")):
+            found = run("await hold(900); console.log(JSON.stringify(report()));",
+                        PERMISSION="false", DENIAL='"%s"' % name)
+            assert wanted in found["status"], (name, found["status"])
 
     def test_a_missing_setup_flashes_an_error_and_never_opens_the_microphone(self):
         answers = json.loads(DEFAULTS["ANSWERS"])
@@ -617,7 +793,19 @@ class TestWhenItCannotRecord:
         assert not any(r.get("kind") == "getUserMedia" for r in found["requests"])
 
     def test_it_will_not_record_while_a_reply_is_generating(self):
+        """Busy is Python's run-state value now rather than the last CSS the
+        panel happened to apply -- section 25. The button's visibility is still
+        the fallback for a page built before that field existed."""
         found = run("""
+            runState.value = "llm";
+            await hold(900);
+            console.log(JSON.stringify(report()));
+        """)
+        assert "Wait for the reply" in found["status"]
+
+    def test_the_button_is_still_the_fallback_where_there_is_no_run_state(self):
+        found = run("""
+            delete elements["mc-llm-chat-voice-run-state"];
             elements["mc-llm-chat-stop"].offsetParent = {};
             await hold(900);
             console.log(JSON.stringify(report()));
@@ -743,7 +931,7 @@ class TestTheComposer:
             mic.fire("pointerup", {pointerId: 7});
             // The reply starts while the transcription is still in flight,
             // which is the race auto-send has to lose.
-            elements["mc-llm-chat-stop"].offsetParent = {};
+            runState.value = "llm";
             await tick();
             console.log(JSON.stringify(report()));
         """, ANSWERS=json.dumps(answers))
@@ -1298,3 +1486,248 @@ class TestTheFolderButtonComesBack:
         found = run("await tick(); console.log(JSON.stringify(report()));",
                     SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
         assert found["settings"]["sttLocalDisabled"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Streaming speech in the browser
+# --------------------------------------------------------------------------- #
+
+
+def stream_answers(chunks=None, *, seconds=None, count=1, **extra):
+    """The default answers with a chosen set of network chunk boundaries.
+
+    ``seconds`` asks for ``count`` blocks of that many seconds of 24 kHz PCM16
+    each, built inside the harness -- a literal array of a hundred thousand
+    zeroes is longer than ``node -e`` will accept as an argument.
+    """
+    answers = json.loads(DEFAULTS["ANSWERS"])
+    if seconds is not None:
+        chunks = {"plan": {"bytes": int(seconds * 24000) * 2, "count": count, "fill": 0}}
+    answers["voice/tts-stream"] = dict(answers["voice/tts-stream"], chunks=chunks, **extra)
+    return json.dumps(answers)
+
+
+class TestTheStreamReader:
+    def test_t_js_1_arbitrary_chunk_sizes_all_arrive(self):
+        """Network reads are not sample-aligned and are not the server's writes.
+        Six samples split three ways, one of the splits landing mid-sample."""
+        found = run("await speak('T1'); console.log(JSON.stringify(report()));")
+        total = sum(item["length"] for item in found["scheduled"])
+        assert total == 6, found["scheduled"]
+
+    def test_t_js_2_an_odd_trailing_byte_is_carried_and_not_played(self):
+        """The first half of a sample whose second half is in the next chunk.
+        Treating it as a whole sample turns the rest of the reply into noise."""
+        found = run("await speak('T1'); console.log(JSON.stringify(report()));",
+                    ANSWERS=stream_answers([[1, 0, 2], [0, 3, 0]]))
+        blocks = [item for item in found["scheduled"] if item["length"]]
+        assert sum(item["length"] for item in blocks) == 3
+        # 1, 2 and 3 as little-endian int16 over 0x7fff.
+        played = [value for item in blocks for value in item["samples"]]
+        assert played[:3] == pytest.approx([1 / 0x7fff, 2 / 0x7fff, 3 / 0x7fff], rel=1e-3)
+
+    def test_t_js_3_pcm16_becomes_float32_at_the_right_sign_and_scale(self):
+        """0x8000 is -1.0 and 0x7fff is +1.0; getting the sign wrong is a reply
+        that sounds inverted and the scale wrong is one that clips."""
+        found = run("await speak('T1'); console.log(JSON.stringify(report()));",
+                    ANSWERS=stream_answers([[0x00, 0x80, 0xff, 0x7f, 0x00, 0x00]]))
+        samples = found["scheduled"][0]["samples"]
+        assert samples[0] == pytest.approx(-1.0, abs=1e-4)
+        assert samples[1] == pytest.approx(1.0, abs=1e-4)
+        assert samples[2] == pytest.approx(0.0, abs=1e-6)
+
+    def test_the_buffer_is_built_at_the_rate_the_header_declares(self):
+        found = run("await speak('T1'); console.log(JSON.stringify(report()));",
+                    ANSWERS=stream_answers([[1, 0, 2, 0]],
+                                           headers={"X-Model-Chain-Voice-Rate": "22050",
+                                                    "X-Model-Chain-Voice-Turn": "T1"}))
+        assert found["scheduled"][0]["rate"] == 22050
+
+    def test_blocks_are_scheduled_back_to_back_and_not_all_at_once(self):
+        """Web Audio has no "append": back-to-back playback is arithmetic on the
+        context's own clock, and getting it wrong plays every block over the
+        first one."""
+        found = run("await speak('T1'); console.log(JSON.stringify(report()));",
+                    ANSWERS=stream_answers(seconds=1.0, count=2))
+        times = [item["at"] for item in found["scheduled"] if item["length"]]
+        assert len(times) == 2
+        assert times[1] > times[0], times
+
+    def test_a_stream_that_answers_for_a_different_turn_is_not_played(self):
+        """Section 24 at the last possible moment: a response stamped with
+        somebody else's turn is a response for a reply that is over."""
+        found = run("await speak('T1'); console.log(JSON.stringify(report()));",
+                    ANSWERS=stream_answers([[1, 0]],
+                                           headers={"X-Model-Chain-Voice-Rate": "24000",
+                                                    "X-Model-Chain-Voice-Turn": "OTHER"}))
+        assert not [item for item in found["scheduled"] if item["length"]]
+
+    def test_the_request_carries_the_turn_id_and_no_text(self):
+        found = run("await speak('T1'); console.log(JSON.stringify(report()));")
+        sent = [r for r in found["requests"] if r["url"].endswith("tts-stream")]
+        assert sent and json.loads(sent[0]["bodyText"]) == {"turn": "T1"}
+        assert sent[0]["headers"]["X-Model-Chain-Voice"] == "PAGE-TOKEN"
+
+    def test_t_js_5_a_deep_queue_stops_the_reader_until_it_drains(self):
+        """Section 22's high-water mark. Not reading is the whole mechanism:
+        the socket stops being drained and the backpressure reaches the worker."""
+        found = run("""
+            turnField.value = "T1";
+            await tick(6);
+            const before = report().scheduled.length;
+            // The audio clock does not move, so everything scheduled is still
+            // queued and the reader should have stopped asking for more.
+            await tick(20);
+            console.log(JSON.stringify(report({before})));
+        """, ANSWERS=stream_answers(seconds=2.0, count=8))
+        queued = sum(item["length"] for item in found["scheduled"]) / 24000.0
+        assert queued < 20, "the reader kept reading past the high-water mark"
+
+
+class TestStoppingInTheBrowser:
+    def test_t_js_7_stop_aborts_the_fetch_and_stops_every_source(self):
+        """The audible half of one unified Stop, and the target is under 100 ms
+        -- which is why it is a local listener rather than a round trip."""
+        found = run("""
+            await speak('T1', 4);
+            elements["mc-llm-chat-stop"].fire("click", {});
+            await pump(2);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=1.0, count=6, stall=True))
+        assert found["aborts"] >= 1
+        assert found["stopped"] >= 1
+        assert any(r["url"].endswith("voice/cancel") for r in found["requests"])
+
+    def test_the_cancel_names_the_turn_it_is_stopping(self):
+        found = run("""
+            await speak('T1', 4);
+            elements["mc-llm-chat-stop"].fire("click", {});
+            await pump(2);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=1.0, count=6, stall=True))
+        cancel = [r for r in found["requests"] if r["url"].endswith("voice/cancel")][0]
+        assert json.loads(cancel["bodyText"]) == {"turn": "T1"}
+
+    def test_t_js_8_a_new_turn_stops_the_previous_one_before_it_plays(self):
+        found = run("""
+            await speak('T1', 4);
+            await speak('T2', 20);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=1.0, count=6))
+        assert found["stopped"] >= 1, "the first reply was not stopped"
+        assert found["aborts"] >= 1
+
+    def test_t_js_10_turning_auto_speak_off_stops_the_current_reply(self):
+        """Section 28. A switch that says "do not read replies aloud" while a
+        reply is being read aloud is a switch nobody trusts again."""
+        found = run("""
+            await speak('T1', 4);
+            const box = elements["mc-llm-chat-voice-auto-speak"];
+            box.type = "checkbox";
+            box.checked = false;
+            box.fire("change", {target: box});
+            await pump(2);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=1.0, count=6, stall=True))
+        assert found["aborts"] >= 1
+        assert any(r["url"].endswith("voice/cancel") for r in found["requests"])
+
+    def test_t_js_11_the_microphone_cancels_the_reply_before_it_records(self):
+        """Section 14. Not merely silencing the speaker -- an obsolete Kokoro
+        run would go on taking the CPU the transcription is about to need."""
+        found = run("""
+            await speak('T1', 4);
+            await hold(900);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=1.0, count=6, stall=True))
+        order = [r.get("url") or "" for r in found["requests"]]
+        cancels = [index for index, url in enumerate(order) if url.endswith("voice/cancel")]
+        transcriptions = [index for index, url in enumerate(order)
+                          if url.endswith("voice/stt")]
+        assert cancels, order
+        assert transcriptions, order
+        assert cancels[0] < transcriptions[0], order
+
+    def test_t_js_12_leaving_the_page_stops_the_speaker_and_the_stream(self):
+        found = run("""
+            await speak('T1', 4);
+            (globalThis.windowHandlers["pagehide"] || []).forEach((fn) => fn());
+            await pump(2);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=1.0, count=6, stall=True))
+        assert found["aborts"] >= 1
+        assert found["stopped"] >= 1
+
+
+class TestTheComposerBusyState:
+    def test_t_js_9_stop_stays_while_voice_is_still_speaking(self):
+        """Release blocker four. The reply finished, Gradio put Send back, and
+        the speaker was still talking with nothing on screen to stop it."""
+        found = run("""
+            runState.value = "llm";
+            await speak('T1', 4);
+            runState.value = "idle";
+            await pump(2);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=2.0, count=6))
+        assert found["sendHidden"] is True
+        assert found["stopHidden"] is False
+
+    def test_stop_is_revealed_and_not_merely_left_alone(self):
+        """The half that is easy to miss. Python's own IDLE update hides Stop
+        when the model finishes -- correctly, as far as Python knows -- so a
+        composer where Voice is still speaking needs Gradio's marker taken
+        *off* Stop rather than a class of ours added to Send."""
+        found = run("""
+            runState.value = "llm";
+            await speak('T1', 4);
+            runState.value = "idle";
+            // Gradio hides Stop the way it hides anything.
+            elements["mc-llm-chat-stop"].classList.add("hidden");
+            await pump(2);
+            console.log(JSON.stringify(report({
+                stopStillHidden: elements["mc-llm-chat-stop"].classList.contains("hidden"),
+            })));
+        """, ANSWERS=stream_answers(seconds=2.0, count=6, stall=True))
+        assert found["stopStillHidden"] is False
+        assert found["stopHidden"] is False
+        assert found["sendHidden"] is True
+
+    def test_send_comes_back_only_when_both_are_idle(self):
+        found = run("""
+            runState.value = "llm";
+            await pump(2);
+            const busy = report();
+            runState.value = "idle";
+            await pump(2);
+            console.log(JSON.stringify(report({wasBusy: busy.stopHidden})));
+        """)
+        assert found["wasBusy"] is False, "Stop was hidden while the model was running"
+        assert found["sendHidden"] is False
+        assert found["stopHidden"] is True
+
+
+class TestTheEnginePanel:
+    def test_load_and_unload_go_to_the_runtime_route(self):
+        found = run("""
+            const panel = elements["mc-llm-chat-voice-engine"];
+            panel.offsetParent = {};
+            panel.fire("click", {target: panel.button});
+            await pump(2);
+            console.log(JSON.stringify(report()));
+        """)
+        sent = [r for r in found["requests"] if r["url"].endswith("voice/runtime")]
+        assert sent, [r["url"] for r in found["requests"]]
+        assert json.loads(sent[0]["bodyText"])["action"] in ("load", "unload")
+
+    def test_unloading_stops_a_reply_that_is_being_read_aloud(self):
+        found = run("""
+            await speak('T1', 4);
+            const panel = elements["mc-llm-chat-voice-engine"];
+            panel.offsetParent = {};
+            panel.button.setAttribute("data-mc-voice-runtime", "unload");
+            panel.fire("click", {target: panel.button});
+            await pump(2);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=1.0, count=6, stall=True))
+        assert found["aborts"] >= 1
