@@ -1780,6 +1780,26 @@ def runtime_accepts(flag: str, value: str, configuration: Config | None = None) 
     return bool(re.search(rf"(?<![A-Za-z0-9_-]){re.escape(value)}(?![A-Za-z0-9_-])", text))
 
 
+def runtime_refused(flag: str, value: str, configuration: Config | None = None) -> bool:
+    """Whether this build has already refused ``value`` for ``flag`` at startup.
+
+    The negative cache alone, and nothing about the help text. It is the right
+    question for a flag whose argument is a *number*, where
+    :func:`runtime_accepts` is the wrong one: that function decides by finding
+    the value as a whole word in ``--help``, which is exactly right for an
+    enumeration like ``--spec-type draft-mtp`` and nonsense for ``--parallel
+    6`` -- llama.cpp's help has no reason to contain a bare "6", so every count
+    reads as unsupported.
+
+    That is not hypothetical. It shipped: a user's log said "this llama.cpp
+    build refused --parallel 6 on an earlier start" while their llama-server
+    log showed no such start had ever been attempted, and the feature was
+    disabled by a sentence about something that never happened.
+    """
+    stamp = _runtime_stamp(configuration)
+    return stamp is not None and (flag, str(value)) in _rejected.get(stamp, ())
+
+
 def note_rejected_value(flag: str, value: str, configuration: Config | None = None) -> None:
     """Record that this build refused ``value`` for ``flag`` when it started.
 
@@ -3067,15 +3087,22 @@ def _slots_for(configuration: Config, placement: mc_llm_context.Placement) -> in
                     "one prompt cache; the modes that use different system prompts will "
                     "re-read each other's", PARALLEL_FLAG)
         return 1
-    if not runtime_accepts(PARALLEL_FLAG, str(slots), configuration):
-        # Refused at startup on an earlier attempt, which is where a build that
-        # will not combine warm caches with an accelerator says so. Keeping the
-        # accelerator is the user's stated choice: it is a setting they picked,
-        # it pays back on every token, and a warm cache is worth one prompt
-        # re-read. So the caches go and the accelerator stays.
-        logger.info("Model Chain: this llama.cpp build refused %s %d on an earlier start, "
-                    "so it keeps one prompt cache and its accelerator",
-                    PARALLEL_FLAG, slots)
+    # Refused *at startup*, which is the only evidence worth having about a
+    # numeric argument -- and deliberately not `runtime_accepts`, whose
+    # help-text search answers an enumeration's question and would call every
+    # slot count unsupported. See :func:`runtime_refused`.
+    while slots > 1 and runtime_refused(PARALLEL_FLAG, str(slots), configuration):
+        # Halved rather than abandoned. A build that would not take six caches
+        # may take three, and the two extra attempts this can cost are argument
+        # parsing rather than model loads. Keeping the accelerator is the
+        # user's stated choice when neither can be had: it is a setting they
+        # picked and it pays back on every token, where a cache is worth one
+        # prompt re-read.
+        slots //= 2
+    if slots <= 1:
+        logger.info("Model Chain: this llama.cpp build refused %s at every count it was "
+                    "offered, so it keeps one prompt cache and its accelerator",
+                    PARALLEL_FLAG)
         return 1
     return slots
 

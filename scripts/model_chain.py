@@ -20,6 +20,7 @@ import time
 import gradio as gr
 
 import mc_arch
+import mc_arm
 import mc_broker
 import mc_hint
 import mc_infotext
@@ -402,6 +403,18 @@ shared.options_templates.update(
                 "the system page cache, so restarting reads from RAM rather than disk. "
                 "Keeping it running moves the model to system RAM instead: no reload, much "
                 "slower generation, and the RAM stays spent"
+            ),
+            mc_arm.OPT_WARM_UP: shared.OptionInfo(
+                mc_arm.WARM_OFF,
+                "Warm up before generating",
+                gr.Radio,
+                {"choices": [label for _, label in mc_arm.WARM_MODES]},
+            ).info(
+                "a cold run and a warm one are the same work in a different order: the "
+                "model load, the placement and the prompt cache all happen once and then "
+                "stop happening. From one log, five identical jobs ran in 82s, 27s, 3.6s, "
+                "4.1s and 5.1s. This decides when that is paid for — halfway through a "
+                "generation somebody is watching, or before it starts"
             ),
             mc_llm_runtime.OPT_LLM_SLOTS: shared.OptionInfo(
                 mc_llm_runtime.SLOTS_AUTOMATIC,
@@ -2081,6 +2094,17 @@ class ScriptModelChain(scripts.Script):
         # A conversation on another card, or on the processor, is not waited
         # for at all -- it is not using this GPU and never was, and the wait it
         # used to cause was a pure loss on both sides.
+        # Everything this generation is going to load, loaded before it starts
+        # rather than halfway through it. Off unless asked for, and a no-op
+        # once the pipeline is already armed -- which after the first run of a
+        # session it is, so this costs a measurement and nothing else.
+        if mc_arm.mode() in (mc_arm.WARM_BEFORE, mc_arm.WARM_STARTUP):
+            try:
+                mc_arm.arm(p.width, p.height, reason="this generation")
+            except Exception:
+                errors.report("Model Chain: could not warm up before generating",
+                              exc_info=True)
+
         mc_broker.await_idle(domain=image_domain)
         # Claim VRAM ownership for the image family, on the image card. The
         # number is zero on purpose: in Hybrid mode a generation starting is
@@ -3427,6 +3451,7 @@ try:
     # which is how "tag completion does not work in these boxes" gets answered
     # without asking somebody to open the developer tools. The file first, so
     # the report lands in it.
+    script_callbacks.on_app_started(mc_arm.on_app_started)
     script_callbacks.on_app_started(mc_logfile.attach)
     script_callbacks.on_app_started(mc_literal_report.install)
 except Exception:
