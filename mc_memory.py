@@ -1410,13 +1410,40 @@ def _stash_current(stage: str = "", protect: str | None = None) -> None:
         kept = protect is not None and _cache.has(protect)
         logger.warning(
             "Model Chain: not enough system RAM to cache %s (%.1f GB needed, %.1f GB available to "
-            "the cache)%s — it will reload from disk on every switch. Raise "
+            "the cache)%s%s — it will reload from disk on every switch. Raise "
             '"Model Chain: max system RAM for model cache (GB)" in Settings if you have the RAM.',
             name,
             size / _GB,
             budget / _GB,
             ", and the model about to be swapped in was kept in preference to it" if kept else "",
+            _llm_ram_note(),
         )
+
+
+def _llm_ram_note() -> str:
+    """Whether a RAM-backed language model is why this cache cannot grow.
+
+    Section 10.9's addition, and it is *only* visibility. The admission
+    arithmetic above is unchanged and correct as it stands: it reads live
+    available memory, so a processor-resident llama-server has already reduced
+    what the cache may take without anybody having to model it. What was
+    missing was the sentence saying so -- otherwise the message points at the
+    RAM-budget setting, and raising that setting cannot conjure memory another
+    process is holding.
+
+    Never adds LLM memory back as though the cache could have it. Deciding to
+    stop a running language model is the broker's, and it is not made here.
+    """
+    try:
+        import mc_broker
+
+        held = int(mc_broker.llm_host_ram_bytes())
+    except Exception:
+        return ""
+    if held <= 0:
+        return ""
+    return (f", while a language model configured for system RAM is using about "
+            f"{held / _GB:.1f} GB of it")
 
 
 def _restore_prepared_state(entry: _Entry, stage: str) -> str:
@@ -2571,7 +2598,15 @@ def _llm_residency_bytes() -> int:
     try:
         import mc_broker
 
-        return max(int(mc_broker.reported_bytes(mc_broker.FAMILY_LLM)), 0)
+        # On the image card, because that is the card the pass was short on.
+        # A reserve miss filed with a second card's llama-server in it would
+        # tell the panel -- and Auto's learned cap -- that nineteen gigabytes
+        # of language model were in the way of a pass that could never have
+        # reached them (design intent T19).
+        index = mc_broker.image_device_index()
+        return max(int(mc_broker.reported_bytes(
+            mc_broker.FAMILY_LLM,
+            card=index if index >= 0 else mc_broker.ANY_CARD)), 0)
     except Exception:
         return 0
 
@@ -2858,6 +2893,87 @@ def _reclaim_foreign(needed: int, reason: str) -> int:
     except Exception:
         logger.warning("Model Chain: cross-workload reclaim failed", exc_info=True)
         return 0
+
+
+# --------------------------------------------------------------------------- #
+# The warm host-RAM tier, as the broker sees it (design intent section 10.2)
+# --------------------------------------------------------------------------- #
+#
+# Three functions, deliberately narrow. The cross-workload broker needs to know
+# how much system RAM this cache is holding, how much of it is safe to drop,
+# and how to ask for some back -- and nothing else. Cache identity, module
+# pairing, LRU order, prepared-state preservation and which incoming entry is
+# protected all stay here, where the Forge entry points and the bookkeeping
+# are; the broker is not given a way to reach a model object, because a broker
+# that could reach one would eventually be written as though it understood one.
+
+
+def warm_ram_bytes() -> int:
+    """System RAM this cache is explicitly holding.
+
+    Explicitly: cache entries, not "everything Forge's process has touched".
+    Weights the current pass is executing against, arena fragmentation and the
+    page cache are all real host memory and none of them is this number, which
+    is the only one this module can honestly offer to give back.
+    """
+    return int(_cache.total_bytes())
+
+
+def reclaimable_warm_ram_bytes() -> int:
+    """Of :func:`warm_ram_bytes`, what could be released right now.
+
+    Everything except the entry describing the checkpoint that is loaded. That
+    one is the model the host is generating with; its weights may be partly on
+    the card and partly offloaded here, and dropping this module's reference to
+    it while a pass is running would be releasing memory the active workload
+    is using -- section 10.10, which is explicit that active image host memory
+    is not a generic victim for an LLM's admission arithmetic.
+    """
+    loaded = _loaded_model_key()
+    return int(sum(entry.size_bytes for key, entry in _cache._entries.items()
+                   if key != loaded))
+
+
+def release_warm_ram(needed_bytes: int, reason: str = "") -> int:
+    """Drop least-recently-used cache entries until ``needed_bytes`` is covered.
+
+    Returns bytes given up, measured as the cache's own reduction. The caller
+    re-reads available system RAM afterwards and believes that instead
+    (invariant I-15): what is dropped here is a *reference*, and the memory
+    comes back when the collector agrees, which is usually immediately and is
+    not this function's to promise.
+
+    The loaded checkpoint is never a candidate, for the reason
+    :func:`reclaimable_warm_ram_bytes` gives. Nothing else is protected: the
+    whole purpose of these entries is to make a future switch faster, and a
+    future switch is exactly what should be given up before an active workload
+    is refused the memory it needs to run at all.
+    """
+    wanted = max(int(needed_bytes), 0)
+    if wanted <= 0:
+        return 0
+    loaded = _loaded_model_key()
+    candidates = sorted(
+        ((key, entry) for key, entry in _cache._entries.items() if key != loaded),
+        key=lambda pair: pair[1].last_used,
+    )
+    freed = 0
+    dropped: list[str] = []
+    for key, entry in candidates:
+        if freed >= wanted:
+            break
+        _cache.drop(key)
+        freed += entry.size_bytes
+        dropped.append(entry.checkpoint_name)
+    if not dropped:
+        return 0
+    logger.info(
+        "Model Chain: released %.1f GB of warm image RAM cache for %s — %s; %.1f GB of "
+        "cache remains and those checkpoints will reload from disk on the next switch",
+        freed / _GB, reason or "another workload", ", ".join(dropped),
+        _cache.total_bytes() / _GB,
+    )
+    return int(freed)
 
 
 def resident_vram_bytes() -> int:

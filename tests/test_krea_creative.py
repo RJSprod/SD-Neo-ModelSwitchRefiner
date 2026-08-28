@@ -702,7 +702,7 @@ class TestTheImageModelKeepsItsRoom:
 
         monkeypatch.setattr(mc_memory, "vram_required_bytes",
                             lambda name, *a, **k: 8 * 1024 ** 3)
-        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None: 0)
+        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None, **_: 0)
         monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
         from modules import shared
 
@@ -716,7 +716,7 @@ class TestTheImageModelKeepsItsRoom:
             self, card, monkeypatch):
         """Those bytes are the loaded checkpoint. Reserving them again would
         shrink the language model to make room for a model already there."""
-        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None: 6 * 1024 ** 3)
+        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None, **_: 6 * 1024 ** 3)
 
         assert mc_creative_krea.image_reserve_bytes() == 2 * 1024 ** 3
 
@@ -731,7 +731,7 @@ class TestTheImageModelKeepsItsRoom:
         assert mc_creative_krea.image_reserve_bytes() == 7 * 1024 ** 3
 
     def test_a_fully_resident_checkpoint_needs_nothing_reserved(self, card, monkeypatch):
-        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None: 20 * 1024 ** 3)
+        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None, **_: 20 * 1024 ** 3)
 
         assert mc_creative_krea.image_reserve_bytes() == 0
 
@@ -744,10 +744,10 @@ class TestTheImageModelKeepsItsRoom:
         another 13.9 GB, which is sixteen of forty-eight blocks on the card and
         the rest crawling from system RAM.
         """
-        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None: 0)
+        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None, **_: 0)
         monkeypatch.setattr(mc_broker, "reported_bytes",
-                            lambda family: 8 * 1024 ** 3 if family == mc_broker.FAMILY_IMAGE
-                            else 0)
+                            lambda family, **_: 8 * 1024 ** 3
+                            if family == mc_broker.FAMILY_IMAGE else 0)
 
         assert mc_creative_krea.image_reserve_bytes() == 0
 
@@ -823,7 +823,7 @@ class TestTheImageModelKeepsItsRoom:
     def test_asking_costs_nothing_when_the_card_already_has_room(self, card, monkeypatch):
         """request_vram returns immediately when what is free covers the
         requirement, so a correctly sized card never pays for the call."""
-        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None: 20 * 1024 ** 3)
+        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None, **_: 20 * 1024 ** 3)
         called = []
         monkeypatch.setattr(mc_broker, "request_vram",
                             lambda *a, **k: called.append(a) or None)
@@ -3018,7 +3018,7 @@ class TestTheReserveComesFromTheWholePlan:
         import mc_plan
 
         monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
-        monkeypatch.setattr(mc_broker, "held_bytes", lambda family: 0)
+        monkeypatch.setattr(mc_broker, "held_bytes", lambda family, **_: 0)
         monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda ours=0: 24 * 1024 ** 3)
         mc_plan.publish(mc_plan.Plan((
             mc_plan.Phase(mc_plan.STAGE_1, mc_plan.KIND_IMAGE, "Stage 1",
@@ -3043,7 +3043,7 @@ class TestTheReserveComesFromTheWholePlan:
         mc_plan.clear()
         monkeypatch.setattr(mc_memory, "vram_required_bytes",
                             lambda name, *a, **k: 8 * 1024 ** 3)
-        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None: 0)
+        monkeypatch.setattr(mc_broker, "resident_bytes", lambda family=None, **_: 0)
         shared.opts.sd_model_checkpoint = "krea2.safetensors"
 
         assert mc_creative_krea.image_reserve_bytes() == 8 * 1024 ** 3

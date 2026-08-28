@@ -30,7 +30,7 @@ GB = 1024**3
 def budget(host, monkeypatch):
     monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda ours=0: 24 * GB)
     monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 1 * GB)
-    monkeypatch.setattr(mc_broker, "held_bytes", lambda family: 0)
+    monkeypatch.setattr(mc_broker, "held_bytes", lambda family, **_: 0)
     return monkeypatch
 
 
@@ -331,7 +331,7 @@ class TestTheCardAddsUp:
         monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: state["total"])
         monkeypatch.setattr(mc_broker, "free_vram_bytes", lambda: state["free"])
         monkeypatch.setattr(mc_broker, "held_bytes",
-                            lambda family: state["image"]
+                            lambda family, **_: state["image"]
                             if family == mc_broker.FAMILY_IMAGE else state["llm"])
         return state
 

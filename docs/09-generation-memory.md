@@ -398,12 +398,15 @@ there zero is the answer.
 `Runtime._outgrown` is where re-placement was decided, and it now declines to
 ask the question at all in two cases:
 
-- an image job holds the card (`mc_broker.host_busy()`), because halfway through
-  a generation there is always memory that has just been released and is about
-  to be taken again, and every one of those instants looks like room to grow
-  into;
+- an image job holds *this server's* card (`Runtime._image_job_conflicts()`),
+  because halfway through a generation there is always memory that has just
+  been released and is about to be taken again, and every one of those instants
+  looks like room to grow into. Scoped to the card since the resource-scoped
+  concurrency work — see `docs/12-resource-scoped-concurrency.md` — because a
+  generation on GPU 0 is no reason to freeze a placement decision on GPU 1;
 - the plan the running server was placed for is still the plan in force
-  (`mc_plan.boundary_moved()` is false).
+  (`Runtime._boundary_moved()` is false). That baseline lives on the runtime
+  rather than in `mc_plan`, so two servers cannot answer each other's question.
 
 `Plan.identity()` quantises phase peaks to quarter-gigabyte classes. A
 byte-exact comparison would call every generation a new plan, because an

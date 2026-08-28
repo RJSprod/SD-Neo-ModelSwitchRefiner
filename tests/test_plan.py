@@ -68,7 +68,7 @@ def card(host, monkeypatch):
                         lambda stage: int(modules.get(str(stage.name), 0.0) * GB))
     monkeypatch.setattr(mc_plan, "usable_vram_bytes", lambda ours=0: 24 * GB)
     monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
-    monkeypatch.setattr(mc_broker, "held_bytes", lambda family: 0)
+    monkeypatch.setattr(mc_broker, "held_bytes", lambda family, **_: 0)
     return types.SimpleNamespace(sizes=sizes, modules=modules)
 
 
@@ -482,7 +482,7 @@ class TestTheBudget:
     def test_what_the_image_side_already_holds_is_not_reserved_again(
             self, card, monkeypatch):
         card.sizes["krea2"] = 14.0
-        monkeypatch.setattr(mc_broker, "held_bytes", lambda family: 14 * GB)
+        monkeypatch.setattr(mc_broker, "held_bytes", lambda family, **_: 14 * GB)
         mc_plan.publish(plan_for(card, stage_1=stage("krea2")))
 
         assert mc_plan.llm_reserve_bytes() == 0
@@ -735,8 +735,8 @@ class TestTheBudgetIsMeasuredNotDeclared:
         monkeypatch.setattr(mc_broker, "total_vram_bytes", lambda: 24575 * self.MiB)
         monkeypatch.setattr(mc_broker, "device_free_vram_bytes", lambda index=None: state["free"])
         monkeypatch.setattr(mc_broker, "held_bytes",
-                            lambda family: state["image"] if family == mc_broker.FAMILY_IMAGE
-                            else state["llm"])
+                            lambda family, **_: state["image"]
+                            if family == mc_broker.FAMILY_IMAGE else state["llm"])
         monkeypatch.setattr(mc_broker, "safety_margin_bytes", lambda: 0)
         return state
 
