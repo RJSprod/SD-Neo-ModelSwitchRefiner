@@ -153,6 +153,54 @@ card with a 18.2 GB model was fitting one copy and then two more into what was
 left.
 
 
+## 2c. One copy of the weights, a cache each
+
+The fix for "three servers on one card" is a setting (`One server`). The fix
+for what that setting *costs* is `--parallel`.
+
+Every mode here opens with a different system prompt — Conversation, Prompt
+Studio, MiniMax, the Krea writer, the Spatial Composer — so a shared server
+re-reads a prefix on every switch. llama.cpp will keep a key/value cache per
+slot and route an incoming prompt to the slot whose cached prefix matches best;
+the routing is already visible in a user's log (`selected slot by LCP
+similarity, f_sim_best = 0.966`). One process, one copy of the weights, a cache
+each. Nothing in the client changes.
+
+Two things make it safe, and both are load-bearing.
+
+**`--ctx-size` is a total that llama.cpp divides among the slots.**
+`Placement.context` stays per-slot, because that is what the number means to
+the person who typed it, and the multiplication happens once, at the command
+line, through `Placement.total_context`. Getting it backwards gives every slot
+a fraction of the context asked for and truncates prompts to it *without an
+error*, so the start reads `n_slots` and `n_ctx_slot` back out of llama.cpp's
+own log and says so when they are not what was asked for.
+
+**A cache is bought with leftovers and sold first.** `_slots_that_fit` works
+from the un-degraded placement and spends only what is spare *after* it already
+fits, so an extra cache can never be why a context shrank or a layer left the
+card. The ladder then gives them back before anything else:
+
+1. a cache — costs one prompt re-read, once
+2. context — costs conversation length
+3. experts to system RAM — costs speed on every token that consults them
+4. layers — costs speed on every token
+
+That ordering is the whole argument for the feature and against over-buying it.
+
+Gaining a cache is deliberately *not* a negotiation note: a note is what
+`Negotiation.degraded` is made of, and this is the opposite of a degradation.
+It is reported on the ready line through `Placement.describe`, and says nothing
+at all at one cache, so an installation that never touches the setting reads
+exactly the line it always read.
+
+Where a build will not take `--parallel` beside a draft model, **the accelerator
+wins**: it is a setting the user chose and it pays back on every token, where a
+cache is worth one prompt. The rejection is recorded through the existing
+`note_rejected_value`, so it is learned once per session rather than re-attempted
+on every start.
+
+
 ## 3. §7.1 — `ANY_CARD`, and why a sentinel rather than `None`
 
 A card filter has three states — every card, one card, the card nobody could

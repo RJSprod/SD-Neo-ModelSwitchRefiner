@@ -403,6 +403,21 @@ shared.options_templates.update(
                 "Keeping it running moves the model to system RAM instead: no reload, much "
                 "slower generation, and the RAM stays spent"
             ),
+            mc_llm_runtime.OPT_LLM_SLOTS: shared.OptionInfo(
+                mc_llm_runtime.SLOTS_AUTOMATIC,
+                "Warm prompt caches llama-server keeps",
+                gr.Radio,
+                {"choices": [label for _, label in mc_llm_runtime.SLOT_MODES]},
+            ).info(
+                "every mode opens with a different system prompt — Conversation, Prompt "
+                "Studio, MiniMax, the Krea writer, the Spatial Composer — and with one cache "
+                "between them each switch re-reads the prefix the last one had just cached. "
+                "A cache each costs a key/value cache each and llama.cpp routes every prompt "
+                "to the cache that matches it best. Automatic buys them only out of VRAM "
+                "left over once the model already fits, so it can never be the reason a "
+                "context shrank or a layer left the card; under pressure they are the first "
+                "thing given back"
+            ),
             mc_llm_runtime.OPT_ROLE_PROCESSES: shared.OptionInfo(
                 mc_llm_runtime.PROCESSES_SHARED,
                 "When Creative and Spatial are configured identically",
