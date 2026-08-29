@@ -47,7 +47,8 @@ class Tts:
         self.calls = []
 
     def generate(self, text, sid=0, speed=1.0, callback=None):
-        self.calls.append({"text": text, "sid": sid, "callback": callback is not None})
+        self.calls.append({"text": text, "sid": sid, "speed": speed,
+                           "callback": callback is not None})
         if callback is not None:
             if self.callback_error is not None:
                 raise self.callback_error
@@ -103,7 +104,7 @@ class TestTheStreamingCapability:
 class TestSpeakingEitherWay:
     def collect(self, found, text="Hello there."):
         blocks = []
-        produced = found.stream(text, 3, 1.0,
+        produced = found.stream(text, 3, worker.NEUTRAL,
                                 lambda block, rate: blocks.append((block, rate)) or True)
         return blocks, produced
 
@@ -158,7 +159,7 @@ class TestSpeakingEitherWay:
     def test_a_speaker_the_bank_does_not_have_is_refused(self):
         found = engines(Tts())
         with pytest.raises(ValueError, match="voice bank"):
-            found.stream("Hello.", 999, 1.0, lambda block, rate: True)
+            found.stream("Hello.", 999, worker.NEUTRAL, lambda block, rate: True)
 
 
 class TestPcm16:
@@ -205,3 +206,131 @@ class TestPcm16:
     def test_empty_input_is_empty_output(self):
         assert worker.pcm16([]) == b""
         assert worker.pcm16(None) == b""
+
+
+# --------------------------------------------------------------------------- #
+# Delivery
+# --------------------------------------------------------------------------- #
+
+
+class TestWhatKokoroIsAskedFor:
+    """One of the four delivery controls is the model's and three are this
+    file's arithmetic on what it produced. The split is the point."""
+
+    def test_a_neutral_delivery_asks_for_speed_one_and_shapes_nothing(self):
+        assert worker.NEUTRAL.generation_speed == 1.0
+        assert worker.NEUTRAL.shapes is False
+
+    def test_speed_goes_straight_into_generate(self):
+        tts = Tts()
+        found = engines(tts)
+        found.streaming = "segment"
+        found.stream("Hello.", 3, worker.Delivery(speed=1.4), lambda block, rate: True)
+        assert tts.calls[-1].get("speed") == pytest.approx(1.4)
+
+    def test_pitch_divides_out_of_the_synthesis_speed(self):
+        """The resampler reads the result back at ``pitch`` samples per output
+        sample, which shortens it again -- so the model has to be asked for
+        ``speed x pitch`` or the pitch would come with a duration change nobody
+        asked for."""
+        tts = Tts()
+        found = engines(tts)
+        found.streaming = "segment"
+        found.stream("Hello.", 3, worker.Delivery(speed=1.0, pitch=2.0),
+                     lambda block, rate: True)
+        assert tts.calls[-1].get("speed") == pytest.approx(2.0)
+
+    def test_a_header_that_is_nonsense_is_kokoros_own_delivery(self):
+        """The boundary between a JSON header and a number that multiplies a
+        synthesis rate. Every way it can be wrong means the same thing."""
+        found = worker.Delivery.from_header(
+            {"speed": "fast", "pitch": None, "gain": float("nan"), "pause_ms": "soon"})
+        assert (found.speed, found.pitch, found.gain, found.pause_ms) == (1.0, 1.0, 1.0, 0)
+
+    def test_a_runaway_multiplier_is_bounded_here_as_well_as_in_the_parent(self):
+        found = worker.Delivery.from_header({"speed": 500, "pitch": 500, "gain": 500,
+                                             "pause_ms": 500000})
+        assert found.speed == worker.Delivery.SPEED[1]
+        assert found.pitch == worker.Delivery.PITCH[1]
+        assert found.gain == worker.Delivery.GAIN[1]
+        assert found.pause_ms == worker.Delivery.PAUSE[1]
+
+
+class TestTheResampler:
+    def test_a_ratio_of_one_returns_what_it_was_given(self):
+        found = worker.Resampler(1.0)
+        assert found.feed([0.0, 0.25, 0.5, 0.75]) == pytest.approx([0.0, 0.25, 0.5, 0.75])
+
+    def test_a_higher_ratio_shortens_the_audio(self):
+        """Which is what raises the pitch: the same waveform read faster."""
+        found = worker.Resampler(2.0)
+        out = found.feed([float(i) for i in range(100)])
+        assert 45 <= len(out) <= 51, len(out)
+
+    def test_a_lower_ratio_lengthens_it(self):
+        found = worker.Resampler(0.5)
+        out = found.feed([float(i) for i in range(100)])
+        assert 190 <= len(out) <= 201, len(out)
+
+    def test_it_reads_across_a_block_boundary_rather_than_restarting(self):
+        """An output sample routinely needs two input samples that arrived in
+        different callback batches. Restarting at each block is a click at every
+        boundary; carrying the read position is not."""
+        whole = worker.Resampler(1.5)
+        streamed = worker.Resampler(1.5)
+        source = [float(i) for i in range(60)]
+        one = whole.feed(list(source))
+        two = streamed.feed(source[:17]) + streamed.feed(source[17:40]) \
+            + streamed.feed(source[40:])
+        assert one == pytest.approx(two)
+
+    def test_it_does_not_hold_the_whole_reply_in_memory(self):
+        """Everything before the next read position can never be read again, and
+        a long reply that kept its first sentence would be a memory leak with a
+        sample rate."""
+        found = worker.Resampler(1.0)
+        for _block in range(50):
+            found.feed([0.1] * 1000)
+        assert len(found._tail) < 100
+
+
+class TestTheShaper:
+    def test_a_neutral_delivery_is_exactly_pcm16(self):
+        samples = [0.0, 0.5, -0.5, 1.0]
+        assert worker.Shaper(worker.NEUTRAL).block(samples) == worker.pcm16(samples)
+
+    def test_volume_scales_the_samples(self):
+        found = worker.Shaper(worker.Delivery(gain=2.0)).block([0.25])
+        assert found == worker.pcm16([0.5])
+
+    def test_volume_cannot_distort(self):
+        """The clamp that was already protecting against a model that overshot
+        is what limits this: a loud setting stops getting louder rather than
+        clipping into distortion."""
+        found = worker.Shaper(worker.Delivery(gain=8.0)).block([0.9])
+        assert found == worker.pcm16([1.0])
+
+    def test_pitch_shortens_the_block(self):
+        samples = [float(i) / 100 for i in range(100)]
+        found = worker.Shaper(worker.Delivery(pitch=2.0)).block(samples)
+        assert len(found) // 2 < len(samples)
+
+    def test_the_completed_path_and_the_streamed_path_shape_alike(self):
+        """An audition and a spoken reply have to come out the same, or the
+        sliders are being adjusted against a sound they do not produce."""
+        delivery = worker.Delivery(pitch=1.5, gain=1.5)
+        samples = [0.4] * 64
+        streamed = worker.Shaper(delivery).block(samples)
+        completed = worker.pcm16(worker.Shaper(delivery).levelled(samples))
+        assert streamed == completed
+
+
+class TestPacing:
+    def test_silence_is_the_length_it_was_asked_for(self):
+        found = worker.silence(24000, 250)
+        assert len(found) == 2 * 6000
+        assert set(found) == {0}
+
+    def test_no_pause_is_no_bytes(self):
+        assert worker.silence(24000, 0) == b""
+        assert worker.silence(0, 250) == b""

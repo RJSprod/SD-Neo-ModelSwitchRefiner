@@ -11,6 +11,8 @@ microphone requires -- and these routes ride on it:
     POST <root>/model-chain/voice/cancel        stop one turn
     POST <root>/model-chain/voice/runtime       load or unload the worker
     POST <root>/model-chain/voice/install       provision one of the bundles
+    POST <root>/model-chain/voice/models        the speech-model tiers; choose one
+    POST <root>/model-chain/voice/profile       how the default voice is delivered
     POST <root>/model-chain/voice/voices        the voice registry
     POST <root>/model-chain/voice/voice/*       default, test, rename, delete
     POST <root>/model-chain/voice/cloning/*     install, start, status, abort
@@ -121,6 +123,8 @@ STATUS_ROUTE = f"{PREFIX}/status"
 STT_ROUTE = f"{PREFIX}/stt"
 TTS_ROUTE = f"{PREFIX}/tts"
 INSTALL_ROUTE = f"{PREFIX}/install"
+MODELS_ROUTE = f"{PREFIX}/models"
+PROFILE_ROUTE = f"{PREFIX}/profile"
 STREAM_ROUTE = f"{PREFIX}/tts-stream"
 CANCEL_ROUTE = f"{PREFIX}/cancel"
 RUNTIME_ROUTE = f"{PREFIX}/runtime"
@@ -134,7 +138,8 @@ CLONING_STATUS_ROUTE = f"{PREFIX}/cloning/status"
 CLONING_START_ROUTE = f"{PREFIX}/cloning/start"
 CLONING_ABORT_ROUTE = f"{PREFIX}/cloning/abort"
 
-ROUTES = (STATUS_ROUTE, STT_ROUTE, TTS_ROUTE, INSTALL_ROUTE, STREAM_ROUTE, CANCEL_ROUTE,
+ROUTES = (STATUS_ROUTE, STT_ROUTE, TTS_ROUTE, INSTALL_ROUTE, MODELS_ROUTE, PROFILE_ROUTE,
+          STREAM_ROUTE, CANCEL_ROUTE,
           RUNTIME_ROUTE, VOICES_ROUTE, VOICE_DEFAULT_ROUTE, VOICE_TEST_ROUTE,
           VOICE_RENAME_ROUTE, VOICE_DELETE_ROUTE, CLONING_INSTALL_ROUTE,
           CLONING_STATUS_ROUTE, CLONING_START_ROUTE, CLONING_ABORT_ROUTE)
@@ -177,7 +182,7 @@ def session_token() -> str:
 # --------------------------------------------------------------------------- #
 
 
-def remember_reply(text: str) -> str:
+def remember_reply(text: str, voice_id: str = "", profile=None) -> str:
     """Take an immutable snapshot of a completed reply. Returns its token.
 
     The snapshot is the design decision (R2-5, I-13). A message index would have
@@ -185,6 +190,13 @@ def remember_reply(text: str) -> str:
     or switched between the run finishing and the browser asking for audio, and
     every one of those changes what an index means. A copy of the string cannot
     change.
+
+    *How* it is to be spoken is part of that snapshot for exactly the same
+    reason, and was not before: this route used to synthesize with no speaker at
+    all, which sherpa answers with speaker 0 -- section 113's bug, still live in
+    the one path that had not been looked at. A reply from a character with a
+    voice of its own has to keep that voice on the non-streaming path too, and
+    the moment the reply finished is the only moment that is certain to know it.
     """
     snapshot = str(text or "")
     if not snapshot.strip():
@@ -193,12 +205,14 @@ def remember_reply(text: str) -> str:
     now = time.monotonic()
     with _lock:
         _expire(now)
-        _targets[token] = {"text": snapshot, "created": now, "session": _token}
+        _targets[token] = {"text": snapshot, "created": now, "session": _token,
+                           "voice": str(voice_id or ""),
+                           "profile": dict(profile) if profile else None}
     return token
 
 
-def take_reply(token: str) -> str:
-    """Consume one target, atomically. Empty string if there is not one.
+def take_reply(token: str):
+    """Consume one target, atomically. ``None`` if there is not one.
 
     One-shot because a token that could be replayed is a token a page left open
     could make speak the same reply again on every refresh, and because the
@@ -210,8 +224,8 @@ def take_reply(token: str) -> str:
         _expire(now)
         found = _targets.pop(key, None)
     if found is None or found.get("session") != _token:
-        return ""
-    return found["text"]
+        return None
+    return found
 
 
 def _expire(now: float) -> None:
@@ -502,11 +516,29 @@ def status_payload() -> dict:
         # Live residency, which "installed" never answered. Section 30, and it
         # is cheap on purpose: reading it starts nothing.
         "engine": runtime.engine(),
+        "stt_model": {"id": found.stt_id, "label": found.stt_label, "tier": found.stt_tier},
         "voice": _default_voice(),
+        "delivery": _delivery_summary(),
         "speaking": turns.busy(),
         "not_ready_message": ("Voice Chat is not set up. Install both models in "
                               "Settings → Voice Chat."),
     }
+
+
+def _delivery_summary() -> str:
+    """One line naming what has been changed about the default voice's delivery.
+
+    In the status because the Voice flyout draws it beside the voice's name, and
+    "why does it sound like that" is a question a settings page two clicks away
+    cannot answer while somebody is listening.
+    """
+    try:
+        import mc_voice_profile as voice_profile
+
+        return voice_profile.describe(voice_profile.stored())
+    except Exception:
+        logger.debug("Model Chain: could not read the voice delivery profile", exc_info=True)
+        return ""
 
 
 def _default_voice() -> dict:
@@ -579,19 +611,63 @@ def _sources() -> dict:
 
 
 def transcribe(body: bytes) -> dict:
-    """The STT route's body: validate, transcribe, and let the bytes go."""
+    """The STT route's body: validate, transcribe, and let the bytes go.
+
+    Two gates sit around the transcription and :mod:`mc_voice_hearing` explains
+    both at length. In front of it, a recording whose level never left the noise
+    floor is refused without waking Whisper -- which is the Bluetooth case, and
+    the answer to it is a sentence naming the microphone rather than a large
+    model confirming that silence is silent. Behind it, a result that is
+    entirely one of Whisper's non-speech annotations is discarded, because
+    ``(music)`` in the composer is worse than nothing in the composer.
+    """
+    import mc_voice_hearing as hearing
+
     shape = validate_wav(body)
+    level = hearing.measure(body)
+    if hearing.silent(level):
+        logger.info("Model Chain: Voice STT refused a silent recording — %.1f s, peak %.3f, "
+                    "rms %.4f", shape["seconds"], level.get("peak", 0.0),
+                    level.get("rms", 0.0))
+        return {"ok": False, "error": hearing.quiet_reason(level), "text": "",
+                "level": _level(level)}
     try:
         found = runtime.transcribe(body)
     except runtime.VoiceRuntimeError as exc:
         raise Refused(503, str(exc)) from None
-    text = found.get("text") or ""
-    logger.info("Model Chain: Voice STT finished — %.1f s audio in %.1f s",
-                shape["seconds"], float(found.get("elapsed") or 0.0))
+    raw = found.get("text") or ""
+    text = hearing.speech(raw)
+    logger.info("Model Chain: Voice STT finished — %.1f s audio in %.1f s, peak %.3f",
+                shape["seconds"], float(found.get("elapsed") or 0.0),
+                level.get("peak", 0.0))
     if not text.strip():
-        return {"ok": False, "error": "No speech was detected.", "text": ""}
+        # The two empty answers are different and are reported differently: a
+        # model that returned nothing heard nothing, and a model that returned
+        # an annotation heard something that was not speech. Only the second
+        # one has a microphone to blame, and only it says so.
+        if raw.strip():
+            logger.info("Model Chain: Voice STT discarded a non-speech result — %.1f s "
+                        "audio, peak %.3f", shape["seconds"], level.get("peak", 0.0))
+            return {"ok": False, "error": hearing.hallucinated_reason(), "text": "",
+                    "level": _level(level)}
+        return {"ok": False, "error": "No speech was detected.", "text": "",
+                "level": _level(level)}
     return {"ok": True, "text": text, "auto_send": state.auto_send(),
-            "request_id": secrets.token_hex(6)}
+            "level": _level(level), "request_id": secrets.token_hex(6)}
+
+
+def _level(measurement: dict) -> dict:
+    """What the browser is told about the recording it just sent.
+
+    Three numbers, rounded, and no audio. It is what lets the composer say "that
+    was very quiet" beside a transcript that came back wrong, which is the one
+    piece of evidence a user has that their microphone changed under them.
+    """
+    if not measurement:
+        return {}
+    return {"peak": round(float(measurement.get("peak") or 0.0), 4),
+            "rms": round(float(measurement.get("rms") or 0.0), 5),
+            "seconds": round(float(measurement.get("seconds") or 0.0), 2)}
 
 
 def speak(token: str) -> bytes:
@@ -602,16 +678,35 @@ def speak(token: str) -> bytes:
     than the one the token stood for, which is the whole class of bug R2-5
     exists to prevent.
     """
-    text = take_reply(token)
-    if not text:
+    found = take_reply(token)
+    if not found:
         raise Refused(404, "There is nothing waiting to be read aloud.")
+    text = found["text"]
+    sid, _entry = _resolve_target(found)
     try:
-        audio = runtime.synthesize(text)
+        audio = runtime.synthesize(text, sid=sid, profile=found.get("profile"))
     except runtime.VoiceRuntimeError as exc:
         raise Refused(503, str(exc)) from None
     logger.info("Model Chain: Voice TTS finished — %d characters, %d bytes of audio",
                 len(text), len(audio))
     return audio
+
+
+def _resolve_target(found: dict):
+    """The numeric speaker a remembered reply is to be spoken by.
+
+    Through the registry, always -- the only path from a name to a number in
+    this feature, and never a number that came from anywhere else.
+    :func:`mc_voice_registry.resolve` already answers a voice that has since
+    been deleted with the default, so the one failure left here is that nothing
+    at all is installed, which is a sentence rather than speaker 0.
+    """
+    import mc_voice_registry as registry
+
+    try:
+        return registry.resolve(found.get("voice") or "")
+    except registry.RegistryError as exc:
+        raise Refused(503, str(exc)) from None
 
 
 # --------------------------------------------------------------------------- #
@@ -770,7 +865,7 @@ def delete_voice(voice_id: str) -> dict:
     return voices_payload()
 
 
-def test_voice(voice_id: str, text: str = "") -> bytes:
+def test_voice(voice_id: str, text: str = "", profile=None) -> bytes:
     """Audition one voice through the ordinary production runtime.
 
     "Ordinary" is the requirement (section 45): a Test that went down a
@@ -787,8 +882,19 @@ def test_voice(voice_id: str, text: str = "") -> bytes:
         sid, _entry = registry.resolve(str(voice_id or ""))
     except registry.RegistryError as exc:
         raise Refused(404, str(exc)) from None
+    # An audition of a voice whose delivery is being edited has to *be* that
+    # delivery, or the sliders are being adjusted against a sound they do not
+    # produce. A body with no profile in it means the default voice's own,
+    # which is what the Settings list has always auditioned.
+    delivery = None
+    if profile is not None:
+        if not isinstance(profile, dict):
+            raise Refused(400, "That is not a delivery profile.")
+        import mc_voice_profile as voice_profile
+
+        delivery = voice_profile.resolve(profile)
     try:
-        audio = runtime.synthesize(wanted, sid=sid)
+        audio = runtime.synthesize(wanted, sid=sid, profile=delivery)
     except runtime.VoiceRuntimeError as exc:
         raise Refused(503, str(exc)) from None
     logger.info("Model Chain: a voice was auditioned — %d characters, %d bytes of audio",
@@ -842,7 +948,66 @@ def cloning_abort() -> dict:
     return cloning_payload()
 
 
-def provision(kind: str, folder: str = "") -> dict:
+def models_payload(kind: str = "stt", select: str = "") -> dict:
+    """The offered speech-model tiers, and which one this installation uses.
+
+    ``select`` changes the choice before answering, so the row that draws the
+    three tiers redraws from the truth in one round trip rather than from what
+    it hoped it had set.
+
+    Choosing stops the worker. It is not a download and it is not an uninstall
+    -- the bundle it names may not even be on disk yet -- but a worker that is
+    already loaded is holding the *previous* tier's Whisper in memory, and the
+    handshake refuses a worker whose models are not the ones this installation
+    verified. Stopping it here means the next dictation starts a worker on the
+    new tier instead of failing that check.
+    """
+    wanted = str(kind or "stt").strip() or "stt"
+    if wanted not in models.OPTIONS:
+        raise Refused(400, "Voice Chat only offers a choice of speech-to-text model.")
+    chosen = str(select or "").strip()
+    if chosen:
+        try:
+            before = models.default_id(wanted)
+            models.select(wanted, chosen)
+        except models.VoiceError as exc:
+            raise Refused(400, str(exc)) from None
+        if models.default_id(wanted) != before:
+            try:
+                runtime.unload("the speech-to-text model was changed")
+            except Exception:
+                logger.debug("Model Chain: could not stop the voice worker after the model "
+                             "was changed", exc_info=True)
+    try:
+        found = models.catalogue(wanted)
+    except models.VoiceError as exc:
+        raise Refused(500, str(exc)) from None
+    return {"ok": True, "kind": wanted, "chosen": models.default_id(wanted),
+            "models": found, "progress": models.progress().get(wanted) or {}}
+
+
+def profile_payload(profile=None) -> dict:
+    """How the default voice is delivered, and a way to change it.
+
+    One route for both directions, like the voices list: a body with a
+    ``profile`` in it writes and then answers, and a body without one only
+    reads. The answer always comes from the store rather than from what was
+    sent, so a value the host refused shows the slider snapping back instead of
+    lying about it.
+    """
+    import mc_voice_profile as voice_profile
+
+    if profile is not None:
+        if not isinstance(profile, dict):
+            raise Refused(400, "That is not a delivery profile.")
+        voice_profile.remember(profile)
+    found = voice_profile.stored()
+    return {"ok": True, "profile": found, "controls": voice_profile.CONTROLS,
+            "fields": list(voice_profile.FIELDS),
+            "summary": voice_profile.describe(found)}
+
+
+def provision(kind: str, folder: str = "", identifier: str = "") -> dict:
     """Start installing one bundle in the background, and say so immediately.
 
     ``folder`` installs from files already on this machine instead of
@@ -872,23 +1037,25 @@ def provision(kind: str, folder: str = "") -> dict:
         return {"ok": True, "already": True}
 
     manual = str(folder or "").strip()
-    refusal = models.refusal(kind, manual=bool(manual))
+    wanted = str(identifier or "").strip()
+    refusal = models.refusal(kind, manual=bool(manual), identifier=wanted)
     if refusal:
         logger.warning("Model Chain: Voice Chat refused to install the %s model — %s",
                        kind.upper(), refusal)
         raise Refused(409, refusal)
 
-    logger.info("Model Chain: Voice Chat install requested for the %s model%s",
-                kind.upper(), " from a folder on this machine" if manual else "")
+    logger.info("Model Chain: Voice Chat install requested for the %s model%s%s",
+                kind.upper(), f" {wanted}" if wanted else "",
+                " from a folder on this machine" if manual else "")
 
     def run():
         try:
             if kind == "runtime":
                 models.install_engine(folder=manual or None)
             elif manual:
-                models.install_from(kind, manual)
+                models.install_from(kind, manual, identifier=wanted)
             else:
-                models.install(kind)
+                models.install(kind, identifier=wanted)
         except Exception:
             # Already logged with its reason, and already recorded where the
             # Settings row will draw it -- see mc_voice_models._claim.
@@ -1050,12 +1217,43 @@ def install(_demo=None, app=None) -> bool:
             _checked(request, INSTALL_ROUTE)
             payload = await _json(request)
             return JSONResponse(provision(str(payload.get("kind") or ""),
-                                          str(payload.get("folder") or "")))
+                                          str(payload.get("folder") or ""),
+                                          str(payload.get("model") or "")))
         except Refused as exc:
             return _refusal(exc)
         except Exception:
             return _failed("a Voice Chat install request failed",
                            "Voice Chat could not start that download.")
+
+    async def voice_models(request: Request):
+        try:
+            _checked(request, MODELS_ROUTE)
+            payload = await _json(request)
+            return JSONResponse(await _offload(models_payload,
+                                               str(payload.get("kind") or "stt"),
+                                               str(payload.get("select") or "")))
+        except Refused as exc:
+            return _refusal(exc)
+        except Exception:
+            return _failed("a Voice Chat model request failed",
+                           "Voice Chat could not read its own model catalogue.")
+
+    async def voice_profile(request: Request):
+        try:
+            _checked(request, PROFILE_ROUTE)
+            payload = await _json(request)
+            # Offloaded like every other handler here. Writing a delivery is a
+            # settings-file save, and section 17's rule is about *any* blocking
+            # half rather than only about inference: a slider released while a
+            # reply is being spoken must not put a disk write on the loop the
+            # audio stream is being read from.
+            return JSONResponse(await _offload(profile_payload,
+                                               payload.get("profile")))
+        except Refused as exc:
+            return _refusal(exc)
+        except Exception:
+            return _failed("a Voice Chat delivery request failed",
+                           "Voice Chat could not read how the default voice is delivered.")
 
     async def voice_voices(request: Request):
         try:
@@ -1097,7 +1295,8 @@ def install(_demo=None, app=None) -> bool:
             _checked(request, VOICE_TEST_ROUTE)
             payload = await _json(request)
             audio = await _offload(test_voice, str(payload.get("voice") or ""),
-                                   str(payload.get("text") or ""))
+                                   str(payload.get("text") or ""),
+                                   payload.get("profile"))
         except Refused as exc:
             return _refusal(exc)
         except Exception:
@@ -1192,6 +1391,7 @@ def install(_demo=None, app=None) -> bool:
     try:
         for path, handler in ((STATUS_ROUTE, voice_status), (STT_ROUTE, voice_stt),
                               (TTS_ROUTE, voice_tts), (INSTALL_ROUTE, voice_install),
+                              (MODELS_ROUTE, voice_models), (PROFILE_ROUTE, voice_profile),
                               (STREAM_ROUTE, voice_stream), (CANCEL_ROUTE, voice_cancel),
                               (RUNTIME_ROUTE, voice_runtime), (VOICES_ROUTE, voice_voices),
                               (VOICE_DEFAULT_ROUTE, voice_default),

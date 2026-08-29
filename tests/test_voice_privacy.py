@@ -61,12 +61,12 @@ def captured(caplog):
 
 class TestNothingSaidIsLogged:
     def test_a_transcript_never_reaches_the_log(self, captured, installed, monkeypatch,
-                                                silent_wav):
+                                                spoken_wav):
         """T-PRIV-1."""
         monkeypatch.setattr(runtime, "transcribe",
                             lambda data: {"text": DICTATED, "audio_seconds": 1.0,
                                           "elapsed": 0.2})
-        found = api.transcribe(silent_wav(1.0))
+        found = api.transcribe(spoken_wav(1.0))
         assert found["text"] == DICTATED, "the test transcribed nothing, so it proves nothing"
 
         assert any("Voice STT finished" in record.getMessage()
@@ -78,7 +78,8 @@ class TestNothingSaidIsLogged:
     def test_a_reply_never_reaches_the_log(self, captured, installed, monkeypatch):
         """T-PRIV-2. The length is logged, which is the useful part; the words
         are not, which is the whole of the promise."""
-        monkeypatch.setattr(runtime, "synthesize", lambda text: b"RIFFfake")
+        monkeypatch.setattr(runtime, "synthesize",
+                            lambda text, sid=0, profile=None: b"RIFFfake")
         token = api.remember_reply(f"Certainly. {SPOKEN} is the answer.")
         api.speak(token)
 
@@ -88,7 +89,7 @@ class TestNothingSaidIsLogged:
             assert SPOKEN not in record.getMessage()
 
     def test_a_failing_request_does_not_report_what_was_in_it(self, captured, installed,
-                                                              monkeypatch, silent_wav):
+                                                              monkeypatch, spoken_wav):
         """The path where content most easily escapes: an exception message
         built by a library that was handed the input."""
         def explode(data):
@@ -96,7 +97,7 @@ class TestNothingSaidIsLogged:
 
         monkeypatch.setattr(runtime, "transcribe", explode)
         with pytest.raises(api.Refused):
-            api.transcribe(silent_wav(1.0))
+            api.transcribe(spoken_wav(1.0))
         for record in captured.records:
             assert DICTATED not in record.getMessage()
 
@@ -126,7 +127,7 @@ class TestNothingSaidIsLogged:
             def speaker(self, sid):
                 return int(sid or 0)
 
-            def synthesize(self, text, sid=0, speed=1.0):
+            def synthesize(self, text, sid=0, profile=None):
                 assert SPOKEN in text
                 return [0.0] * 2400, 24000
 
@@ -166,13 +167,14 @@ class TestNothingSaidIsLogged:
 
 class TestNothingIsWrittenToDisk:
     def test_speech_leaves_no_file_behind_anywhere(self, tmp_path, installed, monkeypatch,
-                                                  silent_wav, voice_root):
+                                                  spoken_wav, voice_root):
         """T-PRIV-3. Snapshot, run a dictation and a synthesis, snapshot again."""
         monkeypatch.setattr(runtime, "transcribe", lambda data: {"text": DICTATED})
-        monkeypatch.setattr(runtime, "synthesize", lambda text: b"RIFFfake audio")
+        monkeypatch.setattr(runtime, "synthesize",
+                            lambda text, sid=0, profile=None: b"RIFFfake audio")
 
         before = {p for p in tmp_path.rglob("*")}
-        api.transcribe(silent_wav(2.0))
+        api.transcribe(spoken_wav(2.0))
         api.speak(api.remember_reply(f"a reply saying {SPOKEN}"))
         after = {p for p in tmp_path.rglob("*")}
 
@@ -250,7 +252,7 @@ class TestNoNetwork:
             def speaker(self, sid):
                 return int(sid or 0)
 
-            def synthesize(self, text, sid=0, speed=1.0):
+            def synthesize(self, text, sid=0, profile=None):
                 return [0.0] * 480, 24000
 
             def stream(self, text, sid, speed, on_audio):
@@ -311,12 +313,12 @@ class TestWhatTheBrowserIsTold:
         assert "session" not in text
 
     def test_the_transcript_goes_only_to_the_browser_that_asked(self, installed,
-                                                                monkeypatch, silent_wav):
+                                                                monkeypatch, spoken_wav):
         """It has to come back -- it is going into the composer. What matters is
         that it goes nowhere else, which is what the absence of any other
         transport in this module means."""
         monkeypatch.setattr(runtime, "transcribe", lambda data: {"text": DICTATED})
-        found = api.transcribe(silent_wav(1.0))
+        found = api.transcribe(spoken_wav(1.0))
         assert found["text"] == DICTATED
         assert "request_id" in found
         assert DICTATED not in found["request_id"]

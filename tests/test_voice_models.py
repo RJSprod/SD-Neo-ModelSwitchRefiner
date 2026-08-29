@@ -1086,3 +1086,108 @@ class TestWhenTheStagedRuntimeWillNotRun:
         trimmed = models._quote(text)
         assert trimmed.endswith("ValueError: the real reason")
         assert len(trimmed) < len(text)
+
+
+# --------------------------------------------------------------------------- #
+# Three qualities of speech-to-text
+# --------------------------------------------------------------------------- #
+
+
+class TestTheSpeechToTextTiers:
+    """One kind, three bundles, and one of them in use.
+
+    The choice is not between three names -- it is between a fast one that
+    mishears, a heavy one that does not, and the one in the middle. So each
+    entry carries what it costs to download and what it costs in memory, and
+    the whole catalogue is one call rather than a list and a status somebody
+    has to join.
+    """
+
+    def test_the_catalogue_offers_low_medium_and_high(self, host):
+        found = models.choices("stt")
+        assert [entry.tier for entry in found] == ["low", "medium", "high"]
+
+    def test_the_shipped_default_is_the_medium_tier(self, host):
+        """Medium because it is the balanced one, and because it is what this
+        installation was already using -- an upgrade must not silently change
+        which model transcribes somebody's dictation."""
+        assert models.default_id("stt") == "whisper-small-int8"
+        assert models.model(models.default_id("stt")).tier == "medium"
+
+    def test_every_tier_says_what_it_costs(self, host):
+        for entry in models.catalogue("stt"):
+            assert entry["about_bytes"] > 0, entry["id"]
+            assert entry["ram_bytes"] > 0, entry["id"]
+            assert entry["summary"], entry["id"]
+            assert entry["notes"], entry["id"]
+
+    def test_choosing_one_is_what_everything_downstream_reads(self, host):
+        """``default_id`` is asked by the installer, the worker's launch paths,
+        the Settings row and the status the browser reads, which is what makes a
+        model chooser one function rather than a search for every literal."""
+        models.select("stt", "whisper-medium-int8")
+        assert models.default_id("stt") == "whisper-medium-int8"
+        assert models.default_model("stt").tier == "high"
+        assert models.status().stt_id == "whisper-medium-int8"
+        assert "medium" in models.bundle_paths("stt")["root"]
+
+    def test_a_stored_choice_this_build_does_not_have_falls_back(self, host):
+        """Read on the path that launches the worker. A settings value nobody
+        can explain is not a reason for speech to stop working."""
+        host.shared.opts.set(models.OPTIONS["stt"], "whisper-enormous-v9")
+        assert models.default_id("stt") == "whisper-small-int8"
+
+    def test_a_choice_of_the_wrong_kind_is_refused_rather_than_stored(self, host):
+        with pytest.raises(models.VoiceError):
+            models.select("stt", "kokoro-multi-lang-v1-cpu")
+
+    def test_an_id_that_is_not_in_the_catalogue_is_refused(self, host):
+        """The security property `model` already has: an id reaching this from a
+        browser can only ever name something the manifest describes, so there is
+        no URL a caller can supply and no file it can ask to have written."""
+        with pytest.raises(models.VoiceError):
+            models.select("stt", "../../etc/passwd")
+
+    def test_each_tier_has_its_own_addresses_for_a_manual_install(self, host):
+        """A manual-install panel that printed one tier's links under another's
+        heading would send somebody to download the wrong two hundred
+        megabytes."""
+        low = {item["url"] for item in models.sources("stt", "whisper-base-int8")}
+        high = {item["url"] for item in models.sources("stt", "whisper-medium-int8")}
+        assert low and high and not (low & high)
+        for url in low | high:
+            assert url.startswith("https://")
+
+    def test_each_tier_installs_into_a_directory_of_its_own(self, host):
+        """So that all three can be on disk at once and switching between them
+        is not a download."""
+        roots = set()
+        for entry in models.choices("stt"):
+            roots.add(str(paths.bundle_root("stt", entry.identifier)))
+        assert len(roots) == 3
+
+    def test_installing_one_tier_does_not_report_another_as_installed(self, host,
+                                                                      voice_root):
+        """The reason the catalogue joins the disk state on the server: a row
+        that joined them in the browser is a row that says "Installed" against
+        the wrong tier."""
+        entry = models.model("whisper-base-int8")
+        root = paths.bundle_root("stt", entry.identifier)
+        root.mkdir(parents=True, exist_ok=True)
+        for name in entry.wanted_paths:
+            (root / name).write_bytes(b"x")
+        (root / paths.INSTALLED_FILENAME).write_text(json.dumps({
+            "schema": models.SCHEMA, "identifier": entry.identifier, "kind": "stt",
+            "source": "local"}), encoding="utf-8")
+
+        found = {item["id"]: item["installed"] for item in models.catalogue("stt")}
+        assert found["whisper-base-int8"] is True
+        assert found["whisper-small-int8"] is False
+        assert found["whisper-medium-int8"] is False
+
+    def test_a_download_records_which_tier_it_is_for(self, host):
+        """A kind is three tiers now, and a row that knew a download was running
+        but not which of its three buttons started it would put the bar on all
+        of them."""
+        with models._claim("stt", None, "whisper-medium-int8"):
+            assert models.progress()["stt"]["model"] == "whisper-medium-int8"

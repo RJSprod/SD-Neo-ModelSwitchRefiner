@@ -1173,15 +1173,42 @@ class VoiceHarness:
         _os.environ["MC_FAKE_VOICE"] = json.dumps(self.plan)
 
 
-def _silent_wav(seconds: float = 1.0, rate: int = 16000) -> bytes:
-    """A valid 16 kHz mono PCM16 WAV of the requested length."""
+def _wav(body: bytes, rate: int) -> bytes:
     import struct as _struct
 
-    frames = int(rate * seconds)
-    body = b"\0\0" * frames
     return (b"RIFF" + _struct.pack("<I", 36 + len(body)) + b"WAVE"
             + b"fmt " + _struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
             + b"data" + _struct.pack("<I", len(body)) + body)
+
+
+def _silent_wav(seconds: float = 1.0, rate: int = 16000) -> bytes:
+    """A structurally valid 16 kHz mono PCM16 WAV holding digital silence.
+
+    Still the right fixture for everything about the *container* -- a recording
+    that is too short, too long, or not a WAV at all is refused before anything
+    looks at its level. It is no longer the right fixture for "a recording that
+    gets transcribed": since ``mc_voice_hearing`` this one is refused on its
+    way in, which is the whole point of it. Use :func:`_spoken_wav` for that.
+    """
+    return _wav(b"\0\0" * int(rate * seconds), rate)
+
+
+def _spoken_wav(seconds: float = 1.0, rate: int = 16000, level: float = 0.35) -> bytes:
+    """A WAV with something audible in it, for tests that mean a real recording.
+
+    A tone rather than speech, because nothing in the tests decodes it: the fake
+    worker answers with a scripted transcript. What it has to be is loud enough
+    to pass the level gate, which is a property of the samples and not of what
+    they say.
+    """
+    import math as _math
+    import struct as _struct
+
+    frames = int(rate * seconds)
+    body = b"".join(
+        _struct.pack("<h", int(32767 * level * _math.sin(2 * _math.pi * 220 * i / rate)))
+        for i in range(frames))
+    return _wav(body, rate)
 
 
 def pytest_configure(config):
@@ -1200,6 +1227,11 @@ def pytest_configure(config):
 @pytest.fixture
 def silent_wav():
     return _silent_wav
+
+
+@pytest.fixture
+def spoken_wav():
+    return _spoken_wav
 
 
 @pytest.fixture
@@ -1360,7 +1392,7 @@ def voice_registry(kokoro_bundle, monkeypatch):
 
     spoken = []
 
-    def synthesize(text, sid=0, speed=1.0):
+    def synthesize(text, sid=0, profile=None):
         spoken.append(int(sid))
         return b"RIFF" + b"\x00" * 200
 

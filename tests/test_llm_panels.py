@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 
 import mc_llm_chat_panel
+import mc_voice_ui
 import mc_llm_krea_panel
 from prompt_master.krea import library
 import mc_llm_minimax_panel
@@ -2931,6 +2932,116 @@ class TestTheCharacterMenu:
         assert restored[9] == 99
 
 
+class TestACharacterHasItsOwnVoice:
+    """"I can have nicole for one character and heart for another."
+
+    The voice is stored in the character file, beside its sampling, as the
+    stable id ``mc_voice_registry`` mints -- never a speaker number, because a
+    number is an address in a block of floats and moves when a bank is rebuilt.
+
+    The delivery is stored the same way and inherits by *absence*: a field
+    nobody has set follows Settings -> Voice Chat rather than freezing today's
+    value into the character.
+    """
+
+    @pytest.fixture
+    def characters(self, store):
+        from prompt_master.chat.characters import Character
+
+        (store / "characters").mkdir(parents=True, exist_ok=True)
+        held = mc_llm_chat_panel._characters()
+        held.save(Character(name="Ada", context="a mathematician"))
+        return held
+
+    def test_a_saved_voice_survives_the_round_trip(self, characters):
+        mc_llm_chat_panel._save_character(
+            "Ada", "Ada", "a mathematician", "", "", 0.85, 0.95, 512, -1, None,
+            "official:af_nicole", False)
+        assert characters.load("Ada").voice == "official:af_nicole"
+
+    def test_two_characters_can_have_two_voices(self, characters):
+        from prompt_master.chat.characters import Character
+
+        characters.save(Character(name="Grace"))
+        mc_llm_chat_panel._save_character(
+            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None, "official:af_nicole", False)
+        mc_llm_chat_panel._save_character(
+            "Grace", "Grace", "", "", "", 0.85, 0.95, 512, -1, None, "official:af_heart",
+            False)
+        assert characters.load("Ada").voice == "official:af_nicole"
+        assert characters.load("Grace").voice == "official:af_heart"
+
+    def test_no_delivery_of_its_own_is_four_unset_fields(self, characters):
+        """Unset rather than defaulted, which is the whole of how a character
+        keeps following Settings when Settings changes."""
+        mc_llm_chat_panel._save_character(
+            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None, "", False, 1.5, 3.0, 2.0,
+            400.0)
+        loaded = characters.load("Ada")
+        assert loaded.voice_profile == {"speed": None, "pitch": None, "gain": None,
+                                        "pause": None}
+
+    def test_its_own_delivery_is_saved_and_read_back(self, characters):
+        mc_llm_chat_panel._save_character(
+            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None, "", True, 1.15, -2.5, 1.0,
+            250.0)
+        loaded = characters.load("Ada")
+        assert loaded.voice_profile == {"speed": 1.15, "pitch": -2.5, "gain": 1.0,
+                                        "pause": 250.0}
+
+    def test_the_editor_opens_on_what_the_character_holds(self, characters):
+        mc_llm_chat_panel._save_character(
+            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None, "official:af_nicole", True,
+            1.15, -2.5, 0.0, 0.0)
+        fields = mc_llm_chat_panel._open_character("Ada")
+        voice = fields[-(3 + len(mc_voice_ui.delivery_controls())):]
+        assert voice[0] == "official:af_nicole"
+        assert voice[1] is True
+        assert voice[3] == 1.15 and voice[4] == -2.5
+
+    def test_a_character_with_no_voice_opens_showing_the_default_delivery(self,
+                                                                          characters):
+        """So the sliders start where the sound the user is hearing actually is,
+        rather than at a neutral they are not listening to."""
+        import mc_voice_profile
+
+        mc_voice_profile.remember({"speed": 1.3})
+        fields = mc_llm_chat_panel._open_character("Ada")
+        voice = fields[-(3 + len(mc_voice_ui.delivery_controls())):]
+        assert voice[0] == ""
+        assert voice[1] is False
+        assert voice[3] == 1.3
+
+    def test_an_older_character_file_is_read_without_a_voice_and_not_refused(self,
+                                                                            characters):
+        """A folder of characters copied in from oobabooga has none of these
+        keys, and neither does one written before this existed."""
+        path = characters.resolve("Ada")
+        path.write_text("name: Ada\ncontext: a mathematician\n", encoding="utf-8")
+        loaded = characters.load("Ada")
+        assert loaded.voice == ""
+        assert loaded.voice_profile == {"speed": None, "pitch": None, "gain": None,
+                                        "pause": None}
+
+    def test_a_hand_edited_value_that_is_not_a_number_is_unset(self, characters):
+        """``None`` is a meaning here rather than a failure, so a typo in a file
+        somebody edited is a character with no override -- not a character that
+        will not load."""
+        path = characters.resolve("Ada")
+        path.write_text("name: Ada\nvoice_pitch: fast\n", encoding="utf-8")
+        assert characters.load("Ada").voice_pitch is None
+
+    def test_the_voice_keys_are_only_written_when_they_hold_something(self, characters):
+        """oobabooga ignores keys it does not read either way. What matters is
+        that a character with four nulls in it reads as configured, and the
+        difference between unset and set-to-the-default is the inheritance."""
+        mc_llm_chat_panel._save_character(
+            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None, "", False)
+        text = characters.resolve("Ada").read_text(encoding="utf-8")
+        assert "voice_speed" not in text
+        assert "voice:" not in text
+
+
 class TestTheSystemPromptIsVisible:
     """Asked for: "expose the current system prompt in the character view".
 
@@ -3024,7 +3135,13 @@ class TestTheSystemPromptIsVisible:
             len(mc_llm_chat_panel._cancel_character("")),
         }
 
-        assert shapes == {13}
+        # Derived rather than written down. The editor grew a voice section and
+        # this assertion was the only thing that had to change for it, which
+        # meant the test was pinning a number rather than the property it is
+        # about: that every handler answers with the *same* shape.
+        import mc_voice_ui
+
+        assert shapes == {13 + 3 + len(mc_voice_ui.delivery_controls())}
 
 
 class TestSeedsAreRandomUntilSomebodyChoosesOne:

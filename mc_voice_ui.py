@@ -183,6 +183,13 @@ def begin_speech(character=None, persona=None, opening: str = ""):
     ``opening`` is the text a continuation is extending. It is not passed to
     the segmenter as text to speak -- it is the reason the turn starts from the
     tail (section 7) -- and the caller feeds only newly generated chunks.
+
+    The voice and the delivery are the character's where it has them and the
+    default where it does not, resolved here and frozen onto the turn. A
+    character that names a voice which is no longer installed falls back to the
+    default rather than going unspoken, for the reason
+    :func:`mc_voice_registry.default_id` gives: a deleted clone is not a reason
+    for a character to stop talking.
     """
     _last_run["turn"] = ""
     try:
@@ -195,15 +202,18 @@ def begin_speech(character=None, persona=None, opening: str = ""):
         if not models.status().tts_ready:
             _quietly("the text-to-speech model is not installed")
             return None
+        import mc_voice_profile as profiles
         import mc_voice_registry as registry
 
-        sid, entry = registry.resolve()
-        found = turns.create(voice_id=entry["id"], sid=sid, labels=_labels(character, persona))
+        sid, entry = registry.resolve(voice_of(character))
+        delivery = profiles.resolve(profile_of(character))
+        found = turns.create(voice_id=entry["id"], sid=sid, labels=_labels(character, persona),
+                             profile=delivery)
         found.base_chars = len(str(opening or ""))
         found.start()
         _last_run["turn"] = found.id
-        logger.info("Model Chain: Voice will read this reply aloud — %s, speaker %d, turn %s",
-                    entry["id"], sid, found.id[:8])
+        logger.info("Model Chain: Voice will read this reply aloud — %s, speaker %d, %s, "
+                    "turn %s", entry["id"], sid, profiles.describe(delivery), found.id[:8])
         return found
     except Exception:
         # Warning rather than debug, and this is the correction that matters:
@@ -213,6 +223,34 @@ def begin_speech(character=None, persona=None, opening: str = ""):
         logger.warning("Model Chain: Voice Chat could not start speaking this reply",
                        exc_info=True)
         return None
+
+
+def voice_of(character) -> str:
+    """The stable voice id a character asks for, or ``""`` for the default.
+
+    Read defensively off whatever the panel handed over. This runs inside the
+    generator that produces a reply, and a character object from an older build,
+    a ``None``, or a hand-edited file with a number where an id belongs are all
+    the same answer: use the default voice.
+    """
+    try:
+        return str(getattr(character, "voice", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def profile_of(character) -> dict:
+    """A character's delivery overrides, or an empty set of them.
+
+    Empty is the ordinary case and is not a failure: it is what every character
+    written before this existed has, and it is what makes them follow the
+    default voice's delivery.
+    """
+    try:
+        found = getattr(character, "voice_profile", None)
+        return dict(found) if isinstance(found, dict) else {}
+    except Exception:
+        return {}
 
 
 def _quietly(reason: str) -> None:
@@ -294,6 +332,147 @@ def sheet() -> dict:
             elem_classes=ui.classes("hint"))
     return {"screen": screen, "back": back, "readiness": readiness, "engine": engine,
             "auto_send": auto_send, "auto_speak": auto_speak}
+
+
+# --------------------------------------------------------------------------- #
+# The character's own voice
+# --------------------------------------------------------------------------- #
+
+
+def character_panel() -> dict:
+    """A character's voice and delivery, inside the character editor.
+
+    The same list Settings shows, in a third of the room. That is the whole
+    design constraint: the character screen is an overlay that has to work on a
+    phone, and fifty-three voices laid out as settings rows would be a screen
+    somebody scrolls past rather than reads. So the rows are one line each --
+    name, accent, audition -- in a grid that reflows, and the group headings
+    Settings uses are kept because "American" and "British" is the distinction
+    somebody is actually choosing between.
+
+    The list itself is painted by ``javascript/voice_chat.js`` from
+    ``/voice/voices``, for the reason the Settings row is: it changes when a
+    clone finishes and when a voice is renamed, and a Gradio dropdown rebuilt
+    from Python would be a list that goes stale the moment either happens. What
+    Gradio owns is the *value* -- a hidden textbox the browser writes and
+    ``_save_character`` reads -- so the selection is saved with the rest of the
+    character by the ordinary Save, with no second store and no second button.
+
+    The four sliders are Gradio's own, because they are ordinary values with no
+    liveness to them. They are behind a checkbox rather than always in force:
+    unchecked means this character has no delivery of its own and follows
+    Settings → Voice Chat, which is what every character written before this
+    existed does and what most of them should keep doing.
+    """
+    controls = {}
+    with gr.Accordion("Voice", open=False, elem_classes=ui.classes("advanced")):
+        gr.Markdown(
+            "Which voice reads this character's replies, and how. Saved with the character "
+            "by **Save character** below.",
+            elem_classes=ui.classes("hint"))
+        picker = gr.HTML(character_voices_html(),
+                         elem_id=ui.ident("chat", "character-voice-list"))
+        # Never shown and never a control. It is where the browser puts the row
+        # somebody tapped, so that Gradio's own Save reads a value rather than
+        # this panel needing a save button of its own.
+        chosen = gr.Textbox(value="", visible=False, container=False,
+                            elem_id=ui.ident("chat", "character-voice"))
+        custom = gr.Checkbox(
+            label="Give this character its own delivery", value=False,
+            elem_id=ui.ident("chat", "character-voice-custom"),
+            info="Off, it speaks the way Settings → Voice Chat says. On, the four settings "
+                 "below are this character's and nothing else changes them.")
+        with gr.Group(visible=False,
+                      elem_id=ui.ident("chat", "character-voice-delivery")) as delivery:
+            for control in delivery_controls():
+                name = control["name"]
+                controls[name] = gr.Slider(
+                    label=_slider_label(control),
+                    minimum=control["minimum"], maximum=control["maximum"],
+                    step=control["step"], value=control["default"],
+                    elem_id=ui.ident("chat", f"character-voice-{name}"))
+    return {"picker": picker, "chosen": chosen, "custom": custom, "delivery": delivery,
+            "sliders": [controls[name] for name in _field_names() if name in controls],
+            "names": [name for name in _field_names() if name in controls]}
+
+
+def _slider_label(control: dict) -> str:
+    """``Pitch (semitones)``. The unit goes in the label because a Gradio slider
+    shows a bare number beside it and "-3" on its own is not a pitch."""
+    unit = str(control.get("unit") or "").strip()
+    if not unit or unit == "x":
+        return str(control.get("label") or "")
+    return f'{control.get("label") or ""} ({unit})'
+
+
+def _field_names() -> tuple:
+    try:
+        import mc_voice_profile as profiles
+
+        return tuple(profiles.FIELDS)
+    except Exception:
+        return ()
+
+
+def character_voices_html() -> str:
+    """The first frame of the compact list, and the shape the browser fills in.
+
+    Static markup here says something true on a page whose JavaScript has not
+    run and on an installation with no text-to-speech model at all; everything
+    live is painted from ``/voice/voices``. No speaker id is put in the
+    document, here or there -- section 56.
+    """
+    return (
+        f'<div class="mc-voice-picker" data-mc-voice-picker '
+        f'data-mc-voice-key="{ui.escape(api.session_token())}">'
+        '<div class="mc-voice-picker-current" data-mc-voice-picker-current>Loading…</div>'
+        '<div class="mc-voice-picker-list" data-mc-voice-picker-list></div>'
+        '</div>')
+
+
+def character_state(character) -> dict:
+    """What the editor's voice controls should hold for ``character``.
+
+    One function so the four places that fill the editor -- opening it, opening
+    it on a new character, cancelling, and switching who you are talking to --
+    cannot disagree about whether a character has a delivery of its own.
+    """
+    overrides = profile_of(character)
+    has_own = any(value is not None for value in overrides.values())
+    try:
+        import mc_voice_profile as profiles
+
+        # ``resolve`` answers with the default for every field the character
+        # does not set, so this is the effective delivery in both cases -- the
+        # sliders open where the sound the user is listening to actually is,
+        # rather than at a neutral they are not.
+        effective = profiles.resolve(overrides)
+        names = profiles.FIELDS
+    except Exception:
+        logger.debug("Model Chain: could not read a character's delivery", exc_info=True)
+        effective, names = {}, ()
+    return {"voice": voice_of(character), "custom": has_own,
+            "values": [effective.get(name) for name in names]}
+
+
+def character_profile(custom, values) -> dict:
+    """The four overrides to save, from the checkbox and the four sliders.
+
+    Unchecked is four ``None``s rather than four defaults, and that is the
+    difference the whole inheritance model rests on: a character that follows
+    Settings has to keep following it when Settings changes.
+    """
+    names = _field_names()
+    if not custom or not names:
+        return {name: None for name in names}
+    offered = dict(zip(names, list(values or [])))
+    try:
+        import mc_voice_profile as profiles
+
+        return profiles.overrides(offered)
+    except Exception:
+        logger.debug("Model Chain: could not read the delivery sliders", exc_info=True)
+        return {name: None for name in names}
 
 
 def engine_panel() -> str:
@@ -398,7 +577,7 @@ def _remember(*, key: str, **values):
     return gr.update(value=stored[key])
 
 
-def speech_marker(take_reply):
+def speech_marker(take_reply, character_named=None):
     """A success-only handler that turns a completed reply into a target token.
 
     ``take_reply`` is the chat panel's own record of what the run that just
@@ -415,9 +594,16 @@ def speech_marker(take_reply):
     Returns the empty string in every one of those cases, which the browser
     ignores, and never raises: a voice failure must not be able to cancel a
     reply that has already arrived.
+
+    ``character_named`` is the panel's own reader -- a name in, a character out.
+    It is a closure rather than an import for the reason this module's docstring
+    gives: the dependency points one way, and a voice module that reached into
+    the character store to ask who was talking would be pointing it both ways.
+    Without one, a reply is remembered against the default voice, which is what
+    this path did for every reply before characters had voices of their own.
     """
 
-    def marker():
+    def marker(who=""):
         try:
             text = take_reply()
             if not text or not str(text).strip():
@@ -433,7 +619,21 @@ def speech_marker(take_reply):
                 return ""
             if not models.status().tts_ready:
                 return ""
-            return api.remember_reply(str(text))
+            # Which voice, and how, snapshotted with the words -- see
+            # :func:`mc_voice_api.remember_reply`. Resolved now rather than when
+            # the browser asks for audio, because "which character was this"
+            # is a question only this moment is certain of the answer to.
+            character = None
+            if character_named is not None:
+                try:
+                    character = character_named(who)
+                except Exception:
+                    logger.debug("Model Chain: could not read the character to speak as",
+                                 exc_info=True)
+            import mc_voice_profile as profiles
+
+            return api.remember_reply(str(text), voice_id=voice_of(character),
+                                      profile=profiles.resolve(profile_of(character)))
         except Exception:
             logger.debug("Model Chain: Voice Chat could not prepare a spoken reply",
                          exc_info=True)
@@ -447,16 +647,26 @@ def speech_marker(take_reply):
 # --------------------------------------------------------------------------- #
 
 
-def _manual_section(kind: str, addresses: list, blurb: str, placeholder: str) -> str:
+def _manual_section(kind: str, addresses: list, blurb: str, placeholder: str,
+                    model: str = "") -> str:
     """The "or install from files you download yourself" half of a row.
 
     Every row has one now, the engine included: the failure that made the engine
     row necessary in the first place was an automatic install that could not be
     completed, and an escape hatch that covers two of the three things a person
     needs is not an escape hatch.
+
+    ``model`` names a particular bundle where a kind has more than one -- the
+    three speech-to-text qualities -- and becomes the *scope* the folder box and
+    its button answer to. The scope has to be per bundle rather than per kind or
+    the three folder boxes on the page would all be found by the same selector,
+    and pressing Install under the high tier would read whatever was typed under
+    the low one. The request still carries the kind, because that is what the
+    install route installs; the model rides beside it.
     """
     if not addresses:
         return ""
+    scope = str(model or kind)
     links = "".join(
         f'<li><a href="{ui.escape(item["url"])}" target="_blank" rel="noreferrer">'
         f'{ui.escape(item["filename"])}</a>'
@@ -472,14 +682,111 @@ def _manual_section(kind: str, addresses: list, blurb: str, placeholder: str) ->
         f'<ul class="mc-voice-links">{links}</ul>'
         f'<div class="mc-voice-folder-row">'
         f'<input type="text" class="mc-voice-folder" '
-        f'data-mc-voice-folder="{kind}" spellcheck="false" '
+        f'data-mc-voice-folder="{ui.escape(scope)}" spellcheck="false" '
         f'placeholder="{ui.escape(placeholder)}" />'
         f'<button type="button" class="mc-voice-install-local" '
-        f'data-mc-voice-local="{kind}">Install from this folder</button>'
+        f'data-mc-voice-local="{ui.escape(kind)}" '
+        f'data-mc-voice-scope="{ui.escape(scope)}" '
+        f'data-mc-voice-model="{ui.escape(str(model or ""))}">'
+        f'Install from this folder</button>'
         f'</div>'
         f'<p class="mc-voice-note">Nothing is installed on trust: a file under the right '
         f'name with the wrong contents is refused exactly as a bad download is.</p>'
         f'</details>')
+
+
+def _tier_row(found) -> str:
+    """The speech-to-text row: three qualities, and one of them in use.
+
+    A card each rather than a drop-down, because the choice is not between three
+    names -- it is between a fast one that mishears, a heavy one that does not,
+    and the one in the middle, and nobody can make that choice from a list of
+    labels. So each card carries what it costs to download, what it costs in
+    memory while it is loaded, and a sentence about what it is good and bad at.
+
+    Two buttons and they are deliberately separate. **Download** fetches that
+    tier. **Use this** points Voice Chat at it. Splitting them is what lets
+    somebody keep all three on disk and switch between them without a download,
+    and what lets somebody choose the high tier and *then* start the download
+    for it rather than being made to do it in the other order.
+
+    The sizes are approximate and say so. The model bundles are not pinned in
+    this repository -- ``mc_voice_models`` explains why at length -- so the
+    exact figure is not known until the publisher is asked at install time, and
+    a number presented as exact that turned out to be 12 MB off would be a
+    worse answer than "about".
+    """
+    if not found.platform_supported:
+        return (f'<div class="mc-voice-row" data-mc-voice-kind="stt">'
+                f'<div class="mc-voice-head">'
+                f'<div class="mc-voice-heading">Speech to text</div>'
+                f'<div class="mc-voice-status" data-mc-voice-status="stt">'
+                f'{ui.escape(found.stt_message)}</div></div></div>')
+    try:
+        tiers = models.catalogue("stt")
+    except Exception:
+        logger.debug("Model Chain: could not describe the speech-to-text tiers",
+                     exc_info=True)
+        tiers = []
+
+    cards = "".join(_tier_card(entry) for entry in tiers)
+    return (
+        f'<div class="mc-voice-row" data-mc-voice-kind="stt">'
+        f'<div class="mc-voice-head">'
+        f'<div class="mc-voice-heading">Speech to text</div>'
+        f'<div class="mc-voice-default" data-mc-voice-chosen="stt">'
+        f'{ui.escape(found.stt_label)}</div>'
+        f'<div class="mc-voice-status" data-mc-voice-status="stt">'
+        f'{ui.escape(found.stt_message)}</div>'
+        f'</div>'
+        f'<p class="mc-voice-note">Three qualities of the same transcriber. They differ in '
+        f'how often they mishear a name or an accent, in how long a sentence takes on the '
+        f'CPU, and in how much memory they hold while they are loaded — all of which is on '
+        f'top of whatever the language and image models are already using. Download as many '
+        f'as you like; only the one marked <em>In use</em> is loaded. Sizes are approximate '
+        f'until the download starts, when the publisher is asked for the exact figure.</p>'
+        f'<div class="mc-voice-tiers" data-mc-voice-tiers="stt">{cards}</div>'
+        f'</div>')
+
+
+def _tier_card(entry: dict) -> str:
+    """One quality, everything it costs, and the two buttons for it."""
+    identifier = str(entry.get("id") or "")
+    facts = []
+    if entry.get("about_label"):
+        facts.append(f"about {entry['about_label']} to download")
+    if entry.get("ram_label"):
+        facts.append(f"about {entry['ram_label']} of memory while it is loaded")
+    return (
+        f'<div class="mc-voice-tier{" mc-voice-tier-chosen" if entry.get("chosen") else ""}" '
+        f'data-mc-voice-tier="{ui.escape(identifier)}">'
+        f'<div class="mc-voice-tier-head">'
+        f'<span class="mc-voice-tier-rank">{ui.escape(entry.get("tier_label") or "")}</span>'
+        f'<span class="mc-voice-tier-name">{ui.escape(entry.get("label") or "")}</span>'
+        f'<span class="mc-voice-tier-mark" data-mc-voice-tier-mark>'
+        f'{"In use" if entry.get("chosen") else ""}</span>'
+        f'</div>'
+        f'<div class="mc-voice-tier-summary">{ui.escape(entry.get("summary") or "")}</div>'
+        f'<div class="mc-voice-tier-facts">{ui.escape(" · ".join(facts))}</div>'
+        f'<div class="mc-voice-tier-notes">{ui.escape(entry.get("notes") or "")}</div>'
+        f'<div class="mc-voice-tier-state" data-mc-voice-tier-state>'
+        f'{ui.escape(entry.get("message") or "")}</div>'
+        f'<div class="mc-voice-tier-actions">'
+        f'<button type="button" class="mc-voice-install" '
+        f'data-mc-voice-tier-install="{ui.escape(identifier)}">'
+        f'{"Installed" if entry.get("installed") else "Download"}</button>'
+        f'<button type="button" class="mc-voice-entry-action" '
+        f'data-mc-voice-tier-use="{ui.escape(identifier)}">Use this</button>'
+        f'</div>'
+        + _manual_section(
+            "stt", entry.get("sources") or [],
+            "The Download button above does all of this for you. This is here for a machine "
+            "that cannot reach the publisher — no Internet, or a proxy that will not pass a "
+            "large binary. Download these three files into one folder, then give Voice Chat "
+            "that folder. The original filenames are fine — nothing needs renaming, and no "
+            "account or access token is needed.",
+            "C:\\Users\\you\\Downloads\\voice-stt", model=identifier)
+        + '</div>')
 
 
 def settings_html() -> str:
@@ -541,7 +848,9 @@ def settings_html() -> str:
         + '</div>')
     parts.append(f'<div class="mc-voice-runtime">{ui.escape(found.summary)}</div>')
 
-    for kind, heading in (("stt", "Speech to text"), ("tts", "Text to speech")):
+    parts.append(_tier_row(found))
+
+    for kind, heading in (("tts", "Text to speech"),):
         label, addresses = "", []
         if found.platform_supported:
             try:
@@ -551,7 +860,7 @@ def settings_html() -> str:
             except Exception:
                 logger.debug("Model Chain: could not describe the %s bundle", kind,
                              exc_info=True)
-        message = found.stt_message if kind == "stt" else found.tts_message
+        message = found.tts_message
 
         parts.append(f'<div class="mc-voice-row" data-mc-voice-kind="{kind}">')
         parts.append(
@@ -587,6 +896,95 @@ def settings_html() -> str:
 # --------------------------------------------------------------------------- #
 
 
+def delivery_controls() -> list:
+    """The four sliders, as data, in the order both surfaces draw them.
+
+    Read from :mod:`mc_voice_profile` rather than repeated here, because a range
+    that differed between the settings page and the character screen would be a
+    setting that silently changed when it was edited in the other place.
+    """
+    try:
+        import mc_voice_profile as profiles
+
+        return [dict(profiles.CONTROLS[name], name=name) for name in profiles.FIELDS]
+    except Exception:
+        logger.debug("Model Chain: could not read the voice delivery controls", exc_info=True)
+        return []
+
+
+def _delivery_block() -> str:
+    """How the default voice is delivered: four sliders and what they do.
+
+    Full width and fully labelled here, because this is the settings page and
+    there is room. The same four controls appear in the character screen in a
+    compact form -- one grid, no help text -- for the same reason the voice list
+    does: that surface is a flyout on a phone.
+
+    Painted by the browser from ``/voice/profile`` like everything else in this
+    row. The first frame is drawn here so that a page whose JavaScript has not
+    run yet still says something true.
+    """
+    try:
+        import mc_voice_profile as profiles
+
+        current = profiles.stored()
+        summary = profiles.describe(current)
+    except Exception:
+        logger.debug("Model Chain: could not read the voice delivery profile", exc_info=True)
+        current, summary = {}, ""
+
+    rows = []
+    for control in delivery_controls():
+        name = control["name"]
+        value = current.get(name, control["default"])
+        rows.append(
+            f'<div class="mc-voice-slider" data-mc-voice-slider="{ui.escape(name)}">'
+            f'<label for="mc-voice-slider-{ui.escape(name)}">'
+            f'{ui.escape(control["label"])}</label>'
+            f'<input type="range" id="mc-voice-slider-{ui.escape(name)}" '
+            f'min="{control["minimum"]}" max="{control["maximum"]}" '
+            f'step="{control["step"]}" value="{value}" '
+            f'data-mc-voice-slider-input="{ui.escape(name)}" />'
+            f'<output data-mc-voice-slider-value="{ui.escape(name)}">'
+            f'{ui.escape(_value_label(name, value))}</output>'
+            f'<div class="mc-voice-slider-help">{ui.escape(control["help"])}</div>'
+            f'</div>')
+
+    return (
+        '<div class="mc-voice-row" data-mc-voice-delivery>'
+        '<div class="mc-voice-head">'
+        '<div class="mc-voice-heading">Delivery</div>'
+        '<div class="mc-voice-default" data-mc-voice-delivery-summary>'
+        f'{ui.escape(summary)}</div>'
+        '</div>'
+        '<p class="mc-voice-note">How the default voice speaks. A character with a delivery '
+        'of its own overrides these; a character without one follows them, so changing a '
+        'slider here changes every character you have not configured separately.</p>'
+        + "".join(rows)
+        + '<div class="mc-voice-slider-actions">'
+        '<button type="button" class="mc-voice-entry-action" data-mc-voice-delivery-test>'
+        'Test</button>'
+        '<button type="button" class="mc-voice-entry-action" data-mc-voice-delivery-reset>'
+        'Reset</button>'
+        '</div>'
+        '<p class="mc-voice-note">Kokoro exposes one of these itself — speed, which changes '
+        'how the model articulates rather than only how fast it plays. Pitch, volume and '
+        'pacing are applied by Voice Chat to the audio the model produced: pitch by '
+        'resynthesising faster and reading the result back slower, which moves the formants '
+        'with it and reads as a different-sized speaker. There is no emotion control, '
+        'because Kokoro-82M has no emotion input — a slider for one would do nothing.</p>'
+        '</div>')
+
+
+def _value_label(name: str, value) -> str:
+    try:
+        import mc_voice_profile as profiles
+
+        return profiles.value_label(name, value)
+    except Exception:
+        return str(value)
+
+
 def voices_html() -> str:
     """Voice selection, auditioning, renaming, deleting, and cloning.
 
@@ -616,7 +1014,8 @@ def voices_html() -> str:
         '<div class="mc-voice-warnings" data-mc-voice-warnings></div>'
         '<div class="mc-voice-list" data-mc-voice-list></div>'
         '</div>'
-        '<div class="mc-voice-row" data-mc-voice-cloning>'
+        + _delivery_block()
+        + '<div class="mc-voice-row" data-mc-voice-cloning>'
         '<div class="mc-voice-head">'
         '<div class="mc-voice-heading">Voice cloning</div>'
         '<div class="mc-voice-status" data-mc-voice-cloning-status>Checking…</div>'
