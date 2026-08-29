@@ -379,7 +379,12 @@ globalThis.clearTimeout = (handle) => {
 };
 globalThis.setInterval = (fn) => { intervals.push(fn); return intervals.length; };
 globalThis.clearInterval = () => {};
-globalThis.Date = class extends Date { static now() { return NOW; } };
+// The wall clock is NOW plus an offset a test can move on its own. That is how
+// "the machine synchronised its time in the middle of a recording" is modelled:
+// `Date.now()` jumps and `performance.now()` does not, which is the whole reason
+// durations are measured with the second one.
+let WALL = 0;
+globalThis.Date = class extends Date { static now() { return NOW + WALL; } };
 // The monotonic clock, moving with the same NOW the tests advance. It is a
 // separate global because the script measures every *duration* with it and only
 // asks the wall clock for absolute moments -- so a test that moves NOW is
@@ -416,6 +421,8 @@ function pending() {
 const tracks = [];
 const played = [];
 const stopped = [];
+let pendingMicrophone = null;
+let pendingStatus = null;
 
 function track() {
     // `label` and `getSettings` are how the script finds out what the browser
@@ -434,11 +441,23 @@ function track() {
 
 const scheduled = [];
 
+// How many times the capture processor's module was loaded. `registerProcessor`
+// puts a name in the context's worklet scope, so a second load for the same
+// context is a duplicate registration -- which a browser may refuse outright and
+// which is in any case a Blob, an object URL and a module load per utterance.
+let moduleLoads = 0;
 const context = {
     state: CONTEXT_STATE,
     sampleRate: SAMPLE_RATE,
     currentTime: 0,
-    audioWorklet: WORKLET_AVAILABLE ? {addModule: () => Promise.resolve()} : null,
+    audioWorklet: WORKLET_AVAILABLE ? {
+        addModule() {
+            moduleLoads += 1;
+            return WORKLET_LOADS
+                ? Promise.resolve()
+                : Promise.reject(new Error("NotSupportedError"));
+        },
+    } : null,
     resume() { context.state = RESUME_WORKS ? "running" : "suspended"; return Promise.resolve(); },
     createMediaStreamSource() { return {connect() {}, disconnect() {}}; },
     createScriptProcessor() {
@@ -505,7 +524,14 @@ Object.defineProperty(globalThis, "navigator", {
                 return Promise.reject(error);
             }
             const only = [track()];
-            return Promise.resolve({getTracks: () => only, getAudioTracks: () => only});
+            const stream = {getTracks: () => only, getAudioTracks: () => only};
+            if (SLOW_OPEN) {
+                // A permission prompt nobody has answered yet, or a device the
+                // platform is still waking. Released by `openMicrophoneNow()`.
+                return new Promise(function (resolve) { pendingMicrophone = resolve; })
+                    .then(() => stream);
+            }
+            return Promise.resolve(stream);
         };
         // The prefixed callback form, which is what some Android WebViews have
         // instead of `mediaDevices`. The script has to reach it, or a phone
@@ -583,14 +609,25 @@ globalThis.fetch = function (url, options) {
     if (!answer) return Promise.reject(new Error("no route " + url));
     if (answer.reject) return Promise.reject(new Error("network"));
     const headerBag = answer.headers || {};
-    return Promise.resolve({
+    const response = {
         ok: answer.status === undefined || answer.status < 400,
         status: answer.status || 200,
         headers: {get: (name) => headerBag[name] === undefined ? null : headerBag[name]},
         body: answer.chunks ? streamBody(answer.chunks, answer.stall) : null,
         json: () => Promise.resolve(answer.json),
         arrayBuffer: () => Promise.resolve(answer.audio || new ArrayBuffer(8)),
-    });
+    };
+    if (answer.defer) {
+        // The WebUI has been asked and has not answered. Released by
+        // `answerStatus()`, which is how "samples arrived before the status
+        // check came back" becomes a thing a test can stand in the middle of.
+        return new Promise(function (resolve) {
+            const waiting = pendingStatus || [];
+            waiting.push(() => resolve(response));
+            pendingStatus = waiting;
+        });
+    }
+    return Promise.resolve(response);
 };
 
 const loaded = [];
@@ -649,6 +686,21 @@ async function announceTurn(id, times) {
     turnField.value = id;
     turnField.fire("input", {});
     await tick(times || 30);
+}
+
+// Let a held-open getUserMedia resolve, and a held-open status route answer.
+async function openMicrophoneNow() {
+    const resolve = pendingMicrophone;
+    pendingMicrophone = null;
+    if (resolve) resolve();
+    await tick(4);
+}
+
+async function answerStatus() {
+    const waiting = pendingStatus || [];
+    pendingStatus = null;
+    waiting.forEach((fn) => fn());
+    await tick(4);
 }
 
 // Gradio re-rendering the panel: the holder keeps its id and the control inside
@@ -756,6 +808,7 @@ function report(extra) {
         pendingTimers: pending(),
         consoleErrors,
         consoleInfo,
+        moduleLoads,
         listeners: Object.keys(mic.handlers).map((k) => [k, mic.handlers[k].length]),
         settings: {
             runtime: settingsParts.runtime.textContent,
@@ -817,6 +870,15 @@ DEFAULTS = {
     "RESUME_WORKS": "true",
     "DECODE_WORKS": "true",
     "WORKLET_AVAILABLE": "true",
+    # Whether `addModule` succeeds. False models a browser that refuses the
+    # module -- a duplicate registration, a Content-Security-Policy that will not
+    # take a blob: URL -- and the capture path must fall back rather than lose
+    # the recording.
+    "WORKLET_LOADS": "true",
+    # Whether getUserMedia settles by itself. False holds it open until the
+    # scenario calls `openMicrophoneNow()`, which is how a permission prompt
+    # nobody has answered yet is modelled.
+    "SLOW_OPEN": "false",
     "GRADIO_CONFIG": '{"root": ""}',
     "ANSWERS": json.dumps({
         "voice/tts-stream": {
@@ -1049,12 +1111,37 @@ class TestSlideToTalk:
         """)
         assert any(r.get("url", "").endswith("/stt") for r in found["requests"])
 
-    def test_recording_state_is_shown_without_a_round_trip(self):
+    def test_engagement_opens_the_microphone_without_a_round_trip(self):
+        """The gesture is not held up by the WebUI. What it enters is OPENING:
+        the microphone has been asked for and nothing has been heard yet."""
         found = run("""
             await engageMic(6);
             console.log(JSON.stringify(report()));
         """)
+        assert any(r.get("kind") == "getUserMedia" for r in found["requests"])
+        assert "mc-llm-voice-opening" in found["micClasses"]
+        assert "mc-llm-voice-recording" not in found["micClasses"]
+        assert found["micLabel"] == "Opening microphone"
+
+    def test_red_begins_at_the_first_sample_and_not_before(self):
+        """The whole of section 7.3. Permission granted is not recording, a
+        connected node is not recording; audio arriving is recording, and on a
+        phone those can be a second apart."""
+        found = run("""
+            await engageMic(6);
+            await tick();
+            const opening = {mic: Array.from(mic.classList.names),
+                             track: Array.from(micTrack.classList.names),
+                             label: mic.getAttribute("aria-label")};
+            feed(new Array(800).fill(0.2));
+            await tick();
+            console.log(JSON.stringify(report({opening})));
+        """)
+        assert "mc-llm-voice-recording" not in found["opening"]["mic"]
+        assert "mc-llm-voice-armed" not in found["opening"]["track"]
+        assert found["opening"]["label"] == "Opening microphone"
         assert "mc-llm-voice-recording" in found["micClasses"]
+        assert "mc-llm-voice-armed" in found["trackClasses"]
         assert found["micLabel"] == "Recording — release to transcribe"
 
     def test_the_control_returns_to_idle_afterwards(self):
@@ -1109,18 +1196,26 @@ class TestTheSlideItself:
         assert found["micTransform"] == "", "the handle did not return to the left"
 
     def test_the_track_is_marked_while_it_is_recording_and_after(self):
+        """Two classes now, because they are two statements. Reaching the end of
+        the track is `engaged` and is not red; `armed` is red and waits for a
+        sample."""
         found = run("""
             await engageMic(24);
             await tick();
-            const armed = Array.from(micTrack.classList.names);
+            const pinned = Array.from(micTrack.classList.names);
             feed(new Array(8000).fill(0.2));
+            await tick();
+            const armed = Array.from(micTrack.classList.names);
             NOW += 900;
             releaseMic(24);
             await tick();
-            console.log(JSON.stringify(report({armed})));
+            console.log(JSON.stringify(report({pinned, armed})));
         """)
+        assert "mc-llm-voice-engaged" in found["pinned"]
+        assert "mc-llm-voice-armed" not in found["pinned"]
         assert "mc-llm-voice-armed" in found["armed"]
         assert "mc-llm-voice-armed" not in found["trackClasses"]
+        assert "mc-llm-voice-engaged" not in found["trackClasses"]
 
     def test_the_handle_is_pinned_at_the_end_once_it_has_engaged(self):
         """A finger drifting back down the track is a finger drifting, not a
@@ -1134,7 +1229,7 @@ class TestTheSlideItself:
             console.log(JSON.stringify(report()));
         """)
         assert found["micTransform"] != ""
-        assert "mc-llm-voice-recording" in found["micClasses"]
+        assert "mc-llm-voice-opening" in found["micClasses"]
 
     def test_holding_space_records_and_releasing_it_sends(self):
         """A control that can only be dragged is a control somebody using a
@@ -1286,6 +1381,297 @@ class TestWhenItCannotRecord:
 # --------------------------------------------------------------------------- #
 # What arrives on the wire
 # --------------------------------------------------------------------------- #
+
+
+def deferred_status(**changes):
+    """The default answers with the status route held open until asked."""
+    answers = json.loads(DEFAULTS["ANSWERS"])
+    answers["voice/status"]["json"].update(changes)
+    answers["voice/status"]["defer"] = True
+    return json.dumps(answers)
+
+
+class TestOpeningAndRecording:
+    """The nine promise orderings a real device produces, and what each must do.
+
+    All of them are the same question asked from different angles: what does the
+    control say, and is what it says true? The old answer was that the far right
+    of the track meant red, which was a statement about a gesture dressed up as
+    a statement about a microphone.
+    """
+
+    def test_m1_samples_are_accepted_before_the_status_check_answers(self):
+        """Sample acceptance used to wait for an HTTP round trip to the WebUI,
+        and every callback that arrived first was dropped -- audio the microphone
+        really had captured, thrown away because a status check was in flight."""
+        found = run("""
+            await engageMic(30);
+            await tick();
+            feed(new Array(8000).fill(0.2));
+            await tick();
+            const early = {mic: Array.from(mic.classList.names)};
+            await answerStatus();
+            NOW += 900;
+            releaseMic(30);
+            await tick(6);
+            console.log(JSON.stringify(report({early})));
+        """, ANSWERS=deferred_status())
+        assert "mc-llm-voice-recording" in found["early"]["mic"], (
+            "red waited for the WebUI rather than for audio")
+        posts = [r for r in found["requests"] if r.get("url", "").endswith("/stt")]
+        assert len(posts) == 1
+        assert posts[0]["bodyLength"] > 44, "the samples captured first were dropped"
+
+    def test_m2_a_release_while_opening_never_becomes_red(self):
+        """The slow-phone case. getUserMedia outliving the gesture must not
+        produce a recording, a red control, or a transcription."""
+        found = run("""
+            await engageMic(31);
+            await tick();
+            releaseMic(31);
+            await tick();
+            const afterRelease = Array.from(mic.classList.names);
+            await openMicrophoneNow();
+            feed(new Array(8000).fill(0.2));
+            await tick(4);
+            console.log(JSON.stringify(report({afterRelease})));
+        """, SLOW_OPEN="true")
+        assert "mc-llm-voice-recording" not in found["afterRelease"]
+        assert "mc-llm-voice-recording" not in found["micClasses"]
+        assert found["tracks"] and all(found["tracks"]), (
+            "a MediaStream that arrived after the release was left running")
+        assert not [r for r in found["requests"] if r.get("url", "").endswith("/stt")]
+
+    def test_m3_a_late_not_ready_answer_stops_and_discards(self):
+        """Accepting samples early is only safe because the answer, when it
+        comes, is still obeyed."""
+        found = run("""
+            await engageMic(32);
+            await tick();
+            feed(new Array(8000).fill(0.2));
+            await tick();
+            await answerStatus();
+            NOW += 900;
+            releaseMic(32);
+            await tick(6);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=deferred_status(ready=False,
+                                     not_ready_message="Install both models."))
+        assert all(found["tracks"]), "the microphone was left open"
+        assert "mc-llm-voice-recording" not in found["micClasses"]
+        assert not [r for r in found["requests"] if r.get("url", "").endswith("/stt")]
+        assert "Install both models." in found["status"]
+
+    def test_m4_two_utterances_load_the_module_once(self):
+        """`registerProcessor` registers a name in the context's worklet scope.
+        Loading the module again for the same context is a duplicate
+        registration a browser may refuse -- and is in any case a Blob, an
+        object URL and a module load per press of the microphone."""
+        found = run("""
+            await hold(900);
+            await tick(4);
+            await hold(900);
+            await tick(4);
+            console.log(JSON.stringify(report()));
+        """)
+        assert found["moduleLoads"] == 1
+        posts = [r for r in found["requests"] if r.get("url", "").endswith("/stt")]
+        assert len(posts) == 2, "the second recording was lost"
+
+    def test_m5_a_worklet_that_will_not_load_still_records(self):
+        """And red still means the first sample, whichever path produced it."""
+        found = run("""
+            await engageMic(33);
+            await tick(4);
+            feed(new Array(8000).fill(0.2));
+            await tick();
+            const armed = Array.from(mic.classList.names);
+            NOW += 900;
+            releaseMic(33);
+            await tick(6);
+            console.log(JSON.stringify(report({armed})));
+        """, WORKLET_LOADS="false")
+        assert "mc-llm-voice-recording" in found["armed"]
+        posts = [r for r in found["requests"] if r.get("url", "").endswith("/stt")]
+        assert len(posts) == 1 and posts[0]["bodyLength"] > 44
+
+    def test_m6_the_minimum_hold_is_measured_from_the_first_sample(self):
+        """Eight hundred milliseconds opening a Bluetooth microphone and three
+        hundred of speech is a recording, not a tap. Charging the device's wait
+        to the user's allowance is how a real utterance got refused."""
+        found = run("""
+            await engageMic(34);
+            await tick();
+            NOW += 800;
+            feed(new Array(8000).fill(0.2));
+            await tick();
+            NOW += 300;
+            releaseMic(34);
+            await tick(6);
+            console.log(JSON.stringify(report()));
+        """)
+        posts = [r for r in found["requests"] if r.get("url", "").endswith("/stt")]
+        assert len(posts) == 1, found["status"]
+        assert "Hold at the right-hand end" not in found["status"]
+
+    def test_a_genuinely_short_hold_is_still_refused(self):
+        """The guard is kept; only its clock moved -- and this is the direction
+        the old clock got wrong. Eight hundred milliseconds of opening and eighty
+        of speech measured from the gesture is 880 ms, comfortably past the
+        minimum, and what it transcribes is a tap."""
+        found = run("""
+            await engageMic(35);
+            await tick();
+            NOW += 800;
+            feed(new Array(8000).fill(0.2));
+            await tick();
+            NOW += 80;
+            releaseMic(35);
+            await tick(6);
+            console.log(JSON.stringify(report()));
+        """)
+        assert not [r for r in found["requests"] if r.get("url", "").endswith("/stt")]
+        assert "Hold at the right-hand end" in found["status"]
+
+    def test_a_release_before_any_sample_says_nothing_about_being_too_short(self):
+        """Section 7.5. There was no recording, so "that was too short" would be
+        a sentence about the user when the wait was the device's."""
+        found = run("""
+            await engageMic(36);
+            await tick();
+            releaseMic(36);
+            await tick(4);
+            console.log(JSON.stringify(report()));
+        """, SLOW_OPEN="true")
+        assert "Hold at the right-hand end" not in found["status"]
+
+    def test_m7_a_known_not_ready_state_never_opens_the_microphone(self):
+        """A permission prompt raised for a feature that cannot run is a prompt
+        asked for nothing."""
+        found = run("""
+            // The slide fills the readiness cache, and the engagement at the end
+            // of it reads the answer that is already in hand.
+            mic.fire("pointerdown", {pointerId: 37, clientX: 0});
+            await tick(4);
+            fireWindow("pointermove", {pointerId: 37, clientX: 400});
+            await tick(4);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=status_answer(ready=False, not_ready_message="Install both models."))
+        assert not any(r.get("kind") == "getUserMedia" for r in found["requests"])
+        assert "Install both models." in found["status"]
+
+    def test_m8_engagement_does_not_wait_for_the_worklet_to_finish_loading(self):
+        """A browser raises a permission prompt only while it still considers a
+        user gesture in progress. A chain that has awaited a module load is past
+        that on a phone, which is how a page that could have asked reported that
+        capture was unavailable instead."""
+        found = run("""
+            mic.fire("pointerdown", {pointerId: 38, clientX: 0});
+            fireWindow("pointermove", {pointerId: 38, clientX: 400});
+            // No await at all between the gesture and this line: whatever
+            // getUserMedia calls exist were made in the same task.
+            const asked = requests.filter((r) => r.kind === "getUserMedia").length;
+            await tick(6);
+            console.log(JSON.stringify(report({asked})));
+        """)
+        assert found["asked"] == 1
+
+    def test_m9_a_wall_clock_that_jumps_does_not_change_the_hold(self):
+        """Durations come from performance.now(). A machine that synchronised
+        its time mid-utterance used to be able to make a held button look like
+        it had been held for a negative length of time."""
+        found = run("""
+            await engageMic(39);
+            await tick();
+            feed(new Array(8000).fill(0.2));
+            await tick();
+            NOW += 900;
+            WALL -= 60000;
+            releaseMic(39);
+            await tick(6);
+            console.log(JSON.stringify(report()));
+        """)
+        posts = [r for r in found["requests"] if r.get("url", "").endswith("/stt")]
+        assert len(posts) == 1, found["status"]
+
+    def test_the_slide_prepares_the_worklet_without_opening_the_microphone(self):
+        """Section 7.4's whole boundary: preparation during the slide is
+        allowed, and touching the microphone because a finger moved is not."""
+        found = run("""
+            mic.fire("pointerdown", {pointerId: 40, clientX: 0});
+            await tick(4);
+            console.log(JSON.stringify(report()));
+        """)
+        assert found["moduleLoads"] == 1
+        assert not any(r.get("kind") == "getUserMedia" for r in found["requests"])
+
+    def test_the_slide_and_the_engagement_share_one_status_request(self):
+        """Two callers a few hundred milliseconds apart asking the same
+        question. On a phone over a mesh VPN the second one is a round trip
+        standing between a gesture and a permission prompt."""
+        found = run("""
+            mic.fire("pointerdown", {pointerId: 41, clientX: 0});
+            fireWindow("pointermove", {pointerId: 41, clientX: 400});
+            await tick(6);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=deferred_status())
+        asked = [r for r in found["requests"] if r.get("url", "").endswith("voice/status")]
+        assert len(asked) == 1, asked
+
+    def test_a_microphone_that_never_opens_gives_the_control_back(self):
+        """The other half of splitting the two timeouts. A getUserMedia that
+        never settles -- an unanswered prompt, a device another application has
+        exclusive -- must not leave the handle pinned at the right for ever."""
+        found = run("""
+            await engageMic(42);
+            await tick();
+            NOW += 20000;
+            await tick(6);
+            console.log(JSON.stringify(report()));
+        """, SLOW_OPEN="true")
+        assert found["micTransform"] == "", "the handle stayed at the recording end"
+        assert "mc-llm-voice-recording" not in found["micClasses"]
+        assert "mc-llm-voice-armed" not in found["trackClasses"]
+        assert "The microphone could not be opened." in found["status"]
+
+    def test_the_recording_cap_is_armed_at_the_first_sample(self):
+        """Section 7.7. A second spent opening a Bluetooth microphone is not a
+        second of the user's sixty."""
+        found = run("""
+            await engageMic(43);
+            await tick();
+            // Fifteen seconds of a device waking up, then the first sample.
+            NOW += 15000;
+            await tick(2);
+            feed(new Array(8000).fill(0.2));
+            await tick();
+            // Sixty-five seconds since the gesture, fifty since the first
+            // sample. A cap counted from the gesture has fired by now.
+            NOW += 50000;
+            await tick(6);
+            const stillRecording = mic.classList.names.has("mc-llm-voice-recording");
+            const sent = requests.filter((r) => (r.url || "").endsWith("/stt")).length;
+            // Seventy-seven seconds since the gesture, sixty-two of recording.
+            NOW += 12000;
+            await tick(12);
+            console.log(JSON.stringify(report({stillRecording, sent})));
+        """)
+        assert found["stillRecording"], "the wait was charged to the recording allowance"
+        assert found["sent"] == 0
+        posts = [r for r in found["requests"] if r.get("url", "").endswith("/stt")]
+        assert len(posts) == 1, "the cap never stopped the recording"
+        assert found["micTransform"] == "", "the handle stayed at the recording end"
+
+    def test_the_capture_timing_line_carries_durations_and_no_device(self):
+        found = run("""
+            await hold(900);
+            console.log(JSON.stringify(report()));
+        """)
+        line = [item for item in found["consoleInfo"] if "microphone timing" in item]
+        assert line, found["consoleInfo"]
+        assert "Built-in microphone" not in line[0]
+        for wanted in ("worklet", "microphone", "graph", "ready", "audio", "released"):
+            assert wanted in line[0]
 
 
 class TestTheRecording:

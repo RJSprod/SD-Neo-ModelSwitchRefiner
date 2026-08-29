@@ -4120,13 +4120,26 @@
     transform: translateY(-50%);
 }
 
-/* Recording. The arrows have been reached, so they stop being an instruction,
-   and the track picks up the same ring the handle wears -- one control saying
-   one thing rather than a button that changed and a track that did not. */
+/* Engaged, which is not recording. The arrows have been reached, so they stop
+   being an instruction and the track goes solid -- but the colour is amber and
+   not red, because at this moment the microphone has been asked for and nothing
+   has been heard from it yet. On a phone opening a Bluetooth headset that is
+   routinely a second, and a red track during it would be the control saying
+   something about the world that is not true. */
+#mc-llm-studio .mc-llm-voice-track.mc-llm-voice-engaged::after,
 #mc-llm-studio .mc-llm-voice-track.mc-llm-voice-armed::after {
     content: none;
 }
 
+#mc-llm-studio .mc-llm-voice-track.mc-llm-voice-engaged {
+    border-style: solid;
+    border-color: var(--warning-500, #d97706);
+}
+
+/* Recording. Red, and it is earned: this class is added at the first sample
+   this page actually accepted, not when permission was granted and not when a
+   node was connected. It follows `engaged` in the file so that it wins when
+   both are present. */
 #mc-llm-studio .mc-llm-voice-track.mc-llm-voice-armed {
     border-style: solid;
     border-color: var(--error-500, #dc2626);
@@ -4145,6 +4158,15 @@
 /* Recording. A ring rather than a fill, so the glyph stays legible and the
    button does not change size -- a control that grows when it is pressed moves
    the composer, and the composer is the thing that must not move. */
+/* Opening. The same ring, in the same amber as the track, so the two halves of
+   the control agree about which state they are in. It is deliberately visible:
+   a gesture that produced no feedback at all for a second would read as a
+   control that had not taken the press. */
+#mc-llm-studio .mc-llm-voice-mic.mc-llm-voice-opening button,
+#mc-llm-studio button.mc-llm-voice-opening {
+    box-shadow: 0 0 0 3px var(--warning-500, #d97706);
+}
+
 #mc-llm-studio .mc-llm-voice-mic.mc-llm-voice-recording button,
 #mc-llm-studio button.mc-llm-voice-recording {
     box-shadow: 0 0 0 3px var(--error-500, #dc2626);
