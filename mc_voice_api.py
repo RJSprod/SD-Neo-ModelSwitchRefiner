@@ -585,6 +585,18 @@ def _log_turn(turn) -> None:
                     found["source_chars"], found["segments"], found["audio_seconds"],
                     found["compute_seconds"], found["rtf"], found["first_audio_ms"],
                     found["cancelled"] or "completed")
+        # A second line, and it is the one a latency question is answered from.
+        # Everything on it is a duration or a count: whether the worker was
+        # already warm, how long warming took, how big the first two segments
+        # were, and how long the synthesis lane stood idle between them. Section
+        # 36 -- no text, and no field here that is not in `metrics`.
+        logger.info("Model Chain: Voice turn latency — worker %s, prepare %s ms, first "
+                    "segment %s ms (%s chars), second segment %s chars after %s ms idle, "
+                    "%s streaming",
+                    "warm" if found["worker_warm_at_turn_start"] else "cold",
+                    found["runtime_prepare_ms"], found["first_segment_ms"],
+                    found["segment_1_chars"], found["segment_2_chars"],
+                    found["segment_wait_2_ms"], found["streaming"] or "unknown")
     except Exception:
         logger.debug("Model Chain: could not record voice turn metrics", exc_info=True)
 

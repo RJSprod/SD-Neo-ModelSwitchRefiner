@@ -3,10 +3,12 @@
   "version": 2,
   "runtime": {
     "version": "1.13.6",
+    "build": 2,
+    "numpy_version": "2.2.6",
     "package": "sherpa-onnx",
     "import_name": "sherpa_onnx",
     "provider": "cpu",
-    "license": "Apache-2.0 (sherpa-onnx, k2-fsa)",
+    "license": "Apache-2.0 (sherpa-onnx, k2-fsa); BSD-3-Clause (NumPy, NumPy Developers)",
     "platforms": [
       {
         "id": "windows-x86_64-cp310",
@@ -30,6 +32,13 @@
             "url": "https://files.pythonhosted.org/packages/81/61/d32923b9f6fa039271760e1c642ffd496b8e2b3340e084bd9b0c7b568448/sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
             "bytes": 16522526,
             "sha256": "9e7ac522b4f108412f6a1173c0e512c65e98d4714d9d9aa0002279d588d2e699"
+          },
+          {
+            "filename": "numpy-2.2.6-cp310-cp310-win_amd64.whl",
+            "local_name": "numpy-2.2.6-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/a3/dd/4b822569d6b96c39d1215dbae0582fd99954dcbcf0c1a13c61783feaca3f/numpy-2.2.6-cp310-cp310-win_amd64.whl",
+            "bytes": 12904620,
+            "sha256": "f0fd6321b839904e15c46e0d257fdd101dd7f530fe03fd6359c1ea63738703f3"
           }
         ]
       },
@@ -55,6 +64,13 @@
             "url": "https://files.pythonhosted.org/packages/81/61/d32923b9f6fa039271760e1c642ffd496b8e2b3340e084bd9b0c7b568448/sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
             "bytes": 16522526,
             "sha256": "9e7ac522b4f108412f6a1173c0e512c65e98d4714d9d9aa0002279d588d2e699"
+          },
+          {
+            "filename": "numpy-2.2.6-cp311-cp311-win_amd64.whl",
+            "local_name": "numpy-2.2.6-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/31/0a/f354fb7176b81747d870f7991dc763e157a934c717b67b58456bc63da3df/numpy-2.2.6-cp311-cp311-win_amd64.whl",
+            "bytes": 12907455,
+            "sha256": "e8213002e427c69c45a52bbd94163084025f533a55a59d6f9c5b820774ef3303"
           }
         ]
       },
@@ -80,6 +96,13 @@
             "url": "https://files.pythonhosted.org/packages/81/61/d32923b9f6fa039271760e1c642ffd496b8e2b3340e084bd9b0c7b568448/sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
             "bytes": 16522526,
             "sha256": "9e7ac522b4f108412f6a1173c0e512c65e98d4714d9d9aa0002279d588d2e699"
+          },
+          {
+            "filename": "numpy-2.2.6-cp312-cp312-win_amd64.whl",
+            "local_name": "numpy-2.2.6-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/36/fa/8c9210162ca1b88529ab76b41ba02d433fd54fecaf6feb70ef9f124683f1/numpy-2.2.6-cp312-cp312-win_amd64.whl",
+            "bytes": 12614190,
+            "sha256": "c1f9540be57940698ed329904db803cf7a402f3fc200bfe599334c9bd84a40b2"
           }
         ]
       },
@@ -105,6 +128,13 @@
             "url": "https://files.pythonhosted.org/packages/81/61/d32923b9f6fa039271760e1c642ffd496b8e2b3340e084bd9b0c7b568448/sherpa_onnx_core-1.13.6-py3-none-win_amd64.whl",
             "bytes": 16522526,
             "sha256": "9e7ac522b4f108412f6a1173c0e512c65e98d4714d9d9aa0002279d588d2e699"
+          },
+          {
+            "filename": "numpy-2.2.6-cp313-cp313-win_amd64.whl",
+            "local_name": "numpy-2.2.6-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/cb/3b/d58c12eafcb298d4e6d0d40216866ab15f59e55d148a5658bb3132311fcf/numpy-2.2.6-cp313-cp313-win_amd64.whl",
+            "bytes": 12610885,
+            "sha256": "b0544343a702fa80c95ad5d3d608ea3599dd54d4632df855e4c8d24eb6ecfa1c"
           }
         ]
       },
@@ -130,6 +160,13 @@
             "url": "https://files.pythonhosted.org/packages/fa/0a/6f64568ebb230b200c30c465eb002113944705fa36c734838ea46f2e1802/sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
             "bytes": 10371677,
             "sha256": "9c1260ae150ebd4f658854fd8d8ca8477828afa5bebf66c1b2f6132f1f704a21"
+          },
+          {
+            "filename": "numpy-2.2.6-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+            "local_name": "numpy-2.2.6-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+            "url": "https://files.pythonhosted.org/packages/b4/63/3de6a34ad7ad6646ac7d2f55ebc6ad439dbbf9c4370017c50cf403fb19b5/numpy-2.2.6-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+            "bytes": 16801050,
+            "sha256": "fc7b73d02efb0e18c000e9ad8b83480dfcd5dfd11065997ed4c6747470ae8915"
           }
         ]
       },
@@ -155,6 +192,13 @@
             "url": "https://files.pythonhosted.org/packages/fa/0a/6f64568ebb230b200c30c465eb002113944705fa36c734838ea46f2e1802/sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
             "bytes": 10371677,
             "sha256": "9c1260ae150ebd4f658854fd8d8ca8477828afa5bebf66c1b2f6132f1f704a21"
+          },
+          {
+            "filename": "numpy-2.2.6-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+            "local_name": "numpy-2.2.6-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+            "url": "https://files.pythonhosted.org/packages/b3/dd/2238b898e51bd6d389b7389ffb20d7f4c10066d80351187ec8e303a5a475/numpy-2.2.6-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+            "bytes": 16821570,
+            "sha256": "ba10f8411898fc418a521833e014a77d3ca01c15b0c6cdcce6a0d2897e6dbbdf"
           }
         ]
       },
@@ -180,6 +224,13 @@
             "url": "https://files.pythonhosted.org/packages/fa/0a/6f64568ebb230b200c30c465eb002113944705fa36c734838ea46f2e1802/sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
             "bytes": 10371677,
             "sha256": "9c1260ae150ebd4f658854fd8d8ca8477828afa5bebf66c1b2f6132f1f704a21"
+          },
+          {
+            "filename": "numpy-2.2.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+            "local_name": "numpy-2.2.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+            "url": "https://files.pythonhosted.org/packages/8c/3d/1e1db36cfd41f895d266b103df00ca5b3cbe965184df824dec5c08c6b803/numpy-2.2.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+            "bytes": 16527618,
+            "sha256": "fd83c01228a688733f1ded5201c678f0c53ecc1006ffbc404db9f7a899ac6249"
           }
         ]
       },
@@ -205,6 +256,13 @@
             "url": "https://files.pythonhosted.org/packages/fa/0a/6f64568ebb230b200c30c465eb002113944705fa36c734838ea46f2e1802/sherpa_onnx_core-1.13.6-py3-none-manylinux2014_x86_64.whl",
             "bytes": 10371677,
             "sha256": "9c1260ae150ebd4f658854fd8d8ca8477828afa5bebf66c1b2f6132f1f704a21"
+          },
+          {
+            "filename": "numpy-2.2.6-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+            "local_name": "numpy-2.2.6-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+            "url": "https://files.pythonhosted.org/packages/19/49/4df9123aafa7b539317bf6d342cb6d227e49f7a35b99c287a6109b13dd93/numpy-2.2.6-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+            "bytes": 16526072,
+            "sha256": "1bc23a79bfabc5d056d106f9befb8d50c31ced2fbc70eedb8155aec74a45798f"
           }
         ]
       }

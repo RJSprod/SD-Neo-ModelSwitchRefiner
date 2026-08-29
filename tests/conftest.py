@@ -1029,6 +1029,7 @@ def speak(stdout, turn):
     write_frame(stdout, {"op": "tts_ready", "turn": turn["id"], "sample_rate": 24000,
                          "streaming": "callback"})
     sequence = 0
+    blocks = PLAN.get("blocks_per_segment", 2)
     while True:
         with turn["lock"]:
             while not turn["segments"] and not turn["done"] and not turn["cancelled"]:
@@ -1040,7 +1041,7 @@ def speak(stdout, turn):
             if not turn["segments"]:
                 break
             turn["segments"].pop(0)
-        for _step in range(PLAN.get("blocks_per_segment", 2)):
+        for _step in range(blocks):
             with turn["lock"]:
                 if turn["cancelled"]:
                     write_frame(stdout, {"op": "tts_cancelled", "turn": turn["id"],
@@ -1050,7 +1051,11 @@ def speak(stdout, turn):
             write_frame(stdout, {"op": "tts_audio", "turn": turn["id"], "seq": sequence,
                                  "sample_rate": 24000}, block)
             time.sleep(PLAN.get("block_delay", 0.0))
-        write_frame(stdout, {"op": "tts_segment_done", "turn": turn["id"], "seq": sequence})
+        # The shape of the segment, which the real worker reports and the parent
+        # turns into content-free latency metrics. One block per sentence batch.
+        write_frame(stdout, {"op": "tts_segment_done", "turn": turn["id"], "seq": sequence,
+                             "blocks": blocks, "first_block_ms": 7,
+                             "segment_ms": 21, "streaming": "callback"})
     write_frame(stdout, {"op": "tts_done", "turn": turn["id"], "seq": sequence,
                          "samples": sequence * (len(block) // 2)})
 

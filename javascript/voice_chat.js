@@ -95,8 +95,15 @@
     const MIN_HOLD_MS = 250;
     // Sixty seconds, then stop and transcribe what there is. This bounds memory
     // and it bounds surprise: a button held down in a pocket is not a five
-    // minute upload.
+    // minute upload. It is counted from the first sample, not from the
+    // engagement: a second spent opening a Bluetooth microphone is the device's
+    // and not the user's.
     const MAX_HOLD_MS = 60000;
+    // And the other half of that split. A getUserMedia that never settles --
+    // a permission prompt nobody answers, a device another application has
+    // exclusive -- must not leave the control pinned at the right for ever.
+    // Generous, because a permission prompt is a human deciding.
+    const OPEN_TIMEOUT_MS = 20000;
     const TARGET_RATE = 16000;
     const STATUS_HOLD_MS = 2600;
     const TOKEN_POLL_MS = 400;
@@ -169,13 +176,44 @@
         return holder.tagName === "BUTTON" ? holder : holder.querySelector("button");
     }
 
-    function fieldValue(id) {
+    // The control inside one of Python's hidden holders, or null. Split out of
+    // `fieldValue` because two things now want it: reading the value, and
+    // binding a listener to the element that emits `input` when Gradio writes.
+    function fieldOf(id) {
         const holder = byId(id);
-        if (!holder) return "";
-        const field = holder.tagName === "TEXTAREA" || holder.tagName === "INPUT"
+        if (!holder) return null;
+        return holder.tagName === "TEXTAREA" || holder.tagName === "INPUT"
             ? holder
             : holder.querySelector("textarea, input");
+    }
+
+    function fieldValue(id) {
+        const field = fieldOf(id);
         return field ? (field.value || "") : "";
+    }
+
+    // One monotonic clock for every duration this file measures.
+    //
+    // `Date.now()` is a wall clock: it moves when the machine syncs time, when
+    // a laptop wakes, and when somebody changes the timezone -- so a recording
+    // held for 300 ms could be measured as -400 ms, and a phone that adjusted
+    // its clock mid-utterance would refuse the recording as too short. Every
+    // *duration* below therefore comes from `performance.now()`, and the only
+    // remaining use of the wall clock is the readiness cache, where an absolute
+    // moment is genuinely what is wanted.
+    //
+    // These numbers never leave the browser and are never compared with the
+    // server's own monotonic clock: two monotonic clocks in two processes share
+    // no origin, and subtracting one from the other produces a number that
+    // looks like a latency and is not one.
+    function nowMs() {
+        try {
+            if (typeof performance === "object" && performance
+                    && typeof performance.now === "function") {
+                return performance.now();
+            }
+        } catch (error) { /* a browser without it falls through */ }
+        return Date.now();
     }
 
     // -- where this WebUI actually lives ----------------------------------- //
@@ -337,6 +375,10 @@
 
     let readiness = null;
     let readinessAt = 0;
+    // The one unforced status request that is currently in flight, so that two
+    // callers a few hundred milliseconds apart share it. Cleared when it
+    // settles; see `refreshStatus`.
+    let readinessPending = null;
 
     // What the last status answer said, if it is recent enough to act on.
     // Separate from `refreshStatus` because the gesture needs an answer it can
@@ -361,6 +403,27 @@
         if (!force && readiness && now - readinessAt < 5000) {
             return Promise.resolve(readiness);
         }
+        // One request, however many callers. The slide starts a check and the
+        // engagement at the end of it asks again a few hundred milliseconds
+        // later; without this the second call opens a second connection to ask
+        // the same question, and on a phone over a mesh VPN that is a round
+        // trip standing between a gesture and a permission prompt. A forced
+        // poll keeps its own semantics -- it is asked precisely because the
+        // caller wants a *new* answer.
+        if (!force && readinessPending) return readinessPending;
+        const request = statusRequest(scope);
+        if (force) return request;
+        // `statusRequest` always resolves -- with an `ok: false` and a sentence
+        // where anything went wrong -- so there is no rejection path to clear.
+        const wrapped = request.then(function (payload) {
+            if (readinessPending === wrapped) readinessPending = null;
+            return payload;
+        });
+        readinessPending = wrapped;
+        return wrapped;
+    }
+
+    function statusRequest(scope) {
         return fetch(url(ROUTES.status), {
             method: "POST", credentials: "same-origin", headers: headers(null, scope),
         }).then(refused).then(function (response) {
@@ -456,10 +519,18 @@
     // gap in the first sentence, and every millisecond of it is latency the user
     // hears as lag. So it moves: an underrun raises it for the next turn, and
     // several clean turns lower it back towards the floor.
+    // The numbers moved down once the producer stopped running dry. They were
+    // chosen for a pipeline where the second segment could be several seconds
+    // behind the first, and 1.6 seconds of prebuffer is 1.6 seconds of latency
+    // paid on every single reply to hide a gap that now mostly is not there.
+    // What is deliberately *not* done is dropping to zero: the envelope still
+    // moves, an underrun still raises it, and a slow machine still recovers to
+    // something that plays without stuttering. Earlier continuous audio, not
+    // merely earlier audio.
     const BUFFER = {
-        start: 1.6,
-        min: 1.2,
-        max: 3.2,
+        start: 0.7,
+        min: 0.4,
+        max: 2.0,
         high: 12.0,
         clean: 0,
     };
@@ -497,6 +568,15 @@
             pending: [],
             pendingSeconds: 0,
             draining: false,
+            // Marks, all on this browser's own monotonic clock and all
+            // durations from `seenAt`. They are what tells "the server was slow"
+            // apart from "this page took a third of a second to notice", which
+            // a single end-to-end number cannot.
+            seenAt: nowMs(),
+            headersAt: 0,
+            firstPcmAt: 0,
+            releasedAt: 0,
+            startTarget: BUFFER.start,
         };
     }
 
@@ -626,7 +706,13 @@
         if (!samples.length || state.ended) return;
         state.pending.push({samples: samples, rate: rate});
         state.pendingSeconds += samples.length / (rate || 24000);
-        if (!state.started && state.pendingSeconds < BUFFER.start && !state.draining) return;
+        // The turn's own target, captured when it started. Reading BUFFER.start
+        // here instead would let an underrun raise the target of the very turn
+        // that is already playing, which is a buffer that grows in the middle
+        // of a sentence rather than before the next one.
+        if (!state.started && state.pendingSeconds < state.startTarget && !state.draining) {
+            return;
+        }
         release(state);
     }
 
@@ -634,6 +720,7 @@
         const waiting = state.pending;
         state.pending = [];
         state.pendingSeconds = 0;
+        if (!state.releasedAt && waiting.length) state.releasedAt = nowMs();
         waiting.forEach(function (block) { play_(state, block.samples, block.rate); });
     }
 
@@ -703,6 +790,7 @@
                 if (!response.ok || !response.body || !response.body.getReader) {
                     throw new Error("stream");
                 }
+                state.headersAt = nowMs();
                 const rate = parseInt(response.headers.get("X-Model-Chain-Voice-Rate")
                                       || "24000", 10) || 24000;
                 const stamped = response.headers.get("X-Model-Chain-Voice-Turn");
@@ -772,7 +860,10 @@
                     carry = bytes.slice(bytes.length - 1);
                     bytes = bytes.subarray(0, bytes.length - 1);
                 }
-                if (bytes.length) schedule(state, toFloat32(bytes), rate);
+                if (bytes.length) {
+                    if (!state.firstPcmAt) state.firstPcmAt = nowMs();
+                    schedule(state, toFloat32(bytes), rate);
+                }
                 if (!complained && !state.started
                         && Date.now() - opened > STREAM_SILENCE_MS) {
                     complained = true;
@@ -785,8 +876,33 @@
         return step();
     }
 
+    // One line per spoken turn, of durations and counts only.
+    //
+    // Every number is a difference between two `performance.now()` readings
+    // taken in this page, so they are all in one clock domain and none of them
+    // is comparable with a timestamp from the WebUI. What they answer is which
+    // stage was slow: noticing the turn, opening the stream, the first sample
+    // arriving, or this page holding samples back in its own prebuffer.
+    //
+    // Never the audio, never the text, and never the turn id: the id is opaque
+    // but it is still a handle on one particular reply.
+    function reportPlayback(state) {
+        const since = function (mark) {
+            return mark ? Math.round(mark - state.seenAt) : null;
+        };
+        try {
+            console.info("Model Chain: Voice played a reply — stream opened "
+                         + since(state.headersAt) + " ms, first audio "
+                         + since(state.firstPcmAt) + " ms, playback began "
+                         + since(state.releasedAt) + " ms after the turn was seen; "
+                         + "startup buffer " + Math.round(state.startTarget * 1000)
+                         + " ms, " + state.underruns + " underruns");
+        } catch (error) { /* a console that will not take it is not a failure */ }
+    }
+
     function finishSpeech(state) {
         if (speech !== state) return;
+        reportPlayback(state);
         if (state.underruns) raiseStartBuffer(); else relaxStartBuffer();
         // The reader is done but the speaker is not: what is scheduled still has
         // to play out before the composer stops showing Stop.
@@ -1092,20 +1208,100 @@
         });
     }
 
-    function startCapture() {
+    // -- the capture processor, registered once per AudioContext -------------- //
+
+    // `registerProcessor` puts a name in the AudioWorkletGlobalScope, and that
+    // scope belongs to the AudioContext rather than to one recording. So
+    // `addModule` was being called again for every utterance to register a name
+    // that was already there -- which is a duplicate registration the
+    // specification allows a browser to refuse with NotSupportedError, and
+    // which even where it is tolerated is a Blob, an object URL and a module
+    // load per press of the microphone.
+    //
+    // One preparation per context, remembered, and a fresh AudioWorkletNode per
+    // utterance -- which is what a node is for. If the context is ever replaced,
+    // the record is replaced with it: a module registered in a scope that no
+    // longer exists is not a module this page has.
+    let captureWorklet = {context: null, promise: null, ready: false};
+
+    function ensureCaptureWorklet(ctx) {
+        if (!ctx) return Promise.resolve(false);
+        if (captureWorklet.context === ctx && captureWorklet.promise) {
+            return captureWorklet.promise;
+        }
+        const settle = function (promise) {
+            captureWorklet = {context: ctx, promise: promise, ready: false};
+            promise.then(function (ok) {
+                if (captureWorklet.promise === promise) captureWorklet.ready = !!ok;
+            });
+            return promise;
+        };
+        if (!ctx.audioWorklet || typeof ctx.audioWorklet.addModule !== "function"
+            || typeof Blob === "undefined" || !window.URL || !window.URL.createObjectURL) {
+            return settle(Promise.resolve(false));
+        }
+        let address = "";
+        try {
+            address = window.URL.createObjectURL(new Blob([WORKLET],
+                                                         {type: "text/javascript"}));
+        } catch (error) {
+            return settle(Promise.resolve(false));
+        }
+        const done = function (ok) {
+            try { window.URL.revokeObjectURL(address); } catch (error) { /* ignore */ }
+            return ok;
+        };
+        let loading;
+        try {
+            loading = Promise.resolve(ctx.audioWorklet.addModule(address));
+        } catch (error) {
+            return settle(Promise.resolve(done(false)));
+        }
+        return settle(loading.then(function () { return done(true); },
+                                   function () { return done(false); }));
+    }
+
+    // Every sample that is kept passes through here, from either capture path,
+    // so that "recording" has exactly one definition: the first PCM frame this
+    // page accepted for the session the user is holding. Not permission
+    // granted, not a node connected -- audio arriving.
+    function acceptChunk(state, samples) {
+        if (!capture || capture !== state) return;
+        if (!samples || !samples.length) return;
+        if (!state.firstPcmAt) {
+            state.firstPcmAt = nowMs();
+            if (holding && holding.capture === state && !holding.cancelled) {
+                holding.recordingAt = state.firstPcmAt;
+                beginRecording(holding);
+            }
+        }
+        state.chunks.push(samples);
+    }
+
+    function startCapture(session) {
         const ctx = audioContext();
         if (!ctx) return Promise.reject(new Error("no audio"));
+        // Started here and deliberately not awaited here. A browser raises a
+        // permission prompt only while it still considers a user gesture in
+        // progress, and a promise chain that has already awaited a module load
+        // is past that on a phone -- so the microphone is asked for in this
+        // same task and the worklet is picked up below if it is ready by then.
+        const worklet = ensureCaptureWorklet(ctx);
+        if (session) session.workletAt = 0;
+        worklet.then(function () {
+            if (session && !session.workletAt) session.workletAt = nowMs();
+        });
         return openMicrophone().then(function (stream) {
+            if (session) session.mediaAt = nowMs();
             const state = {stream: stream, chunks: [], rate: ctx.sampleRate, nodes: [],
-                           track: describeTrack(stream)};
+                           track: describeTrack(stream), firstPcmAt: 0};
             const source = ctx.createMediaStreamSource(stream);
             state.nodes.push(source);
 
             const useProcessor = function () {
                 const processor = ctx.createScriptProcessor(4096, 1, 1);
                 processor.onaudioprocess = function (event) {
-                    if (!capture || capture !== state) return;
-                    state.chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+                    acceptChunk(state, new Float32Array(event.inputBuffer.getChannelData(0)));
                 };
                 source.connect(processor);
                 // Connected to the destination with no gain of its own: a
@@ -1119,30 +1315,22 @@
                 return state;
             };
 
-            if (!ctx.audioWorklet || typeof ctx.audioWorklet.addModule !== "function"
-                || typeof Blob === "undefined" || !window.URL || !window.URL.createObjectURL) {
-                return useProcessor();
-            }
-            let address = "";
-            try {
-                address = window.URL.createObjectURL(new Blob([WORKLET],
-                                                             {type: "text/javascript"}));
-            } catch (error) {
-                return useProcessor();
-            }
-            return ctx.audioWorklet.addModule(address).then(function () {
-                try { window.URL.revokeObjectURL(address); } catch (error) { /* ignore */ }
-                const node = new window.AudioWorkletNode(ctx, "mc-voice-tap");
-                node.port.onmessage = function (event) {
-                    if (!capture || capture !== state) return;
-                    state.chunks.push(event.data);
-                };
-                source.connect(node);
-                state.nodes.push(node);
-                return state;
-            }).catch(function () {
-                try { window.URL.revokeObjectURL(address); } catch (error) { /* ignore */ }
-                return useProcessor();
+            return worklet.then(function (ready) {
+                if (!ready) return useProcessor();
+                try {
+                    const node = new window.AudioWorkletNode(ctx, "mc-voice-tap");
+                    node.port.onmessage = function (event) {
+                        acceptChunk(state, event.data);
+                    };
+                    source.connect(node);
+                    state.nodes.push(node);
+                    return state;
+                } catch (error) {
+                    // The module is registered and this context still could not
+                    // make a node of it. One utterance on the fallback is better
+                    // than no utterance at all.
+                    return useProcessor();
+                }
             });
         });
     }
@@ -1313,19 +1501,54 @@
 
     let holding = null;
 
+    // Five states, and the two that used to be one are the point of this
+    // function. "The slide reached the end" and "audio is arriving" are
+    // different facts about the world, they can be a second apart on a phone,
+    // and a control that says the second when it means the first is a control
+    // that lies about a microphone. Red is earned by PCM; everything before it
+    // is OPENING.
+    //
+    // The text is authoritative, not the colour: a screen reader is told
+    // "Opening microphone" and then "Recording", which is the same distinction
+    // in the channel that does not have a colour to read.
     function markMic(state) {
         const button = clickable(IDS.mic);
         if (!button) return;
-        button.classList.remove("mc-llm-voice-recording", "mc-llm-voice-working",
-                                "mc-llm-voice-error");
+        button.classList.remove("mc-llm-voice-opening", "mc-llm-voice-recording",
+                                "mc-llm-voice-working", "mc-llm-voice-error");
         if (state) button.classList.add("mc-llm-voice-" + state);
         const labels = {
+            opening: "Opening microphone",
             recording: "Recording — release to transcribe",
             working: "Transcribing",
             error: "Voice Chat is not set up",
         };
         button.setAttribute("aria-label", labels[state]
             || "Dictate — slide right and hold, or hold Space");
+    }
+
+    // The transition every part of the interface waits for. Called once per
+    // session, from `acceptChunk`, at the moment the first sample is kept.
+    function beginRecording(session) {
+        if (session.openTimer) {
+            window.clearTimeout(session.openTimer);
+            session.openTimer = 0;
+        }
+        markMic("recording");
+        const button = clickable(IDS.mic);
+        armTrack(button, true);
+        // The maximum hold starts here rather than at engagement. A second
+        // spent opening a Bluetooth microphone is not a second of the user's
+        // recording allowance -- see section 7.7.
+        session.timer = window.setTimeout(function () {
+            if (holding !== session) return;
+            // The sixty-second cap. The slider goes back with it: a control
+            // still sitting at the recording end of its track after the
+            // recording has stopped is a control that is lying about what it
+            // is doing.
+            resetSlider();
+            endHold(false);
+        }, MAX_HOLD_MS);
     }
 
     function refuse(text) {
@@ -1352,8 +1575,7 @@
     // used to do; what changed is only how somebody says they want it.
     function engage() {
         if (holding || capture) return;
-        const button = clickable(IDS.mic);
-        if (!button) return;
+        if (!clickable(IDS.mic)) return;
         // Whatever else happens, this is a user gesture and Web Audio may be
         // unlocked by it. Done first and unconditionally so that a gesture that
         // is then refused still leaves playback able to work.
@@ -1385,9 +1607,12 @@
             return;
         }
 
-        const session = {at: Date.now(), cancelled: false};
+        const session = {engagedAt: nowMs(), cancelled: false, recordingAt: 0,
+                         capture: null, timer: 0, openTimer: 0};
         holding = session;
-        markMic("recording");
+        // OPENING, not RECORDING. The microphone has been asked for and nothing
+        // has been heard yet, and on a phone that gap is routinely a second.
+        markMic("opening");
 
         // The microphone is asked for *here*, in the same task as the gesture,
         // and not after the status check has come back. A browser only raises a
@@ -1399,7 +1624,7 @@
         // reconciled below; a WebUI that turns out not to be ready closes the
         // stream again immediately, which is a microphone open for a few
         // hundred milliseconds rather than a prompt that never appeared.
-        const opening = startCapture();
+        const opening = startCapture(session);
         // Handled here as well so that a rejection which the reconciliation
         // below decides not to look at is not an unhandled one.
         opening.catch(function () { /* reported by the chain below */ });
@@ -1407,47 +1632,62 @@
             return opening.then(releaseCapture, function () { /* nothing opened */ });
         };
 
-        refreshStatus(false).then(function (found) {
-            if (holding !== session) return discard();
-            if (!found || !found.ok) {
-                holding = null;
-                // The route's own sentence, not a generic one: "This page is out
-                // of date with the WebUI. Reload it." is actionable and
-                // "Voice transcription failed" is not.
-                refuse((found && found.error) || MESSAGES.failed);
-                return discard();
+        // A microphone that never opens must not leave the control pinned at
+        // the right for ever. Separate from the recording cap below, because
+        // they bound entirely different things -- see section 7.7.
+        session.openTimer = window.setTimeout(function () {
+            if (holding !== session || session.recordingAt) return;
+            holding = null;
+            session.cancelled = true;
+            resetSlider();
+            refuse(MESSAGES.unreadable);
+            discard();
+        }, OPEN_TIMEOUT_MS);
+
+        // The graph, as soon as it exists -- not after the status round trip.
+        // Sample acceptance used to wait for an HTTP request to the WebUI to
+        // come back, and every callback that arrived first was dropped on the
+        // floor: audio the microphone really had captured, thrown away because
+        // a status check had not answered yet. What the status answer still
+        // decides is whether the recording is *kept*, below.
+        opening.then(function (state) {
+            if (holding !== session || session.cancelled) {
+                releaseCapture(state);
+                return;
             }
-            if (!found.ready) {
-                holding = null;
-                refuse(found.not_ready_message || MESSAGES.notReady);
-                return discard();
-            }
-            return opening.then(function (state) {
-                if (holding !== session || session.cancelled) {
-                    releaseCapture(state);
-                    return;
-                }
-                capture = state;
-                session.timer = window.setTimeout(function () {
-                    if (holding !== session) return;
-                    // The sixty-second cap. The slider goes back with it: a
-                    // control still sitting at the recording end of its track
-                    // after the recording has stopped is a control that is
-                    // lying about what it is doing.
-                    sliding = null;
-                    markSliding(button, false);
-                    slideTo(button, 0);
-                    armTrack(button, false);
-                    endHold(false);
-                }, MAX_HOLD_MS);
-            });
+            capture = state;
+            session.capture = state;
+            session.graphAt = nowMs();
         }).catch(function (error) {
-            if (holding === session) holding = null;
-            markMic("");
+            if (holding !== session) return;
+            holding = null;
+            if (session.openTimer) window.clearTimeout(session.openTimer);
+            resetSlider();
             // Section 39's map, in one place. The browser's own error name is
             // the only thing that knows which of these happened, and each of
             // them is a different thing for the user to do next.
             refuse(captureFailure(error));
+        });
+
+        refreshStatus(false).then(function (found) {
+            if (holding !== session) return;
+            session.readinessAt = nowMs();
+            if (found && found.ok && found.ready) return;
+            // Not ready after all. Whatever has been captured is dropped, the
+            // tracks are stopped, and the reason is the route's own sentence:
+            // "This page is out of date with the WebUI. Reload it." is
+            // actionable and "Voice transcription failed" is not.
+            holding = null;
+            if (session.openTimer) window.clearTimeout(session.openTimer);
+            if (session.timer) window.clearTimeout(session.timer);
+            if (session.capture && capture === session.capture) capture = null;
+            resetSlider();
+            if (!found || !found.ok) {
+                refuse((found && found.error) || MESSAGES.failed);
+            } else {
+                refuse(found.not_ready_message || MESSAGES.notReady);
+            }
+            discard();
         });
     }
 
@@ -1456,15 +1696,33 @@
         holding = null;
         if (!session) return;
         if (session.timer) window.clearTimeout(session.timer);
+        if (session.openTimer) window.clearTimeout(session.openTimer);
         session.cancelled = cancelled;
+        session.releasedAt = nowMs();
 
         const state = capture;
         capture = null;
-        const held = Date.now() - session.at;
+        // From the first sample, not from the gesture. A phone that takes a
+        // second to open a Bluetooth microphone was charging that second to the
+        // user: hold for four hundred milliseconds of speech and the recording
+        // was "long enough" because the wait counted, or -- with the clock the
+        // other way round -- three hundred milliseconds of real speech was
+        // refused as a tap. `performance.now()` rather than `Date.now()`,
+        // because a wall clock that syncs mid-utterance can make a held button
+        // look like it was held for a negative length of time.
+        const held = session.recordingAt ? nowMs() - session.recordingAt : 0;
+        reportCaptureTiming(session, state);
         releaseCapture(state);
         markMic("");
 
         if (cancelled || !state) return;
+        if (!session.recordingAt) {
+            // Released while the microphone was still opening. Nothing was
+            // captured, so there is nothing to transcribe and nothing to refuse
+            // -- section 7.5. Saying "that was too short" here would be a
+            // sentence about the user when the wait was the device's.
+            return;
+        }
         if (held < MIN_HOLD_MS) {
             refuse(MESSAGES.tooShort);
             return;
@@ -1518,6 +1776,36 @@
     }
 
     let lastCapture = {narrowband: false, label: ""};
+
+    // Where a slow microphone actually went, in one line of durations.
+    //
+    // Every number is milliseconds from the engagement, on this browser's own
+    // monotonic clock, and together they separate the four things that used to
+    // be one unexplained second: the browser's permission and hardware
+    // (`microphone`), the module load (`worklet`), assembling the graph
+    // (`graph`), the WebUI's status answer (`ready`) and the first callback
+    // (`audio`). The one that matters most is the gap between `graph` and
+    // `audio`, because that is the device warming up and nothing this page can
+    // shorten -- and it is exactly the gap the control used to spend claiming
+    // to be recording.
+    //
+    // No device name, no level, no samples: `reportCapture` above says what was
+    // heard, and this says only how long it took to start hearing it.
+    function reportCaptureTiming(session, state) {
+        const since = function (mark) {
+            return mark ? Math.round(mark - session.engagedAt) : null;
+        };
+        try {
+            console.info("Model Chain: Voice Chat microphone timing — worklet "
+                         + since(session.workletAt) + " ms, microphone "
+                         + since(session.mediaAt) + " ms, graph "
+                         + since(session.graphAt) + " ms, ready "
+                         + since(session.readinessAt) + " ms, audio "
+                         + since(session.recordingAt) + " ms, released "
+                         + since(session.releasedAt) + " ms"
+                         + (state && state.firstPcmAt ? "" : " (nothing was captured)"));
+        } catch (error) { /* a console that will not take it is not a failure */ }
+    }
     let narrowbandSaid = false;
 
     // What to add to a status line when the microphone is the likely reason.
@@ -1632,8 +1920,31 @@
         else if (!wanted && has) track.classList.remove(name);
     }
 
+    // Red, and only red. "Armed" used to be added the instant the slide reached
+    // the end, which made the track say "recording" while the microphone was
+    // still opening; it now means what its colour means.
     function armTrack(button, armed) {
         trackClass(button, "mc-llm-voice-armed", armed);
+    }
+
+    // Pinned at the right and waiting, in a colour that is not the recording
+    // one. The feedback the gesture needs -- the handle has arrived and the
+    // control has taken the press -- without the claim that audio is arriving.
+    function engageTrack(button, engaged) {
+        trackClass(button, "mc-llm-voice-engaged", engaged);
+    }
+
+    // Everything the control has to be put back to, from wherever it got to.
+    // One function because there are five paths to it -- release, cancel, the
+    // opening timeout, a readiness refusal and the recording cap -- and four of
+    // them used to do a subset.
+    function resetSlider() {
+        const button = clickable(IDS.mic);
+        sliding = null;
+        markSliding(button, false);
+        slideTo(button, 0);
+        engageTrack(button, false);
+        armTrack(button, false);
     }
 
     // While a finger is on the handle it moves with the finger and does not
@@ -1663,6 +1974,15 @@
         // without a round trip standing between the gesture and the browser's
         // permission prompt. Nothing waits on it; it fills the cache.
         refreshStatus(false);
+        // And the same argument for the audio graph. Registering the capture
+        // processor touches no microphone -- section 7.4 permits exactly this
+        // and forbids the thing it would be easy to do next, which is opening
+        // the microphone because a finger moved. It is a module load, and doing
+        // it during the travel means the first utterance on a page costs what
+        // every later one does.
+        try {
+            ensureCaptureWorklet(audioContext());
+        } catch (error) { /* the capture path falls back on its own */ }
         try {
             if (event && event.pointerId !== undefined && button.setPointerCapture) {
                 button.setPointerCapture(event.pointerId);
@@ -1684,7 +2004,7 @@
             // started again under one continuous hold would be a worse control
             // than the one this replaced.
             slideTo(button, sliding.travel);
-            armTrack(button, true);
+            engageTrack(button, true);
             engage();
             return;
         }
@@ -1693,11 +2013,7 @@
 
     function endSlide(cancelled) {
         const session = sliding;
-        sliding = null;
-        const button = clickable(IDS.mic);
-        markSliding(button, false);
-        slideTo(button, 0);
-        armTrack(button, false);
+        resetSlider();
         if (!session) return;
         if (session.engaged) {
             endHold(!!cancelled);
@@ -1716,6 +2032,7 @@
         markMic("");
         markSliding(button, false);
         slideTo(button, 0);
+        engageTrack(button, false);
         armTrack(button, false);
 
         button.addEventListener("pointerdown", function (event) {
@@ -1742,7 +2059,7 @@
             if (event.repeat || sliding) return;
             if (event.preventDefault) event.preventDefault();
             sliding = {x: 0, travel: 0, engaged: true, keyboard: true};
-            armTrack(button, true);
+            engageTrack(button, true);
             engage();
         });
         button.addEventListener("keyup", function (event) {
@@ -1800,6 +2117,64 @@
     let lastTurn = "";
     let lastToken = "";
     let speaking = false;
+
+    // -- noticing a new turn, without waiting for a poll ---------------------- //
+
+    // Section 5.5's hierarchy, and the reason it is a hierarchy rather than one
+    // mechanism.
+    //
+    //   1. Gradio writes these hidden fields and dispatches `input` on them, so
+    //      a listener on the control itself is the fastest and cheapest signal
+    //      there is -- zero to four hundred milliseconds of poll delay becomes
+    //      one task.
+    //   2. Gradio also *replaces* those controls when it re-renders the panel,
+    //      and a listener on a node that is no longer in the document is a
+    //      listener that will never fire again. An observer on the holder
+    //      re-binds when that happens, and re-binding is idempotent -- the flag
+    //      is on the field, so a control that survived a re-render is not bound
+    //      a second time.
+    //   3. The poll below stays. `input` is dispatched by Gradio and not by the
+    //      DOM: a value assigned straight to `field.value` by a theme, a custom
+    //      component or a future version emits nothing at all, and observing an
+    //      input's *attributes* would not see it either -- `value` is an IDL
+    //      property, and assigning it changes no attribute a MutationObserver
+    //      is watching. So the poll is the recovery path, not the mechanism.
+
+    const speechWatchers = {};
+
+    function bindSpeechField(id) {
+        const field = fieldOf(id);
+        if (!field || !field.dataset || field.dataset.mcVoiceSpeech === "1") return;
+        field.dataset.mcVoiceSpeech = "1";
+        const look = function () { attempt("check for a reply to speak", checkSpeech); };
+        field.addEventListener("input", look);
+        field.addEventListener("change", look);
+        // A control that arrived already carrying a value -- which is what a
+        // re-render mid-reply looks like -- has no event left to emit.
+        look();
+    }
+
+    function watchSpeechFields() {
+        [IDS.turn, IDS.token].forEach(function (id) {
+            bindSpeechField(id);
+            const holder = byId(id);
+            if (!holder || typeof MutationObserver !== "function") return;
+            const seen = speechWatchers[id];
+            if (seen && seen.holder === holder) return;
+            if (seen && seen.observer) {
+                try { seen.observer.disconnect(); } catch (error) { /* already gone */ }
+            }
+            const observer = new MutationObserver(function () {
+                attempt("re-bind the reply watcher", function () { bindSpeechField(id); });
+            });
+            try {
+                observer.observe(holder, {childList: true, subtree: true});
+                speechWatchers[id] = {holder: holder, observer: observer};
+            } catch (error) {
+                speechWatchers[id] = {holder: holder, observer: null};
+            }
+        });
+    }
 
     function checkSpeech() {
         const turnId = fieldValue(IDS.turn);
@@ -3126,6 +3501,7 @@
 
     function wire() {
         attempt("wire the microphone", wireMicrophone);
+        attempt("watch for a reply to speak", watchSpeechFields);
         attempt("wire the voice gestures", wireGestures);
         attempt("wire the Voice Chat settings", wireSettings);
         attempt("wire the voice list", wireVoices);

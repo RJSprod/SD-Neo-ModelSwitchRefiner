@@ -21,17 +21,24 @@ R2-2. A package manager that can reach an index is a package manager that can
 install something nobody reviewed, and "the user clicked Download" does not make
 a transitive dependency resolved at three in the morning trustworthy. So the
 manifest names *every* wheel for each supported platform/Python pair, this module
-downloads each one itself and checks its hash, and the installation step runs
-``pip install --no-index --no-deps <local wheel> <local wheel>``: no index, no
-resolver, no opportunity for a byte to arrive that was not verified here first.
-``tests/test_voice_models.py`` puts a recording server in front of a fake index
-and asserts it is never asked for anything.
+downloads each one itself and checks its hash, and the installation step unpacks
+those verified wheels into an interpreter of its own: no index, no resolver, no
+package manager at all, and no opportunity for a byte to arrive that was not
+verified here first. ``tests/test_voice_models.py`` puts a recording server in
+front of a fake index and asserts it is never asked for anything.
+
+Which wheels the closure holds is itself a versioned decision. sherpa's own
+version says what the engine is; :func:`closure_id` says what the *environment*
+is, and it is derived from the platform and the ordered artifact hashes rather
+than remembered by hand -- so adding NumPy to the closure, as build 2 did, makes
+every already-installed two-wheel runtime stale without anybody having to think
+of bumping a number.
 
 Why some entries ship unpinned
 ------------------------------
 The runtime closure is pinned exactly -- eight platform/Python combinations,
-sixteen wheels, real sizes and real hashes read from PyPI at the revision this
-was written against. The two *model* bundles are not: their artifacts live on
+twenty-four wheels, real sizes and real hashes read from PyPI at the revision
+this was written against. The two *model* bundles are not: their artifacts live on
 huggingface.co and on a GitHub release, and pinning a hash means downloading the
 artifact and hashing it, which is a maintainer's job on a machine that can reach
 those hosts. Until somebody runs ``tools/pin_voice_models.py``, those entries
@@ -156,6 +163,24 @@ class RuntimePlatform:
         return (self.system == system
                 and machine in self.machines
                 and self.python == python)
+
+    @property
+    def closure_id(self) -> str:
+        """A fingerprint of exactly which wheels this platform installs.
+
+        Derived rather than declared, which is the whole point. A build number
+        is a promise somebody remembered to keep; this is the platform id and
+        the ordered ``local_name:sha256`` of every artifact, hashed -- so adding
+        a wheel, removing one, reordering the closure or re-pinning any single
+        hash all change it without a maintainer having to notice that they
+        should.
+
+        Sixteen hex characters, because this is compared against a value this
+        installer wrote itself rather than defended against a forger.
+        """
+        parts = [self.identifier]
+        parts += [f"{item.local_name}:{item.sha256 or ''}" for item in self.artifacts]
+        return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
@@ -319,6 +344,12 @@ def _read_manifest(path: Path) -> dict:
     return {
         "version": int(raw.get("version") or 1),
         "runtime_version": str(runtime.get("version") or ""),
+        # The environment's own version, which is not sherpa's. See
+        # :func:`closure_id`: this number is for humans and release notes, and
+        # the derived fingerprint beside it is what freshness is actually
+        # decided on.
+        "runtime_build": int(runtime.get("build") or 1),
+        "runtime_numpy": str(runtime.get("numpy_version") or ""),
         "runtime_package": str(runtime.get("package") or ""),
         "runtime_import": str(runtime.get("import_name") or "sherpa_onnx"),
         "runtime_license": str(runtime.get("license") or ""),
@@ -628,12 +659,15 @@ def describe_host() -> str:
     try:
         spec = manifest()
         wanted = spec["runtime_version"]
+        build = f"{spec['runtime_build']}, NumPy {spec['runtime_numpy'] or 'none'}"
     except Exception:
         wanted = "unreadable manifest"
+        build = "unknown"
     interpreter = runtime_python()
     return (f"{system}/{machine}, Python {python_version} ({sys.version.split()[0]}), "
             f"runtime platform {chosen.identifier if chosen else 'NONE MATCHED'}, "
-            f"pinned sherpa-onnx {wanted}, "
+            f"closure {chosen.closure_id if chosen else 'none'}, "
+            f"pinned sherpa-onnx {wanted}, runtime build {build}, "
             f"isolated interpreter {'present' if interpreter else 'absent'}, "
             f"voice root {paths.data_root()}, "
             f"local pins {'present' if local_pins_path().exists() else 'absent'}")
@@ -761,6 +795,17 @@ def _status() -> Status:
 
 
 def _runtime_state(spec: dict, chosen: RuntimePlatform) -> tuple[bool, str]:
+    """Whether the installed runtime is the one this extension now describes.
+
+    Three questions, and the third is the one that was missing. sherpa's version
+    says which *engine* is installed and the platform id says which Python it
+    was built for, but neither notices that the closure gained a wheel: a
+    runtime provisioned before NumPy joined it reports sherpa-onnx 1.13.6 on the
+    right platform and is, for the purpose of streaming speech, not the runtime
+    this repository ships. :attr:`RuntimePlatform.closure_id` is what tells them
+    apart, and an installation from before that field existed has none -- which
+    is the same answer as a mismatch and produces the same reprovisioning.
+    """
     record = _read_json(paths.runtime_manifest())
     if record is None:
         return False, "Not installed"
@@ -769,10 +814,15 @@ def _runtime_state(spec: dict, chosen: RuntimePlatform) -> tuple[bool, str]:
                        f"version this extension is pinned to ({spec['runtime_version']}).")
     if record.get("platform_id") != chosen.identifier:
         return False, ("The installed runtime was built for a different Python or platform.")
+    if record.get("runtime_closure_id") != chosen.closure_id:
+        return False, ("The installed voice runtime was built from a different set of wheels "
+                       "than this extension now pins. Install it again to bring it up to "
+                       "date.")
     interpreter = runtime_python()
     if interpreter is None or not interpreter.is_file():
         return False, "The installed runtime's interpreter is missing."
-    return True, f"Installed — sherpa-onnx {spec['runtime_version']}, CPU"
+    return True, (f"Installed — sherpa-onnx {spec['runtime_version']}, CPU, "
+                  f"runtime build {spec['runtime_build']}")
 
 
 def _model_state(entry: VoiceModel) -> tuple[bool, str]:
@@ -1369,9 +1419,16 @@ def install_runtime(on_status=None, on_progress=None, folder=None) -> None:
         _write_json(staging / paths.INSTALLED_FILENAME, {
             "schema": SCHEMA,
             "runtime_version": spec["runtime_version"],
+            # The engine version above, the environment's version here, and the
+            # fingerprint of what is actually unpacked below it. Only the last
+            # of the three decides freshness -- see :func:`_runtime_state` --
+            # but the other two are what a person reads in a bug report.
+            "runtime_build": spec["runtime_build"],
+            "runtime_closure_id": chosen.closure_id,
             "platform_id": chosen.identifier,
             "python": chosen.python,
             "provider": report.get("provider", "cpu"),
+            "numpy_version": report.get("numpy_version", ""),
             "artifacts": {item.local_name: item.sha256 for item in chosen.artifacts},
             "installed_at": time.time(),
         })
@@ -1865,6 +1922,18 @@ def _smoke_test(staging: Path, spec: dict) -> dict:
         raise VoiceError(f"The staged Voice Chat runtime is sherpa-onnx "
                          f"{report['runtime_version']}, not the pinned "
                          f"{spec['runtime_version']}. Nothing was installed.")
+    # Reported, never enforced. NumPy is what lets sherpa hand back a sentence
+    # of audio while it is still computing the next one; without it speech
+    # arrives a segment at a time, which is slower and is not a reason to refuse
+    # an installation that otherwise works. Section 6.7: no optimization turns a
+    # recoverable latency problem into "Voice Chat does not speak".
+    if report.get("numpy_version"):
+        logger.info("Model Chain: Voice Chat's isolated runtime has NumPy %s, so speech can "
+                    "stream a sentence at a time", report["numpy_version"])
+    else:
+        logger.warning("Model Chain: Voice Chat's isolated runtime could not import NumPy (%s), "
+                       "so speech will arrive one segment at a time rather than one sentence "
+                       "at a time", report.get("numpy_error") or "no reason reported")
     return report
 
 

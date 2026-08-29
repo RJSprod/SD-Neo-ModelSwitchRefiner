@@ -26,7 +26,8 @@ import mc_voice_turn as turns
 class Speaker:
     """A worker that answers instantly and records what it was asked."""
 
-    def __init__(self, rate: int = 24000, blocks: int = 1, samples: int = 1200):
+    def __init__(self, rate: int = 24000, blocks: int = 1, samples: int = 1200,
+                 warm: bool = True, prepare_error=None):
         self.rate = rate
         self.blocks = blocks
         self.samples = samples
@@ -34,14 +35,29 @@ class Speaker:
         self.began = []
         self.cancelled = []
         self.finished = []
+        self.prepared = 0
+        self.warm = warm
+        self.prepare_error = prepare_error
+        # Order matters more than counts for the warmup: "the worker was asked
+        # to be ready before any text was handed over" is the whole claim.
+        self.calls = []
+
+    def prepare(self):
+        self.prepared += 1
+        self.calls.append("prepare")
+        if self.prepare_error is not None:
+            raise self.prepare_error
+        return self.warm
 
     def begin_turn(self, turn, sid, speed=1.0):
         self.began.append(int(sid))
+        self.calls.append("begin")
         turn.sample_rate = self.rate
         return self.rate
 
     def send_segment(self, turn, text):
         self.segments.append(text)
+        self.calls.append("segment")
         for _block in range(self.blocks):
             turn.offer_audio(b"\x01\x00" * self.samples, self.rate)
 
@@ -51,6 +67,18 @@ class Speaker:
 
     def cancel_turn(self, turn):
         self.cancelled.append(turn.id)
+
+
+class OldSpeaker(Speaker):
+    """A speaker from before ``prepare`` existed.
+
+    The turn asks for the method rather than requiring it, so a stub, a test
+    double or a future alternative speaker that has never heard of warmup still
+    speaks. Worth a class of its own because "optional" is easy to write and
+    easy to stop being true.
+    """
+
+    prepare = None
 
 
 def drain(turn, seconds: float = 3.0) -> int:
@@ -260,11 +288,143 @@ class TestMetrics:
         assert found["voice_type"] == "official"
         assert set(found) == {"source_chars", "base_chars", "segments", "chunks",
                               "audio_seconds", "compute_seconds", "rtf", "first_segment_ms",
-                              "first_audio_ms", "cancelled", "voice_type", "sid"}
+                              "first_audio_ms", "cancelled", "voice_type", "sid",
+                              "worker_warm_at_turn_start", "runtime_prepare_ms",
+                              "segment_1_chars", "segment_2_chars", "segment_wait_2_ms",
+                              "streaming", "callback_blocks", "first_callback_ms",
+                              "segment_1_blocks", "segment_2_blocks"}
 
     def test_a_clone_is_categorised_without_naming_itself(self):
         turn = turns.create(voice_id="clone:1234", sid=53, speaker=Speaker())
         assert turn.metrics()["voice_type"] == "clone"
+
+
+class TestWarmingTheWorkerEarly:
+    """The cold-start overlap, and the four ways it must not misbehave.
+
+    On a cold run the worker has four hundred megabytes of ONNX to read, and it
+    used to read them after the model had finished writing its first sentence
+    rather than while it was writing it. Both are the machine waiting; only one
+    of them is the user waiting.
+    """
+
+    def test_the_worker_is_asked_to_be_ready_before_any_text_arrives(self):
+        speaker = Speaker()
+        turn = turns.create(sid=0, speaker=speaker)
+        turn.attached.set()
+        turn.start()
+        # Nothing has been fed yet. The pump is already warming.
+        deadline = time.monotonic() + 2.0
+        while not speaker.prepared and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert speaker.prepared == 1
+        assert speaker.calls[0] == "prepare"
+        spoken(turn, ["Hello there, and this is a whole sentence to say. "])
+        drain(turn)
+        assert speaker.calls.index("prepare") < speaker.calls.index("segment")
+
+    def test_it_happens_once_and_the_turn_still_opens_once(self):
+        speaker = Speaker()
+        turn = turns.create(sid=0, speaker=speaker)
+        turn.attached.set()
+        turn.start()
+        spoken(turn, ["One sentence, and then a second one to be sure. ",
+                      "And a third that is long enough to be its own segment as well. "])
+        drain(turn)
+        assert speaker.prepared == 1
+        assert len(speaker.began) == 1
+
+    def test_add_text_does_not_wait_for_a_slow_cold_start(self):
+        """The invariant the whole overlap rests on: warming happens on the
+        turn's own thread, and the generator's thread never touches it."""
+        class Slow(Speaker):
+            def prepare(self):
+                time.sleep(0.4)
+                return super().prepare()
+
+        speaker = Slow()
+        turn = turns.create(sid=0, speaker=speaker)
+        turn.attached.set()
+        turn.start()
+        started = time.monotonic()
+        for _ in range(50):
+            turn.add_text("Some more of the reply arrives here. ")
+        assert time.monotonic() - started < 0.2, "add_text waited for the worker"
+        turn.cancel("test")
+
+    def test_a_warm_worker_is_recorded_as_warm(self):
+        speaker = Speaker(warm=True)
+        turn = turns.create(sid=0, speaker=speaker)
+        turn.attached.set()
+        turn.start()
+        spoken(turn, ["A whole sentence, said once and recorded once. "])
+        drain(turn)
+        assert turn.metrics()["worker_warm_at_turn_start"] is True
+
+    def test_a_cold_worker_is_recorded_as_cold(self):
+        """Section 6: a first-audio time that includes a model load is not the
+        same measurement as one that does not."""
+        speaker = Speaker(warm=False)
+        turn = turns.create(sid=0, speaker=speaker)
+        turn.attached.set()
+        turn.start()
+        spoken(turn, ["A whole sentence, said once and recorded once. "])
+        drain(turn)
+        found = turn.metrics()
+        assert found["worker_warm_at_turn_start"] is False
+        assert found["runtime_prepare_ms"] is not None
+
+    def test_a_failed_warmup_leaves_the_turn_to_report_it_properly(self):
+        """A cold-start failure is a Voice error, and it is `begin_turn`'s to
+        raise: cancelling the turn here would report a worker problem as though
+        the reply itself had gone wrong."""
+        import mc_voice_runtime
+
+        class Broken(Speaker):
+            def prepare(self):
+                super().prepare()
+
+            def begin_turn(self, turn, sid, speed=1.0):
+                raise mc_voice_runtime.VoiceRuntimeError("Voice Chat is not set up.")
+
+        speaker = Broken(prepare_error=RuntimeError("no runtime"))
+        turn = turns.create(sid=0, speaker=speaker)
+        turn.attached.set()
+        turn.start()
+        spoken(turn, ["A whole sentence that will not be spoken today. "])
+        turn.finished.wait(2.0)
+        assert speaker.prepared == 1
+        assert turn.error == "Voice Chat is not set up."
+        assert turn.reason == "error"
+
+    def test_a_turn_with_no_text_never_synthesizes(self):
+        speaker = Speaker()
+        turn = turns.create(sid=0, speaker=speaker)
+        turn._pump = None
+        turn.start()
+        time.sleep(0.1)
+        turn.cancel("test")
+        turn.finished.wait(2.0)
+        assert speaker.began == []
+        assert speaker.segments == []
+
+    def test_cancelling_before_the_first_segment_ends_cleanly(self):
+        speaker = Speaker()
+        turn = turns.create(sid=0, speaker=speaker)
+        turn.start()
+        turn.cancel("user")
+        assert turn.finished.wait(2.0)
+        assert speaker.began == []
+
+    def test_a_speaker_without_warmup_still_speaks(self):
+        speaker = OldSpeaker()
+        turn = turns.create(sid=0, speaker=speaker)
+        turn.attached.set()
+        turn.start()
+        spoken(turn, ["A whole sentence, spoken by a speaker that cannot warm up. "])
+        drain(turn)
+        assert speaker.segments
+        assert turn.metrics()["worker_warm_at_turn_start"] is None
 
 
 class TestTheClientWatchdog:

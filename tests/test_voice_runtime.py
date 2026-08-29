@@ -97,6 +97,57 @@ class TestStarting:
             runtime.ensure_started()
 
 
+class TestWarmingUpWithoutATurn:
+    """``prepare`` is ``ensure_started`` with a question in front of it, and the
+    things it must not do are the reason it is a separate function at all."""
+
+    def test_it_starts_a_cold_worker_and_says_it_was_cold(self, fake_worker):
+        assert runtime.status()["running"] is False
+        assert runtime.prepare() is False
+        assert runtime.status()["running"] is True
+
+    def test_a_second_call_reuses_the_worker_and_says_it_was_warm(self, fake_worker):
+        runtime.prepare()
+        pid = runtime.status()["pid"]
+        assert runtime.prepare() is True
+        assert runtime.status()["pid"] == pid
+
+    def test_it_registers_no_turn_and_claims_no_inference_lane(self, fake_worker):
+        """The whole difference between warming and speaking. A warmed worker
+        that is then cancelled before any text arrives must leave nothing
+        behind but a warm worker."""
+        runtime.prepare()
+        assert runtime._turns == {}
+        assert runtime._busy["tts"] == 0
+        assert runtime.engine()["state"] == "idle"
+
+    def test_it_sends_nothing_a_turn_would_send(self, fake_worker, monkeypatch):
+        """No ``tts_begin``, no ``tts_text``: warming is not speaking, and a
+        worker that had been told a turn was open would be a worker holding a
+        turn nobody created."""
+        original = runtime._write
+        sent = []
+
+        def record(header, payload=b""):
+            sent.append(str(header.get("op") or ""))
+            return original(header, payload)
+
+        monkeypatch.setattr(runtime, "_write", record)
+        runtime.prepare()
+        assert sent, "the handshake itself writes nothing"
+        assert not [op for op in sent if op.startswith("tts")], sent
+
+    def test_a_runtime_that_is_not_installed_refuses_readably(self, voice_root, monkeypatch):
+        import mc_voice_models
+
+        monkeypatch.setattr(mc_voice_models, "status", lambda: mc_voice_models.Status(
+            runtime_ready=False, stt_ready=False, tts_ready=False, runtime_message="no",
+            stt_message="no", tts_message="no", platform_supported=True))
+        with pytest.raises(runtime.VoiceRuntimeError, match="not set up"):
+            runtime.prepare()
+        assert runtime.status()["running"] is False
+
+
 class TestRoundTrips:
     def test_audio_goes_in_and_a_transcript_comes_back(self, fake_worker):
         assert runtime.transcribe(fake_worker.wav)["text"] == fake_worker.transcript
@@ -276,6 +327,7 @@ class Sink:
         self.id = identifier
         self.sample_rate = 0
         self.blocks = []
+        self.segments = []
         self.done = False
         self.error = ""
         self.cancelled = threading.Event()
@@ -289,6 +341,10 @@ class Sink:
         self.sample_rate = self.sample_rate or rate
         self.started.set()
         return True
+
+    def note_segment(self, blocks=0, first_block_ms=0, streaming=""):
+        self.segments.append({"blocks": blocks, "first_block_ms": first_block_ms,
+                              "streaming": streaming})
 
     def audio_finished(self):
         self.done = True
@@ -334,6 +390,21 @@ class TestStreamingSpeech:
         runtime.finish_turn(sink)
         assert sink.finished.wait(5.0)
         assert sink.done and sink.blocks
+
+    def test_the_shape_of_each_segment_reaches_the_turn(self, fake_worker):
+        """Section 4's distinction, carried the whole way: how many batches the
+        worker handed back and how soon the first of them came. A handshake
+        that says "callback" is not evidence that any audio arrived early."""
+        sink = Sink()
+        stream_one(sink)
+        assert sink.segments, "no segment shape was reported"
+        assert sink.segments[0]["blocks"] >= 1
+        assert sink.segments[0]["streaming"] == "callback"
+
+    def test_the_handshake_records_what_the_probe_cost(self, fake_worker):
+        runtime.ensure_started()
+        assert runtime._handshake.callback_probe_ms >= 0
+        assert runtime.engine()["streaming"] == "callback"
 
     def test_a_speaker_the_bank_does_not_have_is_refused_rather_than_swapped(self,
                                                                             fake_worker):

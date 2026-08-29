@@ -123,6 +123,7 @@ class TestNothingSaidIsLogged:
             sample_rate = 24000
             bank_version = ""
             streaming = "segment"
+            callback_probe_ms = 0
 
             def speaker(self, sid):
                 return int(sid or 0)
@@ -248,6 +249,7 @@ class TestNoNetwork:
             sample_rate = 24000
             bank_version = ""
             streaming = "segment"
+            callback_probe_ms = 0
 
             def speaker(self, sid):
                 return int(sid or 0)

@@ -2938,12 +2938,20 @@ than after all of it. Stop is one button for both halves: it ends the generation
 *and* the speech, and it stays on screen while the speaker is still talking.
 
 Audio leaves the speech worker at one of two granularities, and the Voice
-runtime line in the log says which one you have. *Segment streaming* is the
-ordinary case: each committed sentence is synthesised and handed over whole.
-*Callback streaming* is finer — sherpa hands back each sentence batch mid-call —
-and needs NumPy in the speech runtime, which is two unpacked wheels and does not
-have it. The difference is granularity inside one sentence; both start speaking
-long before the reply is finished, which is the thing that matters.
+runtime line in the log says which one you have. *Segment streaming* waits for a
+whole committed segment to be synthesised and hands it over at the end.
+*Callback streaming* hands back each sentence batch as sherpa finishes it, which
+needs NumPy in the speech runtime — and since this release the runtime has it,
+pinned in the same closure as the engine itself.
+
+What that is worth is worth stating precisely, because it is easy to oversell.
+The worker asks sherpa for one sentence per batch, so callback mode delivers one
+block per sentence: measured on the pinned runtime, a four-sentence request hands
+its first audio over at 64 ms of a 286 ms synthesis, and a *one*-sentence request
+gets its single block when the synthesis is already finished. So callback mode
+buys overlap across sentences and nothing at all inside one — which is why the
+segment targets, the early worker start and the browser's own buffer are separate
+work rather than things NumPy was going to fix.
 
 **There are twenty-eight voices**, all the English ones the installed Kokoro
 bundle ships, chosen in Settings and auditioned there. On Linux, an optional
@@ -2988,9 +2996,11 @@ token, no GitHub login, nothing to sign up for.
 Every artifact is checked before it is installed, and the row says who did the
 vouching, because there are two answers and they are not equally strong.
 
-**The runtime wheels are pinned in this repository** — sixteen of them, real
-sizes and SHA-256s committed in `voice/managed-voice-models.json` and reviewed
-like any other source file. A byte that does not match is discarded. They are
+**The runtime wheels are pinned in this repository** — twenty-four of them, the
+engine, its compiled core and NumPy for each of eight platform and Python
+combinations, with real sizes and SHA-256s committed in
+`voice/managed-voice-models.json` and reviewed like any other source file. A byte
+that does not match is discarded. They are
 installed by *unpacking* rather than by a package manager: a wheel that needs no
 build step is a zip, and installing one is unzipping it into the runtime. That
 is not only simpler, it is the fix for a real failure — pip can exit zero having
@@ -3002,6 +3012,20 @@ trivially true. The isolated environment is built without pip for the same
 reason: `ensurepip` is one of the likelier things to be broken on the embedded
 Pythons a WebUI is launched from, and it was being installed only to be used
 once.
+
+**NumPy is installed into that runtime and nowhere else.** It is there because
+sherpa hands a batch of samples back through a pybind11 `py::array_t<float>`,
+which needs NumPy in the interpreter running the callback — and that interpreter
+is the isolated one. Voice Chat never adds, upgrades, downgrades or removes a
+package in the Forge environment, which has its own NumPy with its own
+constraints and its own things depending on it.
+
+The manifest also carries a fingerprint of exactly which wheels a platform
+installs, derived from their names and hashes. That is what noticed this change:
+sherpa's version and the platform id were both unchanged when NumPy joined, so
+an existing installation would have reported itself current while missing the
+one wheel this release adds. Settings says the runtime needs installing again,
+one press reprovisions it, and nothing else on the machine is touched.
 
 **The model bundles are resolved from the publisher at install time.** Pinning
 those means fetching several hundred megabytes and hashing them, which is a
@@ -3113,8 +3137,18 @@ moment you tap them, so there is no Apply to remember.
   gesture no platform wants, and opening a microphone stops being something
   anybody does by brushing against a button. Holding **Space** or **Enter** on
   the focused microphone is the same contract from a keyboard.
-- Under a quarter of a second is treated as a slip, not an utterance. Sixty
-  seconds is the ceiling, at which point it stops and transcribes what it has.
+- **Amber means opening; red means recording.** Reaching the far end of the
+  track asks the browser for the microphone, and on a phone — a Bluetooth
+  headset especially — that can take a second to answer. The control says
+  "Opening microphone" for exactly as long as that takes, and turns red at the
+  first audio frame that actually arrives. When it says it is recording, it is
+  recording.
+- Under a quarter of a second is treated as a slip, not an utterance — measured
+  from the first frame of audio, so a device that was slow to wake spends its own
+  time and not yours. Sixty seconds is the ceiling, counted the same way, at
+  which point it stops and transcribes what it has. Letting go while it is still
+  opening records nothing, says nothing about being too short, and stops the
+  microphone the moment the browser gets round to handing it over.
 - If your browser will not open a microphone at all, Voice Chat says which of
   the reasons it was. The common one on a phone is the page not being a secure
   context — `http://192.168.…` is the ordinary way to reach a WebUI from a
@@ -3131,7 +3165,12 @@ moment you tap them, so there is no Apply to remember.
   on the PC rather than merely silencing it, and it is what stops a phone from
   recording its own loudspeaker.
 - *Speak replies automatically* starts speaking as soon as the reply's first
-  complete sentence exists, and keeps up with it from there.
+  complete sentence exists, and keeps up with it from there. The first sentence
+  is committed the moment it is whole, even if the next one has begun arriving in
+  the same chunk; the second one has a lower threshold than the rest, because it
+  is the one with nothing queued in front of it; and the speech worker starts
+  warming while the model is still writing, so a cold run does not read four
+  hundred megabytes of ONNX after the first sentence instead of during it.
 - **Stop stops both.** One press ends the generation and the speech, and Stop
   stays in the composer while the speaker is still talking — so a long answer
   that has finished arriving can still be silenced.
