@@ -1546,11 +1546,7 @@
             // still sitting at the recording end of its track after the
             // recording has stopped is a control that is lying about what it
             // is doing.
-            sliding = null;
-            markSliding(button, false);
-            slideTo(button, 0);
-            engageTrack(button, false);
-            armTrack(button, false);
+            resetSlider();
             endHold(false);
         }, MAX_HOLD_MS);
     }
@@ -1579,8 +1575,7 @@
     // used to do; what changed is only how somebody says they want it.
     function engage() {
         if (holding || capture) return;
-        const button = clickable(IDS.mic);
-        if (!button) return;
+        if (!clickable(IDS.mic)) return;
         // Whatever else happens, this is a user gesture and Web Audio may be
         // unlocked by it. Done first and unconditionally so that a gesture that
         // is then refused still leaves playback able to work.
@@ -1685,7 +1680,7 @@
             holding = null;
             if (session.openTimer) window.clearTimeout(session.openTimer);
             if (session.timer) window.clearTimeout(session.timer);
-            if (capture === session.capture) capture = null;
+            if (session.capture && capture === session.capture) capture = null;
             resetSlider();
             if (!found || !found.ok) {
                 refuse((found && found.error) || MESSAGES.failed);
