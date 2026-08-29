@@ -56,6 +56,61 @@ class TestWhatCommitsAndWhen:
         assert machine.feed("This sentence has not finished yet and there is no") == []
         assert machine.pending
 
+    def test_a_short_first_sentence_commits_even_with_the_next_one_behind_it(self):
+        """The streaming-edge condition, and the reason it is not cosmetic.
+
+        A model that writes "Yes, that's possible. Here is the" in one delta has
+        finished the first sentence at exactly the moment one that wrote it
+        alone did. Holding it back because something arrived behind it made the
+        first segment's latency a property of chunk boundaries.
+        """
+        machine = segment.Segmenter()
+        found = machine.feed("Yes, that's possible. Here is the next sentence beginning")
+        assert found == ["Yes, that's possible."]
+        assert machine.pending == " Here is the next sentence beginning"
+
+    def test_the_opening_is_still_a_sentence_and_not_a_fragment(self):
+        """SHORT_SENTENCE is what stops the correction above from turning a
+        numbered list into speech one item at a time: the full stop after "1."
+        is a real boundary by every guard this module has, and two characters
+        is not a sentence."""
+        machine = segment.Segmenter()
+        found = machine.feed("1. First item here, and then rather more of it follows.")
+        assert found == ["First item here, and then rather more of it follows."]
+
+    def test_no_text_is_lost_or_repeated_across_the_correction(self):
+        machine = segment.Segmenter()
+        found = machine.feed("Yes, that's possible. Here is the next sentence beginning")
+        found += machine.feed(" and here is the end of it.")
+        found += machine.flush()
+        joined = " ".join(found)
+        assert joined.count("Yes, that's possible.") == 1
+        assert "Here is the next sentence beginning and here is the end of it." in joined
+
+    def test_the_second_segment_does_not_wait_for_the_ordinary_target(self):
+        """The first-to-second gap, stated as the thing that causes it: sentence
+        one is playing, and sentence two used to need a hundred characters."""
+        machine = segment.Segmenter()
+        assert machine.feed("Yes, that's possible.") == ["Yes, that's possible."]
+        text = "It takes a little more than fifty characters to say this."
+        assert len(text) < segment.TARGET, "this test would pass for the wrong reason"
+        assert machine.feed(" " + text) == [text]
+
+    def test_later_segments_keep_the_ordinary_target(self):
+        """Only the second one is hurried. By the third there is audio queued in
+        front of it, and a longer segment sounds better for free."""
+        machine = segment.Segmenter()
+        machine.feed("Yes, that's possible.")
+        machine.feed(" It takes a little more than fifty characters to say this.")
+        assert machine.segments == 2
+        assert machine.feed(" A third sentence of about sixty characters goes here.") == []
+        assert machine.pending.strip().startswith("A third")
+
+    def test_the_targets_are_ordered_the_way_the_latency_is(self):
+        machine = segment.Segmenter()
+        assert machine.first_target >= machine.second_target
+        assert machine.second_target <= machine.target
+
 
 class TestTheGuards:
     def test_t_seg_4_a_decimal_point_is_not_a_sentence(self):

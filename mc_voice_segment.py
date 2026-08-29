@@ -66,6 +66,18 @@ before it is. A complete short sentence commits below this -- see
 is whole rather than waiting for a paragraph that may be four seconds away.
 """
 
+SECOND_TARGET = 50
+"""Characters before the *second* segment is worth committing.
+
+The second segment is where the reported gap actually is. The first one commits
+early and is spoken almost immediately; the second one used to wait for the
+ordinary hundred-character target, and a hundred characters of a reply that is
+still being written can be several seconds away -- long enough for playback of
+sentence one to run out before sentence two exists. Lower than TARGET and
+higher than a phrase, because a target this low applied to *every* segment
+would turn one synthesis call into four and put a seam between each of them.
+"""
+
 TARGET = 100
 SOFT_MAX = 320
 HARD_MAX = 480
@@ -374,6 +386,29 @@ def _sentence_at_or_before(text: str, limit: int, fence=lambda _index: False) ->
     return best
 
 
+def _first_sentence(text: str, minimum: int, limit: int, fence=lambda _index: False) -> int:
+    """The *earliest* sentence boundary at least ``minimum`` characters in, or 0.
+
+    The opposite end of the same scan as :func:`_sentence_at_or_before`, and the
+    reason it exists is latency rather than correctness. Taking the last
+    boundary is right for an ordinary segment, where a longer piece of text is a
+    better synthesis call. It is wrong for the opening of a reply: "Yes, that's
+    possible." is the whole answer, and holding it back because the next
+    sentence has begun to arrive in the same streamed chunk is exactly the delay
+    the first segment exists to avoid.
+
+    ``minimum`` is what stops "1." and a stray "Mr." from becoming a segment;
+    every guard :func:`_sentence_end` applies is applied here unchanged.
+    """
+    index = 0
+    while index < min(limit, len(text)):
+        cut = _sentence_end(text, index)
+        if cut and cut <= limit and cut >= minimum and not fence(index):
+            return cut
+        index += 1
+    return 0
+
+
 # --------------------------------------------------------------------------- #
 # The segmenter
 # --------------------------------------------------------------------------- #
@@ -398,10 +433,12 @@ class Segmenter:
     """
 
     def __init__(self, labels=(), first_target: int = FIRST_TARGET, target: int = TARGET,
-                 soft_max: int = SOFT_MAX, hard_max: int = HARD_MAX):
+                 soft_max: int = SOFT_MAX, hard_max: int = HARD_MAX,
+                 second_target: int = SECOND_TARGET):
         self.labels = tuple(str(name or "").strip() for name in (labels or ()) if str(name or "").strip())
         self.first_target = max(1, int(first_target))
         self.target = max(self.first_target, int(target))
+        self.second_target = min(self.target, max(1, int(second_target)))
         self.soft_max = max(self.target, int(soft_max))
         self.hard_max = max(self.soft_max, int(hard_max))
         self._buffer = ""
@@ -516,10 +553,26 @@ class Segmenter:
         self._segments += 1
         return spoken
 
+    def _target(self) -> int:
+        """The weak-boundary target for the segment about to be committed.
+
+        Three values rather than two, and the middle one is the whole of the
+        reported first-to-second gap. The opening commits early because nothing
+        is playing yet; the second one has to commit early because sentence one
+        *is* playing and the producer has no lead at all; by the third there is
+        audio queued ahead of it and a longer, better-sounding segment costs
+        nothing anybody can hear.
+        """
+        if self._segments == 0:
+            return self.first_target
+        if self._segments == 1:
+            return self.second_target
+        return self.target
+
     def _cut(self, text: str, final: bool) -> int:
         """How much of ``text`` is safe to speak, or 0 for "not yet"."""
         length = len(text)
-        target = self.first_target if self._segments == 0 else self.target
+        target = self._target()
         opened = self._fence_open
 
         def fence(index: int) -> bool:
@@ -551,18 +604,25 @@ class Segmenter:
         if paragraph and len(text[:paragraph].strip()) >= SHORT_SENTENCE:
             return paragraph
 
-        # 2. A sentence, once there is enough of a segment to be worth one --
-        #    or a complete short sentence, which section 8 explicitly allows to
-        #    commit early because "Yes, that's possible." is the whole answer.
-        sentence = _sentence_at_or_before(text, min(length, self.hard_max), fence)
-        if sentence:
-            enough = sentence >= target or (
-                self._segments == 0 and sentence >= SHORT_SENTENCE
-                and sentence >= len(text.rstrip()))
-            if enough:
-                return sentence
+        # 2. The opening, before anything else is considered: the first
+        #    validated sentence long enough to be one is committed as soon as it
+        #    is whole. Not "as soon as it is whole and nothing has arrived
+        #    behind it" -- that was the streaming-edge condition this corrects.
+        #    A model that emits "Yes, that's possible. Here is the next" in one
+        #    delta had written the answer just as early as one that emitted the
+        #    sentence on its own, and holding it back for the accident of chunk
+        #    boundaries cost the first segment its whole reason for existing.
+        if self._segments == 0:
+            opening = _first_sentence(text, SHORT_SENTENCE, min(length, self.hard_max), fence)
+            if opening:
+                return opening
 
-        # 3. A clause, but only once the unsent text is long enough that
+        # 3. A sentence, once there is enough of a segment to be worth one.
+        sentence = _sentence_at_or_before(text, min(length, self.hard_max), fence)
+        if sentence and sentence >= target:
+            return sentence
+
+        # 4. A clause, but only once the unsent text is long enough that
         #    waiting for a sentence is the bigger risk.
         if length >= self.soft_max:
             clause = _clause_end(text, self.soft_max, fence)
@@ -572,7 +632,7 @@ class Segmenter:
             if comma >= target:
                 return comma
 
-        # 4. The ceiling. A word boundary, never inside a word, and only when
+        # 5. The ceiling. A word boundary, never inside a word, and only when
         #    the text really has run past the hard maximum with no punctuation
         #    in it at all.
         if length >= self.hard_max:
