@@ -19,6 +19,8 @@ perfectly. These tests are that bug, written down.
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from voice_worker import worker
@@ -160,6 +162,93 @@ class TestSpeakingEitherWay:
         found = engines(Tts())
         with pytest.raises(ValueError, match="voice bank"):
             found.stream("Hello.", 999, worker.NEUTRAL, lambda block, rate: True)
+
+
+class TestReadingTheProcessPriority:
+    """Observation only, and a value that is not a lie.
+
+    The first shipped version reported ``priority=class_0x0`` in real logs.
+    Zero is not a Windows priority class: it is ``GetPriorityClass`` returning
+    failure, most likely because an undeclared pointer-sized handle reached a
+    64-bit API as an int. A diagnostic that reports a failed read as a value is
+    worse than no diagnostic at all, because it is the thing somebody will
+    reason from.
+    """
+
+    def test_it_reports_this_process_nice_value_on_linux(self, monkeypatch):
+        monkeypatch.setattr(worker.os, "name", "posix")
+        found = worker._priority()
+        assert found.startswith("nice"), found
+        assert int(found[4:]) == worker.os.getpriority(worker.os.PRIO_PROCESS, 0)
+
+    def test_reading_it_does_not_change_it(self, monkeypatch):
+        monkeypatch.setattr(worker.os, "name", "posix")
+        before = worker.os.getpriority(worker.os.PRIO_PROCESS, 0)
+        worker._priority()
+        worker._priority()
+        assert worker.os.getpriority(worker.os.PRIO_PROCESS, 0) == before
+
+    def windows(self, monkeypatch, answer):
+        """The Windows branch, with a kernel32 that answers ``answer``."""
+        import types
+
+        calls = []
+
+        class Function:
+            def __init__(self, name, value):
+                self.name = name
+                self.value = value
+                self.restype = None
+                self.argtypes = None
+
+            def __call__(self, *args):
+                calls.append((self.name, self.restype, self.argtypes))
+                return self.value
+
+        class Kernel32:
+            GetCurrentProcess = Function("GetCurrentProcess", -1)
+            GetPriorityClass = Function("GetPriorityClass", answer)
+
+        fake = types.ModuleType("ctypes")
+        fake.windll = types.SimpleNamespace(kernel32=Kernel32())
+        fake.c_void_p = "c_void_p"
+        fake.c_uint = "c_uint"
+        monkeypatch.setitem(__import__("sys").modules, "ctypes", fake)
+        monkeypatch.setattr(worker.os, "name", "nt")
+        return worker._priority(), calls
+
+    def test_a_windows_class_is_named(self, monkeypatch):
+        found, _calls = self.windows(monkeypatch, 0x00004000)
+        assert found == "below_normal"
+
+    def test_a_zero_is_reported_as_a_failed_read_and_not_as_a_class(self, monkeypatch):
+        """The exact bug the logs showed."""
+        found, _calls = self.windows(monkeypatch, 0)
+        assert found == "unreadable"
+        assert "class_0x0" not in found
+
+    def test_the_handle_is_declared_pointer_sized(self, monkeypatch):
+        """Which is the reason zero was being returned in the first place."""
+        _found, calls = self.windows(monkeypatch, 0x00000020)
+        declared = {name: (restype, argtypes) for name, restype, argtypes in calls}
+        assert declared["GetCurrentProcess"][0] == "c_void_p"
+        assert declared["GetPriorityClass"][1] == ["c_void_p"]
+
+    def test_an_unknown_class_still_says_what_it_saw(self, monkeypatch):
+        found, _calls = self.windows(monkeypatch, 0x1234)
+        assert found == "class_0x1234"
+
+    def test_lowering_the_priority_is_left_exactly_as_it_was(self):
+        """Declaring types there would not be a diagnostic change -- it would
+        make the call start working, and a worker that began yielding CPU for
+        the first time is a change to how fast speech is synthesised. That is a
+        decision to take from the corrected reading, not a side effect of
+        tidying a neighbouring function."""
+        source = pathlib.Path(worker.__file__).read_text(encoding="utf-8")
+        body = source.split("def _lower_priority()")[1].split("\ndef ")[0]
+        assert "SetPriorityClass" in body
+        assert "argtypes" not in body
+        assert "restype" not in body
 
 
 class TestCallbackGranularity:

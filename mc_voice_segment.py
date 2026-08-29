@@ -78,6 +78,29 @@ higher than a phrase, because a target this low applied to *every* segment
 would turn one synthesis call into four and put a seam between each of them.
 """
 
+FIRST_SOFT_MAX = 70
+FIRST_HARD_MAX = 160
+"""How large the first segment is allowed to become.
+
+Measured, not guessed. Per-unit timings from an ordinary session put Kokoro at
+about 28 ms of synthesis per character with only ~110 ms of fixed cost per call,
+and the first block of a segment is one whole sentence -- so time to the first
+spoken word is, almost exactly, the length of the first sentence times 28 ms.
+An opening of 28 characters was speaking in a second; one of 95 took nearly
+three.
+
+So the opening gets an envelope of its own, and it is much tighter than the
+ordinary one. Past :data:`FIRST_SOFT_MAX` a clause or a comma inside the first
+sentence will do, which hands Kokoro something it can start saying now and
+leaves the rest to the second segment.
+
+What it deliberately will not do is cut the opening at a bare word boundary
+while a real sentence ending is still within reach. Splitting at a comma costs
+a pause Kokoro would have taken anyway; splitting mid-clause costs a seam in
+the first thing anybody hears, and the first thing anybody hears is not the
+place to spend that. An opening sentence with no early break is spoken whole.
+"""
+
 SECOND_SOFT_MAX = 140
 SECOND_HARD_MAX = 220
 """How large the second segment is allowed to become.
@@ -456,7 +479,9 @@ class Segmenter:
                  soft_max: int = SOFT_MAX, hard_max: int = HARD_MAX,
                  second_target: int = SECOND_TARGET,
                  second_soft_max: int = SECOND_SOFT_MAX,
-                 second_hard_max: int = SECOND_HARD_MAX):
+                 second_hard_max: int = SECOND_HARD_MAX,
+                 first_soft_max: int = FIRST_SOFT_MAX,
+                 first_hard_max: int = FIRST_HARD_MAX):
         self.labels = tuple(str(name or "").strip() for name in (labels or ()) if str(name or "").strip())
         self.first_target = max(1, int(first_target))
         self.target = max(self.first_target, int(target))
@@ -465,6 +490,8 @@ class Segmenter:
         self.hard_max = max(self.soft_max, int(hard_max))
         self.second_soft_max = max(self.second_target, int(second_soft_max))
         self.second_hard_max = max(self.second_soft_max, int(second_hard_max))
+        self.first_soft_max = max(self.first_target, int(first_soft_max))
+        self.first_hard_max = max(self.first_soft_max, int(first_hard_max))
         self._buffer = ""
         self._committed = 0
         self._segments = 0
@@ -586,15 +613,15 @@ class Segmenter:
         at each of the five boundary rules -- and so that the second segment's
         envelope cannot be applied on one path and forgotten on another.
 
-        Three rows rather than two, and the middle one is the whole of the
-        reported first-to-second gap. The opening commits early because nothing
-        is playing yet; the second one has to commit early *and* stay small,
+        Three rows rather than two, and each is a different moment. The opening
+        is the whole of the time to the first spoken word, so it commits early
+        *and* stays small; the second one has to commit early and stay small
         because sentence one is playing and the producer has no lead at all; by
         the third there is audio queued ahead of it and a longer,
         better-sounding segment costs nothing anybody can hear.
         """
         if self._segments == 0:
-            return self.first_target, self.soft_max, self.hard_max
+            return self.first_target, self.first_soft_max, self.first_hard_max
         if self._segments == 1:
             return self.second_target, self.second_soft_max, self.second_hard_max
         return self.target, self.soft_max, self.hard_max
@@ -647,6 +674,30 @@ class Segmenter:
         #    sentence on its own, and holding it back for the accident of chunk
         #    boundaries cost the first segment its whole reason for existing.
         if self._segments == 0:
+            opening = _first_sentence(text, SHORT_SENTENCE, min(length, soft_max), fence)
+            if opening:
+                return opening
+            if length >= soft_max:
+                # The opening sentence is longer than the envelope, and every
+                # character of it is time before anybody hears anything. A
+                # clause or a comma inside it is a pause Kokoro would have taken
+                # anyway, so the first half is handed over now and the rest
+                # becomes the second segment.
+                #
+                # Only a real punctuation boundary, and only the last one that
+                # fits: falling through from here to the word boundary at the
+                # ceiling would put a seam in the middle of the first thing
+                # anybody hears, and rule 3 below speaks the whole sentence
+                # instead whenever one is within reach.
+                early = (_clause_end(text, soft_max, fence)
+                         or _comma_end(text, soft_max, fence))
+                if early >= SHORT_SENTENCE:
+                    return early
+            # No early break inside the envelope, so the opening sentence is
+            # spoken whole -- but the *first* one, not everything that has
+            # arrived. Rule 3 below takes the last boundary that fits, which is
+            # right for an ordinary segment and wrong here: every character
+            # before the first full stop is time nobody is hearing anything.
             opening = _first_sentence(text, SHORT_SENTENCE, min(length, hard_max), fence)
             if opening:
                 return opening

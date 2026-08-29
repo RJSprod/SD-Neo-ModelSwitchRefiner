@@ -143,11 +143,14 @@ argue with something. Speech-to-text stays at four: a transcription is one burst
 after the user has stopped talking, and it was never a stage anybody waited
 through.
 
-Process priority is untouched. The worker still lowers its own at start-up and
-nothing raises it — raising a Linux priority needs `CAP_SYS_NICE`, and asking a
-chat feature for a capability is not a trade worth making. What is new is that
-the priority is *read* and reported, so a shared log can say whether the run
-that produced its numbers was a run at the priority everybody assumes.
+Process priority is untouched. The worker still asks to lower its own at
+start-up and nothing raises it — raising a Linux priority needs `CAP_SYS_NICE`,
+and asking a chat feature for a capability is not a trade worth making. What is
+new is that the priority is *read* and reported, so a shared log can say whether
+the run that produced its numbers was a run at the priority everybody assumes.
+
+That turned out to matter more than expected: the first logs said the read was
+failing, which means the write may be failing too and nobody knew. See §6.
 
 
 ## 4. Making one ordinary run answer the question
@@ -248,12 +251,100 @@ the guards do not. Decimals, abbreviations, initials, domains, ellipses, fences
 and word interiors are not boundaries at 220 characters either.
 
 
-## 6. What is deliberately still missing
+## 6. What the first logs said, and what was changed because of them
 
-* **No lower browser buffer.** 0.7 / 0.4 / 2.0 stays until the four-thread
-  configuration and the new starvation telemetry have been seen together on real
-  machines. Lowering it now would be guessing again, with the measuring
-  apparatus built and unused.
+The whole point of §4 was that the next change should be a person reading
+evidence. Here is that reading, from one ordinary session: 12 synthesis units
+across 6 turns at four threads, plus 15 turns of history at two.
+
+### The four-thread change worked
+
+| | median RTF | sample |
+| --- | --- | --- |
+| two threads, all history | 0.737 | 13 turns |
+| two threads, callback only | 0.877 | 4 turns |
+| **four threads** | **0.593** | 4 turns |
+
+Synthesis produces speech about 1.7× faster than it is consumed. Across the six
+measured turns there was **one underrun, of 34 ms** — the §11 gate asked for no
+gap over 500 ms and zero multi-second gaps, and the worst was thirty-four
+milliseconds.
+
+### Time to first audio is one number, and it is the first sentence
+
+Twelve units, least squares:
+
+```
+synth_ms = 27.9 × chars + 111
+audio_ms = 48.6 × chars + 128
+```
+
+`first_block_ms == synth_ms` on ten of the twelve — the one-callback-per-sentence
+behaviour, as documented. The two exceptions were multi-sentence units where
+callback mode fired early and saved 3.1 s on one of them.
+
+So the budget reads:
+
+```
+first audio ≈ 27.9 ms × (characters in the first sentence) + ~250 ms
+```
+
+Openings of 28 and 33 characters spoke in 1.07 and 1.17 s. Openings of 84, 85
+and ~95 took 2.65, 2.91 and 3.36 s. That is §5's whole justification, and it is
+why the opening got an envelope of its own.
+
+### Three things were crossed off, not fixed
+
+**The browser prebuffer is inert.** `first_pcm_to_playback_ms` was 0, 3, 5, 7, 8
+and 8 ms on the six turns. One callback block is a whole sentence — 1.6 to 10
+seconds of audio — so it satisfies any startup target we would plausibly set.
+Lowering it, which §6 of the previous notes deferred, would gain nothing. That
+question is closed rather than postponed.
+
+**Capture has nothing left to take.** Engage to first sample was 126–805 ms and
+essentially all of it is `getUserMedia`: stream ready at 210–386 ms, graph
+assembly 4–45 ms after that. `preroll_ms` was 0 on all six gestures, because the
+slide (60–123 ms) finished before the device did. Pre-roll costs nothing and
+will help a slower gesture or a slower device; on this machine there was nothing
+in front of it to recover. The one thing left was a `sampleRate` constraint that
+nothing read, and it is gone.
+
+**Threads stay at four.** Fitting `T(n) = s + p/n` to the 2→4 step gives 6
+threads at 1.09–1.19× over 4, with a serial floor implying a ceiling of
+1.32–1.92× no matter how many are thrown at it. That is 0.2–0.5 s off a first
+utterance for 50% more CPU on every reply — against a first-sentence envelope
+worth 0.7–1.1 s for nothing. Continuity does not want it either: RTF 0.59 is
+already 70% headroom. It stays a one-line change and `segment_1_ms ÷ chars` is
+now the way to settle it, rather than the callback probe, which is confounded by
+first-inference warm-up.
+
+### And one thing the logs exposed that nobody was looking for
+
+`priority=class_0x0`. Zero is not a Windows priority class; it is
+`GetPriorityClass` reporting failure. `_lower_priority` uses the same undeclared
+pointer-sized handle, so the worker's priority may never have been lowered at
+all — which means every number above was measured at a priority nobody knows.
+The read is corrected and now says "unreadable" instead of inventing a class;
+the write is deliberately untouched, because fixing it would make the worker
+start yielding CPU for the first time and that is a change to how fast speech is
+synthesised, not a diagnostic. The next log will say which case this is.
+
+### Not from the logs, but worth writing down
+
+The 22.7-second wait before the first turn's opening segment was Qwen3 thinking:
+llama.cpp shows prompt eval at 1.4 s for 2076 tokens and generation at 90–100
+tokens per second. Voice cannot begin until the model emits its first visible
+sentence, and with a reasoning model that can be tens of seconds. There is
+nothing in this feature to fix there, and the ready-wait field is what says so.
+
+
+## 7. What is deliberately still missing
+
+* **No lower browser buffer** — and now for a better reason than caution. The
+  first measured session says the prebuffer contributes 0–8 ms, because one
+  callback block is a whole sentence. There is nothing there to win. See §6.
+* **No six threads.** Modelled at 9–19% over four from the 2→4 step, against a
+  first-sentence envelope worth several times that for no CPU. See §6.
 * **No callback coalescing.** Revision 3 floated combining several Model Chain
   units into one larger `generate()` call to measure per-call overhead.
   Revision 4 removes it from scope: the immediate requirement is diagnosis, it

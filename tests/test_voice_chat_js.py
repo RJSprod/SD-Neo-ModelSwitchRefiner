@@ -2077,7 +2077,7 @@ class TestABluetoothMicrophone:
         """, SAMPLE_RATE="48000")
         assert found["status"] == "Transcribed."
 
-    def test_the_request_asks_for_what_whisper_wants_and_insists_on_nothing(self):
+    def test_the_request_asks_for_what_helps_and_insists_on_nothing(self):
         """Every processor is advisory. They are tuned for a wideband
         microphone, and a browser that cannot apply them to an HFP stream should
         hand over the stream rather than fail the request."""
@@ -2085,9 +2085,28 @@ class TestABluetoothMicrophone:
         opens = [r for r in found["requests"] if r.get("kind") == "getUserMedia"]
         assert opens, "the microphone was never opened"
         audio = opens[0]["constraints"]["audio"]
-        assert audio["sampleRate"] == {"ideal": 16000}
         for name in ("echoCancellation", "noiseSuppression", "autoGainControl"):
             assert audio[name] == {"ideal": True}, name
+
+    def test_it_does_not_ask_the_device_for_a_rate_it_will_not_be_read_at(self):
+        """The samples come out of the AudioContext, not off the track, and are
+        resampled from `ctx.sampleRate` whatever the device was persuaded to do
+        -- so asking was one more thing to negotiate while opening the device,
+        for no effect on the audio."""
+        found = run("await hold(900); console.log(JSON.stringify(report()));")
+        opens = [r for r in found["requests"] if r.get("kind") == "getUserMedia"]
+        assert "sampleRate" not in opens[0]["constraints"]["audio"]
+
+    def test_the_recording_is_still_sixteen_kilohertz(self):
+        """Which is the point: dropping the hint changed the request, not the
+        result."""
+        found = run("""
+            await hold(900, 48000);
+            const post = requests.filter((r) => (r.url || "").endsWith("/stt"))[0];
+            const view = new DataView(post.body);
+            console.log(JSON.stringify(report({rate: view.getUint32(24, true)})));
+        """, SAMPLE_RATE="48000")
+        assert found["rate"] == 16000
 
     def test_a_refused_constraint_set_falls_back_to_any_microphone(self):
         """The devices most likely to reject a constraint set are the Android

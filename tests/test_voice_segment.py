@@ -112,6 +112,84 @@ class TestWhatCommitsAndWhen:
         assert machine.second_target <= machine.target
 
 
+class TestTheOpeningsEnvelope:
+    """Time to the first spoken word is, almost exactly, the length of the first
+    sentence.
+
+    Per-unit timings from an ordinary session put Kokoro at ~28 ms of synthesis
+    per character with ~110 ms of fixed cost per call, and the first callback
+    block is one whole sentence -- so a 28-character opening was speaking in a
+    second and a 95-character one took nearly three. Nothing else in the chain
+    is anywhere near that big: the browser's prebuffer contributed 0-8 ms on
+    every measured turn.
+    """
+
+    def first_of(self, text):
+        machine = segment.Segmenter()
+        found = machine.feed(text)
+        return found[0] if found else None
+
+    def test_a_short_opening_sentence_is_untouched(self):
+        assert self.first_of("Yes, that's possible. And a good deal more after it.") == (
+            "Yes, that's possible.")
+
+    def test_a_long_opening_sentence_is_cut_at_a_comma(self):
+        found = self.first_of(
+            "It turns out that the answer is a little involved, and it depends on a "
+            "few things. Then a second sentence.")
+        assert found == "It turns out that the answer is a little involved,"
+        assert len(found) <= segment.FIRST_SOFT_MAX
+
+    def test_a_long_opening_sentence_with_no_early_break_is_spoken_whole(self):
+        """The trade, stated as a test. A comma is a pause Kokoro would have
+        taken anyway; a word boundary in the middle of the first thing anybody
+        hears is a seam, and that is not where to spend one."""
+        found = self.first_of(
+            "It turns out that the answer here is really quite a lot more involved "
+            "than that. Then a second sentence.")
+        assert found.endswith("than that."), found
+        assert len(found) > segment.FIRST_SOFT_MAX
+
+    def test_the_opening_takes_the_first_sentence_and_not_everything_that_fits(self):
+        """Rule 3 takes the last boundary that fits, which is right for an
+        ordinary segment and wrong here: every character before the full stop is
+        time nobody is hearing anything."""
+        found = self.first_of(
+            "It turns out that the answer here is really quite a lot more involved "
+            "than that. Then a second one. And a third.")
+        assert found.count(".") == 1, found
+
+    def test_a_punctuation_free_opening_stops_at_the_ceiling(self):
+        found = self.first_of(" ".join(["alpha"] * 60))
+        assert len(found) <= segment.FIRST_HARD_MAX
+        assert found.endswith("alpha"), "the cut landed inside a word"
+
+    def test_the_ceiling_is_far_below_the_ordinary_one(self):
+        machine = segment.Segmenter()
+        assert machine.first_soft_max < machine.second_soft_max < machine.soft_max
+        assert machine.first_hard_max < machine.second_hard_max < machine.hard_max
+        assert machine.first_target <= machine.first_soft_max
+
+    def test_the_guards_are_not_relaxed_by_the_smaller_envelope(self):
+        """A decimal, an abbreviation, an initial and a domain are not
+        boundaries at seventy characters either."""
+        found = self.first_of(
+            "Dr. Smith measured 3.14159 at example.com/page and then wrote it all up "
+            "in a good deal more detail than anybody wanted.")
+        joined = found or ""
+        for hazard in ("Dr.", "3.14159", "example.com/page"):
+            assert not joined.rstrip().endswith(hazard.rstrip(".")), joined
+
+    def test_nothing_is_lost_across_the_cut(self):
+        text = ("It turns out that the answer is a little involved, and it depends on a "
+                "few things. Then a second sentence.")
+        machine = segment.Segmenter()
+        found = machine.feed(text) + machine.flush()
+        rebuilt = " ".join(found)
+        for word in ("involved", "depends", "second", "sentence"):
+            assert rebuilt.count(word) == 1, rebuilt
+
+
 class TestTheSecondUnitsEnvelope:
     """How soon the second segment commits is one question; how big it is
     allowed to get is another, and only the first had an answer.
@@ -224,9 +302,15 @@ class TestTheGuards:
         assert len(found) == 1, found
 
     def test_an_initial_is_not_a_sentence(self):
+        """Asserted as "no cut after an initial" rather than "one segment": the
+        opening envelope may take the comma after Tolkien, which is a clause
+        boundary and a pause a reader would take anyway. What must never happen
+        is a cut after ``J.``, which would say "jay" and then start again."""
         found = run(["The author is J. R. R. Tolkien, who wrote the book that everybody has "
                      "heard of and quite a few other ones too."])
-        assert len(found) == 1, found
+        assert "J. R. R. Tolkien" in " ".join(found), found
+        for item in found:
+            assert not item.rstrip().endswith(("J.", "R.")), found
 
     def test_t_seg_6_a_domain_dot_is_not_a_sentence(self):
         found = run(["Have a look at example.com/page for the details, which are all written "
@@ -242,9 +326,12 @@ class TestTheGuards:
         assert "```" not in joined, "a fence marker was going to be read aloud"
 
     def test_an_ellipsis_is_one_pause_and_not_three(self):
+        """Same shape: the comma may be taken, the dots may not."""
         found = run(["Well... I am really not certain about that at all, if I am honest with "
                      "you about the whole business."])
-        assert len(found) == 1, found
+        assert "Well... I am really not certain" in " ".join(found), found
+        for item in found:
+            assert not item.rstrip().endswith(("Well.", "Well..")), found
 
     def test_t_seg_8_punctuation_free_text_splits_only_at_a_word_boundary(self):
         found = run([" ".join(["alpha"] * 400)])

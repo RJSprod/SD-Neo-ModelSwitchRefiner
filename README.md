@@ -2955,10 +2955,15 @@ work rather than things NumPy was going to fix.
 
 **The synthesis lane has four CPU threads**, fixed. It is the stage the pause
 between the first and second sentence is actually made of, and it gets the
-threads for that reason. Nothing rotates the number, runs an A/B or picks it from
-a measurement: a feature that reconfigures itself is a feature whose logs
-describe a different program every time you read them. Speech-to-text is
-untouched, because a transcription is one burst after you have stopped talking.
+threads for that reason: measured across a real session, four threads synthesise
+a second of speech in 0.59 seconds where two took 0.74 to 0.88. Nothing rotates
+the number, runs an A/B or picks it from a measurement: a feature that
+reconfigures itself is a feature whose logs describe a different program every
+time you read them. Six was considered and declined — the same measurements
+model it at 9–19% over four with a hard ceiling not far past that, which is not
+worth 50% more CPU on every reply when synthesis already runs 1.7× faster than
+speech is spoken. Speech-to-text is untouched, because a transcription is one
+burst after you have stopped talking.
 
 **And every ordinary run says which stage was slow.** `model_chain.log` gets one
 line per synthesis unit — how long the text took to arrive, how long the
@@ -3196,10 +3201,13 @@ moment you tap them, so there is no Apply to remember.
 - *Speak replies automatically* starts speaking as soon as the reply's first
   complete sentence exists, and keeps up with it from there. The first sentence
   is committed the moment it is whole, even if the next one has begun arriving in
-  the same chunk; the second one has a lower threshold than the rest, because it
-  is the one with nothing queued in front of it; and the speech worker starts
-  warming while the model is still writing, so a cold run does not read four
-  hundred megabytes of ONNX after the first sentence instead of during it.
+  the same chunk; a long opening sentence is cut at a comma so speech starts
+  sooner, though never mid-clause, because a seam in the first thing you hear is
+  not worth the second it saves; the second segment has a lower threshold than
+  the rest, because it is the one with nothing queued in front of it; and the
+  speech worker starts warming while the model is still writing, so a cold run
+  does not read four hundred megabytes of ONNX after the first sentence instead
+  of during it.
 - **Stop stops both.** One press ends the generation and the speech, and Stop
   stays in the composer — visible *and* pressable — while the speaker is still
   talking, so a long answer that has finished arriving can still be silenced.
