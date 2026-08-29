@@ -169,13 +169,44 @@
         return holder.tagName === "BUTTON" ? holder : holder.querySelector("button");
     }
 
-    function fieldValue(id) {
+    // The control inside one of Python's hidden holders, or null. Split out of
+    // `fieldValue` because two things now want it: reading the value, and
+    // binding a listener to the element that emits `input` when Gradio writes.
+    function fieldOf(id) {
         const holder = byId(id);
-        if (!holder) return "";
-        const field = holder.tagName === "TEXTAREA" || holder.tagName === "INPUT"
+        if (!holder) return null;
+        return holder.tagName === "TEXTAREA" || holder.tagName === "INPUT"
             ? holder
             : holder.querySelector("textarea, input");
+    }
+
+    function fieldValue(id) {
+        const field = fieldOf(id);
         return field ? (field.value || "") : "";
+    }
+
+    // One monotonic clock for every duration this file measures.
+    //
+    // `Date.now()` is a wall clock: it moves when the machine syncs time, when
+    // a laptop wakes, and when somebody changes the timezone -- so a recording
+    // held for 300 ms could be measured as -400 ms, and a phone that adjusted
+    // its clock mid-utterance would refuse the recording as too short. Every
+    // *duration* below therefore comes from `performance.now()`, and the only
+    // remaining use of the wall clock is the readiness cache, where an absolute
+    // moment is genuinely what is wanted.
+    //
+    // These numbers never leave the browser and are never compared with the
+    // server's own monotonic clock: two monotonic clocks in two processes share
+    // no origin, and subtracting one from the other produces a number that
+    // looks like a latency and is not one.
+    function nowMs() {
+        try {
+            if (typeof performance === "object" && performance
+                    && typeof performance.now === "function") {
+                return performance.now();
+            }
+        } catch (error) { /* a browser without it falls through */ }
+        return Date.now();
     }
 
     // -- where this WebUI actually lives ----------------------------------- //
@@ -456,10 +487,18 @@
     // gap in the first sentence, and every millisecond of it is latency the user
     // hears as lag. So it moves: an underrun raises it for the next turn, and
     // several clean turns lower it back towards the floor.
+    // The numbers moved down once the producer stopped running dry. They were
+    // chosen for a pipeline where the second segment could be several seconds
+    // behind the first, and 1.6 seconds of prebuffer is 1.6 seconds of latency
+    // paid on every single reply to hide a gap that now mostly is not there.
+    // What is deliberately *not* done is dropping to zero: the envelope still
+    // moves, an underrun still raises it, and a slow machine still recovers to
+    // something that plays without stuttering. Earlier continuous audio, not
+    // merely earlier audio.
     const BUFFER = {
-        start: 1.6,
-        min: 1.2,
-        max: 3.2,
+        start: 0.7,
+        min: 0.4,
+        max: 2.0,
         high: 12.0,
         clean: 0,
     };
@@ -497,6 +536,15 @@
             pending: [],
             pendingSeconds: 0,
             draining: false,
+            // Marks, all on this browser's own monotonic clock and all
+            // durations from `seenAt`. They are what tells "the server was slow"
+            // apart from "this page took a third of a second to notice", which
+            // a single end-to-end number cannot.
+            seenAt: nowMs(),
+            headersAt: 0,
+            firstPcmAt: 0,
+            releasedAt: 0,
+            startTarget: BUFFER.start,
         };
     }
 
@@ -626,7 +674,13 @@
         if (!samples.length || state.ended) return;
         state.pending.push({samples: samples, rate: rate});
         state.pendingSeconds += samples.length / (rate || 24000);
-        if (!state.started && state.pendingSeconds < BUFFER.start && !state.draining) return;
+        // The turn's own target, captured when it started. Reading BUFFER.start
+        // here instead would let an underrun raise the target of the very turn
+        // that is already playing, which is a buffer that grows in the middle
+        // of a sentence rather than before the next one.
+        if (!state.started && state.pendingSeconds < state.startTarget && !state.draining) {
+            return;
+        }
         release(state);
     }
 
@@ -634,6 +688,7 @@
         const waiting = state.pending;
         state.pending = [];
         state.pendingSeconds = 0;
+        if (!state.releasedAt && waiting.length) state.releasedAt = nowMs();
         waiting.forEach(function (block) { play_(state, block.samples, block.rate); });
     }
 
@@ -703,6 +758,7 @@
                 if (!response.ok || !response.body || !response.body.getReader) {
                     throw new Error("stream");
                 }
+                state.headersAt = nowMs();
                 const rate = parseInt(response.headers.get("X-Model-Chain-Voice-Rate")
                                       || "24000", 10) || 24000;
                 const stamped = response.headers.get("X-Model-Chain-Voice-Turn");
@@ -772,7 +828,10 @@
                     carry = bytes.slice(bytes.length - 1);
                     bytes = bytes.subarray(0, bytes.length - 1);
                 }
-                if (bytes.length) schedule(state, toFloat32(bytes), rate);
+                if (bytes.length) {
+                    if (!state.firstPcmAt) state.firstPcmAt = nowMs();
+                    schedule(state, toFloat32(bytes), rate);
+                }
                 if (!complained && !state.started
                         && Date.now() - opened > STREAM_SILENCE_MS) {
                     complained = true;
@@ -785,8 +844,33 @@
         return step();
     }
 
+    // One line per spoken turn, of durations and counts only.
+    //
+    // Every number is a difference between two `performance.now()` readings
+    // taken in this page, so they are all in one clock domain and none of them
+    // is comparable with a timestamp from the WebUI. What they answer is which
+    // stage was slow: noticing the turn, opening the stream, the first sample
+    // arriving, or this page holding samples back in its own prebuffer.
+    //
+    // Never the audio, never the text, and never the turn id: the id is opaque
+    // but it is still a handle on one particular reply.
+    function reportPlayback(state) {
+        const since = function (mark) {
+            return mark ? Math.round(mark - state.seenAt) : null;
+        };
+        try {
+            console.info("Model Chain: Voice played a reply — stream opened "
+                         + since(state.headersAt) + " ms, first audio "
+                         + since(state.firstPcmAt) + " ms, playback began "
+                         + since(state.releasedAt) + " ms after the turn was seen; "
+                         + "startup buffer " + Math.round(state.startTarget * 1000)
+                         + " ms, " + state.underruns + " underruns");
+        } catch (error) { /* a console that will not take it is not a failure */ }
+    }
+
     function finishSpeech(state) {
         if (speech !== state) return;
+        reportPlayback(state);
         if (state.underruns) raiseStartBuffer(); else relaxStartBuffer();
         // The reader is done but the speaker is not: what is scheduled still has
         // to play out before the composer stops showing Stop.
@@ -1800,6 +1884,64 @@
     let lastTurn = "";
     let lastToken = "";
     let speaking = false;
+
+    // -- noticing a new turn, without waiting for a poll ---------------------- //
+
+    // Section 5.5's hierarchy, and the reason it is a hierarchy rather than one
+    // mechanism.
+    //
+    //   1. Gradio writes these hidden fields and dispatches `input` on them, so
+    //      a listener on the control itself is the fastest and cheapest signal
+    //      there is -- zero to four hundred milliseconds of poll delay becomes
+    //      one task.
+    //   2. Gradio also *replaces* those controls when it re-renders the panel,
+    //      and a listener on a node that is no longer in the document is a
+    //      listener that will never fire again. An observer on the holder
+    //      re-binds when that happens, and re-binding is idempotent -- the flag
+    //      is on the field, so a control that survived a re-render is not bound
+    //      a second time.
+    //   3. The poll below stays. `input` is dispatched by Gradio and not by the
+    //      DOM: a value assigned straight to `field.value` by a theme, a custom
+    //      component or a future version emits nothing at all, and observing an
+    //      input's *attributes* would not see it either -- `value` is an IDL
+    //      property, and assigning it changes no attribute a MutationObserver
+    //      is watching. So the poll is the recovery path, not the mechanism.
+
+    const speechWatchers = {};
+
+    function bindSpeechField(id) {
+        const field = fieldOf(id);
+        if (!field || !field.dataset || field.dataset.mcVoiceSpeech === "1") return;
+        field.dataset.mcVoiceSpeech = "1";
+        const look = function () { attempt("check for a reply to speak", checkSpeech); };
+        field.addEventListener("input", look);
+        field.addEventListener("change", look);
+        // A control that arrived already carrying a value -- which is what a
+        // re-render mid-reply looks like -- has no event left to emit.
+        look();
+    }
+
+    function watchSpeechFields() {
+        [IDS.turn, IDS.token].forEach(function (id) {
+            bindSpeechField(id);
+            const holder = byId(id);
+            if (!holder || typeof MutationObserver !== "function") return;
+            const seen = speechWatchers[id];
+            if (seen && seen.holder === holder) return;
+            if (seen && seen.observer) {
+                try { seen.observer.disconnect(); } catch (error) { /* already gone */ }
+            }
+            const observer = new MutationObserver(function () {
+                attempt("re-bind the reply watcher", function () { bindSpeechField(id); });
+            });
+            try {
+                observer.observe(holder, {childList: true, subtree: true});
+                speechWatchers[id] = {holder: holder, observer: observer};
+            } catch (error) {
+                speechWatchers[id] = {holder: holder, observer: null};
+            }
+        });
+    }
 
     function checkSpeech() {
         const turnId = fieldValue(IDS.turn);
@@ -3126,6 +3268,7 @@
 
     function wire() {
         attempt("wire the microphone", wireMicrophone);
+        attempt("watch for a reply to speak", watchSpeechFields);
         attempt("wire the voice gestures", wireGestures);
         attempt("wire the Voice Chat settings", wireSettings);
         attempt("wire the voice list", wireVoices);

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -51,6 +52,7 @@ const timers = [];
 const intervals = [];
 const requests = [];
 const consoleErrors = [];
+const consoleInfo = [];
 
 function element(id, tag) {
     const listeners = {};
@@ -378,6 +380,12 @@ globalThis.clearTimeout = (handle) => {
 globalThis.setInterval = (fn) => { intervals.push(fn); return intervals.length; };
 globalThis.clearInterval = () => {};
 globalThis.Date = class extends Date { static now() { return NOW; } };
+// The monotonic clock, moving with the same NOW the tests advance. It is a
+// separate global because the script measures every *duration* with it and only
+// asks the wall clock for absolute moments -- so a test that moves NOW is
+// moving both, and a test could move one without the other to model a machine
+// whose wall clock jumped mid-recording.
+globalThis.performance = {now() { return NOW; }};
 const windowHandlers = {};
 globalThis.windowHandlers = windowHandlers;
 globalThis.addEventListener = (name, handler) => {
@@ -385,6 +393,10 @@ globalThis.addEventListener = (name, handler) => {
 };
 globalThis.console = Object.assign({}, console, {
     error(...args) { consoleErrors.push(args.map(String).join(" ")); },
+    // Captured rather than printed. The playback and capture reports are the
+    // page's own content-free diagnostics, and "what is in them, and what is
+    // deliberately not" is a claim worth asserting.
+    info(...args) { consoleInfo.push(args.map(String).join(" ")); },
 });
 
 function runTimers() {
@@ -629,6 +641,25 @@ async function speak(id, times) {
     turnField.value = id;
     await pump(times || 30);
 }
+
+// Gradio writing a hidden field: the value changes and an `input` event is
+// dispatched on the control itself. This is the fast path the script prefers,
+// and it deliberately does *not* run the poll.
+async function announceTurn(id, times) {
+    turnField.value = id;
+    turnField.fire("input", {});
+    await tick(times || 30);
+}
+
+// Gradio re-rendering the panel: the holder keeps its id and the control inside
+// it is a different element with no listeners on it. Returns the new control.
+function rerenderField(id) {
+    const holder = elements[id];
+    const replacement = element(id + "-inner", "TEXTAREA");
+    holder.inner = replacement;
+    observers.forEach((fn) => fn());
+    return replacement;
+}
 const status = elements["mc-llm-chat-status"];
 
 function feed(samples) {
@@ -724,6 +755,7 @@ function report(extra) {
                      .contains("mc-llm-voice-hidden")),
         pendingTimers: pending(),
         consoleErrors,
+        consoleInfo,
         listeners: Object.keys(mic.handlers).map((k) => [k, mic.handlers[k].length]),
         settings: {
             runtime: settingsParts.runtime.textContent,
@@ -2297,6 +2329,186 @@ class TestTheStreamReader:
         """, ANSWERS=stream_answers(seconds=2.0, count=8))
         queued = sum(item["length"] for item in found["scheduled"]) / 24000.0
         assert queued < 20, "the reader kept reading past the high-water mark"
+
+
+# A stream answer with no turn stamp on it, for scenarios that speak more than
+# one reply: the harness serves one canned response to every request, and a
+# stamp naming the first turn is -- correctly -- refused for the second.
+ANY_TURN = {"X-Model-Chain-Voice-Rate": "24000"}
+
+
+def _startup_targets(found: dict) -> list[int]:
+    """The startup buffer each spoken turn actually used, in milliseconds."""
+    return [int(re.search(r"startup buffer (\d+) ms", line).group(1))
+            for line in found["consoleInfo"] if "startup buffer" in line]
+
+
+def _underruns(found: dict) -> list[int]:
+    return [int(re.search(r"(\d+) underruns", line).group(1))
+            for line in found["consoleInfo"] if "underruns" in line]
+
+
+class TestNoticingANewTurn:
+    """Section 5.5. A 400 ms poll is 0-400 ms of latency on every reply, paid
+    for a change the page could have been told about."""
+
+    def test_the_input_event_starts_the_stream_without_the_poll(self):
+        """`announceTurn` fires the event and runs the timers; it deliberately
+        never runs the interval, so a request here can only have come from the
+        event path."""
+        found = run("""
+            await announceTurn('T1');
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=0.2, count=2))
+        assert any(r["url"].endswith("tts-stream") for r in found["requests"])
+        assert [item for item in found["scheduled"] if item["length"]]
+
+    def test_a_value_written_with_no_event_is_still_recovered_by_the_poll(self):
+        """`value` is an IDL property: assigning it fires nothing and changes no
+        attribute an observer is watching. A theme or a future component that
+        writes it directly must still be heard."""
+        found = run("""
+            turnField.value = "T1";
+            await tick(8);
+            const beforePoll = requests.filter((r) => r.url.indexOf("tts-stream") !== -1).length;
+            await pump(20);
+            console.log(JSON.stringify(report({beforePoll})));
+        """, ANSWERS=stream_answers(seconds=0.2, count=2))
+        assert found["beforePoll"] == 0, "the event path claimed a change nobody announced"
+        assert any(r["url"].endswith("tts-stream") for r in found["requests"])
+
+    def test_a_re_rendered_control_is_bound_again(self):
+        """Gradio replaces the control, and a listener on a node that has left
+        the document will never fire again."""
+        found = run("""
+            const replaced = rerenderField("mc-llm-chat-voice-turn");
+            await tick(2);
+            replaced.value = "T1";
+            replaced.fire("input", {});
+            await tick(20);
+            console.log(JSON.stringify(report({
+                bound: Object.keys(replaced.handlers).sort(),
+            })));
+        """, ANSWERS=stream_answers(seconds=0.2, count=2))
+        assert found["bound"] == ["change", "input"]
+        assert any(r["url"].endswith("tts-stream") for r in found["requests"])
+
+    def test_re_binding_does_not_stack_listeners_on_the_same_control(self):
+        """`wire` runs again after every Gradio update, and a second listener on
+        a surviving control would speak one reply twice."""
+        found = run("""
+            updated.forEach((fn) => fn());
+            updated.forEach((fn) => fn());
+            observers.forEach((fn) => fn());
+            await tick(2);
+            console.log(JSON.stringify(report({
+                inputs: (turnField.handlers.input || []).length,
+                changes: (turnField.handlers.change || []).length,
+            })));
+        """)
+        assert found["inputs"] == 1
+        assert found["changes"] == 1
+
+    def test_one_turn_still_opens_one_stream_however_it_is_noticed(self):
+        """Both paths are live at once. The turn id is the guard, and it has to
+        be, because the poll will see the same value the event announced."""
+        found = run("""
+            await announceTurn('T1', 10);
+            await pump(20);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=0.2, count=2))
+        opened = [r for r in found["requests"] if r["url"].endswith("tts-stream")]
+        assert len(opened) == 1, opened
+
+
+class TestTheStartupBuffer:
+    """Section 5.6. Lower, and still adaptive: the point is earlier *continuous*
+    audio, not earlier audio."""
+
+    def test_playback_begins_well_before_the_old_one_and_a_half_seconds(self):
+        found = run("""
+            await speak('T1');
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=0.25, count=8))
+        played = [item for item in found["scheduled"] if item["length"]]
+        assert played, "nothing was scheduled at all"
+        # Everything released together is the prebuffer emptying, so the size of
+        # the first release is the startup target the page actually used.
+        first = played[0]["at"]
+        held = sum(item["length"] for item in played if item["at"] == first) / 24000.0
+        assert held <= 1.0, f"{held} s was held back before playback began"
+
+    def test_a_short_reply_is_not_swallowed_by_the_prebuffer(self):
+        """However little there is, the end of the stream releases it."""
+        found = run("await speak('T1'); console.log(JSON.stringify(report()));",
+                    ANSWERS=stream_answers([[1, 0, 2, 0]]))
+        assert sum(item["length"] for item in found["scheduled"]) == 2
+
+    def test_an_underrun_raises_the_target_for_the_next_turn(self):
+        """The queue ran dry mid-sentence. The next reply starts with a deeper
+        buffer because of it, which is the whole reason the number moves."""
+        found = run("""
+            // Read until the reader parks itself on the high-water mark, then
+            // run the audio clock past everything scheduled and let it resume:
+            // the next block arrives to find the speaker already silent, which
+            // is exactly what an underrun is.
+            turnField.value = "T1";
+            await pump(6);
+            advanceAudio(60);
+            NOW += 1000;
+            await pump(30);
+            turnField.value = "";
+            await pump(2);
+            turnField.value = "T2";
+            turnField.fire("input", {});
+            for (let i = 0; i < 10; i += 1) { NOW += 500; advanceAudio(20); await pump(6); }
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=1.0, count=20, headers=ANY_TURN))
+        targets = _startup_targets(found)
+        assert len(targets) == 2, found["consoleInfo"]
+        assert _underruns(found)[0] >= 1, found["consoleInfo"]
+        assert targets[1] > targets[0], found["consoleInfo"]
+
+    def test_clean_turns_relax_the_target_again(self):
+        """And back down, in small steps, so one bad moment does not cost every
+        later reply its latency for the life of the tab."""
+        found = run("""
+            for (let i = 0; i < 7; i += 1) {
+                turnField.value = "";
+                await pump(2);
+                await announceTurn('T' + i, 20);
+            }
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=0.2, count=4, headers=ANY_TURN))
+        targets = _startup_targets(found)
+        assert len(targets) == 7, found["consoleInfo"]
+        assert _underruns(found) == [0] * 7, found["consoleInfo"]
+        assert targets[-1] < targets[0], targets
+        assert targets[-1] >= 400, "the buffer relaxed past its own floor"
+
+    def test_the_target_a_turn_started_with_is_the_one_it_uses(self):
+        """Raising the buffer in the middle of a reply would deepen the queue of
+        the very sentence that is already playing."""
+        found = run("""
+            await speak('T1');
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=0.25, count=8))
+        targets = _startup_targets(found)
+        assert targets == [700], found["consoleInfo"]
+
+    def test_the_playback_report_carries_durations_and_no_identity(self):
+        """Content-free, and in one clock domain: every number is a difference
+        between two `performance.now()` readings taken in this page."""
+        found = run("""
+            await speak('T1');
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=0.25, count=4))
+        line = [item for item in found["consoleInfo"] if "Voice played a reply" in item]
+        assert line, found["consoleInfo"]
+        assert "T1" not in line[0]
+        for wanted in ("stream opened", "first audio", "playback began", "startup buffer",
+                       "underruns"):
+            assert wanted in line[0]
 
 
 class TestStoppingInTheBrowser:
