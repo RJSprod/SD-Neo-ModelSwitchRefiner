@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import http.server
 import json
+import os
 import shutil
 import sys
 import threading
@@ -104,12 +105,58 @@ class TestTheShippedManifest:
 
     def test_the_runtime_closure_is_complete_for_each_platform(self):
         """R2-2. "Complete" means pip is never asked to find anything: the
-        engine and its compiled core are both named, so ``--no-deps`` is a
-        correct instruction rather than a broken installation."""
+        engine, its compiled core and NumPy are all named, so nothing is left
+        for a resolver to go and find.
+
+        NumPy is in the closure rather than in the host environment because of
+        what it is for. sherpa hands a batch of samples back mid-synthesis by
+        way of a pybind11 ``py::array_t<float>``, which needs NumPy in the
+        interpreter *running the callback* -- and the interpreter running the
+        callback is this isolated one, never Forge's.
+        """
         for platform in models.manifest()["platforms"]:
             names = {artifact.filename for artifact in platform.artifacts}
             assert any("sherpa_onnx-" in name for name in names), platform.identifier
             assert any("sherpa_onnx_core-" in name for name in names), platform.identifier
+            assert any(name.startswith("numpy-") for name in names), platform.identifier
+
+    def test_one_numpy_release_covers_every_supported_combination(self):
+        """"Newest available" is not a design criterion; "one known-good
+        release for all eight" is. A closure that pinned a different NumPy per
+        platform would be eight environments to reason about instead of one."""
+        spec = models.manifest()
+        found = set()
+        for platform in spec["platforms"]:
+            wheels = [a for a in platform.artifacts if a.filename.startswith("numpy-")]
+            assert len(wheels) == 1, platform.identifier
+            found.add(wheels[0].filename.split("-")[1])
+        assert found == {spec["runtime_numpy"]}, found
+
+    def test_the_runtime_declares_its_own_build_and_a_closure_fingerprint(self):
+        spec = models.manifest()
+        assert spec["runtime_build"] >= 2, "NumPy joined the closure in build 2"
+        seen = {p.identifier: p.closure_id for p in spec["platforms"]}
+        assert all(len(value) == 16 for value in seen.values())
+        assert len(set(seen.values())) == len(seen), "two platforms share a fingerprint"
+
+    def test_the_fingerprint_follows_the_wheels_and_not_a_number(self):
+        """The reason a derived identity is preferred to a build number: it
+        cannot be forgotten. Change any hash, any name, or the order, and the
+        closure is a different closure without anybody remembering to say so."""
+        chosen = models.manifest()["platforms"][0]
+        moved = models.RuntimePlatform(
+            identifier=chosen.identifier, system=chosen.system, machines=chosen.machines,
+            python=chosen.python, artifacts=tuple(reversed(chosen.artifacts)))
+        assert moved.closure_id != chosen.closure_id
+        dropped = models.RuntimePlatform(
+            identifier=chosen.identifier, system=chosen.system, machines=chosen.machines,
+            python=chosen.python, artifacts=chosen.artifacts[:-1])
+        assert dropped.closure_id != chosen.closure_id
+
+    def test_numpys_licence_is_recorded_beside_sherpas(self):
+        """A BSD library inside an Apache runtime is still a library somebody
+        has to be told about."""
+        assert "BSD" in models.manifest()["runtime_license"]
 
     def test_windows_and_linux_are_covered_for_the_pythons_forge_uses(self):
         found = {(p.system, p.python) for p in models.manifest()["platforms"]}
@@ -190,6 +237,77 @@ class TestWhatTheManifestRefuses:
 # --------------------------------------------------------------------------- #
 # Readiness
 # --------------------------------------------------------------------------- #
+
+
+class TestTheInstalledRuntimeIsTheOneWePin:
+    """Freshness, which used to be answered by two of the three questions.
+
+    sherpa's version and the platform id both stayed exactly the same when
+    NumPy joined the closure, so a runtime provisioned by the previous release
+    reported itself installed and current while missing the wheel the streaming
+    callback needs. The fingerprint is the third question, and it is derived
+    from the wheels so that the next change to them cannot forget to ask it.
+    """
+
+    def install_record(self, voice_root, **extra):
+        chosen = models.runtime_platform()
+        spec = models.manifest()
+        record = {
+            "schema": models.SCHEMA,
+            "runtime_version": spec["runtime_version"],
+            "runtime_build": spec["runtime_build"],
+            "runtime_closure_id": chosen.closure_id,
+            "platform_id": chosen.identifier,
+            "python": chosen.python,
+            "provider": "cpu",
+        }
+        record.update(extra)
+        target = paths.runtime_manifest()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(record), encoding="utf-8")
+        # The interpreter is the last thing _runtime_state looks for, and these
+        # tests are about the three checks in front of it.
+        return models._runtime_state(spec, chosen)
+
+    def test_a_matching_closure_is_ready(self, voice_root, monkeypatch):
+        monkeypatch.setattr(models, "runtime_python", lambda: Path(sys.executable))
+        ready, message = self.install_record(voice_root)
+        assert ready, message
+        assert "runtime build" in message
+
+    def test_a_runtime_installed_before_numpy_joined_is_stale(self, voice_root, monkeypatch):
+        """The exact upgrade this release has to survive: two wheels on disk,
+        the right sherpa, the right platform, and no NumPy."""
+        monkeypatch.setattr(models, "runtime_python", lambda: Path(sys.executable))
+        ready, message = self.install_record(
+            voice_root, runtime_closure_id=None, runtime_build=None)
+        assert not ready
+        assert "different set of wheels" in message
+
+    def test_a_closure_that_no_longer_matches_is_stale(self, voice_root, monkeypatch):
+        monkeypatch.setattr(models, "runtime_python", lambda: Path(sys.executable))
+        ready, message = self.install_record(voice_root, runtime_closure_id="0000000000000000")
+        assert not ready
+        assert "different set of wheels" in message
+
+    def test_a_stale_closure_is_reinstalled_rather_than_skipped(self, voice_root, monkeypatch):
+        """`install_runtime` returns early when the runtime is already current.
+        A closure change has to get past that, or the manifest entry would be
+        the only thing that ever changed."""
+        monkeypatch.setattr(models, "runtime_python", lambda: Path(sys.executable))
+        self.install_record(voice_root, runtime_closure_id="0000000000000000")
+        reached = []
+        monkeypatch.setattr(models, "_make_room",
+                            lambda *a, **k: reached.append(True) or (_ for _ in ()).throw(
+                                models.VoiceError("stop here")))
+        with pytest.raises(models.VoiceError, match="stop here"):
+            models.install_runtime()
+        assert reached, "an out-of-date closure was treated as already installed"
+
+    def test_the_host_description_names_the_closure(self, voice_root):
+        found = models.describe_host()
+        assert "runtime build" in found
+        assert "closure" in found
 
 
 class TestReadiness:
@@ -680,6 +798,43 @@ class TestTheIsolatedRuntime:
         assert (target / "mcvoicetest" / "__init__.py").is_file()
         assert (target / "mcvoicetest-1.0.dist-info" / "METADATA").is_file()
 
+    def test_nothing_provisioning_runs_touches_the_host_interpreter(self, tmp_path,
+                                                                     monkeypatch):
+        """C1, as a fact about the argv rather than a promise in a docstring.
+
+        NumPy joining the closure is the change that makes this worth asserting:
+        the one thing Voice Chat must never do is decide that the host Forge
+        environment needs a different NumPy. Every subprocess provisioning runs
+        is the staged interpreter, and ``sys.executable`` appears in none of
+        them.
+        """
+        staging = tmp_path / "staging"
+        interpreter = ((staging / "env" / "Scripts" / "python.exe") if os.name == "nt"
+                       else (staging / "env" / "bin" / "python"))
+        interpreter.parent.mkdir(parents=True)
+        interpreter.write_text("")
+
+        ran = []
+
+        class Result:
+            returncode = 0
+            stdout = json.dumps({"ok": True, "provider": "cpu", "runtime_version": "1.13.6",
+                                 "numpy_version": "2.2.6"})
+            stderr = ""
+
+        def record(command, **kwargs):
+            ran.append([str(part) for part in command])
+            return Result()
+
+        monkeypatch.setattr(models.subprocess, "run", record)
+        models._smoke_test(staging, models.manifest())
+
+        assert ran, "the smoke test ran nothing at all"
+        for command in ran:
+            assert command[0] == str(interpreter), command
+            assert sys.executable not in command, command
+            assert "pip" not in command, command
+
     def test_no_package_manager_is_invoked_at_all(self, tmp_path, monkeypatch):
         """The strongest form of "it never reaches an index": there is nothing
         that could."""
@@ -814,8 +969,13 @@ class TestInstallingTheEngineFromAFolder:
             models._adopt_wheels(chosen, folder, wheels, lambda _t: None)
 
     def test_the_addresses_are_offered_for_this_platform(self):
+        # Every wheel in the closure, counted from the closure rather than from
+        # a number written here: the whole point of the folder route is that
+        # somebody can fetch by hand exactly what the installer would have
+        # fetched, so a closure that grows a wheel must grow this list too.
+        chosen = models.runtime_platform()
         found = models.runtime_sources()
-        assert len(found) == 2
+        assert [item["filename"] for item in found] == [a.filename for a in chosen.artifacts]
         for item in found:
             assert item["url"].startswith("https://files.pythonhosted.org/")
             assert item["filename"].endswith(".whl")

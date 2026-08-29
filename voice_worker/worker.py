@@ -1326,8 +1326,21 @@ def selftest() -> int:
     promoted. It deliberately builds a real config object rather than only
     importing: an ONNX Runtime whose CPU provider is missing imports perfectly
     well and fails at the first model.
+
+    NumPy is reported and never required. It is what lets sherpa hand a batch of
+    samples back *during* a synthesis -- pybind11 has to build a
+    ``py::array_t<float>`` to do it -- so a runtime without it speaks a segment
+    at a time instead of a sentence at a time. That is slower and it is not
+    broken, and an install refused for it would trade a working feature for a
+    faster one.
     """
-    report = {"ok": False, "provider": "", "runtime_version": ""}
+    report = {"ok": False, "provider": "", "runtime_version": "", "numpy_version": ""}
+    try:
+        import numpy
+
+        report["numpy_version"] = str(getattr(numpy, "__version__", "") or "")
+    except Exception as exc:  # noqa: BLE001 - absence is a fact, not a failure
+        report["numpy_error"] = f"{exc.__class__.__name__}: {exc}"
     try:
         import sherpa_onnx
 
