@@ -14,6 +14,8 @@ control lists Prompt Studio keeps in three places have not drifted apart.
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 import mc_llm_chat_panel
@@ -1368,11 +1370,31 @@ class TestTheComposer:
 
         assert (idle_send.get("visible"), idle_stop.get("visible")) == (True, False)
         assert (busy_send.get("visible"), busy_stop.get("visible")) == (False, True)
-        # And the one that is not on screen is disabled as well, so a keyboard
-        # shortcut aimed at a hidden Stop finds a control that refuses rather
-        # than one that quietly cancels nothing.
-        assert idle_stop.get("interactive") is False
+        # Send is disabled while it is off screen, so a keyboard shortcut aimed
+        # at a hidden Send finds a control that refuses rather than one that
+        # quietly sends the composer's contents a second time.
         assert busy_send.get("interactive") is False
+
+    def test_stop_is_never_disabled_by_the_language_model_going_idle(self):
+        """The language model finishing is not the end of the response.
+
+        Voice may still be reading the reply aloud, and the browser reveals Stop
+        for that phase -- so a Stop that Gradio had rendered ``disabled`` was a
+        Stop visible during exactly the phase it could not stop. Hiding and
+        disabling are different statements and only the first is Python's here.
+        """
+        _idle_send, idle_stop = mc_llm_chat_panel.IDLE
+        _busy_send, busy_stop = mc_llm_chat_panel.BUSY
+        assert idle_stop.get("interactive") is True
+        assert busy_stop.get("interactive") is True
+
+    def test_the_stop_button_is_built_interactive(self):
+        """And the same claim about the component itself, because a first paint
+        happens before any update is applied to it."""
+        source = pathlib.Path(mc_llm_chat_panel.__file__).read_text(encoding="utf-8")
+        built = source.split('gr.Button("Stop", variant="stop"')[1].split(")")[0]
+        assert "visible=False" in built
+        assert "interactive=True" in built
 
     def test_editing_replaces_the_composer_rather_than_growing_the_panel(self, store):
         """The editor borrows the composer's space, so the transcript above it
@@ -3261,7 +3283,15 @@ class TestStoppingGivesTheControlsBack:
         assert self._restored(mc_llm_prompt_panel._cancel(None)) == (True, False)
 
     def test_conversation_can_be_sent_another_message(self):
-        assert self._restored(mc_llm_chat_panel._cancel(None)) == (True, False)
+        """Send comes back. Stop stays enabled, which is the difference between
+        Conversation and the panels above it: the language model going idle is
+        not the end of the response there, because Voice may still be reading
+        the reply aloud and the browser reveals Stop for that phase. What hides
+        Stop is visibility, not enablement -- see ``mc_llm_chat_panel.IDLE``.
+        """
+        assert self._restored(mc_llm_chat_panel._cancel(None)) == (True, True)
+        _status, _submit, stop = mc_llm_chat_panel._cancel(None)[:3]
+        assert stop.get("visible") is False
 
     def test_conversation_stop_also_ends_the_spoken_reply(self):
         """Section 26. One press, both halves.

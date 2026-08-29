@@ -805,6 +805,12 @@ function report(extra) {
                      .contains("mc-llm-voice-hidden")),
         stopHidden: (elements["mc-llm-chat-stop"].classList
                      .contains("mc-llm-voice-hidden")),
+        // Visible and *actionable* are two claims. A Stop that Gradio has
+        // rendered disabled is on screen during exactly the phase it cannot
+        // stop -- and a disabled button dispatches no click at all, so the
+        // browser's own capture-phase listener never runs either.
+        stopDisabled: !!elements["mc-llm-chat-stop"].disabled
+            || elements["mc-llm-chat-stop"].getAttribute("aria-disabled") === "true",
         pendingTimers: pending(),
         consoleErrors,
         consoleInfo,
@@ -3081,6 +3087,69 @@ class TestTheComposerBusyState:
         assert found["stopStillHidden"] is False
         assert found["stopHidden"] is False
         assert found["sendHidden"] is True
+
+    def test_stop_is_actionable_and_not_merely_visible_during_voice(self):
+        """S-2. The bug this closes: Python built Stop `interactive=False`, the
+        browser revealed it when the model went idle and Voice kept speaking,
+        and what appeared was a Stop that could not be pressed. A disabled
+        button dispatches no click, so even the capture-phase listener that
+        silences the speaker locally never ran."""
+        found = run("""
+            runState.value = "llm";
+            await speak('T1', 4);
+            runState.value = "idle";
+            // Gradio re-rendering the component and reasserting its
+            // server-side attributes, which it may do at any point.
+            elements["mc-llm-chat-stop"].disabled = true;
+            elements["mc-llm-chat-stop"].setAttribute("aria-disabled", "true");
+            await pump(2);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=2.0, count=6, stall=True))
+        assert found["stopHidden"] is False
+        assert found["stopDisabled"] is False
+
+    def test_stop_stays_actionable_while_the_model_is_running(self):
+        """S-1, and the same assertion from the other side."""
+        found = run("""
+            runState.value = "llm";
+            elements["mc-llm-chat-stop"].disabled = true;
+            await pump(2);
+            console.log(JSON.stringify(report()));
+        """)
+        assert found["stopHidden"] is False
+        assert found["stopDisabled"] is False
+
+    def test_one_click_silences_playback_and_cancels_the_server(self):
+        """S-3. The browser's half is immediate and local; the POST is what
+        stops Kokoro computing speech nobody is going to hear."""
+        found = run("""
+            runState.value = "llm";
+            await speak('T1', 4);
+            runState.value = "idle";
+            await pump(2);
+            elements["mc-llm-chat-stop"].fire("click", {});
+            await pump(2);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=2.0, count=6, stall=True))
+        assert found["stopped"] >= 1, "scheduled audio was left playing"
+        assert found["aborts"] >= 1, "the stream request was not aborted"
+        assert any(r["url"].endswith("voice/cancel") for r in found["requests"])
+
+    def test_a_second_click_is_harmless(self):
+        """S-5. Two paths deliberately press this button, and a cancellation
+        race is an ordinary thing rather than an error."""
+        found = run("""
+            runState.value = "llm";
+            await speak('T1', 4);
+            runState.value = "idle";
+            await pump(2);
+            elements["mc-llm-chat-stop"].fire("click", {});
+            elements["mc-llm-chat-stop"].fire("click", {});
+            await pump(4);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=2.0, count=6, stall=True))
+        assert found["consoleErrors"] == []
+        assert found["sendHidden"] is False, "the composer was left showing Stop"
 
     def test_send_comes_back_only_when_both_are_idle(self):
         found = run("""

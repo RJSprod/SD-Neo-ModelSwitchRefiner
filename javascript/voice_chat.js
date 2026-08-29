@@ -1431,6 +1431,14 @@
         const stop = clickable(IDS.stop);
         if (!send || !stop) return;
         const working = busy();
+        // Revealing a disabled button is worse than leaving it hidden: it is a
+        // Stop on screen during exactly the phase it cannot stop. Python builds
+        // Stop interactive now, but a Gradio re-render can reassert the
+        // server-side attributes of a component at any point, so this is
+        // asserted here as well -- conditionally, like every other write in
+        // this file, because rewriting an attribute that is already right wakes
+        // every observer on the page.
+        if (working) enable(stop);
         const sendHolder = holderOf(send);
         const stopHolder = holderOf(stop);
         // On a build where Send and Stop share a wrapper, `holderOf` answers
@@ -1464,6 +1472,26 @@
     // forever, and a page whose observers never settle is a page whose first
     // paint never finishes. Asserting the state is the requirement. Rewriting
     // it when it is already right is what broke somebody's txt2img tab.
+    // Whatever "this control is not available" is currently spelled as. All
+    // three are removed together because a browser, a theme and Gradio each use
+    // a different one, and a control that answers a pointer but reads as
+    // disabled to a screen reader is only half a control.
+    function enable(node) {
+        if (!node) return;
+        if (node.disabled) node.disabled = false;
+        try {
+            if (node.getAttribute && node.getAttribute("disabled") !== null) {
+                node.removeAttribute("disabled");
+            }
+            if (node.getAttribute && node.getAttribute("aria-disabled") === "true") {
+                node.setAttribute("aria-disabled", "false");
+            }
+        } catch (error) { /* a node that will not take it is not a failure */ }
+        if (node.classList && node.classList.contains("disabled")) {
+            node.classList.remove("disabled");
+        }
+    }
+
     function show(node, wanted) {
         if (!node || !node.classList) return;
         if (wanted) {

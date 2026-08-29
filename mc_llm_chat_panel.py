@@ -350,8 +350,16 @@ def build() -> dict:
                 # ever one of them is on screen.
                 send = gr.Button("Send", variant="primary", size="sm", scale=0, min_width=88,
                                  elem_id=ui.ident("chat", "send"))
+                # Hidden, and interactive anyway. Those are two different
+                # questions and building Stop with both answers set to "no" was
+                # the bug: the browser reveals Stop for a Voice-only phase, but
+                # a Gradio button built ``interactive=False`` is rendered
+                # ``disabled``, so what appeared was a Stop that could not be
+                # pressed while the speaker was still talking. Visibility is
+                # shared between Python and the browser; enablement is not
+                # something either of them has a reason to withdraw.
                 stop = gr.Button("Stop", variant="stop", size="sm", scale=0, min_width=88,
-                                 visible=False, interactive=False,
+                                 visible=False, interactive=True,
                                  elem_id=ui.ident("chat", "stop"))
 
             # MESSAGE_EDIT_MODE. The composer's space, borrowed: the transcript
@@ -1868,7 +1876,20 @@ picture the next message would carry again without anybody asking for it.
 """
 
 BUSY = (gr.update(visible=False, interactive=False), gr.update(visible=True, interactive=True))
-IDLE = (gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False))
+IDLE = (gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=True))
+"""Send and Stop, as ``(send, stop)`` pairs, for the two states Python knows about.
+
+Stop is left *interactive* in both. Hiding a control and disabling it are
+different statements, and only the first is Python's to make here: the language
+model going idle is not the end of the response, because the speaker may still
+be reading it aloud. The browser reveals Stop for that phase -- and used to
+reveal a button Gradio had already rendered ``disabled``, which is a Stop that
+is visible during exactly the phase it cannot stop.
+
+So Python owns visibility for its own half and never withdraws enablement.
+``javascript/voice_chat.js`` owns the other half of visibility and clears any
+``disabled`` a re-render puts back.
+"""
 
 LLM_RUNNING = "llm"
 LLM_IDLE = "idle"
