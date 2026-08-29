@@ -338,7 +338,17 @@ whoever reads the numbers.
 
 
 def _lower_priority() -> None:
-    """Be the process that yields when an image is rendering. Never fatal."""
+    """Be the process that yields when an image is rendering. Never fatal.
+
+    The call below is deliberately left exactly as it has always been, including
+    its undeclared handle types -- see :func:`_priority`, where the same pattern
+    turned out to report a failed read. Declaring them here would not be a
+    diagnostic change: it would make this call start working, and a worker that
+    began yielding CPU for the first time is a change to how fast speech is
+    synthesised. That is a decision to take deliberately, from the corrected
+    reading this build now produces, rather than a side effect of tidying a
+    neighbouring function.
+    """
     try:
         if os.name == "nt":
             import ctypes
@@ -376,13 +386,30 @@ def _priority() -> str:
     So this is here to answer one question in a shared log: was the run that
     produced these numbers a run at the priority everybody assumes? Never
     raises; an unreadable priority is reported as unknown rather than guessed.
+
+    The Windows half declares its own types, and that is not decoration. A
+    process handle is pointer-sized, ctypes defaults an undeclared return value
+    and an undeclared argument to ``int``, and the pseudo-handle ``GetCurrentProcess``
+    answers with is ``(HANDLE)-1`` -- so a 64-bit host can be handed a truncated
+    handle and refuse it. That is what the first shipped version of this
+    function did: it reported ``class_0x0``, which is not a priority class at
+    all but ``GetPriorityClass`` returning zero for failure. A diagnostic that
+    quietly reports a failed read as a value is worse than no diagnostic, so
+    ``restype`` and ``argtypes`` are declared and a zero is now named as the
+    failure it is.
     """
     try:
         if os.name == "nt":
             import ctypes
 
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            found = int(ctypes.windll.kernel32.GetPriorityClass(handle))
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            kernel32.GetCurrentProcess.argtypes = []
+            kernel32.GetPriorityClass.restype = ctypes.c_uint
+            kernel32.GetPriorityClass.argtypes = [ctypes.c_void_p]
+            found = int(kernel32.GetPriorityClass(kernel32.GetCurrentProcess()))
+            if not found:
+                return "unreadable"
             return PRIORITY_CLASSES.get(found, f"class_{found:#x}")
         found = os.getpriority(os.PRIO_PROCESS, 0)
         return f"nice{found:+d}"
