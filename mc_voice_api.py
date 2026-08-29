@@ -127,6 +127,7 @@ MODELS_ROUTE = f"{PREFIX}/models"
 PROFILE_ROUTE = f"{PREFIX}/profile"
 STREAM_ROUTE = f"{PREFIX}/tts-stream"
 CANCEL_ROUTE = f"{PREFIX}/cancel"
+TELEMETRY_ROUTE = f"{PREFIX}/telemetry"
 RUNTIME_ROUTE = f"{PREFIX}/runtime"
 VOICES_ROUTE = f"{PREFIX}/voices"
 VOICE_DEFAULT_ROUTE = f"{PREFIX}/voice/default"
@@ -139,7 +140,7 @@ CLONING_START_ROUTE = f"{PREFIX}/cloning/start"
 CLONING_ABORT_ROUTE = f"{PREFIX}/cloning/abort"
 
 ROUTES = (STATUS_ROUTE, STT_ROUTE, TTS_ROUTE, INSTALL_ROUTE, MODELS_ROUTE, PROFILE_ROUTE,
-          STREAM_ROUTE, CANCEL_ROUTE,
+          STREAM_ROUTE, CANCEL_ROUTE, TELEMETRY_ROUTE,
           RUNTIME_ROUTE, VOICES_ROUTE, VOICE_DEFAULT_ROUTE, VOICE_TEST_ROUTE,
           VOICE_RENAME_ROUTE, VOICE_DELETE_ROUTE, CLONING_INSTALL_ROUTE,
           CLONING_STATUS_ROUTE, CLONING_START_ROUTE, CLONING_ABORT_ROUTE)
@@ -561,6 +562,26 @@ def _default_voice() -> dict:
         return {"id": "", "name": ""}
 
 
+def _tts_configuration() -> dict:
+    """The process-level facts a turn's durations have to be read against.
+
+    Separate from the turn's own metrics because they are facts about the
+    worker rather than about the reply, and because reading them must never be
+    able to stop a turn being logged: an unreachable runtime answers "unknown"
+    rather than raising into the summary.
+    """
+    try:
+        import mc_voice_runtime as runtime
+
+        found = runtime.engine()
+        return {"tts_threads": found.get("tts_threads") or runtime.TTS_THREADS,
+                "priority": found.get("priority") or "unknown"}
+    except Exception:
+        logger.debug("Model Chain: could not read the Voice runtime configuration",
+                     exc_info=True)
+        return {"tts_threads": "unknown", "priority": "unknown"}
+
+
 def _log_turn(turn) -> None:
     """One line per spoken turn, of numbers only. Section 36.
 
@@ -586,17 +607,31 @@ def _log_turn(turn) -> None:
                     found["compute_seconds"], found["rtf"], found["first_audio_ms"],
                     found["cancelled"] or "completed")
         # A second line, and it is the one a latency question is answered from.
-        # Everything on it is a duration or a count: whether the worker was
-        # already warm, how long warming took, how big the first two segments
-        # were, and how long the synthesis lane stood idle between them. Section
-        # 36 -- no text, and no field here that is not in `metrics`.
-        logger.info("Model Chain: Voice turn latency — worker %s, prepare %s ms, first "
-                    "segment %s ms (%s chars), second segment %s chars after %s ms idle, "
-                    "%s streaming",
+        # Everything on it is a duration or a count. The thread count and the
+        # priority come from the runtime rather than the turn because they
+        # belong to the process rather than the reply -- and they are on this
+        # line because a duration means nothing without the configuration that
+        # produced it. Section 36: no text, and no field here that is not in
+        # `metrics` or in the runtime's own configuration.
+        engine = _tts_configuration()
+        logger.info("Model Chain: Voice turn latency — worker %s, prepare %s ms, "
+                    "threads %s, priority %s, %s streaming; "
+                    "unit 1 %s chars after %s ms ready, %s ms synth, first block %s ms, "
+                    "%s blocks, %s ms audio; "
+                    "unit 2 %s chars after %s ms ready, %s ms synth, first block %s ms, "
+                    "%s blocks, %s ms audio; "
+                    "slowest unit %s was %s ms; RTF %s, first audio %s ms",
                     "warm" if found["worker_warm_at_turn_start"] else "cold",
-                    found["runtime_prepare_ms"], found["first_segment_ms"],
-                    found["segment_1_chars"], found["segment_2_chars"],
-                    found["segment_wait_2_ms"], found["streaming"] or "unknown")
+                    found["runtime_prepare_ms"], engine["tts_threads"], engine["priority"],
+                    found["streaming"] or "unknown",
+                    found["segment_1_chars"], found["ready_wait_1_ms"],
+                    found["segment_1_ms"], found["segment_1_first_block_ms"],
+                    found["segment_1_callback_blocks"], found["segment_1_audio_ms"],
+                    found["segment_2_chars"], found["ready_wait_2_ms"],
+                    found["segment_2_ms"], found["segment_2_first_block_ms"],
+                    found["segment_2_callback_blocks"], found["segment_2_audio_ms"],
+                    found["max_segment_index"], found["max_segment_ms"],
+                    found["rtf"], found["first_audio_ms"])
     except Exception:
         logger.debug("Model Chain: could not record voice turn metrics", exc_info=True)
 
@@ -786,6 +821,82 @@ def cancel_turn(token: str, reason: str = "") -> dict:
         logger.warning("Model Chain: a browser stopped listening to a reply — %s", why)
     cancelled = turns.cancel(wanted, why or "user") if wanted else turns.cancel_active()
     return {"ok": True, "cancelled": bool(cancelled), "speaking": turns.busy()}
+
+
+TELEMETRY = {
+    "playback": ("turn_seen_to_headers_ms", "headers_to_first_pcm_ms",
+                 "first_pcm_to_playback_ms", "startup_buffer_ms", "underrun_count",
+                 "first_underrun_after_play_ms", "max_underrun_gap_ms",
+                 "total_underrun_gap_ms"),
+    "capture": ("mic_request_ms", "stream_ready_ms", "first_pcm_ms", "engaged_ms",
+                "preroll_ms", "recorded_ms"),
+}
+"""The only fields this route will read, by report kind.
+
+A fixed schema rather than a bag, and named here rather than inferred from
+whatever arrives, because this is the one route whose whole purpose is to write
+into a log file. "Reject or ignore unknown fields according to one documented
+policy" is the requirement and the policy is *ignore*: a page from a newer build
+reporting a field this one has never heard of should still get its other numbers
+recorded rather than have the whole report refused. Nothing outside these tuples
+is read, so nothing outside them can reach a log.
+
+Every one of them is a duration in milliseconds or a count. There is no field
+here that could carry a word.
+"""
+
+TELEMETRY_ENUMS = {"playback_end_reason": ("finished", "cancelled", "error", "replaced"),
+                   "graph": ("worklet", "script", "none"),
+                   "result": ("sent", "discarded", "error")}
+"""The three non-numeric fields, and the complete set of values each may hold.
+
+Enumerated rather than length-limited. A free-text field on a route that writes
+to a log is a way to write text to a log, however short it is trimmed.
+"""
+
+TELEMETRY_MAX_MS = 24 * 60 * 60 * 1000
+"""A day. Not a real duration -- it is the ceiling that stops a page, or
+something pretending to be one, filling a log line with digits."""
+
+
+def telemetry(payload: dict) -> dict:
+    """One content-free playback or capture report from a browser, logged.
+
+    The browser is the only party that can answer some of these questions. The
+    server knows how long a synthesis took; only the page knows whether the
+    speaker actually ran dry, and for how long. So this exists, and it is
+    deliberately the least powerful route in this module: it reads a fixed set
+    of numbers, writes one line, and returns.
+
+    Best-effort in both directions. Nothing waits for it, its failure changes no
+    playback, no capture, no cancellation and no composer state, and a report
+    that cannot be understood is dropped rather than argued with.
+    """
+    kind = str(payload.get("kind") or "")
+    if kind not in TELEMETRY:
+        raise Refused(400, "That is not a kind of report this WebUI records.")
+    turn = str(payload.get("turn") or "")[:24]
+    if turn and not turn.replace("-", "").replace("_", "").isalnum():
+        raise Refused(400, "That is not a turn identifier.")
+    found = {}
+    for name in TELEMETRY[kind]:
+        value = payload.get(name)
+        if value is None:
+            continue
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        found[name] = max(0, min(number, TELEMETRY_MAX_MS))
+    for name, allowed in TELEMETRY_ENUMS.items():
+        value = payload.get(name)
+        if isinstance(value, str) and value in allowed:
+            found[name] = value
+    if not found:
+        raise Refused(400, "That report carried nothing this WebUI records.")
+    logger.info("Model Chain: Voice %s timing — turn %s, %s", kind, turn[:8] or "none",
+                ", ".join(f"{name}={found[name]}" for name in sorted(found)))
+    return {"ok": True, "recorded": len(found)}
 
 
 def set_runtime(action: str) -> dict:
@@ -1213,6 +1324,21 @@ def install(_demo=None, app=None) -> bool:
         except Exception:
             return _failed("a Voice Chat cancel failed", "Voice could not be stopped.")
 
+    async def voice_telemetry(request: Request):
+        try:
+            _checked(request, TELEMETRY_ROUTE)
+            return JSONResponse(telemetry(await _json(request)))
+        except Refused as exc:
+            return _refusal(exc)
+        except Exception:
+            # Logged at debug and answered with an ordinary refusal. A page that
+            # cannot report its own timings has nothing wrong with its audio,
+            # and this route must never be a reason anything else stops.
+            logger.debug("Model Chain: a Voice telemetry report was not recorded",
+                         exc_info=True)
+            return _failed("a Voice Chat timing report failed",
+                           "That timing report was not recorded.")
+
     async def voice_runtime(request: Request):
         try:
             _checked(request, RUNTIME_ROUTE)
@@ -1405,6 +1531,7 @@ def install(_demo=None, app=None) -> bool:
                               (TTS_ROUTE, voice_tts), (INSTALL_ROUTE, voice_install),
                               (MODELS_ROUTE, voice_models), (PROFILE_ROUTE, voice_profile),
                               (STREAM_ROUTE, voice_stream), (CANCEL_ROUTE, voice_cancel),
+                              (TELEMETRY_ROUTE, voice_telemetry),
                               (RUNTIME_ROUTE, voice_runtime), (VOICES_ROUTE, voice_voices),
                               (VOICE_DEFAULT_ROUTE, voice_default),
                               (VOICE_TEST_ROUTE, voice_test),

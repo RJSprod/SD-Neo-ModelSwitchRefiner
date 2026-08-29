@@ -326,6 +326,17 @@ def _containment(parent_pid: int) -> str:
     return "pipe"
 
 
+MAX_NUM_SENTENCES = 1
+"""How many sentences sherpa batches, and therefore how often it calls back.
+
+Named rather than written in place because it is now two things: the batching
+policy, and the unit the per-segment block counts below are counted in. A log
+line saying ``callback_blocks=4`` means four sentences only while this is one,
+so the value is reported in the configuration line rather than assumed by
+whoever reads the numbers.
+"""
+
+
 def _lower_priority() -> None:
     """Be the process that yields when an image is rendering. Never fatal."""
     try:
@@ -339,6 +350,44 @@ def _lower_priority() -> None:
             os.nice(5)
     except Exception:
         _note("could not lower the voice worker's priority")
+
+
+PRIORITY_CLASSES = {
+    0x00000020: "normal",
+    0x00004000: "below_normal",
+    0x00008000: "above_normal",
+    0x00000080: "high",
+    0x00000100: "realtime",
+    0x00000040: "idle",
+}
+"""Windows priority classes, for reading one back. Named rather than raised:
+this file sets ``below_normal`` and nothing here ever asks for more."""
+
+
+def _priority() -> str:
+    """What this process's scheduling priority actually ended up as.
+
+    Observation only, and that is the whole design of it. A worker that read its
+    own priority in order to change it would be a scheduler, and a scheduler is
+    the thing a speech process running beside an image model must not become --
+    raising a Linux priority needs ``CAP_SYS_NICE`` anyway, and asking for it
+    would turn a chat feature into something that wants privileges.
+
+    So this is here to answer one question in a shared log: was the run that
+    produced these numbers a run at the priority everybody assumes? Never
+    raises; an unreadable priority is reported as unknown rather than guessed.
+    """
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            found = int(ctypes.windll.kernel32.GetPriorityClass(handle))
+            return PRIORITY_CLASSES.get(found, f"class_{found:#x}")
+        found = os.getpriority(os.PRIO_PROCESS, 0)
+        return f"nice{found:+d}"
+    except Exception:  # noqa: BLE001 - a priority nobody can read is not a failure
+        return "unknown"
 
 
 # --------------------------------------------------------------------------- #
@@ -575,7 +624,8 @@ class Engines:
         # sentence's audio leaves this process while the second is still being
         # computed, which is the whole latency argument for streaming.
         self.tts = sherpa_onnx.OfflineTts(
-            sherpa_onnx.OfflineTtsConfig(model=model_config, max_num_sentences=1))
+            sherpa_onnx.OfflineTtsConfig(model=model_config,
+                                         max_num_sentences=MAX_NUM_SENTENCES))
         self.num_speakers = int(getattr(self.tts, "num_speakers", 0) or 0)
         self.sample_rate = int(getattr(self.tts, "sample_rate", 0) or 0)
         probe_started = time.monotonic()
@@ -1092,7 +1142,7 @@ class Worker:
         # ``max_num_sentences=1`` the block count *is* the sentence count, which
         # is why the parent can report callback granularity without this file
         # ever counting anything about the text.
-        block = {"count": 0, "first": 0.0, "at": 0.0}
+        block = {"count": 0, "first": 0.0, "at": 0.0, "samples": 0}
         try:
             while True:
                 text = turn.next_segment()
@@ -1106,6 +1156,7 @@ class Worker:
                     sequence += 1
                     if block["at"]:
                         block["count"] += 1
+                        block["samples"] += len(chunk) // 2
                         if not block["first"]:
                             block["first"] = time.monotonic() - block["at"]
                     _turn.samples += len(chunk) // 2
@@ -1121,7 +1172,8 @@ class Worker:
                 # Armed after the pause and not before it: a configured pause is
                 # deliberate prosody, and counting it as this segment's first
                 # audio would make an intentional gap look like a slow synthesis.
-                block.update({"count": 0, "first": 0.0, "at": time.monotonic()})
+                block.update({"count": 0, "first": 0.0, "samples": 0,
+                              "at": time.monotonic()})
                 engines.stream(text, sid, turn.delivery, on_audio)
                 elapsed_segment = time.monotonic() - block["at"]
                 block["at"] = 0.0
@@ -1132,6 +1184,11 @@ class Worker:
                            "blocks": block["count"],
                            "first_block_ms": int(block["first"] * 1000),
                            "segment_ms": int(elapsed_segment * 1000),
+                           # How much speech this unit actually produced, which
+                           # is what turns a synthesis time into a real-time
+                           # factor for one unit rather than for a whole turn.
+                           "samples": block["samples"],
+                           "sample_rate": int(engines.sample_rate or 0),
                            "streaming": engines.streaming})
         except Exception as exc:
             self.send({"op": "tts_error", "turn": turn.id, "error": _safe(exc)})
@@ -1213,6 +1270,8 @@ def serve(stdin, stdout, engines_factory=None) -> int:
                         "bank_version": engines.bank_version,
                         "streaming": engines.streaming,
                         "callback_probe_ms": engines.callback_probe_ms,
+                        "max_num_sentences": MAX_NUM_SENTENCES,
+                        "priority": _priority(),
                         "load_seconds": round(time.monotonic() - started, 3),
                     })
                     _note(f"ready — CPU provider, STT threads {engines.stt_threads}, "

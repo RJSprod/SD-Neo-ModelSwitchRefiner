@@ -923,6 +923,90 @@ class TestCancelling:
         client.post(api.CANCEL_ROUTE, headers=key, json={"turn": "anything"})
 
 
+class TestTheTelemetryRoute:
+    """The least powerful route in the module, and deliberately so.
+
+    It exists because the browser is the only party that can say whether the
+    speaker actually ran dry, and it writes what it is told into a log file --
+    which is precisely why what it will read is a fixed list of numbers rather
+    than whatever arrives.
+    """
+
+    def test_a_playback_report_is_recorded(self, client, key, caplog):
+        with caplog.at_level("INFO", logger="model_chain"):
+            found = client.post(api.TELEMETRY_ROUTE, headers=key, json={
+                "kind": "playback", "turn": "abcd1234",
+                "turn_seen_to_headers_ms": 40, "underrun_count": 2,
+                "max_underrun_gap_ms": 410, "total_underrun_gap_ms": 700,
+                "startup_buffer_ms": 700, "playback_end_reason": "finished",
+            }).json()
+        assert found["ok"] is True and found["recorded"] == 6
+        line = " ".join(record.getMessage() for record in caplog.records)
+        assert "max_underrun_gap_ms=410" in line
+        assert "playback_end_reason=finished" in line
+
+    def test_a_capture_report_is_recorded(self, client, key, caplog):
+        with caplog.at_level("INFO", logger="model_chain"):
+            found = client.post(api.TELEMETRY_ROUTE, headers=key, json={
+                "kind": "capture", "first_pcm_ms": 285, "engaged_ms": 620,
+                "preroll_ms": 335, "graph": "worklet", "result": "sent",
+            }).json()
+        assert found["ok"] is True
+        assert "preroll_ms=335" in " ".join(r.getMessage() for r in caplog.records)
+
+    def test_a_field_this_build_has_never_heard_of_is_ignored(self, client, key, caplog):
+        """The documented policy is ignore rather than reject: a page from a
+        newer build should still get its other numbers recorded."""
+        with caplog.at_level("INFO", logger="model_chain"):
+            found = client.post(api.TELEMETRY_ROUTE, headers=key, json={
+                "kind": "playback", "underrun_count": 1,
+                "something_from_the_future_ms": 12,
+            }).json()
+        assert found["ok"] is True and found["recorded"] == 1
+        assert "something_from_the_future" not in " ".join(
+            r.getMessage() for r in caplog.records)
+
+    def test_nothing_that_could_carry_a_word_gets_through(self, client, key, caplog):
+        """Every field is a duration, a count, or one of a fixed set of words.
+        There is no field on this route that a sentence could be put in."""
+        with caplog.at_level("INFO", logger="model_chain"):
+            client.post(api.TELEMETRY_ROUTE, headers=key, json={
+                "kind": "playback", "underrun_count": 1,
+                "playback_end_reason": "the launch code is four zero four",
+                "startup_buffer_ms": "seven hundred",
+                "note": "the user said hello",
+            })
+        line = " ".join(record.getMessage() for record in caplog.records)
+        assert "launch code" not in line
+        assert "said hello" not in line
+        assert "seven hundred" not in line
+
+    def test_an_unknown_kind_is_refused(self, client, key):
+        assert client.post(api.TELEMETRY_ROUTE, headers=key,
+                           json={"kind": "whatever"}).status_code == 400
+
+    def test_a_report_with_nothing_in_it_is_refused(self, client, key):
+        assert client.post(api.TELEMETRY_ROUTE, headers=key,
+                           json={"kind": "playback"}).status_code == 400
+
+    def test_a_turn_identifier_that_is_not_one_is_refused(self, client, key):
+        assert client.post(api.TELEMETRY_ROUTE, headers=key,
+                           json={"kind": "playback", "turn": "../../etc/passwd",
+                                 "underrun_count": 1}).status_code == 400
+
+    def test_an_absurd_duration_is_clamped_rather_than_written_out(self, client, key,
+                                                                  caplog):
+        with caplog.at_level("INFO", logger="model_chain"):
+            client.post(api.TELEMETRY_ROUTE, headers=key, json={
+                "kind": "playback", "max_underrun_gap_ms": 10 ** 30})
+        line = " ".join(record.getMessage() for record in caplog.records)
+        assert str(api.TELEMETRY_MAX_MS) in line
+
+    def test_a_body_bigger_than_a_report_is_refused_before_it_is_parsed(self, client, key):
+        assert client.post(api.TELEMETRY_ROUTE, headers=key,
+                           content=b"x" * (api.MAX_JSON_BYTES + 1)).status_code == 413
+
+
 class TestTheEngineRoute:
     def test_t_api_9_load_and_unload_go_through_the_route(self, client, key, monkeypatch):
         loaded = []
@@ -1018,7 +1102,7 @@ class TestVoiceManagement:
 
 
 class TestTheNewRoutesAreGuarded:
-    NEW = ("STREAM_ROUTE", "CANCEL_ROUTE", "RUNTIME_ROUTE", "VOICES_ROUTE",
+    NEW = ("STREAM_ROUTE", "CANCEL_ROUTE", "TELEMETRY_ROUTE", "RUNTIME_ROUTE", "VOICES_ROUTE",
            "VOICE_DEFAULT_ROUTE", "VOICE_TEST_ROUTE", "VOICE_RENAME_ROUTE",
            "VOICE_DELETE_ROUTE", "CLONING_INSTALL_ROUTE", "CLONING_STATUS_ROUTE",
            "CLONING_START_ROUTE", "CLONING_ABORT_ROUTE")

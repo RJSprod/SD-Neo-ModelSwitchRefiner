@@ -17,6 +17,7 @@ llama-server got wrong.
 from __future__ import annotations
 
 import pathlib
+import re
 import time
 
 import pytest
@@ -139,10 +140,8 @@ class TestTheFixedThreadConfiguration:
         """No rotation, no A/B, no selection from real-time factors or underrun
         counts. The constant is read; it is never written."""
         source = pathlib.Path(runtime.__file__).read_text(encoding="utf-8")
-        assignments = [line for line in source.splitlines()
-                       if "TTS_THREADS" in line and "=" in line
-                       and not line.lstrip().startswith("#")
-                       and "==" not in line and '"' not in line]
+        assignments = [line.strip() for line in source.splitlines()
+                       if re.match(r"\s*TTS_THREADS\s*=[^=]", line)]
         assert assignments == ["TTS_THREADS = 4"], assignments
 
 
@@ -391,9 +390,11 @@ class Sink:
         self.started.set()
         return True
 
-    def note_segment(self, blocks=0, first_block_ms=0, streaming=""):
+    def note_segment(self, blocks=0, first_block_ms=0, streaming="", synth_ms=0,
+                     audio_ms=0):
         self.segments.append({"blocks": blocks, "first_block_ms": first_block_ms,
-                              "streaming": streaming})
+                              "streaming": streaming, "synth_ms": synth_ms,
+                              "audio_ms": audio_ms})
 
     def audio_finished(self):
         self.done = True

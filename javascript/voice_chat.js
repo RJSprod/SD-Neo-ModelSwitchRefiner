@@ -73,6 +73,7 @@
         tts: "model-chain/voice/tts",
         stream: "model-chain/voice/tts-stream",
         cancel: "model-chain/voice/cancel",
+        telemetry: "model-chain/voice/telemetry",
         runtime: "model-chain/voice/runtime",
         install: "model-chain/voice/install",
         models: "model-chain/voice/models",
@@ -577,6 +578,11 @@
             firstPcmAt: 0,
             releasedAt: 0,
             startTarget: BUFFER.start,
+            underrunTotal: 0,
+            underrunMax: 0,
+            firstUnderrunAt: 0,
+            endReason: "",
+            reported: false,
         };
     }
 
@@ -600,6 +606,11 @@
             playing = null;
         }
         if (!speech) return;
+        // Before the state is torn down, because everything the report is made
+        // of is about to be reset. "Cancelled" unless a caller has already said
+        // what happened -- a turn replaced by the next reply and a stream that
+        // could not be played are different endings and should read that way.
+        reportPlayback(speech, speech.endReason || "cancelled");
         speech.ended = true;
         speech.sources.forEach(function (source) {
             try {
@@ -743,7 +754,18 @@
                 // The queue ran dry while the stream was still producing: the
                 // speaker fell silent mid-sentence. Counted, and the next turn
                 // starts with a deeper buffer because of it.
+                //
+                // How *long* it was silent is the number that was missing, and
+                // it has to be taken here, before `nextStart` is reset: the
+                // distance the audio clock has run past the end of what was
+                // scheduled is exactly the gap the listener heard. A count
+                // alone cannot tell four imperceptible hiccups from one
+                // four-second hole, and those are different bugs.
+                const gap = Math.max(0, now - state.nextStart);
                 state.underruns += 1;
+                state.underrunTotal += gap;
+                if (gap > state.underrunMax) state.underrunMax = gap;
+                if (!state.firstUnderrunAt) state.firstUnderrunAt = nowMs();
             }
             state.nextStart = now + 0.02;
         }
@@ -765,7 +787,10 @@
         if (!turnId || (speech && speech.id === turnId)) return;
         // A new reply supersedes the last one. Locally first -- the server has
         // already cancelled its side by creating the new turn.
-        if (speech) stopSpeaking(true);
+        if (speech) {
+            speech.endReason = "replaced";
+            stopSpeaking(true);
+        }
         const state = newSpeech(turnId);
         speech = state;
         setVoiceBusy(true);
@@ -805,6 +830,7 @@
             }
             say(MESSAGES.speakFailed, "warn");
             console.warn("Model Chain: Voice could not play a reply", error);
+            state.endReason = "error";
             // Reported rather than only shown. The status line this writes to
             // is the panel's own, and the panel overwrites it with "Reply
             // complete." a moment later -- so a user watching for an
@@ -876,33 +902,75 @@
         return step();
     }
 
-    // One line per spoken turn, of durations and counts only.
+    // What this page knows and the WebUI cannot: whether the speaker actually
+    // ran dry, and for how long.
     //
     // Every number is a difference between two `performance.now()` readings
-    // taken in this page, so they are all in one clock domain and none of them
-    // is comparable with a timestamp from the WebUI. What they answer is which
-    // stage was slow: noticing the turn, opening the stream, the first sample
-    // arriving, or this page holding samples back in its own prebuffer.
+    // taken here, so they are all in one clock domain and none of them is
+    // comparable with a timestamp from the server. Between them they name the
+    // stage that was slow: noticing the turn, opening the stream, the first
+    // sample arriving, this page holding audio back in its own prebuffer, or
+    // the queue emptying underneath the speaker.
     //
-    // Never the audio, never the text, and never the turn id: the id is opaque
-    // but it is still a handle on one particular reply.
-    function reportPlayback(state) {
-        const since = function (mark) {
+    // Never the audio and never the text. The turn id goes with it because two
+    // records of one response have to be recognisable as one response; it is
+    // opaque, it belongs to a single reply, and it does not outlive the run.
+    function playbackReport(state, reason) {
+        const gap = function (mark) {
             return mark ? Math.round(mark - state.seenAt) : null;
         };
+        return {
+            kind: "playback",
+            turn: state.id,
+            turn_seen_to_headers_ms: gap(state.headersAt),
+            headers_to_first_pcm_ms: (state.headersAt && state.firstPcmAt)
+                ? Math.round(state.firstPcmAt - state.headersAt) : null,
+            first_pcm_to_playback_ms: (state.firstPcmAt && state.releasedAt)
+                ? Math.round(state.releasedAt - state.firstPcmAt) : null,
+            startup_buffer_ms: Math.round(state.startTarget * 1000),
+            underrun_count: state.underruns,
+            first_underrun_after_play_ms: (state.firstUnderrunAt && state.releasedAt)
+                ? Math.round(state.firstUnderrunAt - state.releasedAt) : null,
+            max_underrun_gap_ms: Math.round(state.underrunMax * 1000),
+            total_underrun_gap_ms: Math.round(state.underrunTotal * 1000),
+            playback_end_reason: reason || state.endReason || "finished",
+        };
+    }
+
+    // Best effort in the strongest sense: nothing waits for it, nothing reads
+    // its answer, and a failure is swallowed. A page that cannot report its own
+    // timings has nothing wrong with its audio, and this must never be a reason
+    // anything else stops.
+    function sendReport(payload) {
         try {
-            console.info("Model Chain: Voice played a reply — stream opened "
-                         + since(state.headersAt) + " ms, first audio "
-                         + since(state.firstPcmAt) + " ms, playback began "
-                         + since(state.releasedAt) + " ms after the turn was seen; "
-                         + "startup buffer " + Math.round(state.startTarget * 1000)
-                         + " ms, " + state.underruns + " underruns");
+            console.info("Model Chain: Voice " + payload.kind + " timing — "
+                         + Object.keys(payload).filter(function (name) {
+                             return name !== "kind" && name !== "turn"
+                                 && payload[name] !== null;
+                         }).map(function (name) {
+                             return name + "=" + payload[name];
+                         }).join(", "));
         } catch (error) { /* a console that will not take it is not a failure */ }
+        try {
+            fetch(url(ROUTES.telemetry), {
+                method: "POST",
+                credentials: "same-origin",
+                headers: headers({"Content-Type": "application/json"}),
+                body: JSON.stringify(payload),
+                keepalive: true,
+            }).catch(function () { /* a timing nobody recorded is not a failure */ });
+        } catch (error) { /* nor is a fetch this browser would not make */ }
+    }
+
+    function reportPlayback(state, reason) {
+        if (!state || state.reported) return;
+        state.reported = true;
+        sendReport(playbackReport(state, reason));
     }
 
     function finishSpeech(state) {
         if (speech !== state) return;
-        reportPlayback(state);
+        reportPlayback(state, "finished");
         if (state.underruns) raiseStartBuffer(); else relaxStartBuffer();
         // The reader is done but the speaker is not: what is scheduled still has
         // to play out before the composer stops showing Stop.
@@ -1294,11 +1362,12 @@
         return openMicrophone().then(function (stream) {
             if (session) session.mediaAt = nowMs();
             const state = {stream: stream, chunks: [], rate: ctx.sampleRate, nodes: [],
-                           track: describeTrack(stream), firstPcmAt: 0};
+                           track: describeTrack(stream), firstPcmAt: 0, graph: "none"};
             const source = ctx.createMediaStreamSource(stream);
             state.nodes.push(source);
 
             const useProcessor = function () {
+                state.graph = "script";
                 const processor = ctx.createScriptProcessor(4096, 1, 1);
                 processor.onaudioprocess = function (event) {
                     acceptChunk(state, new Float32Array(event.inputBuffer.getChannelData(0)));
@@ -1319,6 +1388,7 @@
                 if (!ready) return useProcessor();
                 try {
                     const node = new window.AudioWorkletNode(ctx, "mc-voice-tap");
+                    state.graph = "worklet";
                     node.port.onmessage = function (event) {
                         acceptChunk(state, event.data);
                     };
@@ -1669,6 +1739,7 @@
             session.cancelled = true;
             resetSlider();
             refuse(MESSAGES.unreadable);
+            reportCaptureTiming(session, null, "error");
             discard();
         }, OPEN_TIMEOUT_MS);
 
@@ -1695,6 +1766,7 @@
             // the only thing that knows which of these happened, and each of
             // them is a different thing for the user to do next.
             refuse(captureFailure(error));
+            reportCaptureTiming(session, null, "error");
         });
 
         refreshStatus(false).then(function (found) {
@@ -1739,26 +1811,37 @@
         // because a wall clock that syncs mid-utterance can make a held button
         // look like it was held for a negative length of time.
         const held = session.recordingAt ? nowMs() - session.recordingAt : 0;
-        reportCaptureTiming(session, state);
         releaseCapture(state);
         markMic("");
+        // Reported once, at the end, because the interesting field is what
+        // *happened* to the recording -- and none of the exits below knows that
+        // until it gets there. Every one of them goes through this.
+        const done = function (result) {
+            reportCaptureTiming(session, state, result);
+        };
 
-        if (cancelled || !state) return;
+        if (cancelled || !state) {
+            done("discarded");
+            return;
+        }
         if (!session.recordingAt) {
             // Released while the microphone was still opening. Nothing was
             // captured, so there is nothing to transcribe and nothing to refuse
             // -- section 7.5. Saying "that was too short" here would be a
             // sentence about the user when the wait was the device's.
+            done("discarded");
             return;
         }
         if (held < MIN_HOLD_MS) {
             refuse(MESSAGES.tooShort);
+            done("discarded");
             return;
         }
         const samples = resample(state.chunks, state.rate, TARGET_RATE);
         state.chunks = [];
         if (!samples.length) {
             refuse(MESSAGES.empty);
+            done("discarded");
             return;
         }
 
@@ -1773,9 +1856,11 @@
         reportCapture(state, before, applied);
         if (after.peak < QUIET_PEAK) {
             refuse(lastCapture.narrowband ? MESSAGES.tooQuiet : MESSAGES.empty);
+            done("discarded");
             return;
         }
         send(encodeWav(samples, TARGET_RATE));
+        done("sent");
     }
 
     // One console line per recording, and a status line only when there is
@@ -1819,20 +1904,21 @@
     //
     // No device name, no level, no samples: `reportCapture` above says what was
     // heard, and this says only how long it took to start hearing it.
-    function reportCaptureTiming(session, state) {
+    function reportCaptureTiming(session, state, result) {
         const since = function (mark) {
             return mark ? Math.round(mark - session.engagedAt) : null;
         };
-        try {
-            console.info("Model Chain: Voice Chat microphone timing — worklet "
-                         + since(session.workletAt) + " ms, microphone "
-                         + since(session.mediaAt) + " ms, graph "
-                         + since(session.graphAt) + " ms, ready "
-                         + since(session.readinessAt) + " ms, audio "
-                         + since(session.recordingAt) + " ms, released "
-                         + since(session.releasedAt) + " ms"
-                         + (state && state.firstPcmAt ? "" : " (nothing was captured)"));
-        } catch (error) { /* a console that will not take it is not a failure */ }
+        sendReport({
+            kind: "capture",
+            mic_request_ms: 0,
+            stream_ready_ms: since(session.mediaAt),
+            first_pcm_ms: since(state && state.firstPcmAt),
+            engaged_ms: since(session.recordingAt),
+            recorded_ms: (session.recordingAt && session.releasedAt)
+                ? Math.round(session.releasedAt - session.recordingAt) : null,
+            graph: (state && state.graph) || "none",
+            result: result || "discarded",
+        });
     }
     let narrowbandSaid = false;
 

@@ -1021,8 +1021,7 @@ class TestTheDeploymentRoot:
         found = run("await hold(900); console.log(JSON.stringify(report()));",
                     GRADIO_CONFIG="null")
         assert urls(found), "no request was made at all"
-        assert all(url.endswith("/model-chain/voice/status")
-                   or url.endswith("/model-chain/voice/stt") for url in urls(found))
+        assert all(url.startswith("/model-chain/voice/") for url in urls(found)), urls(found)
 
     def test_every_request_carries_the_page_token(self):
         found = run("await hold(900); console.log(JSON.stringify(report()));")
@@ -1668,16 +1667,36 @@ class TestOpeningAndRecording:
         assert len(posts) == 1, "the cap never stopped the recording"
         assert found["micTransform"] == "", "the handle stayed at the recording end"
 
-    def test_the_capture_timing_line_carries_durations_and_no_device(self):
+    def test_the_capture_report_carries_durations_and_no_device(self):
+        """§8.6. Relative durations, which capture path was used, and what
+        became of the recording. No device label, no level, no samples: the
+        console line above already says what was *heard*, and this says only how
+        long it took to start hearing it."""
         found = run("""
             await hold(900);
             console.log(JSON.stringify(report()));
         """)
-        line = [item for item in found["consoleInfo"] if "microphone timing" in item]
-        assert line, found["consoleInfo"]
-        assert "Built-in microphone" not in line[0]
-        for wanted in ("worklet", "microphone", "graph", "ready", "audio", "released"):
-            assert wanted in line[0]
+        rows = _captures(found)
+        assert len(rows) == 1, rows
+        row = rows.pop()
+        assert row["result"] == "sent"
+        assert row["graph"] in ("worklet", "script")
+        assert row["recorded_ms"] == 900
+        assert "Built-in microphone" not in json.dumps(row)
+        assert "turn" not in row
+
+    def test_an_abandoned_gesture_reports_that_it_was_discarded(self):
+        found = run("""
+            await engageMic(44);
+            await tick();
+            NOW += 40;
+            releaseMic(44);
+            await tick(4);
+            console.log(JSON.stringify(report()));
+        """)
+        rows = _captures(found)
+        assert rows and rows[0]["result"] == "discarded", rows
+        assert not [r for r in found["requests"] if (r.get("url") or "").endswith("/stt")]
 
 
 class TestTheRecording:
@@ -2729,15 +2748,36 @@ class TestTheStreamReader:
 ANY_TURN = {"X-Model-Chain-Voice-Rate": "24000"}
 
 
+def _playbacks(found: dict) -> list[dict]:
+    """Every playback report the page made, as field dictionaries."""
+    rows = []
+    for request in found["requests"]:
+        if not (request.get("url") or "").endswith("voice/telemetry"):
+            continue
+        payload = json.loads(request["bodyText"])
+        if payload.get("kind") == "playback":
+            rows.append(payload)
+    return rows
+
+
+def _captures(found: dict) -> list[dict]:
+    rows = []
+    for request in found["requests"]:
+        if not (request.get("url") or "").endswith("voice/telemetry"):
+            continue
+        payload = json.loads(request["bodyText"])
+        if payload.get("kind") == "capture":
+            rows.append(payload)
+    return rows
+
+
 def _startup_targets(found: dict) -> list[int]:
     """The startup buffer each spoken turn actually used, in milliseconds."""
-    return [int(re.search(r"startup buffer (\d+) ms", line).group(1))
-            for line in found["consoleInfo"] if "startup buffer" in line]
+    return [row["startup_buffer_ms"] for row in _playbacks(found)]
 
 
 def _underruns(found: dict) -> list[int]:
-    return [int(re.search(r"(\d+) underruns", line).group(1))
-            for line in found["consoleInfo"] if "underruns" in line]
+    return [row["underrun_count"] for row in _playbacks(found)]
 
 
 class TestNoticingANewTurn:
@@ -2888,19 +2928,115 @@ class TestTheStartupBuffer:
         targets = _startup_targets(found)
         assert targets == [700], found["consoleInfo"]
 
-    def test_the_playback_report_carries_durations_and_no_identity(self):
+    def test_the_playback_report_carries_durations_and_nothing_else(self):
         """Content-free, and in one clock domain: every number is a difference
-        between two `performance.now()` readings taken in this page."""
+        between two `performance.now()` readings taken in this page. The turn id
+        goes with it so that two records of one response can be recognised as
+        one response, and nothing else does."""
         found = run("""
             await speak('T1');
             console.log(JSON.stringify(report()));
         """, ANSWERS=stream_answers(seconds=0.25, count=4))
-        line = [item for item in found["consoleInfo"] if "Voice played a reply" in item]
-        assert line, found["consoleInfo"]
-        assert "T1" not in line[0]
-        for wanted in ("stream opened", "first audio", "playback began", "startup buffer",
-                       "underruns"):
-            assert wanted in line[0]
+        rows = _playbacks(found)
+        assert len(rows) == 1, rows
+        row = rows.pop()
+        assert row["turn"] == "T1"
+        assert row["playback_end_reason"] == "finished"
+        for wanted in ("turn_seen_to_headers_ms", "headers_to_first_pcm_ms",
+                       "first_pcm_to_playback_ms", "startup_buffer_ms", "underrun_count",
+                       "max_underrun_gap_ms", "total_underrun_gap_ms"):
+            assert wanted in row, wanted
+        for name, value in row.items():
+            if name in ("kind", "turn", "playback_end_reason"):
+                continue
+            assert value is None or isinstance(value, int), (name, value)
+
+
+class TestPlaybackTelemetry:
+    """The browser is the only party that can say whether the speaker ran dry.
+
+    Server real-time factors cannot: a synthesis that kept up on average still
+    produces a four-second hole if it fell behind once. The Web Audio scheduler
+    knows the moment it discovers its next start time is already in the past,
+    and how far in the past it is, which is the length of the silence somebody
+    heard.
+    """
+
+    def test_the_gap_is_measured_and_not_only_counted(self):
+        """A count alone cannot tell four imperceptible hiccups from one
+        four-second hole, and those are different bugs."""
+        found = run("""
+            turnField.value = "T1";
+            await pump(6);
+            // The audio clock runs a long way past everything scheduled, so the
+            // next block arrives to find the speaker silent -- and the distance
+            // it ran past is the gap that was heard.
+            advanceAudio(60);
+            NOW += 1000;
+            await pump(30);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=1.0, count=20, headers=ANY_TURN))
+        rows = _playbacks(found)
+        assert rows, "no playback report was sent"
+        row = rows[0]
+        assert row["underrun_count"] >= 1
+        assert row["max_underrun_gap_ms"] > 0, row
+        assert row["total_underrun_gap_ms"] >= row["max_underrun_gap_ms"]
+        assert row["first_underrun_after_play_ms"] is not None
+
+    def test_a_clean_turn_reports_no_starvation(self):
+        found = run("await speak('T1'); console.log(JSON.stringify(report()));",
+                    ANSWERS=stream_answers(seconds=0.25, count=4))
+        row = _playbacks(found)[0]
+        assert row["underrun_count"] == 0
+        assert row["max_underrun_gap_ms"] == 0
+        assert row["total_underrun_gap_ms"] == 0
+
+    def test_a_cancelled_turn_says_so(self):
+        found = run("""
+            runState.value = "llm";
+            await speak('T1', 4);
+            elements["mc-llm-chat-stop"].fire("click", {});
+            await pump(2);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=1.0, count=6, stall=True))
+        rows = _playbacks(found)
+        assert rows and rows[0]["playback_end_reason"] == "cancelled", rows
+
+    def test_a_superseded_turn_says_it_was_replaced(self):
+        """A reply cut off by the next reply is not a reply somebody stopped."""
+        found = run("""
+            await speak('T1', 6);
+            turnField.value = "";
+            await pump(2);
+            await announceTurn('T2', 20);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=1.0, count=6, stall=True, headers=ANY_TURN))
+        reasons = [row["playback_end_reason"] for row in _playbacks(found)]
+        assert "replaced" in reasons, reasons
+
+    def test_one_report_per_turn_however_many_stops_it_gets(self):
+        """Two paths deliberately press Stop, and a page that reported twice
+        would put one response in the log as two."""
+        found = run("""
+            runState.value = "llm";
+            await speak('T1', 4);
+            elements["mc-llm-chat-stop"].fire("click", {});
+            elements["mc-llm-chat-stop"].fire("click", {});
+            await pump(4);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=1.0, count=6, stall=True))
+        assert len(_playbacks(found)) == 1, _playbacks(found)
+
+    def test_a_telemetry_route_that_fails_changes_nothing(self):
+        """The whole contract of this route. A page that cannot report its own
+        timings has nothing wrong with its audio."""
+        answers = json.loads(stream_answers(seconds=0.25, count=4))
+        answers["voice/telemetry"] = {"reject": True}
+        found = run("await speak('T1'); console.log(JSON.stringify(report()));",
+                    ANSWERS=json.dumps(answers))
+        assert [item for item in found["scheduled"] if item["length"]], "playback stopped"
+        assert found["consoleErrors"] == []
 
 
 class TestStoppingInTheBrowser:

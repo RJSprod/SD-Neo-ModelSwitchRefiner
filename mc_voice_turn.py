@@ -51,6 +51,7 @@ requires Stop to be idempotent because two paths deliberately press it.
 
 from __future__ import annotations
 
+import collections
 import logging
 import queue
 import secrets
@@ -202,8 +203,6 @@ class VoiceTurn:
         """
 
         self._prepare = 0.0
-        self._segment_chars = []
-        self._segment_wait_2 = 0.0
 
         self.streaming = ""
         """Which way the worker delivered audio for this turn -- "callback" or
@@ -213,8 +212,23 @@ class VoiceTurn:
         spoken is the one worth recording."""
 
         self._blocks = 0
-        self._segment_blocks = []
-        self._first_callback = 0
+        self._units = []
+        """The first two synthesis units, whole. Two rather than all of them
+        because they are the ones the reported gap is made of, and a list that
+        grew with the reply would be a per-segment record of how long each
+        piece of somebody's conversation was."""
+
+        self._open_units = collections.deque()
+        """Units handed to the worker and not yet answered for.
+
+        The worker synthesises in order and answers once per unit, so this is a
+        queue rather than a map: the parent knows what it sent (how many
+        characters, how long it waited for them) and the worker knows what it
+        cost, and this is where the two halves of one row meet. Bounded by the
+        same backlog ceiling every other queue in this class is.
+        """
+
+        self._max_unit = {"ms": 0, "index": 0}
 
     # -- text in ----------------------------------------------------------- #
 
@@ -276,12 +290,6 @@ class VoiceTurn:
                 return
             if not self._first_segment:
                 self._first_segment = time.monotonic()
-            if len(self._segment_chars) < 2:
-                # The first two, and only the first two. They are the ones the
-                # first-to-second gap is made of, and a list that grew with the
-                # reply would be a per-segment record of how long each piece of
-                # somebody's conversation was.
-                self._segment_chars.append(len(text))
             self._backlog.put_nowait(text)
 
     def _refuse_length(self) -> None:
@@ -351,7 +359,28 @@ class VoiceTurn:
                 self._queued_samples = max(0, self._queued_samples - len(payload) // 2)
         return (kind, payload)
 
-    def note_segment(self, blocks: int = 0, first_block_ms: int = 0, streaming: str = "") -> None:
+    def _open_unit(self, text: str, waited: float) -> None:
+        """Record the parent's half of one synthesis unit. Holds nothing.
+
+        Called just before the unit is handed over, because this is the half
+        only the parent knows: how many characters it is, and how long the
+        synthesis lane stood idle waiting for the segmenter to produce them.
+        The worker's half arrives later, in :meth:`note_segment`, and the two
+        meet in :attr:`_open_units`.
+        """
+        try:
+            with self._lock:
+                self._open_units.append({
+                    "index": self._segments_sent + 1,
+                    "chars": len(text or ""),
+                    "ready_wait_ms": int(max(0.0, waited) * 1000),
+                })
+        except Exception:
+            logger.debug("Model Chain: a Voice turn could not open a segment record",
+                         exc_info=True)
+
+    def note_segment(self, blocks: int = 0, first_block_ms: int = 0, streaming: str = "",
+                     synth_ms: int = 0, audio_ms: int = 0) -> None:
         """What one segment cost the worker, in counts and milliseconds.
 
         The distinction section 4 asks to be preserved. A handshake that says
@@ -364,21 +393,40 @@ class VoiceTurn:
         exactly nothing, and it should read that way in a log rather than as a
         win.
 
+        ``synth_ms`` is the rest of the answer and the reason this row exists at
+        all. Four numbers on one line -- how long the text took to arrive, how
+        long the synthesis took, when the first block came back, and how much
+        speech came out -- say which stage a gap belongs to. A turn-level total
+        never could.
+
         Never raises: this runs on the runtime's reader thread, and a metric is
         not worth a frame.
         """
+        row = None
         try:
             with self._lock:
                 if streaming:
                     self.streaming = streaming
                 self._blocks += max(0, int(blocks or 0))
-                if len(self._segment_blocks) < 2:
-                    self._segment_blocks.append(max(0, int(blocks or 0)))
-                if not self._first_callback and first_block_ms:
-                    self._first_callback = int(first_block_ms)
+                row = (self._open_units.popleft() if self._open_units
+                       else {"index": len(self._units) + 1, "chars": None,
+                             "ready_wait_ms": None})
+                row.update({
+                    "callback_blocks": max(0, int(blocks or 0)),
+                    "first_block_ms": max(0, int(first_block_ms or 0)),
+                    "synth_ms": max(0, int(synth_ms or 0)),
+                    "audio_ms": max(0, int(audio_ms or 0)),
+                    "streaming": self.streaming,
+                })
+                if row["synth_ms"] > self._max_unit["ms"]:
+                    self._max_unit = {"ms": row["synth_ms"], "index": row["index"]}
+                if len(self._units) < 2:
+                    self._units.append(row)
         except Exception:
             logger.debug("Model Chain: a Voice turn could not record a segment's shape",
                          exc_info=True)
+            return
+        _log_unit(self.id, row)
 
     def audio_finished(self) -> None:
         """The worker said this turn's audio is complete."""
@@ -466,7 +514,9 @@ class VoiceTurn:
         began = False
         try:
             self._warm_up(speaker)
+            asked = time.monotonic()
             first = self._await_segment(FIRST_SEGMENT_WAIT)
+            waited = time.monotonic() - asked
             if first is None:
                 self.cancel(self.reason or "empty")
                 return
@@ -477,17 +527,16 @@ class VoiceTurn:
             pending = first
             self._watch_for_client()
             while pending is not None and not self.cancelled.is_set():
+                # How long the synthesis lane stood idle waiting for this unit's
+                # text. For the first unit that is the wait for the model to say
+                # anything at all; for the second it is the producer half of the
+                # reported gap, and the half no browser buffer can fix.
+                self._open_unit(pending, waited)
                 speaker.send_segment(self, pending)
                 self._segments_sent += 1
                 asked = time.monotonic()
                 pending = self._await_segment(None)
-                if self._segments_sent == 1:
-                    # How long the synthesis lane stood idle between the first
-                    # segment and the second -- which is the producer half of
-                    # the reported gap, and the half a browser buffer cannot
-                    # fix. Recorded once; every later wait is hidden behind
-                    # audio that is already queued.
-                    self._segment_wait_2 = time.monotonic() - asked
+                waited = time.monotonic() - asked
             if not self.cancelled.is_set():
                 speaker.finish_turn(self)
                 # The worker answers ``tts_done`` when the last sample is out,
@@ -602,26 +651,84 @@ class VoiceTurn:
             "first_audio_ms": _since(started, self._first_audio),
             "worker_warm_at_turn_start": self.worker_warm,
             "runtime_prepare_ms": int(self._prepare * 1000) if self._prepare else None,
-            "segment_1_chars": self._segment_chars[0] if self._segment_chars else None,
-            "segment_2_chars": (self._segment_chars[1] if len(self._segment_chars) > 1
-                                else None),
-            "segment_wait_2_ms": (int(self._segment_wait_2 * 1000)
-                                  if self._segment_wait_2 else None),
             "streaming": self.streaming,
             "callback_blocks": self._blocks,
-            "first_callback_ms": self._first_callback or None,
-            "segment_1_blocks": self._segment_blocks[0] if self._segment_blocks else None,
-            "segment_2_blocks": (self._segment_blocks[1] if len(self._segment_blocks) > 1
-                                 else None),
+            "max_segment_ms": self._max_unit["ms"] or None,
+            "max_segment_index": self._max_unit["index"] or None,
             "cancelled": self.reason,
             "voice_type": "clone" if self.voice_id.startswith("clone:") else "official",
             "sid": self.sid,
+            **self._unit_metrics(),
         }
+
+    def _unit_metrics(self) -> dict:
+        """The first two synthesis units, flattened into named fields.
+
+        Answered units and units still with the worker are both here. A turn
+        cancelled halfway through its second unit still knows how many
+        characters that unit was and how long it waited for them, and reporting
+        those as absent because the answer never came back would hide the case
+        the numbers are most wanted for.
+        """
+        with self._lock:
+            rows = {row["index"]: dict(row)
+                    for row in list(self._units) + list(self._open_units)}
+        found = {}
+        for index in (1, 2):
+            row = rows.get(index) or {}
+            for name in ("chars", "ready_wait_ms", "synth_ms", "first_block_ms",
+                         "callback_blocks", "audio_ms"):
+                key = ("ready_wait_%d_ms" % index if name == "ready_wait_ms"
+                       else "segment_%d_%s" % (index, "ms" if name == "synth_ms" else name))
+                found[key] = row.get(name)
+        return found
 
     @property
     def busy(self) -> bool:
         """Whether Voice is still working on this turn."""
         return not (self.finished.is_set() or self.cancelled.is_set())
+
+
+SLOW_SEGMENT_MS = 3000
+"""When a synthesis unit past the second is worth a line of its own.
+
+The first two are always reported: they are what the reported gap is made of.
+Every later one is a DEBUG line, because a forty-segment reply would otherwise
+write forty INFO lines about a turn that went fine. Three seconds is the
+threshold and it is a constant rather than a judgement made per run -- a
+threshold that moved with the machine would make two logs incomparable, which is
+the one thing this instrumentation exists to avoid.
+"""
+
+
+def _log_unit(turn_id: str, row: dict) -> None:
+    """One synthesis unit, as numbers. Never raises, never text.
+
+    Four durations on one line, and between them they name the stage: how long
+    the lane waited for the text, how long the synthesis took, when the first
+    block came back, and how much speech came out. A turn-level total cannot
+    tell "the model was slow to write it" from "Kokoro was slow to say it", and
+    those want completely different fixes.
+
+    The turn id is the short opaque one, and it is here only so that two lines
+    can be recognised as belonging to one response. It is not a conversation
+    identifier and it does not survive a restart.
+    """
+    try:
+        index = int(row.get("index") or 0)
+        line = ("Model Chain: Voice TTS segment — turn %s, n=%d, chars=%s, "
+                "ready_wait_ms=%s, synth_ms=%s, first_block_ms=%s, callback_blocks=%s, "
+                "audio_ms=%s, streaming=%s")
+        values = (str(turn_id or "")[:8], index, row.get("chars"), row.get("ready_wait_ms"),
+                  row.get("synth_ms"), row.get("first_block_ms"),
+                  row.get("callback_blocks"), row.get("audio_ms"),
+                  row.get("streaming") or "unknown")
+        if index <= 2 or int(row.get("synth_ms") or 0) >= SLOW_SEGMENT_MS:
+            logger.info(line, *values)
+        else:
+            logger.debug(line, *values)
+    except Exception:
+        logger.debug("Model Chain: could not record a Voice segment's timing", exc_info=True)
 
 
 def _since(start: float, mark: float):
