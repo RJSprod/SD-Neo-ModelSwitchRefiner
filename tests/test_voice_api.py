@@ -469,7 +469,7 @@ class TestTranscription:
                                                  silent_wav):
         answered = client.post(api.STT_ROUTE, headers=key, content=silent_wav(0.05))
         assert answered.status_code == 400
-        assert "Hold to speak" in answered.json()["error"]
+        assert "Hold at the right-hand end" in answered.json()["error"]
 
     def test_a_recording_past_the_ceiling_is_refused(self, client, key, speech, installed,
                                                      silent_wav):

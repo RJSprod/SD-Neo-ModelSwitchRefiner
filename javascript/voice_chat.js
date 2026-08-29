@@ -5,8 +5,8 @@
 // same reason: Python owns models, persistence, inference and conversation
 // state; this file owns the things only a browser can do.
 //
-//   * the press-and-hold gesture, with pointer capture, so a finger that slides
-//     off the button still ends the recording it started;
+//   * the slide-to-talk gesture, with pointer capture, so a finger that leaves
+//     the track still ends the recording it started;
 //   * opening the microphone, and closing it again the moment the utterance is
 //     over;
 //   * turning what the microphone gave us into one deterministic format --
@@ -50,6 +50,7 @@
 
     const IDS = {
         mic: "mc-llm-chat-voice-mic",
+        track: "mc-llm-chat-voice-track",
         token: "mc-llm-chat-voice-token",
         turn: "mc-llm-chat-voice-turn",
         runState: "mc-llm-chat-voice-run-state",
@@ -113,7 +114,7 @@
         denied: "Microphone access was not allowed by the browser or device.",
         notFound: "No microphone is available.",
         unreadable: "The microphone could not be opened.",
-        tooShort: "Hold to speak.",
+        tooShort: "Hold at the right-hand end to talk.",
         failed: "Voice transcription failed. Your message was not sent.",
         empty: "No speech was detected.",
         speakFailed: "The reply was generated, but Voice could not read it aloud.",
@@ -127,6 +128,16 @@
         // does not trust is decline to expose mediaDevices at all, and the
         // honest report of that is what it is.
         unsupported: "This browser did not make microphone capture available for this page.",
+        // The same fact, when the browser has told us *why*. Reported
+        // separately because "not available" is not something anybody can act
+        // on and this is: a phone reaching a WebUI at http://192.168.x.x is
+        // the ordinary way to arrive here, and it is the one case where the
+        // browser is withholding the microphone for a reason with a remedy.
+        insecure: "Your browser only opens a microphone on a secure page, and this address "
+            + "is not one. Reach this WebUI over HTTPS, or allow this exact address in "
+            + "chrome://flags/#unsafely-treat-insecure-origin-as-secure and restart the "
+            + "browser.",
+        slide: "Slide the microphone all the way to the right, and hold, to talk.",
     };
 
     function root() {
@@ -248,10 +259,85 @@
         }, STATUS_HOLD_MS);
     }
 
+    // -- a page that is no longer this WebUI's -------------------------------- //
+
+    // Every voice route answers 403 for exactly two reasons, and both of them
+    // mean the same thing about this page: it cannot talk to this WebUI any
+    // more. The page token is minted per WebUI process, so a tab that was open
+    // when Forge restarted carries last run's token; and a request that did not
+    // come from this WebUI is refused on origin.
+    //
+    // What that used to cost: the tab kept polling. Every 1.5 seconds, for as
+    // long as it stayed open, against a WebUI that had just started -- which is
+    // a warning in somebody's console during startup, a socket out of the
+    // browser's small per-origin pool while the *new* tab is trying to load,
+    // and no possibility of the answer ever changing. So the first 403 stops
+    // all of it, once, with a sentence that says what to do.
+    let stale = false;
+
+    const RELOAD = "This page was loaded before the WebUI restarted. Reload it.";
+
+    function markStale() {
+        if (stale) return;
+        stale = true;
+        window.clearTimeout(paintTimer);
+        window.clearTimeout(enginePoll);
+        window.clearTimeout(voicesTimer);
+        console.warn("Model Chain: Voice Chat stopped asking this WebUI anything — "
+                     + RELOAD);
+    }
+
+    function refused(response) {
+        if (response && response.status === 403) markStale();
+        return response;
+    }
+
+    // Whether a row is on screen at all. Nothing is fetched for one that is
+    // not: a settings row that fetched on page load put three requests in front
+    // of the first paint of every tab in this WebUI, including the ones with
+    // nothing to do with speech.
+    function onScreen(node) {
+        if (!node) return false;
+        if (node.offsetParent !== null) return true;
+        try {
+            const box = node.getBoundingClientRect();
+            return !!(box && (box.width || box.height));
+        } catch (error) {
+            return false;
+        }
+    }
+
+    // Runs `job` the first time `node` is actually visible, and looks again
+    // once a second until then. A DOM read costs nothing; the request it is
+    // standing in front of does not.
+    function whenOnScreen(node, job) {
+        const look = function () {
+            if (!node || stale) return;
+            if (node.isConnected === false) return;
+            if (!document.hidden && onScreen(node)) {
+                job();
+                return;
+            }
+            window.setTimeout(look, 1000);
+        };
+        look();
+    }
+
     // -- what is installed --------------------------------------------------- //
 
     let readiness = null;
     let readinessAt = 0;
+
+    // What the last status answer said, if it is recent enough to act on.
+    // Separate from `refreshStatus` because the gesture needs an answer it can
+    // use *now*: the slide starts the check and the engagement at the end of
+    // the slide reads it, which is a few hundred milliseconds later and costs
+    // no round trip at all.
+    function knownReadiness() {
+        if (stale) return {ok: false, error: RELOAD};
+        if (readiness && Date.now() - readinessAt < 5000) return readiness;
+        return null;
+    }
 
     // Always resolves, and always with something that has an `ok` and, when it
     // is false, an `error` somebody can read. The first version resolved with
@@ -261,12 +347,13 @@
     // own failure is worse than no status check.
     function refreshStatus(force, scope) {
         const now = Date.now();
+        if (stale) return Promise.resolve({ok: false, error: RELOAD});
         if (!force && readiness && now - readinessAt < 5000) {
             return Promise.resolve(readiness);
         }
         return fetch(url(ROUTES.status), {
             method: "POST", credentials: "same-origin", headers: headers(null, scope),
-        }).then(function (response) {
+        }).then(refused).then(function (response) {
             return response.json().catch(function () {
                 return {ok: false, error: "The WebUI answered HTTP " + response.status
                                           + " with something this page cannot read."};
@@ -786,9 +873,60 @@
     // own -- which on an origin it does not trust is usually to leave
     // mediaDevices undefined. Voice Chat's requirement (section 39) is to stop
     // refusing pages of its own accord, not to pretend it can overrule that.
-    function microphoneAvailable() {
-        return !!(navigator && navigator.mediaDevices
-                  && typeof navigator.mediaDevices.getUserMedia === "function");
+    // Section 39, rewritten after a phone.
+    //
+    // This used to be a capability check that refused before anything was
+    // asked: no `navigator.mediaDevices.getUserMedia`, no recording, and the
+    // browser was never given the chance to raise its own permission prompt.
+    // On Android that check is the whole bug -- the extension answered a
+    // question that was the browser's to answer, and the user got a sentence
+    // about capture not being available instead of a permission dialog.
+    //
+    // Nothing decides for the browser here any more. Every entry point a
+    // browser has ever exposed for this is tried, in order, and the request is
+    // actually made. Only when there is genuinely nothing to call does this
+    // fail -- and it fails with a name of its own so the error map can say why
+    // rather than guessing.
+    function getUserMedia(constraints) {
+        const media = navigator && navigator.mediaDevices;
+        if (media && typeof media.getUserMedia === "function") {
+            try {
+                return media.getUserMedia(constraints);
+            } catch (error) {
+                return Promise.reject(error);
+            }
+        }
+        // The prefixed callback form. It predates the promise API, and it is
+        // still the only one present in some Android WebViews and older
+        // in-app browsers -- exactly the places `mediaDevices` is missing.
+        const legacy = navigator && (navigator.getUserMedia
+                                     || navigator.webkitGetUserMedia
+                                     || navigator.mozGetUserMedia
+                                     || navigator.msGetUserMedia);
+        if (typeof legacy === "function") {
+            return new Promise(function (resolve, reject) {
+                try {
+                    legacy.call(navigator, constraints, resolve, reject);
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        }
+        const missing = new Error("this browser exposes no way to open a microphone");
+        missing.name = "McVoiceNoCapture";
+        return Promise.reject(missing);
+    }
+
+    // A browser withholds `getUserMedia` entirely for one common reason, and
+    // it is one somebody can do something about. Asked only once there is
+    // nothing left to call, so a browser that simply refused permission is
+    // never told it has an HTTPS problem it does not have.
+    function noCaptureReason() {
+        let secure = true;
+        try {
+            if (typeof window.isSecureContext === "boolean") secure = window.isSecureContext;
+        } catch (error) { /* a browser that will not answer is not a verdict */ }
+        return secure ? MESSAGES.unsupported : MESSAGES.insecure;
     }
 
     // One capture at a time, and every resource it holds named here so that
@@ -799,7 +937,7 @@
     function startCapture() {
         const ctx = audioContext();
         if (!ctx) return Promise.reject(new Error("no audio"));
-        return navigator.mediaDevices.getUserMedia({
+        return getUserMedia({
             audio: {
                 channelCount: 1,
                 echoCancellation: true,
@@ -953,8 +1091,19 @@
         const stop = clickable(IDS.stop);
         if (!send || !stop) return;
         const working = busy();
-        show(holderOf(send), !working);
-        show(holderOf(stop), working);
+        const sendHolder = holderOf(send);
+        const stopHolder = holderOf(stop);
+        // On a build where Send and Stop share a wrapper, `holderOf` answers
+        // with that wrapper for both -- and hiding one would hide the other,
+        // leaving a composer with no button in it at all. The buttons
+        // themselves are always distinct, so that is what is used instead.
+        if (sendHolder === stopHolder) {
+            show(send, !working);
+            show(stop, working);
+            return;
+        }
+        show(sendHolder, !working);
+        show(stopHolder, working);
     }
 
     // Hiding is ours; *revealing* has to undo Gradio's, and that is the half
@@ -965,13 +1114,25 @@
     // must be visible, and puts ours on the one that must not be. Reasserted on
     // every tick and on every run-state write, which is what makes it settle
     // rather than flicker.
+    //
+    // Every write here is conditional, and that is not a micro-optimisation.
+    // `classList.remove` of a class that is not there still rewrites the
+    // element's `class` attribute, and rewriting an attribute wakes every
+    // MutationObserver watching that subtree. This function runs on a 400 ms
+    // tick and again after every Gradio update; a theme that observes
+    // attributes -- LobeTheme is one -- then has work to do twice a second
+    // forever, and a page whose observers never settle is a page whose first
+    // paint never finishes. Asserting the state is the requirement. Rewriting
+    // it when it is already right is what broke somebody's txt2img tab.
     function show(node, wanted) {
         if (!node || !node.classList) return;
         if (wanted) {
-            node.classList.remove("mc-llm-voice-hidden");
-            node.classList.remove("hidden");
+            if (node.classList.contains("mc-llm-voice-hidden")) {
+                node.classList.remove("mc-llm-voice-hidden");
+            }
+            if (node.classList.contains("hidden")) node.classList.remove("hidden");
             if (node.style && node.style.display === "none") node.style.display = "";
-        } else {
+        } else if (!node.classList.contains("mc-llm-voice-hidden")) {
             node.classList.add("mc-llm-voice-hidden");
         }
     }
@@ -1011,7 +1172,8 @@
             working: "Transcribing",
             error: "Voice Chat is not set up",
         };
-        button.setAttribute("aria-label", labels[state] || "Hold to dictate");
+        button.setAttribute("aria-label", labels[state]
+            || "Dictate — slide right and hold, or hold Space");
     }
 
     function refuse(text) {
@@ -1026,21 +1188,25 @@
     // microphone" have nothing in common except that no audio arrived.
     function captureFailure(error) {
         const name = (error && error.name) || "";
+        if (name === "McVoiceNoCapture") return noCaptureReason();
         if (name === "NotAllowedError" || name === "SecurityError") return MESSAGES.denied;
         if (name === "NotFoundError" || name === "OverconstrainedError") return MESSAGES.notFound;
         if (name === "NotReadableError" || name === "AbortError") return MESSAGES.unreadable;
         return MESSAGES.unreadable;
     }
 
-    function beginHold(event) {
+    // Called the instant the slide reaches the end of its track, and from the
+    // keyboard equivalent. Everything from here down is what press-and-hold
+    // used to do; what changed is only how somebody says they want it.
+    function engage() {
         if (holding || capture) return;
         const button = clickable(IDS.mic);
         if (!button) return;
-        // Whatever else happens, this press is a user gesture and Web Audio may
-        // be unlocked by it. Done first and unconditionally so that a press that
+        // Whatever else happens, this is a user gesture and Web Audio may be
+        // unlocked by it. Done first and unconditionally so that a gesture that
         // is then refused still leaves playback able to work.
         unlock();
-        // Section 14: pressing the microphone while a reply is being read aloud
+        // Section 14: engaging the microphone while a reply is being read aloud
         // means the reply is over. The speaker stops here -- which also stops a
         // phone feeding its own output back into the recording -- and the server
         // is told, so an obsolete Kokoro run stops burning the CPU the
@@ -1051,46 +1217,76 @@
             refuse(MESSAGES.busy);
             return;
         }
-        // No secure-context gate. Capability detection, then let the browser
-        // make the decision that is genuinely the browser's -- section 39.
-        if (!microphoneAvailable()) {
-            refuse(MESSAGES.unsupported);
+        // Only when the answer is already in hand. A Voice Chat that is known
+        // not to be set up does not open a microphone to find that out -- a
+        // permission prompt raised for a feature that cannot run is a prompt
+        // asked for nothing. Where nothing is known yet, the microphone is
+        // opened below and closed again if the answer turns out to be no,
+        // because that is the only order in which the browser ever asks.
+        const known = knownReadiness();
+        if (known && !known.ok) {
+            refuse(known.error || MESSAGES.failed);
+            return;
+        }
+        if (known && !known.ready) {
+            refuse(known.not_ready_message || MESSAGES.notReady);
             return;
         }
 
-        try {
-            if (event && event.pointerId !== undefined && button.setPointerCapture) {
-                button.setPointerCapture(event.pointerId);
-            }
-        } catch (error) { /* a browser without pointer capture still works */ }
-
-        const session = {at: Date.now(), pointerId: event && event.pointerId, cancelled: false};
+        const session = {at: Date.now(), cancelled: false};
         holding = session;
         markMic("recording");
 
+        // The microphone is asked for *here*, in the same task as the gesture,
+        // and not after the status check has come back. A browser only raises a
+        // permission prompt while it still considers a user gesture in
+        // progress, and a promise chain that has already awaited one round trip
+        // to the WebUI is past that on a phone -- which is how a page that had
+        // never been granted the microphone ended up reporting that capture was
+        // unavailable instead of asking. So both start at once and are
+        // reconciled below; a WebUI that turns out not to be ready closes the
+        // stream again immediately, which is a microphone open for a few
+        // hundred milliseconds rather than a prompt that never appeared.
+        const opening = startCapture();
+        // Handled here as well so that a rejection which the reconciliation
+        // below decides not to look at is not an unhandled one.
+        opening.catch(function () { /* reported by the chain below */ });
+        const discard = function () {
+            return opening.then(releaseCapture, function () { /* nothing opened */ });
+        };
+
         refreshStatus(false).then(function (found) {
-            if (holding !== session) return null;
+            if (holding !== session) return discard();
             if (!found || !found.ok) {
                 holding = null;
                 // The route's own sentence, not a generic one: "This page is out
                 // of date with the WebUI. Reload it." is actionable and
                 // "Voice transcription failed" is not.
                 refuse((found && found.error) || MESSAGES.failed);
-                return null;
+                return discard();
             }
             if (!found.ready) {
                 holding = null;
                 refuse(found.not_ready_message || MESSAGES.notReady);
-                return null;
+                return discard();
             }
-            return startCapture().then(function (state) {
+            return opening.then(function (state) {
                 if (holding !== session || session.cancelled) {
                     releaseCapture(state);
                     return;
                 }
                 capture = state;
                 session.timer = window.setTimeout(function () {
-                    if (holding === session) endHold(false);
+                    if (holding !== session) return;
+                    // The sixty-second cap. The slider goes back with it: a
+                    // control still sitting at the recording end of its track
+                    // after the recording has stopped is a control that is
+                    // lying about what it is doing.
+                    sliding = null;
+                    markSliding(button, false);
+                    slideTo(button, 0);
+                    armTrack(button, false);
+                    endHold(false);
                 }, MAX_HOLD_MS);
             });
         }).catch(function (error) {
@@ -1165,22 +1361,159 @@
         });
     }
 
+    // -- the slide ------------------------------------------------------------ //
+
+    // Press-and-hold was the wrong gesture for a phone, and it was the wrong
+    // gesture for the reason no amount of `touch-action` fixes: on Android a
+    // long press belongs to the operating system before it belongs to a web
+    // page. It raises the context menu, or the selection callout, over the
+    // composer. So the microphone is not held any more, it is *moved*: it rests
+    // at the left of a track two of its own widths across, recording starts
+    // when it has been slid to the far right and is being held there, and
+    // releasing -- anywhere -- ends the recording.
+    //
+    // Two things fall out of that and both are worth having. There is no
+    // gesture left for the platform to claim. And opening a microphone has
+    // stopped being something anybody does by brushing against a button, which
+    // for a control that starts a recording is the right amount of deliberate.
+
+    // Nine tenths of the travel, not all of it: the last few pixels of a slide
+    // are where a fingertip's contact patch and the pointer's reported position
+    // disagree, and a gesture that had to be perfect would be a gesture that
+    // failed half the time on the surface it was designed for.
+    const SLIDE_ENGAGE = 0.9;
+    // What to assume when the track cannot be measured -- a panel that has not
+    // been laid out yet, a component mid-render. Roughly one finger width, so
+    // the gesture is still a slide rather than a tap.
+    const SLIDE_FLOOR = 34;
+
+    let sliding = null;
+    let slideWired = false;
+
+    function trackOf(button) {
+        return byId(IDS.track)
+            || (button && typeof button.closest === "function"
+                ? button.closest(".mc-llm-voice-track") : null)
+            || (button ? button.parentElement : null);
+    }
+
+    function slideTravel(button) {
+        const track = trackOf(button);
+        if (!track || !button) return SLIDE_FLOOR;
+        const room = (track.clientWidth || 0) - (button.offsetWidth || 0);
+        return room > 8 ? room : SLIDE_FLOOR;
+    }
+
+    // `transform` and not `left`: it moves the handle without moving anything
+    // else, and the composer is the one surface in this panel that must not
+    // reflow while somebody is using it.
+    function slideTo(button, offset) {
+        if (!button || !button.style) return;
+        const wanted = offset ? "translateX(" + Math.round(offset) + "px)" : "";
+        if (button.style.transform !== wanted) button.style.transform = wanted;
+    }
+
+    // Conditional for the reason `show` is: this is on the composer, which is
+    // the surface every theme in this WebUI observes, and rewriting a class
+    // attribute that is already right is work somebody else has to do.
+    function trackClass(button, name, wanted) {
+        const track = trackOf(button);
+        if (!track || !track.classList) return;
+        const has = track.classList.contains(name);
+        if (wanted && !has) track.classList.add(name);
+        else if (!wanted && has) track.classList.remove(name);
+    }
+
+    function armTrack(button, armed) {
+        trackClass(button, "mc-llm-voice-armed", armed);
+    }
+
+    // While a finger is on the handle it moves with the finger and does not
+    // ease; when it is let go it glides back. That is one class, and it is what
+    // makes the drag feel attached and the release feel like a spring.
+    function markSliding(button, active) {
+        trackClass(button, "mc-llm-voice-sliding", active);
+    }
+
+    function beginSlide(event) {
+        const button = clickable(IDS.mic);
+        if (!button || sliding) return;
+        // Unlocked on the press whatever the slide turns out to mean: a gesture
+        // that is abandoned halfway should still have left playback able to
+        // work, and this is the user gesture that permits that.
+        unlock();
+        sliding = {
+            x: (event && event.clientX) || 0,
+            pointerId: event && event.pointerId,
+            travel: slideTravel(button),
+            engaged: false,
+        };
+        markSliding(button, true);
+        // The slide is the time window press-and-hold never had. Asking now
+        // means the answer is normally in hand by the time the handle reaches
+        // the end of the track, so the microphone is opened -- or refused --
+        // without a round trip standing between the gesture and the browser's
+        // permission prompt. Nothing waits on it; it fills the cache.
+        refreshStatus(false);
+        try {
+            if (event && event.pointerId !== undefined && button.setPointerCapture) {
+                button.setPointerCapture(event.pointerId);
+            }
+        } catch (error) { /* a browser without pointer capture still works */ }
+    }
+
+    function moveSlide(event) {
+        if (!sliding || sliding.engaged) return;
+        const button = clickable(IDS.mic);
+        if (!button) return;
+        const moved = Math.max(0, Math.min(sliding.travel,
+                                           ((event && event.clientX) || 0) - sliding.x));
+        if (moved >= sliding.travel * SLIDE_ENGAGE) {
+            sliding.engaged = true;
+            // Pinned at the end for as long as the hold lasts. Once a recording
+            // has started, a finger drifting back down the track is a finger
+            // drifting -- not a decision -- and a microphone that stopped and
+            // started again under one continuous hold would be a worse control
+            // than the one this replaced.
+            slideTo(button, sliding.travel);
+            armTrack(button, true);
+            engage();
+            return;
+        }
+        slideTo(button, moved);
+    }
+
+    function endSlide(cancelled) {
+        const session = sliding;
+        sliding = null;
+        const button = clickable(IDS.mic);
+        markSliding(button, false);
+        slideTo(button, 0);
+        armTrack(button, false);
+        if (!session) return;
+        if (session.engaged) {
+            endHold(!!cancelled);
+            return;
+        }
+        // Let go short of the end. Nothing was recorded and nothing is sent --
+        // and the control says what it wanted, because a gesture that does
+        // nothing and explains nothing is the one that gets reported as broken.
+        if (!cancelled) say(MESSAGES.slide);
+    }
+
     function wireMicrophone() {
         const button = clickable(IDS.mic);
         if (!button || button.dataset.mcVoiceWired === "1") return;
         button.dataset.mcVoiceWired = "1";
         markMic("");
+        markSliding(button, false);
+        slideTo(button, 0);
+        armTrack(button, false);
+
         button.addEventListener("pointerdown", function (event) {
             if (event.button !== undefined && event.button !== 0) return;
             if (event.preventDefault) event.preventDefault();
-            beginHold(event);
-        });
-        button.addEventListener("pointerup", function () { endHold(false); });
-        button.addEventListener("pointercancel", function () { endHold(true); });
-        // A press that leaves the window entirely -- an incoming call, a task
-        // switch -- ends the recording rather than leaving the microphone open.
-        button.addEventListener("lostpointercapture", function () {
-            if (holding) endHold(false);
+            beginSlide(event);
         });
         button.addEventListener("contextmenu", function (event) {
             if (event.preventDefault) event.preventDefault();
@@ -1189,6 +1522,58 @@
         // after the pointer sequence cannot make the button do anything twice.
         button.addEventListener("click", function (event) {
             if (event.preventDefault) event.preventDefault();
+        });
+
+        // The keyboard has no slide, and a control that can only be dragged is
+        // a control somebody using a keyboard cannot use at all. Holding Space
+        // or Enter is the same contract by the other route: hold to talk,
+        // release to send.
+        button.addEventListener("keydown", function (event) {
+            const key = event && event.key;
+            if (key !== " " && key !== "Spacebar" && key !== "Enter") return;
+            if (event.repeat || sliding) return;
+            if (event.preventDefault) event.preventDefault();
+            sliding = {x: 0, travel: 0, engaged: true, keyboard: true};
+            armTrack(button, true);
+            engage();
+        });
+        button.addEventListener("keyup", function (event) {
+            const key = event && event.key;
+            if (key !== " " && key !== "Spacebar" && key !== "Enter") return;
+            if (!sliding || !sliding.keyboard) return;
+            if (event.preventDefault) event.preventDefault();
+            endSlide(false);
+        });
+        // Tabbing away mid-hold is not a message somebody meant to dictate.
+        button.addEventListener("blur", function () {
+            if (sliding && sliding.keyboard) endSlide(true);
+        });
+
+        wireSlideWindow();
+    }
+
+    // On the window and not on the button, and only ever once. Pointer capture
+    // normally keeps the whole sequence on the handle, but where it is missing
+    // or has been lost -- a finger that leaves the track, a task switch, an
+    // incoming call -- these are what still end the recording rather than
+    // leaving a microphone open. Both paths reaching them is fine: `moveSlide`
+    // only computes, and the second `endSlide` finds nothing to end.
+    function wireSlideWindow() {
+        if (slideWired) return;
+        slideWired = true;
+        window.addEventListener("pointermove", function (event) {
+            if (!sliding) return;
+            if (event.cancelable && event.preventDefault) event.preventDefault();
+            moveSlide(event);
+        }, {passive: false});
+        window.addEventListener("pointerup", function () {
+            if (sliding) endSlide(false);
+        });
+        window.addEventListener("pointercancel", function () {
+            if (sliding) endSlide(true);
+        });
+        window.addEventListener("blur", function () {
+            if (sliding) endSlide(true);
         });
     }
 
@@ -1461,9 +1846,18 @@
 
     function schedulePaint(holder, delay) {
         if (paintTimer) window.clearTimeout(paintTimer);
+        if (stale) return;
         paintTimer = window.setTimeout(function () {
             if (document.hidden) {
                 schedulePaint(holder, SETTINGS_IDLE_MS);
+                return;
+            }
+            // Forge builds every settings row whether or not anybody has
+            // opened the Settings tab, so "wired" is not "being looked at".
+            // A row nobody can see is asked nothing at all, and is looked at
+            // again a second later, which costs one DOM read.
+            if (!onScreen(holder)) {
+                schedulePaint(holder, 1000);
                 return;
             }
             paintSettings(holder).then(function (payload) {
@@ -1657,12 +2051,13 @@
     }
 
     function post(route, body, holder) {
+        if (stale) return Promise.resolve({ok: false, error: RELOAD});
         return fetch(url(route), {
             method: "POST",
             credentials: "same-origin",
             headers: headers({"Content-Type": "application/json"}, holder),
             body: JSON.stringify(body || {}),
-        }).then(function (response) {
+        }).then(refused).then(function (response) {
             return response.json().catch(function () {
                 return {ok: false, error: "The WebUI did not answer."};
             });
@@ -1837,7 +2232,11 @@
                 post(ROUTES.voices, {test_text: text.value}, holder);
             });
         }
-        refreshVoices(holder);
+        // Not on page load. This row is built into every page this WebUI
+        // serves, and two requests fired from `onUiLoaded` are two requests
+        // ahead of the first paint of a tab that has nothing to do with
+        // speech. The list is fetched the first time somebody can see it.
+        whenOnScreen(holder, function () { refreshVoices(holder); });
     }
 
     function sayInHolder(holder, text) {

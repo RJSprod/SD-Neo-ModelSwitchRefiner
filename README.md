@@ -3101,14 +3101,32 @@ You / Model, and a microphone beside Send. The chip opens an overlay with the
 same two switches Settings has — they are the same stored values, written the
 moment you tap them, so there is no Apply to remember.
 
-- **Press and hold** the microphone to record; let go to transcribe. Sliding
-  your finger off the button and releasing still ends that recording.
-- Under a quarter of a second is treated as a tap, not an utterance. Sixty
+- **Slide the microphone to the right and hold** to record; let go to
+  transcribe. The microphone sits at the left of a short track twice its own
+  width, and recording starts when it reaches the far end. A press that never
+  slides records nothing and says so.
+
+  It is a slide rather than a long press because a long press on Android belongs
+  to the operating system before it belongs to a web page — it raises the
+  context menu, or the selection callout, over the composer, and no combination
+  of `touch-action` and `user-select` reliably takes that back. A slide is a
+  gesture no platform wants, and opening a microphone stops being something
+  anybody does by brushing against a button. Holding **Space** or **Enter** on
+  the focused microphone is the same contract from a keyboard.
+- Under a quarter of a second is treated as a slip, not an utterance. Sixty
   seconds is the ceiling, at which point it stops and transcribes what it has.
+- If your browser will not open a microphone at all, Voice Chat says which of
+  the reasons it was. The common one on a phone is the page not being a secure
+  context — `http://192.168.…` is the ordinary way to reach a WebUI from a
+  handset, and Chrome withholds `getUserMedia` entirely there. Reach the WebUI
+  over HTTPS, or allow that exact address in
+  `chrome://flags/#unsafely-treat-insecure-origin-as-secure`. Voice Chat has no
+  rule of its own about HTTPS and never refuses on its own authority: it asks
+  the browser and reports what the browser said.
 - The transcript is **appended** to whatever is already in the box, and is not
   sent unless *Automatically send dictation* is on.
 - The microphone is unavailable while a reply is generating. Press Stop first.
-- While a reply is being spoken, **holding the microphone stops the speaker** and
+- While a reply is being spoken, **engaging the microphone stops the speaker** and
   starts recording. That is the interrupt gesture; it also cancels the synthesis
   on the PC rather than merely silencing it, and it is what stops a phone from
   recording its own loudspeaker.
@@ -3662,7 +3680,7 @@ the memory planner, the broker, the execution plan or the LLM runtime at any
 depth, only the model manager may import a network transport, and the worker
 imports nothing but the standard library at module level. `test_voice_chat_js.py`
 runs the browser script under node against a DOM whose clock and timers a test
-controls, and covers the press-and-hold contract, 48 kHz being resampled to 16,
+controls, and covers the slide-to-talk contract, 48 kHz being resampled to 16,
 the composer being appended to rather than replaced, auto-send pressing the
 existing button and only when the setting says so, a token never being spoken
 twice, and a Gradio update never installing a second set of pointer listeners.

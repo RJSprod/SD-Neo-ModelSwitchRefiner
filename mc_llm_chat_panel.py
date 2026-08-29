@@ -335,10 +335,10 @@ def build() -> dict:
                     label=None, lines=1, max_lines=6, show_label=False, container=False,
                     scale=1, placeholder="Message…  Enter sends, Shift+Enter for a new line.",
                     elem_id=ui.ident("chat", "message"))
-                # Press and hold to dictate. Everything it does happens in
-                # the browser -- the gesture, the capture, the encoding -- so
+                # Slide right and hold to dictate. Everything it does happens
+                # in the browser -- the gesture, the capture, the encoding -- so
                 # there is no click handler here at all: a Gradio round trip to
-                # start a recording would put a network hop between the press
+                # start a recording would put a network hop between the gesture
                 # and the microphone opening.
                 # Built and not held: everything it does happens in the
                 # browser, so there is no Python handler to wire it to and

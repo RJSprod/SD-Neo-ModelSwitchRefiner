@@ -1372,6 +1372,44 @@ def voice_registry(kokoro_bundle, monkeypatch):
     return mc_voice_registry
 
 
+@pytest.fixture(autouse=True)
+def _forget_voice_options():
+    """Put the voice settings back after every test that changes them.
+
+    The default voice and the test text are ordinary host options, so a test
+    that sets one leaves it set for every test that runs after it -- in the same
+    file or in another. That is how "a fresh installation starts at af_heart"
+    came to fail only when the API tests ran first, which is the worst shape a
+    test failure can have: real, reproducible, and about the wrong thing.
+
+    Only these two keys, and only where the fake host is in play. A blanket
+    options reset would be a second ``host`` fixture applied to tests that never
+    asked for one.
+    """
+    import mc_voice_registry
+
+    keys = (mc_voice_registry.OPT_VOICE, mc_voice_registry.OPT_TEST_TEXT)
+    try:
+        import modules.shared as shared
+    except Exception:  # pragma: no cover - a suite without the fake host
+        yield
+        return
+    # ``__dict__`` and not ``getattr``: the fake host answers for options it has
+    # never been given, so ``hasattr`` is true for a key nothing ever set and
+    # deleting it afterwards raises. What was actually stored is what is put
+    # back, and what was not stored is removed.
+    stored = shared.opts.__dict__
+    before = {key: stored[key] for key in keys if key in stored}
+    try:
+        yield
+    finally:
+        for key in keys:
+            if key in before:
+                stored[key] = before[key]
+            else:
+                stored.pop(key, None)
+
+
 FAKE_STORYTIME = r'''#!/usr/bin/env python3
 # A Storytime that has the real CLI shape and does no optimization.
 #

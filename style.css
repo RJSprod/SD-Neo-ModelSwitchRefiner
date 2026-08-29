@@ -4081,6 +4081,67 @@
     transition: box-shadow 0.12s ease-out, background-color 0.12s ease-out;
 }
 
+/* -- the slide track -------------------------------------------------------
+   Two handles across, which is the 2 x 1 area the gesture asked for. The
+   microphone rests at the left of it and is dragged to the right-hand end to
+   start recording; `javascript/voice_chat.js` moves it with a transform, which
+   is why nothing here positions the handle. A transform moves a control without
+   moving anything else, and the composer is the one surface in this panel that
+   must not reflow while somebody is using it.
+
+   The track is a Gradio Column, so the padding and gap it arrives with are
+   taken off explicitly -- otherwise the travel is whatever that column's theme
+   happened to leave over, which is not a gesture anybody can learn. */
+#mc-llm-studio .mc-llm-voice-track {
+    align-items: flex-start;
+    border: 1px dashed var(--border-color-primary, currentColor);
+    border-radius: 999px;
+    flex: 0 0 auto;
+    gap: 0;
+    justify-content: center;
+    min-width: 88px;
+    overflow: hidden;
+    padding: 0;
+    position: relative;
+}
+
+/* Where the microphone is going. Behind the handle and inert, so it can never
+   take the press that is meant for it. */
+#mc-llm-studio .mc-llm-voice-track::after {
+    color: var(--body-text-color-subdued, inherit);
+    content: "\203a\203a\203a";
+    font-size: 0.9em;
+    letter-spacing: 0.05em;
+    opacity: 0.5;
+    pointer-events: none;
+    position: absolute;
+    right: 0.5em;
+    top: 50%;
+    transform: translateY(-50%);
+}
+
+/* Recording. The arrows have been reached, so they stop being an instruction,
+   and the track picks up the same ring the handle wears -- one control saying
+   one thing rather than a button that changed and a track that did not. */
+#mc-llm-studio .mc-llm-voice-track.mc-llm-voice-armed::after {
+    content: none;
+}
+
+#mc-llm-studio .mc-llm-voice-track.mc-llm-voice-armed {
+    border-style: solid;
+    border-color: var(--error-500, #dc2626);
+}
+
+/* The handle glides back when it is let go, and jumps when it is being dragged
+   -- a transition on the way out only, which is what makes the drag feel
+   attached to the finger and the release feel like a spring. Set on the button
+   by the script, so this is only the return. */
+#mc-llm-studio .mc-llm-voice-track:not(.mc-llm-voice-sliding) .mc-llm-voice-mic button,
+#mc-llm-studio .mc-llm-voice-track:not(.mc-llm-voice-sliding) button.mc-llm-voice-mic {
+    transition: transform 0.16s ease-out, box-shadow 0.12s ease-out,
+                background-color 0.12s ease-out;
+}
+
 /* Recording. A ring rather than a fill, so the glyph stays legible and the
    button does not change size -- a control that grows when it is pressed moves
    the composer, and the composer is the thing that must not move. */
@@ -4103,7 +4164,9 @@
 /* Reduced motion covers the transition above; the states themselves are colour
    and are kept, because they are the only signal that a recording is running. */
 @media (prefers-reduced-motion: reduce) {
-    #mc-llm-studio .mc-llm-voice-mic button {
+    #mc-llm-studio .mc-llm-voice-mic button,
+    #mc-llm-studio .mc-llm-voice-track:not(.mc-llm-voice-sliding) .mc-llm-voice-mic button,
+    #mc-llm-studio .mc-llm-voice-track:not(.mc-llm-voice-sliding) button.mc-llm-voice-mic {
         transition: none;
     }
 }
@@ -4238,10 +4301,8 @@
    demanded 30em would be a settings page with a horizontal scroll bar on a
    laptop. */
 .mc-voice-folder {
-    background: var(--input-background-fill, transparent);
     border: 1px solid var(--border-color-primary, currentColor);
     border-radius: var(--radius-lg, 8px);
-    color: inherit;
     flex: 1 1 18em;
     min-width: 0;
     padding: 0.4em 0.6em;
@@ -4344,10 +4405,8 @@
 }
 
 .mc-voice-testline input {
-    background: var(--input-background-fill, transparent);
     border: 1px solid var(--border-color-primary, currentColor);
     border-radius: var(--radius-lg, 8px);
-    color: inherit;
     flex: 1 1 auto;
     min-height: 2.2em;
     min-width: 0;
@@ -4437,10 +4496,8 @@
 
 .mc-voice-field input,
 .mc-voice-field select {
-    background: var(--input-background-fill, transparent);
     border: 1px solid var(--border-color-primary, currentColor);
     border-radius: var(--radius-lg, 8px);
-    color: inherit;
     flex: 1 1 auto;
     min-height: 2.2em;
     min-width: 0;
@@ -4480,4 +4537,84 @@
     margin-top: 0.4em;
     min-height: 2.2em;
     padding: 0.25em 0.9em;
+}
+
+/* -- fields on the Settings page, on a theme this stylesheet has never met ---
+   Every text box and select above used to take its background from
+   `--input-background-fill` and its text from `color: inherit`. That is two
+   halves of a contrast pair fetched from two different places, and on a theme
+   that keeps Gradio's light tokens defined while painting a dark surface --
+   LobeTheme's night mode is exactly that -- the result is a white box with
+   white text in it, which is a field nobody can read what they typed in.
+
+   So neither half is named here. The background is a tint of the text colour
+   that is already working on this surface, which cannot disagree with it, and
+   the text is inherited. A theme that has no `color-mix` gets a transparent
+   field with the border it already had -- still legible, which is the whole
+   requirement. */
+.mc-voice-testline input,
+.mc-voice-field input,
+.mc-voice-field select,
+.mc-voice-folder {
+    background-color: transparent;
+    color: inherit;
+}
+
+@supports (background: color-mix(in srgb, currentColor 8%, transparent)) {
+    .mc-voice-testline input,
+    .mc-voice-field input,
+    .mc-voice-field select,
+    .mc-voice-folder {
+        background-color: color-mix(in srgb, currentColor 8%, transparent);
+    }
+}
+
+.mc-voice-testline input::placeholder,
+.mc-voice-field input::placeholder,
+.mc-voice-folder::placeholder {
+    color: inherit;
+    opacity: 0.55;
+}
+
+/* The list a select drops down is drawn by the operating system and inherits
+   nothing from here, so it is given the system's own pair rather than half of
+   this one. */
+.mc-voice-field select option {
+    background-color: Canvas;
+    color: CanvasText;
+}
+
+/* -- and the room the Voices row takes ------------------------------------
+   Two separate things put a screenful of nothing under the last voice. The
+   host draws this block inside its own settings container, which on some
+   themes stretches every child to the height of the tallest column; and the
+   list itself is fifty-three official voices long, which is more list than a
+   settings page should hand somebody in one piece.
+
+   So the block is told to size to its content, the list scrolls once it is
+   taller than a screenful, and -- where the browser can address a parent this
+   extension did not render -- the host's own container is told to stop
+   stretching too. A browser without `:has()` drops that last rule and keeps
+   the behaviour it had. */
+.mc-voice-voices,
+.mc-voice-settings {
+    align-self: flex-start;
+    flex: 0 0 auto;
+    min-height: 0;
+}
+
+.mc-voice-list {
+    max-height: 22em;
+    min-height: 0;
+    overflow-y: auto;
+    /* A list that has reached its end stops there rather than handing the
+       scroll on to the settings page underneath it. */
+    overscroll-behavior: contain;
+}
+
+:is(.block, .form, .prose, .gradio-html):has(> :is(.mc-voice-voices, .mc-voice-settings)),
+:is(.block, .form, .prose, .gradio-html):has(> * > :is(.mc-voice-voices, .mc-voice-settings)) {
+    align-self: flex-start;
+    flex: 0 0 auto;
+    min-height: 0;
 }

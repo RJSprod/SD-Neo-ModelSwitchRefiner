@@ -219,6 +219,21 @@ def _remember_install(found: dict) -> None:
     path.write_text(json.dumps(found, indent=2), encoding="utf-8")
 
 
+_SYSTEM_NAMES = {"windows": "Windows", "darwin": "macOS", "linux": "Linux"}
+"""How to say a platform to a person.
+
+``platform.system()`` is lowercased on the way through
+:func:`mc_voice_models.current_platform`, which is right for a directory name
+and wrong in a sentence -- "Voice cloning is not offered on windows" reads like
+a typo rather than like a fact about this PC.
+"""
+
+
+def _system_name(system: str) -> str:
+    """The platform's own name, or whatever it called itself if it is new."""
+    return _SYSTEM_NAMES.get(str(system or "").strip().lower(), str(system or "this system"))
+
+
 def installation() -> dict:
     """What Settings draws for the cloning row. Never raises, never installs.
 
@@ -229,8 +244,8 @@ def installation() -> dict:
     if not supported():
         system, _machine, _python = models.current_platform()
         return {"state": "unsupported", "supported": False, "message":
-                f"Voice cloning is not offered on {system}. Voice Chat itself is unaffected, "
-                f"and voices cloned elsewhere still work here.",
+                f"Voice cloning is not offered on {_system_name(system)}. Voice Chat itself "
+                f"is unaffected, and voices cloned elsewhere still work here.",
                 "sources": _sources(), "capacity": _capacity()}
     found = validate()
     stored = _record()

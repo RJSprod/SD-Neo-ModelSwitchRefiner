@@ -290,7 +290,7 @@ def validate_wav(data: bytes) -> dict:
     if seconds > MAX_SECONDS + 0.5:
         raise Refused(400, "That recording is longer than Voice Chat accepts.")
     if seconds < 0.2:
-        raise Refused(400, "Hold to speak.")
+        raise Refused(400, "Hold at the right-hand end of the track to talk.")
     return {"seconds": seconds, "rate": rate, "frames": frames}
 
 

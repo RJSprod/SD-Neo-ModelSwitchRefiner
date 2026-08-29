@@ -98,6 +98,17 @@ class TestTheControlsAreThere:
         # The same touch target the paperclip beside it establishes.
         assert mic.__dict__.get("min_width") == 44
 
+    def test_the_microphone_sits_in_a_track_twice_its_own_width(self):
+        """The 2 x 1 area the slide gesture needs. The handle rests at the left
+        of it and is carried to the right-hand end to start recording, so the
+        track's width *is* the travel -- a track the size of the handle would be
+        a press-and-hold with extra steps."""
+        build()
+        track = find(None, "mc-llm-chat-voice-track")
+        assert track is not None, "the microphone has no track to slide along"
+        assert track.__dict__.get("min_width") == 2 * mc_voice_ui.MIC_PX
+        assert "mc-llm-voice-track" in (track.__dict__.get("elem_classes") or [])
+
     def test_the_microphone_is_never_disabled(self):
         """Section 14: pressing it with nothing installed is how somebody finds
         out what is wrong. A dead control is one that gets pressed three times

@@ -63,6 +63,21 @@ SCREEN = "voice"
 
 MIC_GLYPH = "\U0001f3a4"
 
+MIC_PX = 44
+"""The handle, at the same 44px the paperclip beside it establishes.
+
+The size a finger can be relied on to hit, and the size the composer row is
+already built around.
+"""
+
+MIC_TRACK_PX = 2 * MIC_PX
+"""The track: two handles wide, which is the "2 x 1 area" this gesture asked for.
+
+Deliberately not wider. A slide has to be long enough that nothing does it by
+accident and short enough that a thumb reaching across a phone completes it in
+one movement, and one handle's travel is both.
+"""
+
 NOT_READY = "Voice Chat is not set up. Install both models in Settings → Voice Chat."
 
 
@@ -79,15 +94,31 @@ def chip():
 
 
 def microphone():
-    """The composer control. One compact button, the same 44px as the paperclip.
+    """The composer control: a two-slot track with the microphone at its left.
+
+    Slide the microphone to the right-hand end of the track and hold it there to
+    record; let go to stop and transcribe. Press-and-hold used to do this, and it
+    was the wrong gesture on the device most likely to be dictating: on Android a
+    long press belongs to the operating system before it belongs to a web page,
+    and it raises the context menu or the selection callout over the composer.
+    A slide is a gesture no platform wants, and opening a microphone stops being
+    something anybody does by brushing against a button.
+
+    The track is drawn by this extension and the handle is an ordinary Gradio
+    button, which is what keeps the failure mode gentle: a page whose JavaScript
+    never ran still has a labelled control that explains what is wrong when it
+    is pressed, rather than a dead patch of composer.
 
     Never disabled, even with nothing installed. The requested interaction is
-    that pressing it *explains what is wrong* -- a control that is simply dead
-    is a control somebody presses three times and then reports as broken.
+    that using it *explains what is wrong* -- a control that is simply dead is a
+    control somebody presses three times and then reports as broken.
     """
-    return gr.Button(MIC_GLYPH, size="sm", scale=0, min_width=44,
-                     elem_id=ui.ident("chat", "voice-mic"),
-                     elem_classes=ui.classes("icon-button", "voice-mic"))
+    with gr.Column(scale=0, min_width=MIC_TRACK_PX,
+                   elem_id=ui.ident("chat", "voice-track"),
+                   elem_classes=ui.classes("voice-track")):
+        return gr.Button(MIC_GLYPH, size="sm", scale=0, min_width=MIC_PX,
+                         elem_id=ui.ident("chat", "voice-mic"),
+                         elem_classes=ui.classes("icon-button", "voice-mic"))
 
 
 def plumbing() -> dict:

@@ -99,6 +99,24 @@ class TestInstallation:
         assert found["supported"] is False
         assert "unaffected" in found["message"]
 
+    def test_the_platform_is_named_the_way_it_names_itself(self, voice_root, monkeypatch):
+        """``platform.system()`` is lowercased on the way through to a directory
+        name, which is right there and wrong in a sentence: "not offered on
+        windows" reads like a typo rather than like a fact about this PC."""
+        monkeypatch.setattr(cloning, "supported", lambda: False)
+        for reported, wanted in (("windows", "Windows"), ("darwin", "macOS"),
+                                 ("linux", "Linux")):
+            monkeypatch.setattr(cloning.models, "current_platform",
+                                lambda reported=reported: (reported, "amd64", "cp313"))
+            assert wanted in cloning.installation()["message"]
+
+    def test_a_platform_nobody_has_heard_of_is_still_said_plainly(self, voice_root,
+                                                                  monkeypatch):
+        monkeypatch.setattr(cloning, "supported", lambda: False)
+        monkeypatch.setattr(cloning.models, "current_platform",
+                            lambda: ("haiku", "amd64", "cp313"))
+        assert "haiku" in cloning.installation()["message"]
+
 
 class TestTheReferenceRecording:
     def test_t_clone_5_a_recording_is_normalized_to_mono_24_khz(self, reference_wav):

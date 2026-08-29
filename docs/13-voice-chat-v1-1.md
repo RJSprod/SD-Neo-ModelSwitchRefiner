@@ -248,17 +248,118 @@ survive Voice outliving the reply.
 
 ## 8. §39 — the microphone policy, stated precisely
 
-The extension's own `isSecureContext` refusal is gone. What replaces it is
-capability detection and the browser's own error names mapped to sentences:
-`NotAllowedError`, `NotFoundError`, `NotReadableError`/`AbortError`.
+The extension's own `isSecureContext` refusal is gone. What replaces it is the
+browser's own error names mapped to sentences: `NotAllowedError`,
+`NotFoundError`, `NotReadableError`/`AbortError`.
 
 What has *not* changed, and is not this extension's to change: mainstream
 browsers restrict `getUserMedia` to secure contexts and commonly leave
 `navigator.mediaDevices` undefined on an insecure origin. So an Android phone on
-`http://192.168.x.x` will usually still not open a microphone. The difference is
-what it says — *this browser did not make microphone capture available for this
-page* — which is true, rather than a claim about HTTPS that Voice Chat is not
-entitled to make. Everything else works over plain HTTP.
+`http://192.168.x.x` will usually still not open a microphone. What Voice Chat
+owes the user there is the reason and the remedy, not a verdict of its own.
+
+
+### What the first phone found, and what changed
+
+The first release still had a capability *pre-check*: no
+`navigator.mediaDevices.getUserMedia`, no recording, refused before anything was
+asked. That is the same mistake §39 removed, one layer down — the extension
+answering a question that belongs to the browser. From a handset it produced a
+sentence about capture being unavailable where a permission prompt should have
+been, and the report that came back was, correctly, *my browser did not request
+microphone*. It had not. Nothing had asked it to.
+
+Three things replace it.
+
+* **Every entry point is tried, and the request is actually made.**
+  `navigator.mediaDevices.getUserMedia` first, then the prefixed callback form
+  (`webkitGetUserMedia` and its siblings), which is still the only one present
+  in some Android WebViews and in-app browsers. Only when there is nothing left
+  to call does the attempt fail, and it fails with a name of its own so the
+  error map can say *why* rather than guess.
+* **The reason is named.** With no capture available at all, `isSecureContext`
+  decides between two sentences: the plain *this browser did not make microphone
+  capture available*, and — on an insecure origin — the one somebody can act on,
+  naming HTTPS and
+  `chrome://flags/#unsafely-treat-insecure-origin-as-secure`.
+* **The prompt is raised inside the gesture.** A browser only raises a
+  permission dialog while it still considers a user gesture in progress, and the
+  old order — check readiness with the WebUI, *then* open the microphone — is
+  past that on a phone. The request now leaves in the same task as the gesture.
+  Where a recent status answer is already in hand it is honoured first, so an
+  installation that is known not to be set up still never opens a microphone to
+  find that out; where nothing is known, the microphone is opened and closed
+  again immediately if the answer turns out to be no.
+
+
+## 8a. The composer gesture: slide, not hold
+
+Press-and-hold was wrong on the device most likely to be dictating, and for a
+reason no amount of `touch-action` and `user-select` fixes: on Android a long
+press belongs to the operating system before it belongs to a web page. It raises
+the context menu, or the text-selection callout, over the composer.
+
+The microphone is therefore not held any more, it is *moved*. It rests at the
+left of a track two of its own widths across — the "2 × 1 area" the request
+asked for — and recording starts when it has been slid to the far right and is
+being held there. Releasing, anywhere, ends the recording.
+
+* **Nine tenths of the travel engages, not all of it.** The last few pixels of a
+  slide are where a fingertip's contact patch and the pointer's reported
+  position disagree, and a gesture that had to be perfect would fail half the
+  time on the surface it was designed for.
+* **The handle is pinned at the end once engaged.** A finger drifting back down
+  the track is a finger drifting, not a decision; a microphone that stopped and
+  restarted under one continuous hold would be worse than the control this
+  replaced.
+* **`transform`, not `left`.** The handle moves without moving anything else.
+  The composer is the one surface in this panel that must not reflow while
+  somebody is using it.
+* **Pointer moves and releases are listened for on the window.** Pointer capture
+  normally keeps the sequence on the handle; where it is missing or lost — a
+  finger off the track, a task switch, an incoming call — these are what still
+  end the recording rather than leaving a microphone open.
+* **Space or Enter is the same contract from a keyboard.** A control that can
+  only be dragged is a control somebody using a keyboard cannot use at all.
+
+The slide also bought something the old gesture could not have: it takes a few
+hundred milliseconds, and the readiness check now starts on the press and is
+read at the moment of engagement. What used to be a round trip standing between
+the gesture and the permission prompt is now a request that has already
+finished.
+
+
+## 8b. What this script costs a page that is not using it
+
+`javascript/voice_chat.js` is in every page this WebUI serves, including the
+tabs with nothing to do with speech, and three things it did were charged to all
+of them.
+
+* **`show()` rewrote class attributes whether or not they had changed.**
+  `classList.remove` of a class that is not present still rewrites the element's
+  `class` attribute, and rewriting an attribute wakes every `MutationObserver`
+  watching that subtree. This ran on a 400 ms tick and again after every Gradio
+  update, so a theme that observes attributes — LobeTheme is one — had work to
+  do twice a second, forever, on a composer nobody was looking at. Every write
+  is now conditional. Asserting the state was always the requirement; rewriting
+  it when it was already right was not.
+* **The Settings rows fetched on page load.** Forge builds every settings row
+  whether or not the Settings tab has ever been opened, so "wired" is not "being
+  looked at". Three requests went out from `onUiLoaded` on every page, out of
+  the same small per-origin connection pool the tab actually being painted needs.
+  Nothing is fetched now for a row that is not on screen; a DOM read once a
+  second stands in for it.
+* **A page with a stale token polled forever.** The page token is minted per
+  WebUI process, so a tab left open across a restart carries last run's token
+  and there is no answer it can ever get but 403. It went on asking every 1.5
+  seconds regardless — which is what put *the page token is from a previous run
+  of this WebUI* into a fresh WebUI's startup log. The first 403 now stops all of
+  it, once, with a line saying to reload.
+
+Also in the composer: `applyComposerState` used to resolve Send and Stop through
+`holderOf`, which on a build where the two share a wrapper answers with the same
+node for both — and hiding one would have hidden the other, leaving a composer
+with no button in it. When they collide, the buttons themselves are used.
 
 
 ## 9. §113 — the migration, and the bug it fixes
