@@ -30,8 +30,10 @@ These run under node, which is not a Forge dependency, so they skip without it.
 from __future__ import annotations
 
 import json
+import pathlib
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -58,14 +60,32 @@ function element(id, tag) {
         dataset: {},
         disabled: false,
         value: "",
+        // The slide moves the handle with a transform and reads the track's
+        // width to know how far "all the way to the right" is, so both are
+        // part of the DOM this harness has to have.
+        style: {},
+        offsetWidth: 0,
+        clientWidth: 0,
         offsetParent: {},
         innerHTML: "",
         textContent: "",
         children: [],
         classList: {
             names: new Set(),
-            add(...names) { names.forEach((n) => node.classList.names.add(n)); },
-            remove(...names) { names.forEach((n) => node.classList.names.delete(n)); },
+            // Counted, because a browser counts them too: `classList.remove` of
+            // a class that is not there still rewrites the element's `class`
+            // attribute and wakes every MutationObserver watching it. "The
+            // composer state is asserted and not rewritten" is a claim about
+            // this number.
+            writes: 0,
+            add(...names) {
+                node.classList.writes += 1;
+                names.forEach((n) => node.classList.names.add(n));
+            },
+            remove(...names) {
+                node.classList.writes += 1;
+                names.forEach((n) => node.classList.names.delete(n));
+            },
             contains(name) { return node.classList.names.has(name); },
         },
         listeners,
@@ -151,6 +171,16 @@ elements["mc-llm-chat-voice-engine"] = enginePanel;
     elements[id].checked = true;
 });
 
+// The composer's slide track: two handles across, the handle 44px of it. Real
+// numbers, because the gesture's engage threshold is a fraction of the travel
+// and a track with no width would engage on the press.
+const micTrack = element("mc-llm-chat-voice-track");
+micTrack.clientWidth = 88;
+elements["mc-llm-chat-voice-track"] = micTrack;
+elements["mc-llm-chat-voice-mic"].offsetWidth = 44;
+elements["mc-llm-chat-voice-mic"].closest = (selector) =>
+    selector.indexOf("mc-llm-voice-track") !== -1 ? micTrack : null;
+
 elements["mc-llm-chat-voice-key"].inner.value = "PAGE-TOKEN";
 // Hidden: Send is showing, Stop is not, which is the idle composer.
 elements["mc-llm-chat-stop"].offsetParent = null;
@@ -205,11 +235,21 @@ settingsRow.querySelectorAll = function (selector) {
     return [];
 };
 
+// The Voices row, which is the other block Python draws on the Settings page.
+// Off screen to begin with, because that is where a settings row starts on
+// every page of this WebUI that is not the Settings page -- and nothing is
+// fetched for a row nobody can see.
+const voicesRow = element("voices");
+voicesRow["data-mc-voice-key"] = "PAGE-TOKEN";
+voicesRow.offsetParent = VOICES_VISIBLE ? {} : null;
+voicesRow.getBoundingClientRect = () => ({width: 0, height: 0});
+
 globalThis.document = {
     documentElement: element("html"),
     querySelector(selector) {
         if (selector.charAt(0) === "#") return elements[selector.slice(1)] || null;
         if (selector === ".mc-voice-settings") return SETTINGS_PRESENT ? settingsRow : null;
+        if (selector === ".mc-voice-voices") return VOICES_PRESENT ? voicesRow : null;
         if (selector === "[data-mc-voice-key]") return SETTINGS_PRESENT ? settingsRow : null;
         return null;
     },
@@ -321,19 +361,28 @@ globalThis.URL = {createObjectURL: () => "blob:worklet", revokeObjectURL() {}};
 Object.defineProperty(globalThis, "navigator", {
     configurable: true,
     writable: true,
-    value: MICROPHONE ? {
-        mediaDevices: {
-            getUserMedia(constraints) {
-                requests.push({kind: "getUserMedia", constraints});
-                if (!PERMISSION) {
-                    const error = new Error("refused");
-                    error.name = DENIAL;
-                    return Promise.reject(error);
-                }
-                return Promise.resolve({getTracks: () => [track()]});
-            },
-        },
-    } : {},
+    value: (function () {
+        const open = function (constraints) {
+            requests.push({kind: "getUserMedia", constraints});
+            if (!PERMISSION) {
+                const error = new Error("refused");
+                error.name = DENIAL;
+                return Promise.reject(error);
+            }
+            return Promise.resolve({getTracks: () => [track()]});
+        };
+        // The prefixed callback form, which is what some Android WebViews have
+        // instead of `mediaDevices`. The script has to reach it, or a phone
+        // that could have recorded is told it cannot.
+        if (LEGACY) {
+            return {
+                webkitGetUserMedia(constraints, resolve, reject) {
+                    open(constraints).then(resolve, reject);
+                },
+            };
+        }
+        return MICROPHONE ? {mediaDevices: {getUserMedia: open}} : {};
+    })(),
 });
 
 globalThis.Event = function (type, options) {
@@ -428,6 +477,7 @@ async function tick(times) {
 
 const mic = elements["mc-llm-chat-voice-mic"];
 const send = elements["mc-llm-chat-send"];
+const stop = elements["mc-llm-chat-stop"];
 const message = elements["mc-llm-chat-message"].inner;
 const token = elements["mc-llm-chat-voice-token"].inner;
 const turnField = elements["mc-llm-chat-voice-turn"].inner;
@@ -475,12 +525,41 @@ async function repaint() {
     await tick();
 }
 
+// Pointer moves and releases are listened for on the window, not the handle:
+// pointer capture normally keeps them on the button, and where it is missing or
+// lost these are what still end a recording. Firing them the same way the
+// browser would is the only way to test that.
+function fireWindow(name, detail) {
+    const event = Object.assign({type: name, preventDefault() {}, cancelable: true,
+                                 button: 0}, detail || {});
+    (globalThis.windowHandlers[name] || []).forEach((fn) => fn(event));
+}
+
+// Slide-to-talk, as one call. Press on the handle at the left of the track,
+// carry it past the engage threshold, and recording starts.
+//
+// A tick between the press and the movement, because a slide is not
+// instantaneous and the script relies on that: pressing starts the readiness
+// check, and the engagement at the end of the slide reads its answer instead of
+// waiting for one.
+async function engageMic(pointerId) {
+    const id = pointerId === undefined ? 7 : pointerId;
+    mic.fire("pointerdown", {pointerId: id, clientX: 0});
+    await tick();
+    fireWindow("pointermove", {pointerId: id, clientX: 400});
+}
+
+function releaseMic(pointerId, cancelled) {
+    fireWindow(cancelled ? "pointercancel" : "pointerup",
+               {pointerId: pointerId === undefined ? 7 : pointerId});
+}
+
 async function hold(ms, sampleCount) {
-    mic.fire("pointerdown", {pointerId: 7});
+    await engageMic(7);
     await tick();
     feed(new Array(sampleCount === undefined ? 8000 : sampleCount).fill(0.2));
     NOW += ms;
-    mic.fire("pointerup", {pointerId: 7});
+    releaseMic(7);
     await tick();
 }
 
@@ -491,6 +570,10 @@ function report(extra) {
                                         bodyLength: r.body && r.body.byteLength,
                                         bodyText: typeof r.body === "string" ? r.body : null})),
         micClasses: Array.from(mic.classList.names),
+        micTransform: mic.style.transform || "",
+        trackClasses: Array.from(micTrack.classList.names),
+        sendWrites: send.classList.writes,
+        stopWrites: stop.classList.writes,
         micLabel: mic.getAttribute("aria-label"),
         composer: message.value,
         sends: send.clicks || 0,
@@ -545,6 +628,9 @@ DEFAULTS = {
     "HIDDEN": "false",
     "SECURE": "true",
     "MICROPHONE": "true",
+    "LEGACY": "false",
+    "VOICES_PRESENT": "false",
+    "VOICES_VISIBLE": "false",
     "PERMISSION": "true",
     "DENIAL": '"NotAllowedError"',
     "SAMPLE_RATE": "48000",
@@ -595,13 +681,27 @@ def status_answer(**changes):
 
 
 def run(scenario: str, **overrides) -> dict:
+    """One scenario, in a real JavaScript engine, against the real script.
+
+    Written to a file rather than passed with ``node -e``. The script under test
+    is the whole of ``javascript/voice_chat.js``, and an argument vector is not
+    an unbounded thing: on Linux a single argument is capped at 128 KiB, and the
+    harness plus the script crossed that as the script grew. The failure that
+    produces is ``OSError: Argument list too long`` from every test at once,
+    which reads like the suite is broken rather than like a limit was reached --
+    so it is not a limit this suite goes near any more. ``.mjs`` because that is
+    how a file asks for the module semantics ``--input-type=module`` used to.
+    """
     settings = dict(DEFAULTS)
     settings.update({key: value for key, value in overrides.items()})
     harness = HARNESS.replace("SOURCE", SCRIPT.read_text()).replace("SCENARIO", scenario)
     for key, value in settings.items():
         harness = harness.replace(key, value if isinstance(value, str) else json.dumps(value))
-    result = subprocess.run(["node", "--input-type=module", "-e", harness],
-                            capture_output=True, text=True, timeout=60)
+    with tempfile.TemporaryDirectory() as room:
+        entry = pathlib.Path(room) / "scenario.mjs"
+        entry.write_text(harness, encoding="utf-8")
+        result = subprocess.run(["node", str(entry)],
+                                capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])
 
@@ -655,23 +755,33 @@ class TestTheDeploymentRoot:
 # --------------------------------------------------------------------------- #
 
 
-class TestPressAndHold:
+class TestSlideToTalk:
+    """The composer gesture. Slide the handle to the right-hand end of its
+    track and hold; release to transcribe.
+
+    It replaced press-and-hold because a long press on Android is the operating
+    system's gesture before it is a web page's -- it raises the context menu
+    over the composer -- and because a recording is worth being deliberate
+    about. Everything past the moment of engagement is unchanged, which is why
+    most of what follows is the same assertion it always was.
+    """
+
     def test_a_hold_records_and_posts_exactly_one_recording(self):
         found = run("await hold(900); console.log(JSON.stringify(report()));")
         posts = [r for r in found["requests"] if r.get("url", "").endswith("/stt")]
         assert len(posts) == 1
         assert posts[0]["bodyLength"] > 44, "the WAV had no samples in it"
 
-    def test_pointerdown_starts_exactly_one_capture(self):
+    def test_a_second_slide_during_one_does_not_open_a_second_microphone(self):
         found = run("""
-            mic.fire("pointerdown", {pointerId: 1});
+            await engageMic(1);
             await tick();
-            mic.fire("pointerdown", {pointerId: 2});
+            await engageMic(2);
             await tick();
             console.log(JSON.stringify(report()));
         """)
         opens = [r for r in found["requests"] if r.get("kind") == "getUserMedia"]
-        assert len(opens) == 1, "a second press opened a second microphone"
+        assert len(opens) == 1, "a second slide opened a second microphone"
 
     def test_the_microphone_is_closed_when_the_finger_comes_up(self):
         """The most alarming thing a page can do is leave the recording
@@ -682,11 +792,11 @@ class TestPressAndHold:
 
     def test_pointercancel_discards_the_recording_and_closes_the_microphone(self):
         found = run("""
-            mic.fire("pointerdown", {pointerId: 3});
+            await engageMic(3);
             await tick();
             feed(new Array(8000).fill(0.2));
             NOW += 900;
-            mic.fire("pointercancel", {pointerId: 3});
+            releaseMic(3, true);
             await tick();
             console.log(JSON.stringify(report()));
         """)
@@ -697,11 +807,11 @@ class TestPressAndHold:
         """Under 250 ms is somebody finding out what the button does."""
         found = run("await hold(120); console.log(JSON.stringify(report()));")
         assert not any(r.get("url", "").endswith("/stt") for r in found["requests"])
-        assert "Hold to speak" in found["status"]
+        assert "Hold at the right-hand end" in found["status"]
 
     def test_the_finger_is_captured_so_sliding_off_still_ends_the_recording(self):
         found = run("""
-            mic.fire("pointerdown", {pointerId: 11});
+            await engageMic(11);
             await tick();
             console.log(JSON.stringify(report({captured: mic.captured})));
         """)
@@ -709,7 +819,7 @@ class TestPressAndHold:
 
     def test_a_sixty_second_cap_is_armed_and_does_not_fire_early(self):
         found = run("""
-            mic.fire("pointerdown", {pointerId: 4});
+            await engageMic(4);
             await tick();
             console.log(JSON.stringify(report({armed: pending()})));
         """)
@@ -717,7 +827,7 @@ class TestPressAndHold:
 
     def test_the_cap_stops_the_recording_by_itself(self):
         found = run("""
-            mic.fire("pointerdown", {pointerId: 5});
+            await engageMic(5);
             await tick();
             feed(new Array(8000).fill(0.2));
             NOW += 60000;
@@ -728,7 +838,7 @@ class TestPressAndHold:
 
     def test_recording_state_is_shown_without_a_round_trip(self):
         found = run("""
-            mic.fire("pointerdown", {pointerId: 6});
+            await engageMic(6);
             console.log(JSON.stringify(report()));
         """)
         assert "mc-llm-voice-recording" in found["micClasses"]
@@ -737,7 +847,112 @@ class TestPressAndHold:
     def test_the_control_returns_to_idle_afterwards(self):
         found = run("await hold(900); console.log(JSON.stringify(report()));")
         assert "mc-llm-voice-recording" not in found["micClasses"]
-        assert found["micLabel"] == "Hold to dictate"
+        assert found["micLabel"] == "Dictate — slide right and hold, or hold Space"
+
+
+class TestTheSlideItself:
+    """What the gesture is, as opposed to what happens once it has engaged."""
+
+    def test_a_press_that_never_slides_records_nothing(self):
+        """The whole point of the shape. A finger that lands on the handle --
+        a scroll that started there, a mis-tap on a phone -- must not open a
+        microphone."""
+        found = run("""
+            mic.fire("pointerdown", {pointerId: 21, clientX: 0});
+            await tick();
+            releaseMic(21);
+            await tick();
+            console.log(JSON.stringify(report()));
+        """)
+        assert not any(r.get("kind") == "getUserMedia" for r in found["requests"])
+        assert "Slide the microphone all the way to the right" in found["status"]
+
+    def test_a_slide_short_of_the_end_does_not_engage(self):
+        """Nine tenths of the travel, and this is eight. The threshold is not
+        the whole width because a fingertip and the pointer position it reports
+        disagree by a few pixels; it is not half of it either, because a gesture
+        that engages halfway is a gesture nobody trusts."""
+        found = run("""
+            mic.fire("pointerdown", {pointerId: 22, clientX: 0});
+            await tick();
+            fireWindow("pointermove", {pointerId: 22, clientX: 30});
+            await tick();
+            console.log(JSON.stringify(report()));
+        """)
+        assert not any(r.get("kind") == "getUserMedia" for r in found["requests"])
+        assert "mc-llm-voice-recording" not in found["micClasses"]
+
+    def test_the_handle_follows_the_finger_and_is_put_back_on_release(self):
+        found = run("""
+            mic.fire("pointerdown", {pointerId: 23, clientX: 0});
+            await tick();
+            fireWindow("pointermove", {pointerId: 23, clientX: 20});
+            const midway = mic.style.transform;
+            releaseMic(23);
+            await tick();
+            console.log(JSON.stringify(report({midway})));
+        """)
+        assert found["midway"] == "translateX(20px)"
+        assert found["micTransform"] == "", "the handle did not return to the left"
+
+    def test_the_track_is_marked_while_it_is_recording_and_after(self):
+        found = run("""
+            await engageMic(24);
+            await tick();
+            const armed = Array.from(micTrack.classList.names);
+            feed(new Array(8000).fill(0.2));
+            NOW += 900;
+            releaseMic(24);
+            await tick();
+            console.log(JSON.stringify(report({armed})));
+        """)
+        assert "mc-llm-voice-armed" in found["armed"]
+        assert "mc-llm-voice-armed" not in found["trackClasses"]
+
+    def test_the_handle_is_pinned_at_the_end_once_it_has_engaged(self):
+        """A finger drifting back down the track is a finger drifting, not a
+        decision. A microphone that stopped and started under one continuous
+        hold would be worse than the control this replaced."""
+        found = run("""
+            await engageMic(25);
+            await tick();
+            fireWindow("pointermove", {pointerId: 25, clientX: 5});
+            await tick();
+            console.log(JSON.stringify(report()));
+        """)
+        assert found["micTransform"] != ""
+        assert "mc-llm-voice-recording" in found["micClasses"]
+
+    def test_holding_space_records_and_releasing_it_sends(self):
+        """A control that can only be dragged is a control somebody using a
+        keyboard cannot use at all."""
+        found = run("""
+            mic.fire("keydown", {key: " "});
+            await tick();
+            feed(new Array(8000).fill(0.2));
+            NOW += 900;
+            mic.fire("keyup", {key: " "});
+            await tick();
+            console.log(JSON.stringify(report()));
+        """)
+        posts = [r for r in found["requests"] if r.get("url", "").endswith("/stt")]
+        assert len(posts) == 1
+
+    def test_a_pointer_that_leaves_the_window_ends_the_recording(self):
+        """An incoming call, a task switch. The failure this must not have is a
+        microphone left open."""
+        found = run("""
+            await engageMic(26);
+            await tick();
+            feed(new Array(8000).fill(0.2));
+            NOW += 900;
+            fireWindow("pointercancel", {pointerId: 26});
+            await tick();
+            console.log(JSON.stringify(report()));
+        """)
+        assert found["tracks"], "no microphone was ever opened"
+        assert all(found["tracks"]), "a MediaStream track was left running"
+        assert not any(r.get("url", "").endswith("/stt") for r in found["requests"])
 
 
 class TestWhenItCannotRecord:
@@ -764,6 +979,47 @@ class TestWhenItCannotRecord:
         assert "did not make microphone capture available" in found["status"]
         assert "HTTPS" not in found["status"]
         assert found["consoleErrors"] == []
+
+    def test_an_insecure_page_with_no_capture_is_told_the_actual_reason(self):
+        """The report that came back from a phone: "my browser did not request
+        microphone". It had not, and this is why -- Chrome does not expose
+        getUserMedia at all on an origin it does not trust, so there was nothing
+        to prompt with. "Capture is not available" is true and useless; the
+        origin being insecure is true and fixable, so that is what is said."""
+        found = run("await hold(900); console.log(JSON.stringify(report()));",
+                    MICROPHONE="false", SECURE="false")
+        assert "only opens a microphone on a secure page" in found["status"]
+        assert "HTTPS" in found["status"]
+        assert "unsafely-treat-insecure-origin-as-secure" in found["status"]
+
+    def test_the_legacy_entry_point_is_used_when_mediadevices_is_missing(self):
+        """Some Android WebViews and in-app browsers have the prefixed callback
+        form and no `mediaDevices`. Refusing there was refusing a browser that
+        could have recorded."""
+        found = run("await hold(900); console.log(JSON.stringify(report()));",
+                    MICROPHONE="false", LEGACY="true")
+        opens = [r for r in found["requests"] if r.get("kind") == "getUserMedia"]
+        assert len(opens) == 1, "the prefixed getUserMedia was never called"
+        posts = [r for r in found["requests"] if r.get("url", "").endswith("/stt")]
+        assert len(posts) == 1
+
+    def test_the_microphone_is_opened_before_the_status_answer_when_nothing_is_known(self):
+        """Why the order matters. A browser raises a permission prompt while it
+        still considers a user gesture in progress; a promise chain that has
+        already awaited a round trip to the WebUI is past that on a phone. So
+        with no cached answer the microphone is asked for first and closed again
+        if the answer turns out to be no."""
+        found = run("""
+            // No tick between the press and the slide: nothing has come back
+            // from the status route yet, which is the first gesture on a page.
+            mic.fire("pointerdown", {pointerId: 31, clientX: 0});
+            fireWindow("pointermove", {pointerId: 31, clientX: 400});
+            console.log(JSON.stringify(report({
+                askedBeforeAnyAnswer: requests.filter(
+                    (r) => r.kind === "getUserMedia").length,
+            })));
+        """)
+        assert found["askedBeforeAnyAnswer"] == 1
 
     def test_a_denied_permission_says_so_and_does_not_retry(self):
         found = run("await hold(900); console.log(JSON.stringify(report()));",
@@ -924,11 +1180,11 @@ class TestTheComposer:
         answers = json.loads(DEFAULTS["ANSWERS"])
         answers["voice/stt"]["json"]["auto_send"] = True
         found = run("""
-            mic.fire("pointerdown", {pointerId: 7});
+            await engageMic(7);
             await tick();
             feed(new Array(8000).fill(0.2));
             NOW += 900;
-            mic.fire("pointerup", {pointerId: 7});
+            releaseMic(7);
             // The reply starts while the transcription is still in flight,
             // which is the race auto-send has to lose.
             runState.value = "llm";
@@ -1047,7 +1303,7 @@ class TestSpeaking:
             intervals.forEach((fn) => fn());
             await tick();
             const before = played.length;
-            mic.fire("pointerdown", {pointerId: 9});
+            await engageMic(9);
             await tick();
             console.log(JSON.stringify(report({before, stoppedNow: stopped.length})));
         """)
@@ -1661,6 +1917,78 @@ class TestStoppingInTheBrowser:
         """, ANSWERS=stream_answers(seconds=1.0, count=6, stall=True))
         assert found["aborts"] >= 1
         assert found["stopped"] >= 1
+
+
+class TestWhatThePageCostsToLoad:
+    """Section 33, and a bug report. This script is in every page this WebUI
+    serves, including the ones with nothing to do with speech, and it used to
+    make three requests and rewrite two class attributes twice a second whether
+    or not anybody was looking at anything it draws. On a theme that observes
+    the DOM -- which is most of them -- that is work with no end and no reader,
+    and the tab that pays for it is whichever one is trying to paint."""
+
+    def test_a_settings_row_nobody_can_see_is_asked_nothing(self):
+        found = run("""
+            settingsRow.offsetParent = null;
+            settingsRow.getBoundingClientRect = () => ({width: 0, height: 0});
+            await repaint();
+            await repaint();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+        assert not any("voice/status" in (r.get("url") or "") for r in found["requests"])
+
+    def test_the_voices_row_is_not_fetched_until_it_is_on_screen(self):
+        found = run("""
+            await tick(2);
+            const before = requests.length;
+            voicesRow.offsetParent = {};
+            NOW += 2000;
+            await tick(4);
+            console.log(JSON.stringify(report({before})));
+        """, VOICES_PRESENT="true")
+        early = found["requests"][:found["before"]]
+        assert not any("voice/voices" in (r.get("url") or "") for r in early), \
+            "the voice list was fetched before anybody could see it"
+        assert any("voice/voices" in (r.get("url") or "") for r in found["requests"]), \
+            "the voice list was never fetched once it was visible"
+
+    def test_an_idle_tick_rewrites_no_class_attributes(self):
+        """A `classList.remove` of a class that is not there still rewrites the
+        element's `class` attribute, and every MutationObserver on the page
+        wakes up for it. Twice a second, forever, is what a heavy theme could
+        not settle under."""
+        found = run("""
+            await tick(2);
+            const before = send.classList.writes + stop.classList.writes;
+            intervals.forEach((fn) => fn());
+            intervals.forEach((fn) => fn());
+            await tick(2);
+            console.log(JSON.stringify(report({
+                before, after: send.classList.writes + stop.classList.writes,
+            })));
+        """)
+        assert found["after"] == found["before"], \
+            "an idle composer tick still wrote to the DOM"
+
+    def test_a_stale_page_token_stops_the_polling_after_one_refusal(self):
+        """The observed failure: a tab left open across a WebUI restart carries
+        last run's page token, and there is no answer it can get but 403. It
+        used to ask again every 1.5 seconds for as long as it stayed open --
+        against a WebUI that had just started, out of the same small pool of
+        connections the tab actually being loaded needs."""
+        answers = json.loads(DEFAULTS["ANSWERS"])
+        answers["voice/status"] = {"status": 403,
+                                   "json": {"ok": False, "error": "reload it"}}
+        found = run("""
+            await repaint();
+            const after = requests.length;
+            await repaint();
+            await repaint();
+            console.log(JSON.stringify(report({after})));
+        """, SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+        assert found["after"] >= 1, "the first request was never made"
+        assert len(found["requests"]) == found["after"], \
+            "a refused page went on asking"
 
 
 class TestTheComposerBusyState:
