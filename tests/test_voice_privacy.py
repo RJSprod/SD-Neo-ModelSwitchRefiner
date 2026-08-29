@@ -108,7 +108,7 @@ class TestNothingSaidIsLogged:
             stt_model_id = "whisper-small-int8"
             tts_model_id = "kokoro-multi-lang-v1-cpu"
             stt_threads = 4
-            tts_threads = 2
+            tts_threads = 4
 
             def __init__(self, config):
                 pass
@@ -234,7 +234,7 @@ class TestNoNetwork:
             stt_model_id = "whisper-small-int8"
             tts_model_id = "kokoro-multi-lang-v1-cpu"
             stt_threads = 4
-            tts_threads = 2
+            tts_threads = 4
 
             def __init__(self, config):
                 pass

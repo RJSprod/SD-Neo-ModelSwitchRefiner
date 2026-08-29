@@ -530,7 +530,7 @@ class Engines:
         self.stt_model_id = str((config.get("stt") or {}).get("id") or "")
         self.tts_model_id = str((config.get("tts") or {}).get("id") or "")
         self.stt_threads = int(config.get("stt_threads") or 4)
-        self.tts_threads = int(config.get("tts_threads") or 2)
+        self.tts_threads = int(config.get("tts_threads") or 4)
         self.num_speakers = 0
         self.sample_rate = 0
         self.bank_version = str(config.get("bank_version") or "")

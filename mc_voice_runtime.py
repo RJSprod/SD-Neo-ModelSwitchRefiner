@@ -109,11 +109,26 @@ than shipping something that works until the day somebody force-quits.
 """
 
 STT_THREADS = 4
-TTS_THREADS = 2
-"""Conservative and hidden, per section 34. Written down once here so a V2
-setting has one place to come from, and small on purpose: the point of running
-beside Forge rather than inside its scheduler is lost if speech takes every
-core from the image that is rendering."""
+TTS_THREADS = 4
+"""Fixed, hidden, and deliberately not adaptive.
+
+Two was the conservative opening bid: speech runs beside an image model, and the
+point of a separate process is lost if it takes every core. Four is the
+considered one. Synthesis is the stage the first-to-second gap is actually made
+of -- one serialized lane, one sentence at a time -- and sherpa's ``num_threads``
+is what that lane is given to work with.
+
+What this is *not* is a tuner. Nothing in this repository rotates between two,
+four and six, runs an A/B, or picks a number from real-time factors, underrun
+counts or CPU load: a production feature that reconfigures itself is a feature
+whose logs describe a different program each time somebody reads them. The
+number appears in the diagnostics instead, so a shared log says exactly which
+configuration produced the run, and moving it again is a deliberate change to
+this line supported by those logs.
+
+STT is untouched at four. A transcription is a single burst after the user has
+stopped talking, and it was never the stage anybody was waiting through.
+"""
 
 HANDSHAKE_TIMEOUT = 300.0
 """Cold, this is four hundred megabytes of ONNX off a spinning disk on a

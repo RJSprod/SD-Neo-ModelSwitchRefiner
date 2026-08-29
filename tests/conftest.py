@@ -1075,12 +1075,18 @@ def main():
 
         if operation == "init":
             found = containment(int(header.get("parent_pid") or 0))
+            # Echoed from the config rather than invented, exactly as the real
+            # worker does: "the parent asked for four threads" and "the worker
+            # is running four" are two claims, and a handshake that made up the
+            # second one would prove neither.
+            asked = header.get("config") or {}
             reply = {
                 "ok": True, "id": request, "protocol_version": 2,
                 "runtime_version": "1.13.6", "provider": "cpu",
                 "parent_death": found, "stt_model_id": "whisper-small-int8",
                 "tts_model_id": "kokoro-multi-lang-v1-cpu",
-                "stt_threads": 4, "tts_threads": 2,
+                "stt_threads": int(asked.get("stt_threads") or 4),
+                "tts_threads": int(asked.get("tts_threads") or 4),
                 "num_speakers": PLAN.get("num_speakers", 85),
                 "sample_rate": 24000, "streaming": "callback",
                 "bank_version": PLAN.get("bank_version", ""),
