@@ -192,7 +192,13 @@ def _quietly(reason: str) -> None:
     the silence this function was added to end.
     """
     now = time.monotonic()
-    if now - _quiet.get(reason, 0.0) < 600.0:
+    last = _quiet.get(reason)
+    # ``None`` rather than a zero default, which is not the same thing: on a
+    # machine whose monotonic clock is still under ten minutes -- a WebUI
+    # started shortly after boot -- "last said at zero" reads as "said
+    # recently", and the first and most useful line is the one that gets
+    # thrown away.
+    if last is not None and now - last < 600.0:
         return
     _quiet[reason] = now
     logger.info("Model Chain: Voice is not reading replies aloud — %s", reason)
