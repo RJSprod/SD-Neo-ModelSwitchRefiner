@@ -182,13 +182,34 @@ class TestTheLogSaysWhyItIsQuiet:
     and these tests keep every branch audible."""
 
     def test_auto_speak_off_says_so(self, store, monkeypatch, speaking, host, caplog):
+        """Also the throttle's own bug: a zero default reads as "said just now"
+        on a machine whose monotonic clock is under ten minutes -- a WebUI
+        started shortly after boot -- and throws away the first and most useful
+        line."""
         host.shared.opts.model_chain_voice_auto_speak = False
         import mc_voice_ui
 
         mc_voice_ui._quiet.clear()
         with caplog.at_level("INFO", logger="model_chain"):
             run_reply(store, monkeypatch)
-        assert any("not reading replies aloud" in record.message for record in caplog.records)
+        said = [record.getMessage() for record in caplog.records]
+        assert any("not reading replies aloud" in line for line in said), said
+
+    def test_the_reason_is_said_once_and_then_throttled(self, store, monkeypatch,
+                                                        speaking, host, caplog):
+        """It is on the path of every assistant turn and the reason does not
+        change between them."""
+        host.shared.opts.model_chain_voice_auto_speak = False
+        import mc_voice_ui
+
+        mc_voice_ui._quiet.clear()
+        with caplog.at_level("INFO", logger="model_chain"):
+            run_reply(store, monkeypatch)
+            run_reply(store, monkeypatch)
+            run_reply(store, monkeypatch)
+        said = [line for line in (record.getMessage() for record in caplog.records)
+                if "not reading replies aloud" in line]
+        assert len(said) == 1, said
 
     def test_a_reply_that_will_be_spoken_says_so_with_its_voice(self, store, monkeypatch,
                                                                speaking, caplog):

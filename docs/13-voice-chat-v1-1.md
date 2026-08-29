@@ -72,11 +72,33 @@ than `MAX_PENDING_AUDIO` frames are unwritten, on a condition variable that
 cancellation also notifies — §16's requirement that backpressure can never make
 a cancel wait behind its own producer.
 
-**Streaming granularity is reported, not assumed.** `Engines._callback_supported`
-asks whether this sherpa build's `generate` takes a callback and says so in the
-handshake. With one, audio leaves during a sentence batch; without one, it
-leaves at the end of each segment the parent committed. Both stream; the second
-is coarser. A build that could do neither would have failed the handshake.
+**Streaming granularity is measured, not read.** The first version of
+`Engines._callback_supported` asked whether the word "callback" appeared in
+`generate`'s signature or docstring. That is a question about documentation
+rather than about what happens when you call it, and it was wrong in a way that
+took the whole feature down without a sound.
+
+sherpa's callback parameter is typed `py::array_t<float>`, so pybind11 has to
+build a NumPy array to deliver each batch to Python. The isolated speech runtime
+is two unpacked wheels — `sherpa_onnx` and its core — and NumPy is not one of
+them, so that construction raises and takes the synthesis with it. The
+completed-audio path is untouched, because `GeneratedAudio.samples` comes back
+as an ordinary list. So auditions worked perfectly while every spoken reply
+failed, and the handshake cheerfully reported "callback streaming" throughout.
+
+What is there now is a probe: one very short synthesis whose callback returns 0
+immediately, run once at load. It costs a fraction of a second and buys a
+handshake that is true. `stream()` also falls back per call — but only when
+nothing has been emitted yet, because re-running a segment that has already been
+half spoken would say those words twice.
+
+Segment streaming is not a degraded mode in any way the product notices. The
+parent commits one sentence at a time, so speech still begins long before the
+reply is finished; the callback only adds granularity *within* a sentence.
+Putting NumPy in the runtime would restore that, and is deliberately not done
+here: it is eight or more new pinned wheels across the supported
+platform/Python matrix, each needing a committed size and SHA-256, for a
+difference nobody can hear.
 
 
 ## 4. §§15–16 — the lock split, and what it buys

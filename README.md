@@ -2937,6 +2937,14 @@ as it is produced — so the first words arrive seconds into a long answer rathe
 than after all of it. Stop is one button for both halves: it ends the generation
 *and* the speech, and it stays on screen while the speaker is still talking.
 
+Audio leaves the speech worker at one of two granularities, and the Voice
+runtime line in the log says which one you have. *Segment streaming* is the
+ordinary case: each committed sentence is synthesised and handed over whole.
+*Callback streaming* is finer — sherpa hands back each sentence batch mid-call —
+and needs NumPy in the speech runtime, which is two unpacked wheels and does not
+have it. The difference is granularity inside one sentence; both start speaking
+long before the reply is finished, which is the thing that matters.
+
 **There are twenty-eight voices**, all the English ones the installed Kokoro
 bundle ships, chosen in Settings and auditioned there. On Linux, an optional
 offline cloning tool can add your own.

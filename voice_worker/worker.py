@@ -387,26 +387,43 @@ class Engines:
         self.streaming = "callback" if self._callback_supported() else "segment"
 
     def _callback_supported(self) -> bool:
-        """Whether this sherpa build's ``generate`` takes a callback.
+        """Whether this runtime can hand samples back *during* a synthesis.
 
-        Asked rather than assumed, and reported in the handshake, because the
-        answer changes what the feature can promise: with a callback, audio
-        leaves during a sentence batch; without one, it leaves at the end of
-        each segment the parent committed. Both stream -- the second is simply
-        coarser -- and a build that could do neither would be a build that
-        cannot speak at all, which the handshake would have failed on already.
+        Tried, not read. An earlier version of this asked whether the word
+        "callback" appeared in ``generate``'s signature or docstring, which is
+        a question about documentation rather than about what happens when you
+        call it -- and it was wrong here in a way that took the whole feature
+        down silently.
+
+        sherpa's callback parameter is typed ``py::array_t<float>``, so pybind11
+        has to build a NumPy array to deliver each batch to Python. This
+        runtime is two unpacked wheels -- sherpa_onnx and its core -- and NumPy
+        is not one of them, so that construction raises and takes the synthesis
+        with it. The completed-audio path is unaffected, because ``samples``
+        comes back as an ordinary list, which is exactly why auditions worked
+        while every spoken reply failed.
+
+        The probe is one very short synthesis whose callback returns 0
+        immediately, so it stops at the first batch. It costs a fraction of a
+        second at worker start and buys a handshake that is true.
         """
-        try:
-            import inspect
+        seen = []
 
-            found = inspect.signature(self.tts.generate)
-            return "callback" in found.parameters
-        except (TypeError, ValueError):
-            # pybind11 overloads do not always produce a signature. The
-            # docstring it generates instead names its arguments.
-            return "callback" in str(getattr(self.tts.generate, "__doc__", "") or "")
-        except Exception:
+        def probe(samples, _progress):
+            seen.append(1)
+            return 0
+
+        try:
+            self.tts.generate("ok", sid=0, speed=1.0, callback=probe)
+        except Exception as exc:  # noqa: BLE001 - every failure means the same thing
+            _note(f"this runtime cannot stream inside a sentence ({_safe(exc)}); "
+                  f"speech will arrive one segment at a time instead")
             return False
+        if not seen:
+            _note("this runtime accepted a streaming callback and never called it; "
+                  "speech will arrive one segment at a time instead")
+            return False
+        return True
 
     def speaker(self, sid) -> int:
         """A speaker id this bank really has.
@@ -467,13 +484,42 @@ class Engines:
                     # honest fallback rather than silence.
                     emit(audio.samples, int(audio.sample_rate))
                 return produced[0]
-            except TypeError:
+            except Exception as exc:  # noqa: BLE001 - see the two branches below
+                if produced[0]:
+                    # Part of this segment has already been sent, so re-running
+                    # it would say those words twice. A failure after audio is a
+                    # real failure and is reported as one.
+                    raise
                 self.streaming = "segment"
-                _note("this sherpa build does not stream; falling back to whole segments")
+                _note(f"this runtime stopped streaming inside a sentence ({_safe(exc)}); "
+                      f"speech will arrive one segment at a time from now on")
 
         audio = self.tts.generate(text, sid=speaker, speed=float(speed or 1.0))
         emit(audio.samples, int(audio.sample_rate))
         return produced[0]
+
+
+_NUMPY = "unasked"
+"""Whether this runtime has NumPy, decided once.
+
+This runtime is two unpacked wheels and NumPy is not one of them, so the answer
+is normally "no" -- and asking per audio block turned that into an ImportError
+raised and swallowed thousands of times a minute. Asked once, remembered, and
+the stdlib path below is the one that actually runs here.
+"""
+
+
+def _numpy():
+    global _NUMPY
+
+    if _NUMPY == "unasked":
+        try:
+            import numpy
+
+            _NUMPY = numpy
+        except Exception:
+            _NUMPY = None
+    return _NUMPY
 
 
 def pcm16(samples) -> bytes:
@@ -483,19 +529,20 @@ def pcm16(samples) -> bytes:
     by a browser's ``DataView`` with ``littleEndian`` hard-coded true -- and a
     big-endian host that silently wrote its own order would produce noise that
     nothing in the chain could explain.
+
+    Works on whatever sherpa hands over: a NumPy array where this runtime has
+    NumPy, and the plain list ``GeneratedAudio.samples`` is otherwise.
     """
     if samples is None:
         return b""
-    try:
-        import numpy
-
-        block = numpy.asarray(samples, dtype="float32")
+    numpy = _numpy()
+    if numpy is not None:
+        block = numpy.array(samples, dtype="float32", copy=True)
         if not block.size:
             return b""
         numpy.clip(block, -1.0, 1.0, out=block)
         return (block * 32767.0).astype("<i2").tobytes()
-    except ImportError:
-        pass
+
     import array
 
     clipped = array.array("h")
