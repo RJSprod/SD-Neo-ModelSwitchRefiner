@@ -166,6 +166,121 @@ class TestNothingSaidIsLogged:
             assert DICTATED not in runtime._readable(reason)
 
 
+class TestThePerformanceLoggingIsContentFree:
+    """The new diagnostics are the most likely place for content to escape.
+
+    They exist to answer "why was there a four-second pause", which means they
+    are written on the hot path, they carry per-unit detail, and one of them is
+    an HTTP route a page posts into. Each of those is a way for a sentence to
+    end up in ``model_chain.log`` if nobody is checking.
+    """
+
+    def test_a_synthesis_unit_is_logged_as_numbers_only(self, captured):
+        import mc_voice_turn as turns
+
+        turn = turns.VoiceTurn()
+        turn._open_unit(f"Certainly. {SPOKEN} is the answer.", 0.1)
+        turn.note_segment(blocks=2, first_block_ms=40, synth_ms=900, audio_ms=1200,
+                          streaming="callback")
+        lines = [record.getMessage() for record in captured.records
+                 if "Voice TTS segment" in record.getMessage()]
+        assert lines, "no unit diagnostic was written at all"
+        for line in lines:
+            assert SPOKEN not in line
+        assert SPOKEN not in repr(turn.metrics())
+
+    def test_the_turn_summary_carries_no_words(self, captured, installed, monkeypatch):
+        import mc_voice_turn as turns
+
+        turn = turns.VoiceTurn()
+        turn.add_text(f"Certainly. {SPOKEN} is the answer, and here is some more of it. ")
+        turn.complete()
+        api._log_turn(turn)
+        for record in captured.records:
+            assert SPOKEN not in record.getMessage()
+
+    def test_the_telemetry_route_has_no_field_a_sentence_fits_in(self):
+        """Every field is a duration, a count, or one of a fixed set of words.
+        Checked against the declaration rather than against one payload, so a
+        field added later has to argue with this."""
+        for names in api.TELEMETRY.values():
+            for name in names:
+                assert name.endswith("_ms") or name.endswith("_count"), name
+        for allowed in api.TELEMETRY_ENUMS.values():
+            for value in allowed:
+                assert value.isalpha() or "_" in value, value
+
+    def test_the_telemetry_route_writes_nothing_it_was_not_asked_for(self, captured):
+        api.telemetry({"kind": "playback", "underrun_count": 1,
+                       "note": f"the user said {SPOKEN}",
+                       "playback_end_reason": SPOKEN})
+        for record in captured.records:
+            assert SPOKEN not in record.getMessage()
+
+    def test_the_configuration_line_names_settings_and_nothing_else(self, captured):
+        line = runtime.tts_config_line()
+        assert "threads=" in line and "targets=" in line
+        for word in ("prompt", "reply", "transcript", "message"):
+            assert word not in line
+
+
+class TestNoMeasurementChangesTheConfiguration:
+    """P4, as a property of the source rather than a promise in a docstring.
+
+    The whole point of collecting these numbers is that a person reads them and
+    then makes a deliberate change. A repository that reconfigured itself from
+    them would be a repository whose logs describe a different program each time
+    somebody opens them -- and every one of the knobs below is one somebody
+    would reach for first.
+    """
+
+    def sources(self):
+        root = Path(__file__).resolve().parent.parent
+        return {name: (root / name).read_text(encoding="utf-8")
+                for name in ("mc_voice_runtime.py", "mc_voice_turn.py", "mc_voice_api.py",
+                             "mc_voice_segment.py", "voice_worker/worker.py")}
+
+    def test_no_module_assigns_a_thread_count_or_a_priority_at_runtime(self):
+        import re
+
+        for name, source in self.sources().items():
+            for line in source.splitlines():
+                assert not re.match(r"\s*(TTS_THREADS|STT_THREADS)\s*=[^=]", line) or (
+                    name == "mc_voice_runtime.py"
+                    and line.strip() in ("TTS_THREADS = 4", "STT_THREADS = 4")), (name, line)
+                assert "SetPriorityClass" not in line or name == "voice_worker/worker.py", (
+                    name, line)
+                assert "os.nice(" not in line or name == "voice_worker/worker.py", (name, line)
+
+    def test_reading_a_priority_does_not_set_one(self):
+        """Observation only. ``_priority`` is allowed to look; the one place
+        that writes is the start-up call that has always been there."""
+        source = self.sources()["voice_worker/worker.py"]
+        body = source.split("def _priority()")[1].split("\ndef ")[0]
+        assert "GetPriorityClass" in body
+        assert "SetPriorityClass" not in body
+        assert "os.nice" not in body
+
+    def test_the_segmenter_thresholds_are_constants(self):
+        import mc_voice_segment as segment
+
+        machine = segment.Segmenter()
+        for name in ("first_target", "second_target", "target", "second_soft_max",
+                     "second_hard_max", "soft_max", "hard_max"):
+            assert isinstance(getattr(machine, name), int)
+        source = self.sources()["mc_voice_segment.py"]
+        assert "underrun" not in source, "the segmenter learned about playback"
+        assert "rtf" not in source.casefold(), "the segmenter learned about timing"
+
+    def test_no_experiment_or_ab_machinery_was_introduced(self):
+        """T-9. Revision 4 removes callback coalescing from scope, and a dormant
+        switch for it is the thing most likely to be added "just in case"."""
+        for name, source in self.sources().items():
+            lowered = source.casefold()
+            for banned in ("a/b test", "experiment_", "coalesc", "autotune", "auto_tune"):
+                assert banned not in lowered, (name, banned)
+
+
 class TestNothingIsWrittenToDisk:
     def test_speech_leaves_no_file_behind_anywhere(self, tmp_path, installed, monkeypatch,
                                                   spoken_wav, voice_root):
