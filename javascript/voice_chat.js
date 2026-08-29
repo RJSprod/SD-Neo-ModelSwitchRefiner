@@ -397,6 +397,9 @@
             started: false,
             underruns: 0,
             ended: false,
+            pending: [],
+            pendingSeconds: 0,
+            draining: false,
         };
     }
 
@@ -428,6 +431,8 @@
             } catch (error) { /* already finished */ }
         });
         speech.sources.clear();
+        speech.pending = [];
+        speech.pendingSeconds = 0;
         speech.nextStart = 0;
         speech.started = false;
         if (speech.controller) {
@@ -439,13 +444,17 @@
     // immediate and local; this is what stops Kokoro computing speech nobody is
     // going to hear. Best effort by design -- a failed cancel must not keep the
     // composer showing Stop.
-    function tellServerToStop(turnId) {
+    function tellServerToStop(turnId, reason) {
         if (!turnId) return Promise.resolve();
         return fetch(url(ROUTES.cancel), {
             method: "POST",
             credentials: "same-origin",
             headers: headers({"Content-Type": "application/json"}),
-            body: JSON.stringify({turn: turnId}),
+            // A fixed word from a fixed list, never text and never a message.
+            // It exists so that "the browser could not play this reply" is a
+            // line in model_chain.log rather than a status the panel overwrites
+            // a moment later.
+            body: JSON.stringify({turn: turnId, reason: reason || "user"}),
             keepalive: true,
         }).catch(function () { /* the turn ends on its own when the stream closes */ });
     }
@@ -454,12 +463,12 @@
     // "Speak replies automatically" being switched off, unloading the engine, and
     // leaving the page. Idempotent -- section 26 requires that, because two of
     // those paths deliberately fire together.
-    function stopSpeaking(alsoTellServer) {
+    function stopSpeaking(alsoTellServer, reason) {
         const turnId = speech ? speech.id : "";
         stopPlayback();
         speech = null;
         setVoiceBusy(false);
-        if (alsoTellServer !== false) tellServerToStop(turnId);
+        if (alsoTellServer !== false) tellServerToStop(turnId, reason);
     }
 
     function play(buffer) {
@@ -511,7 +520,27 @@
     // the clock this keeps: Web Audio gives no "append", so back-to-back playback
     // is arithmetic on the context's own timeline. Resampling to the device rate
     // is the browser's job and is why the buffer is created at the source rate.
+    // Section 22. Blocks are held back until START_BUFFER seconds of them
+    // exist, and then released together -- which is what stops the first
+    // sentence stuttering while the machine is still producing the second. The
+    // held blocks are released the moment the stream ends too, however little
+    // there is, so a two-word reply is not silently swallowed by the buffer.
     function schedule(state, samples, rate) {
+        if (!samples.length || state.ended) return;
+        state.pending.push({samples: samples, rate: rate});
+        state.pendingSeconds += samples.length / (rate || 24000);
+        if (!state.started && state.pendingSeconds < BUFFER.start && !state.draining) return;
+        release(state);
+    }
+
+    function release(state) {
+        const waiting = state.pending;
+        state.pending = [];
+        state.pendingSeconds = 0;
+        waiting.forEach(function (block) { play_(state, block.samples, block.rate); });
+    }
+
+    function play_(state, samples, rate) {
         const ctx = audioContext();
         if (!ctx || !samples.length || state.ended) return;
         let buffer;
@@ -561,8 +590,10 @@
             if (!unlocked) {
                 say(MESSAGES.blocked, "warn");
                 // Not fatal and not silent: the stream is still cancelled so the
-                // server stops synthesising for a speaker that will not play.
-                if (speech === state) stopSpeaking(true);
+                // server stops synthesising for a speaker that will not play,
+                // and the reason is reported so it appears in the log rather
+                // than only in a status line the panel is about to overwrite.
+                if (speech === state) stopSpeaking(true, "audio is locked until a gesture");
                 return null;
             }
             return fetch(url(ROUTES.stream), {
@@ -583,10 +614,18 @@
             });
         }).catch(function (error) {
             if (speech !== state) return;
-            if (!error || error.name !== "AbortError") {
-                say(MESSAGES.speakFailed, "warn");
+            if (!error || error.name === "AbortError") {
+                stopSpeaking(false);
+                return;
             }
-            stopSpeaking(false);
+            say(MESSAGES.speakFailed, "warn");
+            console.warn("Model Chain: Voice could not play a reply", error);
+            // Reported rather than only shown. The status line this writes to
+            // is the panel's own, and the panel overwrites it with "Reply
+            // complete." a moment later -- so a user watching for an
+            // explanation sees nothing at all.
+            stopSpeaking(true, "the stream could not be played: "
+                         + ((error && error.message) || "unknown"));
         });
     }
 
@@ -614,6 +653,11 @@
             return reader.read().then(function (result) {
                 if (result.done) {
                     if (carry) carry = null;
+                    // Whatever is still held back goes now, however little it
+                    // is: the stream is over, so there is nothing left to wait
+                    // for and a short reply must not die in the prebuffer.
+                    state.draining = true;
+                    release(state);
                     finishSpeech(state);
                     return null;
                 }

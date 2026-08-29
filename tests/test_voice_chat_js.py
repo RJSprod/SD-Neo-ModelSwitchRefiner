@@ -1605,8 +1605,12 @@ class TestStoppingInTheBrowser:
             await pump(2);
             console.log(JSON.stringify(report()));
         """, ANSWERS=stream_answers(seconds=1.0, count=6, stall=True))
-        cancel = [r for r in found["requests"] if r["url"].endswith("voice/cancel")][0]
-        assert json.loads(cancel["bodyText"]) == {"turn": "T1"}
+        cancel = [r for r in found["requests"]
+                  if (r.get("url") or "").endswith("voice/cancel")][0]
+        body = json.loads(cancel["bodyText"])
+        assert body["turn"] == "T1"
+        # A fixed word, never text and never a message: it is going into a log.
+        assert body["reason"] == "user"
 
     def test_t_js_8_a_new_turn_stops_the_previous_one_before_it_plays(self):
         found = run("""
