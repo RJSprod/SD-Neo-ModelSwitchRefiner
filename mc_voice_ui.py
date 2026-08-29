@@ -50,7 +50,9 @@ import gradio as gr
 import mc_llm_ui as ui
 import mc_voice_api as api
 import mc_voice_models as models
+import mc_voice_runtime as runtime
 import mc_voice_state as state
+import mc_voice_turn as turns
 
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
@@ -88,12 +90,21 @@ def microphone():
 
 
 def plumbing() -> dict:
-    """The two hidden boxes the browser reads. Neither carries any content.
+    """The four hidden boxes the browser reads. None of them carries content.
 
-    ``token`` is an opaque one-shot handle to a speech target held in this
-    process's RAM -- never the reply text, which is the difference between this
-    and copying an assistant message through a hidden DOM field where a page
-    extension or a screen reader would find it.
+    ``turn`` is the opaque id of the reply being spoken *now*. It is what makes
+    streaming speech possible without the browser ever reading the transcript:
+    the browser exchanges the id for audio, and what that id stands for was
+    decided on the server (section 24).
+
+    ``token`` is the V1 completed-reply target, and it is still here as the
+    explicit non-streaming fallback (section 20). Python writes at most one of
+    the two for any one reply, which is what stops both mechanisms firing for
+    the same answer.
+
+    ``run_state`` is Python's half of "is the composer busy" -- ``"llm"`` while
+    a reply is being generated and ``"idle"`` otherwise. The browser holds the
+    other half and combines them; see :data:`mc_llm_chat_panel.LLM_RUNNING`.
 
     ``key`` is this process's page token, which the browser sends back on every
     voice request. Put in the page by Python because that is the one channel a
@@ -101,9 +112,94 @@ def plumbing() -> dict:
     """
     token = gr.Textbox(value="", visible=False, container=False,
                        elem_id=ui.ident("chat", "voice-token"))
+    turn = gr.Textbox(value="", visible=False, container=False,
+                      elem_id=ui.ident("chat", "voice-turn"))
+    run_state = gr.Textbox(value="idle", visible=False, container=False,
+                           elem_id=ui.ident("chat", "voice-run-state"))
     key = gr.Textbox(value=api.session_token(), visible=False, container=False,
                      elem_id=ui.ident("chat", "voice-key"))
-    return {"token": token, "key": key}
+    return {"token": token, "turn": turn, "run_state": run_state, "key": key}
+
+
+# --------------------------------------------------------------------------- #
+# Speech for one assistant run
+# --------------------------------------------------------------------------- #
+
+
+_last_run: dict = {"turn": ""}
+"""Whether the run that is starting created a speech turn.
+
+Read by :func:`speech_marker`, which is what keeps section 20's rule true: at
+most one automatic-speech mechanism per reply. A run that streams produces a
+turn and no completed-reply target; a run that could not stream produces a
+target and no turn.
+"""
+
+
+def begin_speech(character=None, persona=None, opening: str = ""):
+    """Create the VoiceTurn for a run that is about to start, or ``None``.
+
+    Called from inside the Conversation generator, so every refusal here is a
+    reason the reply is simply not spoken -- never a reason it is not written.
+    The refusals, in order:
+
+        Auto Speak is off                 -> nothing
+        the speech models are not there   -> nothing
+        the default voice does not resolve-> nothing, and Settings says why
+        anything at all went wrong        -> nothing, logged, never raised
+
+    ``opening`` is the text a continuation is extending. It is not passed to
+    the segmenter as text to speak -- it is the reason the turn starts from the
+    tail (section 7) -- and the caller feeds only newly generated chunks.
+    """
+    _last_run["turn"] = ""
+    try:
+        if not state.auto_speak():
+            return None
+        if not models.status().tts_ready:
+            return None
+        import mc_voice_registry as registry
+
+        sid, entry = registry.resolve()
+        found = turns.create(voice_id=entry["id"], sid=sid, labels=_labels(character, persona))
+        found.base_chars = len(str(opening or ""))
+        found.start()
+        _last_run["turn"] = found.id
+        return found
+    except Exception:
+        logger.debug("Model Chain: Voice Chat could not start speaking this reply",
+                     exc_info=True)
+        return None
+
+
+def _labels(character, persona) -> tuple:
+    """The names ``clean_reply`` would strip from the front of a reply.
+
+    Shared with the segmenter so that streaming cannot speak a label the panel
+    is about to remove from the screen (section 9). Read defensively because
+    this runs inside a generator that must not raise for a voice reason.
+    """
+    found = []
+    for candidate in (getattr(character, "name", ""), getattr(persona, "display", ""),
+                      "Assistant"):
+        text = str(candidate or "").strip()
+        if text:
+            found.append(text)
+    return tuple(found)
+
+
+def cancel_speech(reason: str = "user") -> bool:
+    """Stop whatever is being spoken. Idempotent; never raises.
+
+    Called by the Conversation Stop handler, which is the server half of one
+    unified Stop -- see :func:`mc_llm_chat_panel._cancel`.
+    """
+    try:
+        return turns.cancel_active(reason)
+    except Exception:
+        logger.debug("Model Chain: Voice Chat could not cancel the active turn",
+                     exc_info=True)
+        return False
 
 
 def sheet() -> dict:
@@ -114,6 +210,7 @@ def sheet() -> dict:
             back = gr.Button("‹ Back", size="sm", scale=0, min_width=76,
                              elem_classes=ui.classes("sheet-back"))
             gr.Markdown("#### Voice")
+        engine = gr.HTML(engine_panel(), elem_id=ui.ident("chat", "voice-engine"))
         readiness = gr.HTML(readiness_notice(),
                             elem_id=ui.ident("chat", "voice-readiness"))
         auto_send = gr.Checkbox(label="Automatically send dictation",
@@ -125,10 +222,55 @@ def sheet() -> dict:
         gr.Markdown(
             "Speech is transcribed and spoken on this PC, on the CPU. Nothing is sent to an "
             "online service. From a phone, the recording crosses your own connection to this "
-            "WebUI — which needs to be HTTPS for the browser to open the microphone at all.",
+            "WebUI. Most browsers only open a microphone on a page they consider secure — "
+            "Voice Chat does not add a rule of its own, and will tell you what your browser "
+            "actually said if it refuses.",
             elem_classes=ui.classes("hint"))
-    return {"screen": screen, "back": back, "readiness": readiness,
+    return {"screen": screen, "back": back, "readiness": readiness, "engine": engine,
             "auto_send": auto_send, "auto_speak": auto_speak}
+
+
+def engine_panel() -> str:
+    """The live Loaded/Unloaded block, and the button that changes it.
+
+    Section 32. Static HTML with data attributes rather than Gradio controls,
+    for the same reason the Settings install row is: this has to *poll*, and a
+    Gradio component that re-rendered every second while the flyout was open
+    would fight the panel for the surface it is drawn on. The browser paints it
+    from ``/voice/status`` and stops asking the moment the flyout closes.
+
+    What is rendered here is only the first frame, so a flyout opened on a page
+    whose JavaScript has not run yet still says something true.
+    """
+    found = runtime.engine()
+    labels = {
+        "unloaded": "\u25cb Unloaded — loads automatically on next voice use",
+        "loading": "\u25cc Loading speech models…",
+        "idle": "\u25cf Loaded — CPU, idle",
+        "stt": "\u25cf Loaded — Listening",
+        "tts": "\u25cf Loaded — Speaking",
+        "stopping": "\u25cc Unloading…",
+        "error": "\u25cf The speech engine could not start",
+    }
+    action = "unload" if found.get("loaded") else "load"
+    voice = ""
+    try:
+        import mc_voice_registry as registry
+
+        entry = registry.default_entry()
+        voice = entry["label"] if entry else ""
+    except Exception:
+        logger.debug("Model Chain: could not read the default voice", exc_info=True)
+    return (
+        f'<div class="mc-voice-engine">'
+        f'<div class="mc-voice-engine-head">Voice engine</div>'
+        f'<div class="mc-voice-engine-state" data-mc-voice-engine-line>'
+        f'{ui.escape(labels.get(found.get("state") or "unloaded", labels["unloaded"]))}</div>'
+        f'<button type="button" class="mc-voice-runtime" data-mc-voice-runtime="{action}">'
+        f'{action.title()}</button>'
+        f'<div class="mc-voice-engine-voice">Default voice: '
+        f'<span data-mc-voice-default>{ui.escape(voice)}</span></div>'
+        f'</div>')
 
 
 def readiness_notice() -> str:
@@ -155,7 +297,7 @@ def open_sheet(screens) -> list:
     shows a stale value is a flyout that turns a setting off by being tapped.
     """
     current = state.settings()
-    return screens(SCREEN) + [readiness_notice(),
+    return screens(SCREEN) + [readiness_notice(), engine_panel(),
                               gr.update(value=current["auto_send"]),
                               gr.update(value=current["auto_speak"])]
 
@@ -166,6 +308,20 @@ def set_auto_send(value):
 
 
 def set_auto_speak(value):
+    """Persist immediately -- and stop a reply that is being read aloud.
+
+    Section 28. Turning the switch off while the speaker is talking has to be
+    believed at once: a switch that says "do not read replies aloud" while a
+    reply is being read aloud is a switch nobody trusts again. The browser does
+    the same thing from its side for the audible half; this is the server half,
+    and both are idempotent.
+
+    Turning it *on* deliberately does nothing to the reply in flight. That turn
+    was created without speech and cannot grow it, and starting mid-answer would
+    speak from the middle of a sentence.
+    """
+    if not value:
+        cancel_speech("auto speak off")
     return _remember(auto_speak=bool(value), key="auto_speak")
 
 
@@ -199,6 +355,13 @@ def speech_marker(take_reply):
         try:
             text = take_reply()
             if not text or not str(text).strip():
+                return ""
+            if _last_run.get("turn"):
+                # This reply was streamed. Producing a completed-reply target as
+                # well would speak it twice -- section 20 forbids two automatic
+                # mechanisms that can both fire for one reply, and the server is
+                # where that is decided rather than in the browser.
+                _last_run["turn"] = ""
                 return ""
             if not state.auto_speak():
                 return ""
@@ -351,3 +514,100 @@ def settings_html() -> str:
         'installed it needs no Internet connection at all.</div>')
     parts.append("</div>")
     return "".join(parts)
+
+
+# --------------------------------------------------------------------------- #
+# The Settings voice management row
+# --------------------------------------------------------------------------- #
+
+
+def voices_html() -> str:
+    """Voice selection, auditioning, renaming, deleting, and cloning.
+
+    A second HTML block on the Settings page, drawn and redrawn by
+    ``javascript/voice_chat.js`` from ``/voice/voices`` and
+    ``/voice/cloning/status``. Static markup here is the first frame and the
+    shape; everything live is painted by the browser, for the same reason the
+    install row is -- Forge's settings system stores options, it does not host
+    Gradio controls with handlers.
+
+    What is *not* here is any voice data. The list is fetched, so a page that
+    was open when a clone finished shows it on its next paint rather than
+    needing a reload, and no speaker id is ever put in the document (section 56).
+    """
+    return (
+        f'<div class="mc-voice-voices" data-mc-voice-key="{ui.escape(api.session_token())}">'
+        '<div class="mc-voice-row">'
+        '<div class="mc-voice-head">'
+        '<div class="mc-voice-heading">Voices</div>'
+        '<div class="mc-voice-default" data-mc-voice-current>Loading…</div>'
+        '</div>'
+        '<div class="mc-voice-testline">'
+        '<label for="mc-voice-test-text">Test text</label>'
+        '<input type="text" id="mc-voice-test-text" data-mc-voice-test-text '
+        'spellcheck="false" maxlength="400" />'
+        '</div>'
+        '<div class="mc-voice-warnings" data-mc-voice-warnings></div>'
+        '<div class="mc-voice-list" data-mc-voice-list></div>'
+        '</div>'
+        '<div class="mc-voice-row" data-mc-voice-cloning>'
+        '<div class="mc-voice-head">'
+        '<div class="mc-voice-heading">Voice cloning</div>'
+        '<div class="mc-voice-status" data-mc-voice-cloning-status>Checking…</div>'
+        '</div>'
+        '<p class="mc-voice-note">Optional. Voice Chat speaks perfectly well without it, '
+        'and a voice cloned once is used from then on by the ordinary speech engine — '
+        'nothing extra runs while you are talking.</p>'
+        '<p class="mc-voice-note mc-voice-consent">Only clone a voice you own or have '
+        'permission to clone. The recording stays on this PC and is deleted when the clone '
+        'finishes.</p>'
+        '<div class="mc-voice-cloning-checks" data-mc-voice-cloning-checks></div>'
+        '<details class="mc-voice-manual">'
+        '<summary>Manual setup</summary>'
+        '<p>Prepare a Storytime folder with <code>bin/storytime</code>, '
+        '<code>assets/kokoro.onnx</code>, <code>assets/tokens.json</code>, '
+        '<code>assets/spk_encoder.onnx</code> and <code>assets/voices/*.bin</code>, then '
+        'give Voice Chat that folder.</p>'
+        '<ul class="mc-voice-links" data-mc-voice-cloning-links></ul>'
+        '<div class="mc-voice-folder-row">'
+        '<input type="text" class="mc-voice-folder" data-mc-voice-cloning-folder '
+        'spellcheck="false" placeholder="/home/you/storytime" />'
+        '<button type="button" class="mc-voice-install-local" '
+        'data-mc-voice-cloning-adopt>Use this folder</button>'
+        '</div>'
+        '</details>'
+        '<div class="mc-voice-clone-form" data-mc-voice-clone-form hidden>'
+        '<div class="mc-voice-field">'
+        '<label for="mc-voice-clone-name">Name</label>'
+        '<input type="text" id="mc-voice-clone-name" data-mc-voice-clone-name '
+        'maxlength="48" spellcheck="false" />'
+        '</div>'
+        '<div class="mc-voice-field">'
+        '<label for="mc-voice-clone-language">English</label>'
+        '<select id="mc-voice-clone-language" data-mc-voice-clone-language>'
+        '<option value="en-US">American</option>'
+        '<option value="en-GB">British</option>'
+        '</select>'
+        '</div>'
+        '<div class="mc-voice-field">'
+        '<label for="mc-voice-clone-file">Reference recording</label>'
+        '<input type="file" id="mc-voice-clone-file" accept=".wav,audio/wav,audio/x-wav" '
+        'data-mc-voice-clone-file />'
+        '</div>'
+        '<button type="button" class="mc-voice-install" data-mc-voice-clone-start>'
+        'Start cloning</button>'
+        '<p class="mc-voice-note">Ten to twenty seconds, read at your normal pace in a quiet '
+        'room. Cloning runs on the CPU and takes a long time — you can leave this page, and '
+        'speech and images keep working while it runs.</p>'
+        '</div>'
+        '<div class="mc-voice-clone-job" data-mc-voice-clone-job hidden>'
+        '<div class="mc-voice-clone-name" data-mc-voice-job-name></div>'
+        '<div class="mc-voice-clone-state" data-mc-voice-job-state></div>'
+        '<div class="mc-voice-progress"><div class="mc-voice-progress-bar" '
+        'data-mc-voice-job-bar></div></div>'
+        '<div class="mc-voice-clone-step" data-mc-voice-job-step></div>'
+        '<button type="button" class="mc-voice-abort" data-mc-voice-clone-abort>'
+        'Abort clone</button>'
+        '</div>'
+        '</div>'
+        '</div>')

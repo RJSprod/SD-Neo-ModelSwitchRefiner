@@ -2925,10 +2925,21 @@ to reach the Internet for, and nothing about what you said leaves your machines.
 
 It is deliberately two small I/O adapters bolted to the Conversation workspace
 rather than a second AI subsystem. There is no wake word, no open microphone, no
-voice activity detection, no barge-in, no voice chooser and no GPU. Dictation
-fills the composer that was already there, and Send is the Send that was already
-there — so attachments, threads, characters, sampling settings, Stop and every
-per-message action behave exactly as they did.
+voice activity detection and no GPU. Dictation fills the composer that was
+already there, and Send is the Send that was already there — so attachments,
+threads, characters, sampling settings, Stop and every per-message action behave
+exactly as they did.
+
+**Replies are spoken while they are still being written.** The server decides
+where a reply can safely be cut into sentences, Kokoro starts on the first one
+before the model has finished the second, and raw audio streams to the browser
+as it is produced — so the first words arrive seconds into a long answer rather
+than after all of it. Stop is one button for both halves: it ends the generation
+*and* the speech, and it stays on screen while the speaker is still talking.
+
+**There are twenty-eight voices**, all the English ones the installed Kokoro
+bundle ships, chosen in Settings and auditioned there. On Linux, an optional
+offline cloning tool can add your own.
 
 ### Setting it up
 
@@ -2937,7 +2948,7 @@ per-message action behave exactly as they did.
 | | |
 | --- | --- |
 | **Speech to text** | Whisper Small, multilingual, INT8, about 375 MB |
-| **Text to speech** | Kokoro-82M v1.0, one fixed voice |
+| **Text to speech** | Kokoro-82M v1.0, twenty-eight English voices |
 
 Pressing either one also provisions the shared CPU speech runtime, so there is
 no third "download the engine" button to find. Everything is staged under
@@ -3029,18 +3040,45 @@ and recorded at install time, so later tampering still shows, and the status
 line reads *installed from files you supplied* rather than claiming a
 verification that did not happen.
 
+### Choosing a voice
+
+**Settings → Voice Chat → Voices** lists every English voice the installed
+Kokoro bundle has, grouped American and British, with an editable *Test text* at
+the top. Every row has **Test**, which speaks that phrase in that voice through
+the ordinary speech engine, and **Set as Default**, which is the only thing that
+changes what replies are read in — selecting a row and auditioning it does not.
+
+The default is stored as a stable id (`official:af_heart`), never as a speaker
+number. Numbers move when a voice bank is rebuilt; the id does not, which is
+also the fix for a real bug: the V1 manifest said `af_heart` beside speaker `0`,
+and in the upstream sherpa map speaker 0 is `af_alloy`. Every reply this feature
+had ever spoken had been spoken by Alloy. Upgrading corrects it.
+
+A reply snapshots its voice when it starts, so changing the default mid-answer
+applies to the next one rather than switching voices mid-sentence.
+
 ### From an Android phone
 
 This is the deployment the feature was designed for: the browser is on the
 phone, Forge is on the PC, and they are on the same network.
 
-**The microphone needs HTTPS.** Browsers only expose `getUserMedia` in a secure
-context, and `localhost` is only a secure context for the machine it *is* —
-which, from a phone, is the phone. So `http://192.168.x.x:7860` opened on
-Android is not a supported microphone deployment, and pressing the microphone
-there says so rather than failing silently. Serve Forge over TLS with
-`--tls-keyfile` / `--tls-certfile`, or put it behind a local reverse proxy with
-a certificate Android trusts. Voice Chat does not bring a TLS stack of its own.
+**Voice Chat does not refuse a page for being HTTP.** It used to, and that was
+its own rule rather than the browser's. What it does now is ask whether the
+browser exposed a microphone to this page and, if it did, open it — and report
+whatever the browser says if that fails, in the browser's own terms:
+*permission was not allowed*, *no microphone is available*, *the microphone
+could not be opened*.
+
+The practical reality has not changed and is not this extension's to change:
+mainstream browsers restrict `getUserMedia` to secure contexts, and `localhost`
+is only a secure context for the machine it *is* — which, from a phone, is the
+phone. So `http://192.168.x.x:7860` on Android will usually still not open a
+microphone, and what you will see is *this browser did not make microphone
+capture available for this page* rather than a claim about HTTPS that Voice Chat
+is not entitled to make. Serve Forge over TLS with `--tls-keyfile` /
+`--tls-certfile`, or put it behind a local reverse proxy with a certificate
+Android trusts. Everything else — spoken replies, voice selection, Test — works
+over plain HTTP exactly as it does anywhere else.
 
 Playback follows Android's own media route, so a Bluetooth speaker or a pair of
 headphones gets the reply without anything to configure. Mobile browsers also
@@ -3063,10 +3101,104 @@ moment you tap them, so there is no Apply to remember.
   sent unless *Automatically send dictation* is on.
 - The microphone is unavailable while a reply is generating. Press Stop first.
 - While a reply is being spoken, **holding the microphone stops the speaker** and
-  starts recording. That is the interrupt gesture, and it is also what stops a
-  phone from recording its own loudspeaker.
-- *Speak replies automatically* speaks every reply that **completes**. A reply
-  you Stopped, or one that failed, is never read aloud.
+  starts recording. That is the interrupt gesture; it also cancels the synthesis
+  on the PC rather than merely silencing it, and it is what stops a phone from
+  recording its own loudspeaker.
+- *Speak replies automatically* starts speaking as soon as the reply's first
+  complete sentence exists, and keeps up with it from there.
+- **Stop stops both.** One press ends the generation and the speech, and Stop
+  stays in the composer while the speaker is still talking — so a long answer
+  that has finished arriving can still be silenced.
+- Turning *Speak replies automatically* off mid-answer stops that answer.
+  Turning it on mid-answer applies to the next one.
+- A reply already spoken cannot be unspoken. What Stop guarantees is that
+  nothing *further* is said — which is the one thing streaming changes about the
+  old promise that a cancelled reply was never read aloud.
+
+### The Voice engine, loaded and unloaded
+
+The Voice overlay distinguishes what is *installed* from what is *in RAM right
+now*:
+
+```
+Voice engine
+● Loaded — CPU, idle          [Unload]
+```
+
+Nothing is preloaded when the WebUI starts; the first dictation or reply loads
+it, and it stays warm after that. **Load** pays that cost while you are still
+typing rather than in the middle of your first sentence. **Unload** frees the
+worker's memory, cancels anything being spoken, and changes nothing on disk —
+the next voice use starts it again. It is a state, not a setting, and it is not
+persisted.
+
+### Cloning a voice (optional, Linux)
+
+If you want a voice that is yours, **Settings → Voice Chat → Voice cloning**
+will build one from a ten-to-twenty-second recording, entirely offline, on the
+CPU. It is genuinely optional: nothing about ordinary speech needs it, and a
+voice cloned once is spoken from then on by the same sherpa-onnx engine as every
+official voice — the cloning tool is not running while you talk, and is not
+installed on most machines at all.
+
+**It is not one click yet, and the row says so.** Cloning is
+[Storytime](https://github.com/kuym/storytime), a separate offline CLI, and this
+repository will not download an unpinned binary: everything else Voice Chat
+installs has a committed size and SHA-256, and a "one-click" that resolved a
+package at install time would be exactly the trust model the rest of the feature
+refuses. So until a pinned bundle is published, *Manual setup* is the path —
+point Voice Chat at a Storytime folder you prepared, and it validates each part
+separately and tells you which one is missing.
+
+What happens then:
+
+- The recording is normalized to mono 24 kHz here, so you do not have to run
+  `ffmpeg` first, and is deleted when the job ends either way.
+- Storytime runs at low priority in a process group of its own. You can close
+  Settings, keep talking, generate images, load and unload models — none of it
+  touches the clone, and the clone does not touch the GPU (its process cannot
+  see one).
+- Progress and **Abort** are in the row. Abort ends the whole process tree, not
+  just the one process, and deletes the job's checkpoints.
+- **Closing the WebUI ends it.** A clone is hours; a cloning process that
+  outlived Forge would be a CPU-saturating job with no window to stop it from.
+- When it finishes, the voicepack is validated, written into a rebuilt voice
+  bank, and then *spoken through the ordinary engine* before it is registered.
+  Only if that works does it appear as `* Yourname` in the Voices list. If any
+  of it fails, the previous bank is restored and nothing is registered.
+
+Custom voices get thirty-two reserved slots. Their numbers are allocated once
+and never renumbered — deleting one leaves every other voice exactly where it
+was, because a saved default points at a number.
+
+**Only clone a voice you own or have permission to clone.** The recording never
+leaves the machine.
+
+<details>
+<summary>How a custom voice reaches an engine that has no idea about it</summary>
+
+sherpa-onnx's Kokoro loader reads `n_speakers` and `style_dim` out of the ONNX
+model's metadata, loads `voices.bin` as one flat block of float32, refuses to
+start unless the block is exactly `style_rows × style_dim × n_speakers` values,
+and picks a speaker by pointer arithmetic. The graph never sees the speaker id —
+what reaches it is a 1×256 style vector.
+
+So a new voice needs no new weights, no retraining, no fork of sherpa and no
+second TTS engine. It needs a longer `voices.bin` and a model whose metadata
+agrees about how long it is. Model Chain therefore keeps a bank of its own —
+the official speakers in their exact upstream order, then thirty-two reserved
+slots — and a *derived* model that is the pinned one byte for byte with a single
+metadata string rewritten. Building the candidate, promoting it and rolling it
+back are three renames on one filesystem, so there is no moment at which a
+half-written `voices.bin` is what the engine would load.
+
+The reason a clone is synthesized before it is registered is the same loader: a
+speaker id past `n_speakers` is *not* an error there. sherpa logs a warning and
+uses speaker 0. A bank whose metadata had not taken would produce a clone that
+works perfectly and sounds like somebody else, and the only way to find that out
+is to listen.
+
+</details>
 
 ### What is actually private
 
@@ -3087,7 +3219,16 @@ is more useful than the marketing one:
   the WebUI temp directory, the Gradio cache, the output folder or the
   conversation attachments — there are no `.wav` files anywhere in normal use.
 - Transcripts, your messages and the model's replies never appear in the console
-  or in `model_chain.log`. Byte counts, durations and model ids do.
+  or in `model_chain.log`. Byte counts, durations, model ids and per-turn speech
+  metrics — characters, segments, seconds of audio, compute time, which voice
+  category — do. That list is built by naming what may be reported rather than
+  by filtering out what may not, so a field added later is absent from a log
+  until somebody puts it there on purpose.
+- Spoken audio streams from the worker through a pipe, through the WebUI, to the
+  browser's Web Audio queue. It is never a file, never a Gradio audio component
+  and never cached — the responses carry `no-store, no-transform`.
+- A clone's reference recording is the one audio file Voice Chat writes, it goes
+  in a directory of its own, and it is deleted when the job ends.
 - Once you press Send, the transcript is an ordinary message and is saved in your
   thread exactly like typed text. That is Conversation's own history and it is
   the one place any of this is kept.
@@ -3120,6 +3261,18 @@ death mechanism, and the second half is why the list is not longer: a platform
 where that cannot be proved is not one this feature will claim, so it is not
 offered a runtime rather than being offered one that might leave a process
 behind.
+
+**Voice cloning is offered on Linux only**, for the same reason and one more:
+Storytime's ONNX path uses CoreML on macOS, so `--backend onnx` is not a
+CPU-only claim anybody should make there. Voices cloned elsewhere still work
+wherever the ordinary runtime does — using a clone and making one are different
+questions.
+
+Inside the speech process, protocol 2 splits what used to be one blocking loop
+into a command loop that is always reading, one inference lane that serializes
+Whisper and Kokoro, and one writer. That is what makes Stop reach the worker
+*while* it is computing, and what lets the status a page polls answer during a
+three-second synthesis instead of queueing behind it.
 
 ### If it goes wrong
 
@@ -3239,11 +3392,16 @@ mc_llm_minimax_panel.py    MiniMax H3 workspace
 mc_llm_krea_panel.py       Krea 2 workspace
 mc_llm_ui.py          shared UI helpers and the element-id contract
 
-mc_voice_paths.py     where Voice Chat keeps its runtime and its two models
+mc_voice_paths.py     where Voice Chat keeps its runtime, models, bank and clones
 mc_voice_models.py    the voice trust root: manifest, verified install, status
 mc_voice_state.py     the two persisted switches, and the one place they live
+mc_voice_segment.py   where a reply may safely be cut so a sentence can be spoken
+mc_voice_turn.py      one reply on its way to a speaker: identity, bounds, stopping
 mc_voice_runtime.py   the speech worker process, its pipe, and its five exits
-mc_voice_api.py       the browser routes, their auth parity and speech targets
+mc_voice_registry.py  which voices exist, their names, and which number each is
+mc_voice_bank.py      the Kokoro voice bank: metadata, layout, atomic transactions
+mc_voice_clone.py     optional offline cloning, contained and never left running
+mc_voice_api.py       the browser routes, their auth parity and the audio stream
 mc_voice_ui.py        the Voice chip, overlay and microphone in Conversation
 voice_worker/worker.py     the CPU sidecar: framed stdin/stdout, no network
 voice/managed-voice-models.json  the pinned voice artifact manifest (data only)
@@ -3426,7 +3584,7 @@ including that the three 26B quant tiers each get their own profile, that only
 the two smaller ones buy their cache back with q8_0, and that choosing a
 different quantisation moves no sampler.
 
-Voice Chat adds eight files, and the ones worth naming are the three that
+Voice Chat adds twelve files, and the ones worth naming are the three that
 defend an invariant rather than a behaviour.
 
 `test_voice_shutdown.py` is a release gate. Every test in it starts a real parent
@@ -3457,14 +3615,34 @@ never be asked for anything. It also drives the download transaction against
 every way it can fail, and covers the archive expansion refusing a member that
 would be written outside its bundle.
 
-The other five are ordinary. `test_voice_runtime.py` drives a real subprocess
+`test_voice_bank.py` is the other one worth naming, because what it defends is
+arithmetic nobody can see. It hand-writes a real ONNX `ModelProto`, derives an
+extended-speaker copy of it, and asserts that exactly one metadata string
+changed and that the derivation is byte-identical twice running. Then it fills
+every official and reserved slot with a marker only that slot should hold and
+reads them back at their expected offsets — so "af_heart is still speaker 3" and
+"the clone in slot 2 is at speaker 55" are numeric claims rather than hopes.
+Rollback is tested by promoting a bank and putting the previous bytes back.
+
+The rest are ordinary. `test_voice_runtime.py` drives a real subprocess
 speaking the real framed protocol — a fake worker that implements the framing
 independently, so the protocol is checked against something other than itself —
 and covers the handshake refusing a non-CPU provider, a missing parent-death
 mechanism, a mismatched protocol and the wrong models; one restart after an
 unexpected death and no more; the escalation to `terminate` and then `kill`
 inside a bounded time; and, in two places, that a process which fails after
-`Popen` is stopped before its handle is dropped. `test_voice_api.py` runs the
+`Popen` is stopped before its handle is dropped. It also drives a whole streaming turn through that subprocess and asserts the
+things gate 1 exists for: audio arrives before the turn is finished, a cancel
+reaches the worker while it is computing and stops it without killing the
+process, `status()` still answers during a synthesis, a speaker the bank does
+not have is refused rather than quietly swapped for speaker 0, and frames for a
+turn nobody is listening to are dropped.
+
+`test_voice_clone.py` runs a Storytime-shaped script that forks a child of its
+own, and asserts that Abort and WebUI shutdown each end the whole process group
+— checking `/proc` state rather than `kill(pid, 0)`, because a killed orphan is
+a zombie until something reaps it and a zombie answers the easy question wrong.
+`test_voice_api.py` runs the
 routes on a real FastAPI app at the origin root *and* mounted under a subpath,
 refuses a foreign origin and a missing page token, and holds the line that there
 is no sign-in gate: a WebUI with `--gradio-auth` configured still serves a page

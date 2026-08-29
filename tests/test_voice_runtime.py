@@ -259,3 +259,274 @@ class TestTheProcessIsRecognisable:
         assert "--parent-pid" in command
         joined = " ".join(command)
         assert fake_worker.transcript not in joined
+
+
+# --------------------------------------------------------------------------- #
+# Protocol 2: streaming, dispatch, and cancellation that actually reaches the
+# worker while it is computing
+# --------------------------------------------------------------------------- #
+
+
+class Sink:
+    """A VoiceTurn-shaped destination the runtime can dispatch frames into."""
+
+    def __init__(self, identifier: str = "T1"):
+        import threading
+
+        self.id = identifier
+        self.sample_rate = 0
+        self.blocks = []
+        self.done = False
+        self.error = ""
+        self.cancelled = threading.Event()
+        self.finished = threading.Event()
+        self.started = threading.Event()
+
+    def offer_audio(self, pcm, rate, seconds_limit=None):
+        if self.cancelled.is_set():
+            return False
+        self.blocks.append(pcm)
+        self.sample_rate = self.sample_rate or rate
+        self.started.set()
+        return True
+
+    def audio_finished(self):
+        self.done = True
+        self.finished.set()
+
+    def audio_failed(self, reason):
+        self.error = reason
+        self.finished.set()
+        self.cancelled.set()
+
+    def cancel(self, reason="user"):
+        first = not self.cancelled.is_set()
+        self.cancelled.set()
+        self.finished.set()
+        return first
+
+    def drain_audio(self):
+        self.blocks.clear()
+
+    @property
+    def busy(self):
+        return not self.finished.is_set()
+
+
+def stream_one(sink, text=b"Hello there.", finish=True, seconds=5.0):
+    """Drive one whole streaming turn through the runtime and the worker."""
+    runtime.begin_turn(sink, 3)
+    runtime.send_segment(sink, text.decode() if isinstance(text, bytes) else text)
+    if finish:
+        runtime.finish_turn(sink)
+    sink.finished.wait(seconds)
+    return sink
+
+
+class TestStreamingSpeech:
+    def test_t_rt_11_the_supplied_speaker_is_used_and_not_a_startup_one(self, fake_worker):
+        """Section 56. Protocol 1 read one speaker id out of the manifest at
+        start-up and used it for everything, which made "which voice" a property
+        of the process rather than of the request."""
+        sink = Sink()
+        runtime.begin_turn(sink, 3)
+        runtime.send_segment(sink, "Hello there.")
+        runtime.finish_turn(sink)
+        assert sink.finished.wait(5.0)
+        assert sink.done and sink.blocks
+
+    def test_a_speaker_the_bank_does_not_have_is_refused_rather_than_swapped(self,
+                                                                            fake_worker):
+        """sherpa answers an out-of-range sid by using speaker 0, which would
+        make a clone speak silently in somebody else's voice."""
+        sink = Sink()
+        runtime.begin_turn(sink, 9999)
+        assert sink.finished.wait(5.0)
+        assert not sink.blocks
+        assert "voice bank" in sink.error
+
+    def test_audio_arrives_before_the_turn_is_finished(self, fake_worker):
+        """The whole point: a completed-reply design cannot produce a sample
+        before the last sentence is synthesised."""
+        sink = Sink()
+        runtime.begin_turn(sink, 3)
+        runtime.send_segment(sink, "Hello there.")
+        assert sink.started.wait(5.0), "no audio arrived before the turn was finished"
+        runtime.cancel_turn(sink)
+
+    def test_the_sample_rate_arrives_before_any_audio(self, fake_worker):
+        sink = Sink()
+        assert runtime.begin_turn(sink, 3) == 24000
+        runtime.cancel_turn(sink)
+
+    @pytest.mark.voice(blocks_per_segment=40, block_delay=0.05)
+    def test_t_rt_2_a_cancel_reaches_the_worker_while_it_is_speaking(self, fake_worker):
+        """Gate 1's acceptance criterion, and release blocker two.
+
+        The worker here is deliberately slow -- forty blocks at fifty
+        milliseconds -- so that "the cancel arrived while it was computing" is a
+        real claim rather than a race the fast path happens to win. Three things
+        are asserted, and the third is the one that matters: the cancel returns
+        promptly, no more audio arrives after it, and the worker is still there
+        and answering afterwards, because tearing the process down would have
+        been a different (and much worse) way to pass the first two.
+        """
+        import time as _time
+
+        sink = Sink()
+        runtime.begin_turn(sink, 3)
+        runtime.send_segment(sink, "A sentence.")
+        assert sink.started.wait(5.0)
+        started = _time.monotonic()
+        runtime.cancel_turn(sink)
+        assert _time.monotonic() - started < 2.0, "cancel waited for the synthesis"
+
+        seen = len(sink.blocks)
+        _time.sleep(0.6)
+        assert len(sink.blocks) == seen, "audio kept arriving after the cancel"
+        assert runtime.status()["running"] is True, "cancelling a turn killed the worker"
+        assert runtime.transcribe(fake_worker.wav)["text"] == fake_worker.transcript
+
+    def test_t_rt_4_frames_from_a_turn_nobody_is_listening_to_are_dropped(self,
+                                                                         fake_worker):
+        """Section 24. Cancel an old turn, start a new one, and the old PCM
+        still in the pipe must not play over the new reply."""
+        first = Sink("A")
+        runtime.begin_turn(first, 3)
+        runtime.send_segment(first, "The first reply.")
+        first.started.wait(5.0)
+        runtime.cancel_turn(first)
+        before = len(first.blocks)
+
+        second = Sink("B")
+        stream_one(second, "The second reply.")
+        assert second.blocks
+        assert len(first.blocks) == before, "a cancelled turn was still being fed"
+
+    def test_t_rt_6_status_answers_while_a_turn_is_speaking(self, fake_worker):
+        """Section 16. Only true because nothing waiting holds the state lock."""
+        import time as _time
+
+        sink = Sink()
+        runtime.begin_turn(sink, 3)
+        runtime.send_segment(sink, "A sentence.")
+        sink.started.wait(5.0)
+        started = _time.monotonic()
+        assert runtime.status()["running"] is True
+        assert runtime.engine()["state"] in ("tts", "idle")
+        assert _time.monotonic() - started < 1.0
+        runtime.cancel_turn(sink)
+
+    def test_t_rt_7_unload_answers_during_a_turn_and_stops_the_worker(self, fake_worker):
+        import time as _time
+
+        sink = Sink()
+        runtime.begin_turn(sink, 3)
+        runtime.send_segment(sink, "A sentence.")
+        sink.started.wait(5.0)
+        started = _time.monotonic()
+        found = runtime.unload("test")
+        assert _time.monotonic() - started < 6.0
+        assert found["loaded"] is False
+        assert runtime.status()["running"] is False
+
+    def test_t_rt_5_a_transcription_runs_after_a_cancelled_turn(self, fake_worker):
+        """Section 14: the microphone waits only for the cancellation boundary,
+        not for an obsolete synthesis to finish."""
+        sink = Sink()
+        runtime.begin_turn(sink, 3)
+        runtime.send_segment(sink, "A sentence.")
+        sink.started.wait(5.0)
+        runtime.cancel_turn(sink)
+        assert runtime.transcribe(fake_worker.wav)["text"] == fake_worker.transcript
+
+    def test_t_rt_9_two_requests_cannot_receive_one_anothers_replies(self, fake_worker):
+        """Structural rather than a check: each request owns the queue it waits
+        on, so there is no path by which one caller's transcript reaches
+        another."""
+        import threading
+
+        runtime.ensure_started()
+        found = []
+        errors = []
+
+        def ask():
+            try:
+                found.append(runtime.transcribe(fake_worker.wav)["text"])
+            except Exception as exc:  # noqa: BLE001 - recorded for the assertion
+                errors.append(exc)
+
+        threads = [threading.Thread(target=ask) for _index in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=20)
+        assert not errors, errors
+        assert found == [fake_worker.transcript] * 4
+
+    def test_a_worker_that_dies_mid_turn_wakes_the_listener(self, fake_worker):
+        import os
+        import signal
+
+        sink = Sink()
+        runtime.begin_turn(sink, 3)
+        runtime.send_segment(sink, "A sentence.")
+        sink.started.wait(5.0)
+        os.kill(runtime.status()["pid"], signal.SIGKILL)
+        assert sink.finished.wait(10.0), "a dead worker left the turn waiting for ever"
+        assert sink.error
+
+
+class TestLoadAndUnload:
+    def test_load_starts_the_worker_and_reports_live_state(self, fake_worker):
+        assert runtime.engine()["loaded"] is False
+        found = runtime.load()
+        assert found["loaded"] is True
+        assert found["state"] == "idle"
+        assert found["provider"] == "cpu"
+        assert found["voices"] == 85
+
+    def test_unload_frees_the_worker_and_keeps_the_installation(self, fake_worker):
+        runtime.load()
+        assert runtime.unload("test")["loaded"] is False
+        assert runtime.status()["running"] is False
+        # And it starts again on the next use, which is what "not a persistent
+        # disable switch" means.
+        assert runtime.transcribe(fake_worker.wav)["text"] == fake_worker.transcript
+
+    def test_the_engine_report_carries_no_pid_or_path(self, fake_worker):
+        """Section 30's do-not-expose list."""
+        import json
+
+        runtime.load()
+        text = json.dumps(runtime.engine())
+        assert "pid" not in text
+        assert str(fake_worker.script) not in text
+
+    def test_nothing_is_preloaded_by_importing_or_by_asking(self, fake_worker):
+        """Section 34: lazy start remains the default."""
+        assert runtime.engine()["loaded"] is False
+        runtime.engine()
+        runtime.status()
+        assert runtime.status()["running"] is False
+
+
+class TestTheProtocolVersionGate:
+    @pytest.mark.voice(handshake={"protocol_version": 1})
+    def test_t_rt_1_a_protocol_1_worker_and_a_protocol_2_parent_refuse_each_other(
+            self, fake_worker):
+        """A stale pair must fail the handshake rather than try to interpret
+        incompatible streaming frames."""
+        with pytest.raises(runtime.VoiceRuntimeError, match="protocol"):
+            runtime.ensure_started()
+        assert runtime.status()["running"] is False
+
+    @pytest.mark.voice(num_speakers=53)
+    def test_a_bank_smaller_than_the_registry_expects_is_refused(self, fake_worker,
+                                                                 monkeypatch):
+        """Otherwise a registered clone would be spoken silently by speaker 0."""
+        import mc_voice_registry
+
+        monkeypatch.setattr(mc_voice_registry, "highest_sid", lambda: 60)
+        with pytest.raises(runtime.VoiceRuntimeError, match="fewer voices"):
+            runtime.ensure_started()

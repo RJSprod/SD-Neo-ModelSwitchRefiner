@@ -1,17 +1,26 @@
-"""The two things Voice Chat remembers, and the one place they are stored.
+"""The two switches Voice Chat remembers, and the one place they are stored.
 
-Voice Chat V1 persists user *intent* and nothing else:
+Voice Chat persists user *intent* and nothing else. The two switches here are
+the pair Conversation itself touches:
 
     model_chain_voice_auto_send   -- send a dictated message without asking
-    model_chain_voice_auto_speak  -- read completed replies aloud
+    model_chain_voice_auto_speak  -- read replies aloud
 
-Both default off, and both live in the host's own options store. That is the
-whole of the state design, and the deliberate part is what is missing from it.
-Microphone permission, whether the browser has unlocked its AudioContext, which
-audio source is playing, the worker's PID and the id of the request in flight
-are all facts about *this page, right now*; writing any of them to a settings
-file would produce a setting that is wrong the moment the page is closed and
-misleading the moment it is opened somewhere else.
+Both default off, and both live in the host's own options store.
+
+Three more voice options exist and are deliberately not here: the default voice
+and the Test text belong to :mod:`mc_voice_registry`, which is the module that
+can tell whether a stored voice id still resolves, and the cloning folder
+belongs to :mod:`mc_voice_clone`. Each option lives with the code that has to
+validate it, rather than in one module that would have to import all three.
+
+The deliberate part of this design is still what is missing from it. Microphone
+permission, whether the browser has unlocked its AudioContext, which audio
+source is playing, whether the worker is loaded, the worker's PID and the id of
+the turn being spoken are all facts about *this page, right now*; writing any of
+them to a settings file would produce a setting that is wrong the moment the
+page is closed and misleading the moment it is opened somewhere else. Load and
+Unload are a state, not a setting, for exactly that reason.
 
 One store, two surfaces
 -----------------------
@@ -43,10 +52,11 @@ OPT_AUTO_SEND = "model_chain_voice_auto_send"
 OPT_AUTO_SPEAK = "model_chain_voice_auto_speak"
 
 OPTIONS = (OPT_AUTO_SEND, OPT_AUTO_SPEAK)
-"""Every option this feature persists. The settings section registers exactly
-these two booleans, and ``tests/test_voice_ui.py`` asserts the section and this
-tuple agree -- an option registered and never read, or read and never
-registered, is the shape of bug that makes a checkbox do nothing."""
+"""The two switches this module owns. The settings section registers these
+booleans plus the registry's and cloning's own options, and
+``tests/test_voice_ui.py`` asserts the section and those modules agree -- an
+option registered and never read, or read and never registered, is the shape of
+bug that makes a checkbox do nothing."""
 
 DEFAULTS = {
     "auto_send": False,
@@ -56,6 +66,10 @@ DEFAULTS = {
     # is the answer every V1 caller gets and the answer a V2 selector replaces.
     "stt_model_id": None,
     "tts_model_id": None,
+    # Answered by :mod:`mc_voice_registry` since V1.1 -- a stable id like
+    # ``official:af_heart``, never a speaker number. Left named here because
+    # this is the module callers ask "what is configured", and the forward
+    # compatibility this list was written for is exactly what happened.
     "tts_voice_id": None,
     "stt_language": None,
 }

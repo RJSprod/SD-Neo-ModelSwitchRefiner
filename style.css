@@ -4262,3 +4262,222 @@
     cursor: default;
     opacity: 0.55;
 }
+
+/* -- the Voice engine block in the Conversation flyout --------------------
+   Section 32. Live residency rather than installed-ness, which is why it is
+   HTML the browser repaints on a poll rather than a Gradio component: a
+   component that re-rendered every second would fight the flyout for the
+   surface it is drawn on. */
+
+#mc-llm-studio .mc-voice-engine {
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    display: grid;
+    /* The state line takes the room; the button never wraps under it, because
+       a Load button on its own line reads as a separate control. */
+    grid-template-columns: 1fr auto;
+    gap: 0.35em 0.8em;
+    padding: 0.6em 0.8em;
+}
+
+#mc-llm-studio .mc-voice-engine-head {
+    font-weight: 600;
+    grid-column: 1 / -1;
+}
+
+#mc-llm-studio .mc-voice-engine-state {
+    align-self: center;
+    color: var(--body-text-color-subdued, inherit);
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+#mc-llm-studio .mc-voice-engine-voice {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 0.9em;
+    grid-column: 1 / -1;
+}
+
+#mc-llm-studio .mc-voice-runtime {
+    background: var(--button-secondary-background-fill, transparent);
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    color: inherit;
+    cursor: pointer;
+    min-height: 2.2em;
+    padding: 0.25em 0.9em;
+}
+
+#mc-llm-studio .mc-voice-runtime[disabled] {
+    cursor: default;
+    opacity: 0.55;
+}
+
+/* One unified Stop. Which of Send and Stop is on screen is decided in one
+   place in javascript/voice_chat.js -- `busy = llm || voice` -- and applied
+   here, so Gradio's own visibility and this never disagree about the same
+   button. Important because Gradio re-applies its own inline styles on every
+   update and would otherwise win the argument at the worst moment. */
+#mc-llm-studio .mc-llm-voice-hidden,
+#mc-llm-studio .mc-llm-voice-hidden > button {
+    display: none !important;
+}
+
+/* -- the Voices row on the Settings page ---------------------------------- */
+
+.mc-voice-voices {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6em;
+    margin: 0.4em 0 0.8em;
+}
+
+.mc-voice-voices .mc-voice-row {
+    align-items: stretch;
+    flex-direction: column;
+}
+
+.mc-voice-testline {
+    align-items: center;
+    display: flex;
+    gap: 0.6em;
+}
+
+.mc-voice-testline input {
+    background: var(--input-background-fill, transparent);
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    color: inherit;
+    flex: 1 1 auto;
+    min-height: 2.2em;
+    min-width: 0;
+    padding: 0.3em 0.6em;
+}
+
+.mc-voice-group {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 0.9em;
+    font-weight: 600;
+    margin-top: 0.5em;
+}
+
+.mc-voice-entry {
+    align-items: center;
+    border-bottom: 1px solid var(--border-color-primary, currentColor);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4em 0.6em;
+    padding: 0.35em 0;
+}
+
+.mc-voice-entry-name {
+    /* The one thing that must not be squeezed out: on a narrow settings page
+       the buttons wrap to the next line and the name stays where it is. */
+    flex: 1 1 8em;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.mc-voice-entry-default .mc-voice-entry-name {
+    font-weight: 600;
+}
+
+.mc-voice-entry-kind {
+    color: var(--body-text-color-subdued, inherit);
+    flex: 0 0 auto;
+    font-size: 0.85em;
+}
+
+.mc-voice-entry-action {
+    background: var(--button-secondary-background-fill, transparent);
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    color: inherit;
+    cursor: pointer;
+    flex: 0 0 auto;
+    font-size: 0.85em;
+    padding: 0.2em 0.6em;
+}
+
+.mc-voice-entry-action[disabled] {
+    cursor: default;
+    opacity: 0.55;
+}
+
+.mc-voice-warnings {
+    color: var(--color-accent-soft, var(--body-text-color, inherit));
+    font-size: 0.9em;
+}
+
+/* -- cloning -------------------------------------------------------------- */
+
+.mc-voice-consent {
+    font-weight: 600;
+}
+
+.mc-voice-check {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 0.9em;
+}
+
+.mc-voice-check-ok {
+    opacity: 0.75;
+}
+
+.mc-voice-field {
+    align-items: center;
+    display: flex;
+    gap: 0.6em;
+    margin: 0.35em 0;
+}
+
+.mc-voice-field label {
+    flex: 0 0 9em;
+}
+
+.mc-voice-field input,
+.mc-voice-field select {
+    background: var(--input-background-fill, transparent);
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    color: inherit;
+    flex: 1 1 auto;
+    min-height: 2.2em;
+    min-width: 0;
+    padding: 0.3em 0.6em;
+}
+
+.mc-voice-progress {
+    background: var(--background-fill-secondary, transparent);
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    height: 0.8em;
+    margin: 0.35em 0;
+    overflow: hidden;
+}
+
+.mc-voice-progress-bar {
+    background: var(--color-accent, currentColor);
+    height: 100%;
+    /* Transitioned rather than jumping: a clone reports every step, and a bar
+       that redrew instantly at 2 Hz for four hours would be a strobe. */
+    transition: width 0.4s linear;
+    width: 0;
+}
+
+.mc-voice-clone-step,
+.mc-voice-clone-state {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 0.9em;
+}
+
+.mc-voice-abort {
+    background: var(--button-secondary-background-fill, transparent);
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    color: inherit;
+    cursor: pointer;
+    margin-top: 0.4em;
+    min-height: 2.2em;
+    padding: 0.25em 0.9em;
+}

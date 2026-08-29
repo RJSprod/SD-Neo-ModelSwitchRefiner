@@ -551,7 +551,12 @@ def build() -> dict:
                  "composer": composer}
     view = ([transcript, positions, selected, status, header]
             + [selection[key] for key in SELECTION_ORDER])
-    stream = [cancellation, transcript, positions, message, attachment, status, send, stop]
+    # Two more outputs than V1, and both are hidden values rather than
+    # visibilities: the opaque id of the reply being spoken, and Python's half
+    # of "is the composer busy". Appended at the end so every existing yield
+    # keeps its meaning -- see :data:`LLM_RUNNING`.
+    stream = [cancellation, transcript, positions, message, attachment, status, send, stop,
+              voice_plumbing["turn"], voice_plumbing["run_state"]]
     sampling = [temperature, top_p, reply_tokens, seed]
     # The State first, then one visibility per surface: the order
     # :func:`_screens` answers in.
@@ -582,8 +587,8 @@ def build() -> dict:
     # tapped, so the flyout and Settings -> Voice Chat are two views of one
     # value rather than two values that have to be kept in step.
     to_voice.click(fn=lambda: mc_voice_ui.open_sheet(_screens),
-                   outputs=screens + [voice["readiness"], voice["auto_send"],
-                                      voice["auto_speak"]], queue=False)
+                   outputs=screens + [voice["readiness"], voice["engine"],
+                                      voice["auto_send"], voice["auto_speak"]], queue=False)
     # ``input`` and not ``change``, for the reason the thread list gives above:
     # ``change`` also fires when the server puts a value in, and opening the
     # flyout puts both stored values in. Listening to it would write the
@@ -1839,6 +1844,20 @@ picture the next message would carry again without anybody asking for it.
 BUSY = (gr.update(visible=False, interactive=False), gr.update(visible=True, interactive=True))
 IDLE = (gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False))
 
+LLM_RUNNING = "llm"
+LLM_IDLE = "idle"
+"""What the hidden run-state component holds, and why it exists.
+
+Section 25. Send/Stop visibility used to be a property of the last Gradio
+update, which is correct exactly while the language model is the only thing
+that can be busy. Streaming speech breaks that: the reply finishes, this
+generator yields IDLE, Gradio puts Send back -- and the speaker is still
+talking with nothing on screen to stop it. So Python publishes *its* half of
+the answer as a value rather than as a visibility, ``javascript/voice_chat.js``
+holds the other half, and one function in the browser combines them. Neither
+side sets visibility the other could contradict.
+"""
+
 
 _completed: dict = {}
 _completed_lock = threading.Lock()
@@ -1920,7 +1939,8 @@ def _idle(conversation, text, attachment, note: str, kind: str = "info") -> tupl
     slot holds a decoded image now, and handing one back is a full re-encode.
     """
     rows, positions = _view(conversation)
-    return (None, rows, positions, text, attachment, ui.notice(note, kind)) + IDLE
+    return (None, rows, positions, text, attachment, ui.notice(note, kind)) + IDLE \
+        + ("", LLM_IDLE)
 
 
 def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
@@ -1937,7 +1957,6 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
     from prompt_master.chat.prompt import build, clean_reply, needs_vision
     from prompt_master.core.models import RANDOM_SEED, draw_seed
 
-    busy, idle = BUSY, IDLE
     store = _chats()
     # Whatever the previous run left behind stops being true here. See
     # :data:`_completed`.
@@ -1983,6 +2002,26 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
     # reliable about starting with the space that needs.
     join_space = bool(opening) and not opening[-1].isspace()
 
+    # The speech turn for this run, created before the first chunk arrives so
+    # that the browser has its id in the very first yield and can open the audio
+    # stream while the model is still thinking. ``opening`` is passed because a
+    # continuation must speak only the newly generated tail: the existing
+    # opening is already on screen and may already have been read aloud, and
+    # re-speaking it is the surprising behaviour section 7 rules out.
+    #
+    # Everything about this is failure-tolerant on purpose. A voice turn that
+    # cannot be created is a run that streams text exactly as it always did --
+    # invariant: Voice never takes Conversation down with it.
+    turn = mc_voice_ui.begin_speech(character=character, persona=persona, opening=opening)
+    turn_token = turn.id if turn is not None else ""
+    busy = BUSY + (turn_token, LLM_RUNNING)
+    # The token stays in the field when the run ends rather than being cleared:
+    # the browser reads it by polling, and a short reply whose terminal yield
+    # follows the first one immediately would otherwise blank it before anybody
+    # looked. It is superseded by the next run's token, and a token already
+    # spoken is ignored.
+    idle = IDLE + (turn_token, LLM_IDLE)
+
     kept = False
 
     def keep() -> None:
@@ -2012,6 +2051,12 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
                 join_space = False
                 streamed += event.text
                 message.text = streamed
+                # Non-blocking, always: this is inside the generator that draws
+                # the reply, and section 6 is explicit that it must never call
+                # Kokoro. The most this does is run a segmenter over a few
+                # hundred characters and put the result on a queue.
+                if turn is not None:
+                    turn.add_text(event.text)
                 rows, positions = _view(conversation)
                 yield cancel, rows, positions, "", SENT, gr.update(), *busy
             elif event.kind == sessions.STATUS:
@@ -2026,6 +2071,16 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
                     # the one branch that means the reply is whole. Stopped goes
                     # to the same place on screen and deliberately not to here.
                     _completed_reply(message.text)
+                    # The authoritative text, which is what finally decides what
+                    # is spoken: the panel's own ``clean_reply`` has just run,
+                    # and the tail nobody has heard yet is flushed against *that*
+                    # rather than against the concatenated chunks.
+                    if turn is not None:
+                        turn.complete(_spoken_tail(message.text, opening))
+                elif turn is not None:
+                    # Stopped. Nothing further is spoken -- what has already been
+                    # heard cannot be unheard, and section 4 says so plainly.
+                    turn.cancel("stopped")
                 note = "Stopped." if event.kind == sessions.CANCELLED else "Reply complete."
                 rows, positions = _view(conversation)
                 yield (cancel, rows, positions, "", None,
@@ -2036,11 +2091,15 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
                 # The half-written reply goes; your turn stays, so the message
                 # you typed is not lost to a server that would not start.
                 keep()
+                if turn is not None:
+                    turn.cancel("failed")
                 rows, positions = _view(conversation)
                 yield cancel, rows, positions, "", SENT, ui.notice(event.text, "error"), *idle
                 return
     except Exception as exc:
         keep()
+        if turn is not None:
+            turn.cancel("failed")
         rows, positions = _view(conversation)
         yield cancel, rows, positions, "", SENT, ui.notice(ui.failure(exc), "error"), *idle
         return
@@ -2064,12 +2123,39 @@ def _stream(who, conversation, index, temperature, top_p, reply_tokens, seed,
         # already decided.
         if not kept:
             keep()
+        # GeneratorExit lands here and nowhere else -- Stop is wired as
+        # ``cancels=``, which closes this generator rather than raising inside
+        # it. A turn left running after that would keep speaking a reply the
+        # user has already stopped, so the cancel goes in the one block that
+        # runs on every way out. Idempotent, so the branches above that already
+        # cancelled cost nothing.
+        if turn is not None and turn.busy and not turn.source_done:
+            turn.cancel("interrupted")
 
     # The event stream ended without a terminal event, which is the other way
     # a reply finishes whole: everything that arrived, arrived.
     _completed_reply(message.text)
+    if turn is not None:
+        turn.complete(_spoken_tail(message.text, opening))
     rows, positions = _view(conversation)
     yield cancel, rows, positions, "", SENT, ui.notice("Reply complete."), *idle
+
+
+def _spoken_tail(whole: str, opening: str) -> str:
+    """The part of a finished reply Voice is responsible for.
+
+    For an ordinary reply that is all of it. For a continuation it is what was
+    newly generated: the opening is already on screen and may already have been
+    read aloud, and re-speaking it is the surprising behaviour section 7 rules
+    out. Checked rather than sliced blindly, because ``clean_reply`` may have
+    taken whitespace off the front -- and a slice that was one character out
+    would cut a word in half at the join.
+    """
+    if opening and whole.startswith(opening):
+        return whole[len(opening):]
+    if opening and whole.strip().startswith(opening.strip()):
+        return whole.strip()[len(opening.strip()):]
+    return whole
 
 
 def _tidy(conversation, index: int) -> None:
@@ -2134,7 +2220,15 @@ def _cancel(cancel):
     """
     if cancel is not None:
         cancel.cancel()
-    return (ui.notice("Stopped.", "warn"),) + IDLE
+    # The other half of one Stop. The browser has already silenced the speaker
+    # by the time this arrives -- it is on the same button, in the capture phase
+    # -- and this is what guarantees the *backend* stops: Kokoro stops being
+    # asked for samples, and the turn cannot produce any more audio even if the
+    # browser's own request never reached us. Section 26 wants both, and
+    # cancelling twice is defined behaviour, so neither has to know about the
+    # other.
+    mc_voice_ui.cancel_speech("stop")
+    return (ui.notice("Stopped.", "warn"),) + IDLE + ("", LLM_IDLE)
 
 
 def _context_size() -> int:
