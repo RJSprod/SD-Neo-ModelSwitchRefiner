@@ -4158,12 +4158,19 @@
 /* Recording. A ring rather than a fill, so the glyph stays legible and the
    button does not change size -- a control that grows when it is pressed moves
    the composer, and the composer is the thing that must not move. */
-/* Opening. The same ring, in the same amber as the track, so the two halves of
-   the control agree about which state they are in. It is deliberately visible:
-   a gesture that produced no feedback at all for a second would read as a
-   control that had not taken the press. */
+/* Opening, and then buffering. The same ring, in the same amber as the track,
+   so the two halves of the control agree about which state they are in. It is
+   deliberately visible: a gesture that produced no feedback at all for a second
+   would read as a control that had not taken the press.
+
+   They share a colour because they share a claim -- the microphone is open and
+   nothing has been committed -- and they are two classes because they are two
+   different facts, and a screen reader is told which. Neither is red: red is
+   what the slide reaching its end over audio that exists earns. */
 #mc-llm-studio .mc-llm-voice-mic.mc-llm-voice-opening button,
-#mc-llm-studio button.mc-llm-voice-opening {
+#mc-llm-studio button.mc-llm-voice-opening,
+#mc-llm-studio .mc-llm-voice-mic.mc-llm-voice-buffering button,
+#mc-llm-studio button.mc-llm-voice-buffering {
     box-shadow: 0 0 0 3px var(--warning-500, #d97706);
 }
 

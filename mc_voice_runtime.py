@@ -89,6 +89,7 @@ from dataclasses import dataclass
 
 import mc_voice_models as models
 import mc_voice_paths as paths
+import mc_voice_segment as segments
 from voice_worker import worker as protocol
 
 logger = logging.getLogger("model_chain")
@@ -109,11 +110,26 @@ than shipping something that works until the day somebody force-quits.
 """
 
 STT_THREADS = 4
-TTS_THREADS = 2
-"""Conservative and hidden, per section 34. Written down once here so a V2
-setting has one place to come from, and small on purpose: the point of running
-beside Forge rather than inside its scheduler is lost if speech takes every
-core from the image that is rendering."""
+TTS_THREADS = 4
+"""Fixed, hidden, and deliberately not adaptive.
+
+Two was the conservative opening bid: speech runs beside an image model, and the
+point of a separate process is lost if it takes every core. Four is the
+considered one. Synthesis is the stage the first-to-second gap is actually made
+of -- one serialized lane, one sentence at a time -- and sherpa's ``num_threads``
+is what that lane is given to work with.
+
+What this is *not* is a tuner. Nothing in this repository rotates between two,
+four and six, runs an A/B, or picks a number from real-time factors, underrun
+counts or CPU load: a production feature that reconfigures itself is a feature
+whose logs describe a different program each time somebody reads them. The
+number appears in the diagnostics instead, so a shared log says exactly which
+configuration produced the run, and moving it again is a deliberate change to
+this line supported by those logs.
+
+STT is untouched at four. A transcription is a single burst after the user has
+stopped talking, and it was never the stage anybody was waiting through.
+"""
 
 HANDSHAKE_TIMEOUT = 300.0
 """Cold, this is four hundred megabytes of ONNX off a spinning disk on a
@@ -156,6 +172,8 @@ class Handshake:
     bank_version: str = ""
     streaming: str = ""
     callback_probe_ms: int = 0
+    max_num_sentences: int = 0
+    priority: str = ""
 
 
 _state_lock = threading.RLock()
@@ -274,6 +292,12 @@ def engine() -> dict:
                 "sample_rate": _handshake.sample_rate,
                 "voice_bank_version": _handshake.bank_version,
                 "streaming": _handshake.streaming,
+                # Observation only. Nothing in this repository changes a
+                # priority; this is here so a shared log can say whether the
+                # run that produced its numbers was a run at the priority
+                # everybody assumes.
+                "priority": _handshake.priority,
+                "max_num_sentences": _handshake.max_num_sentences,
             })
         return found
 
@@ -706,11 +730,41 @@ def ensure_started() -> None:
                     _handshake.provider, _handshake.stt_threads, _handshake.tts_threads,
                     _handshake.num_speakers, _handshake.streaming or "no",
                     _handshake.callback_probe_ms, _handshake.parent_death, started.pid)
+        logger.info("Model Chain: %s", tts_config_line())
 
 
 # --------------------------------------------------------------------------- #
 # Load and unload
 # --------------------------------------------------------------------------- #
+
+
+def tts_config_line() -> str:
+    """One stable line naming every fixed choice this build speaks with.
+
+    Written once at start-up so that a log somebody shares is self-describing.
+    "There was a four-second pause" is not a report anybody can act on until the
+    configuration that produced it is on the same page: how many threads the
+    synthesis lane had, whether the callback path was available, how many
+    sentences sherpa batches -- which is what the block counts below are counted
+    in -- what the segmenter's targets are, and what priority the worker
+    actually ended up at.
+
+    Effective values wherever there are any: the thread count and the streaming
+    mode are what the worker *reported*, not what this module asked for, because
+    those are two claims and only the second one is evidence.
+    """
+    found = _handshake
+    return (
+        "Voice TTS config — threads={threads}, provider={provider}, streaming={streaming}, "
+        "max_num_sentences={sentences}, priority={priority}, targets={first}/{second}/{rest}, "
+        "second_bounds={soft}/{hard}".format(
+            threads=found.tts_threads if found else TTS_THREADS,
+            provider=found.provider if found else "cpu",
+            streaming=(found.streaming if found and found.streaming else "unknown"),
+            sentences=(found.max_num_sentences if found and found.max_num_sentences else 1),
+            priority=(found.priority if found and found.priority else "unknown"),
+            first=segments.FIRST_TARGET, second=segments.SECOND_TARGET, rest=segments.TARGET,
+            soft=segments.SECOND_SOFT_MAX, hard=segments.SECOND_HARD_MAX))
 
 
 def load() -> dict:
@@ -784,6 +838,8 @@ def _handshake_with(started, state) -> Handshake:
         bank_version=str(reply.get("bank_version") or ""),
         streaming=str(reply.get("streaming") or ""),
         callback_probe_ms=int(reply.get("callback_probe_ms") or 0),
+        max_num_sentences=int(reply.get("max_num_sentences") or 0),
+        priority=str(reply.get("priority") or ""),
     )
     if found.protocol_version != protocol.PROTOCOL_VERSION:
         raise VoiceRuntimeError(
@@ -918,9 +974,26 @@ def _dispatch_turn(operation: str, header: dict, payload: bytes) -> None:
         # handshake apart from a callback that actually delivered early.
         note = getattr(turn, "note_segment", None)
         if note is not None:
-            note(blocks=int(header.get("blocks") or 0),
-                 first_block_ms=int(header.get("first_block_ms") or 0),
-                 streaming=str(header.get("streaming") or ""))
+            # Wrapped, because this is the one reader thread. A destination
+            # that cannot take a new field -- an older stub, a turn-shaped
+            # object from somewhere else -- would otherwise end the pipe for
+            # every frame after it, and a measurement is never worth the audio
+            # it was measuring.
+            try:
+                rate = int(header.get("sample_rate") or 0) or turn.sample_rate or 0
+                samples = int(header.get("samples") or 0)
+                note(blocks=int(header.get("blocks") or 0),
+                     first_block_ms=int(header.get("first_block_ms") or 0),
+                     # How long the unit took, which is the number that
+                     # separates "the text was late" from "the synthesis was
+                     # slow" -- and the one the worker was already measuring
+                     # and the parent was throwing away.
+                     synth_ms=int(header.get("segment_ms") or 0),
+                     audio_ms=int(samples * 1000 / rate) if rate else 0,
+                     streaming=str(header.get("streaming") or ""))
+            except Exception:
+                logger.debug("Model Chain: a Voice segment's timing could not be recorded",
+                             exc_info=True)
     elif operation == "tts_done":
         turn.audio_finished()
         _release_turn(turn)

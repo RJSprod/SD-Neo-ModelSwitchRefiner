@@ -16,6 +16,8 @@ llama-server got wrong.
 
 from __future__ import annotations
 
+import pathlib
+import re
 import time
 
 import pytest
@@ -95,6 +97,52 @@ class TestStarting:
         monkeypatch.setattr(mc_voice_models, "status", lambda: missing)
         with pytest.raises(runtime.VoiceRuntimeError, match="not set up"):
             runtime.ensure_started()
+
+
+class TestTheFixedThreadConfiguration:
+    """Four TTS threads, chosen once and never chosen again at runtime.
+
+    The tests that matter here are the negative ones. A production feature that
+    reconfigures itself is a feature whose logs describe a different program
+    every time somebody reads them, so what is asserted is not only that the
+    number is four but that nothing in this module can make it anything else.
+    """
+
+    def test_the_worker_is_asked_for_four_tts_threads(self, fake_worker, monkeypatch):
+        sent = []
+        original = runtime._exchange
+
+        def record(header, payload, timeout):
+            sent.append(header)
+            return original(header, payload, timeout)
+
+        monkeypatch.setattr(runtime, "_exchange", record)
+        runtime.ensure_started()
+        config = [h for h in sent if h.get("op") == "init"][0]["config"]
+        assert config["tts_threads"] == 4
+        assert runtime.TTS_THREADS == 4
+
+    def test_the_worker_reports_the_number_it_was_given(self, fake_worker):
+        """Two claims, not one: what the parent asked for, and what the engine
+        says it is running."""
+        runtime.ensure_started()
+        assert runtime._handshake.tts_threads == 4
+        assert runtime.engine()["tts_threads"] == 4
+
+    def test_speech_to_text_is_left_where_it_was(self, fake_worker):
+        """A transcription is one burst after the user has stopped talking. It
+        was never the stage anybody was waiting through."""
+        runtime.ensure_started()
+        assert runtime.STT_THREADS == 4
+        assert runtime._handshake.stt_threads == 4
+
+    def test_nothing_here_chooses_a_thread_count_at_runtime(self):
+        """No rotation, no A/B, no selection from real-time factors or underrun
+        counts. The constant is read; it is never written."""
+        source = pathlib.Path(runtime.__file__).read_text(encoding="utf-8")
+        assignments = [line.strip() for line in source.splitlines()
+                       if re.match(r"\s*TTS_THREADS\s*=[^=]", line)]
+        assert assignments == ["TTS_THREADS = 4"], assignments
 
 
 class TestWarmingUpWithoutATurn:
@@ -342,9 +390,11 @@ class Sink:
         self.started.set()
         return True
 
-    def note_segment(self, blocks=0, first_block_ms=0, streaming=""):
+    def note_segment(self, blocks=0, first_block_ms=0, streaming="", synth_ms=0,
+                     audio_ms=0):
         self.segments.append({"blocks": blocks, "first_block_ms": first_block_ms,
-                              "streaming": streaming})
+                              "streaming": streaming, "synth_ms": synth_ms,
+                              "audio_ms": audio_ms})
 
     def audio_finished(self):
         self.done = True

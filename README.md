@@ -2953,6 +2953,21 @@ buys overlap across sentences and nothing at all inside one — which is why the
 segment targets, the early worker start and the browser's own buffer are separate
 work rather than things NumPy was going to fix.
 
+**The synthesis lane has four CPU threads**, fixed. It is the stage the pause
+between the first and second sentence is actually made of, and it gets the
+threads for that reason. Nothing rotates the number, runs an A/B or picks it from
+a measurement: a feature that reconfigures itself is a feature whose logs
+describe a different program every time you read them. Speech-to-text is
+untouched, because a transcription is one burst after you have stopped talking.
+
+**And every ordinary run says which stage was slow.** `model_chain.log` gets one
+line per synthesis unit — how long the text took to arrive, how long the
+synthesis took, when the first callback came back, how much speech came out — a
+configuration line naming the thread count, the streaming mode and the worker's
+effective priority, and a report from the browser saying whether the speaker
+actually ran dry and for how long. All of it is durations and counts. None of it
+is anything you or the model said.
+
 **There are twenty-eight voices**, all the English ones the installed Kokoro
 bundle ships, chosen in Settings and auditioned there. On Linux, an optional
 offline cloning tool can add your own.
@@ -3128,7 +3143,7 @@ moment you tap them, so there is no Apply to remember.
 - **Slide the microphone to the right and hold** to record; let go to
   transcribe. The microphone sits at the left of a short track twice its own
   width, and recording starts when it reaches the far end. A press that never
-  slides records nothing and says so.
+  slides sends nothing and says so.
 
   It is a slide rather than a long press because a long press on Android belongs
   to the operating system before it belongs to a web page — it raises the
@@ -3137,17 +3152,31 @@ moment you tap them, so there is no Apply to remember.
   gesture no platform wants, and opening a microphone stops being something
   anybody does by brushing against a button. Holding **Space** or **Enter** on
   the focused microphone is the same contract from a keyboard.
-- **Amber means opening; red means recording.** Reaching the far end of the
-  track asks the browser for the microphone, and on a phone — a Bluetooth
-  headset especially — that can take a second to answer. The control says
-  "Opening microphone" for exactly as long as that takes, and turns red at the
-  first audio frame that actually arrives. When it says it is recording, it is
-  recording.
+- **The microphone opens when the slide begins, and nothing is sent unless it
+  finishes.** Everything a browser has to do before the first sample exists —
+  ask permission, open the device, hand over a stream, build the audio graph —
+  used to happen *after* the handle reached the end of the track, which is why
+  a word said while sliding could be lost. The travel is now the window all of
+  that happens in, and audio arriving during it is kept in the page and belongs
+  to nobody yet.
+
+  What the gesture decides is unchanged, because it was never "is the
+  microphone touched" — it is "does anything leave this machine". Let go short
+  of the end and every track stops, every sample is dropped, and no
+  transcription is asked for. The browser's own microphone indicator is the
+  honest signal that the device is open, and it comes on when the slide starts.
+- **Amber means the microphone is open; red means you are being recorded.** The
+  control says "Opening microphone" while the browser is still deciding,
+  "Microphone open — slide to record" once samples are arriving, and turns red
+  only when the slide has finished over audio that exists. The label says the
+  same three things for anybody who cannot read a colour. When it says it is
+  recording, it is recording — and the recording includes what you said on the
+  way there.
 - Under a quarter of a second is treated as a slip, not an utterance — measured
   from the first frame of audio, so a device that was slow to wake spends its own
   time and not yours. Sixty seconds is the ceiling, counted the same way, at
   which point it stops and transcribes what it has. Letting go while it is still
-  opening records nothing, says nothing about being too short, and stops the
+  opening sends nothing, says nothing about being too short, and stops the
   microphone the moment the browser gets round to handing it over.
 - If your browser will not open a microphone at all, Voice Chat says which of
   the reasons it was. The common one on a phone is the page not being a secure
@@ -3172,8 +3201,10 @@ moment you tap them, so there is no Apply to remember.
   warming while the model is still writing, so a cold run does not read four
   hundred megabytes of ONNX after the first sentence instead of during it.
 - **Stop stops both.** One press ends the generation and the speech, and Stop
-  stays in the composer while the speaker is still talking — so a long answer
-  that has finished arriving can still be silenced.
+  stays in the composer — visible *and* pressable — while the speaker is still
+  talking, so a long answer that has finished arriving can still be silenced.
+  You are not expected to know which half is busy: whichever of them is, one
+  press ends the response.
 - Turning *Speak replies automatically* off mid-answer stops that answer.
   Turning it on mid-answer applies to the next one.
 - A reply already spoken cannot be unspoken. What Stop guarantees is that

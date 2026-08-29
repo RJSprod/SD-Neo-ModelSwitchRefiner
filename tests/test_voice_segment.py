@@ -112,6 +112,105 @@ class TestWhatCommitsAndWhen:
         assert machine.second_target <= machine.target
 
 
+class TestTheSecondUnitsEnvelope:
+    """How soon the second segment commits is one question; how big it is
+    allowed to get is another, and only the first had an answer.
+
+    A model that writes a hundred and eighty characters before its first full
+    stop hands the second segment one enormous sentence. It arrives as text
+    quickly -- SECOND_TARGET is satisfied immediately -- and then takes as long
+    to synthesise as everything it was supposed to be covering. Continuity is
+    lost to the size of the unit rather than to the wait for it.
+    """
+
+    RUN = ("It turns out that the answer here involves a fairly long explanation "
+           "which runs on for quite a while without ever reaching a full stop and "
+           "keeps going, adding clause after clause, well past two hundred "
+           "characters before it finally ends.")
+
+    def second_of(self, machine, text):
+        assert machine.feed("Yes, that's possible.") == ["Yes, that's possible."]
+        return machine.feed(" " + text)
+
+    def test_a_long_second_unit_is_cut_inside_the_envelope(self):
+        machine = segment.Segmenter()
+        found = self.second_of(machine, self.RUN)
+        assert found, "the second unit was never committed"
+        assert len(found[0]) <= segment.SECOND_HARD_MAX, len(found[0])
+        assert len(found[0]) > segment.SECOND_TARGET, "it was cut smaller than the target"
+
+    def test_a_clause_inside_the_soft_limit_is_preferred_to_the_ceiling(self):
+        """The envelope is where a weaker boundary becomes acceptable, not a
+        character count to chop at. A comma within reach is taken; the word
+        boundary at the ceiling is what happens when there is nothing better."""
+        text = ("The explanation here is a little involved and it carries on, "
+                + "and onwards " * 20)
+        assert text.index(",") < segment.SECOND_SOFT_MAX
+        assert len(text) > segment.SECOND_SOFT_MAX
+        assert "." not in text, "a sentence boundary would beat the clause"
+        machine = segment.Segmenter()
+        found = self.second_of(machine, text)
+        assert found, "nothing committed"
+        assert found[0].rstrip().endswith(","), found[0][-40:]
+        assert len(found[0]) <= segment.SECOND_SOFT_MAX
+
+    def test_a_punctuation_free_second_unit_ends_at_a_word(self):
+        words = " ".join(["alpha", "bravo", "charlie", "delta", "echo"] * 12)
+        machine = segment.Segmenter()
+        found = self.second_of(machine, words)
+        assert found, "nothing committed"
+        assert len(found[0]) <= segment.SECOND_HARD_MAX
+        assert words.startswith(found[0])
+        assert words[len(found[0])] == " ", "the cut landed inside a word"
+
+    def test_the_final_tail_cannot_escape_the_envelope(self):
+        """T-7. Generation ending before another segment arrived is not a reason
+        for the second unit to become the whole rest of the reply."""
+        machine = segment.Segmenter()
+        assert machine.feed("Yes, that's possible.") == ["Yes, that's possible."]
+        found = machine.flush("Yes, that's possible. " + self.RUN)
+        assert len(found) >= 2, [len(item) for item in found]
+        assert len(found[0]) <= segment.SECOND_HARD_MAX, len(found[0])
+
+    def test_later_units_keep_the_ordinary_envelope(self):
+        """Only the second one is small. By the third there is audio queued in
+        front of it, and a longer segment sounds better for free."""
+        machine = segment.Segmenter()
+        machine.feed("Yes, that's possible.")
+        machine.feed(" And here is a second complete sentence, long enough to commit.")
+        assert machine.segments == 2
+        found = machine.feed(" " + self.RUN)
+        assert found, "the third unit never committed"
+        assert len(found[0]) > segment.SECOND_HARD_MAX, (
+            "the third unit was held to the second unit's envelope")
+
+    def test_the_envelope_still_refuses_every_unsafe_boundary(self):
+        """The limits move; the guards do not. A decimal, an abbreviation, a
+        domain and an initial are not boundaries at 220 characters either."""
+        filler = "the value is measured again and again and again, "
+        text = (filler * 4) + "Dr. Smith wrote 3.14159 to example.com about it, J. R. R. Tolkien too."
+        machine = segment.Segmenter()
+        found = self.second_of(machine, text)
+        joined = " ".join(found)
+        for hazard in ("Dr.", "3.14159", "example.com", "J. R. R."):
+            if hazard in joined:
+                assert not joined.rstrip().endswith(hazard.rstrip(".")), joined[-40:]
+        assert "3.14" not in machine.pending or "3.14159" in machine.pending
+
+    def test_a_fence_is_not_split_by_the_smaller_ceiling(self):
+        machine = segment.Segmenter()
+        machine.feed("Yes, that's possible.")
+        fenced = "```\n" + "\n".join(f"line_{index} = {index}" for index in range(40)) + "\n"
+        assert len(fenced) > segment.SECOND_HARD_MAX
+        assert machine.feed(" " + fenced) == []
+
+    def test_the_limits_are_ordered(self):
+        machine = segment.Segmenter()
+        assert machine.second_target <= machine.second_soft_max <= machine.second_hard_max
+        assert machine.second_hard_max < machine.hard_max
+        assert machine.second_soft_max < machine.soft_max
+
+
 class TestTheGuards:
     def test_t_seg_4_a_decimal_point_is_not_a_sentence(self):
         found = run(["The value of pi is 3.14159 and it goes on for ever, which is a fact "

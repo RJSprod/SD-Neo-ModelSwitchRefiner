@@ -27,7 +27,8 @@ class Speaker:
     """A worker that answers instantly and records what it was asked."""
 
     def __init__(self, rate: int = 24000, blocks: int = 1, samples: int = 1200,
-                 warm: bool = True, prepare_error=None):
+                 warm: bool = True, prepare_error=None, synth_ms=None):
+        self.synth_ms = synth_ms
         self.rate = rate
         self.blocks = blocks
         self.samples = samples
@@ -60,6 +61,14 @@ class Speaker:
         self.calls.append("segment")
         for _block in range(self.blocks):
             turn.offer_audio(b"\x01\x00" * self.samples, self.rate)
+        if self.synth_ms is not None:
+            # What the worker answers with once the unit is done: how long it
+            # took, how many batches sherpa handed back, and how much speech
+            # came out. The real one arrives on the runtime's reader thread.
+            index = len(self.segments)
+            turn.note_segment(blocks=2, first_block_ms=11 * index,
+                              synth_ms=self.synth_ms * index,
+                              audio_ms=500 * index, streaming="callback")
 
     def finish_turn(self, turn):
         self.finished.append(turn.id)
@@ -290,9 +299,14 @@ class TestMetrics:
                               "audio_seconds", "compute_seconds", "rtf", "first_segment_ms",
                               "first_audio_ms", "cancelled", "voice_type", "sid",
                               "worker_warm_at_turn_start", "runtime_prepare_ms",
-                              "segment_1_chars", "segment_2_chars", "segment_wait_2_ms",
-                              "streaming", "callback_blocks", "first_callback_ms",
-                              "segment_1_blocks", "segment_2_blocks"}
+                              "streaming", "callback_blocks",
+                              "max_segment_ms", "max_segment_index",
+                              "segment_1_chars", "segment_1_ms", "segment_1_first_block_ms",
+                              "segment_1_callback_blocks", "segment_1_audio_ms",
+                              "ready_wait_1_ms",
+                              "segment_2_chars", "segment_2_ms", "segment_2_first_block_ms",
+                              "segment_2_callback_blocks", "segment_2_audio_ms",
+                              "ready_wait_2_ms"}
 
     def test_a_clone_is_categorised_without_naming_itself(self):
         turn = turns.create(voice_id="clone:1234", sid=53, speaker=Speaker())
@@ -425,6 +439,92 @@ class TestWarmingTheWorkerEarly:
         drain(turn)
         assert speaker.segments
         assert turn.metrics()["worker_warm_at_turn_start"] is None
+
+
+class TestWhatEachSynthesisUnitCost:
+    """One turn-level total cannot tell "the model was slow to write it" from
+    "Kokoro was slow to say it", and those want completely different fixes.
+
+    So each unit carries four durations: how long the lane waited for the text,
+    how long the synthesis took, when the first block came back, and how much
+    speech came out. The worker was already measuring the middle two and the
+    parent was throwing them away.
+    """
+
+    def spoken_turn(self, chunks, synth_ms=120):
+        speaker = Speaker(synth_ms=synth_ms)
+        turn = turns.create(sid=0, speaker=speaker)
+        turn.attached.set()
+        turn.start()
+        spoken(turn, chunks)
+        drain(turn)
+        return turn, speaker
+
+    def test_synthesis_time_crosses_from_the_worker_into_the_metrics(self):
+        """T-5. The worker's ``segment_ms`` used to stop at the runtime."""
+        turn, _speaker = self.spoken_turn(
+            ["Yes, that's possible. And here is a second sentence, long enough to go. "])
+        found = turn.metrics()
+        assert found["segment_1_ms"] == 120
+        assert found["segment_2_ms"] == 240
+
+    def test_the_first_two_units_expose_their_whole_shape(self):
+        """T-6, and the reason all four numbers are wanted rather than one."""
+        turn, _speaker = self.spoken_turn(
+            ["Yes, that's possible. And here is a second sentence, long enough to go. "])
+        found = turn.metrics()
+        for index in (1, 2):
+            assert found[f"segment_{index}_chars"] > 0
+            assert found[f"ready_wait_{index}_ms"] is not None
+            assert found[f"segment_{index}_ms"] > 0
+            assert found[f"segment_{index}_first_block_ms"] > 0
+            assert found[f"segment_{index}_callback_blocks"] == 2
+            assert found[f"segment_{index}_audio_ms"] > 0
+
+    def test_the_slowest_unit_is_named(self):
+        turn, _speaker = self.spoken_turn(
+            ["Yes, that's possible. And here is a second sentence, long enough to go. ",
+             "A third sentence follows it, and it is long enough to be its own unit. "])
+        found = turn.metrics()
+        assert found["max_segment_index"] == found["segments"]
+        assert found["max_segment_ms"] == 120 * found["segments"]
+
+    def test_a_unit_the_worker_never_answered_for_still_reports_its_text(self):
+        """A turn cancelled halfway through its second unit still knows how many
+        characters that unit was and how long it waited for them. Reporting
+        those as absent because the answer never came back would hide the case
+        the numbers are most wanted for."""
+        speaker = Speaker(synth_ms=None)
+        turn = turns.create(sid=0, speaker=speaker)
+        turn.attached.set()
+        turn.start()
+        spoken(turn, ["Yes, that's possible. "])
+        found = turn.metrics()
+        assert found["segment_1_chars"] > 0
+        assert found["ready_wait_1_ms"] is not None
+        assert found["segment_1_ms"] is None, "a synthesis that never answered was invented"
+
+    def test_no_unit_record_carries_a_word_of_the_reply(self):
+        secret = "the launch code is four zero four"
+        turn, _speaker = self.spoken_turn(
+            [f"Hello there, {secret}, and that is the end of the sentence. "])
+        assert secret not in repr(turn.metrics())
+        assert secret not in repr(turn._units)
+
+    def test_the_unit_log_line_is_numbers_only(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="model_chain"):
+            self.spoken_turn(["Yes, that's possible. And a second sentence, long enough. "])
+        lines = [record.getMessage() for record in caplog.records
+                 if "Voice TTS segment" in record.getMessage()]
+        assert len(lines) >= 2, lines
+        for line in lines:
+            assert "possible" not in line
+            assert "sentence" not in line
+            for wanted in ("chars=", "ready_wait_ms=", "synth_ms=", "first_block_ms=",
+                           "callback_blocks=", "audio_ms=", "streaming="):
+                assert wanted in line, (wanted, line)
 
 
 class TestTheClientWatchdog:
