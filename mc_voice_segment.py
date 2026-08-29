@@ -78,6 +78,26 @@ higher than a phrase, because a target this low applied to *every* segment
 would turn one synthesis call into four and put a seam between each of them.
 """
 
+SECOND_SOFT_MAX = 140
+SECOND_HARD_MAX = 220
+"""How large the second segment is allowed to become.
+
+:data:`SECOND_TARGET` says how *soon* the second segment may be committed. It
+says nothing about how big it may get, and the two are not the same question: a
+model that writes a hundred and eighty characters before its first full stop
+hands the second segment a single enormous sentence, which arrives as text
+quickly and then takes as long to synthesise as everything it was supposed to be
+covering. Continuity is lost to the size of the unit rather than to the wait for
+it.
+
+So the second segment gets the whole envelope early, not just the target: a
+clause or a comma will do at :data:`SECOND_SOFT_MAX`, and a word boundary has to
+by :data:`SECOND_HARD_MAX`. Both are far below the ordinary 320/480, and both
+apply to the final tail of a reply as well -- a long second unit must not escape
+the envelope merely because generation happened to end before another segment
+arrived.
+"""
+
 TARGET = 100
 SOFT_MAX = 320
 HARD_MAX = 480
@@ -434,13 +454,17 @@ class Segmenter:
 
     def __init__(self, labels=(), first_target: int = FIRST_TARGET, target: int = TARGET,
                  soft_max: int = SOFT_MAX, hard_max: int = HARD_MAX,
-                 second_target: int = SECOND_TARGET):
+                 second_target: int = SECOND_TARGET,
+                 second_soft_max: int = SECOND_SOFT_MAX,
+                 second_hard_max: int = SECOND_HARD_MAX):
         self.labels = tuple(str(name or "").strip() for name in (labels or ()) if str(name or "").strip())
         self.first_target = max(1, int(first_target))
         self.target = max(self.first_target, int(target))
         self.second_target = min(self.target, max(1, int(second_target)))
         self.soft_max = max(self.target, int(soft_max))
         self.hard_max = max(self.soft_max, int(hard_max))
+        self.second_soft_max = max(self.second_target, int(second_soft_max))
+        self.second_hard_max = max(self.second_soft_max, int(second_hard_max))
         self._buffer = ""
         self._committed = 0
         self._segments = 0
@@ -553,26 +577,32 @@ class Segmenter:
         self._segments += 1
         return spoken
 
-    def _target(self) -> int:
-        """The weak-boundary target for the segment about to be committed.
+    def _limits(self) -> tuple:
+        """``(target, soft_max, hard_max)`` for the segment about to be committed.
 
-        Three values rather than two, and the middle one is the whole of the
+        One place, deliberately. Every threshold in :meth:`_cut` comes from here
+        rather than from the instance directly, so "which segment is this and
+        what is it allowed to be" is answered once instead of being re-derived
+        at each of the five boundary rules -- and so that the second segment's
+        envelope cannot be applied on one path and forgotten on another.
+
+        Three rows rather than two, and the middle one is the whole of the
         reported first-to-second gap. The opening commits early because nothing
-        is playing yet; the second one has to commit early because sentence one
-        *is* playing and the producer has no lead at all; by the third there is
-        audio queued ahead of it and a longer, better-sounding segment costs
-        nothing anybody can hear.
+        is playing yet; the second one has to commit early *and* stay small,
+        because sentence one is playing and the producer has no lead at all; by
+        the third there is audio queued ahead of it and a longer,
+        better-sounding segment costs nothing anybody can hear.
         """
         if self._segments == 0:
-            return self.first_target
+            return self.first_target, self.soft_max, self.hard_max
         if self._segments == 1:
-            return self.second_target
-        return self.target
+            return self.second_target, self.second_soft_max, self.second_hard_max
+        return self.target, self.soft_max, self.hard_max
 
     def _cut(self, text: str, final: bool) -> int:
         """How much of ``text`` is safe to speak, or 0 for "not yet"."""
         length = len(text)
-        target = self._target()
+        target, soft_max, hard_max = self._limits()
         opened = self._fence_open
 
         def fence(index: int) -> bool:
@@ -583,24 +613,28 @@ class Segmenter:
             # a reason to cut. A four-thousand-character tail handed over whole
             # is one synthesis call that cannot be cancelled part-way and one
             # queue entry that cannot start playing until all of it exists, so
-            # the ceiling applies to the last segment exactly as to the others.
-            if length <= self.hard_max:
+            # the ceiling applies to the last segment exactly as to the others
+            # -- including the second segment's smaller one, which is the whole
+            # point of taking the limits from ``_limits`` on this path too. A
+            # long second unit must not escape its envelope merely because
+            # generation happened to end before another segment arrived.
+            if length <= hard_max:
                 # One segment. The tail is what is left of a reply rather than
                 # a piece of one, and cutting a 370-character ending into "365
                 # characters" and "alpha" buys nothing and costs a synthesis
                 # call, a queue entry and an audible seam.
                 return length
             for finder in (_paragraph_end, _sentence_at_or_before, _clause_end, _comma_end):
-                found = finder(text, min(length, self.hard_max), fence)
+                found = finder(text, min(length, hard_max), fence)
                 if found >= target:
                     return found
-            word = _word_end(text, min(length, self.hard_max))
-            return word if word >= target else min(length, self.hard_max)
+            word = _word_end(text, min(length, hard_max))
+            return word if word >= target else min(length, hard_max)
 
         # 1. A paragraph break is the strongest boundary there is, and it is
         #    taken as soon as there is one -- a heading followed by a blank line
         #    is a complete thing to say.
-        paragraph = _paragraph_end(text, min(length, self.hard_max), fence)
+        paragraph = _paragraph_end(text, min(length, hard_max), fence)
         if paragraph and len(text[:paragraph].strip()) >= SHORT_SENTENCE:
             return paragraph
 
@@ -613,37 +647,37 @@ class Segmenter:
         #    sentence on its own, and holding it back for the accident of chunk
         #    boundaries cost the first segment its whole reason for existing.
         if self._segments == 0:
-            opening = _first_sentence(text, SHORT_SENTENCE, min(length, self.hard_max), fence)
+            opening = _first_sentence(text, SHORT_SENTENCE, min(length, hard_max), fence)
             if opening:
                 return opening
 
         # 3. A sentence, once there is enough of a segment to be worth one.
-        sentence = _sentence_at_or_before(text, min(length, self.hard_max), fence)
+        sentence = _sentence_at_or_before(text, min(length, hard_max), fence)
         if sentence and sentence >= target:
             return sentence
 
         # 4. A clause, but only once the unsent text is long enough that
         #    waiting for a sentence is the bigger risk.
-        if length >= self.soft_max:
-            clause = _clause_end(text, self.soft_max, fence)
+        if length >= soft_max:
+            clause = _clause_end(text, soft_max, fence)
             if clause >= target:
                 return clause
-            comma = _comma_end(text, self.soft_max, fence)
+            comma = _comma_end(text, soft_max, fence)
             if comma >= target:
                 return comma
 
         # 5. The ceiling. A word boundary, never inside a word, and only when
         #    the text really has run past the hard maximum with no punctuation
         #    in it at all.
-        if length >= self.hard_max:
-            if fence(self.hard_max):
+        if length >= hard_max:
+            if fence(hard_max):
                 # Inside a code fence there is no good cut. Wait for the fence
                 # to close; the reply's own end will flush it if it never does.
                 return 0
-            word = _word_end(text, self.hard_max)
+            word = _word_end(text, hard_max)
             if word >= target:
                 return word
-            return self.hard_max
+            return hard_max
         return 0
 
 
