@@ -1340,6 +1340,7 @@
             state.firstPcmAt = nowMs();
             const session = sliding;
             if (session && session.capture === state && !session.cancelled) {
+                armCaptureLimits(session);
                 if (session.engaged) {
                     // The gesture finished before the device did. These samples
                     // are the beginning of the utterance and the control says so
@@ -1646,26 +1647,41 @@
 
     // The transition every part of the interface waits for. Called once per
     // session, from `acceptChunk`, at the moment the first sample is kept.
-    function beginRecording(session) {
+    // Armed at the first sample, whether or not the gesture has finished.
+    //
+    // Two bounds swap over here, and the swap is the point. Up to this moment
+    // the risk is a microphone that never opens, and the opening timeout covers
+    // it; from this moment the risk is a microphone that stays open, and the
+    // recording cap covers that. A device that took a second to wake has spent
+    // its own second and not the user's -- section 7.7 -- and a gesture still
+    // buffering after a minute is a microphone held open for a minute, which is
+    // the same thing the cap exists to stop.
+    function armCaptureLimits(session) {
         if (session.openTimer) {
             window.clearTimeout(session.openTimer);
             session.openTimer = 0;
         }
-        markMic("recording");
-        const button = clickable(IDS.mic);
-        armTrack(button, true);
-        // The maximum hold starts here rather than at engagement. A second
-        // spent opening a Bluetooth microphone is not a second of the user's
-        // recording allowance -- see section 7.7.
+        if (session.timer) return;
         session.timer = window.setTimeout(function () {
-            if (holding !== session) return;
-            // The sixty-second cap. The slider goes back with it: a control
-            // still sitting at the recording end of its track after the
-            // recording has stopped is a control that is lying about what it
-            // is doing.
+            if (sliding !== session && holding !== session) return;
+            // The slider goes back with it: a control still sitting at the
+            // recording end of its track after the recording has stopped is a
+            // control that is lying about what it is doing.
             resetSlider();
-            endHold(false);
+            if (session.engaged) {
+                endHold(false);
+                return;
+            }
+            // A minute of pre-roll nobody committed. It is not an utterance and
+            // it never was, so it goes the way every abandoned gesture goes.
+            abandon(session, "discarded");
         }, MAX_HOLD_MS);
+    }
+
+    function beginRecording(session) {
+        armCaptureLimits(session);
+        markMic("recording");
+        armTrack(clickable(IDS.mic), true);
     }
 
     function refuse(text) {
@@ -1750,7 +1766,10 @@
         // ever. Separate from the recording cap, because they bound entirely
         // different things -- see section 7.7.
         session.openTimer = window.setTimeout(function () {
-            if (sliding !== session || session.recordingAt) return;
+            // Only while nothing has been captured at all. Once samples are
+            // arriving the recording cap owns the gesture -- see
+            // `armCaptureLimits`, which cancels this on its way past.
+            if (sliding !== session) return;
             session.refused = MESSAGES.unreadable;
             abandon(session, "error");
             if (session.engaged) {

@@ -1858,6 +1858,48 @@ class TestPreRollCapture:
             assert found["tracks"], "no microphone was opened at all: " + scenario
             assert all(found["tracks"]), "a track was left running: " + scenario
 
+    def test_a_gesture_that_only_ever_buffers_is_still_bounded(self):
+        """The two bounds swap at the first sample. Before it, the risk is a
+        microphone that never opens; after it, a microphone that stays open --
+        and a finger resting on the handle for a minute is the second one."""
+        found = run("""
+            mic.fire("pointerdown", {pointerId: 56, clientX: 0});
+            await tick(4);
+            feed(new Array(8000).fill(0.2));
+            await tick();
+            const buffering = Array.from(mic.classList.names);
+            NOW += 61000;
+            await tick(8);
+            console.log(JSON.stringify(report({buffering})));
+        """)
+        assert "mc-llm-voice-buffering" in found["buffering"]
+        assert found["tracks"] and all(found["tracks"]), "a microphone was held open"
+        assert not [r for r in found["requests"] if (r.get("url") or "").endswith("/stt")]
+        assert _captures(found).pop()["result"] == "discarded"
+
+    def test_the_opening_timeout_stops_covering_a_microphone_that_opened(self):
+        """It bounds a device that never produced anything, and hands over the
+        moment one does. A gesture buffering happily at twenty-one seconds must
+        not be torn down by the timeout that was waiting for it."""
+        found = run("""
+            mic.fire("pointerdown", {pointerId: 57, clientX: 0});
+            await tick(4);
+            feed(new Array(8000).fill(0.2));
+            await tick();
+            NOW += 21000;
+            await tick(8);
+            const stillOpen = Array.from(mic.classList.names);
+            fireWindow("pointermove", {pointerId: 57, clientX: 400});
+            await tick();
+            NOW += 900;
+            releaseMic(57);
+            await tick(4);
+            console.log(JSON.stringify(report({stillOpen})));
+        """)
+        assert "mc-llm-voice-buffering" in found["stillOpen"], found["stillOpen"]
+        posts = [r for r in found["requests"] if (r.get("url") or "").endswith("/stt")]
+        assert len(posts) == 1, found["status"]
+
     def test_m7_buffering_never_claims_to_be_recording(self):
         """Sample capture and utterance commitment are different states, and the
         control says which one it is in -- in the colour and, for anybody who
