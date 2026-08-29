@@ -539,6 +539,14 @@ def _log_turn(turn) -> None:
     try:
         found = turn.metrics()
         if not found.get("chunks"):
+            # The interesting case, and the one an earlier version of this
+            # function skipped: a turn a browser listened to and that produced
+            # no audio at all leaves no other trace anywhere.
+            logger.warning("Model Chain: Voice turn %s produced no audio — %d characters, "
+                           "%d segments handed over, %s", turn.id[:8], found["source_chars"],
+                           found["segments"], found["cancelled"] or "no reason recorded")
+            if turn.error:
+                logger.warning("Model Chain: Voice turn %s — %s", turn.id[:8], turn.error)
             return
         logger.info("Model Chain: Voice turn finished — %d characters, %d segments, "
                     "%.1f s audio in %.1f s compute (RTF %s), first audio %s ms, %s",
@@ -621,10 +629,15 @@ def open_stream(token: str):
     """
     turn = turns.lookup(str(token or ""))
     if turn is None:
+        logger.warning("Model Chain: a browser asked to hear a reply this WebUI has no "
+                       "record of — the page is probably older than this run")
         raise Refused(404, "There is nothing waiting to be read aloud.")
     if turn.cancelled.is_set() and not turn.started.is_set():
+        logger.warning("Model Chain: Voice turn %s was over before anything listened to it "
+                       "— %s", turn.id[:8], turn.reason or "no reason recorded")
         raise Refused(409, turn.error or "That reply is no longer being read aloud.")
     turn.attached.set()
+    logger.info("Model Chain: Voice is streaming turn %s to a browser", turn.id[:8])
     return turn
 
 
@@ -649,7 +662,7 @@ def stream_headers(turn) -> dict:
     }
 
 
-def cancel_turn(token: str) -> dict:
+def cancel_turn(token: str, reason: str = "") -> dict:
     """The Stop button's server half. Idempotent by construction.
 
     Takes a turn id and never any text, cancels only the turn it names, and is
@@ -658,7 +671,13 @@ def cancel_turn(token: str) -> dict:
     explicit that it must not cost a four-hundred-megabyte model reload.
     """
     wanted = str(token or "")
-    cancelled = turns.cancel(wanted) if wanted else turns.cancel_active()
+    why = str(reason or "")[:80]
+    if why and why != "user":
+        # The browser's own account of why it stopped listening. Never text --
+        # a fixed word from a fixed list -- and worth writing down, because a
+        # page that cannot play a reply is otherwise invisible from the server.
+        logger.warning("Model Chain: a browser stopped listening to a reply — %s", why)
+    cancelled = turns.cancel(wanted, why or "user") if wanted else turns.cancel_active()
     return {"ok": True, "cancelled": bool(cancelled), "speaking": turns.busy()}
 
 
@@ -1008,7 +1027,8 @@ def install(_demo=None, app=None) -> bool:
         try:
             _checked(request, CANCEL_ROUTE)
             payload = await _json(request)
-            return JSONResponse(cancel_turn(str(payload.get("turn") or "")))
+            return JSONResponse(cancel_turn(str(payload.get("turn") or ""),
+                                            str(payload.get("reason") or "")))
         except Refused as exc:
             return _refusal(exc)
         except Exception:

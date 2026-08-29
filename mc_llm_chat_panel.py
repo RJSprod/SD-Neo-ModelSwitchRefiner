@@ -773,7 +773,9 @@ def build() -> dict:
         # is not the same claim as a whole reply.
         run.success(fn=speech_marker, outputs=[voice_plumbing["token"]])
 
-    stop.click(fn=_cancel, inputs=[cancellation], outputs=[status, send, stop],
+    stop.click(fn=_cancel, inputs=[cancellation],
+               outputs=[status, send, stop, voice_plumbing["turn"],
+                        voice_plumbing["run_state"]],
                cancels=[replying, submitted, regenerating, again, continuing, resending],
                queue=False)
 

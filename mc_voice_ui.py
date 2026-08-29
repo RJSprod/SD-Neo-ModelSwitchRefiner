@@ -44,6 +44,7 @@ The speech marker, and why it is a closure
 from __future__ import annotations
 
 import logging
+import time
 
 import gradio as gr
 
@@ -155,8 +156,13 @@ def begin_speech(character=None, persona=None, opening: str = ""):
     _last_run["turn"] = ""
     try:
         if not state.auto_speak():
+            # The commonest reason by far, and the one that used to be
+            # indistinguishable from a broken feature: both produce a reply
+            # that is simply not spoken and nothing written down anywhere.
+            _quietly("\"Speak replies automatically\" is off")
             return None
         if not models.status().tts_ready:
+            _quietly("the text-to-speech model is not installed")
             return None
         import mc_voice_registry as registry
 
@@ -165,11 +171,34 @@ def begin_speech(character=None, persona=None, opening: str = ""):
         found.base_chars = len(str(opening or ""))
         found.start()
         _last_run["turn"] = found.id
+        logger.info("Model Chain: Voice will read this reply aloud — %s, speaker %d, turn %s",
+                    entry["id"], sid, found.id[:8])
         return found
     except Exception:
-        logger.debug("Model Chain: Voice Chat could not start speaking this reply",
-                     exc_info=True)
+        # Warning rather than debug, and this is the correction that matters:
+        # a failure here disables the whole feature for that reply and used to
+        # leave no trace at all in a log at the default level. "Voice went
+        # silent and nothing was written down" is not a diagnosable state.
+        logger.warning("Model Chain: Voice Chat could not start speaking this reply",
+                       exc_info=True)
         return None
+
+
+def _quietly(reason: str) -> None:
+    """Say once, at most every ten minutes, why a reply was not read aloud.
+
+    Throttled because it is on the path of every assistant turn and the reason
+    does not change between them -- but said at all, because the alternative is
+    the silence this function was added to end.
+    """
+    now = time.monotonic()
+    if now - _quiet.get(reason, 0.0) < 600.0:
+        return
+    _quiet[reason] = now
+    logger.info("Model Chain: Voice is not reading replies aloud — %s", reason)
+
+
+_quiet: dict = {}
 
 
 def _labels(character, persona) -> tuple:
