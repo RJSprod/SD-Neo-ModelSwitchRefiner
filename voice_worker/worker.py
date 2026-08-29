@@ -535,6 +535,14 @@ class Engines:
         self.sample_rate = 0
         self.bank_version = str(config.get("bank_version") or "")
         self.streaming = ""
+        self.callback_probe_ms = 0
+        """How long the streaming probe below took, in milliseconds.
+
+        Reported rather than only decided on. "Callbacks work here" and "this
+        runtime is fast enough for them to help" are different claims, and a
+        probe that takes a second on somebody's machine is the first evidence
+        that the second one may not follow from the first.
+        """
 
     def load(self) -> None:
         import sherpa_onnx
@@ -570,7 +578,9 @@ class Engines:
             sherpa_onnx.OfflineTtsConfig(model=model_config, max_num_sentences=1))
         self.num_speakers = int(getattr(self.tts, "num_speakers", 0) or 0)
         self.sample_rate = int(getattr(self.tts, "sample_rate", 0) or 0)
+        probe_started = time.monotonic()
         self.streaming = "callback" if self._callback_supported() else "segment"
+        self.callback_probe_ms = int((time.monotonic() - probe_started) * 1000)
 
     def _callback_supported(self) -> bool:
         """Whether this runtime can hand samples back *during* a synthesis.
@@ -1077,20 +1087,30 @@ class Worker:
         started = time.monotonic()
         spoken = 0
         gap = silence(int(engines.sample_rate or 0), turn.delivery.pause_ms)
+        # One segment's shape, in numbers only: how many times sherpa handed
+        # audio back and how long the first of them took. With
+        # ``max_num_sentences=1`` the block count *is* the sentence count, which
+        # is why the parent can report callback granularity without this file
+        # ever counting anything about the text.
+        block = {"count": 0, "first": 0.0, "at": 0.0}
         try:
             while True:
                 text = turn.next_segment()
                 if text is None:
                     break
 
-                def on_audio(block: bytes, rate: int, _turn=turn) -> bool:
+                def on_audio(chunk: bytes, rate: int, _turn=turn) -> bool:
                     nonlocal sequence
                     if _turn.cancelled.is_set() or self._stopping.is_set():
                         return False
                     sequence += 1
-                    _turn.samples += len(block) // 2
+                    if block["at"]:
+                        block["count"] += 1
+                        if not block["first"]:
+                            block["first"] = time.monotonic() - block["at"]
+                    _turn.samples += len(chunk) // 2
                     self.send({"op": "tts_audio", "turn": _turn.id, "seq": sequence,
-                               "sample_rate": int(rate or 0)}, block, audio=True)
+                               "sample_rate": int(rate or 0)}, chunk, audio=True)
                     return not _turn.cancelled.is_set()
 
                 # Before this segment rather than after the last one, so a turn
@@ -1098,11 +1118,21 @@ class Worker:
                 # that finishes does not leave the composer waiting through one.
                 if gap and spoken and not turn.cancelled.is_set():
                     on_audio(gap, int(engines.sample_rate or 0))
+                # Armed after the pause and not before it: a configured pause is
+                # deliberate prosody, and counting it as this segment's first
+                # audio would make an intentional gap look like a slow synthesis.
+                block.update({"count": 0, "first": 0.0, "at": time.monotonic()})
                 engines.stream(text, sid, turn.delivery, on_audio)
+                elapsed_segment = time.monotonic() - block["at"]
+                block["at"] = 0.0
                 spoken += 1
                 if turn.cancelled.is_set():
                     break
-                self.send({"op": "tts_segment_done", "turn": turn.id, "seq": sequence})
+                self.send({"op": "tts_segment_done", "turn": turn.id, "seq": sequence,
+                           "blocks": block["count"],
+                           "first_block_ms": int(block["first"] * 1000),
+                           "segment_ms": int(elapsed_segment * 1000),
+                           "streaming": engines.streaming})
         except Exception as exc:
             self.send({"op": "tts_error", "turn": turn.id, "error": _safe(exc)})
             self.close_turn(turn.id)
@@ -1182,6 +1212,7 @@ def serve(stdin, stdout, engines_factory=None) -> int:
                         "sample_rate": engines.sample_rate,
                         "bank_version": engines.bank_version,
                         "streaming": engines.streaming,
+                        "callback_probe_ms": engines.callback_probe_ms,
                         "load_seconds": round(time.monotonic() - started, 3),
                     })
                     _note(f"ready — CPU provider, STT threads {engines.stt_threads}, "

@@ -155,6 +155,7 @@ class Handshake:
     sample_rate: int = 0
     bank_version: str = ""
     streaming: str = ""
+    callback_probe_ms: int = 0
 
 
 _state_lock = threading.RLock()
@@ -375,6 +376,38 @@ def _delivery(profile) -> dict:
     except Exception:
         logger.debug("Model Chain: could not read the voice delivery profile", exc_info=True)
         return {"speed": 1.0, "pitch": 1.0, "gain": 1.0, "pause_ms": 0}
+
+
+def prepare() -> bool:
+    """Start the Voice worker without opening a turn. Returns "it was warm".
+
+    The cold-start overlap. :meth:`mc_voice_turn.VoiceTurn._run` used to wait
+    for the first committed segment and only then call :func:`begin_turn`, which
+    is what ultimately starts the worker -- so on a cold run the four hundred
+    megabytes of ONNX were read *after* the model had finished writing its first
+    sentence, when they could have been read while it was writing it. Both of
+    those are the machine waiting; only one of them is the user waiting.
+
+    What this deliberately does not do is anything a turn does. It registers no
+    turn, it does not touch the TTS busy count, it sends no ``tts_begin`` and it
+    synthesizes nothing: the worker becomes ready, and the turn that opens on it
+    a moment later opens exactly as it would have. So a warmed worker that is
+    then cancelled before any text arrives leaves nothing behind but a warm
+    worker -- which is the state the first real use would have left anyway.
+
+    Crash-loop guarding, restart limits, containment and the "one worker even if
+    two callers arrive together" lock are all :func:`ensure_started`'s, unchanged,
+    because this is that function with a question in front of it.
+
+    Raises :class:`VoiceRuntimeError` exactly as :func:`ensure_started` does. The
+    caller is a turn pump, and a turn that cannot warm a worker is a reply that
+    is not spoken -- never a reply that is not written.
+    """
+    with _state_lock:
+        if _process is not None and _process.poll() is None:
+            return True
+    ensure_started()
+    return False
 
 
 def begin_turn(turn, sid: int = 0, profile=None) -> int:
@@ -668,10 +701,11 @@ def ensure_started() -> None:
 
         stop_on_exit()
         logger.info("Model Chain: Voice runtime ready — %s provider, STT threads %d, "
-                    "TTS threads %d, %d voices, %s streaming, containment %s, pid %s",
+                    "TTS threads %d, %d voices, %s streaming (probed in %d ms), "
+                    "containment %s, pid %s",
                     _handshake.provider, _handshake.stt_threads, _handshake.tts_threads,
                     _handshake.num_speakers, _handshake.streaming or "no",
-                    _handshake.parent_death, started.pid)
+                    _handshake.callback_probe_ms, _handshake.parent_death, started.pid)
 
 
 # --------------------------------------------------------------------------- #
@@ -749,6 +783,7 @@ def _handshake_with(started, state) -> Handshake:
         sample_rate=int(reply.get("sample_rate") or 0),
         bank_version=str(reply.get("bank_version") or ""),
         streaming=str(reply.get("streaming") or ""),
+        callback_probe_ms=int(reply.get("callback_probe_ms") or 0),
     )
     if found.protocol_version != protocol.PROTOCOL_VERSION:
         raise VoiceRuntimeError(
@@ -875,8 +910,17 @@ def _dispatch_turn(operation: str, header: dict, payload: bytes) -> None:
         turn.offer_audio(payload, rate)
     elif operation == "tts_ready":
         turn.sample_rate = int(header.get("sample_rate") or 0) or turn.sample_rate
+        turn.streaming = str(header.get("streaming") or "") or turn.streaming
     elif operation == "tts_segment_done":
-        return
+        # Counts and milliseconds, and nothing else. With the worker's
+        # ``max_num_sentences=1`` the block count is how many sentence batches
+        # sherpa handed back for that segment, which is what tells a callback
+        # handshake apart from a callback that actually delivered early.
+        note = getattr(turn, "note_segment", None)
+        if note is not None:
+            note(blocks=int(header.get("blocks") or 0),
+                 first_block_ms=int(header.get("first_block_ms") or 0),
+                 streaming=str(header.get("streaming") or ""))
     elif operation == "tts_done":
         turn.audio_finished()
         _release_turn(turn)

@@ -191,6 +191,31 @@ class VoiceTurn:
         self._compute_started = 0.0
         self._compute = 0.0
 
+        self.worker_warm = None
+        """Whether the Voice worker was already running when this turn began.
+
+        ``None`` until :meth:`_warm_up` has asked. It is the field that tells a
+        cold turn's numbers apart from a warm one's, which section 6 asks for
+        explicitly: a first-audio time that includes a model load is not the
+        same measurement as one that does not, and averaging them together
+        describes neither.
+        """
+
+        self._prepare = 0.0
+        self._segment_chars = []
+        self._segment_wait_2 = 0.0
+
+        self.streaming = ""
+        """Which way the worker delivered audio for this turn -- "callback" or
+        "segment". Reported by the worker on ``tts_ready`` rather than read from
+        the handshake, because a runtime that accepts a callback and then fails
+        inside one downgrades itself mid-turn, and the turn that was actually
+        spoken is the one worth recording."""
+
+        self._blocks = 0
+        self._segment_blocks = []
+        self._first_callback = 0
+
     # -- text in ----------------------------------------------------------- #
 
     def add_text(self, delta: str) -> None:
@@ -251,6 +276,12 @@ class VoiceTurn:
                 return
             if not self._first_segment:
                 self._first_segment = time.monotonic()
+            if len(self._segment_chars) < 2:
+                # The first two, and only the first two. They are the ones the
+                # first-to-second gap is made of, and a list that grew with the
+                # reply would be a per-segment record of how long each piece of
+                # somebody's conversation was.
+                self._segment_chars.append(len(text))
             self._backlog.put_nowait(text)
 
     def _refuse_length(self) -> None:
@@ -319,6 +350,35 @@ class VoiceTurn:
             with self._lock:
                 self._queued_samples = max(0, self._queued_samples - len(payload) // 2)
         return (kind, payload)
+
+    def note_segment(self, blocks: int = 0, first_block_ms: int = 0, streaming: str = "") -> None:
+        """What one segment cost the worker, in counts and milliseconds.
+
+        The distinction section 4 asks to be preserved. A handshake that says
+        "callback" proves callbacks work; it does not prove any audio arrived
+        early. ``blocks`` is how many times sherpa handed samples back for that
+        segment -- one per sentence batch, because the worker configures
+        ``max_num_sentences=1`` -- and ``first_block_ms`` is how long the first
+        of them took. A one-sentence segment with one block and a first block
+        that arrives at the end of the synthesis is callback mode delivering
+        exactly nothing, and it should read that way in a log rather than as a
+        win.
+
+        Never raises: this runs on the runtime's reader thread, and a metric is
+        not worth a frame.
+        """
+        try:
+            with self._lock:
+                if streaming:
+                    self.streaming = streaming
+                self._blocks += max(0, int(blocks or 0))
+                if len(self._segment_blocks) < 2:
+                    self._segment_blocks.append(max(0, int(blocks or 0)))
+                if not self._first_callback and first_block_ms:
+                    self._first_callback = int(first_block_ms)
+        except Exception:
+            logger.debug("Model Chain: a Voice turn could not record a segment's shape",
+                         exc_info=True)
 
     def audio_finished(self) -> None:
         """The worker said this turn's audio is complete."""
@@ -405,6 +465,7 @@ class VoiceTurn:
         speaker = self._speaker
         began = False
         try:
+            self._warm_up(speaker)
             first = self._await_segment(FIRST_SEGMENT_WAIT)
             if first is None:
                 self.cancel(self.reason or "empty")
@@ -418,7 +479,15 @@ class VoiceTurn:
             while pending is not None and not self.cancelled.is_set():
                 speaker.send_segment(self, pending)
                 self._segments_sent += 1
+                asked = time.monotonic()
                 pending = self._await_segment(None)
+                if self._segments_sent == 1:
+                    # How long the synthesis lane stood idle between the first
+                    # segment and the second -- which is the producer half of
+                    # the reported gap, and the half a browser buffer cannot
+                    # fix. Recorded once; every later wait is hidden behind
+                    # audio that is already queued.
+                    self._segment_wait_2 = time.monotonic() - asked
             if not self.cancelled.is_set():
                 speaker.finish_turn(self)
                 # The worker answers ``tts_done`` when the last sample is out,
@@ -444,6 +513,34 @@ class VoiceTurn:
                                  exc_info=True)
             self.finished.set()
             self._audio.put(("end", b""))
+
+    def _warm_up(self, speaker) -> None:
+        """Ask the worker to be ready while the reply is still being written.
+
+        Section 5.4. The turn thread has nothing else to do until the first
+        segment is whole, and on a cold run the worker has four hundred
+        megabytes of ONNX to read -- so the two are made to overlap rather than
+        queue. ``add_text`` is unaffected: it runs on the generator's thread and
+        this runs on this one.
+
+        A failure here is deliberately not fatal to the turn. ``begin_turn``
+        below meets the same failure a moment later and reports it through the
+        path that already exists for it, and a turn cancelled here would report
+        a cold-start problem as though the reply itself had gone wrong.
+        """
+        if self.cancelled.is_set():
+            return
+        prepare = getattr(speaker, "prepare", None)
+        if prepare is None:
+            return
+        started = time.monotonic()
+        try:
+            self.worker_warm = bool(prepare())
+        except Exception:
+            logger.debug("Model Chain: a Voice turn could not warm the worker early; the "
+                         "turn itself will report why", exc_info=True)
+        finally:
+            self._prepare = time.monotonic() - started
 
     def _watch_for_client(self) -> None:
         """Give up on a turn no browser ever opened. See :attr:`attached`."""
@@ -503,6 +600,19 @@ class VoiceTurn:
             "rtf": round(self._compute / audio_seconds, 3) if audio_seconds > 0.01 else None,
             "first_segment_ms": _since(started, self._first_segment),
             "first_audio_ms": _since(started, self._first_audio),
+            "worker_warm_at_turn_start": self.worker_warm,
+            "runtime_prepare_ms": int(self._prepare * 1000) if self._prepare else None,
+            "segment_1_chars": self._segment_chars[0] if self._segment_chars else None,
+            "segment_2_chars": (self._segment_chars[1] if len(self._segment_chars) > 1
+                                else None),
+            "segment_wait_2_ms": (int(self._segment_wait_2 * 1000)
+                                  if self._segment_wait_2 else None),
+            "streaming": self.streaming,
+            "callback_blocks": self._blocks,
+            "first_callback_ms": self._first_callback or None,
+            "segment_1_blocks": self._segment_blocks[0] if self._segment_blocks else None,
+            "segment_2_blocks": (self._segment_blocks[1] if len(self._segment_blocks) > 1
+                                 else None),
             "cancelled": self.reason,
             "voice_type": "clone" if self.voice_id.startswith("clone:") else "official",
             "sid": self.sid,

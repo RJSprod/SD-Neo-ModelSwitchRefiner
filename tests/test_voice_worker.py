@@ -162,6 +162,100 @@ class TestSpeakingEitherWay:
             found.stream("Hello.", 999, worker.NEUTRAL, lambda block, rate: True)
 
 
+class TestCallbackGranularity:
+    """What "callback streaming" is actually worth, measured rather than assumed.
+
+    sherpa calls the generation callback once every ``max_num_sentences``
+    sentences, and this worker configures that to one. So callback mode overlaps
+    production *across sentences* and does nothing at all for a segment that
+    contains a single sentence -- and a handshake that says "callback" is not
+    evidence to the contrary. The worker therefore reports how many batches it
+    received and how soon the first arrived, so the difference is visible in a
+    log instead of being argued about.
+    """
+
+    class Sentences:
+        """A synthesiser that batches by sentence, the way the real one does."""
+
+        num_speakers = 53
+        sample_rate = 24000
+
+        def generate(self, text, sid=0, speed=1.0, callback=None):
+            batches = max(1, text.count(".") + text.count("?") + text.count("!"))
+            if callback is None:
+                return Audio([0.25] * (8 * batches))
+            for _batch in range(batches):
+                if callback([0.5] * 4, 0.5) == 0:
+                    return Audio([])
+            return Audio([])
+
+    def blocks_for(self, text):
+        found = engines(self.Sentences())
+        found.streaming = "callback"
+        seen = []
+        found.stream(text, 3, worker.NEUTRAL, lambda block, rate: seen.append(block) or True)
+        return seen
+
+    def test_one_sentence_arrives_in_one_batch(self):
+        """The measurement that stops callback mode being oversold: for a
+        one-sentence segment the first batch *is* the whole synthesis."""
+        assert len(self.blocks_for("Yes, that is possible.")) == 1
+
+    def test_a_multi_sentence_segment_arrives_in_several(self):
+        assert len(self.blocks_for("One. Two. Three. Four.")) == 4
+
+    def test_the_probe_records_what_it_cost(self):
+        found = worker.Engines({})
+        found.tts = Tts()
+        found.sample_rate = 24000
+        found.num_speakers = 53
+        started = worker.time.monotonic()
+        found.streaming = "callback" if found._callback_supported() else "segment"
+        found.callback_probe_ms = int((worker.time.monotonic() - started) * 1000)
+        assert found.streaming == "callback"
+        assert found.callback_probe_ms >= 0
+
+
+class TestWhatTheParentIsToldAboutASegment:
+    """``tts_segment_done`` carries counts and milliseconds, and nothing else."""
+
+    def speak_one(self, tts, text="One. Two. Three.", pause_ms=0):
+        found = engines(tts)
+        found.streaming = "callback"
+        machine = worker.Worker(stdout=None)
+        machine.engines = found
+        sent = []
+        machine.send = lambda header, payload=b"", audio=False: sent.append(header)
+        turn = worker.Turn("T1", 3, worker.Delivery(pause_ms=pause_ms))
+        turn.segments.put(text)
+        turn.finish()
+        machine.speak(turn)
+        return sent
+
+    def test_the_block_count_is_the_sentence_batch_count(self):
+        sent = self.speak_one(TestCallbackGranularity.Sentences())
+        done = [frame for frame in sent if frame["op"] == "tts_segment_done"]
+        assert len(done) == 1
+        assert done[0]["blocks"] == 3
+        assert done[0]["streaming"] == "callback"
+        assert done[0]["first_block_ms"] >= 0
+
+    def test_a_configured_pause_is_not_counted_as_this_segments_audio(self):
+        """A pause the user asked for is prosody. Counting the silence as the
+        segment's first block would make an intentional gap read as a fast
+        synthesis, which is the opposite of the truth."""
+        first = self.speak_one(TestCallbackGranularity.Sentences(), pause_ms=0)
+        second = self.speak_one(TestCallbackGranularity.Sentences(), pause_ms=250)
+        done = [frame for frame in second if frame["op"] == "tts_segment_done"]
+        assert done[0]["blocks"] == [f for f in first
+                                     if f["op"] == "tts_segment_done"][0]["blocks"]
+
+    def test_nothing_about_the_text_is_reported(self):
+        sent = self.speak_one(TestCallbackGranularity.Sentences(),
+                              text="The launch code is four zero four.")
+        assert "four zero four" not in repr(sent)
+
+
 class TestPcm16:
     def test_it_converts_a_plain_list_without_numpy(self, monkeypatch):
         """The list is what ``GeneratedAudio.samples`` is on this runtime, and
