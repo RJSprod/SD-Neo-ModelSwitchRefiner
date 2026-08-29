@@ -1142,11 +1142,23 @@
     // Three things follow, and they are the three changes in this block.
     //
     // The constraints ask for what actually helps and stop asking for what
-    // does not. `sampleRate: 16000` is a hint the platform may honour, and it
-    // asks for the rate Whisper wants rather than 48 kHz that has to be thrown
-    // away. The three processors are *advisory* rather than required, because
-    // they are tuned for a wideband microphone and a browser that cannot apply
-    // them to an HFP stream should give us the stream rather than fail.
+    // does not.
+    //
+    // `sampleRate` used to be here, asking for the 16 kHz Whisper wants rather
+    // than the 48 kHz that gets thrown away. It never did anything: the samples
+    // this file receives come out of the AudioContext, not off the track, and
+    // `resample` converts from `ctx.sampleRate` to 16 kHz whatever the device
+    // was persuaded to do. What it could do is give the browser one more thing
+    // to negotiate while it opens the device -- and opening the device is the
+    // largest remaining cost in the capture path, 210 to 386 ms in the measured
+    // session. So it is gone, and `stream_ready_ms` will say whether that
+    // mattered. The track's real rate is still reported by `describeTrack`,
+    // which is the piece of evidence a user has that their microphone changed
+    // under them.
+    //
+    // The three processors are *advisory* rather than required, because they
+    // are tuned for a wideband microphone and a browser that cannot apply them
+    // to an HFP stream should give us the stream rather than fail.
     //
     // The capture path is reported, not guessed. `track.getSettings()` and the
     // track's own label say which device this is and at what rate, which is the
@@ -1162,7 +1174,6 @@
         echoCancellation: {ideal: true},
         noiseSuppression: {ideal: true},
         autoGainControl: {ideal: true},
-        sampleRate: {ideal: TARGET_RATE},
     };
 
     // Under this peak there was nothing to transcribe. The same floor
