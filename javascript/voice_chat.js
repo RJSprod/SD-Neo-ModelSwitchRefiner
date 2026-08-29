@@ -1338,9 +1338,22 @@
         if (!samples || !samples.length) return;
         if (!state.firstPcmAt) {
             state.firstPcmAt = nowMs();
-            if (holding && holding.capture === state && !holding.cancelled) {
-                holding.recordingAt = state.firstPcmAt;
-                beginRecording(holding);
+            const session = sliding;
+            if (session && session.capture === state && !session.cancelled) {
+                if (session.engaged) {
+                    // The gesture finished before the device did. These samples
+                    // are the beginning of the utterance and the control says so
+                    // now.
+                    session.recordingAt = state.firstPcmAt;
+                    beginRecording(session);
+                } else {
+                    // Pre-roll. Audio is arriving and it belongs to nobody yet:
+                    // it is kept in this page's memory and it becomes an
+                    // utterance only if the slide completes. The control says
+                    // the microphone is open, which is true, and does not say
+                    // it is recording, which is not.
+                    markMic("buffering");
+                }
             }
         }
         state.chunks.push(samples);
@@ -1599,24 +1612,30 @@
 
     let holding = null;
 
-    // Five states, and the two that used to be one are the point of this
-    // function. "The slide reached the end" and "audio is arriving" are
-    // different facts about the world, they can be a second apart on a phone,
-    // and a control that says the second when it means the first is a control
-    // that lies about a microphone. Red is earned by PCM; everything before it
-    // is OPENING.
+    // Six states, and the three before red are the point of this function.
+    //
+    //   opening     the microphone has been asked for and nothing has come back
+    //   buffering   samples are arriving and belong to nobody yet
+    //   recording   the slide reached the end, so those samples are an utterance
+    //
+    // Those are three different facts about the world and they can be a second
+    // apart on a phone. Red is the claim that the user is being recorded, and
+    // it is earned by the gesture completing over audio that exists -- not by
+    // permission, not by a connected node, and not by a finger arriving.
     //
     // The text is authoritative, not the colour: a screen reader is told
-    // "Opening microphone" and then "Recording", which is the same distinction
-    // in the channel that does not have a colour to read.
+    // "Microphone open — slide to record" and then "Recording", which is the
+    // same distinction in the channel that has no colour to read.
     function markMic(state) {
         const button = clickable(IDS.mic);
         if (!button) return;
-        button.classList.remove("mc-llm-voice-opening", "mc-llm-voice-recording",
-                                "mc-llm-voice-working", "mc-llm-voice-error");
+        button.classList.remove("mc-llm-voice-opening", "mc-llm-voice-buffering",
+                                "mc-llm-voice-recording", "mc-llm-voice-working",
+                                "mc-llm-voice-error");
         if (state) button.classList.add("mc-llm-voice-" + state);
         const labels = {
             opening: "Opening microphone",
+            buffering: "Microphone open — slide to record",
             recording: "Recording — release to transcribe",
             working: "Transcribing",
             error: "Voice Chat is not set up",
@@ -1668,139 +1687,192 @@
         return MESSAGES.unreadable;
     }
 
-    // Called the instant the slide reaches the end of its track, and from the
-    // keyboard equivalent. Everything from here down is what press-and-hold
-    // used to do; what changed is only how somebody says they want it.
-    function engage() {
-        if (holding || capture) return;
-        if (!clickable(IDS.mic)) return;
-        // Whatever else happens, this is a user gesture and Web Audio may be
-        // unlocked by it. Done first and unconditionally so that a gesture that
-        // is then refused still leaves playback able to work.
-        unlock();
-        // Section 14: engaging the microphone while a reply is being read aloud
-        // means the reply is over. The speaker stops here -- which also stops a
-        // phone feeding its own output back into the recording -- and the server
-        // is told, so an obsolete Kokoro run stops burning the CPU the
-        // transcription is about to need rather than merely being inaudible.
-        stopSpeaking(true);
-
+    // Whether this gesture may open a microphone at all, decided synchronously
+    // from what is already known.
+    //
+    // Synchronously is the whole point. The press is the moment the microphone
+    // has to be asked for, and a check that waits for a round trip to the WebUI
+    // is a check that has spent the pre-roll it was meant to protect. So the
+    // two cheap answers are taken here -- the model is generating, or the last
+    // status answer already said no -- and the expensive one runs alongside the
+    // capture and is reconciled when it arrives.
+    //
+    // A refusal is remembered rather than announced. A press that never becomes
+    // a slide is not a request for anything, and a control that complains about
+    // being touched is a control people stop touching.
+    function eligible(session) {
         if (llmBusy()) {
-            refuse(MESSAGES.busy);
-            return;
+            session.refused = MESSAGES.busy;
+            return false;
         }
-        // Only when the answer is already in hand. A Voice Chat that is known
-        // not to be set up does not open a microphone to find that out -- a
-        // permission prompt raised for a feature that cannot run is a prompt
-        // asked for nothing. Where nothing is known yet, the microphone is
-        // opened below and closed again if the answer turns out to be no,
-        // because that is the only order in which the browser ever asks.
         const known = knownReadiness();
         if (known && !known.ok) {
-            refuse(known.error || MESSAGES.failed);
-            return;
+            session.refused = known.error || MESSAGES.failed;
+            return false;
         }
         if (known && !known.ready) {
-            refuse(known.not_ready_message || MESSAGES.notReady);
-            return;
+            session.refused = known.not_ready_message || MESSAGES.notReady;
+            return false;
         }
+        return true;
+    }
 
-        const session = {engagedAt: nowMs(), cancelled: false, recordingAt: 0,
-                         capture: null, timer: 0, openTimer: 0};
-        holding = session;
-        // OPENING, not RECORDING. The microphone has been asked for and nothing
-        // has been heard yet, and on a phone that gap is routinely a second.
+    // The microphone, asked for at the beginning of the gesture rather than at
+    // the end of it.
+    //
+    // This is the change revision 4 is mostly about. Permission, device open,
+    // stream and graph assembly all used to sit between the slide finishing and
+    // the first sample being kept, so a user who began talking as they slid
+    // lost the first word or two of it. Now the slide *is* the window those
+    // things happen in, and what they produce is kept locally until the gesture
+    // says whether it is an utterance.
+    //
+    // Nothing is uploaded and nothing is claimed. The microphone is open, which
+    // is a state the control shows and a state the browser's own indicator
+    // shows; whether any of it is a recording is decided at the far end of the
+    // track.
+    function openForGesture(session) {
+        if (!eligible(session)) return;
+        // Section 14, and now one gesture earlier: the assistant's own speaker
+        // output is the thing most likely to end up in a microphone opened
+        // beside it, so it is silenced before any pre-roll is accepted rather
+        // than after.
+        stopSpeaking(true);
         markMic("opening");
 
-        // The microphone is asked for *here*, in the same task as the gesture,
-        // and not after the status check has come back. A browser only raises a
-        // permission prompt while it still considers a user gesture in
-        // progress, and a promise chain that has already awaited one round trip
-        // to the WebUI is past that on a phone -- which is how a page that had
-        // never been granted the microphone ended up reporting that capture was
-        // unavailable instead of asking. So both start at once and are
-        // reconciled below; a WebUI that turns out not to be ready closes the
-        // stream again immediately, which is a microphone open for a few
-        // hundred milliseconds rather than a prompt that never appeared.
         const opening = startCapture(session);
+        session.opening = opening;
         // Handled here as well so that a rejection which the reconciliation
         // below decides not to look at is not an unhandled one.
         opening.catch(function () { /* reported by the chain below */ });
-        const discard = function () {
-            return opening.then(releaseCapture, function () { /* nothing opened */ });
-        };
 
-        // A microphone that never opens must not leave the control pinned at
-        // the right for ever. Separate from the recording cap below, because
-        // they bound entirely different things -- see section 7.7.
+        // A microphone that never opens must not leave the control waiting for
+        // ever. Separate from the recording cap, because they bound entirely
+        // different things -- see section 7.7.
         session.openTimer = window.setTimeout(function () {
-            if (holding !== session || session.recordingAt) return;
-            holding = null;
-            session.cancelled = true;
-            resetSlider();
-            refuse(MESSAGES.unreadable);
-            reportCaptureTiming(session, null, "error");
-            discard();
+            if (sliding !== session || session.recordingAt) return;
+            session.refused = MESSAGES.unreadable;
+            abandon(session, "error");
+            if (session.engaged) {
+                holding = null;
+                resetSlider();
+                refuse(MESSAGES.unreadable);
+            }
         }, OPEN_TIMEOUT_MS);
 
-        // The graph, as soon as it exists -- not after the status round trip.
-        // Sample acceptance used to wait for an HTTP request to the WebUI to
-        // come back, and every callback that arrived first was dropped on the
-        // floor: audio the microphone really had captured, thrown away because
-        // a status check had not answered yet. What the status answer still
-        // decides is whether the recording is *kept*, below.
         opening.then(function (state) {
-            if (holding !== session || session.cancelled) {
+            if (sliding !== session || session.cancelled) {
+                // The gesture is over and this stream arrived anyway. Section
+                // 5.5: stop every track, attach nothing, accept nothing.
                 releaseCapture(state);
                 return;
             }
             capture = state;
             session.capture = state;
             session.graphAt = nowMs();
+            if (!session.engaged) markMic("buffering");
         }).catch(function (error) {
-            if (holding !== session) return;
-            holding = null;
-            if (session.openTimer) window.clearTimeout(session.openTimer);
-            resetSlider();
-            // Section 39's map, in one place. The browser's own error name is
-            // the only thing that knows which of these happened, and each of
-            // them is a different thing for the user to do next.
-            refuse(captureFailure(error));
-            reportCaptureTiming(session, null, "error");
+            if (sliding !== session) return;
+            session.refused = captureFailure(error);
+            abandon(session, "error");
+            if (session.engaged) {
+                holding = null;
+                resetSlider();
+                // Section 39's map, in one place. The browser's own error name
+                // is the only thing that knows which of these happened, and
+                // each of them is a different thing for the user to do next.
+                refuse(session.refused);
+            }
         });
 
+        // The expensive answer, running alongside rather than in front. What it
+        // still decides is whether the recording is *kept*.
         refreshStatus(false).then(function (found) {
-            if (holding !== session) return;
+            if (sliding !== session || session.cancelled) return;
             session.readinessAt = nowMs();
             if (found && found.ok && found.ready) return;
-            // Not ready after all. Whatever has been captured is dropped, the
-            // tracks are stopped, and the reason is the route's own sentence:
-            // "This page is out of date with the WebUI. Reload it." is
-            // actionable and "Voice transcription failed" is not.
+            const why = (!found || !found.ok)
+                ? ((found && found.error) || MESSAGES.failed)
+                : (found.not_ready_message || MESSAGES.notReady);
+            session.refused = why;
+            abandon(session, "error");
             holding = null;
-            if (session.openTimer) window.clearTimeout(session.openTimer);
-            if (session.timer) window.clearTimeout(session.timer);
-            if (session.capture && capture === session.capture) capture = null;
             resetSlider();
-            if (!found || !found.ok) {
-                refuse((found && found.error) || MESSAGES.failed);
-            } else {
-                refuse(found.not_ready_message || MESSAGES.notReady);
-            }
-            discard();
+            refuse(why);
         });
+    }
+
+    // Everything a gesture has to give back, on every path that ends one
+    // without sending: release, cancel, timeout, readiness failure, capture
+    // failure. Section 5.7, in one place, because five callers each doing four
+    // of the five things is how a microphone gets left open.
+    function abandon(session, result) {
+        if (session.done) return;
+        session.done = true;
+        session.cancelled = true;
+        if (session.openTimer) window.clearTimeout(session.openTimer);
+        if (session.timer) window.clearTimeout(session.timer);
+        if (!session.releasedAt) session.releasedAt = nowMs();
+        const state = session.capture;
+        if (capture === state) capture = null;
+        releaseCapture(state);
+        if (state) state.chunks = [];
+        if (session.opening) {
+            // A stream still on its way. It is stopped the moment it arrives --
+            // the guard above already refuses to attach it, and this makes sure
+            // its tracks do not stay live because nobody was left to look.
+            session.opening.then(releaseCapture, function () { /* nothing opened */ });
+        }
+        markMic("");
+        reportCaptureTiming(session, state, result || "discarded");
+    }
+
+    // Called the instant the slide reaches the end of its track, and from the
+    // keyboard equivalent. What it does now is *commit*: the microphone is
+    // already open, samples may already be arriving, and this is the moment
+    // they stop being the page's and become the user's utterance.
+    function engage() {
+        const session = sliding;
+        if (!session || session.engaged) return;
+        session.engaged = true;
+        session.engagedAt = nowMs();
+
+        // Whatever this gesture was refused for at the press, said now -- at
+        // the point the user actually asked for something.
+        if (session.refused) {
+            // The interrupt gesture still applies. Sliding the microphone while
+            // a reply is being read aloud means the reply is over, whether or
+            // not this page is willing to record.
+            stopSpeaking(true);
+            abandon(session, "error");
+            resetSlider();
+            refuse(session.refused);
+            return;
+        }
+
+        holding = session;
+        if (session.capture && session.capture.firstPcmAt) {
+            // The device was ready before the finger arrived. Section 5.6: the
+            // committed utterance begins at the first retained sample, because
+            // that pre-roll is deliberately part of what was said.
+            session.recordingAt = session.capture.firstPcmAt;
+            beginRecording(session);
+        } else {
+            markMic("opening");
+        }
     }
 
     function endHold(cancelled) {
         const session = holding;
         holding = null;
-        if (!session) return;
+        if (!session || session.done) return;
+        session.done = true;
         if (session.timer) window.clearTimeout(session.timer);
         if (session.openTimer) window.clearTimeout(session.openTimer);
-        session.cancelled = cancelled;
+        session.cancelled = true;
         session.releasedAt = nowMs();
 
-        const state = capture;
+        const state = capture || session.capture;
         capture = null;
         // From the first sample, not from the gesture. A phone that takes a
         // second to open a Bluetooth microphone was charging that second to the
@@ -1905,15 +1977,29 @@
     // No device name, no level, no samples: `reportCapture` above says what was
     // heard, and this says only how long it took to start hearing it.
     function reportCaptureTiming(session, state, result) {
+        if (session.timed) return;
+        session.timed = true;
         const since = function (mark) {
-            return mark ? Math.round(mark - session.engagedAt) : null;
+            return mark ? Math.round(mark - session.startedAt) : null;
         };
+        const firstPcm = state && state.firstPcmAt;
         sendReport({
             kind: "capture",
+            // From the press, because the press is where the microphone is now
+            // asked for. Every one of these is a duration from that moment, so
+            // together they separate the browser's permission and hardware from
+            // the module load from the graph from the device simply taking a
+            // while to produce its first sample.
             mic_request_ms: 0,
             stream_ready_ms: since(session.mediaAt),
-            first_pcm_ms: since(state && state.firstPcmAt),
-            engaged_ms: since(session.recordingAt),
+            first_pcm_ms: since(firstPcm),
+            engaged_ms: since(session.engagedAt),
+            // How much of the utterance existed before the slide finished --
+            // which is the whole of what revision 4 added, and the number that
+            // says whether it was worth adding. On a discarded gesture it is
+            // how much was thrown away.
+            preroll_ms: (firstPcm && session.engagedAt && session.engagedAt > firstPcm)
+                ? Math.round(session.engagedAt - firstPcm) : 0,
             recorded_ms: (session.recordingAt && session.releasedAt)
                 ? Math.round(session.releasedAt - session.recordingAt) : null,
             graph: (state && state.graph) || "none",
@@ -2068,6 +2154,8 @@
         trackClass(button, "mc-llm-voice-sliding", active);
     }
 
+    let gestures = 0;
+
     function beginSlide(event) {
         const button = clickable(IDS.mic);
         if (!button || sliding) return;
@@ -2075,28 +2163,41 @@
         // that is abandoned halfway should still have left playback able to
         // work, and this is the user gesture that permits that.
         unlock();
+        gestures += 1;
         sliding = {
             x: (event && event.clientX) || 0,
             pointerId: event && event.pointerId,
             travel: slideTravel(button),
             engaged: false,
+            // The identity everything asynchronous is checked against. A
+            // getUserMedia, a status answer or a module load that resolves
+            // after this gesture is over belongs to nothing, and section 5.5
+            // says what to do about it: stop the tracks, attach nothing.
+            token: gestures,
+            startedAt: nowMs(),
+            cancelled: false,
+            done: false,
+            capture: null,
+            opening: null,
+            refused: "",
+            mediaAt: 0,
+            workletAt: 0,
+            graphAt: 0,
+            readinessAt: 0,
+            engagedAt: 0,
+            recordingAt: 0,
+            releasedAt: 0,
+            openTimer: 0,
+            timer: 0,
         };
         markSliding(button, true);
-        // The slide is the time window press-and-hold never had. Asking now
-        // means the answer is normally in hand by the time the handle reaches
-        // the end of the track, so the microphone is opened -- or refused --
-        // without a round trip standing between the gesture and the browser's
-        // permission prompt. Nothing waits on it; it fills the cache.
-        refreshStatus(false);
-        // And the same argument for the audio graph. Registering the capture
-        // processor touches no microphone -- section 7.4 permits exactly this
-        // and forbids the thing it would be easy to do next, which is opening
-        // the microphone because a finger moved. It is a module load, and doing
-        // it during the travel means the first utterance on a page costs what
-        // every later one does.
-        try {
-            ensureCaptureWorklet(audioContext());
-        } catch (error) { /* the capture path falls back on its own */ }
+        // The microphone, here, in the same task as the press. Everything the
+        // browser has to do before a sample exists -- permission, opening the
+        // device, the stream, the graph -- used to sit *after* the slide, so a
+        // user who began talking as they slid lost the first word of it. The
+        // slide is that window, and what it produces is kept locally and
+        // uploaded only if the gesture completes.
+        openForGesture(sliding);
         try {
             if (event && event.pointerId !== undefined && button.setPointerCapture) {
                 button.setPointerCapture(event.pointerId);
@@ -2111,7 +2212,12 @@
         const moved = Math.max(0, Math.min(sliding.travel,
                                            ((event && event.clientX) || 0) - sliding.x));
         if (moved >= sliding.travel * SLIDE_ENGAGE) {
-            sliding.engaged = true;
+            // `engage` marks the session engaged itself, synchronously, and the
+            // guard at the top of this function is what stops a second move
+            // from arriving in the meantime. Setting it here as well was how
+            // the commit stopped happening: `engage` saw a session that was
+            // already engaged and returned without committing anything.
+            //
             // Pinned at the end for as long as the hold lasts. Once a recording
             // has started, a finger drifting back down the track is a finger
             // drifting -- not a decision -- and a microphone that stopped and
@@ -2133,10 +2239,16 @@
             endHold(!!cancelled);
             return;
         }
-        // Let go short of the end. Nothing was recorded and nothing is sent --
-        // and the control says what it wanted, because a gesture that does
+        // Let go short of the end. The microphone may well have been open and
+        // samples may well have been arriving; none of it becomes an utterance,
+        // none of it is uploaded, and the tracks stop now. Section 5.1's
+        // abandoned path, and the reason opening the microphone early is not a
+        // privacy change: what the gesture decides is not whether the device is
+        // touched but whether anything leaves this page.
+        abandon(session, "discarded");
+        // And the control says what it wanted, because a gesture that does
         // nothing and explains nothing is the one that gets reported as broken.
-        if (!cancelled) say(MESSAGES.slide);
+        if (!cancelled && !session.refused) say(MESSAGES.slide);
     }
 
     function wireMicrophone() {
@@ -2172,7 +2284,14 @@
             if (key !== " " && key !== "Spacebar" && key !== "Enter") return;
             if (event.repeat || sliding) return;
             if (event.preventDefault) event.preventDefault();
-            sliding = {x: 0, travel: 0, engaged: true, keyboard: true};
+            // The same gesture by the other route, and it goes through the
+            // same two steps: the press opens the microphone, and the
+            // engagement commits what it produced. There is no slide here, so
+            // the two happen in one task and the pre-roll is whatever the
+            // device manages in it.
+            beginSlide({clientX: 0});
+            if (!sliding) return;
+            sliding.keyboard = true;
             engageTrack(button, true);
             engage();
         });

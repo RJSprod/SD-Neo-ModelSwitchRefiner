@@ -1158,18 +1158,28 @@ class TestSlideToTalk:
 class TestTheSlideItself:
     """What the gesture is, as opposed to what happens once it has engaged."""
 
-    def test_a_press_that_never_slides_records_nothing(self):
-        """The whole point of the shape. A finger that lands on the handle --
-        a scroll that started there, a mis-tap on a phone -- must not open a
-        microphone."""
+    def test_a_press_that_never_slides_uploads_nothing(self):
+        """The whole point of the shape, restated for pre-roll.
+
+        A finger that lands on the handle -- a scroll that started there, a
+        mis-tap on a phone -- may now open the microphone, because the slide is
+        the window everything before the first sample has to happen in. What it
+        must never do is turn any of that into an utterance: nothing is
+        uploaded, no transcription is asked for, the tracks stop, and the
+        samples are dropped.
+        """
         found = run("""
             mic.fire("pointerdown", {pointerId: 21, clientX: 0});
+            await tick(4);
+            feed(new Array(8000).fill(0.2));
             await tick();
             releaseMic(21);
-            await tick();
+            await tick(4);
             console.log(JSON.stringify(report()));
         """)
-        assert not any(r.get("kind") == "getUserMedia" for r in found["requests"])
+        assert not [r for r in found["requests"] if (r.get("url") or "").endswith("/stt")]
+        assert found["tracks"] and all(found["tracks"]), "a microphone was left open"
+        assert "mc-llm-voice-recording" not in found["micClasses"]
         assert "Slide the microphone all the way to the right" in found["status"]
 
     def test_a_slide_short_of_the_end_does_not_engage(self):
@@ -1179,13 +1189,17 @@ class TestTheSlideItself:
         that engages halfway is a gesture nobody trusts."""
         found = run("""
             mic.fire("pointerdown", {pointerId: 22, clientX: 0});
-            await tick();
+            await tick(4);
             fireWindow("pointermove", {pointerId: 22, clientX: 30});
+            feed(new Array(8000).fill(0.2));
             await tick();
             console.log(JSON.stringify(report()));
         """)
-        assert not any(r.get("kind") == "getUserMedia" for r in found["requests"])
+        # The microphone is open -- that is what the press is for now -- and
+        # samples are being kept. What has not happened is the commitment.
         assert "mc-llm-voice-recording" not in found["micClasses"]
+        assert "mc-llm-voice-buffering" in found["micClasses"]
+        assert not [r for r in found["requests"] if (r.get("url") or "").endswith("/stt")]
 
     def test_the_handle_follows_the_finger_and_is_put_back_on_release(self):
         found = run("""
@@ -1352,14 +1366,25 @@ class TestWhenItCannotRecord:
                         PERMISSION="false", DENIAL='"%s"' % name)
             assert wanted in found["status"], (name, found["status"])
 
-    def test_a_missing_setup_flashes_an_error_and_never_opens_the_microphone(self):
+    def test_a_missing_setup_is_reported_and_records_nothing(self):
+        """The first gesture on a page cannot know: the answer arrives while the
+        pre-roll is being captured, and when it says no the capture is dropped
+        and the tracks are stopped. The *second* gesture knows, and never opens
+        anything at all."""
         answers = json.loads(DEFAULTS["ANSWERS"])
         answers["voice/status"]["json"].update({"ready": False, "stt_ready": False})
-        found = run("await hold(900); console.log(JSON.stringify(report()));",
-                    ANSWERS=json.dumps(answers))
+        found = run("""
+            await hold(900);
+            const first = requests.filter((r) => r.kind === "getUserMedia").length;
+            await hold(900);
+            console.log(JSON.stringify(report({first})));
+        """, ANSWERS=json.dumps(answers))
         assert "not set up" in found["status"]
         assert "mc-llm-voice-error" in found["micClasses"]
-        assert not any(r.get("kind") == "getUserMedia" for r in found["requests"])
+        assert not [r for r in found["requests"] if (r.get("url") or "").endswith("/stt")]
+        assert found["tracks"] and all(found["tracks"]), "a microphone was left open"
+        opened = len([r for r in found["requests"] if r.get("kind") == "getUserMedia"])
+        assert opened == found["first"], "the second gesture opened a microphone anyway"
 
     def test_it_will_not_record_while_a_reply_is_generating(self):
         """Busy is Python's run-state value now rather than the last CSS the
@@ -1552,17 +1577,26 @@ class TestOpeningAndRecording:
 
     def test_m7_a_known_not_ready_state_never_opens_the_microphone(self):
         """A permission prompt raised for a feature that cannot run is a prompt
-        asked for nothing."""
+        asked for nothing. "Known" is the operative word: this is the cheap
+        synchronous check the press makes, and it can only refuse on an answer
+        that is already in hand."""
         found = run("""
-            // The slide fills the readiness cache, and the engagement at the end
-            // of it reads the answer that is already in hand.
+            // The first gesture fills the readiness cache and is refused when
+            // the answer arrives.
             mic.fire("pointerdown", {pointerId: 37, clientX: 0});
+            await tick(6);
+            releaseMic(37);
             await tick(4);
-            fireWindow("pointermove", {pointerId: 37, clientX: 400});
+            const before = requests.filter((r) => r.kind === "getUserMedia").length;
+            // The second one knows before it touches anything.
+            mic.fire("pointerdown", {pointerId: 38, clientX: 0});
             await tick(4);
-            console.log(JSON.stringify(report()));
+            fireWindow("pointermove", {pointerId: 38, clientX: 400});
+            await tick(4);
+            console.log(JSON.stringify(report({before})));
         """, ANSWERS=status_answer(ready=False, not_ready_message="Install both models."))
-        assert not any(r.get("kind") == "getUserMedia" for r in found["requests"])
+        opened = len([r for r in found["requests"] if r.get("kind") == "getUserMedia"])
+        assert opened == found["before"], "a known-unavailable Voice Chat opened a microphone"
         assert "Install both models." in found["status"]
 
     def test_m8_engagement_does_not_wait_for_the_worklet_to_finish_loading(self):
@@ -1599,16 +1633,19 @@ class TestOpeningAndRecording:
         posts = [r for r in found["requests"] if r.get("url", "").endswith("/stt")]
         assert len(posts) == 1, found["status"]
 
-    def test_the_slide_prepares_the_worklet_without_opening_the_microphone(self):
-        """Section 7.4's whole boundary: preparation during the slide is
-        allowed, and touching the microphone because a finger moved is not."""
+    def test_the_press_opens_the_microphone_and_prepares_the_worklet_together(self):
+        """Revision 4's boundary, and it has moved. The gesture is what asks for
+        the microphone; the module load runs alongside it and never in front of
+        it. What the press does not do is commit anything."""
         found = run("""
             mic.fire("pointerdown", {pointerId: 40, clientX: 0});
+            const asked = requests.filter((r) => r.kind === "getUserMedia").length;
             await tick(4);
-            console.log(JSON.stringify(report()));
+            console.log(JSON.stringify(report({asked})));
         """)
+        assert found["asked"] == 1, "the microphone was not asked for in the gesture's task"
         assert found["moduleLoads"] == 1
-        assert not any(r.get("kind") == "getUserMedia" for r in found["requests"])
+        assert "mc-llm-voice-recording" not in found["micClasses"]
 
     def test_the_slide_and_the_engagement_share_one_status_request(self):
         """Two callers a few hundred milliseconds apart asking the same
@@ -1697,6 +1734,164 @@ class TestOpeningAndRecording:
         rows = _captures(found)
         assert rows and rows[0]["result"] == "discarded", rows
         assert not [r for r in found["requests"] if (r.get("url") or "").endswith("/stt")]
+
+
+class TestPreRollCapture:
+    """The lead-in, and the seven ways it must not misbehave.
+
+    Everything before the first sample -- permission, opening the device, the
+    stream, assembling the graph -- used to sit between the slide finishing and
+    the recording starting, so a user who began talking as they slid lost the
+    first word of it. The slide is now the window those things happen in.
+
+    What that changes is when the microphone is touched. What it deliberately
+    does not change is when anything leaves this page: the gesture still decides
+    that, and a gesture that is abandoned uploads nothing.
+    """
+
+    def test_m1_samples_captured_before_engagement_are_part_of_the_utterance(self):
+        """Section 5.6: the committed utterance begins at the first retained
+        sample, because that pre-roll is deliberately part of what was said."""
+        found = run("""
+            mic.fire("pointerdown", {pointerId: 50, clientX: 0});
+            await tick(4);
+            // Talking while sliding.
+            feed(new Array(8000).fill(0.2));
+            await tick();
+            NOW += 300;
+            fireWindow("pointermove", {pointerId: 50, clientX: 400});
+            await tick();
+            feed(new Array(8000).fill(0.2));
+            NOW += 600;
+            releaseMic(50);
+            await tick(4);
+            console.log(JSON.stringify(report()));
+        """)
+        posts = [r for r in found["requests"] if (r.get("url") or "").endswith("/stt")]
+        assert len(posts) == 1, found["status"]
+        # Both blocks are in the upload: 16000 samples of 48 kHz resampled to
+        # 16 kHz is about 5333 frames, so ten and a half thousand bytes.
+        assert posts[0]["bodyLength"] > 9000, posts[0]["bodyLength"]
+        row = _captures(found).pop()
+        assert row["preroll_ms"] == 300, row
+        assert row["result"] == "sent"
+
+    def test_m2_an_abandoned_gesture_uploads_nothing(self):
+        found = run("""
+            mic.fire("pointerdown", {pointerId: 51, clientX: 0});
+            await tick(4);
+            feed(new Array(8000).fill(0.2));
+            await tick();
+            NOW += 900;
+            releaseMic(51);
+            await tick(4);
+            console.log(JSON.stringify(report()));
+        """)
+        assert not [r for r in found["requests"] if (r.get("url") or "").endswith("/stt")]
+        assert found["tracks"] and all(found["tracks"]), "a microphone was left open"
+        row = _captures(found).pop()
+        assert row["result"] == "discarded"
+        assert row["preroll_ms"] == 0, "an abandoned gesture reported an engagement"
+
+    def test_m3_a_pending_worklet_does_not_delay_an_open_microphone(self):
+        """Section 5.4. The preferred graph is preferred, not waited for: a
+        module load that has not finished when the stream arrives gets the
+        ScriptProcessor for this utterance and finishes for the next one."""
+        found = run("""
+            await hold(900);
+            console.log(JSON.stringify(report()));
+        """, WORKLET_LOADS="false")
+        posts = [r for r in found["requests"] if (r.get("url") or "").endswith("/stt")]
+        assert len(posts) == 1 and posts[0]["bodyLength"] > 44
+        assert _captures(found).pop()["graph"] == "script"
+
+    def test_m4_a_stream_that_arrives_after_the_gesture_is_stopped_at_once(self):
+        """Section 5.5. Release, then the permission prompt is answered. What
+        comes back is attached to nothing and stopped immediately."""
+        found = run("""
+            mic.fire("pointerdown", {pointerId: 52, clientX: 0});
+            await tick();
+            releaseMic(52);
+            await tick();
+            const beforeStream = report().tracks.filter(Boolean).length;
+            await openMicrophoneNow();
+            feed(new Array(8000).fill(0.2));
+            await tick(4);
+            console.log(JSON.stringify(report({beforeStream})));
+        """, SLOW_OPEN="true")
+        assert found["tracks"], "no microphone was asked for at all"
+        assert all(found["tracks"]), "a late stream was left running"
+        assert not [r for r in found["requests"] if (r.get("url") or "").endswith("/stt")]
+        assert "mc-llm-voice-recording" not in found["micClasses"]
+
+    def test_m5_tts_is_silenced_before_any_pre_roll_is_accepted(self):
+        """The assistant's own loudspeaker is the thing most likely to end up in
+        a microphone opened beside it, so it is stopped at the press now rather
+        than at the far end of the track."""
+        found = run("""
+            await speak('T1', 4);
+            const playing = report().played;
+            mic.fire("pointerdown", {pointerId: 53, clientX: 0});
+            const stoppedAtPress = report().stopped;
+            await tick(4);
+            console.log(JSON.stringify(report({playing, stoppedAtPress})));
+        """, ANSWERS=stream_answers(seconds=1.0, count=6, stall=True))
+        assert found["playing"] >= 1, "nothing was playing to interrupt"
+        assert found["stoppedAtPress"] >= 1, "the speaker was still going during pre-roll"
+        assert any(r["url"].endswith("voice/cancel") for r in found["requests"])
+
+    def test_m6_no_track_survives_any_exit(self):
+        """Release, cancel, and a readiness answer that says no."""
+        for scenario in ("releaseMic(54); await tick(4);",
+                         "fireWindow('pointercancel', {pointerId: 54}); await tick(4);",
+                         "await answerStatus();"):
+            found = run("""
+                mic.fire("pointerdown", {pointerId: 54, clientX: 0});
+                await tick(4);
+                feed(new Array(8000).fill(0.2));
+                await tick();
+                SCENARIO_STEP
+                console.log(JSON.stringify(report()));
+            """.replace("SCENARIO_STEP", scenario),
+                        ANSWERS=deferred_status(ready=False,
+                                                not_ready_message="Install both models."))
+            assert found["tracks"], "no microphone was opened at all: " + scenario
+            assert all(found["tracks"]), "a track was left running: " + scenario
+
+    def test_m7_buffering_never_claims_to_be_recording(self):
+        """Sample capture and utterance commitment are different states, and the
+        control says which one it is in -- in the colour and, for anybody who
+        cannot read a colour, in the label."""
+        found = run("""
+            mic.fire("pointerdown", {pointerId: 55, clientX: 0});
+            await tick(4);
+            feed(new Array(8000).fill(0.2));
+            await tick();
+            console.log(JSON.stringify(report({
+                label: mic.getAttribute("aria-label"),
+                track: Array.from(micTrack.classList.names),
+            })));
+        """)
+        assert "mc-llm-voice-buffering" in found["micClasses"]
+        assert "mc-llm-voice-recording" not in found["micClasses"]
+        assert "mc-llm-voice-armed" not in found["track"]
+        assert found["label"] == "Microphone open — slide to record"
+
+    def test_the_keyboard_route_opens_and_commits_in_one_gesture(self):
+        """There is no slide to hold Space through, so the press and the
+        engagement happen in one task and the pre-roll is whatever the device
+        manages in it. What must not change is that it records and sends."""
+        found = run("""
+            mic.fire("keydown", {key: " "});
+            await tick(4);
+            feed(new Array(8000).fill(0.2));
+            NOW += 900;
+            mic.fire("keyup", {key: " "});
+            await tick(4);
+            console.log(JSON.stringify(report()));
+        """)
+        posts = [r for r in found["requests"] if (r.get("url") or "").endswith("/stt")]
+        assert len(posts) == 1, found["status"]
 
 
 class TestTheRecording:
