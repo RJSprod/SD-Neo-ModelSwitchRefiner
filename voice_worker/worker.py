@@ -42,7 +42,7 @@ Operations:
                 carries the transcript.
     tts         payload is UTF-8 text; the payload of the reply is a WAV. Kept
                 for Test playback and for an explicit non-streaming fallback.
-    tts_begin   open a turn: an id, a validated numeric speaker and a speed.
+    tts_begin   open a turn: an id, a validated numeric speaker and a delivery.
     tts_text    one immutable segment of that turn, already decided by the
                 parent's segmenter. Never a raw token.
     tts_finish  no more segments are coming.
@@ -54,6 +54,32 @@ Frames out carry ``turn`` wherever they belong to a turn: ``tts_ready``,
 ``tts_audio``, ``tts_segment_done``, ``tts_done``, ``tts_cancelled`` and
 ``tts_error``. Section 24 -- an audio block that cannot say which reply it
 belongs to is an audio block that can be played over the next one.
+
+Delivery: what the model does, and what this file does
+------------------------------------------------------
+A turn and a ``tts`` both carry four numbers, and it is worth being exact about
+which of them Kokoro has ever heard of.
+
+``speed`` is the model's. It goes straight into ``generate`` and changes how the
+model articulates. The other three are arithmetic this file does on the samples
+that came back, and :class:`Delivery` is where they are held:
+
+    ``pitch``     a frequency ratio. Synthesis runs at ``speed x pitch`` and
+                  :class:`Resampler` then reads the result back at ``pitch``
+                  samples per output sample -- which shifts every frequency by
+                  the ratio and puts the duration back where ``speed`` asked
+                  for it. Formants move too, so this reads as a
+                  different-sized speaker rather than as a transposed one.
+    ``gain``      a linear scalar folded into the PCM16 conversion, so it costs
+                  nothing extra and cannot produce a second pass over the
+                  samples.
+    ``pause_ms``  silence emitted between segments, which is a property of a
+                  streamed turn and does nothing on the single-call ``tts``
+                  route -- there are no segment boundaries there to put it at.
+
+All of it is skipped when the numbers are neutral: :attr:`Delivery.shapes` is
+false for the default profile, and an installation that never touches these
+controls runs the path it ran before they existed.
 
 Cancellation, honestly
 ----------------------
@@ -320,6 +346,166 @@ def _lower_priority() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _bounded(value, limits, fallback):
+    """``value`` as a float inside ``limits``, or ``fallback``.
+
+    Total on purpose. This is the boundary between a JSON header and a number
+    that multiplies a synthesis rate, and every way that value can be wrong --
+    absent, a string, a NaN, an infinity, negative -- means the same thing here.
+    """
+    low, high = limits
+    try:
+        found = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if found != found or found in (float("inf"), float("-inf")):
+        return fallback
+    return min(max(found, low), high)
+
+
+class Delivery:
+    """The four numbers one synthesis is shaped by.
+
+    Built from a frame header, which is the only place they come from, and
+    bounded here as well as in the parent -- ``mc_voice_profile`` clamps them
+    before they are sent, and this process does not take a caller's word for a
+    multiplier it is about to hand to native code.
+    """
+
+    __slots__ = ("speed", "pitch", "gain", "pause_ms")
+
+    SPEED = (0.25, 4.0)
+    PITCH = (0.5, 2.0)
+    GAIN = (0.05, 8.0)
+    PAUSE = (0, 5000)
+
+    def __init__(self, speed=1.0, pitch=1.0, gain=1.0, pause_ms=0):
+        self.speed = _bounded(speed, self.SPEED, 1.0)
+        self.pitch = _bounded(pitch, self.PITCH, 1.0)
+        self.gain = _bounded(gain, self.GAIN, 1.0)
+        self.pause_ms = int(_bounded(pause_ms, self.PAUSE, 0))
+
+    @classmethod
+    def from_header(cls, header: dict) -> "Delivery":
+        found = header or {}
+        return cls(speed=found.get("speed"), pitch=found.get("pitch"),
+                   gain=found.get("gain"), pause_ms=found.get("pause_ms"))
+
+    @property
+    def generation_speed(self) -> float:
+        """What ``generate`` is actually asked for.
+
+        ``speed x pitch``, because the resampler below divides the duration by
+        ``pitch`` again on the way out. Asking Kokoro for the user's speed and
+        then resampling would produce the right pitch at the wrong length.
+        """
+        return _bounded(self.speed * self.pitch, self.SPEED, 1.0)
+
+    @property
+    def shapes(self) -> bool:
+        """Whether anything at all has to be done to the samples."""
+        return self.pitch != 1.0 or self.gain != 1.0
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return (f"Delivery(speed={self.speed}, pitch={self.pitch}, gain={self.gain}, "
+                f"pause_ms={self.pause_ms})")
+
+
+NEUTRAL = Delivery()
+"""Kokoro exactly as it comes out of the model. The default everywhere."""
+
+
+class Resampler:
+    """Linear resampling of a stream, with the state a stream needs.
+
+    ``ratio`` is how many input samples advance per output sample, so a ratio
+    above one shortens the audio and raises its pitch. Blocks arrive from
+    sherpa's callback at whatever granularity it chooses, and an output sample
+    routinely needs two input samples that arrived in different blocks -- so the
+    unconsumed tail and the fractional read position are carried between calls
+    rather than recomputed, which is what stops a click at every block boundary.
+
+    One instance per segment. At most one input sample is left unread when a
+    segment ends, which at 24 kHz is forty microseconds of the silence Kokoro
+    already puts at the end of a sentence.
+
+    Linear rather than windowed, for the reason ``javascript/voice_chat.js``
+    gives about the microphone path: the artefacts a proper filter would remove
+    sit far above what a 24 kHz speech signal shifted by a few semitones puts
+    there, and a resampling dependency inside a two-wheel runtime is a
+    dependency this feature has already decided not to have.
+    """
+
+    def __init__(self, ratio: float):
+        self.ratio = float(ratio)
+        self._tail = []
+        self._base = 0.0
+        self._position = 0.0
+
+    def feed(self, samples) -> list:
+        tail = self._tail
+        tail.extend(samples)
+        position, base, ratio = self._position, self._base, self.ratio
+        limit = base + len(tail) - 1
+        out = []
+        while position <= limit:
+            local = position - base
+            low = int(local)
+            fraction = local - low
+            first = tail[low]
+            out.append(first + (tail[low + 1] - first) * fraction if fraction else first)
+            position += ratio
+        # Everything before the next read position can never be read again.
+        # Dropped here rather than at the end of the segment, or a long reply
+        # would carry its whole first sentence in this list.
+        spent = int(position - base)
+        if spent > 0:
+            del tail[:spent]
+            base += spent
+        self._position, self._base = position, base
+        return out
+
+
+class Shaper:
+    """One segment's samples, pitched and levelled, as PCM16 bytes.
+
+    Holds the resampler so that the pitch shift is continuous across the blocks
+    of one segment, and folds the gain into the conversion so that the level
+    costs no pass of its own. A neutral delivery makes this exactly
+    :func:`pcm16`, which is the path an installation that has never opened these
+    controls takes.
+    """
+
+    def __init__(self, delivery: "Delivery" = None):
+        self.delivery = delivery or NEUTRAL
+        self._resampler = (Resampler(self.delivery.pitch)
+                           if self.delivery.pitch != 1.0 else None)
+
+    def shaped(self, samples):
+        """The samples at the requested pitch. Level is not applied here.
+
+        Split from :meth:`block` because the streaming path wants PCM16 and the
+        completed-audio path wants floats to hand to ``encode_wav``, and
+        converting to bytes and back for the second one would be a round trip
+        for nothing.
+        """
+        if self._resampler is None:
+            return samples
+        return self._resampler.feed(samples)
+
+    def block(self, samples) -> bytes:
+        """One block of a streamed segment, pitched and levelled, as PCM16."""
+        return pcm16(self.shaped(samples), self.delivery.gain)
+
+    def levelled(self, samples):
+        """The samples at the requested pitch *and* level, still as floats."""
+        found = self.shaped(samples)
+        level = self.delivery.gain
+        if level == 1.0:
+            return found
+        return [min(max(float(value) * level, -1.0), 1.0) for value in found]
+
+
 class Engines:
     """The recognizer and the synthesiser, loaded once and kept warm.
 
@@ -444,11 +630,28 @@ class Engines:
         self.recognizer.decode_stream(stream)
         return (stream.result.text or "").strip()
 
-    def synthesize(self, text: str, sid: int = 0, speed: float = 1.0):
-        audio = self.tts.generate(text, sid=self.speaker(sid), speed=float(speed or 1.0))
-        return audio.samples, int(audio.sample_rate)
+    def synthesize(self, text: str, sid: int = 0, delivery: "Delivery" = None):
+        """One complete string, shaped, as float samples and a rate.
 
-    def stream(self, text: str, sid: int, speed: float, on_audio) -> int:
+        Returns samples rather than bytes because ``encode_wav`` above is what
+        this route's caller wants. It goes through the same :class:`Shaper` the
+        streaming path uses, so an audition and a spoken reply cannot end up
+        pitched differently.
+
+        ``pause_ms`` does nothing here and is not quietly approximated: this
+        route is one ``generate`` call with no segment boundaries in it, and the
+        pacing control is a gap *between* segments. The only text that comes
+        down this path is an audition or a fallback for a single short reply.
+        """
+        found = delivery or NEUTRAL
+        audio = self.tts.generate(text, sid=self.speaker(sid),
+                                  speed=found.generation_speed)
+        rate = int(audio.sample_rate)
+        if not found.shapes:
+            return audio.samples, rate
+        return Shaper(found).levelled(audio.samples), rate
+
+    def stream(self, text: str, sid: int, delivery, on_audio) -> int:
         """Synthesize ``text``, handing PCM16 to ``on_audio`` as it appears.
 
         ``on_audio(pcm, rate)`` returns True to continue and False to stop, and
@@ -462,11 +665,16 @@ class Engines:
         holds a reference to native audio memory after the callback returns.
         """
         speaker = self.speaker(sid)
+        found = delivery or NEUTRAL
         rate = int(self.sample_rate or 0)
         produced = [0]
+        # One per segment, because the pitch shift carries a fractional read
+        # position between blocks and starting a new one mid-sentence would put
+        # a click at the boundary.
+        shaper = Shaper(found)
 
         def emit(samples, sample_rate) -> bool:
-            block = pcm16(samples)
+            block = shaper.block(samples)
             if not block:
                 return True
             produced[0] += len(block) // 2
@@ -477,7 +685,8 @@ class Engines:
                 return 1 if emit(samples, rate or self.sample_rate) else 0
 
             try:
-                audio = self.tts.generate(text, sid=speaker, speed=float(speed or 1.0),
+                audio = self.tts.generate(text, sid=speaker,
+                                          speed=found.generation_speed,
                                           callback=callback)
                 if not produced[0] and getattr(audio, "samples", None) is not None:
                     # A build that accepts the argument and never calls it. One
@@ -493,8 +702,12 @@ class Engines:
                 self.streaming = "segment"
                 _note(f"this runtime stopped streaming inside a sentence ({_safe(exc)}); "
                       f"speech will arrive one segment at a time from now on")
+                # The half-used shaper goes with the attempt that failed. It
+                # carries a read position into audio nobody heard, and reusing
+                # it would start the retry a fraction of a sample out.
+                shaper = Shaper(found)
 
-        audio = self.tts.generate(text, sid=speaker, speed=float(speed or 1.0))
+        audio = self.tts.generate(text, sid=speaker, speed=found.generation_speed)
         emit(audio.samples, int(audio.sample_rate))
         return produced[0]
 
@@ -522,8 +735,12 @@ def _numpy():
     return _NUMPY
 
 
-def pcm16(samples) -> bytes:
-    """Float samples in [-1, 1] as little-endian PCM16 bytes.
+def pcm16(samples, gain: float = 1.0) -> bytes:
+    """Float samples in [-1, 1] as little-endian PCM16 bytes, times ``gain``.
+
+    The gain is folded in here rather than applied in a pass of its own, and the
+    clamp that was already protecting against a model that overshot is what
+    limits it: a volume setting cannot distort, it can only stop getting louder.
 
     Little-endian on every platform, explicitly, because these bytes are read
     by a browser's ``DataView`` with ``littleEndian`` hard-coded true -- and a
@@ -535,23 +752,39 @@ def pcm16(samples) -> bytes:
     """
     if samples is None:
         return b""
+    level = float(gain or 1.0)
     numpy = _numpy()
     if numpy is not None:
         block = numpy.array(samples, dtype="float32", copy=True)
         if not block.size:
             return b""
+        if level != 1.0:
+            block *= level
         numpy.clip(block, -1.0, 1.0, out=block)
         return (block * 32767.0).astype("<i2").tobytes()
 
     import array
 
     clipped = array.array("h")
+    scale = 32767.0 * level
     for value in samples:
-        scaled = int(float(value) * 32767.0)
+        scaled = int(float(value) * scale)
         clipped.append(32767 if scaled > 32767 else (-32768 if scaled < -32768 else scaled))
     if sys.byteorder == "big":
         clipped.byteswap()
     return clipped.tobytes()
+
+
+def silence(rate: int, milliseconds: int) -> bytes:
+    """A block of PCM16 quiet, for the gap between two sentences.
+
+    Built rather than synthesized: asking Kokoro to say nothing costs a
+    forward pass and produces a room tone that would change with the speaker.
+    Zeroes are the same silence every time, which is what a pacing control is
+    asking for.
+    """
+    frames = int(max(int(rate or 0), 0) * max(int(milliseconds or 0), 0) / 1000.0)
+    return b"\x00\x00" * frames if frames > 0 else b""
 
 
 def _required(section: dict, key: str) -> str:
@@ -635,10 +868,10 @@ not thirty.
 class Turn:
     """One streaming reply inside this process."""
 
-    def __init__(self, identifier: str, sid: int, speed: float):
+    def __init__(self, identifier: str, sid: int, delivery: "Delivery" = None):
         self.id = str(identifier or "")
         self.sid = int(sid or 0)
-        self.speed = float(speed or 1.0)
+        self.delivery = delivery or NEUTRAL
         self.segments = queue.Queue()
         self.cancelled = threading.Event()
         self.source_done = threading.Event()
@@ -811,8 +1044,8 @@ class Worker:
         with self._turn_lock:
             return self._turns.get(str(identifier or ""))
 
-    def open_turn(self, identifier: str, sid: int, speed: float) -> Turn:
-        found = Turn(identifier, sid, speed)
+    def open_turn(self, identifier: str, sid: int, delivery: "Delivery" = None) -> Turn:
+        found = Turn(identifier, sid, delivery)
         with self._turn_lock:
             self._turns[found.id] = found
         return found
@@ -842,6 +1075,8 @@ class Worker:
                    "streaming": engines.streaming})
         sequence = 0
         started = time.monotonic()
+        spoken = 0
+        gap = silence(int(engines.sample_rate or 0), turn.delivery.pause_ms)
         try:
             while True:
                 text = turn.next_segment()
@@ -858,7 +1093,13 @@ class Worker:
                                "sample_rate": int(rate or 0)}, block, audio=True)
                     return not _turn.cancelled.is_set()
 
-                engines.stream(text, sid, turn.speed, on_audio)
+                # Before this segment rather than after the last one, so a turn
+                # that is cancelled mid-reply does not end on a gap and a turn
+                # that finishes does not leave the composer waiting through one.
+                if gap and spoken and not turn.cancelled.is_set():
+                    on_audio(gap, int(engines.sample_rate or 0))
+                engines.stream(text, sid, turn.delivery, on_audio)
+                spoken += 1
                 if turn.cancelled.is_set():
                     break
                 self.send({"op": "tts_segment_done", "turn": turn.id, "seq": sequence})
@@ -984,7 +1225,7 @@ def serve(stdin, stdout, engines_factory=None) -> int:
             elif operation == "tts_begin":
                 turn = worker.open_turn(str(header.get("turn") or ""),
                                         int(header.get("sid") or 0),
-                                        float(header.get("speed") or 1.0))
+                                        Delivery.from_header(header))
                 worker.submit(lambda found=turn: worker.speak(found))
 
             elif operation == "tts_text":
@@ -1056,7 +1297,7 @@ def _do_tts(worker, reply, request_id, header: dict, payload: bytes) -> None:
         text = payload.decode("utf-8", "replace")
         started = time.monotonic()
         samples, rate = worker.engines.synthesize(text, int(header.get("sid") or 0),
-                                                  float(header.get("speed") or 1.0))
+                                                  Delivery.from_header(header))
         audio = encode_wav(samples, rate)
         elapsed = time.monotonic() - started
         seconds = len(audio) / float(max(rate, 1) * 2)

@@ -479,6 +479,11 @@ def build() -> dict:
                     "with the rest of the character, so a seed of −1 there is what makes "
                     "its replies vary.",
                     elem_classes=ui.classes("hint"))
+                # Which voice reads this character aloud, and how, beside the
+                # rest of what makes it that character. Built by the voice
+                # module so the compact list here and the full one in Settings
+                # cannot drift apart -- see mc_voice_ui.character_panel.
+                character_voice = mc_voice_ui.character_panel()
                 with gr.Row():
                     save_character = gr.Button("Save character", variant="primary", size="sm")
                     close_editor = gr.Button("Cancel", size="sm")
@@ -628,13 +633,20 @@ def build() -> dict:
     # One output list for every handler that touches the editor, in the order
     # ``_editor_fields`` answers in, so none of them can leave the boxes and
     # the character being written to describing different characters.
+    # The voice controls, in the order ``_editor_fields`` answers in. Held as a
+    # list of its own so the two places that build an editor state -- the fields
+    # and the closed-editor no-op -- agree about how many there are.
+    voice_fields = ([character_voice["chosen"], character_voice["custom"],
+                     character_voice["delivery"]] + character_voice["sliders"])
+
     editor = ([character_editor, editing, name, context, greeting, system]
-              + sampling + [system_preview, status, character_face])
+              + sampling + [system_preview, status, character_face] + voice_fields)
 
     switched = character.change(fn=_select_character, inputs=[character, search, message],
                                 outputs=[threads, thread_state, message] + view
                                 + [name, context, greeting, system] + sampling
-                                + [editing, system_preview, character_face], queue=False)
+                                + [editing, system_preview, character_face]
+                                + voice_fields, queue=False)
     switched.then(fn=_faces_update, inputs=[character], outputs=[transcript], queue=False)
     edit_character.click(fn=_open_character, inputs=[character], outputs=editor, queue=False)
     new_character.click(fn=_new_character, outputs=editor, queue=False)
@@ -650,9 +662,19 @@ def build() -> dict:
                       outputs=[system, status], queue=False)
     saving = save_character.click(
         fn=_save_character,
-        inputs=[editing, name, context, greeting, system] + sampling + [character_face],
+        inputs=([editing, name, context, greeting, system] + sampling + [character_face]
+                + [character_voice["chosen"], character_voice["custom"]]
+                + character_voice["sliders"]),
         outputs=[character, editing, status], queue=False)
     saving.then(fn=_faces_update, inputs=[character], outputs=[transcript], queue=False)
+    # Shown and hidden by the checkbox above it, on ``change`` rather than
+    # ``input`` so that loading a character which has its own delivery reveals
+    # the sliders holding it -- a group left shut over four values that are in
+    # force would be four settings nobody can see.
+    character_voice["custom"].change(
+        fn=lambda wanted: gr.update(visible=bool(wanted)),
+        inputs=[character_voice["custom"]], outputs=[character_voice["delivery"]],
+        queue=False)
     delete_character.click(fn=_delete_character, inputs=[character],
                            outputs=[character, character_editor, editing, status], queue=False)
     imported = import_card.upload(
@@ -755,7 +777,7 @@ def build() -> dict:
     # a reply cannot be added without either joining this loop or being visibly
     # absent from it. Section 49's requirement is exactly that the registration
     # be structurally shared.
-    speech_marker = mc_voice_ui.speech_marker(take_completed_reply)
+    speech_marker = mc_voice_ui.speech_marker(take_completed_reply, _character_named)
 
     for run in (replying, submitted, regenerating, again, continuing, resending):
         # The thread list is refreshed because an untitled thread has just been
@@ -771,7 +793,8 @@ def build() -> dict:
         # an event that did not raise, and the handler still checks what the run
         # actually left behind, because a nominally successful terminal callback
         # is not the same claim as a whole reply.
-        run.success(fn=speech_marker, outputs=[voice_plumbing["token"]])
+        run.success(fn=speech_marker, inputs=[character],
+                    outputs=[voice_plumbing["token"]])
 
     stop.click(fn=_cancel, inputs=[cancellation],
                outputs=[status, send, stop, voice_plumbing["turn"],
@@ -1342,7 +1365,8 @@ def _select_character(who, filter_text, typed=""):
                loaded.temperature, loaded.top_p, loaded.max_reply_tokens, loaded.seed,
                loaded.name or NOT_EDITING,
                _system_preview(loaded.name, loaded.context, loaded.system),
-               _face_value(_character_face(loaded.name))])
+               _face_value(_character_face(loaded.name))]
+            + _voice_fields(loaded))
 
 
 def _open_thread(who, identifier, typed=""):
@@ -2277,6 +2301,25 @@ NOT_EDITING = ""
 """``editing`` while the editor holds a character that is not on disk yet."""
 
 
+def _character_named(who):
+    """The character being talked to, or ``None``. Never raises.
+
+    Passed to :func:`mc_voice_ui.speech_marker` so that a completed reply is
+    remembered against the voice its character asked for. Total, because it is
+    read on a success handler attached to every reply-producing run: a character
+    file that has gone missing is a reply spoken in the default voice, not a
+    reply that fails after it has been written.
+    """
+    name = str(who or "").strip()
+    if not name:
+        return None
+    try:
+        return _characters().load(name)
+    except Exception:
+        logger.debug("Model Chain: could not read the character %r", name, exc_info=True)
+        return None
+
+
 def _blank_character():
     """A character with the vendored package's own defaults and no name.
 
@@ -2310,13 +2353,33 @@ def _editor_fields(character, editing: str, note: str, kind: str = "info") -> li
             # The picture this character has, if it has one. Read off disk with
             # everything else so the box cannot end up showing the face of the
             # character that *was* open in the editor.
-            _face_value(_character_face(character.name))]
+            _face_value(_character_face(character.name))] + _voice_fields(character)
+
+
+def _voice_fields(character) -> list:
+    """The voice controls for ``character``, in the order they are wired.
+
+    The hidden id, the "its own delivery" checkbox, that group's visibility, and
+    then the four sliders. Visibility is in the list rather than left to the
+    checkbox's own handler because loading a character is a server-side write:
+    Gradio does not fire ``change`` for a value Python put there, so a character
+    with its own delivery would open with the box ticked and the sliders hidden
+    under it.
+    """
+    found = mc_voice_ui.character_state(character)
+    return ([found["voice"], found["custom"], gr.update(visible=found["custom"])]
+            + list(found["values"]))
+
+
+def _blank_voice_fields() -> list:
+    """The same list, all of it left alone. One per control, counted here."""
+    return [gr.update()] * (3 + len(mc_voice_ui.delivery_controls()))
 
 
 def _closed_editor(note: str, kind: str = "info") -> list:
     """The editor shut, with everything in it left exactly as it was."""
     return ([gr.update(visible=False), gr.update()] + [gr.update()] * 9
-            + [ui.notice(note, kind), gr.update()])
+            + [ui.notice(note, kind), gr.update()] + _blank_voice_fields())
 
 
 def _system_preview(name, context, system) -> str:
@@ -2413,7 +2476,8 @@ def _cancel_character(who):
 
 
 def _save_character(editing, name, context, greeting, system, temperature, top_p,
-                    reply_tokens, seed, face=None):
+                    reply_tokens, seed, face=None, voice="", voice_custom=False,
+                    *voice_values):
     """Write the editor to disk, creating or renaming as ``editing`` says.
 
     ``editing`` and not the drop-down, which is the whole fix. Creating refuses
@@ -2434,12 +2498,19 @@ def _save_character(editing, name, context, greeting, system, temperature, top_p
                           f"another name, or press Edit to change that one.", "warn")]
 
     blank = _blank_character()
+    # Four values or four ``None``s, and the difference is the checkbox: a
+    # character with no delivery of its own follows Settings → Voice Chat, and
+    # keeps following it when that changes. See mc_voice_ui.character_profile.
+    delivery = mc_voice_ui.character_profile(voice_custom, voice_values)
     character = Character(
         name=wanted, context=context or "", greeting=greeting or "",
         temperature=_decimal(temperature, blank.temperature),
         top_p=_decimal(top_p, blank.top_p),
         max_reply_tokens=_number(reply_tokens, blank.max_reply_tokens),
-        seed=_number(seed, blank.seed), system=system or "")
+        seed=_number(seed, blank.seed), system=system or "",
+        voice=str(voice or "").strip(),
+        voice_speed=delivery.get("speed"), voice_pitch=delivery.get("pitch"),
+        voice_gain=delivery.get("gain"), voice_pause=delivery.get("pause"))
     try:
         store.save(character, previous_name=None if creating else editing)
     except Exception as exc:

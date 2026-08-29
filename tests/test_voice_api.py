@@ -77,6 +77,25 @@ def _forget_progress():
 
 
 @pytest.fixture(autouse=True)
+def _forget_settings(host):
+    """The chosen speech model and the delivery profile are host options, and a
+    test that changes one leaves it changed for every test after it.
+
+    Same hazard as the two fixtures above, one layer out: this is state in the
+    host's settings store rather than in a module, and it is reset here rather
+    than in each test because forgetting is silent -- the next test gets correct
+    behaviour reported against the wrong starting point.
+    """
+    import mc_voice_models
+    import mc_voice_profile
+
+    host.shared.opts.set(mc_voice_models.OPTIONS["stt"], "")
+    for option in mc_voice_profile.OPTIONS.values():
+        host.shared.opts.set(option, None)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _forget_repeats():
     """The refusal log is throttled, so its memory is module state.
 
@@ -114,7 +133,7 @@ def speech(monkeypatch):
         calls["transcribed"].append(data)
         return {"text": "the quick brown fox", "audio_seconds": 1.0, "elapsed": 0.1}
 
-    def synthesize(text):
+    def synthesize(text, sid=0, profile=None):
         calls["spoken"].append(text)
         return b"RIFF....WAVEfake audio"
 
@@ -406,8 +425,8 @@ class TestTheLogDoesNotScroll:
 
 class TestTranscription:
     def test_a_valid_recording_is_transcribed(self, client, key, speech, installed,
-                                              silent_wav):
-        answered = client.post(api.STT_ROUTE, headers=key, content=silent_wav(1.0))
+                                              spoken_wav):
+        answered = client.post(api.STT_ROUTE, headers=key, content=spoken_wav(1.0))
         assert answered.status_code == 200
         payload = answered.json()
         assert payload["ok"] is True
@@ -415,14 +434,14 @@ class TestTranscription:
         assert speech["transcribed"], "the worker was never asked"
 
     def test_the_response_says_whether_to_send_it(self, client, key, speech, installed,
-                                                  silent_wav, host, monkeypatch):
+                                                  spoken_wav, host, monkeypatch):
         """Settings is authoritative, so the browser is told rather than asked
         to look the setting up for itself -- there is one reader of that option
         and it is in Python."""
         import mc_voice_state
 
         monkeypatch.setattr(mc_voice_state, "auto_send", lambda: True)
-        payload = client.post(api.STT_ROUTE, headers=key, content=silent_wav(1.0)).json()
+        payload = client.post(api.STT_ROUTE, headers=key, content=spoken_wav(1.0)).json()
         assert payload["auto_send"] is True
 
     def test_an_oversized_body_is_refused_before_inference(self, client, key, speech,
@@ -479,19 +498,19 @@ class TestTranscription:
 
     def test_an_empty_transcript_is_said_rather_than_inserted(self, client, key,
                                                               installed, monkeypatch,
-                                                              silent_wav):
+                                                              spoken_wav):
         monkeypatch.setattr(runtime, "transcribe", lambda data: {"text": "   "})
-        payload = client.post(api.STT_ROUTE, headers=key, content=silent_wav(1.0)).json()
+        payload = client.post(api.STT_ROUTE, headers=key, content=spoken_wav(1.0)).json()
         assert payload["ok"] is False
         assert payload["error"] == "No speech was detected."
 
     def test_a_broken_runtime_does_not_take_the_route_down(self, client, key, installed,
-                                                           monkeypatch, silent_wav):
+                                                           monkeypatch, spoken_wav):
         def broken(data):
             raise runtime.VoiceRuntimeError("Voice runtime stopped unexpectedly. Try again.")
 
         monkeypatch.setattr(runtime, "transcribe", broken)
-        answered = client.post(api.STT_ROUTE, headers=key, content=silent_wav(1.0))
+        answered = client.post(api.STT_ROUTE, headers=key, content=spoken_wav(1.0))
         assert answered.status_code == 503
         assert "stopped unexpectedly" in answered.json()["error"]
 
@@ -553,14 +572,14 @@ class TestSpeakingAReply:
             self, client, key, installed, monkeypatch):
         """Section 50. Re-resolving "the current last reply" to try again would
         speak a different message than the token stood for."""
-        def broken(text):
+        def broken(text, sid=0, profile=None):
             raise runtime.VoiceRuntimeError("the runtime is gone")
 
         monkeypatch.setattr(runtime, "synthesize", broken)
         token = api.remember_reply("a reply")
         answered = client.post(api.TTS_ROUTE, headers=key, json={"token": token})
         assert answered.status_code == 503
-        assert api.take_reply(token) == "", "a consumed target was put back"
+        assert api.take_reply(token) is None, "a consumed target was put back"
 
 
 def monkeypatch_install(models_module, recorder):
@@ -673,7 +692,8 @@ class TestWhatAnInstallSays:
 
         seen = []
 
-        def install(kind, on_status=None, on_progress=None):
+        def install(kind, on_status=None, on_progress=None,
+                    identifier=""):
             say = mc_voice_models._narrator(kind, on_status)
             tick = mc_voice_models._ticker(kind, on_progress)
             with mc_voice_models._claim(kind, say):
@@ -699,7 +719,8 @@ class TestWhatAnInstallSays:
                                                                     installable):
         import mc_voice_models
 
-        def install(kind, on_status=None, on_progress=None):
+        def install(kind, on_status=None, on_progress=None,
+                    identifier=""):
             say = mc_voice_models._narrator(kind, on_status)
             with mc_voice_models._claim(kind, say):
                 raise mc_voice_models.VoiceError("decoder.onnx failed its hash check.")
@@ -719,10 +740,10 @@ class TestWhatAnInstallSays:
 
 class TestNothingIsWrittenDown:
     def test_a_transcription_creates_no_file_anywhere_under_the_voice_root(
-            self, client, key, speech, installed, silent_wav, voice_root, tmp_path):
+            self, client, key, speech, installed, spoken_wav, voice_root, tmp_path):
         """I-5. Not a temp file, not a Gradio cache entry, not an attachment."""
         before = sorted(p.name for p in tmp_path.rglob("*"))
-        client.post(api.STT_ROUTE, headers=key, content=silent_wav(1.0))
+        client.post(api.STT_ROUTE, headers=key, content=spoken_wav(1.0))
         token = api.remember_reply("and a spoken reply too")
         client.post(api.TTS_ROUTE, headers=key, json={"token": token})
         after = sorted(p.name for p in tmp_path.rglob("*"))
@@ -1058,7 +1079,7 @@ class TestNothingBlocksTheEventLoop:
             speaking.join(timeout=10)
 
     def test_t_api_8_a_long_transcription_does_not_block_cancel_or_runtime(
-            self, client, key, installed, monkeypatch, silent_wav):
+            self, client, key, installed, monkeypatch, spoken_wav):
         import threading
 
         release = threading.Event()
@@ -1069,7 +1090,7 @@ class TestNothingBlocksTheEventLoop:
 
         monkeypatch.setattr(runtime, "transcribe", slow)
         listening = threading.Thread(
-            target=lambda: client.post(api.STT_ROUTE, headers=key, content=silent_wav(1.0)),
+            target=lambda: client.post(api.STT_ROUTE, headers=key, content=spoken_wav(1.0)),
             daemon=True)
         listening.start()
         time.sleep(0.2)
@@ -1124,3 +1145,223 @@ class TestCloningRoutes:
 
     def test_aborting_when_nothing_runs_is_harmless(self, client, key, voice_root):
         assert client.post(api.CLONING_ABORT_ROUTE, headers=key, json={}).status_code == 200
+
+
+class TestTheModelRoute:
+    """Three speech-to-text qualities, listed and chosen through one route.
+
+    Listing and choosing are the same call so the row that draws the three
+    cards redraws from the truth in one round trip rather than from what it
+    hoped it had set.
+    """
+
+    def test_it_lists_the_tiers_with_what_is_on_disk_beside_them(self, client, key,
+                                                                 voice_root):
+        payload = client.post(api.MODELS_ROUTE, headers=key, json={"kind": "stt"}).json()
+        assert payload["ok"] is True
+        assert [entry["tier"] for entry in payload["models"]] == ["low", "medium", "high"]
+        assert payload["chosen"] == "whisper-small-int8"
+        assert all("installed" in entry and "about_label" in entry
+                   for entry in payload["models"])
+
+    def test_choosing_one_answers_with_the_new_state(self, client, key, voice_root):
+        payload = client.post(api.MODELS_ROUTE, headers=key,
+                              json={"kind": "stt",
+                                    "select": "whisper-medium-int8"}).json()
+        assert payload["chosen"] == "whisper-medium-int8"
+        assert [entry["chosen"] for entry in payload["models"]] == [False, False, True]
+
+    def test_choosing_one_stops_a_worker_holding_the_other(self, client, key, voice_root,
+                                                           monkeypatch):
+        """The handshake refuses a worker whose models are not the ones this
+        installation verified, so a loaded worker holding the previous tier has
+        to go -- or the next dictation fails that check instead of starting a
+        worker on the new tier."""
+        import mc_voice_runtime
+
+        stopped = []
+        monkeypatch.setattr(mc_voice_runtime, "unload",
+                            lambda reason="": stopped.append(reason) or {})
+        client.post(api.MODELS_ROUTE, headers=key,
+                    json={"kind": "stt", "select": "whisper-base-int8"})
+        assert stopped, "the worker was left holding the previous model"
+
+    def test_choosing_the_one_already_in_use_does_not_stop_anything(self, client, key,
+                                                                    voice_root,
+                                                                    monkeypatch):
+        import mc_voice_runtime
+
+        stopped = []
+        monkeypatch.setattr(mc_voice_runtime, "unload",
+                            lambda reason="": stopped.append(reason) or {})
+        client.post(api.MODELS_ROUTE, headers=key,
+                    json={"kind": "stt", "select": "whisper-small-int8"})
+        assert not stopped
+
+    def test_an_unknown_id_is_refused_with_a_sentence(self, client, key, voice_root):
+        answered = client.post(api.MODELS_ROUTE, headers=key,
+                               json={"kind": "stt", "select": "whisper-enormous"})
+        assert answered.status_code == 400
+        assert answered.json()["ok"] is False
+
+    def test_text_to_speech_is_not_a_choice(self, client, key, voice_root):
+        """One Kokoro bundle. What a user varies about it is which voice and how
+        it is delivered, which is the registry and the profile -- not a second
+        model."""
+        answered = client.post(api.MODELS_ROUTE, headers=key, json={"kind": "tts"})
+        assert answered.status_code == 400
+
+    def test_an_install_can_name_a_tier(self, client, key, installed, monkeypatch):
+        import mc_voice_models
+
+        asked = []
+        monkeypatch.setattr(mc_voice_models, "install",
+                            lambda kind, on_status=None, on_progress=None, identifier="":
+                            asked.append((kind, identifier)))
+        client.post(api.INSTALL_ROUTE, headers=key,
+                    json={"kind": "stt", "model": "whisper-medium-int8"})
+        for _ in range(100):
+            if asked:
+                break
+            time.sleep(0.02)
+        assert asked == [("stt", "whisper-medium-int8")]
+
+
+class TestTheProfileRoute:
+    """How the default voice is delivered. One route for both directions: a body
+    with a profile in it writes and then answers, a body without one reads."""
+
+    def test_reading_answers_with_the_controls_and_the_values(self, client, key):
+        payload = client.post(api.PROFILE_ROUTE, headers=key, json={}).json()
+        assert payload["ok"] is True
+        assert payload["profile"] == {"speed": 1.0, "pitch": 0.0, "gain": 0.0, "pause": 0.0}
+        assert set(payload["fields"]) == {"speed", "pitch", "gain", "pause"}
+        assert payload["controls"]["pitch"]["unit"].strip() == "semitones"
+
+    def test_writing_answers_from_the_store_rather_than_the_request(self, client, key):
+        """So a value the host refused shows the slider snapping back instead of
+        lying about it."""
+        payload = client.post(api.PROFILE_ROUTE, headers=key,
+                              json={"profile": {"speed": 99, "pitch": -3}}).json()
+        assert payload["profile"]["speed"] == 2.0
+        assert payload["profile"]["pitch"] == -3.0
+        assert "pitch -3 semitones" in payload["summary"]
+
+    def test_a_body_that_is_not_a_profile_is_refused(self, client, key):
+        answered = client.post(api.PROFILE_ROUTE, headers=key, json={"profile": "loud"})
+        assert answered.status_code == 400
+
+    def test_an_audition_can_carry_a_delivery_that_is_not_saved_anywhere(
+            self, client, key, voice_registry, kokoro_bundle):
+        """The character screen's play button. Adjusting sliders against a sound
+        they do not produce is not a preview."""
+        answered = client.post(api.VOICE_TEST_ROUTE, headers=key,
+                               json={"voice": "official:af_heart", "text": "Hello.",
+                                     "profile": {"pitch": 4}})
+        assert answered.status_code == 200
+        stored = client.post(api.PROFILE_ROUTE, headers=key, json={}).json()
+        assert stored["profile"]["pitch"] == 0.0, "an audition wrote the stored profile"
+
+
+class TestARecordingWithNothingInIt:
+    """The Bluetooth report, at the route. See mc_voice_hearing for the whole
+    account: a headset microphone is narrowband and quiet, and what Whisper does
+    with a quiet band-limited stream is describe it rather than transcribe it."""
+
+    def test_a_silent_recording_never_reaches_the_model(self, client, key, speech,
+                                                        installed, silent_wav):
+        answered = client.post(api.STT_ROUTE, headers=key, content=silent_wav(1.0))
+        payload = answered.json()
+        assert payload["ok"] is False
+        assert "Bluetooth" in payload["error"]
+        assert not speech["transcribed"], "a large model was run over silence"
+
+    def test_an_annotation_is_not_put_in_the_composer(self, client, key, installed,
+                                                      spoken_wav, monkeypatch):
+        """`(music)` in the composer is worse than nothing in the composer."""
+        import mc_voice_runtime
+
+        monkeypatch.setattr(mc_voice_runtime, "transcribe",
+                            lambda body: {"text": "(music)", "elapsed": 0.1})
+        payload = client.post(api.STT_ROUTE, headers=key,
+                              content=spoken_wav(1.0)).json()
+        assert payload["ok"] is False
+        assert payload["text"] == ""
+        assert "described the sound" in payload["error"]
+
+    def test_words_are_still_words(self, client, key, installed, spoken_wav, monkeypatch):
+        import mc_voice_runtime
+
+        monkeypatch.setattr(mc_voice_runtime, "transcribe",
+                            lambda body: {"text": "play some music", "elapsed": 0.1})
+        payload = client.post(api.STT_ROUTE, headers=key,
+                              content=spoken_wav(1.0)).json()
+        assert payload["ok"] is True
+        assert payload["text"] == "play some music"
+
+    def test_the_level_comes_back_so_the_page_can_say_it_was_quiet(self, client, key,
+                                                                   speech, installed,
+                                                                   spoken_wav):
+        payload = client.post(api.STT_ROUTE, headers=key,
+                              content=spoken_wav(1.0)).json()
+        assert 0 < payload["level"]["peak"] <= 1.0
+        assert payload["level"]["seconds"] == 1.0
+
+    def test_nothing_about_the_recording_but_numbers_is_reported(self, client, key,
+                                                                 speech, installed,
+                                                                 spoken_wav):
+        """I-6 still holds: the level is three numbers, and no audio."""
+        payload = client.post(api.STT_ROUTE, headers=key,
+                              content=spoken_wav(1.0)).json()
+        assert set(payload["level"]) == {"peak", "rms", "seconds"}
+        assert all(isinstance(value, (int, float)) for value in payload["level"].values())
+
+
+class TestTheCompletedReplyPathSpeaksAsTheRightVoice:
+    """The non-streaming path used to synthesize with no speaker at all.
+
+    sherpa answers an absent speaker with speaker 0, which in the upstream
+    Kokoro map is ``af_alloy`` -- section 113's bug, still live in the one path
+    that had not been looked at when the rest of it was fixed. It matters more
+    now than it did: a character with a voice of its own has to keep that voice
+    here too, or the fallback is the one place a character sounds like somebody
+    else.
+    """
+
+    def test_the_voice_is_snapshotted_with_the_words(self, client, key, voice_registry,
+                                                     kokoro_bundle):
+        token = api.remember_reply("Hello there.", voice_id="official:bf_emma")
+        answered = client.post(api.TTS_ROUTE, headers=key, json={"token": token})
+        assert answered.status_code == 200
+        assert voice_registry.spoken[-1] == 21, "the reply was spoken by the wrong speaker"
+
+    def test_a_reply_with_no_voice_uses_the_default_rather_than_speaker_zero(
+            self, client, key, voice_registry, kokoro_bundle):
+        token = api.remember_reply("Hello there.")
+        client.post(api.TTS_ROUTE, headers=key, json={"token": token})
+        assert voice_registry.spoken[-1] == 3, (
+            "the completed-reply path fell back to speaker 0 instead of the default voice")
+
+    def test_a_voice_that_has_since_been_deleted_is_still_spoken(self, client, key,
+                                                                 voice_registry,
+                                                                 kokoro_bundle):
+        """A deleted clone is not a reason for a reply that has already been
+        written to go unspoken."""
+        token = api.remember_reply("Hello there.", voice_id="clone:gone")
+        answered = client.post(api.TTS_ROUTE, headers=key, json={"token": token})
+        assert answered.status_code == 200
+
+    def test_the_delivery_is_snapshotted_too(self, client, key, voice_registry,
+                                             kokoro_bundle, monkeypatch):
+        import mc_voice_runtime
+
+        seen = {}
+        real = mc_voice_runtime.synthesize
+        monkeypatch.setattr(mc_voice_runtime, "synthesize",
+                            lambda text, sid=0, profile=None:
+                            seen.update({"profile": profile}) or real(text, sid=sid))
+        token = api.remember_reply("Hello there.", profile={"speed": 1.4, "pitch": -2.0,
+                                                            "gain": 0.0, "pause": 0.0})
+        client.post(api.TTS_ROUTE, headers=key, json={"token": token})
+        assert seen["profile"]["speed"] == 1.4
+        assert seen["profile"]["pitch"] == -2.0

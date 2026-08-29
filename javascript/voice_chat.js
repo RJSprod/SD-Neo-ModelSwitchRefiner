@@ -62,6 +62,9 @@
         chip: "mc-llm-chat-to-voice",
         engine: "mc-llm-chat-voice-engine",
         autoSpeak: "mc-llm-chat-voice-auto-speak",
+        characterVoice: "mc-llm-chat-character-voice",
+        characterVoiceList: "mc-llm-chat-character-voice-list",
+        characterVoiceCustom: "mc-llm-chat-character-voice-custom",
     };
 
     const ROUTES = {
@@ -72,6 +75,8 @@
         cancel: "model-chain/voice/cancel",
         runtime: "model-chain/voice/runtime",
         install: "model-chain/voice/install",
+        models: "model-chain/voice/models",
+        profile: "model-chain/voice/profile",
         voices: "model-chain/voice/voices",
         voiceDefault: "model-chain/voice/voice/default",
         voiceTest: "model-chain/voice/voice/test",
@@ -138,6 +143,11 @@
             + "chrome://flags/#unsafely-treat-insecure-origin-as-secure and restart the "
             + "browser.",
         slide: "Slide the microphone all the way to the right, and hold, to talk.",
+        // The Bluetooth answer, and it is deliberately about the microphone
+        // rather than about Voice Chat. See the block above `startCapture`.
+        tooQuiet: "That recording was almost silent, so nothing was sent. A Bluetooth "
+            + "headset microphone is narrowband and much quieter than the phone's own — "
+            + "switching back to the phone's microphone usually fixes it.",
     };
 
     function root() {
@@ -929,23 +939,165 @@
         return secure ? MESSAGES.unsupported : MESSAGES.insecure;
     }
 
+    // -- what a Bluetooth microphone actually is ---------------------------- //
+    //
+    // The report this exists for: dictation from an Android phone was good on
+    // the handset's own microphone and produced "(music)" and "(static)" the
+    // moment a Bluetooth headset was connected.
+    //
+    // Nothing here can fix that, and everything here is about surviving it.
+    // A headset carries audio *out* over A2DP, which has no microphone in it at
+    // all, so capturing from one needs the hands-free profile and an SCO link —
+    // the link a phone call uses. Outside a call Android decides whether to open
+    // it, and what it opens is narrowband: 8 kHz for plain HFP, 16 kHz with
+    // mSBC. What reaches this page is band-limited to about 4 kHz, already
+    // through a codec built for telephony, and usually far quieter than the
+    // phone's own microphone, which the platform gain-stages and beam-forms.
+    // `mc_voice_hearing.py` says the same thing from Whisper's side.
+    //
+    // Three things follow, and they are the three changes in this block.
+    //
+    // The constraints ask for what actually helps and stop asking for what
+    // does not. `sampleRate: 16000` is a hint the platform may honour, and it
+    // asks for the rate Whisper wants rather than 48 kHz that has to be thrown
+    // away. The three processors are *advisory* rather than required, because
+    // they are tuned for a wideband microphone and a browser that cannot apply
+    // them to an HFP stream should give us the stream rather than fail.
+    //
+    // The capture path is reported, not guessed. `track.getSettings()` and the
+    // track's own label say which device this is and at what rate, which is the
+    // one piece of evidence a user has that their microphone changed under them.
+    //
+    // The level is measured and normalised. A quiet capture is made louder by a
+    // bounded amount before it is encoded, and one that is under the floor even
+    // after that is not sent at all — a round trip and a large model are a slow
+    // way to be told a recording was silent.
+
+    const CAPTURE_CONSTRAINTS = {
+        channelCount: 1,
+        echoCancellation: {ideal: true},
+        noiseSuppression: {ideal: true},
+        autoGainControl: {ideal: true},
+        sampleRate: {ideal: TARGET_RATE},
+    };
+
+    // Under this peak there was nothing to transcribe. The same floor
+    // `mc_voice_hearing.SILENCE_PEAK` uses, deliberately: refusing here saves
+    // the round trip and refusing there covers a page that predates this.
+    const QUIET_PEAK = 0.012;
+    // How much a quiet capture may be lifted. Twelve times is about 21 dB,
+    // which covers the gap between a Bluetooth headset and a handset
+    // microphone; past that the noise comes up with the speech and nothing is
+    // gained.
+    const MAX_MAKEUP = 12.0;
+    // What a normalised recording should peak at. Not 1.0: Whisper is not
+    // helped by a signal against the ceiling, and leaving headroom means the
+    // limiter below never has anything to do on ordinary speech.
+    const TARGET_PEAK = 0.6;
+
+    // What the microphone turned out to be, for the status line and the console.
+    // Read once per capture, after the track exists — before that it is a guess.
+    function describeTrack(stream) {
+        let track = null;
+        try {
+            // `getAudioTracks` where the browser has it, and `getTracks` where
+            // it does not -- the older of the two is still the only one present
+            // in some Android WebViews, which are exactly the browsers this
+            // whole path exists for.
+            const found = typeof stream.getAudioTracks === "function"
+                ? stream.getAudioTracks() : stream.getTracks();
+            track = (found || [])[0] || null;
+        } catch (error) { /* a stream that will not answer is not a verdict */ }
+        if (!track) return {};
+        let settings = {};
+        try {
+            settings = (typeof track.getSettings === "function" ? track.getSettings() : {})
+                || {};
+        } catch (error) { /* older browsers */ }
+        return {
+            label: track.label || "",
+            rate: settings.sampleRate || 0,
+            channels: settings.channelCount || 0,
+            device: settings.deviceId || "",
+        };
+    }
+
+    // A device whose name or capture rate says "telephony". Only ever used to
+    // choose which sentence to show — never to refuse a capture, and never to
+    // change what is recorded.
+    function looksNarrowband(found) {
+        if (!found) return false;
+        if (found.rate && found.rate <= 16000) return true;
+        const label = (found.label || "").toLowerCase();
+        return label.indexOf("bluetooth") >= 0 || label.indexOf("headset") >= 0
+            || label.indexOf("hands-free") >= 0 || label.indexOf("hfp") >= 0
+            || label.indexOf("sco") >= 0;
+    }
+
+    // Peak and RMS of what was captured, in one pass over the samples we are
+    // about to encode anyway.
+    function levelOf(samples) {
+        let peak = 0;
+        let total = 0;
+        for (let i = 0; i < samples.length; i += 1) {
+            const value = samples[i];
+            const magnitude = value < 0 ? -value : value;
+            if (magnitude > peak) peak = magnitude;
+            total += value * value;
+        }
+        return {
+            peak: peak,
+            rms: samples.length ? Math.sqrt(total / samples.length) : 0,
+        };
+    }
+
+    // Lift a quiet recording towards TARGET_PEAK, by no more than MAX_MAKEUP,
+    // and never at all when it is already loud enough. In place, because the
+    // array is this function's caller's and is about to be encoded and dropped.
+    //
+    // No compression and no limiter: the gain is chosen so the loudest sample
+    // lands on TARGET_PEAK, which cannot clip by construction. A recording that
+    // is quiet *because it is mostly silence with one loud word in it* is
+    // therefore left alone, which is correct — that word was already audible.
+    function normalise(samples, level) {
+        if (!samples.length || level.peak <= 0) return 1;
+        if (level.peak >= TARGET_PEAK) return 1;
+        const wanted = Math.min(TARGET_PEAK / level.peak, MAX_MAKEUP);
+        if (wanted <= 1.01) return 1;
+        for (let i = 0; i < samples.length; i += 1) samples[i] *= wanted;
+        return wanted;
+    }
+
     // One capture at a time, and every resource it holds named here so that
     // stopping it can never leave a track open. An open microphone the user did
     // not ask for is the failure this feature must not have.
     let capture = null;
 
+    // The constrained request first, then a bare one. Every constraint above is
+    // advisory, but a browser is entitled to reject a constraint *set* it does
+    // not understand, and the devices most likely to do that are the Android
+    // WebViews this feature already bends over backwards for. A second attempt
+    // asking for nothing but audio is the difference between a worse recording
+    // and no recording.
+    function openMicrophone() {
+        return getUserMedia({audio: CAPTURE_CONSTRAINTS}).catch(function (error) {
+            const name = (error && error.name) || "";
+            if (name !== "OverconstrainedError" && name !== "ConstraintNotSatisfiedError"
+                && name !== "TypeError" && name !== "NotSupportedError") {
+                return Promise.reject(error);
+            }
+            console.warn("Model Chain: Voice Chat's microphone constraints were refused ("
+                         + name + "); asking for any microphone instead.");
+            return getUserMedia({audio: true});
+        });
+    }
+
     function startCapture() {
         const ctx = audioContext();
         if (!ctx) return Promise.reject(new Error("no audio"));
-        return getUserMedia({
-            audio: {
-                channelCount: 1,
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-            },
-        }).then(function (stream) {
-            const state = {stream: stream, chunks: [], rate: ctx.sampleRate, nodes: []};
+        return openMicrophone().then(function (stream) {
+            const state = {stream: stream, chunks: [], rate: ctx.sampleRate, nodes: [],
+                           track: describeTrack(stream)};
             const source = ctx.createMediaStreamSource(stream);
             state.nodes.push(source);
 
@@ -1323,7 +1475,62 @@
             refuse(MESSAGES.empty);
             return;
         }
+
+        // Measured, then lifted, then measured against the floor. In that
+        // order: a Bluetooth capture is routinely quiet enough to need the
+        // gain and still loud enough to transcribe perfectly once it has it,
+        // so refusing on the raw level would throw away recordings that are
+        // fine. What is refused is what is still silent after the lift.
+        const before = levelOf(samples);
+        const applied = normalise(samples, before);
+        const after = applied === 1 ? before : levelOf(samples);
+        reportCapture(state, before, applied);
+        if (after.peak < QUIET_PEAK) {
+            refuse(lastCapture.narrowband ? MESSAGES.tooQuiet : MESSAGES.empty);
+            return;
+        }
         send(encodeWav(samples, TARGET_RATE));
+    }
+
+    // One console line per recording, and a status line only when there is
+    // something worth saying. The console line is what makes "my microphone
+    // changed under me" a thing somebody can actually check: it names the
+    // device, the rate the browser gave us, and the level that came out.
+    //
+    // Never the audio, and never a transcript — this file's half of I-6.
+    function reportCapture(state, level, applied) {
+        const track = state.track || {};
+        try {
+            console.info("Model Chain: Voice Chat captured "
+                         + (track.label || "an unnamed microphone")
+                         + " at " + (track.rate || state.rate || 0) + " Hz — peak "
+                         + Math.round(level.peak * 100) + "%, rms "
+                         + Math.round(level.rms * 1000) / 10 + "%"
+                         + (applied > 1 ? ", lifted " + Math.round(applied * 10) / 10 + "x"
+                                        : ""));
+        } catch (error) { /* a console that will not take it is not a failure */ }
+        // Remembered rather than said here. The status line is about to read
+        // "Transcribing…" and would overwrite anything written now; what this
+        // is for is the moment the answer comes back, which is where a note
+        // about the microphone is actually useful.
+        lastCapture = {narrowband: looksNarrowband(track),
+                       label: track.label || "a Bluetooth microphone"};
+    }
+
+    let lastCapture = {narrowband: false, label: ""};
+    let narrowbandSaid = false;
+
+    // What to add to a status line when the microphone is the likely reason.
+    // Once per session for a success -- a note repeated after every good
+    // transcription is a note nobody reads -- and every time for a failure,
+    // where it is the answer rather than a remark.
+    function microphoneNote(failed) {
+        if (!lastCapture.narrowband) return "";
+        if (!failed && narrowbandSaid) return "";
+        narrowbandSaid = true;
+        return " Recording from " + lastCapture.label
+            + " — Bluetooth microphones are narrowband and often misheard; the phone's own "
+            + "microphone is usually much more accurate.";
     }
 
     function send(wav) {
@@ -1339,14 +1546,15 @@
         }).then(function (payload) {
             markMic("");
             if (!payload || !payload.ok) {
-                say((payload && payload.error) || MESSAGES.failed, "warn");
+                say(((payload && payload.error) || MESSAGES.failed) + microphoneNote(true),
+                    "warn");
                 return;
             }
             if (!insert(payload.text)) {
                 say(MESSAGES.failed, "error");
                 return;
             }
-            say("Transcribed.");
+            say("Transcribed." + microphoneNote(false));
             if (!payload.auto_send) return;
             // One task, so Gradio has taken the value off the textarea before
             // the Send handler reads it. Send is pressed rather than reproduced:
@@ -1752,7 +1960,30 @@
     }
 
     function localButton(holder, kind) {
-        return holder.querySelector('[data-mc-voice-local="' + kind + '"]');
+        // The tier cards have one of these each, and they answer to a scope of
+        // their own -- `paintTiers` owns those. This is for the rows that do
+        // not: the engine and Kokoro. Filtered rather than expressed as a
+        // `:not()` selector because the distinction is "has a model attribute",
+        // and a selector that says so is one more thing every caller has to
+        // spell identically.
+        const found = Array.prototype.filter.call(
+            holder.querySelectorAll("[data-mc-voice-local]"), function (button) {
+                return button.getAttribute("data-mc-voice-local") === kind
+                    && !button.getAttribute("data-mc-voice-model");
+            });
+        return found[0] || null;
+    }
+
+    function tierCard(holder, model) {
+        return holder ? holder.querySelector('[data-mc-voice-tier="' + cssEscape(model)
+                                             + '"]') : null;
+    }
+
+    function sayInCard(card, text, bad) {
+        const line = card ? card.querySelector("[data-mc-voice-tier-state]") : null;
+        if (!line) return;
+        line.textContent = text;
+        setClass(line, "mc-voice-failed", !!bad);
     }
 
     function sayInRow(holder, kind, text, bad) {
@@ -1783,6 +2014,129 @@
         }
     }
 
+    // -- the three speech-to-text qualities ---------------------------------- //
+    //
+    // Two buttons per card and they do different things. Download fetches that
+    // tier; Use points Voice Chat at it. Separate because keeping all three on
+    // disk and switching between them should not be a download, and because
+    // choosing the high tier and *then* starting its download is the order
+    // people actually do it in.
+    //
+    // Everything about the cards is painted from `/voice/models`, which answers
+    // with what is on disk beside what is offered — joined on the server, so a
+    // row can never end up saying "Installed" against the wrong tier.
+
+    function tiersHolder(holder) {
+        return holder ? holder.querySelector('[data-mc-voice-tiers="stt"]') : null;
+    }
+
+    function paintTiers(holder, payload) {
+        const list = tiersHolder(holder);
+        if (!list || !payload || !payload.ok) return;
+        const chosen = payload.chosen || "";
+        const progress = payload.progress || {};
+        (payload.models || []).forEach(function (entry) {
+            const card = list.querySelector('[data-mc-voice-tier="' + cssEscape(entry.id)
+                                            + '"]');
+            if (!card) return;
+            const running = progress.running && progress.model === entry.id;
+            setClass(card, "mc-voice-tier-chosen", entry.id === chosen);
+            const mark = card.querySelector("[data-mc-voice-tier-mark]");
+            if (mark) mark.textContent = entry.id === chosen ? "In use" : "";
+            const state = card.querySelector("[data-mc-voice-tier-state]");
+            if (state) {
+                state.textContent = running
+                    ? (progress.text || "Working…") + "  "
+                      + Math.round((progress.fraction || 0) * 100) + "%"
+                    : (progress.failed && progress.model === entry.id
+                       ? progress.text : entry.message || "");
+                setClass(state, "mc-voice-failed",
+                         !!(progress.failed && progress.model === entry.id && !running));
+            }
+            const install = card.querySelector("[data-mc-voice-tier-install]");
+            if (install) {
+                install.disabled = !!running;
+                install.textContent = running ? "Downloading…"
+                    : entry.installed ? "Download again" : "Download";
+            }
+            const use = card.querySelector("[data-mc-voice-tier-use]");
+            if (use) {
+                use.disabled = entry.id === chosen;
+                use.textContent = entry.id === chosen ? "In use" : "Use this";
+            }
+            const local = card.querySelector("[data-mc-voice-local]");
+            if (local && !running) {
+                local.disabled = false;
+                local.textContent = entry.installed ? "Reinstall from a folder"
+                                                    : "Install from this folder";
+            } else if (local) {
+                local.disabled = true;
+                local.textContent = "Installing…";
+            }
+        });
+        const label = holder.querySelector('[data-mc-voice-chosen="stt"]');
+        const current = (payload.models || []).filter(function (entry) {
+            return entry.id === chosen;
+        })[0];
+        if (label && current) label.textContent = current.label || "";
+    }
+
+    function refreshTiers(holder, select) {
+        // Nothing asked for a row that has no cards in it -- an unsupported
+        // platform draws the heading and the reason and no tiers, and a poll
+        // that fetched a catalogue for it would be a request with no reader.
+        if (!tiersHolder(holder)) return Promise.resolve(null);
+        return post(ROUTES.models, select ? {kind: "stt", select: select} : {kind: "stt"},
+                    holder).then(function (payload) {
+            paintTiers(holder, payload);
+            return payload;
+        });
+    }
+
+    function wireTiers(holder) {
+        const list = tiersHolder(holder);
+        if (!list) return;
+        list.addEventListener("click", function (event) {
+            const use = event.target.closest("[data-mc-voice-tier-use]");
+            if (use) {
+                event.preventDefault();
+                use.disabled = true;
+                refreshTiers(holder, use.getAttribute("data-mc-voice-tier-use"))
+                    .then(function () { schedulePaint(holder, 0); });
+                return;
+            }
+            const install = event.target.closest("[data-mc-voice-tier-install]");
+            if (install) {
+                event.preventDefault();
+                startInstall(holder, "stt", install, "",
+                             install.getAttribute("data-mc-voice-tier-install"));
+            }
+        });
+        whenOnScreen(holder, function () { refreshTiers(holder, ""); });
+    }
+
+    // `CSS.escape` where the browser has it, and a conservative fallback where
+    // it does not. The ids come from this extension's own manifest and are
+    // ordinary words and hyphens, so the fallback is never actually exercised —
+    // it is here so that a manifest edited later cannot produce a selector that
+    // silently matches nothing.
+    function cssEscape(value) {
+        const text = String(value || "");
+        if (window.CSS && typeof window.CSS.escape === "function") {
+            return window.CSS.escape(text);
+        }
+        return text.replace(/[^\w-]/g, "\\$&");
+    }
+
+    function setClass(node, name, wanted) {
+        if (!node || !node.classList) return;
+        // Conditional for the reason `show` is: rewriting a class attribute that
+        // is already right wakes every MutationObserver on this page, and a
+        // theme is one of them.
+        if (wanted && !node.classList.contains(name)) node.classList.add(name);
+        else if (!wanted && node.classList.contains(name)) node.classList.remove(name);
+    }
+
     function wireSettings() {
         const holder = document.querySelector(".mc-voice-settings")
             || root().querySelector(".mc-voice-settings");
@@ -1805,18 +2159,23 @@
                 button.addEventListener("click", function (event) {
                     if (event.preventDefault) event.preventDefault();
                     const kind = button.getAttribute("data-mc-voice-local");
+                    const model = button.getAttribute("data-mc-voice-model") || "";
+                    const scope = button.getAttribute("data-mc-voice-scope") || kind;
                     const box = holder.querySelector(
-                        '[data-mc-voice-folder="' + kind + '"]');
+                        '[data-mc-voice-folder="' + cssEscape(scope) + '"]');
                     const folder = box ? (box.value || "").trim() : "";
                     if (!folder) {
-                        sayInRow(holder, kind, "Type the folder the downloaded files are "
-                                 + "in, then press this again.", true);
+                        const complaint = "Type the folder the downloaded files are in, "
+                            + "then press this again.";
+                        if (model) sayInCard(tierCard(holder, model), complaint, true);
+                        else sayInRow(holder, kind, complaint, true);
                         return;
                     }
-                    startInstall(holder, kind, button, folder);
+                    startInstall(holder, kind, button, folder, model);
                 });
             });
 
+        wireTiers(holder);
         schedulePaint(holder, 0);
     }
 
@@ -1866,24 +2225,35 @@
         }, delay);
     }
 
-    function startInstall(holder, kind, button, folder) {
+    function startInstall(holder, kind, button, folder, model) {
         button.disabled = true;
         button.textContent = "Starting…";
-        sayInRow(holder, kind, "Starting…", false);
+        // A tier card has a state line of its own; the runtime and text-to-speech
+        // rows have the shared one. Writing the shared one for a tier would put
+        // "Starting…" above three cards and against none of them.
+        const card = model ? tierCard(holder, model) : null;
+        const say = function (text, bad) {
+            if (card) sayInCard(card, text, bad);
+            else sayInRow(holder, kind, text, bad);
+        };
+        say("Starting…", false);
 
         const failed = function (text) {
-            sayInRow(holder, kind, text, true);
-            releaseButton(holder, kind, false);
+            say(text, true);
+            if (!card) releaseButton(holder, kind, false);
             button.disabled = false;
             console.error("Model Chain: Voice Chat could not start the " + kind
                           + " install — " + text);
         };
 
+        const body = {kind: kind};
+        if (folder) body.folder = folder;
+        if (model) body.model = model;
         fetch(url(ROUTES.install), {
             method: "POST",
             credentials: "same-origin",
             headers: headers({"Content-Type": "application/json"}, holder),
-            body: JSON.stringify(folder ? {kind: kind, folder: folder} : {kind: kind}),
+            body: JSON.stringify(body),
         }).then(function (response) {
             return response.json().catch(function () {
                 return {ok: false, error: "The WebUI answered HTTP " + response.status
@@ -1922,6 +2292,11 @@
                 return payload;
             }
             if (runtime) runtime.textContent = payload.summary || "";
+            // The three tiers redraw from their own route, which is the only
+            // one that knows which of them is installed and which is in use.
+            // Asked for here rather than on a timer of its own, so a download
+            // that is running moves both this row's bar and the card's.
+            refreshTiers(holder, "");
             KINDS.forEach(function (kind) {
                 const progress = (payload.progress || {})[kind] || {};
                 const ready = kind === "runtime" ? payload.runtime_ready
@@ -1945,11 +2320,229 @@
                     }
                     return;
                 }
+
                 sayInRow(holder, kind, progress.failed ? progress.text : message,
                          !!progress.failed);
-                releaseButton(holder, kind, ready);
+                // Speech to text has no button of its own any more -- its three
+                // tier cards have one each, and `paintTiers` owns them.
+                if (kind !== "stt") releaseButton(holder, kind, ready);
             });
             return payload;
+        });
+    }
+
+    // -- the character's own voice ------------------------------------------- //
+    //
+    // The same list Settings draws, in a third of the room, inside the character
+    // editor. It is painted from the same `/voice/voices` route for the same
+    // reason: the list changes when a clone finishes or a voice is renamed, and
+    // a copy built into the page would go stale.
+    //
+    // The selection is not this file's to keep. It goes into a hidden Gradio
+    // textbox, and the ordinary Save character button reads it with everything
+    // else — so there is no second save, no second store, and nothing to get
+    // out of step with the character file.
+    //
+    // The first row is "the default voice" rather than a voice. A character that
+    // names no voice follows Settings, and that has to be something somebody can
+    // choose *back*, not only a state they start in.
+
+    function pickerHolder() {
+        return byId(IDS.characterVoiceList) || null;
+    }
+
+    function pickerValue() {
+        return (fieldValue(IDS.characterVoice) || "").trim();
+    }
+
+    function setPickerValue(wanted) {
+        const holder = byId(IDS.characterVoice);
+        if (!holder) return false;
+        const field = holder.tagName === "TEXTAREA" || holder.tagName === "INPUT"
+            ? holder : holder.querySelector("textarea, input");
+        if (!field) return false;
+        field.value = wanted;
+        // Assign, then tell it, on both events Gradio listens to. The pattern
+        // this repository already uses everywhere the browser writes into a
+        // Gradio control -- see `insert`.
+        field.dispatchEvent(new Event("input", {bubbles: true}));
+        field.dispatchEvent(new Event("change", {bubbles: true}));
+        return true;
+    }
+
+    function pickerRow(entry, chosen) {
+        const row = document.createElement("div");
+        row.className = "mc-voice-pick";
+        row.setAttribute("data-mc-voice-pick", entry.id);
+        if (entry.id === chosen) row.classList.add("mc-voice-pick-chosen");
+
+        const name = document.createElement("button");
+        name.type = "button";
+        name.className = "mc-voice-pick-name";
+        name.setAttribute("data-mc-voice-pick-choose", entry.id);
+        // The asterisk is presentation and only presentation -- section 41. It
+        // is not in the display name, not in the id, and not in any filename.
+        name.textContent = (entry.official ? "" : "* ") + (entry.display_name || entry.label
+                                                           || entry.id);
+        row.appendChild(name);
+
+        const play = document.createElement("button");
+        play.type = "button";
+        play.className = "mc-voice-pick-play";
+        play.setAttribute("data-mc-voice-pick-test", entry.id);
+        play.title = "Hear this voice";
+        play.setAttribute("aria-label", "Hear this voice");
+        play.textContent = "\u25b6";
+        row.appendChild(play);
+        return row;
+    }
+
+    function defaultRow(chosen, payload) {
+        const entry = (payload.voices || []).filter(function (voice) {
+            return voice.id === payload.default;
+        })[0];
+        return pickerRow({
+            id: "",
+            official: true,
+            display_name: "Default voice"
+                + (entry ? " (" + (entry.display_name || entry.label) + ")" : ""),
+        }, chosen);
+    }
+
+    function paintPicker(holder, payload) {
+        if (!holder || !payload || !payload.ok) return;
+        const list = holder.querySelector("[data-mc-voice-picker-list]");
+        const chosen = pickerValue();
+        if (list) {
+            list.textContent = "";
+            list.appendChild(defaultRow(chosen, payload));
+            const groups = [
+                ["American", (payload.voices || []).filter(function (v) {
+                    return v.official && v.language === "en-US";
+                })],
+                ["British", (payload.voices || []).filter(function (v) {
+                    return v.official && v.language === "en-GB";
+                })],
+                ["Custom", (payload.voices || []).filter(function (v) {
+                    return !v.official;
+                })],
+            ];
+            groups.forEach(function (group) {
+                if (!group[1].length) return;
+                const heading = document.createElement("div");
+                heading.className = "mc-voice-pick-group";
+                heading.textContent = group[0];
+                list.appendChild(heading);
+                group[1].forEach(function (entry) {
+                    list.appendChild(pickerRow(entry, chosen));
+                });
+            });
+        }
+        holder.dataset.mcVoiceDefault = payload.default || "";
+        markPicker(holder);
+    }
+
+    // Which row is highlighted, read off the hidden field rather than
+    // remembered here. Python writes that field when a character is loaded, and
+    // Gradio does not tell this file when it does -- so the highlight follows
+    // the value on a tick rather than only on a click.
+    function markPicker(holder) {
+        if (!holder) return;
+        const chosen = pickerValue();
+        let seen = false;
+        Array.prototype.forEach.call(
+            holder.querySelectorAll("[data-mc-voice-pick]"), function (row) {
+                const mine = row.getAttribute("data-mc-voice-pick") === chosen;
+                if (mine) seen = true;
+                setClass(row, "mc-voice-pick-chosen", mine);
+            });
+        const line = holder.querySelector("[data-mc-voice-picker-current]");
+        if (!line) return;
+        const row = holder.querySelector('[data-mc-voice-pick="' + cssEscape(chosen) + '"]'
+                                         + " .mc-voice-pick-name");
+        // A character naming a voice that is no longer installed says so rather
+        // than showing nothing selected: it is still going to be spoken, in the
+        // default voice, and that is worth knowing before the next reply.
+        line.textContent = seen && row
+            ? "Speaking as: " + row.textContent
+            : (chosen ? "Speaking as: " + chosen + " — not installed, so the default voice "
+                        + "will be used"
+                      : "Speaking as: the default voice");
+    }
+
+    function refreshPicker(holder) {
+        return post(ROUTES.voices, {}, holder).then(function (payload) {
+            paintPicker(holder, payload);
+            return payload;
+        });
+    }
+
+    // The four sliders in the character editor are Gradio's, so their values are
+    // read out of the DOM. Only sent when the checkbox beside them is on --
+    // otherwise this character has no delivery of its own and an audition has to
+    // demonstrate the default one.
+    function characterProfile() {
+        const custom = byId(IDS.characterVoiceCustom);
+        const box = custom ? custom.querySelector('input[type="checkbox"]') : null;
+        if (!box || !box.checked) return null;
+        const found = {};
+        ["speed", "pitch", "gain", "pause"].forEach(function (name) {
+            const holder = byId(IDS.characterVoice + "-" + name);
+            if (!holder) return;
+            const input = holder.querySelector('input[type="number"], input[type="range"]');
+            if (input && input.value !== "") found[name] = Number(input.value);
+        });
+        return Object.keys(found).length ? found : null;
+    }
+
+    function wirePicker() {
+        const holder = pickerHolder();
+        if (!holder || holder.dataset.mcVoiceWired === "1") return;
+        holder.dataset.mcVoiceWired = "1";
+
+        holder.addEventListener("click", function (event) {
+            const choose = event.target.closest("[data-mc-voice-pick-choose]");
+            if (choose) {
+                event.preventDefault();
+                setPickerValue(choose.getAttribute("data-mc-voice-pick-choose"));
+                markPicker(holder);
+                return;
+            }
+            const test = event.target.closest("[data-mc-voice-pick-test]");
+            if (test) {
+                event.preventDefault();
+                test.disabled = true;
+                const wanted = test.getAttribute("data-mc-voice-pick-test");
+                unlock();
+                const body = {voice: wanted || holder.dataset.mcVoiceDefault || "",
+                              text: ""};
+                const profile = characterProfile();
+                if (profile) body.profile = profile;
+                fetch(url(ROUTES.voiceTest), {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: headers({"Content-Type": "application/json"}, holder),
+                    body: JSON.stringify(body),
+                }).then(function (response) {
+                    if (!response.ok) throw new Error("test");
+                    return response.arrayBuffer();
+                }).then(play).catch(function () {
+                    const line = holder.querySelector("[data-mc-voice-picker-current]");
+                    if (line) line.textContent = "That voice could not be played.";
+                }).then(function () { test.disabled = false; });
+            }
+        });
+
+        whenOnScreen(holder, function () {
+            refreshPicker(holder);
+            // A DOM read a second, which is what stands in for an event Gradio
+            // does not give us: the hidden field changes when a character is
+            // loaded, and the highlight has to follow it. Cheap, conditional,
+            // and stopped when the screen is not on screen.
+            window.setInterval(function () {
+                if (stale || !onScreen(holder)) return;
+                markPicker(holder);
+            }, 1000);
         });
     }
 
@@ -2236,7 +2829,129 @@
         // serves, and two requests fired from `onUiLoaded` are two requests
         // ahead of the first paint of a tab that has nothing to do with
         // speech. The list is fetched the first time somebody can see it.
-        whenOnScreen(holder, function () { refreshVoices(holder); });
+        whenOnScreen(holder, function () {
+            refreshVoices(holder);
+            wireDelivery(holder);
+        });
+    }
+
+    // -- how the default voice is delivered ---------------------------------- //
+    //
+    // Four sliders, written through on release rather than on every pixel of
+    // drag: each write is a settings-file save, and a save per pixel would be
+    // hundreds of them for one gesture. `input` moves the number beside the
+    // slider so it still feels live; `change` is what persists.
+
+    let deliveryControls = {};
+
+    function deliveryHolder(holder) {
+        return holder ? holder.querySelector("[data-mc-voice-delivery]") : null;
+    }
+
+    function readDelivery(holder) {
+        const found = {};
+        const panel = deliveryHolder(holder);
+        if (!panel) return found;
+        Array.prototype.forEach.call(
+            panel.querySelectorAll("[data-mc-voice-slider-input]"), function (input) {
+                found[input.getAttribute("data-mc-voice-slider-input")] = Number(input.value);
+            });
+        return found;
+    }
+
+    function paintDelivery(holder, payload) {
+        const panel = deliveryHolder(holder);
+        if (!panel || !payload || !payload.ok) return;
+        deliveryControls = payload.controls || deliveryControls;
+        const profile = payload.profile || {};
+        Object.keys(profile).forEach(function (name) {
+            const input = panel.querySelector('[data-mc-voice-slider-input="'
+                                              + cssEscape(name) + '"]');
+            // Never over a slider somebody has hold of. A repaint that moved the
+            // control under a finger would be a control that fights its user.
+            if (input && document.activeElement !== input) input.value = profile[name];
+            showDeliveryValue(panel, name, profile[name]);
+        });
+        const summary = panel.querySelector("[data-mc-voice-delivery-summary]");
+        if (summary) summary.textContent = payload.summary || "";
+    }
+
+    // The same label Python writes, built here because the slider has to move
+    // its number without a round trip. `mc_voice_profile.value_label` is the
+    // definition; this follows it, and the next paint from the server is what
+    // corrects it if it ever drifts.
+    function deliveryLabel(name, value) {
+        const spec = deliveryControls[name];
+        if (!spec) return String(value);
+        const decimals = spec.decimals || 0;
+        let text = Number(value).toFixed(decimals);
+        if (decimals) text = text.replace(/0+$/, "").replace(/\.$/, "") || "0";
+        const sign = (name === "pitch" || name === "gain") && Number(value) > 0 ? "+" : "";
+        return sign + text + (spec.unit || "");
+    }
+
+    function showDeliveryValue(panel, name, value) {
+        const output = panel.querySelector('[data-mc-voice-slider-value="'
+                                           + cssEscape(name) + '"]');
+        if (output) output.textContent = deliveryLabel(name, value);
+    }
+
+    function saveDelivery(holder) {
+        return post(ROUTES.profile, {profile: readDelivery(holder)}, holder)
+            .then(function (payload) {
+                paintDelivery(holder, payload);
+                return payload;
+            });
+    }
+
+    function wireDelivery(holder) {
+        const panel = deliveryHolder(holder);
+        // Guarded, because `whenOnScreen` is allowed to answer more than once
+        // and a second set of listeners would write the settings file twice for
+        // every slider release.
+        if (!panel || panel.dataset.mcVoiceWired === "1") return;
+        panel.dataset.mcVoiceWired = "1";
+        panel.addEventListener("input", function (event) {
+            const input = event.target.closest("[data-mc-voice-slider-input]");
+            if (!input) return;
+            showDeliveryValue(panel, input.getAttribute("data-mc-voice-slider-input"),
+                              input.value);
+        });
+        panel.addEventListener("change", function (event) {
+            const input = event.target.closest("[data-mc-voice-slider-input]");
+            if (!input) return;
+            saveDelivery(holder);
+        });
+        panel.addEventListener("click", function (event) {
+            if (event.target.closest("[data-mc-voice-delivery-reset]")) {
+                event.preventDefault();
+                Array.prototype.forEach.call(
+                    panel.querySelectorAll("[data-mc-voice-slider-input]"),
+                    function (input) {
+                        const spec = deliveryControls[
+                            input.getAttribute("data-mc-voice-slider-input")];
+                        if (spec) input.value = spec.default;
+                    });
+                saveDelivery(holder);
+                return;
+            }
+            const test = event.target.closest("[data-mc-voice-delivery-test]");
+            if (test) {
+                event.preventDefault();
+                test.disabled = true;
+                // Saved first, so what is auditioned is what is stored -- an
+                // audition of unsaved slider positions would be a preview of a
+                // setting nobody has.
+                saveDelivery(holder).then(function () {
+                    return audition(holder, "");
+                }).catch(function () {
+                    sayInHolder(holder, "That voice could not be played.");
+                }).then(function () { test.disabled = false; });
+            }
+        });
+        post(ROUTES.profile, {}, holder).then(function (payload) {
+            paintDelivery(holder, payload);
+        });
     }
 
     function sayInHolder(holder, text) {
@@ -2414,6 +3129,7 @@
         attempt("wire the voice gestures", wireGestures);
         attempt("wire the Voice Chat settings", wireSettings);
         attempt("wire the voice list", wireVoices);
+        attempt("wire the character's voice", wirePicker);
         attempt("watch the run state", watchRunState);
         attempt("update the composer", applyComposerState);
     }

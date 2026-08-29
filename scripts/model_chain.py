@@ -42,7 +42,9 @@ import mc_references
 import mc_styles
 import mc_voice_api
 import mc_voice_clone
+import mc_voice_models
 import mc_voice_paths
+import mc_voice_profile
 import mc_voice_registry
 import mc_voice_runtime
 import mc_voice_state
@@ -645,6 +647,70 @@ _VOICE_OPTIONS.update({
         gr.Textbox,
     ).info(
         "what Test says when you audition a voice. Editable here and in the Voices list"
+    ),
+    mc_voice_models.OPTIONS["stt"]: shared.OptionInfo(
+        "",
+        "Speech-to-text model",
+        gr.Textbox,
+    ).info(
+        "which of the three transcription qualities is used — chosen with Use in the Speech "
+        "to text row above rather than typed. Empty, or naming a model this build does not "
+        "have, means the medium tier this extension ships with"
+    ),
+    # The four delivery numbers. Stored as options rather than in a file of
+    # this feature's own for the reason the two switches are: Settings and the
+    # Voice flyout are two views of one value, and a second store is a second
+    # thing to keep in step. Sliders here as well as in the Voices row, because
+    # somebody who has scrolled to the settings page should not have to find a
+    # painted control to change a number they can see.
+    mc_voice_profile.OPT_SPEED: shared.OptionInfo(
+        mc_voice_profile.CONTROLS["speed"]["default"],
+        "Voice speed",
+        gr.Slider,
+        {"minimum": mc_voice_profile.CONTROLS["speed"]["minimum"],
+         "maximum": mc_voice_profile.CONTROLS["speed"]["maximum"],
+         "step": mc_voice_profile.CONTROLS["speed"]["step"]},
+    ).info(
+        "Kokoro's own speaking rate for the default voice — the one control of the four "
+        "that the model itself takes. Set it in the Delivery block above, which applies it "
+        "the moment you let go of the slider; this row is the stored value. A character "
+        "with a speed of its own overrides it, and one without follows it"
+    ),
+    mc_voice_profile.OPT_PITCH: shared.OptionInfo(
+        mc_voice_profile.CONTROLS["pitch"]["default"],
+        "Voice pitch (semitones)",
+        gr.Slider,
+        {"minimum": mc_voice_profile.CONTROLS["pitch"]["minimum"],
+         "maximum": mc_voice_profile.CONTROLS["pitch"]["maximum"],
+         "step": mc_voice_profile.CONTROLS["pitch"]["step"]},
+    ).info(
+        "shifts the whole voice, formants included, so it reads as a different-sized "
+        "speaker. Kokoro has no pitch input of its own — Voice Chat resynthesises faster "
+        "and reads the result back slower, which moves the formants with it. Set it in the "
+        "Delivery block above"
+    ),
+    mc_voice_profile.OPT_GAIN: shared.OptionInfo(
+        mc_voice_profile.CONTROLS["gain"]["default"],
+        "Voice volume (dB)",
+        gr.Slider,
+        {"minimum": mc_voice_profile.CONTROLS["gain"]["minimum"],
+         "maximum": mc_voice_profile.CONTROLS["gain"]["maximum"],
+         "step": mc_voice_profile.CONTROLS["gain"]["step"]},
+    ).info(
+        "loudness relative to the model's own output, limited so a loud setting cannot clip "
+        "into distortion. Set it in the Delivery block above"
+    ),
+    mc_voice_profile.OPT_PAUSE: shared.OptionInfo(
+        mc_voice_profile.CONTROLS["pause"]["default"],
+        "Pause between sentences (ms)",
+        gr.Slider,
+        {"minimum": mc_voice_profile.CONTROLS["pause"]["minimum"],
+         "maximum": mc_voice_profile.CONTROLS["pause"]["maximum"],
+         "step": mc_voice_profile.CONTROLS["pause"]["step"]},
+    ).info(
+        "extra silence after each sentence of a spoken reply, on top of the model's own. "
+        "Only a reply that is streamed sentence by sentence has boundaries to put it at, so "
+        "it does not change an audition. Set it in the Delivery block above"
     ),
     mc_voice_clone.OPT_ROOT: shared.OptionInfo(
         "",

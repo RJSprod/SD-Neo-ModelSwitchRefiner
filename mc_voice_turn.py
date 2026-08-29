@@ -124,11 +124,16 @@ class VoiceTurn:
     """One reply's speech, from the first chunk to the last sample."""
 
     def __init__(self, voice_id: str = "", sid: int = 0, labels=(), page: str = "",
-                 speaker=None, max_source_chars: int = MAX_SOURCE_CHARS):
+                 speaker=None, max_source_chars: int = MAX_SOURCE_CHARS, profile=None):
         self.id = secrets.token_urlsafe(18)
         self.page = str(page or "")
         self.voice_id = str(voice_id or "")
         self.sid = int(sid or 0)
+        self.profile = dict(profile) if profile else None
+        """The delivery this reply is spoken with, resolved when the turn was
+        created. Held rather than read at ``begin_turn`` for the reason the
+        voice is: what a reply sounds like is decided once, at its beginning,
+        and a slider moved while it is speaking changes the next one."""
         self.created_at = time.monotonic()
 
         self.cancelled = threading.Event()
@@ -404,7 +409,7 @@ class VoiceTurn:
             if first is None:
                 self.cancel(self.reason or "empty")
                 return
-            self.sample_rate = int(speaker.begin_turn(self, self.sid) or 0)
+            self.sample_rate = int(speaker.begin_turn(self, self.sid, self.profile) or 0)
             began = True
             self.synthesis_started = True
             self._compute_started = time.monotonic()
@@ -541,7 +546,7 @@ accumulate one dictionary entry per reply.
 
 
 def create(voice_id: str = "", sid: int = 0, labels=(), page: str = "",
-           speaker=None) -> VoiceTurn:
+           speaker=None, profile=None) -> VoiceTurn:
     """Make a turn the active one, cancelling whatever was active before.
 
     Cancelling the previous turn here rather than leaving it is section 24's
@@ -551,7 +556,8 @@ def create(voice_id: str = "", sid: int = 0, labels=(), page: str = "",
     """
     global _active_id
 
-    turn = VoiceTurn(voice_id=voice_id, sid=sid, labels=labels, page=page, speaker=speaker)
+    turn = VoiceTurn(voice_id=voice_id, sid=sid, labels=labels, page=page, speaker=speaker,
+                     profile=profile)
     previous = None
     with _lock:
         _expire()

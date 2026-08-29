@@ -84,13 +84,56 @@ class Character:
     # Replaces the built system prompt entirely when set. The escape hatch for
     # a character whose framing this application's wrapper gets wrong.
     system: str = ""
+    # Which voice reads this character's replies aloud, as the stable id
+    # ``mc_voice_registry`` mints — ``official:af_nicole`` or ``clone:<uuid>``,
+    # never a speaker number, for the reason that module gives at length: a
+    # number is an address in a block of floats and moves when a bank is
+    # rebuilt. Empty means "whatever the default voice is", which is what every
+    # character written before voices were per-character has.
+    voice: str = ""
+    # How that voice delivers it. ``None`` is not a missing value here, it is
+    # the value: it means "follow the default voice's setting", so a character
+    # nobody has configured tracks Settings → Voice Chat instead of freezing
+    # today's numbers into its own file. See mc_voice_profile.resolve.
+    voice_speed: float | None = None
+    voice_pitch: float | None = None
+    voice_gain: float | None = None
+    voice_pause: float | None = None
+
+    @property
+    def voice_profile(self) -> dict[str, object]:
+        """This character's delivery overrides, in mc_voice_profile's spelling.
+
+        A dictionary rather than four attributes because that is what crosses
+        into the voice modules, and because ``None`` has to survive the trip:
+        the whole point of the four fields is which of them are unset.
+        """
+        return {"speed": self.voice_speed, "pitch": self.voice_pitch,
+                "gain": self.voice_gain, "pause": self.voice_pause}
 
     def to_mapping(self) -> dict[str, object]:
-        """The file, in the order it is written."""
-        return {"name": self.name, "context": self.context, "greeting": self.greeting,
-                "temperature": self.temperature, "top_p": self.top_p,
-                "max_reply_tokens": self.max_reply_tokens, "seed": self.seed,
-                "system": self.system}
+        """The file, in the order it is written.
+
+        The voice keys are written only when they hold something. oobabooga
+        ignores keys it does not read either way, but a character with four
+        ``null``s in it reads as a character that has been configured, and the
+        difference between "unset" and "set to the default" is the whole of how
+        inheritance works here.
+        """
+        found: dict[str, object] = {
+            "name": self.name, "context": self.context, "greeting": self.greeting,
+            "temperature": self.temperature, "top_p": self.top_p,
+            "max_reply_tokens": self.max_reply_tokens, "seed": self.seed,
+            "system": self.system}
+        if self.voice:
+            found["voice"] = self.voice
+        for key, value in (("voice_speed", self.voice_speed),
+                           ("voice_pitch", self.voice_pitch),
+                           ("voice_gain", self.voice_gain),
+                           ("voice_pause", self.voice_pause)):
+            if value is not None:
+                found[key] = value
+        return found
 
     @classmethod
     def from_mapping(cls, data: dict) -> "Character":
@@ -114,6 +157,11 @@ class Character:
             max_reply_tokens=int(_number(values.get("max_reply_tokens"), DEFAULT_MAX_REPLY_TOKENS)),
             seed=int(_number(values.get("seed"), RANDOM_SEED)),
             system=_first(values, ("system", "system_message")),
+            voice=_first(values, ("voice", "voice_id")),
+            voice_speed=_optional_number(values.get("voice_speed")),
+            voice_pitch=_optional_number(values.get("voice_pitch")),
+            voice_gain=_optional_number(values.get("voice_gain")),
+            voice_pause=_optional_number(values.get("voice_pause")),
         )
 
 
@@ -412,3 +460,23 @@ def _number(value: object, default: float) -> float:
         return float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return default
+
+
+def _optional_number(value: object) -> float | None:
+    """A number, or ``None`` for a key that is absent or unreadable.
+
+    Distinct from :func:`_number` because here ``None`` is a meaning rather
+    than a failure: an unset delivery field follows the default voice, and a
+    field this could not read is unset. A hand-edited character file with
+    ``voice_pitch: fast`` in it is a character with no pitch override, not a
+    character that fails to load.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        found = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return None if found != found else found

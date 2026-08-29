@@ -174,6 +174,11 @@ class VoiceModel:
     revision: str = ""
     license: str = ""
     attribution: str = ""
+    tier: str = ""
+    summary: str = ""
+    notes: str = ""
+    about_bytes: int = 0
+    ram_bytes: int = 0
     extra: dict = field(default_factory=dict)
 
     @property
@@ -183,6 +188,18 @@ class VoiceModel:
     @property
     def total_bytes(self) -> int:
         return sum(item.approximate_bytes for item in self.artifacts)
+
+    @property
+    def download_bytes(self) -> int:
+        """How large this bundle is, for a sentence somebody reads before choosing.
+
+        The pinned total when there is one, and the manifest's own approximation
+        otherwise. Approximate is the honest word for it: the model bundles are
+        not pinned in this repository, so the exact figure is not known until
+        :func:`_resolve` asks the publisher at install time -- which is also the
+        number the progress line then counts against.
+        """
+        return self.total_bytes or int(self.about_bytes or 0)
 
     @property
     def wanted_paths(self) -> tuple[str, ...]:
@@ -365,6 +382,15 @@ def _read_model(identifier: str, entry) -> VoiceModel:
         revision=str(entry.get("revision") or ""),
         license=str(entry.get("license") or ""),
         attribution=str(entry.get("attribution") or ""),
+        # What a chooser needs and an installer does not: which of the offered
+        # tiers this is, and the two sentences and two numbers somebody weighs
+        # before pressing Download. None of it is verified against anything and
+        # none of it can be -- see :attr:`VoiceModel.download_bytes`.
+        tier=str(entry.get("tier") or ""),
+        summary=str(entry.get("summary") or ""),
+        notes=str(entry.get("notes") or ""),
+        about_bytes=int(entry.get("about_bytes") or 0),
+        ram_bytes=int(entry.get("ram_bytes") or 0),
         # Everything a *particular* bundle carries that is not a property every
         # bundle has. The Kokoro entry's speaker map lives here, pinned beside
         # the checksums of the archive those names came out of -- which is the
@@ -412,14 +438,147 @@ def _read_artifact(owner: str, entry) -> Artifact:
                     strip_root=str(entry.get("strip_root") or ""))
 
 
+OPTIONS = {"stt": "model_chain_voice_stt_model_id"}
+"""Where a chosen bundle is remembered, per kind.
+
+Only speech-to-text is offered as a choice. Text-to-speech has one bundle and
+the thing a user actually varies about it -- which voice, how it is delivered --
+is :mod:`mc_voice_registry` and :mod:`mc_voice_profile`, not a second Kokoro.
+"""
+
+TIERS = ("low", "medium", "high")
+"""Display order, worst-and-fastest first. A tier this build does not know is
+still listed, after these, rather than hidden."""
+
+TIER_LABELS = {"low": "Low", "medium": "Medium", "high": "High"}
+
+
+def _stored_choice(kind: str) -> str:
+    option = OPTIONS.get(kind)
+    if not option:
+        return ""
+    try:
+        from modules import shared
+
+        return str(getattr(shared.opts, option, "") or "").strip()
+    except Exception:
+        return ""
+
+
 def default_id(kind: str) -> str:
-    """Which bundle a V1 installation uses for ``kind``.
+    """Which bundle this installation uses for ``kind``.
 
     Asked through here by everything -- the installer, the worker's launch
-    paths, the Settings row -- so that a V2 model chooser has exactly one
-    function to change.
+    paths, the Settings row, the status the browser reads -- which is what makes
+    a model chooser one function rather than a search for every literal.
+
+    A stored choice wins, and only if it still names a bundle of this kind that
+    this build's catalogue describes. Everything else -- no choice, a choice
+    from a later build, a choice for the wrong kind, a host that will not answer
+    -- lands on the manifest's own default. That is deliberately total: this is
+    read on the path that launches the worker, and a settings value nobody can
+    explain is not a reason for speech to stop working.
     """
-    return manifest()["defaults"][kind]
+    fallback = manifest()["defaults"][kind]
+    wanted = _stored_choice(kind)
+    if not wanted or wanted == fallback:
+        return fallback
+    found = manifest()["models"].get(wanted)
+    if found is None or found.kind != kind:
+        logger.info("Model Chain: the chosen %s model %r is not in this build's catalogue; "
+                    "using %s", kind.upper(), wanted, fallback)
+        return fallback
+    return wanted
+
+
+def choices(kind: str) -> list:
+    """Every bundle of ``kind`` this build offers, in tier order.
+
+    The list a chooser draws. Ordered by :data:`TIERS` rather than by the order
+    they happen to appear in the manifest, so "Low, Medium, High" is a property
+    of this function and not of whoever last edited the JSON.
+    """
+    found = [entry for entry in manifest()["models"].values() if entry.kind == kind]
+
+    def rank(entry):
+        try:
+            return (TIERS.index(entry.tier), entry.label)
+        except ValueError:
+            return (len(TIERS), entry.label)
+
+    return sorted(found, key=rank)
+
+
+def select(kind: str, identifier: str) -> str:
+    """Remember which bundle of ``kind`` to use. Returns what is chosen after.
+
+    Refuses an id that is not in the catalogue, for the reason :func:`model`
+    gives: this is reachable from a browser, and an id that reached the disk
+    without passing through the manifest would be a path a caller supplied.
+
+    Choosing does not download anything and does not check that the bundle is
+    installed. Those are separate on purpose -- somebody may reasonably pick the
+    high tier and then press Download, and a chooser that refused to move until
+    the files were there would be a chooser that could never start the download.
+    """
+    if kind not in OPTIONS:
+        raise VoiceError(f"Voice Chat does not offer a choice of {kind} model.")
+    entry = model(identifier)
+    if entry.kind != kind:
+        raise VoiceError(f"{entry.label} is not a {kind} model.")
+    _remember(OPTIONS[kind], entry.identifier)
+    logger.info("Model Chain: the Voice Chat %s model is now %s (%s)",
+                kind.upper(), entry.identifier, entry.label)
+    return default_id(kind)
+
+
+def _remember(name: str, value: str) -> None:
+    """Write one option through to the host's store, and save it.
+
+    Best-effort and never fatal, exactly as :mod:`mc_voice_state` is: an
+    installation whose options object refuses the write keeps the model it had,
+    and Voice Chat keeps working with it.
+    """
+    try:
+        from modules import shared
+
+        shared.opts.set(name, value)
+        shared.opts.save(shared.config_filename)
+    except Exception:
+        logger.debug("Model Chain: could not persist the chosen voice model", exc_info=True)
+
+
+def catalogue(kind: str) -> list:
+    """Every offered bundle of ``kind``, with what is on disk beside it.
+
+    One call rather than a list and a status the caller has to join, because
+    joining them in the browser is how a row ends up saying "Installed" against
+    the wrong tier.
+    """
+    chosen = default_id(kind)
+    found = []
+    for entry in choices(kind):
+        ready, message = _model_state(entry)
+        found.append({
+            "id": entry.identifier,
+            "kind": entry.kind,
+            "tier": entry.tier,
+            "tier_label": TIER_LABELS.get(entry.tier, entry.tier.title() or "Other"),
+            "label": entry.label,
+            "summary": entry.summary,
+            "notes": entry.notes,
+            "about_bytes": entry.download_bytes,
+            "about_label": _bytes_label(entry.download_bytes),
+            "ram_bytes": int(entry.ram_bytes or 0),
+            "ram_label": _bytes_label(entry.ram_bytes) if entry.ram_bytes else "",
+            "license": entry.license,
+            "attribution": entry.attribution,
+            "installed": ready,
+            "message": message,
+            "chosen": entry.identifier == chosen,
+            "sources": sources(kind, entry.identifier),
+        })
+    return found
 
 
 def model(identifier: str) -> VoiceModel:
@@ -513,6 +672,12 @@ class Status:
     tts_id: str = ""
     tts_voice: str = ""
     busy: str = ""
+    # Appended rather than slotted in beside ``stt_id``, where they belong by
+    # meaning. Several callers build a Status positionally, and a field added
+    # in the middle of a positional signature is a value that silently lands in
+    # the wrong attribute -- which is a worse bug than an untidy field order.
+    stt_label: str = ""
+    stt_tier: str = ""
 
     @property
     def ready(self) -> bool:
@@ -569,12 +734,15 @@ def _status() -> Status:
         return Status(False, False, False, text, text, text, False, busy=busy)
 
     runtime_ready, runtime_message = _runtime_state(spec, chosen)
+    # ``default_id`` rather than the manifest's own default, so that everything
+    # downstream of this -- the microphone's readiness, the Settings row, the
+    # handshake check that the worker loaded what this installation verified --
+    # is talking about the tier the user actually chose.
+    stt, tts = default_id("stt"), default_id("tts")
     states = {}
-    for kind in paths.KINDS:
-        entry = spec["models"][spec["defaults"][kind]]
-        states[kind] = _model_state(entry)
+    for kind, identifier in (("stt", stt), ("tts", tts)):
+        states[kind] = _model_state(spec["models"][identifier])
 
-    stt, tts = spec["defaults"]["stt"], spec["defaults"]["tts"]
     return Status(
         runtime_ready=runtime_ready,
         stt_ready=states["stt"][0],
@@ -585,6 +753,8 @@ def _status() -> Status:
         platform_supported=True,
         stt_id=stt,
         tts_id=tts,
+        stt_label=spec["models"][stt].label,
+        stt_tier=spec["models"][stt].tier,
         tts_voice=spec["models"][tts].voice,
         busy=busy,
     )
@@ -753,12 +923,17 @@ def _resolve(artifact: Artifact) -> Expected:
                     else "the publisher's byte count only")
 
 
-def refusal(kind: str, manual: bool = False) -> str:
+def refusal(kind: str, manual: bool = False, identifier: str = "") -> str:
     """Why ``kind`` cannot be installed right now, or an empty string.
 
     ``manual`` is kept for the caller's benefit and no longer changes the
     answer: an unpinned artifact stopped being a refusal when resolving it
     against the publisher became part of the download.
+
+    ``identifier`` names one bundle rather than whichever is currently chosen,
+    which is what lets a Settings row offer three tiers with a Download button
+    each. An id that is not in this build's catalogue is refused here, before a
+    thread is started, so the browser waiting for the answer gets a sentence.
 
     Asked *before* anything is started, and separately from starting it, because
     the two questions have different audiences. This one answers a browser that
@@ -772,9 +947,10 @@ def refusal(kind: str, manual: bool = False) -> str:
                 "text-to-speech model.")
     try:
         # Not for its value -- for the exception. A catalogue this build cannot
-        # read is the one thing here that is still a refusal.
+        # read, or an id it does not know, are the two things here that are
+        # still a refusal.
         if kind != "runtime":
-            default_model(kind)
+            _wanted(kind, identifier)
     except VoiceError as exc:
         return str(exc)
 
@@ -796,8 +972,23 @@ def refusal(kind: str, manual: bool = False) -> str:
     return ""
 
 
-def install(kind: str, on_status=None, on_progress=None) -> Status:
-    """Provision the runtime if needed, then install ``kind``'s default bundle.
+def _wanted(kind: str, identifier: str = "") -> VoiceModel:
+    """The bundle an install or a listing is about.
+
+    Named rather than repeated at four call sites, because "the one that was
+    asked for, or the one in use" is the rule and a call site that got it wrong
+    would install the right files under the wrong tier's name.
+    """
+    if not str(identifier or "").strip():
+        return default_model(kind)
+    entry = model(identifier)
+    if entry.kind != kind:
+        raise VoiceError(f"{entry.label} is not a {kind} model.")
+    return entry
+
+
+def install(kind: str, on_status=None, on_progress=None, identifier: str = "") -> Status:
+    """Provision the runtime if needed, then install one of ``kind``'s bundles.
 
     One button per model and no third button for the engine, because "download
     the voice engine" is not a decision anybody has the information to make:
@@ -823,12 +1014,12 @@ def install(kind: str, on_status=None, on_progress=None) -> Status:
         raise VoiceError(f"{kind!r} is not a Voice Chat model kind.")
     say = _narrator(kind, on_status)
     tick = _ticker(kind, on_progress)
+    entry = _wanted(kind, identifier)
 
-    with _claim(kind, say):
-        entry = default_model(kind)
+    with _claim(kind, say, entry.identifier):
         logger.info("Model Chain: Voice Chat is installing the %s bundle %s (%s, about %s)",
                     kind.upper(), entry.identifier, entry.label,
-                    _bytes_label(entry.total_bytes))
+                    _bytes_label(entry.download_bytes))
 
         say("Checking the voice runtime…")
         install_runtime(on_status=say, on_progress=lambda f: tick(f * 0.5))
@@ -847,22 +1038,28 @@ def install(kind: str, on_status=None, on_progress=None) -> Status:
         return status()
 
 
-def sources(kind: str) -> list[dict]:
-    """Where a person would go to fetch ``kind``'s files by hand.
+def sources(kind: str, identifier: str = "") -> list[dict]:
+    """Where a person would go to fetch a bundle's files by hand.
 
     The manifest already names every URL, so the Settings row can show them
     rather than asking somebody to find the right Whisper export themselves.
     Returned as data rather than markup because the row is not the only thing
     that will want it.
+
+    Per bundle rather than per kind: three Whisper tiers are three different
+    sets of addresses, and a manual-install panel that printed the chosen
+    tier's links under another tier's heading would send somebody to download
+    the wrong two hundred megabytes.
     """
-    entry = default_model(kind)
+    entry = _wanted(kind, identifier)
     return [{"filename": item.filename, "url": item.url, "save_as": item.local_name,
              "archive": bool(item.archive)}
             for item in entry.artifacts]
 
 
-def install_from(kind: str, folder, on_status=None, on_progress=None) -> Status:
-    """Install ``kind`` from files already on this machine.
+def install_from(kind: str, folder, on_status=None, on_progress=None,
+                 identifier: str = "") -> Status:
+    """Install one of ``kind``'s bundles from files already on this machine.
 
     The escape hatch, and it earns its place beyond the situation that prompted
     it: a machine with no route to huggingface.co, a corporate proxy that
@@ -900,8 +1097,9 @@ def install_from(kind: str, folder, on_status=None, on_progress=None) -> Status:
     if not source.is_dir():
         raise VoiceError(f"{source} is not a folder.")
 
-    with _claim(kind, say):
-        entry = default_model(kind)
+    entry = _wanted(kind, identifier)
+
+    with _claim(kind, say, entry.identifier):
         logger.info("Model Chain: Voice Chat is installing the %s bundle %s from %s",
                     kind.upper(), entry.identifier, source)
         say(f"Reading {source}…")
@@ -1781,8 +1979,8 @@ def _bytes_label(value: int) -> str:
 
 
 @contextlib.contextmanager
-def _claim(kind: str, say=None):
-    """One install per model at a time, and a status line while it runs.
+def _claim(kind: str, say=None, identifier: str = ""):
+    """One install per model kind at a time, and a status line while it runs.
 
     Two presses of the same button is the ordinary case -- a row that says
     "Downloading…" invites a second click -- and two transactions writing the
@@ -1797,15 +1995,18 @@ def _claim(kind: str, say=None):
     with _lock:
         if kind in _progress and _progress[kind].get("running"):
             raise VoiceError(f"The {kind.upper()} model is already being installed.")
+        # ``model`` rather than only ``kind``, because a kind is now three
+        # tiers and a row that knew a download was running but not which of
+        # its three buttons started it would put the bar on all of them.
         _progress[kind] = {"running": True, "text": "Starting…", "fraction": 0.0,
-                           "failed": False}
+                           "failed": False, "model": str(identifier or "")}
     try:
         yield
     except Exception as exc:
         reason = str(exc) or exc.__class__.__name__
         with _lock:
             _progress[kind] = {"running": False, "text": reason, "failed": True,
-                               "fraction": 0.0}
+                               "fraction": 0.0, "model": str(identifier or "")}
         logger.warning("Model Chain: Voice Chat could not install the %s model — %s",
                        kind.upper(), reason)
         # Everything somebody would have to be asked for, written down without
@@ -1817,7 +2018,7 @@ def _claim(kind: str, say=None):
     else:
         with _lock:
             _progress[kind] = {"running": False, "text": "Installed.", "fraction": 1.0,
-                               "failed": False}
+                               "failed": False, "model": str(identifier or "")}
 
 
 def _narrator(kind: str, on_status=None):

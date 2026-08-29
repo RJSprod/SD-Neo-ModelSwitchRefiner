@@ -4618,3 +4618,266 @@
     flex: 0 0 auto;
     min-height: 0;
 }
+
+/* -- the three speech-to-text qualities ------------------------------------
+   A card each rather than a drop-down, because the choice is between a fast one
+   that mishears and a heavy one that does not, and nobody can make that from
+   three labels. Every colour here is `inherit` or a tint of `currentColor` for
+   the reason the fields above give at length: naming a background token and
+   inheriting a text colour is two halves of a contrast pair fetched from two
+   places, and on a theme that keeps Gradio's light tokens defined while
+   painting a dark surface -- LobeTheme's night mode is exactly that -- the
+   result is white on white. */
+
+.mc-voice-tiers {
+    display: grid;
+    gap: 0.5em;
+    /* One column on a phone, and as many as fit on a settings page. `auto-fit`
+       rather than `auto-fill` so two tiers do not leave a third column of air. */
+    grid-template-columns: repeat(auto-fit, minmax(17em, 1fr));
+    margin-top: 0.4em;
+}
+
+.mc-voice-tier {
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    color: inherit;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+    padding: 0.6em 0.7em;
+}
+
+/* The one in use. A border rather than a fill: a fill is a background colour,
+   and a background colour is the half of the pair this stylesheet has decided
+   not to name. */
+.mc-voice-tier-chosen {
+    border-color: var(--color-accent, currentColor);
+    box-shadow: inset 0 0 0 1px var(--color-accent, currentColor);
+}
+
+.mc-voice-tier-head {
+    align-items: baseline;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4em;
+}
+
+.mc-voice-tier-rank {
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-sm, 4px);
+    color: inherit;
+    flex: 0 0 auto;
+    font-size: 0.75em;
+    letter-spacing: 0.04em;
+    padding: 0.05em 0.45em;
+    text-transform: uppercase;
+}
+
+.mc-voice-tier-name {
+    flex: 1 1 8em;
+    font-weight: 600;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.mc-voice-tier-mark {
+    color: var(--color-accent, inherit);
+    flex: 0 0 auto;
+    font-size: 0.8em;
+    font-weight: 600;
+}
+
+.mc-voice-tier-summary {
+    font-size: 0.9em;
+}
+
+.mc-voice-tier-facts,
+.mc-voice-tier-notes,
+.mc-voice-tier-state {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 0.85em;
+    overflow-wrap: anywhere;
+}
+
+.mc-voice-tier-state.mc-voice-failed {
+    color: var(--error-text-color, var(--body-text-color, inherit));
+    font-weight: 600;
+}
+
+.mc-voice-tier-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4em;
+    margin-top: 0.2em;
+}
+
+.mc-voice-tier-actions .mc-voice-install,
+.mc-voice-tier-actions .mc-voice-entry-action {
+    flex: 1 1 auto;
+    font-size: 0.85em;
+    min-height: 2.2em;
+    padding: 0.25em 0.6em;
+}
+
+/* -- the delivery sliders --------------------------------------------------
+   Full width on the settings page, where there is room for the help text under
+   each one. The character screen draws the same four controls as Gradio
+   sliders, so nothing here applies to them. */
+
+.mc-voice-slider {
+    display: grid;
+    align-items: center;
+    column-gap: 0.6em;
+    grid-template-columns: 11em 1fr 5em;
+    margin: 0.35em 0;
+}
+
+.mc-voice-slider label {
+    grid-column: 1;
+    min-width: 0;
+}
+
+.mc-voice-slider input[type="range"] {
+    /* The track and the thumb are the browser's, tinted from the text colour
+       that is already working on this surface. `accent-color` is the one
+       property that colours both without replacing the control. */
+    accent-color: var(--color-accent, currentColor);
+    grid-column: 2;
+    min-width: 0;
+    width: 100%;
+}
+
+.mc-voice-slider output {
+    color: inherit;
+    font-variant-numeric: tabular-nums;
+    grid-column: 3;
+    text-align: right;
+}
+
+.mc-voice-slider-help {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 0.85em;
+    grid-column: 1 / -1;
+    margin-top: 0.15em;
+}
+
+.mc-voice-slider-actions {
+    display: flex;
+    gap: 0.4em;
+    margin: 0.5em 0 0.2em;
+}
+
+/* Narrow enough that a three-column grid would leave the slider two centimetres
+   wide. The label goes above it and the value stays beside it. */
+@media (max-width: 640px) {
+    .mc-voice-slider {
+        grid-template-columns: 1fr 4.5em;
+    }
+
+    .mc-voice-slider label {
+        grid-column: 1 / -1;
+    }
+
+    .mc-voice-slider input[type="range"] {
+        grid-column: 1;
+    }
+
+    .mc-voice-slider output {
+        grid-column: 2;
+    }
+}
+
+/* -- the character's voice picker ------------------------------------------
+   The same list Settings shows, in a third of the room, inside an overlay that
+   has to work on a phone. Scoped to this extension's panel because it is drawn
+   inside Conversation rather than on the settings page. */
+
+#mc-llm-studio .mc-voice-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+}
+
+#mc-llm-studio .mc-voice-picker-current {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 0.85em;
+    overflow-wrap: anywhere;
+}
+
+#mc-llm-studio .mc-voice-picker-list {
+    display: grid;
+    /* Two or three to a row on a phone, more on a desktop. The names are one
+       word each, so this is a great deal of list in very little height. */
+    grid-template-columns: repeat(auto-fill, minmax(9em, 1fr));
+    gap: 0.2em;
+    max-height: 15em;
+    overflow-y: auto;
+    /* A list that has reached its end stops there rather than scrolling the
+       overlay behind it off the screen. */
+    overscroll-behavior: contain;
+}
+
+#mc-llm-studio .mc-voice-pick-group {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 0.8em;
+    font-weight: 600;
+    grid-column: 1 / -1;
+    margin-top: 0.3em;
+}
+
+#mc-llm-studio .mc-voice-pick {
+    align-items: stretch;
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-sm, 4px);
+    display: flex;
+    min-width: 0;
+    overflow: hidden;
+}
+
+#mc-llm-studio .mc-voice-pick-chosen {
+    border-color: var(--color-accent, currentColor);
+    box-shadow: inset 0 0 0 1px var(--color-accent, currentColor);
+}
+
+#mc-llm-studio .mc-voice-pick button {
+    background-color: transparent;
+    border: 0;
+    color: inherit;
+    cursor: pointer;
+    font-size: 0.85em;
+    min-height: 2.1em;
+    padding: 0.2em 0.4em;
+}
+
+#mc-llm-studio .mc-voice-pick-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#mc-llm-studio .mc-voice-pick-play {
+    border-left: 1px solid var(--border-color-primary, currentColor) !important;
+    flex: 0 0 auto;
+}
+
+#mc-llm-studio .mc-voice-pick-play[disabled] {
+    cursor: default;
+    opacity: 0.55;
+}
+
+/* The hover and the chosen state are a tint of the text colour that is already
+   legible here, which cannot disagree with it. A browser without `color-mix`
+   gets the border it already had, which is still a usable control. */
+@supports (background: color-mix(in srgb, currentColor 8%, transparent)) {
+    #mc-llm-studio .mc-voice-pick button:hover {
+        background-color: color-mix(in srgb, currentColor 10%, transparent);
+    }
+
+    #mc-llm-studio .mc-voice-pick-chosen {
+        background-color: color-mix(in srgb, currentColor 8%, transparent);
+    }
+}

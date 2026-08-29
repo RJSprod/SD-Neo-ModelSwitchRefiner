@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "version": 1,
+  "version": 2,
   "runtime": {
     "version": "1.13.6",
     "package": "sherpa-onnx",
@@ -273,6 +273,44 @@
     "tts": "kokoro-multi-lang-v1-cpu"
   },
   "models": {
+    "whisper-base-int8": {
+      "kind": "stt",
+      "label": "Whisper Base (multilingual, INT8, CPU)",
+      "engine": "sherpa-onnx-offline-whisper",
+      "language": "",
+      "repo": "csukuangfj/sherpa-onnx-whisper-base",
+      "revision": "main",
+      "tier": "low",
+      "summary": "Fastest, lightest. Good enough for short, clear dictation.",
+      "notes": "Transcribes a sentence in a fraction of the time the higher tiers take and holds about a gigabyte while it is loaded. It makes noticeably more mistakes on names, technical words and strong accents, and it is the tier most likely to invent something from a poor microphone. Choose it on a busy machine, or when the CPU is already carrying an image model.",
+      "about_bytes": 94371840,
+      "ram_bytes": 1073741824,
+      "license": "MIT (OpenAI Whisper code and weights)",
+      "attribution": "Whisper by OpenAI (MIT). ONNX export by csukuangfj for sherpa-onnx.",
+      "files": [
+        {
+          "filename": "base-encoder.int8.onnx",
+          "local_name": "encoder.onnx",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-encoder.int8.onnx",
+          "bytes": null,
+          "sha256": null
+        },
+        {
+          "filename": "base-decoder.int8.onnx",
+          "local_name": "decoder.onnx",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-decoder.int8.onnx",
+          "bytes": null,
+          "sha256": null
+        },
+        {
+          "filename": "base-tokens.txt",
+          "local_name": "tokens.txt",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-tokens.txt",
+          "bytes": null,
+          "sha256": null
+        }
+      ]
+    },
     "whisper-small-int8": {
       "kind": "stt",
       "label": "Whisper Small (multilingual, INT8, CPU)",
@@ -301,6 +339,49 @@
           "filename": "small-tokens.txt",
           "local_name": "tokens.txt",
           "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-small/resolve/main/small-tokens.txt",
+          "bytes": null,
+          "sha256": null
+        }
+      ],
+      "tier": "medium",
+      "summary": "The balanced default. Accurate enough for ordinary conversation.",
+      "notes": "The tier Voice Chat ships with. On a modern desktop CPU it transcribes a few seconds of speech in about a second and holds roughly one and a half gigabytes while loaded. Unless dictation is being misheard often, or the machine is short of memory, this is the one to keep.",
+      "about_bytes": 262144000,
+      "ram_bytes": 1610612736
+    },
+    "whisper-medium-int8": {
+      "kind": "stt",
+      "label": "Whisper Medium (multilingual, INT8, CPU)",
+      "engine": "sherpa-onnx-offline-whisper",
+      "language": "",
+      "repo": "csukuangfj/sherpa-onnx-whisper-medium",
+      "revision": "main",
+      "tier": "high",
+      "summary": "Most accurate. Slow on the CPU, and much heavier.",
+      "notes": "Clearly better on names, accents, technical vocabulary and noisy or Bluetooth microphones. It is also several times slower per utterance on the CPU and holds around three gigabytes while loaded, on top of whatever the language and image models are already using. Worth it on a machine with memory to spare and patience for a second or two of extra delay.",
+      "about_bytes": 838860800,
+      "ram_bytes": 3221225472,
+      "license": "MIT (OpenAI Whisper code and weights)",
+      "attribution": "Whisper by OpenAI (MIT). ONNX export by csukuangfj for sherpa-onnx.",
+      "files": [
+        {
+          "filename": "medium-encoder.int8.onnx",
+          "local_name": "encoder.onnx",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-medium/resolve/main/medium-encoder.int8.onnx",
+          "bytes": null,
+          "sha256": null
+        },
+        {
+          "filename": "medium-decoder.int8.onnx",
+          "local_name": "decoder.onnx",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-medium/resolve/main/medium-decoder.int8.onnx",
+          "bytes": null,
+          "sha256": null
+        },
+        {
+          "filename": "medium-tokens.txt",
+          "local_name": "tokens.txt",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-medium/resolve/main/medium-tokens.txt",
           "bytes": null,
           "sha256": null
         }

@@ -27,6 +27,7 @@ import mc_llm_paths
 import mc_voice_api
 import mc_voice_models
 import mc_voice_state
+import mc_voice_profile
 import mc_voice_ui
 
 
@@ -108,6 +109,32 @@ class TestTheControlsAreThere:
         assert track is not None, "the microphone has no track to slide along"
         assert track.__dict__.get("min_width") == 2 * mc_voice_ui.MIC_PX
         assert "mc-llm-voice-track" in (track.__dict__.get("elem_classes") or [])
+
+    def test_the_character_editor_carries_a_voice_and_a_delivery(self):
+        """"I can have nicole for one character and heart for another."
+
+        The list itself is painted by the browser -- it changes when a clone
+        finishes -- so what Gradio owns is the hidden field the browser writes
+        and the ordinary Save reads. The four sliders are Gradio's own, because
+        they are values with no liveness to them.
+        """
+        build()
+        assert find(None, "mc-llm-chat-character-voice-list") is not None
+        assert find(None, "mc-llm-chat-character-voice") is not None
+        assert find(None, "mc-llm-chat-character-voice-custom") is not None
+        for name in ("speed", "pitch", "gain", "pause"):
+            slider = find(None, f"mc-llm-chat-character-voice-{name}")
+            assert slider is not None, name
+            control = mc_voice_profile.CONTROLS[name]
+            assert slider.__dict__.get("minimum") == control["minimum"], name
+            assert slider.__dict__.get("maximum") == control["maximum"], name
+
+    def test_the_selection_is_a_hidden_field_rather_than_a_second_save(self):
+        """No second store and nothing to get out of step with the character
+        file: the browser writes the id, Save character reads it."""
+        build()
+        held = find(None, "mc-llm-chat-character-voice")
+        assert held.__dict__.get("visible") is False
 
     def test_the_microphone_is_never_disabled(self):
         """Section 14: pressing it with nothing installed is how somebody finds
@@ -255,7 +282,7 @@ class TestTheMarker:
         marker = mc_voice_ui.speech_marker(lambda: "the reply that completed")
         token = marker()
         assert token
-        assert mc_voice_api.take_reply(token) == "the reply that completed"
+        assert mc_voice_api.take_reply(token)["text"] == "the reply that completed"
 
     def test_it_creates_nothing_when_the_run_left_nothing(self, installed, monkeypatch):
         monkeypatch.setattr(mc_voice_state, "auto_speak", lambda: True)
@@ -364,14 +391,20 @@ class TestTheSettingsSection:
         registered = {name for name in host.shared.options_templates
                       if name.startswith("model_chain_voice_")}
         import mc_voice_clone
+        import mc_voice_models
         import mc_voice_paths
+        import mc_voice_profile
         import mc_voice_registry
 
-        known = set(mc_voice_state.OPTIONS) | {
+        known = set(mc_voice_state.OPTIONS) | set(mc_voice_models.OPTIONS.values()) | {
             mc_voice_paths.OPT_ROOT,
             mc_voice_registry.OPT_VOICE,
             mc_voice_registry.OPT_TEST_TEXT,
             mc_voice_clone.OPT_ROOT,
+            mc_voice_profile.OPT_SPEED,
+            mc_voice_profile.OPT_PITCH,
+            mc_voice_profile.OPT_GAIN,
+            mc_voice_profile.OPT_PAUSE,
             "model_chain_voice_status",
             "model_chain_voice_voices",
         }
@@ -399,8 +432,34 @@ class TestTheSettingsSection:
     def test_the_status_row_carries_the_page_token_and_both_buttons(self):
         markup = mc_voice_ui.settings_html()
         assert mc_voice_api.session_token() in markup
-        assert 'data-mc-voice-install="stt"' in markup
         assert 'data-mc-voice-install="tts"' in markup
+        # Speech to text is three qualities rather than one bundle, so its
+        # Download button is per tier. The row still has to offer every one of
+        # them a way in, or a tier is a card nobody can install.
+        assert 'data-mc-voice-tiers="stt"' in markup
+        for identifier in ("whisper-base-int8", "whisper-small-int8", "whisper-medium-int8"):
+            assert f'data-mc-voice-tier="{identifier}"' in markup
+            assert f'data-mc-voice-tier-install="{identifier}"' in markup
+            assert f'data-mc-voice-tier-use="{identifier}"' in markup
+
+    def test_every_tier_says_what_it_costs_before_it_is_chosen(self):
+        """The choice is between a fast one that mishears and a heavy one that
+        does not, and nobody can make it from three labels."""
+        markup = mc_voice_ui.settings_html()
+        for rank in ("Low", "Medium", "High"):
+            assert f'>{rank}</span>' in markup
+        assert "to download" in markup
+        assert "of memory while it is loaded" in markup
+
+    def test_the_delivery_block_offers_the_four_controls_and_no_emotion(self):
+        import mc_voice_profile
+
+        markup = mc_voice_ui.voices_html()
+        for name in mc_voice_profile.FIELDS:
+            assert f'data-mc-voice-slider-input="{name}"' in markup
+        # Stated rather than implied. Kokoro has no emotion input, and a
+        # slider for one would be a control that does nothing.
+        assert "no emotion control" in markup
 
     def test_the_status_row_is_not_saved_to_the_config_file(self, host):
         import model_chain  # noqa: F401
@@ -409,3 +468,102 @@ class TestTheSettingsSection:
         if option is None:
             pytest.skip("this host build has no HTML settings component")
         assert getattr(option, "do_not_save", False) is True
+
+
+class TestACharactersVoiceReachesTheTurn:
+    """The end of the chain the character screen starts: which voice, and which
+    delivery, the reply that is about to be written will be spoken in.
+
+    Resolved once, here, at the moment the turn opens -- for the same reason the
+    voice is (section 56): what a reply sounds like is decided at its beginning,
+    and a slider moved while it is speaking changes the next one.
+    """
+
+    @pytest.fixture
+    def speaking(self, monkeypatch, installed):
+        import mc_voice_turn
+
+        made = {}
+
+        def create(**values):
+            made.update(values)
+
+            class Turn:
+                id = "TURN"
+                base_chars = 0
+
+                def start(self):
+                    return None
+
+            return Turn()
+
+        monkeypatch.setattr(mc_voice_turn, "create", create)
+        monkeypatch.setattr(mc_voice_state, "auto_speak", lambda: True)
+        return made
+
+    def character(self, **values):
+        from prompt_master.chat.characters import Character
+
+        return Character(name="Ada", **values)
+
+    def test_the_characters_own_voice_is_the_one_resolved(self, speaking, monkeypatch):
+        import mc_voice_registry
+
+        asked = []
+
+        def resolve(voice_id=""):
+            asked.append(voice_id)
+            return 6, {"id": voice_id or "official:af_heart"}
+
+        monkeypatch.setattr(mc_voice_registry, "resolve", resolve)
+        mc_voice_ui.begin_speech(character=self.character(voice="official:af_nicole"))
+        assert asked == ["official:af_nicole"]
+        assert speaking["voice_id"] == "official:af_nicole"
+
+    def test_a_character_with_no_voice_asks_for_the_default(self, speaking, monkeypatch):
+        import mc_voice_registry
+
+        asked = []
+        monkeypatch.setattr(mc_voice_registry, "resolve",
+                            lambda voice_id="": (asked.append(voice_id)
+                                                 or (3, {"id": "official:af_heart"})))
+        mc_voice_ui.begin_speech(character=self.character())
+        assert asked == [""]
+
+    def test_the_characters_delivery_is_frozen_onto_the_turn(self, speaking, monkeypatch):
+        import mc_voice_profile
+        import mc_voice_registry
+
+        monkeypatch.setattr(mc_voice_registry, "resolve",
+                            lambda voice_id="": (3, {"id": "official:af_heart"}))
+        mc_voice_profile.remember({"speed": 1.0, "pitch": 0.0})
+        mc_voice_ui.begin_speech(character=self.character(voice_pitch=-3.0))
+        assert speaking["profile"]["pitch"] == -3.0
+        assert speaking["profile"]["speed"] == 1.0
+
+    def test_a_character_with_none_follows_the_default_voices_delivery(self, speaking,
+                                                                       monkeypatch):
+        import mc_voice_profile
+        import mc_voice_registry
+
+        monkeypatch.setattr(mc_voice_registry, "resolve",
+                            lambda voice_id="": (3, {"id": "official:af_heart"}))
+        mc_voice_profile.remember({"speed": 0.85})
+        mc_voice_ui.begin_speech(character=self.character())
+        assert speaking["profile"]["speed"] == 0.85
+
+    def test_a_character_object_from_an_older_build_is_not_a_silent_reply(self, speaking,
+                                                                          monkeypatch):
+        """This runs inside the generator that produces a reply. Anything odd
+        about the character is the default voice, never an exception."""
+        import mc_voice_registry
+
+        monkeypatch.setattr(mc_voice_registry, "resolve",
+                            lambda voice_id="": (3, {"id": "official:af_heart"}))
+
+        class Older:
+            name = "Ada"
+
+        assert mc_voice_ui.voice_of(Older()) == ""
+        assert mc_voice_ui.profile_of(Older()) == {}
+        assert mc_voice_ui.begin_speech(character=Older()) is not None

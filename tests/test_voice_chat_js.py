@@ -209,6 +209,55 @@ settingsParts.runtimeLine = element("runtime-line");
 settingsParts.runtimeButton = element("runtime-button", "BUTTON");
 settingsParts.runtimeButton["data-mc-voice-install"] = "runtime";
 
+// Speech to text is three qualities rather than one bundle, so its row is three
+// cards with a Download and a Use each. Modelled here in the same shape the
+// real markup has, so a selector typo in the script is a failing test rather
+// than three cards that never move.
+function tierCard(identifier) {
+    const card = element("tier-" + identifier);
+    card.installButton = element("tier-install-" + identifier, "BUTTON");
+    card.installButton.setAttribute("data-mc-voice-tier-install", identifier);
+    card.useButton = element("tier-use-" + identifier, "BUTTON");
+    card.useButton.setAttribute("data-mc-voice-tier-use", identifier);
+    card.state = element("tier-state-" + identifier);
+    card.mark = element("tier-mark-" + identifier);
+    card.local = element("tier-local-" + identifier, "BUTTON");
+    card.local.setAttribute("data-mc-voice-local", "stt");
+    card.local.setAttribute("data-mc-voice-model", identifier);
+    card.local.setAttribute("data-mc-voice-scope", identifier);
+    card.folder = element("tier-folder-" + identifier, "INPUT");
+    card.querySelector = function (selector) {
+        if (selector.indexOf("tier-install") !== -1) return card.installButton;
+        if (selector.indexOf("tier-use") !== -1) return card.useButton;
+        if (selector.indexOf("tier-state") !== -1) return card.state;
+        if (selector.indexOf("tier-mark") !== -1) return card.mark;
+        if (selector.indexOf("mc-voice-local") !== -1) return card.local;
+        return null;
+    };
+    const answer = (selector) => (selector.indexOf("tier-install") !== -1
+                                  || selector.indexOf("tier-use") !== -1
+                                  || selector.indexOf("mc-voice-local") !== -1);
+    card.installButton.closest = (selector) =>
+        selector.indexOf("tier-install") !== -1 ? card.installButton : null;
+    card.useButton.closest = (selector) =>
+        selector.indexOf("tier-use") !== -1 ? card.useButton : null;
+    card.local.closest = (selector) => answer(selector) ? card.local : null;
+    return card;
+}
+
+settingsParts.tiers = {
+    "whisper-base-int8": tierCard("whisper-base-int8"),
+    "whisper-small-int8": tierCard("whisper-small-int8"),
+    "whisper-medium-int8": tierCard("whisper-medium-int8"),
+};
+settingsParts.tierList = element("tier-list");
+settingsParts.tierList.querySelector = function (selector) {
+    const found = Object.keys(settingsParts.tiers).filter(
+        (id) => selector.indexOf(id) !== -1)[0];
+    return found ? settingsParts.tiers[found] : null;
+};
+settingsParts.chosenLabel = element("stt-chosen");
+
 const settingsRow = element("settings");
 settingsRow["data-mc-voice-key"] = "PAGE-TOKEN";
 settingsRow.querySelector = function (selector) {
@@ -223,6 +272,18 @@ settingsRow.querySelector = function (selector) {
     if (selector === '[data-mc-voice-install="tts"]') return settingsParts.ttsButton;
     if (selector === '[data-mc-voice-folder="stt"]') return settingsParts.sttFolder;
     if (selector === '[data-mc-voice-folder="tts"]') return settingsParts.ttsFolder;
+    if (selector === '[data-mc-voice-tiers="stt"]') return settingsParts.tierList;
+    if (selector === '[data-mc-voice-chosen="stt"]') return settingsParts.chosenLabel;
+    if (selector.indexOf("data-mc-voice-tier=") !== -1) {
+        const wanted = Object.keys(settingsParts.tiers).filter(
+            (id) => selector.indexOf(id) !== -1)[0];
+        return wanted ? settingsParts.tiers[wanted] : null;
+    }
+    if (selector.indexOf("data-mc-voice-folder=") !== -1) {
+        const wanted = Object.keys(settingsParts.tiers).filter(
+            (id) => selector.indexOf(id) !== -1)[0];
+        return wanted ? settingsParts.tiers[wanted].folder : null;
+    }
     return null;
 };
 settingsRow.querySelectorAll = function (selector) {
@@ -230,7 +291,8 @@ settingsRow.querySelectorAll = function (selector) {
         return [settingsParts.runtimeButton, settingsParts.sttButton, settingsParts.ttsButton];
     }
     if (selector === "[data-mc-voice-local]") {
-        return [settingsParts.sttLocal, settingsParts.ttsLocal];
+        return [settingsParts.sttLocal, settingsParts.ttsLocal].concat(
+            Object.keys(settingsParts.tiers).map((id) => settingsParts.tiers[id].local));
     }
     return [];
 };
@@ -243,6 +305,48 @@ const voicesRow = element("voices");
 voicesRow["data-mc-voice-key"] = "PAGE-TOKEN";
 voicesRow.offsetParent = VOICES_VISIBLE ? {} : null;
 voicesRow.getBoundingClientRect = () => ({width: 0, height: 0});
+
+// The four delivery sliders, which live in the Voices row and are the same four
+// controls the character screen draws as Gradio sliders. Modelled here because
+// they are the half of that pair this script owns.
+const voicesParts = {sliders: {}, outputs: {}};
+voicesParts.deliveryPanel = element("delivery");
+voicesParts.deliverySummary = element("delivery-summary");
+voicesParts.resetButton = element("delivery-reset", "BUTTON");
+voicesParts.testButton = element("delivery-test", "BUTTON");
+["speed", "pitch", "gain", "pause"].forEach(function (name) {
+    const slider = element("slider-" + name, "INPUT");
+    slider.type = "range";
+    slider.value = name === "speed" ? "1" : "0";
+    slider.setAttribute("data-mc-voice-slider-input", name);
+    slider.closest = (selector) =>
+        selector.indexOf("slider-input") !== -1 ? slider : null;
+    voicesParts.sliders[name] = slider;
+    voicesParts.outputs[name] = element("output-" + name);
+});
+voicesParts.deliveryPanel.querySelector = function (selector) {
+    const name = ["speed", "pitch", "gain", "pause"].filter(
+        (key) => selector.indexOf('"' + key + '"') !== -1
+                 || selector.indexOf("=" + key) !== -1)[0];
+    if (selector.indexOf("slider-input") !== -1) {
+        return name ? voicesParts.sliders[name] : null;
+    }
+    if (selector.indexOf("slider-value") !== -1) {
+        return name ? voicesParts.outputs[name] : null;
+    }
+    if (selector.indexOf("delivery-summary") !== -1) return voicesParts.deliverySummary;
+    return null;
+};
+voicesParts.deliveryPanel.querySelectorAll = function (selector) {
+    if (selector.indexOf("slider-input") !== -1) {
+        return ["speed", "pitch", "gain", "pause"].map((k) => voicesParts.sliders[k]);
+    }
+    return [];
+};
+voicesRow.querySelector = function (selector) {
+    if (selector.indexOf("mc-voice-delivery]") !== -1) return voicesParts.deliveryPanel;
+    return null;
+};
 
 globalThis.document = {
     documentElement: element("html"),
@@ -302,7 +406,16 @@ const played = [];
 const stopped = [];
 
 function track() {
-    const item = {stopped: false, stop() { item.stopped = true; }};
+    // `label` and `getSettings` are how the script finds out what the browser
+    // actually gave it -- which device, at what rate. On Android that is the
+    // difference between the handset's own microphone and a Bluetooth headset's
+    // narrowband one, and it is the only evidence a user has that it changed.
+    const item = {
+        stopped: false,
+        stop() { item.stopped = true; },
+        label: TRACK_LABEL,
+        getSettings: () => ({sampleRate: TRACK_RATE, channelCount: 1, deviceId: "d1"}),
+    };
     tracks.push(item);
     return item;
 }
@@ -362,14 +475,25 @@ Object.defineProperty(globalThis, "navigator", {
     configurable: true,
     writable: true,
     value: (function () {
+        let opened = 0;
         const open = function (constraints) {
             requests.push({kind: "getUserMedia", constraints});
+            opened += 1;
+            // A browser that rejects the constraint *set* rather than the
+            // request. The script is expected to ask again for any microphone
+            // at all rather than report that capture is unavailable.
+            if (FIRST_OPEN_FAILS && opened === 1) {
+                const refusal = new Error("constraints");
+                refusal.name = DENIAL;
+                return Promise.reject(refusal);
+            }
             if (!PERMISSION) {
                 const error = new Error("refused");
                 error.name = DENIAL;
                 return Promise.reject(error);
             }
-            return Promise.resolve({getTracks: () => [track()]});
+            const only = [track()];
+            return Promise.resolve({getTracks: () => only, getAudioTracks: () => only});
         };
         // The prefixed callback form, which is what some Android WebViews have
         // instead of `mediaDevices`. The script has to reach it, or a phone
@@ -554,10 +678,11 @@ function releaseMic(pointerId, cancelled) {
                {pointerId: pointerId === undefined ? 7 : pointerId});
 }
 
-async function hold(ms, sampleCount) {
+async function hold(ms, sampleCount, level) {
     await engageMic(7);
     await tick();
-    feed(new Array(sampleCount === undefined ? 8000 : sampleCount).fill(0.2));
+    feed(new Array(sampleCount === undefined ? 8000 : sampleCount)
+         .fill(level === undefined ? 0.2 : level));
     NOW += ms;
     releaseMic(7);
     await tick();
@@ -567,6 +692,7 @@ function report(extra) {
     return Object.assign({
         requests: requests.map((r) => ({url: r.url, kind: r.kind,
                                         headers: r.headers,
+                                        constraints: r.constraints,
                                         bodyLength: r.body && r.body.byteLength,
                                         bodyText: typeof r.body === "string" ? r.body : null})),
         micClasses: Array.from(mic.classList.names),
@@ -610,9 +736,27 @@ function report(extra) {
             sttFailed: settingsParts.sttLine.classList.contains("mc-voice-failed"),
             sttLocalDisabled: settingsParts.sttLocal.disabled,
             sttLocalLabel: settingsParts.sttLocal.textContent,
+            ttsLocalDisabled: settingsParts.ttsLocal.disabled,
+            ttsLocalLabel: settingsParts.ttsLocal.textContent,
             runtimeLine: settingsParts.runtimeLine.textContent,
             runtimeButton: settingsParts.runtimeButton.textContent,
             runtimeDisabled: settingsParts.runtimeButton.disabled,
+            chosenLabel: settingsParts.chosenLabel.textContent,
+            tiers: Object.keys(settingsParts.tiers).reduce((found, id) => {
+                const card = settingsParts.tiers[id];
+                found[id] = {
+                    install: card.installButton.textContent,
+                    installDisabled: card.installButton.disabled,
+                    use: card.useButton.textContent,
+                    useDisabled: card.useButton.disabled,
+                    state: card.state.textContent,
+                    mark: card.mark.textContent,
+                    chosen: card.classList.contains("mc-voice-tier-chosen"),
+                    failed: card.state.classList.contains("mc-voice-failed"),
+                    localLabel: card.local.textContent,
+                };
+                return found;
+            }, {}),
         },
     }, extra || {});
 }
@@ -634,6 +778,9 @@ DEFAULTS = {
     "PERMISSION": "true",
     "DENIAL": '"NotAllowedError"',
     "SAMPLE_RATE": "48000",
+    "TRACK_LABEL": '"Built-in microphone"',
+    "TRACK_RATE": "48000",
+    "FIRST_OPEN_FAILS": "false",
     "CONTEXT_STATE": '"running"',
     "RESUME_WORKS": "true",
     "DECODE_WORKS": "true",
@@ -669,6 +816,40 @@ DEFAULTS = {
                                "auto_send": False}},
         "voice/tts": {"audio": None},
         "voice/install": {"json": {"ok": True, "already": False}},
+        "voice/models": {"json": {
+            "ok": True, "kind": "stt", "chosen": "whisper-small-int8", "progress": {},
+            "models": [
+                {"id": "whisper-base-int8", "tier": "low", "tier_label": "Low",
+                 "label": "Whisper Base", "summary": "Fastest.", "notes": "",
+                 "about_label": "90 MB", "ram_label": "1.0 GB", "installed": False,
+                 "message": "Not installed", "chosen": False, "sources": []},
+                {"id": "whisper-small-int8", "tier": "medium", "tier_label": "Medium",
+                 "label": "Whisper Small", "summary": "Balanced.", "notes": "",
+                 "about_label": "250 MB", "ram_label": "1.5 GB", "installed": True,
+                 "message": "Installed", "chosen": True, "sources": []},
+                {"id": "whisper-medium-int8", "tier": "high", "tier_label": "High",
+                 "label": "Whisper Medium", "summary": "Most accurate.", "notes": "",
+                 "about_label": "800 MB", "ram_label": "3.0 GB", "installed": False,
+                 "message": "Not installed", "chosen": False, "sources": []},
+            ]}},
+        "voice/profile": {"json": {
+            "ok": True,
+            "profile": {"speed": 1.0, "pitch": 0.0, "gain": 0.0, "pause": 0.0},
+            "fields": ["speed", "pitch", "gain", "pause"],
+            "summary": "Kokoro's own delivery",
+            "controls": {
+                "speed": {"label": "Speed", "unit": "x", "minimum": 0.5, "maximum": 2.0,
+                          "step": 0.05, "default": 1.0, "decimals": 2, "help": ""},
+                "pitch": {"label": "Pitch", "unit": " semitones", "minimum": -12.0,
+                          "maximum": 12.0, "step": 0.5, "default": 0.0, "decimals": 1,
+                          "help": ""},
+                "gain": {"label": "Volume", "unit": " dB", "minimum": -12.0,
+                         "maximum": 12.0, "step": 0.5, "default": 0.0, "decimals": 1,
+                         "help": ""},
+                "pause": {"label": "Pause between sentences", "unit": " ms",
+                          "minimum": 0.0, "maximum": 1200.0, "step": 25.0,
+                          "default": 0.0, "decimals": 0, "help": ""},
+            }}},
     }),
 }
 
@@ -1131,6 +1312,115 @@ class TestTheRecording:
         assert posts[0]["bodyLength"] > 44
 
 
+class TestABluetoothMicrophone:
+    """The reported bug: dictation was good on an Android handset's own
+    microphone and produced "(music)" and "(static)" through a Bluetooth
+    headset.
+
+    None of that is this page's to fix and all of it is this page's to survive.
+    A headset has no microphone over A2DP, so capturing from one opens an HFP
+    SCO link -- narrowband, telephony-codec, and far quieter than a handset
+    microphone the platform gain-stages itself. What Whisper does with a quiet
+    band-limited stream is emit the annotation tokens it was trained to use for
+    non-speech passages. See mc_voice_hearing.py for the same account from the
+    model's side.
+    """
+
+    def test_a_quiet_capture_is_lifted_before_it_is_sent(self):
+        """The single biggest practical win: a Bluetooth capture is routinely
+        quiet enough to be misheard and loud enough to transcribe perfectly once
+        it has been normalised."""
+        found = run("""
+            await hold(900, 16000, 0.05);
+            const post = requests.filter((r) => (r.url || "").endsWith("/stt"))[0];
+            const view = new DataView(post.body);
+            let peak = 0;
+            for (let at = 44; at + 1 < post.body.byteLength; at += 2) {
+                const value = Math.abs(view.getInt16(at, true));
+                if (value > peak) peak = value;
+            }
+            console.log(JSON.stringify(report({peak: peak / 32768})));
+        """, SAMPLE_RATE="16000")
+        assert 0.5 < found["peak"] <= 0.65, found["peak"]
+
+    def test_an_already_loud_capture_is_left_alone(self):
+        found = run("""
+            await hold(900, 16000, 0.8);
+            const post = requests.filter((r) => (r.url || "").endsWith("/stt"))[0];
+            const view = new DataView(post.body);
+            let peak = 0;
+            for (let at = 44; at + 1 < post.body.byteLength; at += 2) {
+                const value = Math.abs(view.getInt16(at, true));
+                if (value > peak) peak = value;
+            }
+            console.log(JSON.stringify(report({peak: peak / 32768})));
+        """, SAMPLE_RATE="16000")
+        assert found["peak"] > 0.75, found["peak"]
+
+    def test_a_silent_capture_is_never_sent_at_all(self):
+        """Running a large model over silence to be told it was silence is a
+        slower way to the same place, and the answer that comes back is
+        `(music)` rather than nothing."""
+        found = run("""
+            await hold(900, 16000, 0.0002);
+            console.log(JSON.stringify(report()));
+        """, SAMPLE_RATE="16000")
+        assert not [r for r in found["requests"] if (r.get("url") or "").endswith("/stt")]
+
+    def test_the_refusal_names_the_headset_when_that_is_what_it_is(self):
+        found = run("""
+            await hold(900, 16000, 0.0002);
+            console.log(JSON.stringify(report()));
+        """, SAMPLE_RATE="16000", TRACK_RATE="8000",
+             TRACK_LABEL='"Jabra Elite (Bluetooth)"')
+        assert "Bluetooth" in found["status"]
+
+    def test_a_good_transcript_still_mentions_the_headset_once(self):
+        """Once. A note repeated after every successful transcription is a note
+        nobody reads, and the point of it is that somebody who is being misheard
+        can tell why."""
+        found = run("""
+            await hold(900, 16000, 0.3);
+            const first = status.notice.textContent;
+            await hold(900, 16000, 0.3);
+            console.log(JSON.stringify(report({first})));
+        """, SAMPLE_RATE="16000", TRACK_RATE="8000",
+             TRACK_LABEL='"Jabra Elite (Bluetooth)"')
+        assert "Jabra" in found["first"]
+        assert "Jabra" not in found["status"]
+        assert found["status"].startswith("Transcribed.")
+
+    def test_the_handset_microphone_is_never_complained_about(self):
+        found = run("""
+            await hold(900, 16000, 0.3);
+            console.log(JSON.stringify(report()));
+        """, SAMPLE_RATE="48000")
+        assert found["status"] == "Transcribed."
+
+    def test_the_request_asks_for_what_whisper_wants_and_insists_on_nothing(self):
+        """Every processor is advisory. They are tuned for a wideband
+        microphone, and a browser that cannot apply them to an HFP stream should
+        hand over the stream rather than fail the request."""
+        found = run("await hold(900); console.log(JSON.stringify(report()));")
+        opens = [r for r in found["requests"] if r.get("kind") == "getUserMedia"]
+        assert opens, "the microphone was never opened"
+        audio = opens[0]["constraints"]["audio"]
+        assert audio["sampleRate"] == {"ideal": 16000}
+        for name in ("echoCancellation", "noiseSuppression", "autoGainControl"):
+            assert audio[name] == {"ideal": True}, name
+
+    def test_a_refused_constraint_set_falls_back_to_any_microphone(self):
+        """The devices most likely to reject a constraint set are the Android
+        WebViews this feature already bends over backwards for, and a second
+        attempt is the difference between a worse recording and no recording."""
+        found = run("await hold(900); console.log(JSON.stringify(report()));",
+                    DENIAL='"OverconstrainedError"', FIRST_OPEN_FAILS="true")
+        opens = [r for r in found["requests"] if r.get("kind") == "getUserMedia"]
+        assert len(opens) == 2, opens
+        assert opens[1]["constraints"] == {"audio": True}
+        assert [r for r in found["requests"] if (r.get("url") or "").endswith("/stt")]
+
+
 # --------------------------------------------------------------------------- #
 # The composer
 # --------------------------------------------------------------------------- #
@@ -1383,8 +1673,8 @@ class TestTheSettingsRow:
                     SETTINGS_PRESENT="true")
         assert found["settings"]["runtime"] == "Voice Chat is ready."
         assert found["settings"]["runtimeLine"] == "Installed"
-        assert found["settings"]["sttButton"] == "Installed"
-        assert found["settings"]["sttDisabled"] is True
+        assert found["settings"]["ttsButton"] == "Installed"
+        assert found["settings"]["ttsDisabled"] is True
 
     def test_a_pressed_button_that_is_refused_says_why_and_comes_back(self):
         """The reported bug, as a test. The build cannot install anything, the
@@ -1656,6 +1946,169 @@ class TestThePollingStops:
         assert found["polls"] == 0, "a hidden tab kept polling the WebUI"
 
 
+class TestTheThreeQualities:
+    """The speech-to-text row is three cards, and the two buttons on each do
+    different things. Download fetches that tier; Use points Voice Chat at it.
+
+    Separate on purpose: keeping all three on disk and switching between them
+    should not be a download, and choosing the high tier and *then* starting its
+    download is the order people actually do it in.
+    """
+
+    def test_each_tier_is_drawn_with_its_own_state(self):
+        found = run("await tick(); console.log(JSON.stringify(report()));",
+                    SETTINGS_PRESENT="true")
+        tiers = found["settings"]["tiers"]
+        assert tiers["whisper-small-int8"]["mark"] == "In use"
+        assert tiers["whisper-small-int8"]["chosen"] is True
+        assert tiers["whisper-small-int8"]["install"] == "Download again"
+        assert tiers["whisper-small-int8"]["useDisabled"] is True
+        assert tiers["whisper-base-int8"]["mark"] == ""
+        assert tiers["whisper-base-int8"]["install"] == "Download"
+        assert tiers["whisper-base-int8"]["use"] == "Use this"
+        assert tiers["whisper-base-int8"]["useDisabled"] is False
+        assert found["settings"]["chosenLabel"] == "Whisper Small"
+
+    def test_pressing_use_names_the_tier_and_nothing_else(self):
+        found = run("""
+            await tick();
+            settingsParts.tierList.fire("click", {
+                target: settingsParts.tiers["whisper-medium-int8"].useButton});
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+        chose = [r for r in found["requests"]
+                 if "voice/models" in r["url"] and "select" in (r["bodyText"] or "")]
+        assert chose, "pressing Use never asked the WebUI to change the model"
+        body = json.loads(chose[-1]["bodyText"])
+        assert body == {"kind": "stt", "select": "whisper-medium-int8"}
+
+    def test_pressing_download_carries_the_kind_and_the_model(self):
+        found = run("""
+            await tick();
+            settingsParts.tierList.fire("click", {
+                target: settingsParts.tiers["whisper-medium-int8"].installButton});
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+        installs = [r for r in found["requests"] if "voice/install" in r["url"]]
+        assert installs, "pressing Download never reached the install route"
+        assert json.loads(installs[-1]["bodyText"]) == {
+            "kind": "stt", "model": "whisper-medium-int8"}
+
+    def test_a_download_draws_its_progress_on_its_own_card_only(self):
+        """A kind is three tiers now. A row that knew a download was running but
+        not which of its three buttons started it would put the bar on all of
+        them."""
+        answers = json.loads(DEFAULTS["ANSWERS"])
+        answers["voice/models"]["json"]["progress"] = {
+            "running": True, "fraction": 0.41, "model": "whisper-medium-int8",
+            "text": "Downloading 2 of 3 — decoder.onnx (490 MB)"}
+        found = run("await tick(); console.log(JSON.stringify(report()));",
+                    SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+        tiers = found["settings"]["tiers"]
+        assert "decoder.onnx" in tiers["whisper-medium-int8"]["state"]
+        assert "41%" in tiers["whisper-medium-int8"]["state"]
+        assert tiers["whisper-medium-int8"]["installDisabled"] is True
+        assert "decoder.onnx" not in tiers["whisper-base-int8"]["state"]
+        assert tiers["whisper-base-int8"]["installDisabled"] is False
+
+    def test_a_failed_download_keeps_its_reason_on_its_own_card(self):
+        answers = json.loads(DEFAULTS["ANSWERS"])
+        answers["voice/models"]["json"]["progress"] = {
+            "running": False, "failed": True, "fraction": 0.0,
+            "model": "whisper-base-int8", "text": "decoder.onnx failed its hash check."}
+        found = run("await tick(); console.log(JSON.stringify(report()));",
+                    SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+        tiers = found["settings"]["tiers"]
+        assert tiers["whisper-base-int8"]["state"] == "decoder.onnx failed its hash check."
+        assert tiers["whisper-base-int8"]["failed"] is True
+        assert tiers["whisper-base-int8"]["installDisabled"] is False, (
+            "a failed download left its button disabled, so it cannot be retried")
+        assert tiers["whisper-medium-int8"]["failed"] is False
+
+    def test_a_folder_install_reads_the_box_under_the_tier_it_belongs_to(self):
+        """Three folder boxes on one page. Pressing Install under the high tier
+        while something is typed under the low one must not install the low
+        one's folder."""
+        found = run("""
+            await tick();
+            settingsParts.tiers["whisper-base-int8"].folder.value = "/downloads/base";
+            settingsParts.tiers["whisper-medium-int8"].folder.value = "/downloads/medium";
+            settingsParts.tiers["whisper-medium-int8"].local.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+        installs = [r for r in found["requests"] if "voice/install" in r["url"]]
+        assert installs, "the folder install never reached the route"
+        assert json.loads(installs[-1]["bodyText"]) == {
+            "kind": "stt", "folder": "/downloads/medium", "model": "whisper-medium-int8"}
+
+
+class TestTheDeliverySliders:
+    """Four sliders for the default voice, written on release rather than on
+    every pixel of drag: each write is a settings-file save."""
+
+    def test_they_are_drawn_from_the_route(self):
+        found = run("""
+            await tick();
+            console.log(JSON.stringify({
+                pitch: voicesParts.sliders.pitch.value,
+                shown: voicesParts.outputs.pitch.textContent,
+                summary: voicesParts.deliverySummary.textContent,
+            }));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true")
+        assert found["shown"] == "0 semitones"
+        assert found["summary"] == "Kokoro's own delivery"
+
+    def test_dragging_moves_the_number_without_saving(self):
+        found = run("""
+            await tick();
+            voicesParts.sliders.pitch.value = "-3";
+            voicesParts.deliveryPanel.fire("input", {target: voicesParts.sliders.pitch});
+            await tick();
+            console.log(JSON.stringify(report({
+                shown: voicesParts.outputs.pitch.textContent,
+            })));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true")
+        assert found["shown"] == "-3 semitones"
+        assert not [r for r in found["requests"]
+                    if "voice/profile" in r["url"] and "profile" in (r["bodyText"] or "")]
+
+    def test_releasing_saves_all_four(self):
+        found = run("""
+            await tick();
+            voicesParts.sliders.speed.value = "1.25";
+            voicesParts.deliveryPanel.fire("change", {target: voicesParts.sliders.speed});
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true")
+        writes = [r for r in found["requests"]
+                  if "voice/profile" in r["url"] and "profile" in (r["bodyText"] or "")]
+        assert writes, "releasing a slider never saved anything"
+        assert json.loads(writes[-1]["bodyText"])["profile"]["speed"] == 1.25
+
+    def test_reset_puts_every_control_back_and_saves_once(self):
+        found = run("""
+            await tick();
+            voicesParts.sliders.speed.value = "1.9";
+            voicesParts.sliders.pitch.value = "5";
+            voicesParts.deliveryPanel.fire("click", {
+                target: {closest: (s) => s.indexOf("delivery-reset") !== -1
+                                         ? voicesParts.resetButton : null}});
+            await tick();
+            console.log(JSON.stringify(report({
+                speed: voicesParts.sliders.speed.value,
+                pitch: voicesParts.sliders.pitch.value,
+            })));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true")
+        assert float(found["speed"]) == 1.0
+        assert float(found["pitch"]) == 0.0
+        writes = [r for r in found["requests"]
+                  if "voice/profile" in r["url"] and "profile" in (r["bodyText"] or "")]
+        assert len(writes) == 1, "Reset saved once per control instead of once"
+
+
 class TestTheEngineRow:
     """The engine has a button of its own, because the reasoning that it did not
     need one had a hole and somebody fell in.
@@ -1705,35 +2158,41 @@ class TestTheEngineRow:
 class TestTheFolderButtonComesBack:
     """The second stuck button. `paintSettings` repainted the primary install
     button and never the "Install from this folder" one beside it, so a folder
-    install left that button saying "Starting…" for good."""
+    install left that button saying "Starting…" for good.
+
+    Against the text-to-speech row, which is the one that still has the shape
+    this defect was found in: one bundle, one Download, one folder box. Speech
+    to text became three tier cards with a folder box each, and
+    ``TestTheThreeQualities`` below is where that shape is checked.
+    """
 
     def test_it_is_restored_after_a_folder_install_finishes(self):
         answers = status_answer()
         found = run("""
             await tick();
-            settingsParts.sttFolder.value = "C:\\\\Roots\\\\downloads";
-            settingsParts.sttLocal.fire("click");
+            settingsParts.ttsFolder.value = "C:\\\\Roots\\\\downloads";
+            settingsParts.ttsLocal.fire("click");
             await tick();
             await repaint();
             console.log(JSON.stringify(report()));
         """, SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
 
-        assert found["settings"]["sttLocalDisabled"] is False
-        assert found["settings"]["sttLocalLabel"] != "Starting…"
+        assert found["settings"]["ttsLocalDisabled"] is False
+        assert found["settings"]["ttsLocalLabel"] != "Starting…"
 
     def test_an_installed_bundle_offers_to_reinstall_rather_than_going_dead(self):
         found = run("await tick(); console.log(JSON.stringify(report()));",
                     SETTINGS_PRESENT="true")
-        assert found["settings"]["sttLocalLabel"] == "Reinstall from a folder"
-        assert found["settings"]["sttLocalDisabled"] is False
+        assert found["settings"]["ttsLocalLabel"] == "Reinstall from a folder"
+        assert found["settings"]["ttsLocalDisabled"] is False
 
     def test_it_shows_progress_while_one_runs(self):
-        answers = status_answer(stt_ready=False, ready=False, progress={
-            "stt": {"running": True, "fraction": 0.5, "text": "Copying encoder.onnx…"}})
+        answers = status_answer(tts_ready=False, ready=False, progress={
+            "tts": {"running": True, "fraction": 0.5, "text": "Copying model.onnx…"}})
         found = run("await tick(); console.log(JSON.stringify(report()));",
                     SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
-        assert found["settings"]["sttLocalLabel"] == "Installing…"
-        assert found["settings"]["sttLocalDisabled"] is True
+        assert found["settings"]["ttsLocalLabel"] == "Installing…"
+        assert found["settings"]["ttsLocalDisabled"] is True
 
     def test_a_failure_frees_it_too(self):
         answers = status_answer(stt_ready=False, ready=False, progress={

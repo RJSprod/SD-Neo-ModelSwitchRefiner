@@ -310,7 +310,7 @@ def transcribe(wav_bytes: bytes) -> dict:
             "elapsed": reply.get("elapsed")}
 
 
-def synthesize(text: str, sid: int = 0, speed: float = 1.0) -> bytes:
+def synthesize(text: str, sid: int = 0, profile=None) -> bytes:
     """One complete string to a WAV, in memory. Test playback and fallback.
 
     ``text`` is an immutable snapshot the caller already took; nothing here
@@ -320,6 +320,12 @@ def synthesize(text: str, sid: int = 0, speed: float = 1.0) -> bytes:
     ``sid`` is a numeric speaker the *caller* resolved from the registry.
     Nothing in this module turns a name into a number, and nothing accepts one
     from a browser -- see :func:`mc_voice_registry.resolve`.
+
+    ``profile`` is a delivery in :mod:`mc_voice_profile`'s own spelling --
+    speed, pitch in semitones, volume in dB, pacing in milliseconds -- and is
+    converted to the worker's multipliers by :func:`mc_voice_profile.request`.
+    ``None`` means the default voice's stored delivery, which is what makes an
+    audition sound like the reply that voice would speak.
     """
     encoded = (text or "").encode("utf-8")
     if not encoded.strip():
@@ -332,8 +338,9 @@ def synthesize(text: str, sid: int = 0, speed: float = 1.0) -> bytes:
     with _state_lock:
         _busy["tts"] += 1
     try:
-        _reply, payload = _request({"op": "tts", "sid": int(sid or 0),
-                                    "speed": float(speed or 1.0)}, encoded, TTS_TIMEOUT)
+        header = {"op": "tts", "sid": int(sid or 0)}
+        header.update(_delivery(profile))
+        _reply, payload = _request(header, encoded, TTS_TIMEOUT)
     finally:
         with _state_lock:
             _busy["tts"] = max(0, _busy["tts"] - 1)
@@ -347,21 +354,50 @@ def synthesize(text: str, sid: int = 0, speed: float = 1.0) -> bytes:
 # --------------------------------------------------------------------------- #
 
 
-def begin_turn(turn, sid: int = 0, speed: float = 1.0) -> int:
+def _delivery(profile) -> dict:
+    """A delivery profile as the worker's header carries it. Never raises.
+
+    Read on the path that speaks a reply, so a profile module that could not be
+    imported or a settings store that would not answer is a reply spoken in
+    Kokoro's own delivery rather than a reply that is not spoken at all.
+    """
+    try:
+        import mc_voice_profile as voice_profile
+
+        # ``None`` means the default voice's stored delivery rather than a
+        # neutral one. A turn carries a profile it resolved when it opened; a
+        # caller that has none -- an audition, the completed-reply fallback --
+        # is asking for "however the default voice speaks", and answering that
+        # with Kokoro's own would make those two paths sound different from
+        # every reply.
+        return voice_profile.request(
+            voice_profile.stored() if profile is None else profile)
+    except Exception:
+        logger.debug("Model Chain: could not read the voice delivery profile", exc_info=True)
+        return {"speed": 1.0, "pitch": 1.0, "gain": 1.0, "pause_ms": 0}
+
+
+def begin_turn(turn, sid: int = 0, profile=None) -> int:
     """Open one streaming turn on the worker. Returns its sample rate.
 
     The turn is registered *before* the frame is written, because the worker
     answers ``tts_ready`` fast enough that a registration afterwards is a real
     race -- and a ``tts_ready`` for a turn the reader does not know about is a
     turn that never learns its own sample rate.
+
+    ``profile`` is resolved once, here, at the moment the turn opens -- for the
+    same reason its voice is (section 56): a reply is spoken with the delivery
+    that was configured when it started, and changing a slider halfway through
+    does not re-pitch the sentence already in the speaker.
     """
     ensure_started()
     with _state_lock:
         _turns[turn.id] = turn
         _busy["tts"] += 1
     try:
-        _write({"op": "tts_begin", "turn": turn.id, "sid": int(sid or 0),
-                "speed": float(speed or 1.0)}, b"")
+        header = {"op": "tts_begin", "turn": turn.id, "sid": int(sid or 0)}
+        header.update(_delivery(profile))
+        _write(header, b"")
     except _WorkerGone:
         _release_turn(turn)
         raise VoiceRuntimeError("The voice runtime stopped before it could speak.") from None
