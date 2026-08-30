@@ -96,6 +96,7 @@
         soproClone: "model-chain/voice/sopro/clone",
         soproRebuild: "model-chain/voice/sopro/rebuild",
         soproStarter: "model-chain/voice/sopro/starter",
+        soproValidate: "model-chain/voice/sopro/validate",
         cleanup: "model-chain/voice/cleanup",
         cleanupInstall: "model-chain/voice/cleanup/install",
         cleanupRun: "model-chain/voice/cleanup/run",
@@ -3075,6 +3076,7 @@
         wireEngineSelector(holder);
         wireSopro(holder);
         wireCleanup(holder);
+        wireValidate(holder);
         schedulePaint(holder, 0);
     }
 
@@ -3145,6 +3147,114 @@
     // markup, the route, the module, the worker and the runtime were all there,
     // and pressing the button did nothing at all.
     let cleanupTimer = 0;
+
+    // -- Sopro validation ----------------------------------------------------- //
+
+    // Section 20's measurement, as a button. It changes nothing: it starts
+    // processes, times them, and writes a table to model_chain.log. So the only
+    // thing this has to get right is not lying about what is happening -- a
+    // sweep takes minutes, and a button that looked idle for four of them would
+    // be pressed again.
+    let validateTimer = 0;
+
+    function wireValidate(holder) {
+        const row = holder.querySelector("[data-mc-voice-sopro-validate-row]");
+        if (!row || row.dataset.mcVoiceWired === "1") return;
+        row.dataset.mcVoiceWired = "1";
+
+        const button = row.querySelector("[data-mc-voice-sopro-validate]");
+        if (button) {
+            button.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                if (button.disabled) return;
+                button.disabled = true;
+                setText(row, "[data-mc-voice-sopro-validate-status]", "Starting…");
+                post(ROUTES.soproValidate, {start: true}, holder).then(function (payload) {
+                    if (!payload || !payload.ok) {
+                        button.disabled = false;
+                        setText(row, "[data-mc-voice-sopro-validate-status]",
+                                (payload && payload.error)
+                                || "That could not be started.");
+                        return;
+                    }
+                    paintValidate(row, payload);
+                    pollValidate(holder, row, 900);
+                }).catch(function () {
+                    button.disabled = false;
+                    setText(row, "[data-mc-voice-sopro-validate-status]",
+                            "That could not be started.");
+                });
+            });
+        }
+        // Picks up a sweep started before this panel was drawn -- a reopened
+        // flyout, or a second tab -- rather than showing an idle button beside
+        // a run that is minutes from finishing.
+        whenOnScreen(row, function () { pollValidate(holder, row, 0); });
+    }
+
+    function pollValidate(holder, row, delay) {
+        window.clearTimeout(validateTimer);
+        validateTimer = window.setTimeout(function () {
+            post(ROUTES.soproValidate, {}, holder).then(function (payload) {
+                paintValidate(row, payload);
+                if (payload && payload.running) pollValidate(holder, row, 1500);
+            }).catch(function () { /* the next paint tries again */ });
+        }, Math.max(0, delay || 0));
+    }
+
+    // The table is drawn here as well as logged. The log is what gets sent on,
+    // but somebody who just waited four minutes should not have to go and find
+    // a file to see the answer.
+    function validateTable(rows) {
+        const head = "precision  threads    rate   RTF@7s  break-even";
+        const body = rows.map(function (row) {
+            const name = String(row.precision || "?");
+            const threads = String(row.threads || row.asked_threads || "?");
+            if (row.rtf === null || row.rtf === undefined) {
+                return pad(name, 9) + "  " + pad(threads, 7) + "  "
+                    + (row.error || "no result");
+            }
+            return pad(name, 9) + "  " + pad(threads, 7) + "  "
+                + pad(row.rate.toFixed(3), 6) + "  " + pad(row.rtf.toFixed(3), 7) + "  "
+                + pad((row.break_even_speed || 0).toFixed(2) + "x", 10);
+        });
+        return [head].concat(body).join("\n");
+    }
+
+    function pad(text, width) {
+        let found = String(text);
+        while (found.length < width) found = " " + found;
+        return found;
+    }
+
+    function paintValidate(row, payload) {
+        if (!row || !payload || !payload.ok) return;
+        const running = !!payload.running;
+        const button = row.querySelector("[data-mc-voice-sopro-validate]");
+        if (button) {
+            button.disabled = running;
+            button.textContent = running ? "Measuring…" : "Run validation";
+        }
+        let status = payload.message || "";
+        if (payload.error) status = payload.error;
+        else if (running && payload.total) {
+            status = "Step " + payload.step + " of " + payload.total
+                + (payload.message ? " — " + payload.message : "");
+        } else if (!running && payload.done && payload.best) {
+            status = "Fastest here: " + payload.best.precision + " at "
+                + payload.best.threads + " threads, RTF "
+                + Number(payload.best.rtf).toFixed(3) + " — clean up to Speed "
+                + Number(payload.best.break_even_speed).toFixed(2)
+                + "x. The full table is in model_chain.log.";
+        }
+        setText(row, "[data-mc-voice-sopro-validate-status]", status);
+        const table = row.querySelector("[data-mc-voice-sopro-validate-table]");
+        if (table) {
+            const rows = payload.rows || [];
+            table.hidden = !rows.length;
+            if (rows.length) table.textContent = validateTable(rows);
+        }
+    }
 
     function wireCleanup(holder) {
         const row = holder.querySelector('[data-mc-voice-kind="cleanup"]');
