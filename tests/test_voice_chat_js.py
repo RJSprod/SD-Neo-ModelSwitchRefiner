@@ -398,6 +398,9 @@ cloneParts.state = element("clone-state");
 cloneParts.clean = element("clone-clean", "INPUT");
 cloneParts.clean.type = "checkbox";
 cloneParts.clean.checked = false;
+cloneParts.how = element("clone-how", "SELECT");
+cloneParts.how.value = "page";
+cloneParts.how.hidden = true;
 
 // A canvas that records what was painted on it, so "the waveform was drawn" is
 // a number rather than an assumption.
@@ -428,6 +431,9 @@ cloneParts.form.querySelector = function (selector) {
         "trim-start": cloneParts.start,
         "trim-end": cloneParts.end,
         "trim-state": cloneParts.state,
+        // Before "voice-clean", because `[data-mc-voice-clean-how]` contains it
+        // and a first-match map would otherwise hand back the checkbox.
+        "voice-clean-how": cloneParts.how,
         "voice-clean": cloneParts.clean,
     };
     const key = Object.keys(map).filter((name) => selector.indexOf(name) !== -1)[0];
@@ -951,6 +957,7 @@ function report(extra) {
         trimStart: cloneParts.start.value,
         trimEnd: cloneParts.end.value,
         cloneStatus: cloneParts.status.textContent,
+        cleanHowHidden: cloneParts.how.hidden,
         painted: painted.length,
         uploaded: lastUploadedWav(),
         requests: requests.map((r) => ({url: r.url, kind: r.kind,

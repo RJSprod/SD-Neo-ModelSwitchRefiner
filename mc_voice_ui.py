@@ -948,6 +948,7 @@ def settings_html() -> str:
         # DOM, a theme script or a partial Gradio re-render has nothing to
         # expose, and no request can be built from markup that is not there.
         parts.append(sopro_html())
+        parts.append(cleanup_html())
         parts.append(
             '<div class="mc-voice-note">Voice Chat runs on the CPU and never uses the '
             'graphics card. Sopro brings its own isolated PyTorch runtime, which is kept '
@@ -1121,6 +1122,63 @@ def sopro_html() -> str:
             title="Or install the model artifacts from files you download yourself")
         + _sopro_engine_settings(settings, found)
         + '</div>')
+
+
+def cleanup_html() -> str:
+    """The recording-cleanup installer, and what it costs.
+
+    Its own row rather than a line in Sopro's, because it is not a
+    text-to-speech engine: it takes a recording and gives back a quieter one,
+    and the engine selector has no opinion about it. It sits here because this
+    is where the recording is made.
+
+    The price is on the row rather than behind it. A quarter of a gigabyte to
+    tidy a twenty-second clip is a real decision and somebody should be able to
+    make it before pressing anything.
+    """
+    import mc_voice_cleanup as cleanup
+
+    try:
+        found = cleanup.status()
+        size = models._bytes_label(found.download_bytes)
+    except Exception:
+        logger.debug("Model Chain: could not describe recording cleanup", exc_info=True)
+        return ('<div class="mc-voice-row" data-mc-voice-kind="cleanup">'
+                '<div class="mc-voice-head"><div class="mc-voice-heading">Recording '
+                'cleanup</div><div class="mc-voice-status">Recording cleanup could not be '
+                'described. This is a problem with the extension rather than with your '
+                'installation.</div></div></div>')
+
+    return (
+        f'<div class="mc-voice-row" data-mc-voice-kind="cleanup">'
+        f'<div class="mc-voice-head">'
+        f'<div class="mc-voice-heading">Recording cleanup</div>'
+        f'<div class="mc-voice-default">{ui.escape(cleanup.LABEL)}, CPU only</div>'
+        f'<div class="mc-voice-status" data-mc-voice-status="cleanup">'
+        f'{ui.escape(found.message)}</div>'
+        f'<button type="button" class="mc-voice-install" data-mc-voice-cleanup-install'
+        f'{" disabled" if not found.platform_supported else ""}>'
+        f'{"Installed" if found.ready else "Install cleanup"}</button>'
+        f'</div>'
+        f'<p class="mc-voice-note">Optional. A learned denoiser that takes background '
+        f'noise out of a recording before it becomes a voice — a fan, a room, traffic, '
+        f'hiss. The page already does a simpler cleanup with no download at all, and this '
+        f'is the better one.</p>'
+        f'<p class="mc-voice-note">It costs about {ui.escape(size)}, most of it a second '
+        f'copy of PyTorch: DeepFilterNet only publishes its Rust library for Python 3.10 '
+        f'and 3.11, so it brings an interpreter of its own rather than sharing this '
+        f'WebUI\'s. It runs only while a recording is being cleaned, stops itself two '
+        f'minutes after the last one, and is ended with the WebUI whatever happens.</p>'
+        f'<div class="mc-voice-sopro-parts">'
+        f'<div class="mc-voice-check" data-mc-voice-cleanup-runtime>'
+        f'{ui.escape(found.runtime_message)}</div>'
+        f'<div class="mc-voice-check" data-mc-voice-cleanup-model>'
+        f'{ui.escape(found.model_message)}</div>'
+        f'</div>'
+        f'<div class="mc-voice-progress" data-mc-voice-progress="cleanup" hidden>'
+        f'<div class="mc-voice-progress-bar" data-mc-voice-progress-bar="cleanup"></div>'
+        f'</div>'
+        f'</div>')
 
 
 def _sopro_engine_settings(settings: dict, found) -> str:
@@ -1393,6 +1451,13 @@ def _sopro_voices_html() -> str:
         f'Pick 15 s for me</button>'
         f'<label class="mc-voice-lab-check">'
         f'<input type="checkbox" data-mc-voice-clean /> Clean up the recording</label>'
+        # Shown only when the engine is installed, because a control offering a
+        # choice between one thing and one thing that is not there is not a
+        # choice. The page-side pass is always available and is the default.
+        f'<select data-mc-voice-clean-how class="mc-voice-clean-how" hidden>'
+        f'<option value="page">in this page (fast)</option>'
+        f'<option value="deepfilternet">with DeepFilterNet (better)</option>'
+        f'</select>'
         f'<label for="mc-voice-trim-start">Start</label>'
         f'<input type="number" id="mc-voice-trim-start" data-mc-voice-trim-start '
         f'min="0" step="0.1" inputmode="decimal" />'

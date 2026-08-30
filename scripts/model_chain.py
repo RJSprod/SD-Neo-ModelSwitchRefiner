@@ -50,6 +50,7 @@ import mc_voice_registry
 import mc_voice_runtime
 import mc_voice_sopro
 import mc_voice_sopro_profile
+import mc_voice_cleanup_runtime
 import mc_voice_sopro_runtime
 import mc_voice_state
 import mc_voice_ui
@@ -3661,6 +3662,10 @@ def _on_script_unloaded():
         # running is one more thing that can be wrong at the exact moment
         # nothing may be.
         mc_voice_sopro_runtime.shutdown()
+        # And the cleanup engine, which has an idle timer of its own and must
+        # not be trusted to have fired. A timer is a courtesy; this is the
+        # requirement.
+        mc_voice_cleanup_runtime.shutdown()
         # Separately owned, and stopped separately (section 82). A clone is a
         # long CPU job that has nothing to do with speech residency, and its
         # process tree must not outlive this one either -- release blocker nine.

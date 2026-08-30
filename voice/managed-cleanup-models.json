@@ -1,0 +1,192 @@
+{
+  "schema": 1,
+  "version": 1,
+  "notes": "The cleanup engine: DeepFilterNet on its own cp311 interpreter, because DeepFilterLib publishes no wheel for the Python Forge runs on. Installed and removed on its own, started only while a recording is being cleaned, and ended with the WebUI.",
+  "runtime": {
+    "python": "3.11",
+    "platform": "windows-x86_64-cp311",
+    "build": 1,
+    "interpreter": {
+      "filename": "python-3.11.9-embed-amd64.zip",
+      "url": "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip",
+      "about_bytes": 10485760
+    },
+    "wheels": [
+      {
+        "filename": "deepfilternet-0.5.6-py3-none-any.whl",
+        "local_name": "deepfilternet-0.5.6-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/70/71/2edcc970c4dc689c301ea83e89a169fde08d6af0dfb26b14009ab27ee105/deepfilternet-0.5.6-py3-none-any.whl",
+        "bytes": 113208,
+        "sha256": "99f5688d954fcfa8f853bf8bb8c3b2a59e4f9dc5d95643c9e6a32053234ba7c6"
+      },
+      {
+        "filename": "DeepFilterLib-0.5.6-cp311-none-win_amd64.whl",
+        "local_name": "DeepFilterLib-0.5.6-cp311-none-win_amd64.whl",
+        "url": "https://files.pythonhosted.org/packages/8e/51/2522f3e4ca0da09c895413056498251bc5f4240aac95a306db1de2046d1e/DeepFilterLib-0.5.6-cp311-none-win_amd64.whl",
+        "bytes": 518210,
+        "sha256": "e53fa759448dbee8ad7ad10d3313bbd8ca80e6989542f6971b95693de500cebf"
+      },
+      {
+        "filename": "torch-2.2.2-cp311-cp311-win_amd64.whl",
+        "local_name": "torch-2.2.2-cp311-cp311-win_amd64.whl",
+        "url": "https://files.pythonhosted.org/packages/5c/01/5ab75f138bf32d7a69df61e4997e24eccad87cc009f5fb7e2a31af8a4036/torch-2.2.2-cp311-cp311-win_amd64.whl",
+        "bytes": 198584125,
+        "sha256": "f9ef0a648310435511e76905f9b89612e45ef2c8b023bee294f5e6f7e73a3e7c"
+      },
+      {
+        "filename": "torchaudio-2.2.2-cp311-cp311-win_amd64.whl",
+        "local_name": "torchaudio-2.2.2-cp311-cp311-win_amd64.whl",
+        "url": "https://files.pythonhosted.org/packages/5b/b8/c2eb1dea20b703ac43e41f95c29998b040bfe7e5ad50acd21ee4fb13078e/torchaudio-2.2.2-cp311-cp311-win_amd64.whl",
+        "bytes": 2370442,
+        "sha256": "45ff277ced4a3f8cdc0474df16ebfb177633337040e5ac82d1fd46e4e6b57f85"
+      },
+      {
+        "filename": "numpy-1.26.4-cp311-cp311-win_amd64.whl",
+        "local_name": "numpy-1.26.4-cp311-cp311-win_amd64.whl",
+        "url": "https://files.pythonhosted.org/packages/3f/6b/5610004206cf7f8e7ad91c5a85a8c71b2f2f8051a0c0c4d5916b76d6cbb2/numpy-1.26.4-cp311-cp311-win_amd64.whl",
+        "bytes": 15811913,
+        "sha256": "cd25bcecc4974d09257ffcd1f098ee778f7834c3ad767fe5db785be9a4aa9cb2"
+      },
+      {
+        "filename": "loguru-0.7.3-py3-none-any.whl",
+        "local_name": "loguru-0.7.3-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/0c/29/0348de65b8cc732daa3e33e67806420b2ae89bdce2b04af740289c5c6c8c/loguru-0.7.3-py3-none-any.whl",
+        "bytes": 61595,
+        "sha256": "31a33c10c8e1e10422bfd431aeb5d351c7cf7fa671e3c4df004162264b28220c"
+      },
+      {
+        "filename": "appdirs-1.4.4-py2.py3-none-any.whl",
+        "local_name": "appdirs-1.4.4-py2.py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/3b/00/2344469e2084fb287c2e0b57b72910309874c3245463acd6cf5e3db69324/appdirs-1.4.4-py2.py3-none-any.whl",
+        "bytes": 9566,
+        "sha256": "a841dacd6b99318a741b166adb07e19ee71a274450e68237b4650ca1055ab128"
+      },
+      {
+        "filename": "requests-2.32.3-py3-none-any.whl",
+        "local_name": "requests-2.32.3-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/f9/9b/335f9764261e915ed497fcdeb11df5dfd6f7bf257d4a6a2a686d80da4d54/requests-2.32.3-py3-none-any.whl",
+        "bytes": 64928,
+        "sha256": "70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6"
+      },
+      {
+        "filename": "colorama-0.4.6-py2.py3-none-any.whl",
+        "local_name": "colorama-0.4.6-py2.py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl",
+        "bytes": 25335,
+        "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"
+      },
+      {
+        "filename": "win32_setctime-1.2.0-py3-none-any.whl",
+        "local_name": "win32_setctime-1.2.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/e1/07/c6fe3ad3e685340704d314d765b7912993bcb8dc198f0e7a89382d37974b/win32_setctime-1.2.0-py3-none-any.whl",
+        "bytes": 4083,
+        "sha256": "95d644c4e708aba81dc3704a116d8cbc974d70b3bdb8be1d150e36be6e9d1390"
+      },
+      {
+        "filename": "charset_normalizer-3.4.0-cp311-cp311-win_amd64.whl",
+        "local_name": "charset_normalizer-3.4.0-cp311-cp311-win_amd64.whl",
+        "url": "https://files.pythonhosted.org/packages/0b/6e/b13bd47fa9023b3699e94abf565b5a2f0b0be6e9ddac9812182596ee62e4/charset_normalizer-3.4.0-cp311-cp311-win_amd64.whl",
+        "bytes": 101752,
+        "sha256": "cee4373f4d3ad28f1ab6290684d8e2ebdb9e7a1b74fdc39e4c211995f77bec27"
+      },
+      {
+        "filename": "idna-3.10-py3-none-any.whl",
+        "local_name": "idna-3.10-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/76/c6/c88e154df9c4e1a2a66ccf0005a88dfb2650c1dffb6f5ce603dfbd452ce3/idna-3.10-py3-none-any.whl",
+        "bytes": 70442,
+        "sha256": "946d195a0d259cbba61165e88e65941f16e9b36ea6ddb97f00452bae8b1287d3"
+      },
+      {
+        "filename": "urllib3-2.2.3-py3-none-any.whl",
+        "local_name": "urllib3-2.2.3-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/ce/d9/5f4c13cecde62396b0d3fe530a50ccea91e7dfc1ccf0e09c228841bb5ba8/urllib3-2.2.3-py3-none-any.whl",
+        "bytes": 126338,
+        "sha256": "ca899ca043dcb1bafa3e262d73aa25c465bfb49e0bd9dd5d59f1d0acba2f8fac"
+      },
+      {
+        "filename": "certifi-2024.8.30-py3-none-any.whl",
+        "local_name": "certifi-2024.8.30-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/12/90/3c9ff0512038035f59d279fddeb79f5f1eccd8859f06d6163c58798b9487/certifi-2024.8.30-py3-none-any.whl",
+        "bytes": 167321,
+        "sha256": "922820b53db7a7257ffbda3f597266d435245903d80737e34f8a45ff3e3230d8"
+      },
+      {
+        "filename": "filelock-3.16.1-py3-none-any.whl",
+        "local_name": "filelock-3.16.1-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/b9/f8/feced7779d755758a52d1f6635d990b8d98dc0a29fa568bbe0625f18fdf3/filelock-3.16.1-py3-none-any.whl",
+        "bytes": 16163,
+        "sha256": "2082e5703d51fbf98ea75855d9d5527e33d8ff23099bec374a134febee6946b0"
+      },
+      {
+        "filename": "typing_extensions-4.12.2-py3-none-any.whl",
+        "local_name": "typing_extensions-4.12.2-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/26/9f/ad63fc0248c5379346306f8668cda6e2e2e9c95e01216d2b8ffd9ff037d0/typing_extensions-4.12.2-py3-none-any.whl",
+        "bytes": 37438,
+        "sha256": "04e5ca0351e0f3f85c6853954072df659d0d13fac324d0072316b67d7794700d"
+      },
+      {
+        "filename": "sympy-1.13.3-py3-none-any.whl",
+        "local_name": "sympy-1.13.3-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/99/ff/c87e0622b1dadea79d2fb0b25ade9ed98954c9033722eb707053d310d4f3/sympy-1.13.3-py3-none-any.whl",
+        "bytes": 6189483,
+        "sha256": "54612cf55a62755ee71824ce692986f23c88ffa77207b30c1368eda4a7060f73"
+      },
+      {
+        "filename": "mpmath-1.3.0-py3-none-any.whl",
+        "local_name": "mpmath-1.3.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl",
+        "bytes": 536198,
+        "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c"
+      },
+      {
+        "filename": "networkx-3.4.2-py3-none-any.whl",
+        "local_name": "networkx-3.4.2-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/b9/54/dd730b32ea14ea797530a4479b2ed46a6fb250f682a9cfb997e968bf0261/networkx-3.4.2-py3-none-any.whl",
+        "bytes": 1723263,
+        "sha256": "df5d4365b724cf81b8c6a7312509d0c22386097011ad1abe274afd5e9d3bbc5f"
+      },
+      {
+        "filename": "jinja2-3.1.4-py3-none-any.whl",
+        "local_name": "jinja2-3.1.4-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/31/80/3a54838c3fb461f6fec263ebf3a3a41771bd05190238de3486aae8540c36/jinja2-3.1.4-py3-none-any.whl",
+        "bytes": 133271,
+        "sha256": "bc5dd2abb727a5319567b7a813e6a2e7318c39f4f487cfe6c89c6f9c7d25197d"
+      },
+      {
+        "filename": "MarkupSafe-2.1.5-cp311-cp311-win_amd64.whl",
+        "local_name": "MarkupSafe-2.1.5-cp311-cp311-win_amd64.whl",
+        "url": "https://files.pythonhosted.org/packages/b7/a2/c78a06a9ec6d04b3445a949615c4c7ed86a0b2eb68e44e7541b9d57067cc/MarkupSafe-2.1.5-cp311-cp311-win_amd64.whl",
+        "bytes": 17224,
+        "sha256": "2b7c57a4dfc4f16f7142221afe5ba4e093e09e728ca65c51f5620c9aaeb9a617"
+      },
+      {
+        "filename": "fsspec-2024.9.0-py3-none-any.whl",
+        "local_name": "fsspec-2024.9.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/1d/a0/6aaea0c2fbea2f89bfd5db25fb1e3481896a423002ebe4e55288907a97a3/fsspec-2024.9.0-py3-none-any.whl",
+        "bytes": 179253,
+        "sha256": "a0947d552d8a6efa72cc2c730b12c41d043509156966cca4fb157b0f2a0c574b"
+      },
+      {
+        "filename": "setuptools-75.1.0-py3-none-any.whl",
+        "local_name": "setuptools-75.1.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/ff/ae/f19306b5a221f6a436d8f2238d5b80925004093fa3edea59835b514d9057/setuptools-75.1.0-py3-none-any.whl",
+        "bytes": 1248506,
+        "sha256": "35ab7fd3bcd95e6b7fd704e4a1539513edad446c097797f2985e0e4b960772f2"
+      }
+    ],
+    "bytes": 228110057
+  },
+  "model": {
+    "identifier": "deepfilternet3",
+    "label": "DeepFilterNet3 (CPU)",
+    "filename": "DeepFilterNet3.zip",
+    "url": "https://github.com/Rikorose/DeepFilterNet/raw/main/models/DeepFilterNet3.zip",
+    "about_bytes": 3145728,
+    "license": "MIT / Apache-2.0 (DeepFilterNet)",
+    "attribution": "DeepFilterNet by Hendrik Schr\u00f6ter et al.",
+    "expects": [
+      "config.ini",
+      "checkpoints"
+    ]
+  }
+}
