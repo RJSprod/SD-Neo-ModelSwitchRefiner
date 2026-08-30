@@ -5146,11 +5146,47 @@
     padding: 0.5em 0.6em;
 }
 
+/* One control per row, and only a second column when there is genuinely room
+   for two whole ones.
+   `auto-fit` with a 15em minimum was packing three sliders across a settings
+   panel, which leaves each of them a couple of centimetres of track: fine with
+   a mouse and unusable with a thumb. The label, the track and the readout each
+   get room instead, and every one of these is a control somebody drags. */
 .mc-voice-lab-sliders {
     display: grid;
-    gap: 0.3em 0.8em;
-    grid-template-columns: repeat(auto-fit, minmax(15em, 1fr));
+    gap: 0.5em 1.2em;
+    grid-template-columns: 1fr;
     margin: 0.5em 0;
+}
+
+@media (min-width: 60em) {
+    .mc-voice-lab-sliders {
+        grid-template-columns: repeat(2, minmax(24em, 1fr));
+    }
+}
+
+/* A 44px target is the size a finger actually hits, and the thumb has to be
+   big enough to find without looking. Both are set explicitly because the
+   browser's defaults are drawn for a pointer. */
+.mc-voice-lab-sliders .mc-voice-slider {
+    grid-template-columns: minmax(7em, 9em) 1fr 3.5em;
+    margin: 0;
+    min-height: 2.75rem;
+}
+
+.mc-voice-lab-sliders input[type="range"] {
+    height: 2.75rem;
+    touch-action: pan-y;
+}
+
+.mc-voice-lab-sliders input[type="range"]::-webkit-slider-thumb {
+    height: 1.5rem;
+    width: 1.5rem;
+}
+
+.mc-voice-lab-sliders input[type="range"]::-moz-range-thumb {
+    height: 1.5rem;
+    width: 1.5rem;
 }
 
 .mc-voice-lab-check {

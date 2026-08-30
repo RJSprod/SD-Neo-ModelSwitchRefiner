@@ -360,6 +360,18 @@ def sopro_registry_path() -> Path:
     return sopro_voices_root() / SOPRO_REGISTRY_FILENAME
 
 
+def sopro_settings_path() -> Path:
+    """Sopro's global settings, in a file of Sopro's own.
+
+    Not in the host's options, and that is the point. An option is a component
+    on the settings page as well as a stored value, so Forge's "Apply settings"
+    writes the page's stamped-at-build-time copy back over anything a live panel
+    changed since -- which is how a chosen default voice, or a slowed-down
+    delivery, quietly went back to what it had been.
+    """
+    return sopro_root() / "settings.json"
+
+
 def sopro_voice_root(identifier: str) -> Path:
     """One saved Sopro voice's directory, addressed by server-generated UUID.
 

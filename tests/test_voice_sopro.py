@@ -447,6 +447,44 @@ class TestTheVoiceLibrary:
         then this is empty rather than a placeholder."""
         assert sopro.official() == []
 
+    def test_the_default_survives_an_apply_on_the_settings_page(self, host, voice_root,
+                                                                 fake_sopro_worker,
+                                                                 spoken_wav):
+        """The reported bug, reproduced.
+
+        Forge's "Apply settings" writes every component on the settings page
+        back into the option store, and the browser's copy of an option is
+        stamped when the page is built -- so it knows nothing about a "Set as
+        Default" pressed since. The default lived in an option, so setting one
+        and then changing anything else on that page put the old value quietly
+        back, and Conversation went on speaking with the first voice in the list.
+
+        It lives in the registry file now, which no settings form can reach.
+        """
+        first = sopro.create("First", spoken_wav(9.0, 24000), "en")["voice"]
+        second = sopro.create("Second", spoken_wav(9.0, 24000), "en")["voice"]
+        sopro.set_default(second["id"])
+
+        # What an Apply does: the stale component value goes back into the store.
+        host.shared.opts.set(sopro.OPT_VOICE, first["id"])
+
+        assert sopro.default_id() == second["id"]
+        assert sopro.resolve("")[0] == second["id"]
+
+    def test_a_default_set_by_an_older_build_is_still_honoured(self, host, voice_root,
+                                                              fake_sopro_worker,
+                                                              spoken_wav):
+        """Migration: the option is read once, when the file has nothing."""
+        sopro.create("First", spoken_wav(9.0, 24000), "en")
+        second = sopro.create("Second", spoken_wav(9.0, 24000), "en")["voice"]
+
+        stored = sopro._read()
+        stored["default"] = ""
+        sopro._write(stored)
+        host.shared.opts.set(sopro.OPT_VOICE, second["id"])
+
+        assert sopro.default_id() == second["id"]
+
     def test_starter_voices_are_not_bundled_speakers(self):
         """The distinction section 8 actually draws.
 

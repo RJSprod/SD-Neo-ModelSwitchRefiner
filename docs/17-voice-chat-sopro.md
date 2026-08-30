@@ -343,6 +343,78 @@ Two smaller things in the same report, both reporting rather than behaviour:
 
 ---
 
+## One control per value
+
+A host option is two things at once: a stored value, and a component on the
+settings page. Forge's "Apply settings" writes every component on that page back
+into the store, and the browser's copy of each was stamped when the page was
+built — so it knows nothing about anything a live panel changed since.
+
+Every one of Sopro's twelve settings was therefore duplicated: once in the panel
+meant to be used, once as a row further down the same page, each able to
+overwrite the other. Setting a default voice and then changing anything else on
+that page put the old default quietly back, and Conversation went on speaking
+with the first voice in the list. The same was true of the delivery sliders and
+the engine settings.
+
+They live in Sopro's own files now — the default voice beside the voices in
+`registry.json`, the rest in `settings.json` — written atomically, out of reach
+of any settings form, and set in exactly one place. The options are still *read*
+once, so an installation configured under an older build keeps what it chose.
+Kokoro's default voice had the identical defect and moved to its own registry
+file with it.
+
+## Two controls that did not remember
+
+**The character's sampling.** Temperature, top-p, reply tokens and seed already
+*loaded* with a character. Nothing wrote them back without pressing Save
+character — which is on the editor screen, while the accordion holding them is
+in the flyout, beside whoever you are talking to. So setting a seed of −1 there
+set it for that reply and for nothing afterwards. They are written back on
+change now, while the editor is shut; with it open they belong to the edit, and
+Save and Cancel decide their fate.
+
+**Where the page was.** Emptying a list and refilling it costs the scroll
+position of whatever is scrolling it: the browser clamps `scrollTop` to the
+content present at that moment, a list wiped to nothing clamps to zero, and
+refilling it does not put it back. Every poll that repainted a voice list threw
+somebody back to the top of the flyout, and expanding a section — which is
+followed by a repaint — did it reliably enough to look like the expanding caused
+it. Every rebuild now runs inside a helper that notes where the page and the
+nearest scrolling ancestor were and puts them back.
+
+## Cleaning a reference recording, and the denoiser that could not be installed
+
+Sopro clones what it is given, hiss included. DeepFilterNet was the obvious
+answer and **cannot be installed here**: its Rust extension, `DeepFilterLib`,
+publishes wheels for CPython 3.8 to 3.11 only, and this WebUI runs 3.13.
+Building it from the sdist needs a Rust toolchain — precisely the "resolve and
+build something nobody reviewed" that the pinned-wheel design exists to prevent.
+That is a fact about the package, not a preference, and it would apply to any
+isolated engine process built around it.
+
+What is there instead is spectral subtraction, in the page, on the selection
+about to be uploaded: an 80 Hz high-pass, a per-bin noise floor estimated as the
+10th percentile over time (minimum statistics, because a recording somebody
+trimmed themselves rarely opens on silence), moderate over-subtraction, a gain
+smoothed across frequency and time, and a peak normalise.
+
+The smoothing is the part that matters. An unsmoothed gain flips between "keep"
+and "floor" bin by bin and frame by frame, and the result is musical noise — a
+shimmer of tones where there used to be honest hiss. Smoothing is what buys the
+moderate over-subtraction; without it the only way to remove this much noise is
+to be aggressive enough to hear. Measured on a synthetic speech-like signal it
+is about 6 dB, and `tests/test_voice_chat_js.py` asserts both halves of that:
+the hiss falls, and the voice is still the loudest thing in the result.
+
+It is not a learned denoiser and the UI does not claim it is. It takes out what
+is steady and leaves what is not, which is most of what a bad reference
+recording suffers from, and it costs no dependency at all. One thing it is
+correctly bad at is a genuinely constant tone — which is indistinguishable from
+stationary noise, and which the first version of its test used as the signal.
+
+---
+
 ## Containment, and the check that was in the wrong place
 
 The install worked, the decoder took the file, and then the worker would not

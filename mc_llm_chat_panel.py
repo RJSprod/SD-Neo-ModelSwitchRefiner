@@ -668,6 +668,12 @@ def build() -> dict:
                    outputs=[system_preview], queue=False)
     edit_system.click(fn=_adopt_system_prompt, inputs=[name, context, system],
                       outputs=[system, status], queue=False)
+    # `input` rather than `change`: `change` also fires when these are *set*
+    # from a character being loaded, which would write the file back the moment
+    # it was read. Only a person moving the control reaches here.
+    for control in sampling:
+        control.input(fn=_remember_sampling, inputs=[character, editing] + sampling,
+                      outputs=[], queue=False)
     saving = save_character.click(
         fn=_save_character,
         inputs=([editing, name, context, greeting, system] + sampling + [character_face]
@@ -2546,6 +2552,47 @@ def _cancel_character(who):
     fields = _editor_fields(loaded, NOT_EDITING, "Ready.")
     fields[0] = gr.update(visible=False)
     return fields
+
+
+def _remember_sampling(who, editing, temperature, top_p, reply_tokens, seed):
+    """Keep the Advanced generation settings on the character being talked to.
+
+    These four already *load* with a character -- :func:`_select_character`
+    returns them -- but nothing wrote them back without pressing Save character,
+    which lives on the editor screen and is about the editor's boxes. The
+    accordion is not in the editor: it is in the flyout, beside the character
+    you are talking to. So setting a seed there and carrying on chatting set it
+    for that reply and for nothing afterwards, and the next session opened on
+    whatever the file still said. Setting the same seed every time is not a
+    workflow; it is a control that does not remember.
+
+    Only while the editor is shut. With it open these four belong to the edit,
+    and Save and Cancel are what decide their fate -- writing them out from
+    under Cancel would make Cancel a lie.
+
+    Never fatal and never noisy: this is a side effect of moving a slider, and a
+    character file that cannot be written is reported by the next thing that
+    tries to write it properly rather than by a toast nobody asked for.
+    """
+    wanted = str(who or "").strip()
+    if not wanted or str(editing or NOT_EDITING) != NOT_EDITING:
+        return
+    from dataclasses import replace
+
+    try:
+        store = _characters()
+        character = store.load(wanted)
+        blank = _blank_character()
+        store.save(
+            replace(character,
+                    temperature=_decimal(temperature, blank.temperature),
+                    top_p=_decimal(top_p, blank.top_p),
+                    max_reply_tokens=_number(reply_tokens, blank.max_reply_tokens),
+                    seed=_number(seed, blank.seed)),
+            previous_name=wanted)
+    except Exception:
+        logger.debug("Model Chain: could not remember the sampling for %r", wanted,
+                     exc_info=True)
 
 
 def _save_character(editing, name, context, greeting, system, temperature, top_p,

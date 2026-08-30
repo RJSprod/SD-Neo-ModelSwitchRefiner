@@ -364,14 +364,22 @@ def describe(profile=None) -> str:
 
 
 def stored() -> dict:
-    """The profile the Sopro default voice speaks with, from the host's options."""
+    """The profile the Sopro default voice speaks with, from Sopro's own file.
+
+    Not from the host's options, and that is a correction rather than a
+    preference: an option is a component on the settings page as well as a
+    stored value, so "Apply settings" wrote the page's build-time copy back over
+    whatever this panel had just set. Two controls for one value, each able to
+    overwrite the other. See :func:`mc_voice_sopro._setting`, which still reads
+    the option when the file has nothing, so nobody loses what they configured.
+    """
+    import mc_voice_sopro as sopro
+
     found = {}
     try:
-        from modules import shared
-
         for name, option in OPTIONS.items():
-            found[name] = getattr(shared.opts, option, None)
-        found["language"] = getattr(shared.opts, OPT_LANGUAGE, None)
+            found[name] = sopro._setting(option)
+        found["language"] = sopro._setting(OPT_LANGUAGE)
     except Exception:
         return dict(DEFAULTS, language="")
     return clamp(found)
@@ -388,17 +396,16 @@ def remember(values=None, **extra) -> dict:
     happens here (I-3), which is enforced by the option names rather than by a
     check that could be forgotten.
     """
+    import mc_voice_sopro as sopro
+
     wanted = clamp(values, **extra)
     try:
-        from modules import shared
-
         for name, option in OPTIONS.items():
             value = wanted[name]
             # A generation field that is ``None`` is stored as an empty string,
-            # which is what "follow the model" survives a settings round trip as.
-            shared.opts.set(option, "" if value is None else value)
-        shared.opts.set(OPT_LANGUAGE, wanted.get("language") or "")
-        shared.opts.save(shared.config_filename)
+            # which is what "follow the model" survives a round trip as.
+            sopro._remember(option, "" if value is None else value)
+        sopro._remember(OPT_LANGUAGE, wanted.get("language") or "")
     except Exception:
         logger.debug("Model Chain: could not persist the Sopro delivery profile",
                      exc_info=True)
