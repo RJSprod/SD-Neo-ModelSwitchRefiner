@@ -350,6 +350,84 @@ from a measured real-time factor. The user is told; the user decides.
 
 ---
 
+## The resampler, and why every clone sounded worse than its reference
+
+The largest single defect in cloning quality, and it was four lines.
+
+Sopro conditions on mono 24 kHz. Almost every recording anybody clones from is
+44.1 or 48 kHz, so almost every reference went through a resampler — and the one
+that shipped was linear interpolation with no anti-alias filter. A resampler
+without a filter does not attenuate what the new rate cannot represent. It folds
+it.
+
+Measured on this build: a 15 kHz tone in a 48 kHz recording came back at 9 kHz,
+in the middle of the speech band, at **0.0 dB** — full amplitude, entirely
+unattenuated. Everything between 12 and 24 kHz was mirrored down on top of the
+voice: microphone self-noise, room hiss, and above all sibilance, which is
+exactly where "s", "sh" and "t" live.
+
+Then the conditioning is computed from those samples, so the clone inherits it
+permanently. It is the difference between a voice that sounds like the speaker
+and one that sounds like the speaker through a broken microphone — on every
+sentence it will ever say.
+
+The replacement is an ordinary windowed sinc: Kaiser at β 8.6 over 24 zero
+crossings, cutoff at 94.5% of the new Nyquist to leave a transition band,
+normalised per output sample so the passband is flat. Same tone, same
+measurement:
+
+| | 15 kHz → 9 kHz fold | 200 Hz–6 kHz passband |
+|---|---:|---:|
+| linear interpolation | **0.0 dB** | 0.00 dB |
+| windowed sinc (NumPy) | **−102 dB** | 0.00 dB |
+| windowed sinc (pure Python fallback) | −58 dB | 0.00 dB |
+
+NumPy is the path Forge always takes; the pure-Python fallback narrows the
+filter to 8 zero crossings because the same 24 in an interpreted loop would take
+most of a minute, and −58 dB is still a different universe from none.
+
+`tests/test_voice_sopro.py` measures all of it, and keeps the old four lines
+alive in the test file to prove the threshold is one that has been seen to fail.
+
+---
+
+## Cleaning a reference is not the same job as cleaning a recording
+
+Reported as "the cleanup almost always makes things worse", and there were three
+reasons, of which the first is a plain bug.
+
+**DeepFilterNet was being fed the page's own denoised audio.** `cleanWithEngine`
+wanted the untouched selection and got it by setting the method to `"page"` and
+calling `clipSamples()` — which, with cleaning on, returns the spectrally
+subtracted audio. So choosing the *better* engine ran spectral subtraction first
+and then handed the result to a learned denoiser as though it were a recording:
+two denoisers in series, the second treating the first one's musical noise as
+signal. Selecting the better option made it worse than leaving it alone.
+
+**The noise floor was estimated from the speech.** It was a per-bin 10th
+percentile over the whole clip — for each frequency independently, its
+tenth-quietest moment. In fifteen seconds of near-continuous speech the tenth
+percentile of a vowel bin is quiet *speech*, not noise. That inflated estimate
+was then multiplied by an over-subtraction factor of 2.5 and taken back out of
+the voice. Frames are now ranked by broadband energy and the quietest fifth —
+the pauses and breaths — are averaged: an estimate of the room rather than of
+the speaker.
+
+**The numbers were tuned for listening, not for conditioning.** Over-subtraction
+2.5 → 1.5, gain floor −30 dB → −20 dB. Less is removed, and what is removed is
+removed less deeply. The constraint is different in kind from ordinary noise
+reduction: whatever a cleaner takes out of the timbre, the model conditions on
+the hole and reproduces it under every sentence forever. A reference is worth
+cleaning only when cleaning it is audibly an improvement, which is why there are
+now two play buttons — the recording, and exactly what Create would upload —
+rather than one whose meaning depended on a checkbox.
+
+DeepFilterNet is now selected by default when it is installed. Leaving the
+in-page pass selected meant somebody who had deliberately installed the better
+engine still got spectral subtraction unless they noticed a second dropdown.
+
+---
+
 ## What is stored for a cloned voice, and what is not
 
 ```

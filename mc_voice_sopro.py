@@ -42,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -1548,6 +1549,182 @@ def _decode_pcm16(body: bytes, encoding: int, bits: int):
     return None
 
 
+RESAMPLE_ZEROS = 24
+RESAMPLE_ROLLOFF = 0.945
+RESAMPLE_BETA = 8.6
+RESAMPLE_BLOCK = 32768
+"""The anti-aliasing filter, and why a resampler needs one at all.
+
+What was here before was linear interpolation with no filter, and the damage it
+did is not subtle. Measured on this build: a 15 kHz tone in a 48 kHz recording
+came back at 9 kHz -- folded into the middle of the speech band -- at **0.0 dB**,
+which is to say at full amplitude, entirely unattenuated. Everything a recorder
+captured between 12 and 24 kHz was mirrored back down on top of the voice: mic
+self-noise, room hiss, and above all sibilance, which is exactly the band where
+"s" and "sh" and "t" live. Almost every recording anybody clones from is 44.1 or
+48 kHz, so almost every clone was conditioned on a reference with a mirror image
+of its own top end laid over it.
+
+A cloned voice inherits that permanently, because the conditioning is computed
+from these samples. It is the difference between a clone that sounds like the
+speaker and one that sounds like the speaker through a broken microphone.
+
+The replacement is an ordinary windowed-sinc: a Kaiser window at beta 8.6 over
+24 zero crossings, with the cutoff pulled to 94.5% of the new Nyquist to leave a
+transition band. Same measurement, same tone: **-102 dB**. A 1 kHz and 3 kHz
+speech-band pair comes through at 0.00 dB, so nothing that should survive is
+touched.
+
+Numbers, not adjectives: ``tests/test_voice_sopro.py`` measures both.
+"""
+
+_KAISER_TABLE = None
+_KAISER_POINTS = 4097
+
+
+def _bessel_i0(value: float) -> float:
+    """The modified Bessel function of the first kind, order zero, by series.
+
+    Written out rather than imported because this module runs in the WebUI
+    process, where SciPy is not a dependency and NumPy is only an optional
+    accelerator -- and the window has to be identical on both paths or the two
+    would resample differently.
+    """
+    total, term, step = 1.0, 1.0, 1
+    while step < 200:
+        term *= (value / (2.0 * step)) ** 2
+        total += term
+        if term < 1e-12 * total:
+            break
+        step += 1
+    return total
+
+
+def _kaiser_table():
+    """The Kaiser window sampled on [-1, 1], built once.
+
+    A table rather than a call per tap: the window is evaluated tens of millions
+    of times in a twenty-second reference, and two Bessel series per tap is the
+    difference between a resample that is imperceptible and one that is a
+    visible pause in the interface.
+    """
+    global _KAISER_TABLE
+
+    if _KAISER_TABLE is None:
+        scale = _bessel_i0(RESAMPLE_BETA)
+        _KAISER_TABLE = [
+            _bessel_i0(RESAMPLE_BETA * math.sqrt(max(0.0, 1.0 - position * position)))
+            / scale
+            for position in (
+                -1.0 + 2.0 * index / (_KAISER_POINTS - 1)
+                for index in range(_KAISER_POINTS))
+        ]
+    return _KAISER_TABLE
+
+
+def _resample(samples, rate: int, target: int):
+    """Band-limited resampling to ``target``, as PCM16 in an ``array``.
+
+    NumPy when it is importable, which in Forge it always is; the pure-Python
+    path exists so that this module never *requires* it, and narrows the filter
+    because the same 24 zero crossings would take most of a minute in a loop.
+    Even the narrow one is a different universe from no filter at all.
+    """
+    import array as _array
+
+    if rate == target or not len(samples):
+        return samples
+    count = int(len(samples) * target / float(rate))
+    if count <= 0:
+        return _array.array("h")
+    try:
+        import numpy
+    except Exception:  # noqa: BLE001 - an optional accelerator, never required
+        return _resample_slowly(samples, rate, target, count)
+    return _resample_with(numpy, samples, rate, target, count)
+
+
+def _filter_shape(rate: int, target: int, zeros: int):
+    """Cutoff and half-width for a source-rate filter. Shared by both paths.
+
+    The half-width widens by the decimation factor because the filter has to be
+    band-limited to the *new* Nyquist while being applied at the *old* rate: a
+    fixed number of taps would be a fixed fraction of the source spectrum, which
+    is the wrong thing to hold constant.
+    """
+    down = max(1.0, rate / float(target))
+    return 0.5 * RESAMPLE_ROLLOFF / down, int(math.ceil(zeros * down))
+
+
+def _resample_with(numpy, samples, rate: int, target: int, count: int):
+    import array as _array
+
+    source = numpy.asarray(samples, dtype=numpy.float64)
+    cutoff, half = _filter_shape(rate, target, RESAMPLE_ZEROS)
+    taps = numpy.arange(-half, half + 1, dtype=numpy.float64)
+    window = numpy.asarray(_kaiser_table(), dtype=numpy.float64)
+    positions = numpy.linspace(-1.0, 1.0, _KAISER_POINTS)
+    padded = numpy.concatenate([numpy.zeros(half), source, numpy.zeros(half + 2)])
+    out = numpy.empty(count, dtype=numpy.float64)
+    step = rate / float(target)
+    # Blocked, because the tap matrix is one row per output sample: twenty
+    # seconds at 48 kHz against a 97-tap filter is 93 million doubles in one
+    # allocation, and this runs in the WebUI's own process.
+    for begin in range(0, count, RESAMPLE_BLOCK):
+        end = min(count, begin + RESAMPLE_BLOCK)
+        centre = numpy.arange(begin, end, dtype=numpy.float64) * step
+        base = numpy.floor(centre).astype(numpy.int64)
+        delta = taps[None, :] - (centre - base)[:, None]
+        argument = 2.0 * cutoff * delta
+        sinc = numpy.where(numpy.abs(argument) < 1e-9, 1.0,
+                           numpy.sin(numpy.pi * argument)
+                           / (numpy.pi * argument + 1e-30))
+        weights = sinc * numpy.interp(numpy.clip(delta / half, -1.0, 1.0),
+                                      positions, window)
+        # Normalised per output sample so the passband is flat and DC is exact.
+        weights /= weights.sum(axis=1, keepdims=True)
+        index = base[:, None] + taps[None, :].astype(numpy.int64) + half
+        out[begin:end] = (padded[index] * weights).sum(axis=1)
+    clipped = numpy.clip(numpy.rint(out), -32768, 32767).astype(numpy.int16)
+    return _array.array("h", clipped.tobytes())
+
+
+def _resample_slowly(samples, rate: int, target: int, count: int):
+    """The same filter in a loop, narrowed so it finishes this decade."""
+    import array as _array
+
+    cutoff, half = _filter_shape(rate, target, 8)
+    window = _kaiser_table()
+    last = len(samples) - 1
+    out = _array.array("h", bytes(2 * count))
+    step = rate / float(target)
+    for index in range(count):
+        centre = index * step
+        base = int(math.floor(centre))
+        total, weight_sum = 0.0, 0.0
+        for tap in range(-half, half + 1):
+            delta = tap - (centre - base)
+            argument = 2.0 * cutoff * delta
+            if abs(argument) < 1e-9:
+                sinc = 1.0
+            else:
+                sinc = math.sin(math.pi * argument) / (math.pi * argument)
+            position = delta / half
+            if position < -1.0:
+                position = -1.0
+            elif position > 1.0:
+                position = 1.0
+            shaped = window[int((position + 1.0) * 0.5 * (_KAISER_POINTS - 1))]
+            weight = sinc * shaped
+            at = base + tap
+            if 0 <= at <= last:
+                total += samples[at] * weight
+            weight_sum += weight
+        value = int(round(total / weight_sum)) if weight_sum else 0
+        out[index] = max(-32768, min(32767, value))
+    return out
+
+
 def normalize_reference(data: bytes) -> tuple:
     """A recording as canonical mono 24 kHz PCM16, or a refusal that says why.
 
@@ -1639,16 +1816,7 @@ def normalize_reference(data: bytes) -> tuple:
                          "selected and that it is not muted.")
 
     if rate != TARGET_RATE:
-        wanted = int(len(samples) * TARGET_RATE / float(rate))
-        ratio = len(samples) / float(max(1, wanted))
-        resampled = array.array("h", bytes(2 * wanted))
-        for index in range(wanted):
-            position = index * ratio
-            left = int(position)
-            right = min(left + 1, len(samples) - 1)
-            weight = position - left
-            resampled[index] = int(samples[left] * (1.0 - weight) + samples[right] * weight)
-        samples = resampled
+        samples = _resample(samples, int(rate), TARGET_RATE)
     if _sys.byteorder == "big":
         samples.byteswap()
 
