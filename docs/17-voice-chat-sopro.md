@@ -413,6 +413,61 @@ recording suffers from, and it costs no dependency at all. One thing it is
 correctly bad at is a genuinely constant tone — which is indistinguishable from
 stationary noise, and which the first version of its test used as the signal.
 
+### Three things a denoiser cannot fix
+
+None of these is noise, so none of them is touched by any amount of spectral
+subtraction, and all three are ordinary in a recording made on a phone.
+
+* **Clicks.** One sample where the waveform was never going. Detected as a
+  second difference far larger than the first differences either side of it —
+  band-limited sound takes large steps but changes those steps slowly, and a
+  plain amplitude threshold would take the top off every plosive instead.
+* **Clipping.** A run of samples pinned at the rail is a peak the recorder could
+  not write down; left alone it is a square wave in the reference, which is
+  broadband, harsh, and faithfully learned by the voice built from it. An arc
+  goes back over it, bulging in proportion to how long the flat top ran.
+* **Level.** Peak normalisation alone turns the speech down to make room for one
+  door slam. The target is an RMS level with the peak ceiling only there to stop
+  it clipping on the way out.
+
+The levelling test found a real bug in the stage above it: the first and last
+window's worth of samples have only partial overlap-add weight, so dividing by
+that weight amplified them into a spike at each end — which was then the loudest
+thing in the clip and dragged the whole gain down. The divisor is floored at half
+the steady-state weight now, and the ends are faded.
+
+### Why not a learned denoiser, yet
+
+DeepFilterNet is the right destination and the objection first recorded here —
+that it "cannot be installed" — was too absolute. `DeepFilterLib` ships
+`win_amd64` wheels for CPython 3.10 and 3.11, and this extension already builds
+isolated environments; nothing stops one of them being built from a different
+interpreter. What that costs is a second CPython *and* a second copy of Torch,
+since DeepFilterNet's inference path imports Torch and cannot share the cp313
+one Sopro already has: roughly 150 MB and a second runtime, for cleaning a
+twenty-second clip.
+
+Two things stop it being built here rather than being merely expensive. A
+redistributable interpreter cannot be pinned from this workspace — only PyPI is
+reachable, and every other byte this feature installs is checked against a hash
+committed in the repository. And none of it could be executed even once: no
+Windows, no cp311 Torch, and the weights are behind the same blocked host.
+
+RNNoise was measured rather than assumed, and the measurement is the reason it
+is not here either. On a synthetic vowel plus hiss its own speech probability
+stayed under 0.5 for 98% of frames: it decided the signal was not speech and
+gated it away, leaving 3% of the voice band and a correlation with the clean
+reference of −0.003. That is very likely the synthetic signal's fault rather
+than a fair verdict on real speech — but it is exactly the failure mode a
+VAD-gated model has, and a reference recording is arbitrary material somebody
+brings from outside. On the same signal the spectral pass moved correlation with
+the clean voice from 0.868 to 0.967 and took about 70% of the hiss out, because
+it has no opinion about what speech is.
+
+So the order is: a signal-agnostic pass that cannot destroy a recording, now;
+a learned one when its interpreter can be pinned *and* the result heard on real
+speech.
+
 ---
 
 ## Containment, and the check that was in the wrong place
