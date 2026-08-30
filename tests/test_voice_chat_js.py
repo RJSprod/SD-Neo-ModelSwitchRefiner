@@ -439,7 +439,7 @@ cloneParts.playClean = element("clone-play-clean", "BUTTON");
 cloneParts.playClean.textContent = "Play cleaned";
 cloneParts.playClean.hidden = true;
 cloneParts.best = element("clone-best", "BUTTON");
-cloneParts.best.textContent = "Pick the best part";
+cloneParts.best.textContent = "Pick 20 s for me";
 cloneParts.start = element("clone-start", "INPUT");
 cloneParts.end = element("clone-end", "INPUT");
 cloneParts.state = element("clone-state");
@@ -3541,7 +3541,10 @@ class TestBringingAnAudioFile:
                             DECODE_SECONDS="40")
 
         assert float(found["trimStart"]) == 0.0
-        assert float(found["trimEnd"]) == 15.0
+        # The ceiling, not a guess in the middle of the range: conditioning is
+        # built from whatever is given and more of it costs nothing at speaking
+        # time, so the selection opens as wide as the engine will take.
+        assert float(found["trimEnd"]) == 20.0
         assert "ready to create" in found["trimState"], found["trimState"]
 
     def test_a_short_file_is_taken_whole_and_says_it_is_too_short(self):
@@ -3552,7 +3555,7 @@ class TestBringingAnAudioFile:
         assert "at least 5 s" in found["trimState"], found["trimState"]
 
     def test_what_is_uploaded_is_the_selection_and_not_the_file(self):
-        """The point of the whole exercise: forty seconds go in, fifteen come
+        """The point of the whole exercise: forty seconds go in, twenty come
         out, as one mono 16-bit PCM WAV built in the tab."""
         found = self.choose("""
             cloneParts.name.value = "Ada";
@@ -3565,7 +3568,7 @@ class TestBringingAnAudioFile:
         assert len(posts) == 1, found["cloneStatus"]
         uploaded = found["uploaded"]
         assert uploaded is not None
-        assert abs(uploaded["seconds"] - 15.0) < 0.1, uploaded
+        assert abs(uploaded["seconds"] - 20.0) < 0.1, uploaded
 
     def test_the_boxes_move_the_selection_and_the_upload_follows(self):
         found = self.choose("""
@@ -3965,11 +3968,15 @@ class TestBringingAnAudioFile:
 class TestTheReferenceLengthTheModelWants:
     """`ref_seconds` is Sopro's own answer to "how long should a reference be",
     it has been in the handshake since the worker was written, and it was read
-    by nothing.
+    by nothing at all.
 
-    So the trimmer suggested a hardcoded fifteen seconds while a user comparing
-    seven, fourteen and twenty second references was guessing at a number the
-    engine already knew and could have said.
+    It does not pick the selection — the ceiling does, because conditioning is
+    built from whatever it is given and twenty seconds of somebody's recording
+    costs nothing at speaking time. But it is the only figure in this surface
+    that comes from the engine rather than from us, and a number the model
+    volunteers while the interface hides it is exactly how a hardcoded fifteen
+    survived as long as it did. So it is reported when it disagrees with what
+    is selected.
     """
 
     @staticmethod
@@ -3983,60 +3990,55 @@ class TestTheReferenceLengthTheModelWants:
         answers["voice/voices"] = {"json": payload}
         return json.dumps(answers)
 
-    def test_the_button_names_the_length_the_model_asked_for(self):
-        found = run("""
-            await tick();
-            await hold(200);
-            console.log(JSON.stringify(report({label: cloneParts.best.textContent})));
-        """, VOICES_PRESENT="true", VOICES_VISIBLE="true",
-             ANSWERS=self._answers(12))
-        assert found["label"] == "Pick 12 s for me", found["label"]
-
-    def test_the_suggestion_uses_it_rather_than_fifteen(self):
-        found = run("""
+    def choose(self, ideal, seconds="40", scenario="console.log(JSON.stringify(report()));"):
+        return run("""
             await tick();
             await hold(200);
             cloneParts.file.files = [new Blob([new Uint8Array(2048)])];
             cloneParts.file.fire("change");
             await tick();
-            cloneParts.best.fire("click");
-            await tick();
-            console.log(JSON.stringify(report()));
-        """, VOICES_PRESENT="true", VOICES_VISIBLE="true",
-             DECODE_SECONDS="40", ANSWERS=self._answers(12))
-        chosen = float(found["trimEnd"]) - float(found["trimStart"])
-        assert abs(chosen - 12) < 0.05, (found["trimStart"], found["trimEnd"])
+            """ + scenario, VOICES_PRESENT="true", VOICES_VISIBLE="true",
+                   DECODE_SECONDS=seconds, ANSWERS=self._answers(ideal))
 
-    def test_a_model_that_says_nothing_keeps_the_fallback(self):
+    def test_the_selection_opens_at_the_ceiling_whatever_the_model_says(self):
+        found = self.choose(12)
+        assert float(found["trimEnd"]) == 20.0, found["trimEnd"]
+
+    def test_a_shorter_file_is_taken_whole(self):
+        """"If available" — a nine-second recording is nine seconds, not a
+        refusal and not a selection that runs off the end."""
+        found = self.choose(12, seconds="9")
+        assert abs(float(found["trimEnd"]) - 9.0) < 0.1, found["trimEnd"]
+        assert float(found["trimStart"]) == 0.0
+
+    def test_a_disagreeing_model_figure_is_reported(self):
+        found = self.choose(12)
+        assert "12 s as the length it was built to condition on" in found["trimState"], \
+            found["trimState"]
+
+    def test_it_is_not_mentioned_when_it_agrees(self):
+        """Twenty selected and twenty asked for is not a remark worth making."""
+        found = self.choose(20)
+        assert "built to condition on" not in found["trimState"], found["trimState"]
+
+    def test_a_model_that_says_nothing_says_nothing(self):
         """A panel drawn before the worker has started has no handshake to read,
-        and must still offer something rather than a zero-second selection."""
-        found = run("""
-            await tick();
-            await hold(200);
-            cloneParts.file.files = [new Blob([new Uint8Array(2048)])];
-            cloneParts.file.fire("change");
-            await tick();
-            cloneParts.best.fire("click");
-            await tick();
-            console.log(JSON.stringify(report({
-                label: cloneParts.best.textContent})));
-        """, VOICES_PRESENT="true", VOICES_VISIBLE="true",
-             DECODE_SECONDS="40", ANSWERS=self._answers(0))
-        chosen = float(found["trimEnd"]) - float(found["trimStart"])
-        assert abs(chosen - 15) < 0.05, (found["trimStart"], found["trimEnd"])
-        assert found["label"] == "Pick the best part", found["label"]
+        and must not invent a figure to report."""
+        found = self.choose(0)
+        assert "built to condition on" not in found["trimState"], found["trimState"]
+        assert float(found["trimEnd"]) == 20.0
 
-    def test_a_nonsense_length_is_clamped_to_what_this_build_accepts(self):
-        """The number comes from a model configuration, which is data this
-        extension did not write. Five to twenty is what the rest of the flow
-        will actually take."""
-        found = run("""
-            await tick();
-            await hold(200);
-            console.log(JSON.stringify(report({label: cloneParts.best.textContent})));
-        """, VOICES_PRESENT="true", VOICES_VISIBLE="true",
-             ANSWERS=self._answers(900))
-        assert found["label"] == "Pick 20 s for me", found["label"]
+    def test_a_nonsense_figure_is_clamped_before_it_is_repeated(self):
+        """It comes from a model configuration, which is data this extension did
+        not write. Reporting "900 s" as a length to aim for would be repeating
+        a number nothing here can accept."""
+        found = self.choose(900)
+        assert "built to condition on" not in found["trimState"], found["trimState"]
+
+    def test_a_figure_below_the_floor_is_clamped_and_still_reported(self):
+        found = self.choose(2)
+        assert "5 s as the length it was built to condition on" in found["trimState"], \
+            found["trimState"]
 
 
 class TestPreviewingAVoiceBeforeKeepingIt:

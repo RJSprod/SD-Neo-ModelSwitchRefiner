@@ -512,6 +512,27 @@ right defaults for that. They are the wrong ones for somebody who has said they
 will trade time for quality, and the difference between those two cases is a
 thing the user knows and the code cannot.
 
+### Two of them are now the shipped choice
+
+**Solver steps ship at 8**, the top of the range, and the constant is named
+(`STEP_DEFAULT`) rather than `STEP_CHOICES[0]` — the shipped default used to be
+a property of the *order* of a tuple, so reordering it for the interface would
+have silently changed what every untouched installation runs. The cost is
+stated where it is chosen: 8 is about four times the solver work of 2, and on a
+slower machine it is the first thing to lower if replies start pausing.
+
+**The trimmer opens at twenty seconds**, or the whole file when it is shorter.
+Conditioning is built from whatever it is given and more of it costs nothing at
+speaking time, so there is no reason for the selection to open in the middle of
+the range.
+
+`ref_seconds` survives that change rather than being deleted by it. It no longer
+picks the selection, but it is still the only figure in this surface that comes
+from the engine rather than from us, so it is reported in the trim line when it
+disagrees with what is selected by more than a second. A number the model
+volunteers and the interface hides is exactly how the hardcoded fifteen lasted
+as long as it did.
+
 ---
 
 ## What is stored for a cloned voice, and what is not

@@ -4293,29 +4293,25 @@
 
     const CLIP_MIN_SECONDS = 5;
     const CLIP_MAX_SECONDS = 20;
-    // What the *model* was built to condition on, which is not the same as what
-    // this extension will accept. Sopro reports it as `ref_seconds` in its
-    // handshake and nothing had ever read it, so the suggestion here was a
-    // hardcoded fifteen and a user comparing seven, fourteen and twenty second
-    // references was guessing at a number the engine already knew. Fifteen
-    // stays as the fallback for a panel drawn before the worker has started.
-    let clipSuggested = 15;
+    // As much reference as the pipeline will carry. More conditioning is the
+    // cheapest quality this engine has -- it costs nothing at synthesis time,
+    // only twenty seconds of somebody's recording instead of fifteen -- so the
+    // selection opens at the ceiling and shrinks only when the file is shorter
+    // than that.
+    let clipSuggested = CLIP_MAX_SECONDS;
+
+    // What the *model* says it was built to condition on. Sopro reports it as
+    // `ref_seconds` and nothing had ever read it. It no longer picks the
+    // selection -- the ceiling does -- but it is still the only figure in the
+    // system that comes from the engine rather than from us, so it is kept and
+    // shown when it disagrees with what is selected. A number the model volunteers
+    // and the interface hides is how the fifteen-second guess survived this long.
+    let idealClip = 0;
 
     function noteIdealClip(payload) {
         const found = payload && payload.clone && Number(payload.clone.ideal_seconds);
         if (!found || !isFinite(found) || found <= 0) return;
-        clipSuggested = Math.max(CLIP_MIN_SECONDS, Math.min(CLIP_MAX_SECONDS, found));
-        // Defensively: the label is a nicety and a panel drawn without this
-        // button, or a host whose NodeList has no forEach, must not lose the
-        // number itself -- which is already in `clipSuggested` by here.
-        let buttons = [];
-        try {
-            buttons = Array.prototype.slice.call(
-                document.querySelectorAll("[data-mc-voice-trim-best]") || []);
-        } catch (error) { buttons = []; }
-        buttons.forEach(function (button) {
-            button.textContent = "Pick " + clipSuggested.toFixed(0) + " s for me";
-        });
+        idealClip = Math.max(CLIP_MIN_SECONDS, Math.min(CLIP_MAX_SECONDS, found));
     }
 
     function clipDuration() {
@@ -4445,11 +4441,22 @@
             sayTrim(form, shown + " selected — Sopro takes at most "
                     + CLIP_MAX_SECONDS + " s. Drag the edges in.");
         } else {
+            // The engine's own figure, said once and only when it disagrees
+            // with what is selected by more than a second. It does not change
+            // anything -- longer is the deliberate default -- but it is the one
+            // number here that came from the model rather than from us, and
+            // silently discarding it is how the old fifteen-second guess lasted
+            // as long as it did.
+            const differs = idealClip && Math.abs(chosen - idealClip) > 1.0;
             sayTrim(form, shown + " selected — ready to create."
                     + (soproClip.clean
                        ? (soproClip.how === "deepfilternet" && soproClip.engineCleaned
                           ? " Cleaned with DeepFilterNet."
                           : " Cleaning is on.")
+                       : "")
+                    + (differs
+                       ? " This Sopro build reports " + idealClip.toFixed(0)
+                         + " s as the length it was built to condition on."
                        : ""));
         }
     }
