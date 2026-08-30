@@ -207,6 +207,114 @@ class TestEngineSettings:
         assert kokoro_profile.stored() == before
 
 
+class TestTheCpuThreadSetting:
+    """The lever the validation sweep exists to inform, made selectable.
+
+    It began as an environment variable, which was the wrong place: Precision is
+    already a user control that changes compute, RAM and which warmed caches
+    survive, and thread count is the same kind of thing. What I-12 forbids is
+    the *code* picking a number from a measured real-time factor — a person
+    reading a table and choosing a row is what "one measured, fixed policy"
+    asks for. Asking that person to set an environment variable on Windows is
+    asking them not to bother.
+    """
+
+    def test_the_default_is_the_released_policy(self, host, voice_root):
+        from sopro_worker import worker as protocol
+
+        assert sopro.intraop_threads() == protocol.INTRAOP_THREADS
+
+    def test_a_chosen_count_is_kept(self, host, voice_root, monkeypatch):
+        import mc_voice_sopro_runtime as runtime
+
+        monkeypatch.setattr(runtime, "stop", lambda reason="": None)
+        monkeypatch.setattr(sopro, "thread_choices", lambda: (2, 4, 8))
+        sopro.set_engine_settings(threads=8)
+        assert sopro.intraop_threads() == 8
+        assert sopro.engine_settings()["threads"] == 8
+
+    def test_a_count_that_is_not_offered_is_refused(self, host, voice_root, monkeypatch):
+        """Checked against the offerable list rather than against a range, so a
+        number a browser invented cannot become a thread count."""
+        import mc_voice_sopro_runtime as runtime
+
+        monkeypatch.setattr(runtime, "stop", lambda reason="": None)
+        monkeypatch.setattr(sopro, "thread_choices", lambda: (2, 4, 8))
+        sopro.set_engine_settings(threads=999)
+        assert sopro.intraop_threads() != 999
+
+    def test_changing_it_stops_the_worker(self, host, voice_root, monkeypatch):
+        """The policy is applied before the model loads, so a running worker
+        cannot adopt it. Restarting is one cold load."""
+        import mc_voice_sopro_runtime as runtime
+
+        stopped = []
+        monkeypatch.setattr(runtime, "stop", lambda reason="": stopped.append(reason))
+        monkeypatch.setattr(sopro, "thread_choices", lambda: (2, 4, 8))
+        sopro.set_engine_settings(threads=8)
+        assert stopped and "thread" in stopped[0], stopped
+
+    def test_the_choices_never_exceed_the_machine(self, monkeypatch):
+        """Offering more threads than cores would put a row in the dropdown
+        that is reliably worse than the one above it."""
+        monkeypatch.setattr(sopro.os, "cpu_count", lambda: 4)
+        assert max(sopro.thread_choices()) <= 4
+
+    def test_the_released_policy_is_always_reachable(self, monkeypatch):
+        """A dropdown that could not express the shipped configuration would be
+        one somebody could not get back to."""
+        from sopro_worker import worker as protocol
+
+        monkeypatch.setattr(sopro.os, "cpu_count", lambda: 1)
+        assert protocol.INTRAOP_THREADS in sopro.thread_choices()
+
+    def test_the_chosen_count_reaches_the_worker(self, host, voice_root, monkeypatch):
+        """The whole point. A setting the child never hears about would be a
+        dropdown that changes a number in a file.
+
+        Both channels carry it: the worker reads the count back out of the
+        environment and hands it to Torch, and OpenMP sizes its pool from the
+        same value — so the two cannot disagree.
+        """
+        import mc_voice_sopro_runtime as runtime
+        from sopro_worker import worker as protocol
+
+        monkeypatch.setattr(runtime, "stop", lambda reason="": None)
+        monkeypatch.setattr(sopro, "thread_choices", lambda: (2, 4, 8))
+        sopro.set_engine_settings(threads=8)
+        found = sopro.worker_environment()
+        assert found[protocol.OVERRIDE_INTRAOP] == "8"
+        assert found["OMP_NUM_THREADS"] == "8"
+
+    def test_choosing_the_released_number_does_not_read_as_an_override(
+            self, host, voice_root, monkeypatch):
+        """Selecting 4 deliberately is the shipped policy, and every log line
+        should keep saying so."""
+        import mc_voice_sopro_runtime as runtime
+        from sopro_worker import worker as protocol
+
+        monkeypatch.setattr(runtime, "stop", lambda reason="": None)
+        monkeypatch.setattr(sopro, "thread_choices", lambda: (2, 4, 8))
+        sopro.set_engine_settings(threads=protocol.INTRAOP_THREADS)
+        monkeypatch.setenv(protocol.OVERRIDE_INTRAOP,
+                           sopro.worker_environment()[protocol.OVERRIDE_INTRAOP])
+        _intraop, _interop, overridden = protocol.effective_policy(note=False)
+        assert overridden is False
+
+    def test_a_sweep_override_still_wins_over_the_setting(self, host, voice_root,
+                                                          monkeypatch):
+        """The sweep measures configurations this installation has not chosen,
+        so its number has to beat the stored one for the row to mean anything."""
+        import mc_voice_sopro_runtime as runtime
+        from sopro_worker import worker as protocol
+
+        monkeypatch.setattr(runtime, "stop", lambda reason="": None)
+        monkeypatch.setattr(sopro, "thread_choices", lambda: (2, 4, 8))
+        sopro.set_engine_settings(threads=8)
+        monkeypatch.setenv(protocol.OVERRIDE_INTRAOP, "2")
+        assert sopro.intraop_threads() == 2
+
+
 class TestReferenceValidation:
     def test_a_recording_shorter_than_the_window_is_refused(self, voice_root, spoken_wav):
         with pytest.raises(sopro.SoproError) as raised:

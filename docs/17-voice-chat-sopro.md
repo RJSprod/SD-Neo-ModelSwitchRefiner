@@ -234,20 +234,36 @@ the producer loses ground for as long as the reply lasts: at Speed 1.35, 6.1
 seconds of silence owed across a 38-second reply. Invisible on short replies,
 unmissable on long ones — which is exactly how it was reported.
 
-### INT8 was slower, and the label said otherwise
+### The first swept machine
 
-The Precision control offered "INT8 (faster, CPU only)". On the first machine it
-was ever measured on, that was wrong by about 40% in the other direction:
+Eight configurations, Windows, Torch 2.11 CPU, one 16-thread desktop:
 
-| Precision | fitted | RTF at Speed 1.00 | break-even Speed | first block |
-|---|---|---:|---:|---:|
-| full | 420 ms + 0.798 x audio | 0.858 | **1.17x** | 1091 ms |
-| int8 | 12 ms + 1.122 x audio | 1.124 | **0.89x** | 1541 ms |
+| Precision | 2 threads | 4 threads | 6 threads | 8 threads |
+|---|---:|---:|---:|---:|
+| **full** | 0.900 | 0.824 | 0.803 | **0.705** |
+| **int8** | 1.426 | 1.073 | 1.009 | 0.915 |
 
-A break-even Speed below 1.0 means INT8 could not keep up with *ordinary*
-speech on that machine, let alone fast speech. (Three segments only, against 39
-for full — thin, and reported as thin. The 450 ms jump in first-block time is an
-independent corroboration from a different measurement.)
+(RTF at a 7-second segment. Break-even Speed is its reciprocal: full at 8
+threads streams cleanly up to **1.42x**, int8 at 2 threads only to 0.70x.)
+
+Three things fall out of it.
+
+**INT8 is slower at every thread count** — by 28% at the matched released
+policy. The control used to be labelled "INT8 (faster, CPU only)"; that claim
+was never measured, and it is wrong here in the other direction. Quantization
+shrinks the weights; whether it shrinks the *time* depends on whether this Torch
+build has int8 kernels for these shapes on this CPU, and on a small
+autoregressive model the dequantize-requantize traffic can cost more than the
+narrower multiply saves. Neither option claims a speed now.
+
+**Thread scaling is poor and not monotone in shape.** 2→4 buys 8%, 4→6 buys
+2.6%, and 6→8 buys 14.6%. A compute-bound workload does not look like that; this
+one is bound by something else for most of its range, and the released four
+threads sits exactly in the flat part.
+
+**Four was a defensible choice for the wrong reason.** It was picked to match
+Kokoro's synthesis lane so cross-engine comparison meant something, and that is
+still worth having — but on this machine it leaves about 15% on the table.
 
 Quantization shrinks the weights. Whether it shrinks the *time* depends on
 whether this Torch build has int8 kernels for these shapes on this CPU, and on a
@@ -281,13 +297,41 @@ tried to run it. Nothing about the measurement wanted to be a command line. The
 button runs in the process that already resolved those paths, so it cannot
 resolve them differently.
 
-It changes nothing. Moving the released policy is still a deliberate edit to
-`INTRAOP_THREADS`, made by somebody who has read a table. The only new lever at
-runtime is `MC_SOPRO_INTRAOP_THREADS`, which the sweep sets and a person who has
-run it may keep; it is bounded to 1–64, and an installation running it says so
-in a warning line, in the handshake's `thread_policy` field, and in every log
-line that already carried a thread count. An override that could be mistaken for
-the shipped configuration would defeat the point of I-12 entirely.
+It changes nothing itself, and the released `INTRAOP_THREADS` still only moves
+by a deliberate edit. What acts on the table is a **CPU threads** control beside
+Precision, defaulting to the released four.
+
+That control is where this belongs, and the environment variable it replaces was
+the wrong shape for it. Precision is already a user setting that changes compute,
+RAM and which warmed caches survive; thread count is the same kind of thing, and
+there was never a principle making one a dropdown and the other an environment
+variable somebody has to set on Windows. I-12 forbids the *code* picking a number
+from a measured real-time factor — a person reading a table and choosing a row is
+precisely the "one measured, fixed policy" it asks for. The list stops at the core
+count the machine reports, because offering more threads than cores is offering a
+slower row with a faster-looking number, and the released value is always in it so
+the shipped configuration stays reachable.
+
+`MC_SOPRO_INTRAOP_THREADS` remains, now as the channel the parent uses to hand
+the chosen count to the child — so the pool OpenMP sizes and the count Torch is
+given are one number by construction rather than by two functions agreeing. A
+worker running anything but the released policy says so in a warning line, in the
+handshake's `thread_policy` field, and in every log line that already carried a
+thread count.
+
+### A confidence figure that could not fail
+
+The first table this printed reported R² = 1.000 on all eight rows. It was not a
+good fit; it was two observations and two parameters. A line through two points
+fits them perfectly whatever they are, so the column could not have printed
+anything else — a reassurance sitting next to numbers somebody was about to
+change a released constant with.
+
+The fit now returns no R² at all below three observations, and the default sweep
+does two runs per length so there is something left over to check. The rule is
+worth stating generally: a goodness-of-fit number computed from an exactly
+determined system is not weak evidence, it is not evidence, and printing it is
+worse than printing nothing.
 
 Two things follow, and both are implemented rather than written down:
 

@@ -1232,9 +1232,17 @@ def _sopro_engine_settings(settings: dict, found) -> str:
           'over. Smaller may start sooner and finish later; larger may do the reverse. '
           'Only benchmarked values are offered.</p>'
         '</div>'
-        f'<p class="mc-voice-note">CPU threads are fixed at four working threads and one '
-        f'coordinating thread for this build, reported in the log rather than tuned here. '
-        f'Build fingerprint '
+        '<div class="mc-voice-field">'
+        '<label>CPU threads</label>'
+        + choices("threads", settings["threads"], settings["thread_choices"])
+        + f'<p class="mc-voice-note">How many working threads Sopro gets. This is the '
+          f'largest single lever on whether speech keeps up with playback, and the right '
+          f'value is a property of your CPU rather than something that can be shipped — '
+          f'run the validation below and take the fastest row. The released default is '
+          f'{settings["released_threads"]}, and the list stops at the number of cores this '
+          f'machine reports. One coordinating thread either way.</p>'
+        '</div>'
+        f'<p class="mc-voice-note">Build fingerprint '
         f'<code>{ui.escape(found.fingerprint or "not installed")}</code>.</p>'
         + _sopro_validation()
         + '</details>')

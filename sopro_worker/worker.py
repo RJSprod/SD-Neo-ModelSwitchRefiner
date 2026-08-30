@@ -445,10 +445,10 @@ def _apply_cpu_policy() -> dict:
 
     intraop, interop, overridden = effective_policy()
     if overridden:
-        _note(f"the released CPU policy was overridden from the environment: "
-              f"{intraop} intra-op, {interop} inter-op (released: "
-              f"{INTRAOP_THREADS} and {INTEROP_THREADS}). Timings from this "
-              f"process are not measurements of the shipped configuration.")
+        _note(f"running at {intraop} intra-op / {interop} inter-op threads rather "
+              f"than the released {INTRAOP_THREADS} and {INTEROP_THREADS} — either "
+              f"the CPU thread setting or a validation sweep asked for it. Timings "
+              f"from this process are not measurements of the shipped policy.")
     for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                  "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         os.environ.setdefault(name, str(intraop))

@@ -123,6 +123,15 @@ def _fit(points):
 
     A regression rather than a pair of divisions, so one slow run is a residual
     rather than the answer. Returns ``(fixed_ms, rate, r_squared)``.
+
+    ``r_squared`` is ``None`` unless there were more observations than
+    parameters, and that is not a technicality. A line through two points fits
+    them perfectly whatever they are, so the first version of this reported
+    R² = 1.000 on every row of every table it ever printed -- a confidence
+    figure that could not fail, sitting next to numbers a person was about to
+    make a decision with. Two parameters need at least three observations
+    before "how well did it fit" is a question with an answer, and below that
+    the honest output is a blank.
     """
     xs = [float(audio) for audio, _compute in points]
     ys = [float(compute) for _audio, compute in points]
@@ -139,6 +148,8 @@ def _fit(points):
         return 0.0, (mean_y / mean_x if mean_x else None), None
     rate = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / spread
     fixed = mean_y - rate * mean_x
+    if count < 3:
+        return fixed, rate, None
     residual = sum((y - (fixed + rate * x)) ** 2 for x, y in zip(xs, ys))
     total = sum((y - mean_y) ** 2 for y in ys)
     return fixed, rate, (1.0 - residual / total) if total > 0 else 1.0
@@ -170,7 +181,7 @@ def _measure(interpreter, script, environ, request, cwd) -> dict:
                       else f"the worker exited {finished.returncode} saying nothing")}
 
 
-def run(threads=None, precisions=None, repeats: int = 1) -> None:
+def run(threads=None, precisions=None, repeats: int = 2) -> None:
     """The sweep. Long, blocking, and meant to be called on a thread."""
     import mc_voice_paths as paths
     import mc_voice_sopro as sopro
@@ -227,9 +238,10 @@ def _sweep(paths, sopro, runtime, threads, precisions, repeats) -> None:
     _say(f"Measuring {len(plan)} configurations. This takes a few minutes.",
          total=len(plan))
     logger.info("Model Chain: Sopro validation — closure %s, %d voice(s), "
-                "%d configurations, %d run(s) each at two lengths",
+                "%d configurations, %d run(s) each at two lengths (%d observations "
+                "per row, %d degrees of freedom)",
                 base.get("fingerprint", "?"), len(base.get("voices") or {}),
-                len(plan), repeats)
+                len(plan), repeats, repeats * 2, max(0, repeats * 2 - 2))
 
     script = paths.sopro_worker_script()
     root = paths.extension_root()

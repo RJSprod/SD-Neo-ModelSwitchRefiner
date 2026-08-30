@@ -38,7 +38,8 @@ class TestTheFit:
     problem."""
 
     def test_it_recovers_a_line_it_was_given(self):
-        points = [(2000, 300 + 0.8 * 2000), (12000, 300 + 0.8 * 12000)]
+        points = [(2000, 300 + 0.8 * 2000), (12000, 300 + 0.8 * 12000),
+                  (2000, 300 + 0.8 * 2000), (12000, 300 + 0.8 * 12000)]
         fixed, rate, quality = bench._fit(points)
         assert fixed == pytest.approx(300, abs=1)
         assert rate == pytest.approx(0.8, abs=0.001)
@@ -68,11 +69,40 @@ class TestTheFit:
     def test_the_fit_reports_how_well_it_fitted(self):
         """R² is on the table because a rate from points that do not lie on a
         line is a number with no claim behind it."""
-        _fixed, _rate, clean = bench._fit([(2000, 2000), (12000, 10000)])
+        _fixed, _rate, clean = bench._fit(
+            [(2000, 2000), (2000, 2000), (12000, 10000), (12000, 10000)])
         _fixed2, _rate2, messy = bench._fit(
             [(2000, 2000), (2000, 9000), (12000, 10000), (12000, 3000)])
         assert clean > 0.99
         assert messy < 0.5, messy
+
+    def test_two_observations_get_no_confidence_figure_at_all(self):
+        """The defect this caught in the shipped tool, kept as a test.
+
+        A line through two points fits them perfectly whatever they are, so the
+        first version reported R² = 1.000 on every row of every table it
+        printed — a confidence number that could not fail, sitting beside the
+        numbers somebody was about to change a released constant with. Two
+        parameters need three observations before "how well did it fit" is a
+        question with an answer.
+        """
+        _fixed, rate, quality = bench._fit([(2000, 1900), (12000, 9900)])
+        assert rate is not None, "the fit itself is still fine and still useful"
+        assert quality is None, "a perfect fit through two points is not evidence"
+
+    def test_three_observations_are_enough_to_have_an_opinion(self):
+        _fixed, _rate, quality = bench._fit(
+            [(2000, 1900), (2000, 1900), (12000, 9900)])
+        assert quality is not None
+
+    def test_the_default_run_leaves_room_for_a_residual(self):
+        """The other half of the same fix: a default of one run per length
+        could never produce a fit with anything left over to check."""
+        import inspect
+
+        default = inspect.signature(bench.run).parameters["repeats"].default
+        assert default * 2 >= 3, \
+            "the default sweep cannot report a fit quality it did not earn"
 
     def test_one_length_is_reported_as_a_rate_and_no_fit(self):
         """No leverage to separate the intercept, so it does not invent one."""
