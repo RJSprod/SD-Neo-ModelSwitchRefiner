@@ -94,6 +94,8 @@
         soproInstall: "model-chain/voice/sopro/install",
         soproSettings: "model-chain/voice/sopro/settings",
         soproClone: "model-chain/voice/sopro/clone",
+        soproSave: "model-chain/voice/sopro/save",
+        soproDiscard: "model-chain/voice/sopro/discard",
         soproRebuild: "model-chain/voice/sopro/rebuild",
         soproStarter: "model-chain/voice/sopro/starter",
         soproValidate: "model-chain/voice/sopro/validate",
@@ -5186,6 +5188,7 @@
             });
         }
         wireTrim(form, holder);
+        wirePreview(holder, form);
     }
 
     // Reuses the capture primitives dictation uses -- `startCapture`,
@@ -5300,23 +5303,124 @@
                 say((payload && payload.error) || "That voice could not be created.");
                 return;
             }
-            say("Created. Playing it back…");
-            name.value = "";
-            soproClip = null;
-            const trim = form.querySelector("[data-mc-voice-trim]");
-            if (trim) trim.hidden = true;
-            applyVoices(holder, payload);
-            if (payload.audio) {
-                // The audition that validated the voice, played rather than
-                // regenerated. Regenerating it would be playing a different
-                // take than the one the registry commit was based on.
-                unlock();
-                play(base64ToBuffer(payload.audio)).catch(function () { /* silent */ });
-            }
+            // Nothing is saved and nothing is cleared. The name, the file and
+            // the selection all stay exactly where they are, because the next
+            // thing that happens may well be "no, try a different fifteen
+            // seconds" -- and a form that emptied itself on preview would make
+            // trying again mean starting again.
+            soproPreview = {token: payload.token || "",
+                            name: payload.name || name.value,
+                            audio: payload.audio || ""};
+            say("Ready. Listen, then Save voice or Discard.");
+            showPreview(holder, form);
+            playPreview();
         }).catch(function () {
             button.disabled = false;
             say("That voice could not be created.");
         });
+    }
+
+    // -- the voice that exists but is not saved ------------------------------ //
+
+    // Section 23's seam, which was always there and was not being used:
+    // everything up to the registry write leaves nothing anybody can see, so a
+    // prepared voice with no registry entry is not half-saved -- it is a voice
+    // that does not exist yet and costs one directory to stop existing.
+    //
+    // Create used to write the registry entry, make the voice the default if it
+    // was the first, and *then* play the audition. Hearing it was a receipt.
+    let soproPreview = null;
+
+    function previewRow(holder) {
+        return holder.querySelector("[data-mc-voice-sopro-preview]");
+    }
+
+    function showPreview(holder, form) {
+        const row = previewRow(holder);
+        if (!row) return;
+        row.hidden = !soproPreview;
+        const note = row.querySelector("[data-mc-voice-sopro-preview-note]");
+        if (note) {
+            note.textContent = soproPreview
+                ? ("\u201c" + soproPreview.name + "\u201d is ready to listen to. "
+                   + "It is not saved yet.")
+                : "";
+        }
+        if (!soproPreview && form) {
+            const trim = form.querySelector("[data-mc-voice-trim]");
+            if (trim) trim.hidden = true;
+        }
+    }
+
+    function playPreview() {
+        if (!soproPreview || !soproPreview.audio) return;
+        unlock();
+        play(base64ToBuffer(soproPreview.audio)).catch(function () { /* silent */ });
+    }
+
+    function wirePreview(holder, form) {
+        const row = previewRow(holder);
+        if (!row || row.dataset.mcVoiceWired === "1") return;
+        row.dataset.mcVoiceWired = "1";
+
+        const say = function (text) {
+            const status = holder.querySelector("[data-mc-voice-sopro-clone-status]");
+            if (status) status.textContent = text || "";
+        };
+        const again = row.querySelector("[data-mc-voice-sopro-preview-play]");
+        const save = row.querySelector("[data-mc-voice-sopro-preview-save]");
+        const discard = row.querySelector("[data-mc-voice-sopro-preview-discard]");
+
+        if (again) {
+            again.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                playPreview();
+            });
+        }
+        if (save) {
+            save.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                if (!soproPreview || save.disabled) return;
+                save.disabled = true;
+                post(ROUTES.soproSave, {token: soproPreview.token}, holder)
+                    .then(function (payload) {
+                        save.disabled = false;
+                        if (!payload || !payload.ok) {
+                            say((payload && payload.error)
+                                || "That voice could not be saved.");
+                            return;
+                        }
+                        say("Saved " + soproPreview.name + ".");
+                        soproPreview = null;
+                        showPreview(holder, form);
+                        // Only now: the list has only now changed.
+                        applyVoices(holder, payload);
+                        const name = form
+                            && form.querySelector("[data-mc-voice-sopro-name]");
+                        if (name) name.value = "";
+                        soproClip = null;
+                    }).catch(function () {
+                        save.disabled = false;
+                        say("That voice could not be saved.");
+                    });
+            });
+        }
+        if (discard) {
+            discard.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                if (!soproPreview) return;
+                const token = soproPreview.token;
+                const gone = soproPreview.name;
+                // Locally first. The server call removes the directory, and a
+                // failed one must not leave a Save button for a voice the user
+                // has said no to.
+                soproPreview = null;
+                showPreview(holder, form);
+                say("Discarded " + gone + ".");
+                post(ROUTES.soproDiscard, {token: token}, holder)
+                    .catch(function () { /* the shutdown path clears it too */ });
+            });
+        }
     }
 
     function base64ToBuffer(text) {

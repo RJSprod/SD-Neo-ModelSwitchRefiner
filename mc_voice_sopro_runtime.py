@@ -1028,6 +1028,16 @@ def shutdown() -> None:
             turns.forget_all("shutdown")
         except Exception:
             pass
+        try:
+            import mc_voice_sopro as sopro
+
+            # A voice built but never kept. Its directory holds a recording of
+            # somebody, and nothing in the registry points at it -- so if it is
+            # not removed here, nothing ever removes it. The decision was
+            # "not yet", and a WebUI that closed on "not yet" has answered it.
+            sopro.discard_preview()
+        except Exception:
+            pass
         with _state_lock:
             _closing = True
             if _process is not None:

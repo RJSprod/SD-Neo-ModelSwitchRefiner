@@ -150,6 +150,8 @@ SOPRO_CLONE_ROUTE = f"{PREFIX}/sopro/clone"
 SOPRO_REBUILD_ROUTE = f"{PREFIX}/sopro/rebuild"
 SOPRO_STARTER_ROUTE = f"{PREFIX}/sopro/starter"
 SOPRO_VALIDATE_ROUTE = f"{PREFIX}/sopro/validate"
+SOPRO_SAVE_ROUTE = f"{PREFIX}/sopro/save"
+SOPRO_DISCARD_ROUTE = f"{PREFIX}/sopro/discard"
 CLEANUP_ROUTE = f"{PREFIX}/cleanup"
 CLEANUP_INSTALL_ROUTE = f"{PREFIX}/cleanup/install"
 CLEANUP_RUN_ROUTE = f"{PREFIX}/cleanup/run"
@@ -174,6 +176,7 @@ SOPRO_ROUTES = (ENGINES_ROUTE, ENGINE_SELECT_ROUTE, SURFACE_ROUTE,
                 SOPRO_ROUTE, SOPRO_INSTALL_ROUTE,
                 SOPRO_SETTINGS_ROUTE, SOPRO_CLONE_ROUTE, SOPRO_REBUILD_ROUTE,
                 SOPRO_STARTER_ROUTE, SOPRO_VALIDATE_ROUTE,
+                SOPRO_SAVE_ROUTE, SOPRO_DISCARD_ROUTE,
                 CLEANUP_ROUTE, CLEANUP_INSTALL_ROUTE, CLEANUP_RUN_ROUTE,
                 LAB_ROUTE, LAB_UPDATE_ROUTE, LAB_RESET_ROUTE, LAB_PLAY_ROUTE)
 
@@ -1483,7 +1486,12 @@ def sopro_settings(precision: str = "", steps=None, chunk_frames=None,
 
 
 def sopro_clone(name: str, language: str, wav: bytes) -> dict:
-    """Create a Sopro voice from a reference recording. Returns the audition.
+    """Build a Sopro voice from a reference recording and audition it.
+
+    It is not saved. What comes back is a token and the audition the
+    preparation actually produced, and the voice exists only as an unregistered
+    directory until :func:`sopro_save` is called or the preview is discarded --
+    which is what makes the audition a preview rather than a receipt.
 
     The audio comes back with the payload rather than through a second route, so
     the user hears the voice that was just validated rather than one synthesized
@@ -1500,7 +1508,7 @@ def sopro_clone(name: str, language: str, wav: bytes) -> dict:
                        "larger than %d bytes", sopro.MAX_REFERENCE_BYTES)
         raise Refused(413, "That recording is too large.")
     try:
-        made = sopro.create(str(name or ""), wav or b"", str(language or ""))
+        made = sopro.prepare_preview(str(name or ""), wav or b"", str(language or ""))
     except sopro.SoproError as exc:
         # Written down as well as answered. A refusal that only ever reached the
         # clone form's status line is a refusal nobody can diagnose from a log
@@ -1511,9 +1519,37 @@ def sopro_clone(name: str, language: str, wav: bytes) -> dict:
     except Exception as exc:
         logger.warning("Model Chain: a Sopro voice could not be created", exc_info=True)
         raise Refused(500, str(exc) or "That voice could not be created.") from None
-    return {"ok": True, "voice": _public(made["voice"]),
-            "audio": base64.b64encode(made.get("audio") or b"").decode("ascii"),
+    # No voice yet, so no voice in the payload and no refreshed list: nothing
+    # has changed on disk that anybody could pick from. The token is the only
+    # handle on it, and it is opaque and server-generated (section 57).
+    return {"ok": True, "preview": True, "token": made["token"], "name": made["name"],
+            "seconds": made["seconds"],
+            "audio": base64.b64encode(made.get("audio") or b"").decode("ascii")}
+
+
+def sopro_save(token: str) -> dict:
+    """Keep the voice that was previewed. The only step that writes it down."""
+    import mc_voice_engines as engines
+    import mc_voice_sopro as sopro
+
+    _active(engines.SOPRO)
+    try:
+        kept = sopro.save_preview(str(token or ""))
+    except sopro.SoproError as exc:
+        logger.warning("Model Chain: a previewed Sopro voice was not saved — %s", exc)
+        raise Refused(400, str(exc)) from None
+    return {"ok": True, "voice": _public(kept["voice"]),
             **voices_payload(engine=engines.SOPRO)}
+
+
+def sopro_discard(token: str = "") -> dict:
+    """Throw the previewed voice away, directory and all."""
+    import mc_voice_engines as engines
+    import mc_voice_sopro as sopro
+
+    _active(engines.SOPRO)
+    return {"ok": True, "discarded": bool(sopro.discard_preview(str(token or ""))),
+            **sopro.preview_state()}
 
 
 def sopro_validate(start: bool = False) -> dict:
@@ -2316,6 +2352,13 @@ def install(_demo=None, app=None) -> bool:
     sopro_starter_route = _json_route(
         SOPRO_STARTER_ROUTE, lambda _payload: sopro_starter(),
         "That starter voice could not be made.")
+    sopro_save_route = _json_route(
+        SOPRO_SAVE_ROUTE, lambda payload: sopro_save(str(payload.get("token") or "")),
+        "That voice could not be saved.")
+    sopro_discard_route = _json_route(
+        SOPRO_DISCARD_ROUTE,
+        lambda payload: sopro_discard(str(payload.get("token") or "")),
+        "That preview could not be discarded.")
     sopro_validate_route = _json_route(
         SOPRO_VALIDATE_ROUTE,
         lambda payload: sopro_validate(bool(payload.get("start"))),
@@ -2481,6 +2524,8 @@ def install(_demo=None, app=None) -> bool:
                               (SOPRO_REBUILD_ROUTE, sopro_rebuild_route),
                               (SOPRO_STARTER_ROUTE, sopro_starter_route),
                               (SOPRO_VALIDATE_ROUTE, sopro_validate_route),
+                              (SOPRO_SAVE_ROUTE, sopro_save_route),
+                              (SOPRO_DISCARD_ROUTE, sopro_discard_route),
                               (CLEANUP_ROUTE, cleanup_status_route),
                               (CLEANUP_INSTALL_ROUTE, cleanup_install_route),
                               (CLEANUP_RUN_ROUTE, cleanup_run_route),

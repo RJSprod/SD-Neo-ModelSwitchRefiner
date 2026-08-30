@@ -27,6 +27,21 @@ import mc_voice_paths as paths
 import mc_voice_sopro as sopro
 
 
+@pytest.fixture(autouse=True)
+def _no_pending_preview():
+    """No test starts or ends with a voice waiting to be saved.
+
+    The pending preview is process-global on purpose — one at a time, so that
+    there is never a second unregistered directory to reason about — which means
+    a test that leaves one behind changes the answer for the next one. Cleared
+    in memory rather than through ``discard_preview`` so that this never removes
+    a directory outside a test's own temporary root.
+    """
+    sopro._preview.clear()
+    yield
+    sopro._preview.clear()
+
+
 class TestTheManifest:
     def test_gate_s_0_every_runtime_wheel_is_pinned(self):
         """An artifact without a hash is one this repository makes no claim
@@ -883,6 +898,110 @@ class TestTheVoiceLibrary:
             sopro.create("Rebecca", spoken_wav(9.0, 24000), "")
         assert sopro.entries() == []
         assert not list(paths.sopro_voices_root().glob("*/reference.wav"))
+
+    def test_preparing_a_preview_writes_no_registry_entry(
+            self, host, voice_root, fake_sopro_worker, spoken_wav):
+        """The whole point. Create used to build the voice, write it into the
+        registry, make it the default if it was the first, and *then* play the
+        audition — so hearing it was a receipt rather than a decision."""
+        made = sopro.prepare_preview("Rebecca", spoken_wav(9.0, 24000), "")
+        assert made["token"]
+        assert made["audio"], "the preview came back with nothing to listen to"
+        assert sopro.entries() == [], "the voice was saved before anybody heard it"
+        assert sopro.preview_state()["pending"] is True
+
+    def test_the_prepared_voice_is_on_disk_but_not_in_the_registry(
+            self, host, voice_root, fake_sopro_worker, spoken_wav):
+        """Section 23's seam. Everything up to the registry write leaves nothing
+        anybody can see, which is why the failure path has always been one
+        rmtree — a prepared voice with no entry is not half-saved."""
+        sopro.prepare_preview("Rebecca", spoken_wav(9.0, 24000), "")
+        assert list(paths.sopro_voices_root().glob("*/reference.wav"))
+        assert sopro.entries() == []
+
+    def test_saving_the_preview_is_what_registers_it(
+            self, host, voice_root, fake_sopro_worker, spoken_wav):
+        made = sopro.prepare_preview("Rebecca", spoken_wav(9.0, 24000), "")
+        kept = sopro.save_preview(made["token"])
+        assert kept["voice"]["display_name"] == "Rebecca"
+        assert [entry["display_name"] for entry in sopro.entries()] == ["Rebecca"]
+        assert sopro.preview_state()["pending"] is False
+
+    def test_discarding_takes_the_recording_with_it(
+            self, host, voice_root, fake_sopro_worker, spoken_wav):
+        """A directory holding a recording of somebody, with nothing in the
+        registry pointing at it, is one nothing would ever remove."""
+        sopro.prepare_preview("Rebecca", spoken_wav(9.0, 24000), "")
+        assert sopro.discard_preview() is True
+        assert sopro.entries() == []
+        assert not list(paths.sopro_voices_root().glob("*/reference.wav"))
+        assert sopro.preview_state()["pending"] is False
+
+    def test_a_second_preview_discards_the_first(
+            self, host, voice_root, fake_sopro_worker, spoken_wav):
+        """One at a time. Two unregistered directories is two things to reason
+        about and nobody asked for the second one."""
+        first = sopro.prepare_preview("Rebecca", spoken_wav(9.0, 24000), "")
+        sopro.prepare_preview("Ada", spoken_wav(9.0, 24000), "")
+        assert len(list(paths.sopro_voices_root().glob("*/reference.wav"))) == 1
+        with pytest.raises(sopro.SoproError):
+            sopro.save_preview(first["token"])
+
+    def test_saving_with_the_wrong_token_is_refused(
+            self, host, voice_root, fake_sopro_worker, spoken_wav):
+        """A browser sitting on an old panel must not be able to save a voice
+        the user has already replaced with another preview."""
+        sopro.prepare_preview("Rebecca", spoken_wav(9.0, 24000), "")
+        with pytest.raises(sopro.SoproError):
+            sopro.save_preview("not-the-token")
+        assert sopro.entries() == []
+        assert sopro.preview_state()["pending"] is True, \
+            "a refused save threw the preview away"
+
+    def test_saving_when_nothing_is_pending_says_so(self, host, voice_root):
+        with pytest.raises(sopro.SoproError) as raised:
+            sopro.save_preview("anything")
+        assert "no voice waiting" in str(raised.value)
+
+    def test_discarding_someone_else_s_preview_is_refused(
+            self, host, voice_root, fake_sopro_worker, spoken_wav):
+        sopro.prepare_preview("Rebecca", spoken_wav(9.0, 24000), "")
+        assert sopro.discard_preview("not-the-token") is False
+        assert sopro.preview_state()["pending"] is True
+
+    def test_the_first_saved_voice_becomes_the_default_and_a_preview_does_not(
+            self, host, voice_root, fake_sopro_worker, spoken_wav):
+        """An installation with one voice and no default is one where Auto
+        Speak silently does nothing — but a voice nobody has kept must not be
+        what the whole installation speaks with."""
+        sopro.prepare_preview("Rebecca", spoken_wav(9.0, 24000), "")
+        assert not str(sopro._read().get("default") or "")
+        made = sopro.prepare_preview("Ada", spoken_wav(9.0, 24000), "")
+        kept = sopro.save_preview(made["token"])
+        assert sopro._read().get("default") == kept["voice"]["id"]
+
+    def test_shutdown_throws_a_pending_preview_away(
+            self, host, voice_root, fake_sopro_worker, spoken_wav, monkeypatch):
+        """The decision was "not yet", and a WebUI that closed on "not yet" has
+        answered it. Otherwise the directory outlives the process that knew
+        about it and nothing ever removes it."""
+        import mc_voice_sopro_runtime as runtime
+
+        sopro.prepare_preview("Rebecca", spoken_wav(9.0, 24000), "")
+        assert list(paths.sopro_voices_root().glob("*/reference.wav"))
+        runtime.shutdown()
+        assert not list(paths.sopro_voices_root().glob("*/reference.wav"))
+        assert sopro.preview_state()["pending"] is False
+
+    def test_create_still_prepares_and_keeps_in_one_call(
+            self, host, voice_root, fake_sopro_worker, spoken_wav):
+        """Starter voices have nobody to ask: they are Kokoro reading a fixed
+        script, so there is no recording anybody chose and nothing to audition
+        before deciding."""
+        made = sopro.create("Rebecca", spoken_wav(9.0, 24000), "")
+        assert made["voice"]["display_name"] == "Rebecca"
+        assert made["audio"]
+        assert sopro.preview_state()["pending"] is False
 
     def test_a_voice_directory_is_a_uuid_and_never_a_display_name(
             self, host, voice_root, fake_sopro_worker, spoken_wav):

@@ -1535,12 +1535,27 @@ def _sopro_voices_html() -> str:
         f'installed.</p>'
         f'</div>'
         f'<button type="button" class="mc-voice-install" data-mc-voice-sopro-create>'
-        f'Create voice</button>'
-        f'<p class="mc-voice-note">'
+        f'Create preview</button>'
+        # The note under this button already said "you will hear the finished
+        # voice before it is saved", and it was not true: Create built the
+        # voice, wrote it into the registry, made it the default if it was the
+        # first, and *then* played the audition. Hearing it was a receipt, not a
+        # decision. These three are the decision.
+        + '<div class="mc-voice-preview" data-mc-voice-sopro-preview hidden>'
+        '<p class="mc-voice-note" data-mc-voice-sopro-preview-note></p>'
+        '<button type="button" class="mc-voice-entry-action" '
+        'data-mc-voice-sopro-preview-play>Play again</button>'
+        '<button type="button" class="mc-voice-install" '
+        'data-mc-voice-sopro-preview-save>Save voice</button>'
+        '<button type="button" class="mc-voice-entry-action" '
+        'data-mc-voice-sopro-preview-discard>Discard</button>'
+        '</div>'
+        + f'<p class="mc-voice-note">'
         f'{int(sopro.MIN_REFERENCE_SECONDS)} to {int(sopro.MAX_REFERENCE_SECONDS)} seconds '
         f'of one clear speaker, at a natural speaking pace, in a room without much '
-        f'background noise. The recording is checked, normalised and prepared here; you '
-        f'will hear the finished voice before it is saved.</p>'
+        f'background noise. Create preview builds the voice and reads a line back to '
+        f'you; nothing is saved until you press Save voice, and Discard removes the '
+        f'whole thing including the recording it kept.</p>'
         f'</div>'
         f'</div>'
         + _lab_html()

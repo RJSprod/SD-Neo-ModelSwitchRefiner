@@ -417,6 +417,19 @@ cloneParts.file.type = "file";
 cloneParts.file.files = [];
 cloneParts.record = element("clone-record", "BUTTON");
 cloneParts.create = element("clone-create", "BUTTON");
+cloneParts.preview = element("clone-preview");
+cloneParts.preview.hidden = true;
+cloneParts.previewNote = element("clone-preview-note");
+cloneParts.previewPlay = element("clone-preview-play", "BUTTON");
+cloneParts.previewSave = element("clone-preview-save", "BUTTON");
+cloneParts.previewDiscard = element("clone-preview-discard", "BUTTON");
+cloneParts.preview.querySelector = function (selector) {
+    if (selector.indexOf("preview-note") !== -1) return cloneParts.previewNote;
+    if (selector.indexOf("preview-play") !== -1) return cloneParts.previewPlay;
+    if (selector.indexOf("preview-save") !== -1) return cloneParts.previewSave;
+    if (selector.indexOf("preview-discard") !== -1) return cloneParts.previewDiscard;
+    return null;
+};
 cloneParts.note = element("clone-note");
 cloneParts.trim = element("clone-trim");
 cloneParts.trim.hidden = true;
@@ -483,6 +496,9 @@ voicesRow.querySelector = function (selector) {
     if (selector.indexOf("mc-voice-delivery]") !== -1) return voicesParts.deliveryPanel;
     if (selector.indexOf("sopro-form") !== -1) return cloneParts.form;
     if (selector.indexOf("sopro-clone-status") !== -1) return cloneParts.status;
+    // Before "sopro-preview" has a chance to be read as anything else: the
+    // preview row lives on the voices panel rather than inside the clone form.
+    if (selector.indexOf("sopro-preview]") !== -1) return cloneParts.preview;
     return null;
 };
 
@@ -1145,6 +1161,10 @@ DEFAULTS = {
             "chunks": [[1, 0, 2, 0, 3], [0, 4, 0], [5, 0, 6, 0]],
         },
         "voice/cancel": {"json": {"ok": True, "cancelled": True}},
+        "voice/sopro/save": {"json": {"ok": True, "voices": [], "default": "",
+                                      "voice": {"id": "sopro:clone:kept",
+                                                "display_name": "Ada"}}},
+        "voice/sopro/discard": {"json": {"ok": True, "discarded": True}},
         "voice/cleanup/install": {"json": {"ok": True, "already": False}},
         "voice/cleanup": {"json": {"ok": True, "installed": False,
                                    "platform_supported": True,
@@ -3566,9 +3586,13 @@ class TestBringingAnAudioFile:
     def test_cleaning_takes_the_hiss_out_and_leaves_the_voice(self):
         """The measured claim, not the hopeful one.
 
-        DeepFilterNet was the obvious answer and cannot be installed here --
-        its Rust extension publishes wheels for CPython 3.8 to 3.11 and this
-        WebUI runs 3.13 — so this is spectral subtraction in the page. It only
+        This is the page's own pass, which is the fallback for an installation
+        without DeepFilterNet rather than the recommendation. (An earlier
+        version of this docstring said DeepFilterNet "cannot be installed here"
+        because its Rust extension publishes wheels only for CPython 3.8-3.11
+        and this WebUI runs 3.13. That was too absolute and was corrected
+        elsewhere at the time: it installs perfectly well in an interpreter of
+        its own, which is what ``mc_voice_cleanup`` builds.) It only
         earns its checkbox if it actually improves the recording, which is a
         number: the ratio between the tone the speaker is and the hiss they are
         not, in the audio that leaves the page.
@@ -3911,6 +3935,168 @@ class TestBringingAnAudioFile:
         assert not [r for r in found["requests"]
                     if r.get("url", "").endswith("/sopro/clone")]
         assert "record something" in found["cloneStatus"].lower(), found["cloneStatus"]
+
+
+class TestPreviewingAVoiceBeforeKeepingIt:
+    """Create used to save. The note under the button said "you will hear the
+    finished voice before it is saved", and it was not true: it built the voice,
+    wrote it into the registry, made it the default if it was the first, and
+    *then* played the audition. Hearing it was a receipt.
+
+    Section 23's seam was always there — everything up to the registry write
+    leaves nothing anybody can see — so the split costs one directory to undo.
+    """
+
+    @staticmethod
+    def _answers(**overrides):
+        answers = json.loads(DEFAULTS["ANSWERS"])
+        answers["voice/sopro/clone"] = {"json": dict(
+            {"ok": True, "preview": True, "token": "TOKEN-1", "name": "Ada",
+             "seconds": 12.0, "audio": ""}, **overrides)}
+        return json.dumps(answers)
+
+    def ready(self, scenario: str, **overrides) -> dict:
+        answers = overrides.pop("ANSWERS", self._answers())
+        return run("""
+            await tick();
+            cloneParts.file.files = [new Blob([new Uint8Array(2048)])];
+            cloneParts.file.fire("change");
+            await tick();
+            cloneParts.name.value = "Ada";
+            cloneParts.start.value = "0"; cloneParts.start.fire("input");
+            cloneParts.end.value = "12";  cloneParts.end.fire("input");
+            """ + scenario, VOICES_PRESENT="true", VOICES_VISIBLE="true",
+                   DECODE_SECONDS="12", ANSWERS=answers, **overrides)
+
+    def test_creating_shows_the_preview_row_and_saves_nothing(self):
+        """Create asks the server to *build* a voice and nothing else.
+
+        That nothing is written down is enforced server-side and tested there —
+        ``prepare_preview`` writes no registry entry, which is the guarantee
+        that matters and the only place it can be made. What this page can be
+        held to is that pressing Create never reaches the route that keeps it.
+        """
+        found = self.ready("""
+            cloneParts.create.fire("click");
+            await tick();
+            console.log(JSON.stringify(report({
+                hidden: cloneParts.preview.hidden,
+                note: cloneParts.previewNote.textContent})));
+        """)
+        assert found["hidden"] is False
+        assert "not saved yet" in found["note"], found["note"]
+        touched = [r["url"] for r in found["requests"] if "/sopro/" in r.get("url", "")]
+        assert any(url.endswith("/sopro/clone") for url in touched), touched
+        assert not [url for url in touched if url.endswith("/sopro/save")], touched
+
+    def test_the_form_keeps_its_name_and_selection_for_another_try(self):
+        """The next thing that happens may well be "no, try a different fifteen
+        seconds", and a form that emptied itself on preview would make trying
+        again mean starting again."""
+        found = self.ready("""
+            cloneParts.create.fire("click");
+            await tick();
+            console.log(JSON.stringify(report({
+                name: cloneParts.name.value,
+                trimHidden: cloneParts.trim.hidden})));
+        """)
+        assert found["name"] == "Ada"
+        assert found["trimHidden"] is False
+
+    def test_save_is_what_asks_the_server_to_keep_it(self):
+        found = self.ready("""
+            cloneParts.create.fire("click");
+            await tick();
+            requests.length = 0;
+            cloneParts.previewSave.fire("click");
+            await tick();
+            console.log(JSON.stringify(report({hidden: cloneParts.preview.hidden})));
+        """)
+        posts = [r for r in found["requests"] if r.get("url", "").endswith("/sopro/save")]
+        assert len(posts) == 1, "Save did not reach the server"
+        assert json.loads(posts[0]["bodyText"]).get("token") == "TOKEN-1"
+        assert found["hidden"] is True, "the preview row stayed after saving"
+
+    def test_discard_tells_the_server_and_clears_the_row(self):
+        found = self.ready("""
+            cloneParts.create.fire("click");
+            await tick();
+            requests.length = 0;
+            cloneParts.previewDiscard.fire("click");
+            await tick();
+            console.log(JSON.stringify(report({hidden: cloneParts.preview.hidden,
+                                               status: cloneParts.status.textContent})));
+        """)
+        posts = [r for r in found["requests"]
+                 if r.get("url", "").endswith("/sopro/discard")]
+        assert len(posts) == 1, "Discard did not reach the server"
+        assert json.loads(posts[0]["bodyText"]).get("token") == "TOKEN-1"
+        assert found["hidden"] is True
+        assert "Discarded" in found["status"], found["status"]
+
+    def test_a_discard_the_server_refuses_still_clears_the_row(self):
+        """Locally first. A failed call must not leave a Save button for a voice
+        the user has already said no to."""
+        answers = json.loads(self._answers())
+        answers["voice/sopro/discard"] = {"reject": True}
+        found = self.ready("""
+            cloneParts.create.fire("click");
+            await tick();
+            cloneParts.previewDiscard.fire("click");
+            await tick();
+            console.log(JSON.stringify(report({hidden: cloneParts.preview.hidden})));
+        """, ANSWERS=json.dumps(answers))
+        assert found["hidden"] is True
+
+    def test_a_refused_save_leaves_the_preview_where_it_is(self):
+        """The opposite asymmetry to discard, and for the same reason: the user
+        said keep, so the thing to keep must still be there to try again."""
+        answers = json.loads(self._answers())
+        answers["voice/sopro/save"] = {"status": 400,
+                                       "json": {"ok": False, "error": "no such preview"}}
+        found = self.ready("""
+            cloneParts.create.fire("click");
+            await tick();
+            cloneParts.previewSave.fire("click");
+            await tick();
+            console.log(JSON.stringify(report({
+                hidden: cloneParts.preview.hidden,
+                disabled: cloneParts.previewSave.disabled,
+                status: cloneParts.status.textContent})));
+        """, ANSWERS=json.dumps(answers))
+        assert found["hidden"] is False, "a refused save threw the preview away"
+        assert found["disabled"] is False, "Save could not be pressed again"
+        assert "no such preview" in found["status"], found["status"]
+
+    def test_the_audition_is_played_and_can_be_played_again(self):
+        """The bytes the preparation produced, not a re-synthesis: a second
+        take would be a different take from the one being judged."""
+        found = self.ready("""
+            scheduled.length = 0;
+            cloneParts.create.fire("click");
+            await tick();
+            const onCreate = played.length;
+            cloneParts.previewPlay.fire("click");
+            await tick();
+            console.log(JSON.stringify(report({onCreate, after: played.length})));
+        """, ANSWERS=self._answers(audio="UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9"
+                                        "AAACABAAZGF0YQAAAAA="))
+        assert found["onCreate"] >= 1, "the preview was not played on creation"
+        assert found["after"] > found["onCreate"], "Play again played nothing"
+
+    def test_a_refusal_from_create_shows_no_preview_row(self):
+        found = self.ready("""
+            cloneParts.create.fire("click");
+            await tick();
+            console.log(JSON.stringify(report({hidden: cloneParts.preview.hidden,
+                                               status: cloneParts.status.textContent})));
+        """, ANSWERS=json.dumps(dict(
+            json.loads(self._answers()),
+            **{"voice/sopro/clone": {"status": 400,
+                                     "json": {"ok": False,
+                                              "error": "That recording is silent."}}})))
+        assert found["hidden"] is True
+        assert "silent" in found["status"], found["status"]
 
 
 class TestTheFolderButtonComesBack:
