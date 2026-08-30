@@ -800,7 +800,19 @@ def _handshake_with(state) -> Handshake:
 
     system, _machine, _python = models.current_platform()
     wanted = CONTAINMENT.get(system)
-    if wanted and found.parent_death != wanted:
+    if system == "windows":
+        # Proved in :func:`_die_with_us`, against this job and this child's own
+        # handle, before the worker was given any work. What the worker says is
+        # corroboration: it can only ask the weaker question -- am I in *some*
+        # job -- and on a real machine it could not always ask it at all. It is
+        # logged when it disagrees and it is never a veto, because a veto here
+        # is a worker refused for failing to confirm a fact the kernel has
+        # already confirmed at the other end.
+        if found.parent_death != wanted:
+            logger.info("Model Chain: the Sopro worker reported its containment as %r; the "
+                        "job object was confirmed at this end, and that is what ends it",
+                        found.parent_death or "unknown")
+    elif wanted and found.parent_death != wanted:
         raise SoproRuntimeError(
             "The Sopro worker could not be tied to this process's lifetime, so it was not "
             "started. A speech process that outlives the WebUI is not something this feature "
@@ -959,7 +971,11 @@ def _drain_stderr(started) -> None:
         for line in iter(started.stderr.readline, b""):
             text = line.decode("utf-8", "replace").strip()
             if text:
-                logger.debug("Model Chain: %s", text)
+                # Info rather than debug. These are exceptional-condition notes,
+                # not chatter, and the one that mattered most -- why the worker
+                # could not confirm its own containment -- was invisible at the
+                # default level in the log of the user it stopped.
+                logger.info("Model Chain: %s", text)
     except Exception:
         pass
 
@@ -1196,6 +1212,21 @@ def _die_with_us(started) -> None:
     from ctypes import wintypes
 
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    # Declared rather than left to ctypes' defaults. Without argtypes every
+    # argument is marshalled as a C ``int``, and a HANDLE on 64-bit Windows is
+    # not one: the calls here happen to survive it because kernel handles are
+    # small, and the check below -- which passes a real handle and reads a
+    # BOOL out by pointer -- is exactly the shape that does not.
+    kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                               ctypes.c_void_p, wintypes.DWORD]
+    kernel.SetInformationJobObject.restype = wintypes.BOOL
+    kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE,
+                                      ctypes.POINTER(wintypes.BOOL)]
+    kernel.IsProcessInJob.restype = wintypes.BOOL
     if _job_handle is None:
         job = kernel.CreateJobObjectW(None, None)
         if not job:
@@ -1227,5 +1258,27 @@ def _die_with_us(started) -> None:
                 ctypes.sizeof(information)):
             raise ctypes.WinError(ctypes.get_last_error())
         _job_handle = job
-    if not kernel.AssignProcessToJobObject(_job_handle, int(handle)):
+    if not kernel.AssignProcessToJobObject(_job_handle, wintypes.HANDLE(int(handle))):
         raise ctypes.WinError(ctypes.get_last_error())
+
+    # And then ask the kernel whether it took, here, where both handles are
+    # real ones and the question can name *this* job rather than "any job".
+    #
+    # This is where containment is proved, and it did not used to be. The proof
+    # lived in the worker instead, which could only ask the weaker question --
+    # am I in some job -- through a pseudo-handle, and which answered "no" when
+    # it meant "I could not tell". A worker whose containment was arranged and
+    # enforced was then refused for failing to confirm it, on a real machine,
+    # every time. The place that made the arrangement is the place that can
+    # check it.
+    inside = wintypes.BOOL(0)
+    if not kernel.IsProcessInJob(wintypes.HANDLE(int(handle)), _job_handle,
+                                 ctypes.byref(inside)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not inside.value:
+        raise SoproRuntimeError(
+            "Windows did not put the Sopro worker in this process's job object, so it was "
+            "not started. A speech process that outlives the WebUI is not something this "
+            "feature will leave running.")
+    logger.info("Model Chain: the Sopro worker is in this process's job object and Windows "
+                "will end it if this process is killed")

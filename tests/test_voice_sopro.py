@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import struct
+import types
 
 import pytest
 
@@ -445,6 +446,95 @@ class TestTheVoiceLibrary:
         explicitly licensed and represented separately from user clones. Until
         then this is empty rather than a placeholder."""
         assert sopro.official() == []
+
+    def test_starter_voices_are_not_bundled_speakers(self):
+        """The distinction section 8 actually draws.
+
+        A starter voice is *made* on the machine it runs on, from Kokoro reading
+        a passage, and what it leaves behind is an ordinary Sopro clone with its
+        own retained reference. Nothing ships with the extension, so the "no
+        built-in speakers" rule above is untouched by it."""
+        assert sopro.official() == []
+        assert [name for _sid, name in sopro.STARTER_VOICES]
+
+    def test_the_starter_list_shrinks_as_they_are_made(self, host, voice_root,
+                                                       fake_sopro_worker, spoken_wav,
+                                                       monkeypatch):
+        import mc_voice_models as models
+        import mc_voice_registry as registry
+        import mc_voice_runtime as kokoro
+
+        monkeypatch.setattr(models, "status",
+                            lambda: types.SimpleNamespace(tts_ready=True))
+        monkeypatch.setattr(registry, "resolve", lambda voice_id="": (3, {"id": voice_id}))
+        monkeypatch.setattr(kokoro, "synthesize",
+                            lambda text, sid=0, profile=None: spoken_wav(16.0, 24000))
+
+        assert len(sopro.starter_names()) == len(sopro.STARTER_VOICES)
+        made = sopro.create_starter_voice()
+
+        assert made["created"] == sopro.STARTER_VOICES[0][1]
+        assert made["remaining"] == len(sopro.STARTER_VOICES) - 1
+        assert len(sopro.starter_names()) == len(sopro.STARTER_VOICES) - 1
+        # And what it left behind is an ordinary voice, not a special kind.
+        found = [entry for entry in sopro.entries()
+                 if entry["display_name"] == made["created"]]
+        assert found and found[0]["id"].startswith("sopro:clone:")
+        assert found[0]["editable"] and found[0]["deletable"]
+
+    def test_a_starter_voice_is_read_by_kokoro_and_prepared_by_sopro(self, host,
+                                                                     voice_root,
+                                                                     fake_sopro_worker,
+                                                                     spoken_wav,
+                                                                     monkeypatch):
+        """The one place the two engines touch, and it is a creation step: the
+        reference is Kokoro's, the voice that comes out is Sopro's own and keeps
+        working if Kokoro is removed afterwards."""
+        import mc_voice_models as models
+        import mc_voice_registry as registry
+        import mc_voice_runtime as kokoro
+
+        asked = []
+        monkeypatch.setattr(models, "status",
+                            lambda: types.SimpleNamespace(tts_ready=True))
+        monkeypatch.setattr(registry, "resolve",
+                            lambda voice_id="": (asked.append(voice_id) or (3, {})))
+        monkeypatch.setattr(kokoro, "synthesize",
+                            lambda text, sid=0, profile=None: (asked.append(len(text))
+                                                               or spoken_wav(16.0, 24000)))
+        sopro.create_starter_voice()
+
+        assert asked[0] == "official:" + sopro.STARTER_VOICES[0][0]
+        assert asked[1] > 200, "the reference passage is too short to condition on"
+
+    def test_starter_voices_say_so_when_kokoro_is_missing(self, host, voice_root,
+                                                          fake_sopro_worker, monkeypatch):
+        """Rather than failing somewhere inside a runtime that was never asked
+        to be installed."""
+        import mc_voice_models as models
+
+        monkeypatch.setattr(models, "status",
+                            lambda: types.SimpleNamespace(tts_ready=False))
+        with pytest.raises(sopro.SoproError, match="Kokoro"):
+            sopro.create_starter_voice()
+
+    def test_asking_again_when_they_all_exist_is_not_an_error(self, host, voice_root,
+                                                              fake_sopro_worker,
+                                                              spoken_wav, monkeypatch):
+        import mc_voice_models as models
+        import mc_voice_registry as registry
+        import mc_voice_runtime as kokoro
+
+        monkeypatch.setattr(models, "status",
+                            lambda: types.SimpleNamespace(tts_ready=True))
+        monkeypatch.setattr(registry, "resolve", lambda voice_id="": (3, {}))
+        monkeypatch.setattr(kokoro, "synthesize",
+                            lambda text, sid=0, profile=None: spoken_wav(16.0, 24000))
+        for _ in sopro.STARTER_VOICES:
+            sopro.create_starter_voice()
+
+        found = sopro.create_starter_voice()
+        assert found == {"created": "", "remaining": 0}
 
     def test_t_sopro_7_a_voice_is_created_renamed_defaulted_and_deleted(
             self, host, voice_root, fake_sopro_worker, spoken_wav):

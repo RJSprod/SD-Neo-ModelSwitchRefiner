@@ -95,6 +95,7 @@
         soproSettings: "model-chain/voice/sopro/settings",
         soproClone: "model-chain/voice/sopro/clone",
         soproRebuild: "model-chain/voice/sopro/rebuild",
+        soproStarter: "model-chain/voice/sopro/starter",
         lab: "model-chain/voice/lab",
         labUpdate: "model-chain/voice/lab/update",
         labReset: "model-chain/voice/lab/reset",
@@ -3790,6 +3791,7 @@
         whenOnScreen(holder, function () {
             refreshVoices(holder);
             wireDelivery(holder);
+            wireSoproStarter(holder);
             // Only ever present when Sopro is the selected engine, because the
             // markup they wire is only rendered then. Both are no-ops on a
             // Kokoro page rather than branches on the engine -- absence is the
@@ -3958,10 +3960,348 @@
     // production path is that the user hears what Conversation will produce.
 
     let soproRecorder = null;
-    let soproRecording = null;
+
+    // The chosen recording, decoded, with the part of it the user has picked.
+    //
+    // One object for both ways in. A file the browser can play and a take
+    // recorded here arrive at exactly the same place, are trimmed with the same
+    // controls, and leave as the same mono 16-bit PCM WAV -- so the server keeps
+    // one narrow thing to validate and the person keeps every format they own.
+    let soproClip = null;
+
+    const CLIP_MIN_SECONDS = 5;
+    const CLIP_MAX_SECONDS = 20;
+    const CLIP_SUGGESTED = 15;
+
+    function clipDuration() {
+        if (!soproClip) return 0;
+        return Math.max(0, soproClip.end - soproClip.start);
+    }
+
+    // Decode whatever was handed over. `decodeAudioData` is the browser's own
+    // decoder, so this is every format it can play -- MP3, M4A, Opus, FLAC, OGG,
+    // WebM and WAV -- without this extension shipping a codec or the WebUI
+    // growing a dependency.
+    function loadSoproClip(form, blob, label) {
+        const ctx = audioContext();
+        const trim = form.querySelector("[data-mc-voice-trim]");
+        if (!ctx) {
+            sayTrim(form, "This browser has no Web Audio, so a recording cannot be "
+                    + "trimmed here.");
+            return Promise.resolve(false);
+        }
+        sayTrim(form, "Reading " + (label || "the recording") + "…");
+        return blob.arrayBuffer().then(function (bytes) {
+            return new Promise(function (resolve, reject) {
+                // The callback form, not the promise form: Safari still ships
+                // only the callback one, and a voice reference is exactly the
+                // file somebody brings from a phone.
+                ctx.decodeAudioData(bytes, resolve, function (error) {
+                    reject(error || new Error("decode failed"));
+                });
+            });
+        }).then(function (decoded) {
+            soproClip = {buffer: decoded, start: 0, end: decoded.duration,
+                         label: label || "recording"};
+            // A file is usually far longer than Sopro's window, so the opening
+            // selection is a usable one rather than the whole thing: somebody
+            // who presses Create straight away gets a voice, not a refusal.
+            if (decoded.duration > CLIP_MAX_SECONDS) {
+                soproClip.end = CLIP_SUGGESTED;
+            }
+            if (trim) trim.hidden = false;
+            paintTrim(form);
+            return true;
+        }).catch(function () {
+            soproClip = null;
+            if (trim) trim.hidden = true;
+            sayTrim(form, "That file could not be read as audio. Try a WAV, MP3, M4A, "
+                    + "FLAC or OGG.");
+            return false;
+        });
+    }
+
+    function sayTrim(form, text) {
+        const state = form.querySelector("[data-mc-voice-trim-state]");
+        if (state) state.textContent = text || "";
+    }
+
+    // Min and max per pixel column, which is what a waveform is: an average
+    // would draw a quiet grey band for speech and hide exactly the silences
+    // somebody is trying to trim off the ends.
+    function drawWave(form) {
+        const canvas = form.querySelector("[data-mc-voice-wave]");
+        if (!canvas || !soproClip) return;
+        const width = Math.max(1, Math.floor(canvas.clientWidth || canvas.width || 600));
+        const height = canvas.height || 96;
+        if (canvas.width !== width) canvas.width = width;
+        const ctx2d = canvas.getContext ? canvas.getContext("2d") : null;
+        if (!ctx2d) return;
+        const data = soproClip.buffer.getChannelData(0);
+        const step = data.length / width;
+        const ink = window.getComputedStyle(canvas).color || "#888";
+        ctx2d.clearRect(0, 0, width, height);
+
+        // The selection first, underneath, so the wave stays readable on top.
+        const total = soproClip.buffer.duration || 1;
+        const left = Math.round((soproClip.start / total) * width);
+        const right = Math.round((soproClip.end / total) * width);
+        ctx2d.globalAlpha = 0.18;
+        ctx2d.fillStyle = ink;
+        ctx2d.fillRect(left, 0, Math.max(1, right - left), height);
+        ctx2d.globalAlpha = 1;
+
+        ctx2d.fillStyle = ink;
+        for (let column = 0; column < width; column += 1) {
+            let low = 1;
+            let high = -1;
+            const from = Math.floor(column * step);
+            const to = Math.min(data.length, Math.floor((column + 1) * step));
+            for (let index = from; index < to; index += 1) {
+                const value = data[index];
+                if (value < low) low = value;
+                if (value > high) high = value;
+            }
+            if (low > high) { low = 0; high = 0; }
+            const top = (1 - high) * height / 2;
+            const bottom = (1 - low) * height / 2;
+            ctx2d.globalAlpha = (column >= left && column < right) ? 1 : 0.35;
+            ctx2d.fillRect(column, top, 1, Math.max(1, bottom - top));
+        }
+        ctx2d.globalAlpha = 1;
+        // The two edges, drawn last so they are never buried by a loud sample.
+        ctx2d.fillRect(left, 0, 2, height);
+        ctx2d.fillRect(Math.max(left + 2, right - 2), 0, 2, height);
+    }
+
+    function paintTrim(form) {
+        if (!soproClip) return;
+        const total = soproClip.buffer.duration;
+        soproClip.start = Math.max(0, Math.min(soproClip.start, total));
+        soproClip.end = Math.max(soproClip.start, Math.min(soproClip.end, total));
+        const start = form.querySelector("[data-mc-voice-trim-start]");
+        const end = form.querySelector("[data-mc-voice-trim-end]");
+        if (start) {
+            start.max = String(total.toFixed(1));
+            if (document.activeElement !== start) start.value = soproClip.start.toFixed(1);
+        }
+        if (end) {
+            end.max = String(total.toFixed(1));
+            if (document.activeElement !== end) end.value = soproClip.end.toFixed(1);
+        }
+        drawWave(form);
+        const chosen = clipDuration();
+        const shown = chosen.toFixed(1) + " s of " + total.toFixed(1) + " s";
+        if (chosen < CLIP_MIN_SECONDS) {
+            sayTrim(form, shown + " selected — Sopro needs at least "
+                    + CLIP_MIN_SECONDS + " s. Drag the edges wider.");
+        } else if (chosen > CLIP_MAX_SECONDS) {
+            sayTrim(form, shown + " selected — Sopro takes at most "
+                    + CLIP_MAX_SECONDS + " s. Drag the edges in.");
+        } else {
+            sayTrim(form, shown + " selected — ready to create.");
+        }
+    }
+
+    // The selection as one mono 16-bit PCM WAV at the source's own rate. Mono
+    // because Sopro conditions on one speaker and the server would downmix it
+    // anyway; the source rate because resampling twice is worse than once and
+    // the server does the one that matters.
+    function clipToWav() {
+        if (!soproClip) return null;
+        const buffer = soproClip.buffer;
+        const rate = buffer.sampleRate;
+        const from = Math.max(0, Math.floor(soproClip.start * rate));
+        const to = Math.min(buffer.length, Math.ceil(soproClip.end * rate));
+        const length = Math.max(0, to - from);
+        if (!length) return null;
+        const mixed = new Float32Array(length);
+        for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+            const data = buffer.getChannelData(channel);
+            for (let index = 0; index < length; index += 1) {
+                mixed[index] += data[from + index];
+            }
+        }
+        if (buffer.numberOfChannels > 1) {
+            for (let index = 0; index < length; index += 1) {
+                mixed[index] /= buffer.numberOfChannels;
+            }
+        }
+        return encodeWav(mixed, rate);
+    }
+
+    function playSelection(form, button) {
+        if (!soproClip) return;
+        const ctx = audioContext();
+        if (!ctx) return;
+        unlock();
+        stopPlayback();
+        const source = ctx.createBufferSource();
+        source.buffer = soproClip.buffer;
+        source.connect(ctx.destination);
+        source.onended = function () {
+            if (playing === source) playing = null;
+            if (button) button.textContent = "Play selection";
+        };
+        playing = source;
+        if (button) button.textContent = "Stop";
+        source.start(0, soproClip.start, Math.max(0.05, clipDuration()));
+    }
+
+    function wireTrim(form) {
+        const canvas = form.querySelector("[data-mc-voice-wave]");
+        const play = form.querySelector("[data-mc-voice-trim-play]");
+        const best = form.querySelector("[data-mc-voice-trim-best]");
+        const start = form.querySelector("[data-mc-voice-trim-start]");
+        const end = form.querySelector("[data-mc-voice-trim-end]");
+
+        if (canvas) {
+            let dragging = false;
+            let anchor = 0;
+            const at = function (event) {
+                const box = canvas.getBoundingClientRect();
+                const ratio = box.width ? (event.clientX - box.left) / box.width : 0;
+                const total = soproClip ? soproClip.buffer.duration : 0;
+                return Math.max(0, Math.min(total, ratio * total));
+            };
+            canvas.addEventListener("pointerdown", function (event) {
+                if (!soproClip) return;
+                dragging = true;
+                anchor = at(event);
+                soproClip.start = anchor;
+                soproClip.end = anchor;
+                if (canvas.setPointerCapture) canvas.setPointerCapture(event.pointerId);
+                paintTrim(form);
+            });
+            canvas.addEventListener("pointermove", function (event) {
+                if (!dragging || !soproClip) return;
+                const here = at(event);
+                soproClip.start = Math.min(anchor, here);
+                soproClip.end = Math.max(anchor, here);
+                paintTrim(form);
+            });
+            const release = function () { dragging = false; };
+            canvas.addEventListener("pointerup", release);
+            canvas.addEventListener("pointercancel", release);
+        }
+        if (play) {
+            play.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                if (playing) {
+                    stopPlayback();
+                    play.textContent = "Play selection";
+                    return;
+                }
+                playSelection(form, play);
+            });
+        }
+        if (best) {
+            best.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                if (!soproClip) return;
+                // The loudest fifteen seconds, which is the closest thing to
+                // "the part with speech in it" that costs one pass over the
+                // samples. Not clever, and much better than the first fifteen
+                // when a clip opens with silence or a count-in.
+                soproClip.start = loudestWindow(soproClip.buffer, CLIP_SUGGESTED);
+                soproClip.end = Math.min(soproClip.buffer.duration,
+                                         soproClip.start + CLIP_SUGGESTED);
+                paintTrim(form);
+            });
+        }
+        [[start, "start"], [end, "end"]].forEach(function (pair) {
+            if (!pair[0]) return;
+            pair[0].addEventListener("input", function () {
+                if (!soproClip) return;
+                const value = parseFloat(pair[0].value);
+                if (!isFinite(value)) return;
+                soproClip[pair[1]] = value;
+                if (soproClip.end < soproClip.start) {
+                    soproClip.end = soproClip.start;
+                }
+                paintTrim(form);
+            });
+        });
+        window.addEventListener("resize", function () {
+            if (soproClip) drawWave(form);
+        });
+    }
+
+    // One pass, on second-wide blocks, keeping the window with the most energy.
+    function loudestWindow(buffer, seconds) {
+        const data = buffer.getChannelData(0);
+        const rate = buffer.sampleRate;
+        const blocks = Math.max(1, Math.floor(buffer.duration));
+        if (buffer.duration <= seconds) return 0;
+        const energy = new Float64Array(blocks);
+        for (let block = 0; block < blocks; block += 1) {
+            let sum = 0;
+            const from = block * rate;
+            const to = Math.min(data.length, from + rate);
+            for (let index = from; index < to; index += 1) sum += data[index] * data[index];
+            energy[block] = sum;
+        }
+        const width = Math.max(1, Math.round(seconds));
+        let best = 0;
+        let bestSum = -1;
+        for (let block = 0; block + width <= blocks; block += 1) {
+            let sum = 0;
+            for (let inner = 0; inner < width; inner += 1) sum += energy[block + inner];
+            if (sum > bestSum) { bestSum = sum; best = block; }
+        }
+        return Math.min(best, Math.max(0, buffer.duration - seconds));
+    }
 
     function soproForm(holder) {
         return holder ? holder.querySelector("[data-mc-voice-sopro-form]") : null;
+    }
+
+    // Starter voices, one request each.
+    //
+    // A loop rather than one long call: each voice is a full Sopro preparation,
+    // four of them in a single request is a minute of silence and a browser that
+    // may give up in the middle of it, and doing them one at a time lets the row
+    // say which voice it is on.
+    function wireSoproStarter(holder) {
+        const row = holder.querySelector("[data-mc-voice-sopro-starter]");
+        if (!row || row.dataset.mcVoiceWired === "1") return;
+        row.dataset.mcVoiceWired = "1";
+        const button = row.querySelector("[data-mc-voice-starter-make]");
+        if (!button) return;
+        const say = function (text) {
+            const status = row.querySelector("[data-mc-voice-starter-status]");
+            if (status) status.textContent = text || "";
+        };
+        button.addEventListener("click", function (event) {
+            if (event.preventDefault) event.preventDefault();
+            button.disabled = true;
+            say("Making the first starter voice\u2026");
+            const step = function (made) {
+                return post(ROUTES.soproStarter, {}, holder).then(function (payload) {
+                    if (!payload || !payload.ok) {
+                        say((payload && payload.error) || "That could not be done.");
+                        return false;
+                    }
+                    applyVoices(holder, payload);
+                    const count = made + (payload.created ? 1 : 0);
+                    if (payload.remaining > 0) {
+                        say("Made " + (payload.created || "a voice") + ". "
+                            + payload.remaining + " to go\u2026");
+                        return step(count);
+                    }
+                    say(count
+                        ? "Done \u2014 " + count + " starter voice"
+                          + (count === 1 ? "" : "s") + " added."
+                        : "The starter voices are already here.");
+                    return true;
+                });
+            };
+            step(0).catch(function () {
+                say("That could not be done.");
+            }).then(function () {
+                button.disabled = false;
+            });
+        });
     }
 
     function wireSoproClone(holder) {
@@ -3980,6 +4320,14 @@
                 startSoproRecording(form, record);
             });
         }
+        const file = form.querySelector("[data-mc-voice-sopro-file]");
+        if (file) {
+            file.addEventListener("change", function () {
+                const chosen = file.files && file.files[0];
+                if (!chosen) return;
+                loadSoproClip(form, chosen, chosen.name || "that file");
+            });
+        }
         const create = form.querySelector("[data-mc-voice-sopro-create]");
         if (create) {
             create.addEventListener("click", function (event) {
@@ -3987,6 +4335,7 @@
                 createSoproVoice(holder, form, create);
             });
         }
+        wireTrim(form);
     }
 
     // Reuses the capture primitives dictation uses -- `startCapture`,
@@ -4011,7 +4360,9 @@
         unlock();
         startCapture(null, true).then(function (state) {
             soproRecorder = state;
-            soproRecording = null;
+            soproClip = null;
+            const trim = form.querySelector("[data-mc-voice-trim]");
+            if (trim) trim.hidden = true;
             button.textContent = "Stop recording";
             if (note) note.textContent = "Recording…";
             // Stopped for them at the top of the supported window. A microphone
@@ -4043,16 +4394,18 @@
             if (note) note.textContent = "Nothing was recorded.";
             return;
         }
-        soproRecording = encodeWav(samples, state.rate);
         const seconds = samples.length / (state.rate || 1);
         if (note) note.textContent = "Recorded " + seconds.toFixed(1) + " s";
+        // Into the trimmer, not into a variable of its own. A take with three
+        // seconds of throat-clearing at the front is the ordinary case, and
+        // before this the only way to fix one was to record it again.
+        loadSoproClip(form, new Blob([encodeWav(samples, state.rate)], {type: "audio/wav"}),
+                      "your recording");
     }
 
     function createSoproVoice(holder, form, button) {
         const name = form.querySelector("[data-mc-voice-sopro-name]");
         const language = form.querySelector("[data-mc-voice-sopro-language]");
-        const file = form.querySelector("[data-mc-voice-sopro-file]");
-        const chosen = file && file.files && file.files[0];
         const say = function (text) {
             const status = holder.querySelector("[data-mc-voice-sopro-clone-status]");
             if (status) status.textContent = text || "";
@@ -4061,8 +4414,21 @@
             say("Give the voice a name.");
             return;
         }
-        if (!chosen && !soproRecording) {
-            say("Record something or choose a WAV file first.");
+        if (!soproClip) {
+            say("Choose an audio file or record something first.");
+            return;
+        }
+        const chosen = clipDuration();
+        if (chosen < CLIP_MIN_SECONDS || chosen > CLIP_MAX_SECONDS) {
+            // Said here as well as under the waveform, because this is the
+            // button somebody pressed and the answer belongs next to it.
+            say("Sopro clones from " + CLIP_MIN_SECONDS + " to " + CLIP_MAX_SECONDS
+                + " seconds. " + chosen.toFixed(1) + " s is selected.");
+            return;
+        }
+        const wav = clipToWav();
+        if (!wav) {
+            say("That selection is empty.");
             return;
         }
         button.disabled = true;
@@ -4070,9 +4436,7 @@
         const body = new FormData();
         body.append("name", name.value);
         body.append("language", language ? language.value : "");
-        body.append("reference", chosen
-            ? chosen
-            : new Blob([soproRecording], {type: "audio/wav"}), "reference.wav");
+        body.append("reference", new Blob([wav], {type: "audio/wav"}), "reference.wav");
         fetch(url(ROUTES.soproClone), {
             method: "POST",
             credentials: "same-origin",
@@ -4088,7 +4452,9 @@
             }
             say("Created. Playing it back…");
             name.value = "";
-            soproRecording = null;
+            soproClip = null;
+            const trim = form.querySelector("[data-mc-voice-trim]");
+            if (trim) trim.hidden = true;
             applyVoices(holder, payload);
             if (payload.audio) {
                 // The audition that validated the voice, played rather than

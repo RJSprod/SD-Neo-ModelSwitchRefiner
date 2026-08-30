@@ -233,6 +233,47 @@ class TestTheWorkerAsksForTheCpu:
             mc_voice_sopro_runtime.ensure_started()
         assert not mc_voice_sopro_runtime.status()["running"]
 
+    @pytest.mark.sopro(handshake={"parent_death": "unknown"})
+    def test_on_windows_the_workers_own_answer_is_not_a_veto(self, fake_sopro_worker,
+                                                             monkeypatch, caplog):
+        """Windows containment is proved by the parent, so the worker saying it
+        could not tell is a note, not a refusal.
+
+        The regression this locks: the worker asked the kernel "am I in some
+        job" through a pseudo-handle, reported failure and refusal with the same
+        word, and the parent turned it away. On a real machine that meant a
+        worker whose containment had been arranged and *was* being enforced --
+        the job object is created, the child assigned to it, and both were
+        checked at the parent -- could never start at all.
+        """
+        import logging
+
+        import mc_voice_models as models
+        import mc_voice_sopro_runtime
+
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("windows", "x86_64", "3.13"))
+        with caplog.at_level(logging.INFO, logger="model_chain"):
+            mc_voice_sopro_runtime.ensure_started()
+
+        assert mc_voice_sopro_runtime.status()["running"]
+        said = " ".join(record.getMessage() for record in caplog.records)
+        assert "reported its containment as 'unknown'" in said, said
+        mc_voice_sopro_runtime.shutdown()
+
+    @pytest.mark.sopro(handshake={"parent_death": "pipe"})
+    def test_a_platform_whose_worker_does_the_arranging_still_refuses(self,
+                                                                     fake_sopro_worker):
+        """Linux is the other way round: ``PR_SET_PDEATHSIG`` can only be set
+        inside the child, so there the child's word is the only evidence there
+        is and it still has to be good."""
+        import mc_voice_models as models
+        import mc_voice_sopro_runtime
+
+        assert models.current_platform()[0] == "linux", "this test is about the Linux rule"
+        with pytest.raises(mc_voice_sopro_runtime.SoproRuntimeError, match="lifetime"):
+            mc_voice_sopro_runtime.ensure_started()
+
     @pytest.mark.sopro(handshake={"backend": "kokoro"})
     def test_a_worker_claiming_the_other_backend_is_refused(self, fake_sopro_worker):
         """Section 18: the parent refuses a handshake for a backend other than

@@ -343,6 +343,90 @@ Two smaller things in the same report, both reporting rather than behaviour:
 
 ---
 
+## Containment, and the check that was in the wrong place
+
+The install worked, the decoder took the file, and then the worker would not
+start: *the Sopro worker could not be tied to this process's lifetime.* Three
+times, across a restart.
+
+The parent creates a job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and
+assigns the worker to it. Both calls returned success — that is the arrangement,
+and it is what the kernel enforces. The refusal came from somewhere else: the
+worker checked its own containment with `IsProcessInJob` through the
+`GetCurrentProcess` pseudo-handle, and reported the same word, `pipe`, whether
+the kernel said "no" or the call could not be made at all. The parent read that
+as "no" and refused. A worker whose containment was arranged and *was being
+enforced* could never start.
+
+Two things were wrong and both are fixed.
+
+The check is now made by the parent, immediately after the assignment, with
+`IsProcessInJob(child, job)` — real handles on both sides, and it names *this*
+job rather than asking the weaker "any job at all". That is stronger evidence
+than the worker could ever produce, and it is available at the moment and place
+the arrangement is made. Windows containment is proved there; the worker's own
+answer is logged and is not a veto. On Linux it is the other way round —
+`PR_SET_PDEATHSIG` can only be set inside the child — so there the child's word
+is still the only evidence there is and still has to be good.
+
+The worker also now distinguishes `job`, `none` and `unknown` instead of
+collapsing the last two, and every Win32 call on both sides declares its
+`argtypes`: a HANDLE is not a C `int` on 64-bit Windows, and the calls here
+survived that only because kernel handles are small — which the pseudo-handle
+`-1` conspicuously is not.
+
+The worker's own diagnostics were being logged at `debug`, so the sentence
+explaining which of the three had happened was invisible at the default level in
+the log of the person it stopped. They are `info` now.
+
+---
+
+## Bringing audio in, and getting started without a microphone
+
+Two walls in front of the first voice, both of them removed in the page rather
+than in the model.
+
+**Any format, trimmed here.** Sopro conditions on five to twenty seconds of mono
+reference audio. That is a real constraint, and it was being handed to the user
+as homework: find a WAV, make it 16-bit PCM, make it the right length. The
+browser already decodes every format it can play, and this extension already had
+a WAV encoder for dictation, so both jobs move into the tab. Choose an MP3, M4A,
+FLAC, OGG or WAV — or record one — and it is decoded, drawn as a waveform, and
+trimmed by dragging or with two number boxes; "Pick 15 s for me" takes the
+loudest window, which beats the first fifteen seconds on a clip that opens with
+silence. What is uploaded is the selection, as one mono 16-bit PCM WAV. A file
+longer than the window opens on a selection that will work rather than on a
+refusal. Nothing about this reaches the network, and the server's validation is
+unchanged and still strict.
+
+**Starter voices.** Sopro has no speaker bank — every voice it has comes from a
+reference recording — so a fresh installation offered exactly one way forward:
+record yourself. That is a wall in front of somebody who only wants to hear
+whether the engine works. There is now a button that makes four voices by having
+Kokoro read a short passage and cloning that.
+
+This is the one place the two engines touch, and it is a *creation* step rather
+than a dependency: what it leaves behind is an ordinary Sopro voice with its own
+retained reference, which renames, rebuilds, auditions and deletes like any
+other and keeps working if Kokoro is removed. It is also the one clone where
+consent is not a question anybody has to weigh — a Kokoro speaker is synthetic
+and Apache-2.0, so no person's identity is being copied. Section 8's rule about
+bundled example voices is untouched: nothing ships with the extension,
+`sopro.official()` is still empty, and a starter voice is a local clone that
+says so in its name.
+
+**Contrast.** Every field this feature adds now states its own contrast pair and
+means it. The previous rule set `background-color`, which a host theme's
+`background` shorthand beat on specificity — so LobeTheme's night mode went on
+painting a white box under light text. Both halves now come from one place: the
+text is whatever is already legible on the surface and the field is that same
+colour at 8%, which computes to about 11:1 on a dark theme and 15:1 on a light
+one without this stylesheet knowing which it is in. Borders clear 3:1,
+placeholders 5:1, focus is always visible, and the file button, checkboxes and
+sliders are covered too.
+
+---
+
 ## Two things the first real install disproved
 
 Both were found by installing this on Windows rather than by reading it, and

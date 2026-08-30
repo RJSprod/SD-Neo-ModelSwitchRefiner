@@ -1533,6 +1533,97 @@ def normalize_reference(data: bytes) -> tuple:
     return header + raw, len(raw) / float(TARGET_RATE * 2)
 
 
+STARTER_VOICES = (
+    ("af_heart", "Heart (starter)"),
+    ("am_michael", "Michael (starter)"),
+    ("bf_emma", "Emma (starter)"),
+    ("bm_george", "George (starter)"),
+)
+"""Kokoro speakers to seed Sopro from, and what the seeded voices are called.
+
+Two American and two British, two of each timbre, so the four are actually
+different from each other rather than four takes of one voice.
+"""
+
+STARTER_TEXT = (
+    "This is a reference recording, made on this computer, for a starter voice. "
+    "It runs for about fifteen seconds so that there is enough of it to work "
+    "from. The quick brown fox jumps over the lazy dog, and the judge asked "
+    "whether five or six of them had really done so. Numbers like one, seven "
+    "and thirty come out here too, along with a question, and a pause."
+)
+"""Roughly fifteen seconds of read speech, which is what Sopro conditions on.
+
+Phonetically spread on purpose -- a reference made of one flat sentence gives
+the model one intonation to copy. It says what it is, so a starter voice that
+somebody plays back is not a sentence they have to wonder about.
+"""
+
+
+def starter_names() -> list:
+    """The starter voices that do not exist yet, in the order they are made."""
+    made = {str(entry.get("display_name") or "").casefold() for entry in entries()}
+    return [(sid, name) for sid, name in STARTER_VOICES
+            if name.casefold() not in made]
+
+
+def create_starter_voice() -> dict:
+    """Make the next starter voice, by cloning one of Kokoro's own speakers.
+
+    Sopro has no speaker bank: every voice it has is conditioned on a reference
+    recording, so a fresh installation has nothing to say anything with and the
+    only way in was to record yourself. That is a real wall in front of somebody
+    who just wants to hear the engine work, and it is unnecessary, because a
+    perfectly good reference recording can be made on the spot by the engine
+    that is already installed.
+
+    So the reference is Kokoro reading :data:`STARTER_TEXT`. This is the one
+    place the two engines touch, and it is a *creation* step rather than a
+    dependency: what it leaves behind is an ordinary Sopro voice with its own
+    retained reference, which rebuilds, renames, deletes and speaks like any
+    other, and which keeps working if Kokoro is removed afterwards.
+
+    It is also the one clone where consent is not a question anybody has to
+    think about. A Kokoro speaker is synthetic and Apache-2.0; no person's
+    identity is being copied, which is exactly what makes it the right thing to
+    put in front of the record button rather than behind it.
+
+    One per call. Four prepares in one request is a request that takes minutes
+    and a browser that gives up halfway; the caller asks again for the next one
+    and gets to say which voice it is on.
+    """
+    import mc_voice_models as models
+    import mc_voice_registry as registry
+    import mc_voice_runtime as kokoro
+
+    found = status()
+    if not found.ready:
+        raise SoproError("Sopro is not installed, so it cannot make a starter voice.")
+    if not models.status().tts_ready:
+        raise SoproError(
+            "Starter voices are read by Kokoro, which is not installed. Install the "
+            "text-to-speech model in Settings, or record a voice of your own.")
+
+    wanted = starter_names()
+    if not wanted:
+        return {"created": "", "remaining": 0}
+    sid_name, display = wanted[0]
+    try:
+        sid, _entry = registry.resolve(f"official:{sid_name}")
+    except Exception as exc:
+        raise SoproError(f"Kokoro has no speaker called {sid_name}, so that starter voice "
+                         f"could not be made.") from None
+    logger.info("Model Chain: making the Sopro starter voice %r from Kokoro's %s",
+                display, sid_name)
+    try:
+        reference = kokoro.synthesize(STARTER_TEXT, int(sid))
+    except Exception as exc:
+        raise SoproError(f"Kokoro could not read the reference for that starter voice "
+                         f"({exc}).") from None
+    made = create(display, reference, "en")
+    return {"created": display, "remaining": len(starter_names()), "voice": made["voice"]}
+
+
 def create(display_name: str, wav: bytes, language: str = "") -> dict:
     """Make a Sopro voice from a reference recording. The whole transaction.
 

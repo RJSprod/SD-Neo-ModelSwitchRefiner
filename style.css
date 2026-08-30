@@ -4613,6 +4613,99 @@
     color: CanvasText;
 }
 
+/* -- and said again, in a way a host theme cannot take back ------------------
+   The rule above was right and lost. It sets `background-color`, and a theme
+   that sets the `background` shorthand on `.gradio-container input` beats it on
+   specificity and wins the cascade -- so LobeTheme's night mode went on drawing
+   a white box under light text, which is the exact pair the rule was written to
+   prevent. A block that lives inside somebody else's theme has to state its own
+   contrast pair and mean it.
+
+   Both halves come from one place on purpose. The text is whatever is already
+   legible on this surface; the field is that same colour at 8%, laid over the
+   surface. Those cannot disagree: on a dark theme it computes to about 11:1 and
+   on a light one to about 15:1, both comfortably past WCAG AA's 4.5:1, without
+   this stylesheet ever having to know which theme it is in. The border is the
+   same colour at 35%, which clears the 3:1 that AA asks of a control's boundary,
+   and the placeholder is held at 0.6 rather than the 0.55 it had, which is what
+   moves it from 4.6:1 to about 5.1:1.
+
+   A browser with no `color-mix` keeps the transparent field and its border and
+   stays perfectly legible, which was always the requirement. */
+.mc-voice-settings input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+.mc-voice-settings select,
+.mc-voice-settings textarea,
+.mc-voice-voices input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+.mc-voice-voices select,
+.mc-voice-voices textarea {
+    background: transparent !important;
+    border: 1px solid var(--border-color-primary, currentColor) !important;
+    border-radius: var(--radius-lg, 8px);
+    color: inherit !important;
+    /* Some themes paint text through this rather than `color`, and a field whose
+       fill colour is still the light theme's is unreadable however right the
+       background is. */
+    -webkit-text-fill-color: currentColor !important;
+}
+
+@supports (background: color-mix(in srgb, currentColor 8%, transparent)) {
+    .mc-voice-settings input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+    .mc-voice-settings select,
+    .mc-voice-settings textarea,
+    .mc-voice-voices input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+    .mc-voice-voices select,
+    .mc-voice-voices textarea {
+        background: color-mix(in srgb, currentColor 8%, transparent) !important;
+        border-color: color-mix(in srgb, currentColor 35%, transparent) !important;
+    }
+}
+
+.mc-voice-settings input::placeholder,
+.mc-voice-settings textarea::placeholder,
+.mc-voice-voices input::placeholder,
+.mc-voice-voices textarea::placeholder {
+    color: inherit;
+    opacity: 0.6;
+}
+
+/* The browser draws this button itself and gives it the platform's colours,
+   which on a dark surface is the same white-on-white problem one control
+   further in. */
+.mc-voice-settings input[type="file"]::file-selector-button,
+.mc-voice-voices input[type="file"]::file-selector-button {
+    background: transparent;
+    border: 1px solid currentColor;
+    border-radius: var(--radius-lg, 8px);
+    color: inherit;
+    cursor: pointer;
+    margin-right: 0.6em;
+    padding: 0.2em 0.8em;
+}
+
+/* Checkboxes and sliders are painted from `accent-color`, which no rule above
+   touches: left alone they are the platform's blue on any surface, which is the
+   one pair that is neither this theme's nor readable on it. */
+.mc-voice-settings input[type="checkbox"],
+.mc-voice-settings input[type="range"],
+.mc-voice-voices input[type="checkbox"],
+.mc-voice-voices input[type="range"] {
+    accent-color: var(--color-accent, currentColor);
+}
+
+/* Focus has to be visible on both, and a theme that removed the outline
+   entirely leaves a keyboard user with no way to tell where they are. */
+.mc-voice-settings input:focus-visible,
+.mc-voice-settings select:focus-visible,
+.mc-voice-settings textarea:focus-visible,
+.mc-voice-settings button:focus-visible,
+.mc-voice-voices input:focus-visible,
+.mc-voice-voices select:focus-visible,
+.mc-voice-voices textarea:focus-visible,
+.mc-voice-voices button:focus-visible {
+    outline: 2px solid var(--color-accent, currentColor);
+    outline-offset: 2px;
+}
+
 /* -- and the room the Voices row takes ------------------------------------
    Two separate things put a screenful of nothing under the last voice. The
    host draws this block inside its own settings container, which on some
@@ -4973,6 +5066,53 @@
 
 .mc-voice-engine-name {
     font-weight: 600;
+}
+
+/* -- trimming a recording in the page ---------------------------------------
+   The canvas takes its ink from `color`, so the waveform is whatever is legible
+   on this theme's surface without the stylesheet naming a colour. `touch-action`
+   is what makes dragging a selection work on a touch screen at all: without it
+   the browser claims the gesture for scrolling before the first pointermove
+   arrives. */
+.mc-voice-trim {
+    margin: 0.5em 0;
+}
+
+.mc-voice-wave {
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    cursor: crosshair;
+    display: block;
+    height: 96px;
+    touch-action: none;
+    width: 100%;
+}
+
+.mc-voice-trim-row {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5em;
+    margin-top: 0.5em;
+}
+
+/* Wide enough for "120.5" and no wider: these are seconds, and a number box
+   that took the rest of the row would push the readout onto its own line. */
+.mc-voice-trim-row input[type="number"] {
+    flex: 0 0 6em;
+    min-height: 2.2em;
+    padding: 0.3em 0.6em;
+}
+
+.mc-voice-trim-row label {
+    flex: 0 0 auto;
+}
+
+.mc-voice-trim-state {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 0.9em;
+    margin-top: 0.4em;
+    min-height: 1.2em;
 }
 
 .mc-voice-sopro-parts {

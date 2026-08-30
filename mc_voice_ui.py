@@ -1323,6 +1323,23 @@ def _sopro_voices_html() -> str:
         '<div class="mc-voice-list" data-mc-voice-list></div>'
         '</div>'
         + _delivery_block()
+        # Above the clone form on purpose. Sopro has no speaker bank, so an
+        # installation with nothing in it used to offer exactly one way forward:
+        # record yourself. That is a wall in front of somebody who only wants to
+        # hear whether the engine works, and the way past it is cheap.
+        + '<div class="mc-voice-row" data-mc-voice-sopro-starter>'
+        '<div class="mc-voice-head">'
+        '<div class="mc-voice-heading">Starter voices</div>'
+        '<div class="mc-voice-status" data-mc-voice-starter-status></div>'
+        '<button type="button" class="mc-voice-install" data-mc-voice-starter-make>'
+        'Add starter voices</button>'
+        '</div>'
+        '<p class="mc-voice-note">Four voices made here, on this PC, by having '
+        'Kokoro read a short passage and cloning that. They take a few seconds '
+        'each and need no recording and no download. Nobody\'s voice is copied — '
+        'a Kokoro speaker is synthetic — and what you get is an ordinary Sopro '
+        'voice you can rename, audition, assign or delete like any other.</p>'
+        '</div>'
         + f'<div class="mc-voice-row" data-mc-voice-sopro-clone>'
         f'<div class="mc-voice-head">'
         f'<div class="mc-voice-heading">Clone voice</div>'
@@ -1350,12 +1367,42 @@ def _sopro_voices_html() -> str:
         f'right answer unless you know otherwise.</p>'
         f'</div>'
         f'<div class="mc-voice-field">'
-        f'<label for="mc-voice-sopro-file">Reference recording</label>'
-        f'<input type="file" id="mc-voice-sopro-file" accept=".wav,audio/wav,audio/x-wav" '
+        f'<label for="mc-voice-sopro-file">Recording</label>'
+        f'<input type="file" id="mc-voice-sopro-file" '
+        f'accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.oga,.opus,.flac,.webm,.mp4" '
         f'data-mc-voice-sopro-file />'
         f'<button type="button" class="mc-voice-entry-action" data-mc-voice-sopro-record>'
         f'Record here</button>'
         f'<span class="mc-voice-sopro-recording" data-mc-voice-sopro-recording></span>'
+        f'</div>'
+        # The browser already decodes every format it can play, and already has
+        # a WAV encoder in this file for dictation. So "bring me a 16-bit PCM
+        # WAV of between five and twenty seconds" -- which is a real constraint
+        # of the model and was being handed to the user as homework -- becomes
+        # something the page does: drop in an MP3, drag the part you want, press
+        # Create. Nothing here reaches the network; the file is read, decoded,
+        # trimmed and encoded in the tab.
+        + f'<div class="mc-voice-trim" data-mc-voice-trim hidden>'
+        f'<canvas class="mc-voice-wave" data-mc-voice-wave height="96" '
+        f'aria-label="Waveform of the chosen recording. Drag to choose the part to '
+        f'clone, or use the start and end boxes below."></canvas>'
+        f'<div class="mc-voice-trim-row">'
+        f'<button type="button" class="mc-voice-entry-action" data-mc-voice-trim-play>'
+        f'Play selection</button>'
+        f'<button type="button" class="mc-voice-entry-action" data-mc-voice-trim-best>'
+        f'Pick 15 s for me</button>'
+        f'<label for="mc-voice-trim-start">Start</label>'
+        f'<input type="number" id="mc-voice-trim-start" data-mc-voice-trim-start '
+        f'min="0" step="0.1" inputmode="decimal" />'
+        f'<label for="mc-voice-trim-end">End</label>'
+        f'<input type="number" id="mc-voice-trim-end" data-mc-voice-trim-end '
+        f'min="0" step="0.1" inputmode="decimal" />'
+        f'</div>'
+        # Written into an aria-live region rather than only drawn on the canvas:
+        # the length is the one thing that decides whether Create will work, and
+        # a canvas says it to nobody using a screen reader.
+        f'<div class="mc-voice-trim-state" data-mc-voice-trim-state role="status" '
+        f'aria-live="polite"></div>'
         f'</div>'
         f'<button type="button" class="mc-voice-install" data-mc-voice-sopro-create>'
         f'Create voice</button>'
