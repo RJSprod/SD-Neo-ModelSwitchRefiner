@@ -477,6 +477,43 @@ nothing to audition before deciding.
 
 ---
 
+## What is left when the pipeline is right
+
+Once the resampler stopped aliasing and the cleaner stopped running twice, the
+remaining complaint is "still not quite good enough", and the honest answer is
+that it is **not yet** the engine's ceiling — the shipped configuration is set
+for the opposite of fidelity, in three places at once.
+
+**Solver steps default to the lowest of the three.** `STEP_CHOICES` is `(2, 4,
+8)` and `steps()` returns `STEP_CHOICES[0]`. That is the acoustic solver's step
+count, which is the main quality control the engine has, and it defaults to its
+minimum so that speech keeps up with playback on a modest machine. On a machine
+that has since been measured at RTF 0.705 there is headroom to spend, and the
+control's help text now says so instead of "More is slower".
+
+**Sampling temperature trades directly against resemblance.** The reference
+conditions the sampling; a higher temperature lets each take wander further from
+it. The control is labelled "Variation" and its help said only that higher was
+"more varied ... and eventually less stable", which is true and omits the part
+that matters to somebody whose clone does not sound like them.
+
+**The model already says how long a reference should be, and nothing asked.**
+`ref_seconds` has been in the worker's handshake since it was written and was
+read by nothing at all. Meanwhile the trimmer suggested a hardcoded fifteen
+seconds and a user comparing 7.1, 14.1 and 20.0 second references was guessing
+at a number the engine could have told them. It now rides on the voices payload
+— the panel that holds the trimmer, rather than the settings panel somebody may
+never open — and the button relabels itself to the model's own figure, clamped
+to the five-to-twenty this build will accept.
+
+None of these three is a defect in the sense the resampler was. They are
+defaults chosen for a streaming engine on unknown hardware, and they are the
+right defaults for that. They are the wrong ones for somebody who has said they
+will trade time for quality, and the difference between those two cases is a
+thing the user knows and the code cannot.
+
+---
+
 ## What is stored for a cloned voice, and what is not
 
 ```

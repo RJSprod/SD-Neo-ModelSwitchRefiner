@@ -4260,6 +4260,7 @@
             swapSurface();
             return;
         }
+        noteIdealClip(payload);
         if (payload.voices) paintVoices(holder, payload);
     }
 
@@ -4292,7 +4293,30 @@
 
     const CLIP_MIN_SECONDS = 5;
     const CLIP_MAX_SECONDS = 20;
-    const CLIP_SUGGESTED = 15;
+    // What the *model* was built to condition on, which is not the same as what
+    // this extension will accept. Sopro reports it as `ref_seconds` in its
+    // handshake and nothing had ever read it, so the suggestion here was a
+    // hardcoded fifteen and a user comparing seven, fourteen and twenty second
+    // references was guessing at a number the engine already knew. Fifteen
+    // stays as the fallback for a panel drawn before the worker has started.
+    let clipSuggested = 15;
+
+    function noteIdealClip(payload) {
+        const found = payload && payload.clone && Number(payload.clone.ideal_seconds);
+        if (!found || !isFinite(found) || found <= 0) return;
+        clipSuggested = Math.max(CLIP_MIN_SECONDS, Math.min(CLIP_MAX_SECONDS, found));
+        // Defensively: the label is a nicety and a panel drawn without this
+        // button, or a host whose NodeList has no forEach, must not lose the
+        // number itself -- which is already in `clipSuggested` by here.
+        let buttons = [];
+        try {
+            buttons = Array.prototype.slice.call(
+                document.querySelectorAll("[data-mc-voice-trim-best]") || []);
+        } catch (error) { buttons = []; }
+        buttons.forEach(function (button) {
+            button.textContent = "Pick " + clipSuggested.toFixed(0) + " s for me";
+        });
+    }
 
     function clipDuration() {
         if (!soproClip) return 0;
@@ -4329,7 +4353,7 @@
             // selection is a usable one rather than the whole thing: somebody
             // who presses Create straight away gets a voice, not a refusal.
             if (decoded.duration > CLIP_MAX_SECONDS) {
-                soproClip.end = CLIP_SUGGESTED;
+                soproClip.end = clipSuggested;
             }
             if (trim) trim.hidden = false;
             paintTrim(form);
@@ -5022,9 +5046,9 @@
                 // "the part with speech in it" that costs one pass over the
                 // samples. Not clever, and much better than the first fifteen
                 // when a clip opens with silence or a count-in.
-                soproClip.start = loudestWindow(soproClip.buffer, CLIP_SUGGESTED);
+                soproClip.start = loudestWindow(soproClip.buffer, clipSuggested);
                 soproClip.end = Math.min(soproClip.buffer.duration,
-                                         soproClip.start + CLIP_SUGGESTED);
+                                         soproClip.start + clipSuggested);
                 paintTrim(form);
             });
         }

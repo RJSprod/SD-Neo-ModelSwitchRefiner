@@ -1176,7 +1176,35 @@ def voices_payload(test_text=None, engine: str = "") -> dict:
         "test_text": adapter.test_text(),
         "capacity": adapter.capacity(),
         "warnings": adapter.warnings(),
+        # The reference length the engine was built to condition on, when it
+        # has one. Here rather than only on the Sopro settings payload because
+        # the control that needs it -- the trimmer's "pick the best part" -- is
+        # on *this* panel, and reading it from the settings poll meant the
+        # number only ever arrived for somebody who had opened Settings first.
+        "clone": _clone_hints(active),
     }
+
+
+def _clone_hints(active: str) -> dict:
+    """What the clone form should suggest, from the engine rather than a guess.
+
+    Empty for an engine that has nothing to say, which is the ordinary case:
+    Kokoro's cloning path has its own window and does not go through here.
+    """
+    import mc_voice_engines as engines
+
+    if active != engines.SOPRO:
+        return {}
+    try:
+        import mc_voice_sopro as sopro
+        import mc_voice_sopro_runtime as sopro_runtime
+
+        return {"min_seconds": sopro.MIN_REFERENCE_SECONDS,
+                "max_seconds": sopro.MAX_REFERENCE_SECONDS,
+                "ideal_seconds": sopro_runtime.defaults().get("ref_seconds") or 0}
+    except Exception:
+        logger.debug("Model Chain: could not read the Sopro clone hints", exc_info=True)
+        return {}
 
 
 def _public(entry: dict) -> dict:
@@ -1441,8 +1469,15 @@ def sopro_payload() -> dict:
         "defaults": sopro_runtime.defaults(),
         "state": sopro_runtime.engine(),
         "languages": [{"id": code, "label": label} for code, label in sopro.LANGUAGES],
+        # ``ideal_seconds`` is the model's own ``ref_seconds`` -- the reference
+        # length Sopro was built to condition on, as opposed to the five and
+        # twenty this extension will *accept*. It has been in the handshake
+        # since the worker was written and was read by nothing, so the number
+        # the model actually wants has been sitting one function call away from
+        # a user picking lengths by guesswork.
         "clone": {"min_seconds": sopro.MIN_REFERENCE_SECONDS,
                   "max_seconds": sopro.MAX_REFERENCE_SECONDS,
+                  "ideal_seconds": sopro_runtime.defaults().get("ref_seconds") or 0,
                   "max_bytes": sopro.MAX_REFERENCE_BYTES},
         "sources": {"runtime": sopro.sources("runtime"), "model": sopro.sources("model")},
         "warnings": sopro.warnings(),

@@ -439,6 +439,7 @@ cloneParts.playClean = element("clone-play-clean", "BUTTON");
 cloneParts.playClean.textContent = "Play cleaned";
 cloneParts.playClean.hidden = true;
 cloneParts.best = element("clone-best", "BUTTON");
+cloneParts.best.textContent = "Pick the best part";
 cloneParts.start = element("clone-start", "INPUT");
 cloneParts.end = element("clone-end", "INPUT");
 cloneParts.state = element("clone-state");
@@ -510,6 +511,10 @@ globalThis.document = {
         if (selector === ".mc-voice-voices") return VOICES_PRESENT ? voicesRow : null;
         if (selector === "[data-mc-voice-key]") return SETTINGS_PRESENT ? settingsRow : null;
         return null;
+    },
+    querySelectorAll(selector) {
+        if (selector.indexOf("trim-best") !== -1) return [cloneParts.best];
+        return [];
     },
     createElement(tag) { return element("created", tag.toUpperCase()); },
     addEventListener() {},
@@ -844,7 +849,13 @@ globalThis.fetch = function (url, options) {
     requests.push({url, options: options || {},
                    body: options && options.body,
                    headers: (options && options.headers) || {}});
-    const answer = ANSWERS[Object.keys(ANSWERS).find((k) => url.indexOf(k) !== -1)];
+    // Longest match, not first. These keys are substrings of a URL and some of
+    // them are substrings of each other -- "voice/sopro" is a prefix of
+    // "voice/sopro/clone" -- so first-match made the answer depend on the order
+    // keys happened to be inserted in, which a test helper adding one changes.
+    const matches = Object.keys(ANSWERS).filter((k) => url.indexOf(k) !== -1);
+    matches.sort((a, b) => b.length - a.length);
+    const answer = ANSWERS[matches[0]];
     if (!answer) return Promise.reject(new Error("no route " + url));
     if (answer.reject) return Promise.reject(new Error("network"));
     const headerBag = answer.headers || {};
@@ -1233,6 +1244,20 @@ DEFAULTS = {
                           "minimum": 0.0, "maximum": 1200.0, "step": 25.0,
                           "default": 0.0, "decimals": 0, "help": ""},
             }}},
+        "voice/sopro": {"json": {
+            "ok": True, "engine": "sopro", "installed": True, "runtime_ready": True,
+            "model_ready": True, "runtime_message": "Installed",
+            "model_message": "Installed", "platform_supported": True,
+            "label": "Sopro V2", "fingerprint": "abc", "warnings": [], "progress": {},
+            "languages": [{"id": "en", "label": "English"}],
+            "settings": {"precision": "full", "precisions": [], "steps": 2,
+                         "step_choices": [2, 4, 8], "chunk_frames": 64,
+                         "chunk_choices": [32, 64, 128], "threads": 4,
+                         "thread_choices": [2, 4, 8], "released_threads": 4},
+            "defaults": {}, "state": {"loaded": True, "state": "idle"},
+            "clone": {"min_seconds": 5, "max_seconds": 20, "ideal_seconds": 0,
+                      "max_bytes": 1},
+            "sources": {}}},
     }),
 }
 
@@ -3935,6 +3960,83 @@ class TestBringingAnAudioFile:
         assert not [r for r in found["requests"]
                     if r.get("url", "").endswith("/sopro/clone")]
         assert "record something" in found["cloneStatus"].lower(), found["cloneStatus"]
+
+
+class TestTheReferenceLengthTheModelWants:
+    """`ref_seconds` is Sopro's own answer to "how long should a reference be",
+    it has been in the handshake since the worker was written, and it was read
+    by nothing.
+
+    So the trimmer suggested a hardcoded fifteen seconds while a user comparing
+    seven, fourteen and twenty second references was guessing at a number the
+    engine already knew and could have said.
+    """
+
+    @staticmethod
+    def _answers(ideal):
+        """The hint rides on the *voices* payload, which is what the panel
+        holding the trimmer already fetches."""
+        answers = json.loads(DEFAULTS["ANSWERS"])
+        payload = dict(answers["voice/voices"]["json"])
+        payload["clone"] = {"min_seconds": 5, "max_seconds": 20,
+                            "ideal_seconds": ideal}
+        answers["voice/voices"] = {"json": payload}
+        return json.dumps(answers)
+
+    def test_the_button_names_the_length_the_model_asked_for(self):
+        found = run("""
+            await tick();
+            await hold(200);
+            console.log(JSON.stringify(report({label: cloneParts.best.textContent})));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true",
+             ANSWERS=self._answers(12))
+        assert found["label"] == "Pick 12 s for me", found["label"]
+
+    def test_the_suggestion_uses_it_rather_than_fifteen(self):
+        found = run("""
+            await tick();
+            await hold(200);
+            cloneParts.file.files = [new Blob([new Uint8Array(2048)])];
+            cloneParts.file.fire("change");
+            await tick();
+            cloneParts.best.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true",
+             DECODE_SECONDS="40", ANSWERS=self._answers(12))
+        chosen = float(found["trimEnd"]) - float(found["trimStart"])
+        assert abs(chosen - 12) < 0.05, (found["trimStart"], found["trimEnd"])
+
+    def test_a_model_that_says_nothing_keeps_the_fallback(self):
+        """A panel drawn before the worker has started has no handshake to read,
+        and must still offer something rather than a zero-second selection."""
+        found = run("""
+            await tick();
+            await hold(200);
+            cloneParts.file.files = [new Blob([new Uint8Array(2048)])];
+            cloneParts.file.fire("change");
+            await tick();
+            cloneParts.best.fire("click");
+            await tick();
+            console.log(JSON.stringify(report({
+                label: cloneParts.best.textContent})));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true",
+             DECODE_SECONDS="40", ANSWERS=self._answers(0))
+        chosen = float(found["trimEnd"]) - float(found["trimStart"])
+        assert abs(chosen - 15) < 0.05, (found["trimStart"], found["trimEnd"])
+        assert found["label"] == "Pick the best part", found["label"]
+
+    def test_a_nonsense_length_is_clamped_to_what_this_build_accepts(self):
+        """The number comes from a model configuration, which is data this
+        extension did not write. Five to twenty is what the rest of the flow
+        will actually take."""
+        found = run("""
+            await tick();
+            await hold(200);
+            console.log(JSON.stringify(report({label: cloneParts.best.textContent})));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true",
+             ANSWERS=self._answers(900))
+        assert found["label"] == "Pick 20 s for me", found["label"]
 
 
 class TestPreviewingAVoiceBeforeKeepingIt:

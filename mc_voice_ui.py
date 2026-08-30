@@ -1222,8 +1222,13 @@ def _sopro_engine_settings(settings: dict, found) -> str:
         '<div class="mc-voice-field">'
         '<label>Solver steps</label>'
         + choices("steps", settings["steps"], settings["step_choices"])
-        + '<p class="mc-voice-note">How many steps the acoustic solver takes. More is '
-          'slower. This is a compute setting, not a character trait.</p>'
+        + '<p class="mc-voice-note">How many steps the acoustic solver takes, and the '
+          'main quality control this engine has. The default is the <em>lowest</em> of '
+          'the three, chosen so that speech keeps up with playback on a modest machine '
+          '— so if clones sound rough and you would rather wait, this is the first '
+          'thing to raise. Cost is roughly proportional: 8 steps is about four times '
+          'the solver work of 2. Run the validation below afterwards to see what it did '
+          'to the real-time factor. A compute setting, not a character trait.</p>'
         '</div>'
         '<div class="mc-voice-field">'
         '<label>Streaming chunk size</label>'
@@ -1499,8 +1504,11 @@ def _sopro_voices_html() -> str:
         # by ear needs A and B under two fingers.
         f'<button type="button" class="mc-voice-entry-action" '
         f'data-mc-voice-trim-play-clean hidden>Play cleaned</button>'
+        # No number in the markup. Fifteen was a guess baked in at build time;
+        # the model reports the length it was built to condition on, and the
+        # page rewrites this label with it as soon as it knows.
         f'<button type="button" class="mc-voice-entry-action" data-mc-voice-trim-best>'
-        f'Pick 15 s for me</button>'
+        f'Pick the best part</button>'
         f'<label class="mc-voice-lab-check">'
         f'<input type="checkbox" data-mc-voice-clean /> Clean up the recording</label>'
         # Shown only when the engine is installed, because a control offering a

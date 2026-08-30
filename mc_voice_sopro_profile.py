@@ -167,9 +167,13 @@ CONTROLS = {
         "owner": "sopro",
         "advanced": False,
         "help": "Sopro's sampling temperature. Higher is more varied between takes and "
-                "eventually less stable; lower is flatter and more repeatable. It is not an "
-                "emotion or warmth control — the model has no such input. Left alone it "
-                "follows the model's own default.",
+                "eventually less stable; lower is flatter and more repeatable. It is not "
+                "an emotion or warmth control — the model has no such input. It also "
+                "trades against how much the output sounds like the voice you cloned: "
+                "the reference conditions the sampling, and turning this up lets each "
+                "take wander further from it, so if a clone is not recognisable enough, "
+                "lower this before anything else. Left alone it follows the model's own "
+                "default.",
     },
     "top_p": {
         "label": "Top-p",
