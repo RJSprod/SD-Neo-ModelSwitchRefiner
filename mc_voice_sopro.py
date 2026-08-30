@@ -432,14 +432,19 @@ def worker_environment() -> dict:
     """
     from sopro_worker import worker as protocol
 
+    # The effective count rather than the constant. When the benchmark override
+    # is set these caps have to track it, or OpenMP sizes its pool at the
+    # released four while Torch is asked for eight and the measurement belongs
+    # to neither number.
+    intraop, _interop, _overridden = protocol.effective_policy(note=False)
     return {
         "CUDA_VISIBLE_DEVICES": "",
         "HIP_VISIBLE_DEVICES": "",
         "ROCR_VISIBLE_DEVICES": "",
         "PYTORCH_NO_CUDA_MEMORY_CACHING": "1",
-        "OMP_NUM_THREADS": str(protocol.INTRAOP_THREADS),
-        "MKL_NUM_THREADS": str(protocol.INTRAOP_THREADS),
-        "OPENBLAS_NUM_THREADS": str(protocol.INTRAOP_THREADS),
+        "OMP_NUM_THREADS": str(intraop),
+        "MKL_NUM_THREADS": str(intraop),
+        "OPENBLAS_NUM_THREADS": str(intraop),
         "PYTHONNOUSERSITE": "1",
         "PYTHONUNBUFFERED": "1",
         "HF_HUB_OFFLINE": "1",
@@ -504,14 +509,27 @@ def engine_settings() -> dict:
     """
     return {
         "precision": precision(),
+        # "INT8 (faster, CPU only)" is what this said, and on the first machine
+        # it was measured on it was wrong by 40% in the other direction: full
+        # precision fitted at 0.80 x real time and INT8 at 1.12, with the first
+        # block 450 ms slower. Quantization shrinks the weights; whether it also
+        # shrinks the *time* depends on whether this Torch build has int8
+        # kernels for these shapes on this CPU, and on a small autoregressive
+        # model the dequantize-requantize traffic can cost more than the
+        # narrower multiply saves. So neither option claims a speed here. The
+        # sweep is the only thing that can answer it for a given machine.
         "precisions": [{"id": "full", "label": "Full CPU precision",
-                        "help": "Sopro exactly as it was released. Slower and larger in "
-                                "memory than INT8, and the one to compare against."},
-                       {"id": "int8", "label": "INT8 (faster, CPU only)",
-                        "help": "Quantizes the autoregressive blocks. Faster and lighter; "
-                                "the acoustic solver and the vocoder are unchanged. Saved "
-                                "voices stay valid — only the warmed streaming caches are "
-                                "rebuilt."}],
+                        "help": "Sopro exactly as it was released, and the one to compare "
+                                "against. Larger in memory than INT8, and on some CPUs "
+                                "also the faster of the two."},
+                       {"id": "int8", "label": "INT8 (smaller, CPU only)",
+                        "help": "Quantizes the autoregressive blocks, so the model is "
+                                "lighter in RAM; the acoustic solver and the vocoder are "
+                                "unchanged. Whether it is faster depends on the machine, "
+                                "and it is measurably slower on some — the turn summary "
+                                "in model_chain.log reports the real-time factor either "
+                                "way. Saved voices stay valid; only the warmed streaming "
+                                "caches are rebuilt."}],
         "steps": steps(),
         "step_choices": list(STEP_CHOICES),
         "chunk_frames": chunk_frames(),

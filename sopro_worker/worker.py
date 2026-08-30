@@ -370,6 +370,68 @@ whose Torch build does not pass it is refused rather than shipped -- see
 :func:`_attention_is_stable`.
 """
 
+OVERRIDE_INTRAOP = "MC_SOPRO_INTRAOP_THREADS"
+OVERRIDE_INTEROP = "MC_SOPRO_INTEROP_THREADS"
+"""The one way the policy above moves without an edit, and what it costs.
+
+I-12 says the policy is *measured*, fixed, and never auto-tuned from runtime
+measurements. Those are three requirements and only the third one forbids
+anything here: a benchmark that sweeps thread counts is how the first one is
+satisfied, and ``tools/sweep_sopro_threads.py`` cannot sweep a constant. So the
+count may be set from the environment -- by that tool, or by somebody who has
+run it and wants to keep the answer.
+
+What is *not* allowed is an installation quietly running a policy nobody
+measured. So an override is loud in three places: a warning line when it is
+applied, a ``policy`` field of ``"override"`` in the handshake, and the effective
+counts in every line that already carried them. Nothing in this repository reads
+these variables to decide anything; they are read once, here, before the model
+loads, and never again.
+"""
+
+
+def _asked(name: str, fallback: int, note: bool = True) -> "tuple[int, bool]":
+    """A thread count from the environment, bounded, with whether it was used.
+
+    Bounded rather than trusted: a zero or a negative would be handed to
+    ``torch.set_num_threads`` as-is, and 4096 is a machine spending all of its
+    time in barriers. 64 is well past any CPU this closure will meet and is a
+    limit rather than a suggestion.
+
+    ``note`` is off when the parent asks, because the parent reads this to build
+    the worker's environment and its complaints belong in the WebUI log rather
+    than on a stderr stream nobody is draining yet.
+    """
+    raw = str(os.environ.get(name) or "").strip()
+    if not raw:
+        return fallback, False
+    try:
+        found = int(raw)
+    except ValueError:
+        if note:
+            _note(f"{name} is not a number, so the released policy was kept")
+        return fallback, False
+    if found < 1 or found > 64:
+        if note:
+            _note(f"{name}={found} is outside 1-64, so the released policy was kept")
+        return fallback, False
+    return found, found != fallback
+
+
+def effective_policy(note: bool = True) -> "tuple[int, int, bool]":
+    """The counts that will actually be applied, and whether they are the
+    released ones.
+
+    Shared with the parent because :func:`mc_voice_sopro.worker_environment`
+    pins ``OMP_NUM_THREADS`` and friends *before* this process starts, and
+    OpenMP has usually sized its pool before any of our code runs. A parent that
+    capped OMP at the released four while the child asked Torch for eight would
+    produce a benchmark of neither number.
+    """
+    intraop, intraop_set = _asked(OVERRIDE_INTRAOP, INTRAOP_THREADS, note=note)
+    interop, interop_set = _asked(OVERRIDE_INTEROP, INTEROP_THREADS, note=note)
+    return intraop, interop, (intraop_set or interop_set)
+
 
 def _apply_cpu_policy() -> dict:
     """Pin the thread policy before the model is built, and report what took.
@@ -381,21 +443,28 @@ def _apply_cpu_policy() -> dict:
     """
     import torch
 
+    intraop, interop, overridden = effective_policy()
+    if overridden:
+        _note(f"the released CPU policy was overridden from the environment: "
+              f"{intraop} intra-op, {interop} inter-op (released: "
+              f"{INTRAOP_THREADS} and {INTEROP_THREADS}). Timings from this "
+              f"process are not measurements of the shipped configuration.")
     for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                  "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
-        os.environ.setdefault(name, str(INTRAOP_THREADS))
+        os.environ.setdefault(name, str(intraop))
     try:
-        torch.set_num_threads(INTRAOP_THREADS)
+        torch.set_num_threads(intraop)
     except Exception as exc:  # noqa: BLE001 - reported, never fatal
         _note(f"could not set the intra-op thread count: {exc.__class__.__name__}")
     try:
-        torch.set_num_interop_threads(INTEROP_THREADS)
+        torch.set_num_interop_threads(interop)
     except Exception:
         # Already fixed by something that ran a parallel region first. Not an
         # error and not silently ignored either: the effective value is read
         # back below and is what the handshake reports.
         pass
     return {
+        "thread_policy": "override" if overridden else "released",
         "intraop_threads": int(torch.get_num_threads()),
         "interop_threads": int(torch.get_num_interop_threads()),
         "omp_num_threads": str(os.environ.get("OMP_NUM_THREADS") or ""),
@@ -2133,16 +2202,96 @@ def selftest() -> int:
     return 0 if report["ok"] else 1
 
 
+def benchmark(stdin=None) -> int:
+    """Measure this closure on this machine, at whatever policy is in force.
+
+    The half of I-12 that is easy to miss: the released CPU policy has to be a
+    *measured* one, and 4 intra-op threads was chosen to match Kokoro's lane
+    rather than because Sopro was measured against 6 or 8. This is how it gets
+    measured, and ``tools/sweep_sopro_threads.py`` is what drives it.
+
+    Two lengths rather than one, because a single real-time factor conflates two
+    costs that respond to completely different things. Synthesis time on this
+    engine fits ``fixed + rate x audio`` very tightly, and the two halves point
+    at different fixes: the fixed cost per unit is amortised by *longer
+    segments*, and the marginal rate is what threads, precision and solver steps
+    move. Reporting one number would hide which of those a machine actually
+    needs.
+
+    Nothing here writes anything, speaks to a browser, or touches product
+    state. It reads a voice this installation already has, synthesizes fixed
+    text into a counter, and prints one JSON line.
+    """
+    report = {"ok": False}
+    try:
+        request = json.loads((stdin or sys.stdin).read() or "{}")
+        config = dict(request.get("config") or {})
+        voice_id = str(request.get("voice_id") or "")
+        repeats = max(1, min(10, int(request.get("repeats") or 3)))
+        texts = list(request.get("texts") or [])
+        if not texts:
+            raise ValueError("the benchmark was given no text to speak")
+
+        engine = Engine(config)
+        engine.load()
+        report.update(engine.threads)
+        report["precision"] = engine.precision
+        report["steps"] = engine.steps
+        report["chunk_frames"] = engine.chunk_frames
+        report["torch_version"] = engine.torch_version
+        report["load_seconds"] = engine.load_seconds
+        if not voice_id:
+            voice_id = next(iter(engine.catalog), "")
+        if not voice_id:
+            raise ValueError("this installation has no Sopro voice to measure with")
+        report["voice_id"] = voice_id
+
+        # Warmed first and measured after, deliberately. A cold prompt state is
+        # a real cost and it is section 47's, not the thread policy's; folding
+        # it in would make every configuration look worse by the same constant
+        # and tell nobody anything.
+        engine.warm(voice_id, NEUTRAL)
+        runs = []
+        for text in texts:
+            for index in range(repeats):
+                samples = [0]
+
+                def count(pcm, _rate, into=samples):
+                    into[0] += len(pcm) // 2
+                    return True
+
+                started = time.monotonic()
+                found = engine.stream(text, voice_id, NEUTRAL, count)
+                runs.append({
+                    "chars": len(text),
+                    "run": index,
+                    "compute_ms": int((time.monotonic() - started) * 1000),
+                    "audio_ms": int(samples[0] * 1000 / (engine.sample_rate or 24000)),
+                    "first_audio_ms": int(found.get("first_audio_ms") or 0),
+                    "chunks": int(found.get("chunks") or 0),
+                })
+        report["runs"] = runs
+        report["ok"] = True
+    except Exception as exc:  # noqa: BLE001 - the sweep prints it and moves on
+        report["error"] = f"{exc.__class__.__name__}: {exc}"
+    sys.stdout.write(json.dumps(report) + "\n")
+    sys.stdout.flush()
+    return 0 if report.get("ok") else 1
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(MARKER, dest="marker", action="store_true")
     parser.add_argument("--parent-pid", type=int, default=0)
     parser.add_argument("--session", default="")
     parser.add_argument("--selftest", action="store_true")
+    parser.add_argument("--benchmark", action="store_true")
     known, _unknown = parser.parse_known_args(argv)
 
     if known.selftest:
         return selftest()
+    if known.benchmark:
+        return benchmark()
 
     # Binary on both sides: the protocol is length-prefixed bytes, and a text
     # wrapper would translate newlines on Windows and corrupt every WAV.

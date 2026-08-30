@@ -208,20 +208,76 @@ throws part of it away afterwards. So the compute is unchanged and the result is
 shorter, which multiplies the real-time factor by exactly the speed.
 
 That is the difference between an engine that streams and one that stutters.
-Measured on the reference Windows CPU machine (16 logical cores, four intra-op
-threads), a 38-second reply:
 
-| Speed | Model audio | Delivered | Compute | RTF |
-|------:|------------:|----------:|--------:|----:|
-| 1.00 | 51.3 s | 51.3 s | 44.2 s | 0.86 |
-| 1.35 | 51.3 s | 38.0 s | 44.2 s | 1.16 |
+### The cost model, fitted
 
-At 0.86 the producer gains about a seventh of a second of headroom for every
-second it speaks, and a 0.7 s prebuffer is never touched again. At 1.16 it
-*loses* about a sixth of a second per second, without bound: 6.1 seconds of
-silence owed across that reply, which no fixed prebuffer can cover because the
-debt grows for as long as the reply lasts. The failure is invisible on short
-replies and unmissable on long ones, which is exactly how it was reported.
+Synthesis time here is very nearly affine in the audio produced. Fitted over 39
+segments from real conversations on one Windows machine (Torch 2.11 CPU, four
+intra-op threads, full precision), spanning 0.9 s to 20 s of audio and three
+different Speed settings:
+
+```
+synth_ms  =  420  +  0.798 x model_audio_ms          R² = 0.990
+```
+
+Two numbers, and they are moved by different things:
+
+| | what it is | what moves it |
+|---|---|---|
+| **420 ms** | fixed cost of a unit — prompt state, first chunk | *longer segments*, not threads |
+| **0.798** | marginal cost of one more second of speech | threads, precision, solver steps |
+
+For a typical 7-second segment that is RTF **0.858** at Speed 1.00 — and since
+Speed multiplies it, the **break-even Speed is 1.17x**. Below that the producer
+gains headroom every second and the prebuffer is never touched again. Above it
+the producer loses ground for as long as the reply lasts: at Speed 1.35, 6.1
+seconds of silence owed across a 38-second reply. Invisible on short replies,
+unmissable on long ones — which is exactly how it was reported.
+
+### INT8 was slower, and the label said otherwise
+
+The Precision control offered "INT8 (faster, CPU only)". On the first machine it
+was ever measured on, that was wrong by about 40% in the other direction:
+
+| Precision | fitted | RTF at Speed 1.00 | break-even Speed | first block |
+|---|---|---:|---:|---:|
+| full | 420 ms + 0.798 x audio | 0.858 | **1.17x** | 1091 ms |
+| int8 | 12 ms + 1.122 x audio | 1.124 | **0.89x** | 1541 ms |
+
+A break-even Speed below 1.0 means INT8 could not keep up with *ordinary*
+speech on that machine, let alone fast speech. (Three segments only, against 39
+for full — thin, and reported as thin. The 450 ms jump in first-block time is an
+independent corroboration from a different measurement.)
+
+Quantization shrinks the weights. Whether it shrinks the *time* depends on
+whether this Torch build has int8 kernels for these shapes on this CPU, and on a
+small autoregressive model the dequantize-requantize traffic can cost more than
+the narrower multiply saves. So neither option claims a speed any more: full is
+described as the one to compare against, INT8 as the smaller one, and the turn
+summary reports the real-time factor whichever is selected.
+
+### Measuring it, which I-12 asks for and nobody had done
+
+I-12 wants a policy that is **measured**, fixed, and never auto-tuned from
+runtime measurements. Only the third was actually true — four intra-op threads
+was chosen to match Kokoro's synthesis lane so that a same-machine comparison
+between the engines meant something, and never measured against six or eight.
+
+`tools/sweep_sopro_threads.py` is the missing measurement. It spawns the
+isolated interpreter once per configuration — a fresh process every time, because
+OpenMP sizes its pool at the first parallel region and
+`set_num_interop_threads` refuses outright after one, so a sweep that reused a
+process would be measuring the first thread count several times under different
+labels — speaks a short line and a long one at each, fits the model above, and
+prints the break-even Speed for each configuration.
+
+It changes nothing. Moving the released policy is still a deliberate edit to
+`INTRAOP_THREADS`, made by somebody who has read a table. The only new lever at
+runtime is `MC_SOPRO_INTRAOP_THREADS`, which the sweep sets and a person who has
+run it may keep; it is bounded to 1–64, and an installation running it says so
+in a warning line, in the handshake's `thread_policy` field, and in every log
+line that already carried a thread count. An override that could be mistaken for
+the shipped configuration would defeat the point of I-12 entirely.
 
 Two things follow, and both are implemented rather than written down:
 
