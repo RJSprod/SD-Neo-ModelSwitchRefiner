@@ -925,6 +925,10 @@ DEFAULTS = {
             "chunks": [[1, 0, 2, 0, 3], [0, 4, 0], [5, 0, 6, 0]],
         },
         "voice/cancel": {"json": {"ok": True, "cancelled": True}},
+        "voice/surface": {"json": {"ok": True, "engine": "sopro",
+                                   "engine_label": "Sopro V2",
+                                   "settings": "<div class='mc-voice-settings'></div>",
+                                   "voices": "<div class='mc-voice-voices'></div>"}},
         "voice/runtime": {"json": {"ok": True, "engine": {"loaded": True, "state": "idle"}}},
         "voice/voices": {"json": {"ok": True, "voices": [], "default": "official:af_heart",
                                   "test_text": "This is a test of voice cloning.",
@@ -2890,14 +2894,15 @@ class TestTheEngineSelector:
     """Choosing an engine is a runtime boundary, not a preference.
 
     The server cancels speech, stops whichever worker was running and persists
-    the choice before it answers, and the page then *reloads* rather than
-    repaints. That is deliberate: the inactive engine's controls have to be
-    absent from the document rather than hidden in it, and the cheapest way to
-    be certain of that is to ask the server for a document that never contained
-    them.
+    the choice before it answers, and the page then replaces its settings
+    surface with markup built for the engine now selected. The inactive
+    engine's controls have to be absent from the document rather than hidden in
+    it, and replacing the nodes is what delivers that here -- reloading cannot,
+    because Forge builds a settings row's HTML once per process and hands the
+    same string to every page load.
     """
 
-    def test_choosing_an_engine_posts_it_and_reloads(self):
+    def test_choosing_an_engine_posts_it_and_swaps_the_surface(self):
         found = run("""
             await tick();
             requests.length = 0;
@@ -2911,7 +2916,8 @@ class TestTheEngineSelector:
                  if r.get("url", "").endswith("/engine/select")]
         assert len(posts) == 1
         assert json.loads(posts[0]["bodyText"]) == {"engine": "sopro"}
-        assert found["reloads"] == 1
+        assert [r for r in found["requests"] if r.get("url", "").endswith("/voice/surface")]
+        assert found["reloads"] == 0, "reloading returns the same markup Forge built at startup"
 
     def test_the_selected_engine_cannot_be_re_selected(self):
         """Its card is disabled, so a second press is not a second switch --
@@ -2928,8 +2934,8 @@ class TestTheEngineSelector:
                     if r.get("url", "").endswith("/engine/select")]
         assert found["reloads"] == 0
 
-    def test_a_refused_switch_re_enables_the_cards_and_does_not_reload(self):
-        """A page that disabled both cards and then reloaded on a failure would
+    def test_a_refused_switch_re_enables_the_cards_and_swaps_nothing(self):
+        """A page that disabled both cards and then swapped on a failure would
         be a page you cannot get back to the engine you were on."""
         answers = status_answer()
         answers["voice/engine/select"] = {
@@ -2945,6 +2951,8 @@ class TestTheEngineSelector:
         """, SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
 
         assert found["reloads"] == 0
+        assert not [r for r in found["requests"]
+                    if r.get("url", "").endswith("/voice/surface")]
         assert found["soproDisabled"] is False
 
 
@@ -2959,7 +2967,7 @@ class TestTheEngineChangedUnderThisPage:
     reloaded for all of them would reload when a button is pressed twice.
     """
 
-    def test_a_flagged_refusal_reloads_the_page(self):
+    def test_a_flagged_refusal_rebuilds_the_surface(self):
         answers = status_answer()
         answers["voice/voices"] = {
             "status": 409,
@@ -2970,7 +2978,8 @@ class TestTheEngineChangedUnderThisPage:
             await hold(200);
             console.log(JSON.stringify(report()));
         """, VOICES_PRESENT="true", VOICES_VISIBLE="true", ANSWERS=json.dumps(answers))
-        assert found["reloads"] == 1
+        assert [r for r in found["requests"] if r.get("url", "").endswith("/voice/surface")]
+        assert found["reloads"] == 0
 
     def test_an_ordinary_refusal_does_not(self):
         answers = status_answer()
@@ -2981,11 +2990,19 @@ class TestTheEngineChangedUnderThisPage:
             await hold(200);
             console.log(JSON.stringify(report()));
         """, VOICES_PRESENT="true", VOICES_VISIBLE="true", ANSWERS=json.dumps(answers))
+        assert not [r for r in found["requests"]
+                    if r.get("url", "").endswith("/voice/surface")]
         assert found["reloads"] == 0
 
-    def test_it_reloads_once_however_many_requests_were_in_flight(self):
-        """Several polls can be in the air at the moment of a switch, and a
-        reload storm is worse than a stale panel."""
+    def test_it_rebuilds_once_however_many_requests_were_in_flight(self):
+        """Several polls can be in the air at the moment of a switch.
+
+        The regression this bounds: the page used to *reload* here, and Forge
+        serves the same startup-built markup to the reloaded page -- so the
+        mismatch was still there, and so was the reload, for as long as the tab
+        stayed open. A rebuild resolves it; the cooldown means that even if it
+        somehow did not, what is left is a request every few seconds rather than
+        a browser that will not stop."""
         answers = status_answer()
         answers["voice/voices"] = {
             "status": 409,
@@ -2998,7 +3015,15 @@ class TestTheEngineChangedUnderThisPage:
             await hold(400);
             console.log(JSON.stringify(report()));
         """, VOICES_PRESENT="true", VOICES_VISIBLE="true", ANSWERS=json.dumps(answers))
-        assert found["reloads"] == 1
+        assert len([r for r in found["requests"]
+                    if r.get("url", "").endswith("/voice/surface")]) == 1
+        assert found["reloads"] == 0
+
+    def test_nothing_in_this_file_reloads_the_page(self):
+        """The whole class of bug, asserted against the source rather than a
+        scenario: a settings row Forge built once cannot be refreshed by asking
+        the browser for the same document again."""
+        assert "location.reload" not in SCRIPT.read_text(encoding="utf-8")
 
 
 class TestTheFolderButtonComesBack:

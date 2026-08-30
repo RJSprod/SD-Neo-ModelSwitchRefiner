@@ -582,7 +582,7 @@
       "attribution": "Sopro V2 Turbo by Samuel Vitorino (Apache-2.0). Model artifacts from huggingface.co/samuel-vitorino/sopro-v2-turbo.",
       "summary": "A streaming reference-conditioned model. Clones a voice from a short local recording.",
       "notes": "Downloaded once and then read from disk. Voice Chat passes Sopro a verified local directory rather than a repository id, so nothing here is resolved again after installation.",
-      "about_bytes": 1400000000,
+      "about_bytes": 764577997,
       "ram_bytes": 3221225472,
       "files": [
         {

@@ -89,6 +89,7 @@
         cloningAbort: "model-chain/voice/cloning/abort",
         engines: "model-chain/voice/engines",
         engineSelect: "model-chain/voice/engine/select",
+        surface: "model-chain/voice/surface",
         sopro: "model-chain/voice/sopro",
         soproInstall: "model-chain/voice/sopro/install",
         soproSettings: "model-chain/voice/sopro/settings",
@@ -347,24 +348,84 @@
                      + RELOAD);
     }
 
-    let engineStale = false;
-
     // The text-to-speech engine changed under this page -- somebody switched it
     // in another tab, or in this one before a request already in flight came
     // back. The document was built for an engine that is no longer selected and
-    // every control in it belongs to that engine, so repainting is not a fix
-    // and reloading is: the server then hands back a document that never
-    // contained them.
+    // every control in it belongs to that engine, so repainting it is not a fix:
+    // the whole surface has to be replaced with the other engine's.
     //
-    // Once, guarded, because several polls can be in flight at the moment of a
-    // switch and a reload storm is worse than a stale panel. Driven by the
-    // server's own `engine_mismatch` flag rather than by the status code: 409
-    // already means several other things on these routes.
+    // Driven by the server's own `engine_mismatch` flag rather than by the
+    // status code: 409 already means several other things on these routes.
     function engineChanged(payload) {
-        if (!payload || !payload.engine_mismatch || engineStale) return false;
-        engineStale = true;
-        window.setTimeout(function () { window.location.reload(); }, 50);
+        if (!payload || !payload.engine_mismatch) return false;
+        swapSurface();
         return true;
+    }
+
+    // Replace the settings surface with markup built for the engine that is
+    // selected now.
+    //
+    // Reloading used to stand here, on the reasoning that the cheapest way to
+    // be certain the inactive engine's controls are absent is to ask the server
+    // for a document that never contained them. That reasoning was wrong about
+    // this host: Forge builds a settings row's HTML once, when the extension is
+    // imported, and serves that same string for the life of the process. A
+    // reload therefore came back to the *same* stale markup, which was still
+    // for the wrong engine, which reloaded -- a loop that only stopped when the
+    // tab was closed.
+    //
+    // So the nodes are replaced instead. That is the same guarantee by a
+    // different route: what is in the document afterwards was built for the
+    // engine selected now, and the other engine's controls are gone from it
+    // because they were removed, not hidden.
+    //
+    // One swap at a time, because several polls can be in flight at the moment
+    // of a switch and each of them will notice the same mismatch -- and no more
+    // than one every few seconds, whatever happens after that.
+    //
+    // The cooldown is the bound the reload never had. Replacing the surface
+    // resolves the mismatch that asked for it, so in a browser one swap is the
+    // end of it; the cooldown is there for the case where it somehow is not,
+    // and it turns "ask again on the next poll, forever" into a request every
+    // three seconds rather than a page that reloads until the tab is closed.
+    // An explicit press bypasses it: somebody who just chose an engine is owed
+    // the surface for it now.
+    let swapping = false;
+    let swappedAt = -Infinity;
+
+    const SWAP_COOLDOWN_MS = 3000;
+
+    function swapSurface(pressed) {
+        if (stale || swapping) return Promise.resolve(false);
+        if (!pressed && nowMs() - swappedAt < SWAP_COOLDOWN_MS) {
+            return Promise.resolve(false);
+        }
+        swappedAt = nowMs();
+        swapping = true;
+        // The three timers that paint nodes about to be thrown away. Not
+        // `enginePoll`: the Voice flyout is not part of this surface, it is not
+        // replaced, and stopping its residency line would be a second bug.
+        window.clearTimeout(paintTimer);
+        window.clearTimeout(voicesTimer);
+        window.clearTimeout(soproTimer);
+        return post(ROUTES.surface, {}).then(function (payload) {
+            if (!payload || !payload.ok || !payload.settings) return false;
+            [[".mc-voice-settings", payload.settings],
+             [".mc-voice-voices", payload.voices]].forEach(function (pair) {
+                const node = document.querySelector(pair[0]);
+                if (node && pair[1]) node.outerHTML = pair[1];
+            });
+            const name = document.querySelector("[data-mc-voice-engine-name]");
+            if (name && payload.engine_label) name.textContent = payload.engine_label;
+            attempt("wire the Voice Chat settings", wireSettings);
+            attempt("wire the voice list", wireVoices);
+            return true;
+        }).catch(function () {
+            return false;
+        }).then(function (done) {
+            swapping = false;
+            return done;
+        });
     }
 
     function refused(response) {
@@ -2884,12 +2945,12 @@
     // stops whichever TTS worker was running and persists the choice before it
     // answers.
     //
-    // The page is then *reloaded* rather than repainted, and that is deliberate.
-    // The design rule is that the inactive engine's operational controls are
-    // absent from the document rather than hidden in it, and the cheapest way to
-    // be certain of that is to ask the server for a document that never
-    // contained them. A switch is a rare, explicit action; a reload is a fair
-    // price for a guarantee that no stale node can be found by a selector.
+    // The surface is then *replaced* rather than repainted. The design rule is
+    // that the inactive engine's operational controls are absent from the
+    // document rather than hidden in it, and `swapSurface` is what delivers
+    // that here: the server builds the markup for the engine selected now and
+    // the old nodes are thrown away, so no stale node can be found by a
+    // selector afterwards.
 
     function wireEngineSelector(holder) {
         const panel = holder.querySelector("[data-mc-voice-engines]");
@@ -2914,7 +2975,7 @@
                 });
                 post(ROUTES.engineSelect, {engine: wanted}, holder).then(function (payload) {
                     if (payload && payload.ok) {
-                        window.location.reload();
+                        swapSurface(true);
                         return;
                     }
                     // Put the cards back. A page that disabled both and then
@@ -3873,7 +3934,7 @@
         // for the other engine is exactly the mixed surface the design forbids.
         const mine = holder.getAttribute("data-mc-voice-engine-id");
         if (payload.engine && mine && payload.engine !== mine) {
-            window.location.reload();
+            swapSurface();
             return;
         }
         if (payload.voices) paintVoices(holder, payload);

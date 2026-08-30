@@ -408,6 +408,22 @@ class Served:
         return io.BytesIO(self.payload)
 
 
+def serve(monkeypatch, open_url) -> None:
+    """Put ``open_url`` behind both doors the module uses to reach a host.
+
+    ``_download`` opens a URL directly; ``_head`` builds an opener first, so it
+    can decline a redirect off the publisher's host. A fake that patches only
+    one of them leaves the other reaching the real Internet from a unit test --
+    which is how a run of this file ended up asking huggingface.co for a Whisper
+    encoder and being refused by a proxy.
+    """
+    import types as _types
+
+    monkeypatch.setattr(models.urllib.request, "urlopen", open_url)
+    monkeypatch.setattr(models.urllib.request, "build_opener",
+                        lambda *handlers: _types.SimpleNamespace(open=open_url))
+
+
 def artifact_for(payload: bytes, **overrides) -> models.Artifact:
     fields = {
         "filename": "thing.onnx",
@@ -548,7 +564,7 @@ class TestAskingThePublisherFirst:
         def explode(*args, **kwargs):
             raise AssertionError("a pinned artifact was resolved over the network")
 
-        monkeypatch.setattr(models.urllib.request, "urlopen", explode)
+        serve(monkeypatch, explode)
         found = models._resolve(artifact_for(b"x" * 32))
         assert found.verified
         assert found.source == "this extension's manifest"
@@ -558,7 +574,7 @@ class TestAskingThePublisherFirst:
         the LLM catalogue — read here at install time instead."""
         head = self.Head({"x-linked-size": "117000000",
                           "x-linked-etag": '"' + "c" * 64 + '"'})
-        monkeypatch.setattr(models.urllib.request, "urlopen", head.open)
+        serve(monkeypatch, head.open)
         found = models._resolve(artifact_for(b"x", sha256=None, size=None))
         assert found.sha256 == "c" * 64
         assert found.size == 117000000
@@ -567,14 +583,14 @@ class TestAskingThePublisherFirst:
 
     def test_a_sha256_prefixed_etag_is_understood(self, monkeypatch):
         head = self.Head({"content-length": "10", "etag": "sha256:" + "d" * 64})
-        monkeypatch.setattr(models.urllib.request, "urlopen", head.open)
+        serve(monkeypatch, head.open)
         assert models._resolve(artifact_for(b"x", sha256=None, size=None)).sha256 == "d" * 64
 
     def test_an_etag_that_is_not_a_digest_is_not_mistaken_for_one(self, monkeypatch):
         """A release asset on another host answers with an S3-style etag. Saying
         "no digest" is better than pretending one was offered."""
         head = self.Head({"content-length": "4096", "etag": '"abc123-7"'})
-        monkeypatch.setattr(models.urllib.request, "urlopen", head.open)
+        serve(monkeypatch, head.open)
         found = models._resolve(artifact_for(b"x", sha256=None, size=None))
         assert found.sha256 is None
         assert found.verified is False
@@ -586,15 +602,189 @@ class TestAskingThePublisherFirst:
         def refuse(*args, **kwargs):
             raise OSError("the network is down")
 
-        monkeypatch.setattr(models.urllib.request, "urlopen", refuse)
+        serve(monkeypatch, refuse)
         found = models._resolve(artifact_for(b"x", sha256=None, size=None))
         assert found.sha256 is None
         assert "did not answer" in found.source
 
     def test_an_http_error_is_reported_and_not_fatal(self, monkeypatch):
         head = self.Head({}, status=404)
-        monkeypatch.setattr(models.urllib.request, "urlopen", head.open)
+        serve(monkeypatch, head.open)
         assert "404" in models._resolve(artifact_for(b"x", sha256=None, size=None)).source
+
+
+class Origin:
+    """One HTTP host on a port of its own, answering through ``handle``."""
+
+    def __init__(self, handle):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - http.server's own spelling
+                handle(self)
+
+            do_HEAD = do_GET
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def origin(self) -> str:
+        host, port = self.server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class Hub:
+    """A publisher and a delivery host, on separate ports, wired like a hub.
+
+    The publisher answers a HEAD with its own headers and a 302 to the delivery
+    host; the delivery host answers with the bytes and an ``ETag`` of its own.
+    That shape is the entire point of this fixture. It is what Hugging Face
+    does, and the difference between reading the publisher's digest and reading
+    a cache's validator is invisible to any fake that does not redirect -- which
+    is exactly how a version of this module shipped that resolved every large
+    artifact to the delivery host's ``ETag``, a sixty-four character value that
+    was never the file's digest, and then refused every correct download for
+    disagreeing with it.
+    """
+
+    def __init__(self, payload: bytes, publisher_headers: dict, delivery_etag: str):
+        self.payload = payload
+        self.publisher_headers = publisher_headers
+        self.delivery_etag = delivery_etag
+        self.asked = []
+        self.delivery = Origin(self._deliver)
+        self.publisher = Origin(self._publish)
+
+    @property
+    def url(self) -> str:
+        return self.publisher.origin + "/repo/resolve/main/object.bin"
+
+    def _publish(self, request):
+        self.asked.append(("publisher", request.command))
+        request.send_response(302)
+        for name, value in self.publisher_headers.items():
+            request.send_header(name, value)
+        request.send_header("Location", self.delivery.origin + "/lfs/object.bin")
+        request.send_header("Content-Length", "0")
+        request.end_headers()
+
+    def _deliver(self, request):
+        self.asked.append(("delivery", request.command))
+        request.send_response(200)
+        if self.delivery_etag:
+            request.send_header("ETag", '"' + self.delivery_etag + '"')
+        request.send_header("Content-Length", str(len(self.payload)))
+        request.end_headers()
+        if request.command == "GET":
+            request.wfile.write(self.payload)
+
+    def close(self):
+        self.publisher.close()
+        self.delivery.close()
+
+
+class TestAHubThatRedirects:
+    """What a HEAD reads when the publisher hands the file off to a CDN.
+
+    Every one of these runs the real ``urllib`` redirect machinery against real
+    sockets, because the bug they exist for lived entirely in that machinery: a
+    HEAD that followed the redirect threw the publisher's answer away and read
+    the delivery host's in its place.
+    """
+
+    PAYLOAD = b"the object the publisher describes, at some length" * 400
+
+    @pytest.fixture
+    def hub(self):
+        made = []
+
+        def build(publisher_headers, delivery_etag="f" * 64):
+            found = Hub(self.PAYLOAD, publisher_headers, delivery_etag)
+            made.append(found)
+            return found
+
+        yield build
+        for found in made:
+            found.close()
+
+    def test_the_publishers_digest_is_read_and_the_delivery_hosts_is_not(self, hub):
+        """The regression. The delivery host's etag is sixty-four hex characters
+        and is not the file's digest; reading it rejected correct downloads."""
+        digest = hashlib.sha256(self.PAYLOAD).hexdigest()
+        served = hub({"X-Linked-Size": str(len(self.PAYLOAD)), "X-Linked-Etag": digest})
+
+        found = models._resolve(artifact_for(b"x", url=served.url, sha256=None, size=None))
+
+        assert found.sha256 == digest
+        assert found.size == len(self.PAYLOAD)
+        assert "publisher" in found.source
+        assert ("delivery", "HEAD") not in served.asked, \
+            "the HEAD followed the redirect and read a cache's validator as a digest"
+
+    def test_a_download_through_the_same_hub_is_kept(self, hub, tmp_path):
+        """End to end: resolve against the publisher, fetch through the CDN, and
+        have the two agree. This is the install the user could not complete."""
+        digest = hashlib.sha256(self.PAYLOAD).hexdigest()
+        served = hub({"X-Linked-Size": str(len(self.PAYLOAD)), "X-Linked-Etag": digest})
+        artifact = artifact_for(b"x", url=served.url, sha256=None, size=None)
+
+        expected = models._resolve(artifact)
+        found = models._download(artifact, tmp_path / "object.bin", lambda _n: None,
+                                 expected)
+
+        assert found == digest
+        assert (tmp_path / "object.bin").read_bytes() == self.PAYLOAD
+
+    def test_a_delivery_etag_alone_is_a_byte_count_and_no_digest(self, hub):
+        """A publisher that states no digest does not acquire one by redirecting
+        to a host that happens to answer with the right number of characters."""
+        served = hub({})
+
+        found = models._resolve(artifact_for(b"x", url=served.url, sha256=None, size=None))
+
+        assert found.sha256 is None
+        assert found.verified is False
+        assert found.size == len(self.PAYLOAD), \
+            "a length one hop away is still a length, and it is the only check left"
+        assert "byte count" in found.source
+
+    def test_a_committed_digest_is_never_put_to_the_network_at_all(self, hub):
+        served = hub({"X-Linked-Etag": "b" * 64})
+        artifact = artifact_for(self.PAYLOAD, url=served.url)
+
+        found = models._resolve(artifact)
+
+        assert found.sha256 == hashlib.sha256(self.PAYLOAD).hexdigest()
+        assert found.source == "this extension's manifest"
+        assert served.asked == []
+
+
+class TestWhatCountsAsAPublishedDigest:
+    """An entity tag is an opaque validator (RFC 9110), not a checksum."""
+
+    def test_a_header_that_names_itself_a_sha256_is_believed(self):
+        assert models._published_digest({"x-linked-etag": '"' + "a" * 64 + '"'}) == "a" * 64
+        assert models._published_digest({"x-checksum-sha256": "B" * 64}) == "b" * 64
+
+    def test_a_weak_validator_is_unwrapped_rather_than_rejected(self):
+        assert models._published_digest({"x-linked-etag": 'W/"' + "c" * 64 + '"'}) == "c" * 64
+
+    def test_a_bare_etag_is_opaque_however_much_it_looks_like_a_digest(self):
+        assert models._published_digest({"etag": '"' + "d" * 64 + '"'}) is None
+        assert models._published_digest({"etag": '"abc123-7"'}) is None
+
+    def test_an_etag_that_says_what_it_is_is_believed(self):
+        assert models._published_digest({"etag": "sha256:" + "e" * 64}) == "e" * 64
+
+    def test_nothing_at_all_is_an_answer_and_not_an_error(self):
+        assert models._published_digest({}) is None
 
 
 class TestPromotion:
@@ -1025,7 +1215,7 @@ class TestOneClickInstall:
                 return Answer()
             return _io.BytesIO(body)
 
-        monkeypatch.setattr(models.urllib.request, "urlopen", open_url)
+        serve(monkeypatch, open_url)
         monkeypatch.setattr(models, "install_runtime",
                             lambda on_status=None, on_progress=None: None)
         return types_namespace(files=files, asked=asked)
@@ -1095,7 +1285,7 @@ class TestOneClickInstall:
         def refuse(*args, **kwargs):
             raise OSError("the network went away")
 
-        monkeypatch.setattr(models.urllib.request, "urlopen", refuse)
+        serve(monkeypatch, refuse)
         with pytest.raises(models.VoiceError):
             models.install("stt")
 

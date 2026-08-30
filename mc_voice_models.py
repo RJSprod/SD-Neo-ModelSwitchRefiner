@@ -69,6 +69,8 @@ import sys
 import tarfile
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import zipfile
@@ -922,25 +924,148 @@ class Expected:
         return bool(self.sha256)
 
 
+class _StopAtRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect handler that follows nothing, so :func:`_head` can decide."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _host(url: str) -> str:
+    return urllib.parse.urlsplit(url).netloc.casefold()
+
+
+def _header_map(answer) -> dict:
+    return {str(name).casefold(): value for name, value in answer.headers.items()}
+
+
+def _head(url: str, hops: int = 5) -> tuple[int, dict]:
+    """A HEAD whose answer is the *publisher's*, not a delivery host's.
+
+    Redirects are followed only while they stay on the host that was asked, and
+    the last same-host answer is what comes back. That is not fastidiousness --
+    it is the difference between a digest and a cache key. Hugging Face answers
+    a ``/resolve/`` HEAD with ``X-Linked-Etag``, the LFS object's SHA-256, and a
+    302 to a storage host whose own ``ETag`` is an opaque validator that happens
+    to be sixty-four hexadecimal characters wide. Following that redirect threw
+    the first away and left the second in its place, so every large artifact was
+    checked against a value that was never its digest and every correct download
+    of one was rejected. ``huggingface_hub`` stops at the same point, for the
+    same reason.
+
+    A redirect off the host is not a failure and is not reported as one: the
+    publisher has said everything it is going to say, and what it said is what
+    the caller wanted.
+    """
+    opener = urllib.request.build_opener(_StopAtRedirect)
+    here = url
+    status, found = 0, {}
+    for _ in range(max(int(hops), 1)):
+        request = urllib.request.Request(
+            here, method="HEAD",
+            headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"})
+        try:
+            with contextlib.closing(opener.open(request, timeout=TIMEOUT)) as answer:
+                return int(getattr(answer, "status", 200) or 200), _header_map(answer)
+        except urllib.error.HTTPError as answer:
+            with contextlib.closing(answer):
+                status = int(getattr(answer, "code", 0) or 0)
+                found = _header_map(answer)
+        if status not in (301, 302, 303, 307, 308):
+            return status, found
+        target = str(found.get("location") or "").strip()
+        if not target:
+            return status, found
+        target = urllib.parse.urljoin(here, target)
+        if _host(target) != _host(here):
+            return 200, found
+        here = target
+    return status or 200, found
+
+
+SHA256_HEADERS = ("x-linked-etag", "x-checksum-sha256", "x-amz-meta-sha256")
+"""Headers whose *name* states that the value is a SHA-256 of the content.
+
+``etag`` is deliberately not among them. RFC 9110 defines an entity tag as an
+opaque validator: a host may make it an MD5, a storage-layer hash, an upload id
+or a random string, and it is only ever obliged to change when the body does. A
+value that looks like a SHA-256 is therefore not evidence of being one, and
+reading Hugging Face's delivery host that way is exactly the bug this list
+exists to prevent. ``x-linked-etag`` is different in kind: Hugging Face
+documents it as the LFS object's SHA-256 and its own client reads it as that.
+"""
+
+
+def _as_sha256(raw, prefixed: bool) -> str | None:
+    """``raw`` as a lowercase SHA-256, or ``None``.
+
+    ``prefixed`` demands that the value say what it is -- ``sha256:<hex>`` --
+    which is how a header that is otherwise opaque can still be trusted.
+    """
+    value = str(raw or "").strip()
+    if value[:2].upper() == "W/":
+        value = value[2:].strip()
+    value = value.strip('"')
+    if value[:7].casefold() == "sha256:":
+        value = value[7:]
+    elif prefixed:
+        return None
+    if len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value):
+        return value.casefold()
+    return None
+
+
+def _published_digest(headers: dict) -> str | None:
+    """A SHA-256 the publisher actually stated, or ``None`` if it stated none.
+
+    ``None`` is a perfectly good answer and not a failure: the download then
+    has its byte count checked, and the digest of what arrived is recorded so
+    the *next* install of that bundle is checked against a constant.
+    """
+    for name in SHA256_HEADERS:
+        found = _as_sha256(headers.get(name), prefixed=False)
+        if found:
+            return found
+    return _as_sha256(headers.get("etag"), prefixed=True)
+
+
+def _declared_size(url: str) -> int | None:
+    """The length a delivery host declares, following every redirect.
+
+    Only reached when the publisher's own answer carried no length -- GitHub's
+    release URLs are a redirect and nothing else. A byte count from a delivery
+    host is worth having where a digest from one is not: it is a sanity bound
+    and a progress bar, never an attestation.
+    """
+    request = urllib.request.Request(
+        url, method="HEAD",
+        headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"})
+    try:
+        with contextlib.closing(urllib.request.urlopen(request, timeout=TIMEOUT)) as answer:
+            raw = str(answer.headers.get("Content-Length") or "")
+    except Exception:
+        logger.debug("Model Chain: Voice Chat could not read a length for %s", url,
+                     exc_info=True)
+        return None
+    return int(raw) if raw.isdigit() and int(raw) > 0 else None
+
+
 def _resolve(artifact: Artifact) -> Expected:
     """Ask the publisher what this file is, before fetching a byte of it.
 
-    A HEAD, following redirects. Hugging Face answers for an LFS object with
-    ``x-linked-size`` and ``x-linked-etag``, and that etag *is* the object's
-    SHA-256 -- the same fact ``tools/pin_managed_models.py`` reads to pin the
-    LLM catalogue, read here at install time instead of at review time. A
-    release asset on another host answers with a length and an etag that is not
-    a digest, and saying so is better than pretending: what comes back then is a
-    size, and the checks below it are structural.
+    A HEAD that stops at the publisher (:func:`_head`), so what is read is what
+    the publisher said rather than what a cache in front of it happens to
+    answer. Hugging Face states an LFS object's SHA-256 in ``x-linked-size`` and
+    ``x-linked-etag`` -- the same fact ``tools/pin_managed_models.py`` reads to
+    pin the LLM catalogue, read here at install time instead of at review time.
+    A release asset on another host answers with a length and an opaque etag,
+    and saying so is better than pretending: what comes back then is a size, and
+    the checks below it are structural.
     """
     if artifact.sha256 and artifact.size:
         return Expected(artifact.size, artifact.sha256, "this extension's manifest")
-    request = urllib.request.Request(artifact.url, method="HEAD",
-                                     headers={"User-Agent": USER_AGENT})
     try:
-        with contextlib.closing(urllib.request.urlopen(request, timeout=TIMEOUT)) as answer:
-            headers = {str(k).casefold(): v for k, v in answer.headers.items()}
-            status = getattr(answer, "status", 200)
+        status, headers = _head(artifact.url)
     except Exception as exc:
         logger.warning("Model Chain: Voice Chat could not ask the publisher about %s — %s: %s",
                        artifact.filename, exc.__class__.__name__, exc)
@@ -958,14 +1083,9 @@ def _resolve(artifact: Artifact) -> Expected:
             size = int(raw)
             break
 
-    digest = artifact.sha256
-    if not digest:
-        for name in ("x-linked-etag", "etag"):
-            raw = str(headers.get(name) or "").strip().strip('"')
-            raw = raw[7:] if raw.startswith("sha256:") else raw
-            if len(raw) == 64 and all(c in "0123456789abcdefABCDEF" for c in raw):
-                digest = raw.casefold()
-                break
+    digest = artifact.sha256 or _published_digest(headers)
+    if not size:
+        size = _declared_size(artifact.url) or artifact.size
 
     return Expected(size, digest,
                     "this extension's manifest" if artifact.sha256
@@ -1615,7 +1735,9 @@ def _download(artifact: Artifact, destination: Path, report, expected: "Expected
     # before anything disagrees. Twice the expected size, or a flat ceiling when
     # nothing would say.
     ceiling = (expected.size or 0) * 2 or (4 * 1024 * 1024 * 1024)
-    request = urllib.request.Request(artifact.url, headers={"User-Agent": USER_AGENT})
+    request = urllib.request.Request(
+        artifact.url,
+        headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"})
     try:
         with contextlib.closing(urllib.request.urlopen(request, timeout=TIMEOUT)) as response:
             with open(partial, "wb") as handle:

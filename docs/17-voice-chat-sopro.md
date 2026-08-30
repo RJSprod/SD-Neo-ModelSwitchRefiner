@@ -290,7 +290,76 @@ The selected engine failing is never permission to use the other one.
 | No Sopro voice exists at all | Voice says one must be created. |
 | Engine switched mid-reply | Speech cancelled, old worker stopped, choice saved, surfaces redrawn. The reply does not finish in a different voice. |
 | Engine switched while a reply waits to be spoken | The pending reply is refused with a sentence rather than spoken by whichever engine is selected now. |
-| A page from before a switch mutates something | Refused with an active-engine mismatch; the browser reloads its panel. |
+| A page from before a switch mutates something | Refused with an active-engine mismatch; the browser fetches the surface again and replaces its panel. |
+
+---
+
+## Two things the first real install disproved
+
+Both were found by installing this on Windows rather than by reading it, and
+both were assumptions the design stated confidently and got wrong. They are
+recorded here because in each case the *mechanism* was sound and the *fact it
+rested on* was not, which is the kind of mistake that comes back.
+
+### An entity tag is not a checksum
+
+An unpinned model artifact is resolved against the publisher before it is
+fetched, and what was read as the publisher's digest was the `ETag` of whatever
+answered the HEAD. Two things were wrong with that.
+
+The HEAD followed redirects. Hugging Face answers `/resolve/` with its own
+headers — `X-Linked-Size`, and `X-Linked-Etag`, which *is* the LFS object's
+SHA-256 — and a 302 to a delivery host. Following it discarded the publisher's
+answer and read the delivery host's headers instead. `huggingface_hub` follows
+only *relative* redirects for exactly this reason.
+
+And the fallback accepted a bare `ETag` whenever it was sixty-four hexadecimal
+characters wide. RFC 9110 defines an entity tag as an opaque validator: a host
+may make it an MD5, a storage-layer hash, an upload id or a random string, and
+is only obliged to change it when the body changes. Hugging Face's delivery
+host answers with a sixty-four character value that is not the file's digest.
+
+Together those two produced a check that could not pass. Every artifact above
+the LFS threshold — Sopro's five `.safetensors`, and Whisper's ONNX exports on
+the same hub — downloaded correctly, hashed correctly, and was thrown away for
+disagreeing with a cache key. Small non-LFS files were unaffected, which is why
+`config.json` installed and `model.safetensors` did not.
+
+The HEAD now stops at the first redirect that leaves the publisher's host, and
+a digest is taken only from a header whose *name* says it is one
+(`x-linked-etag`, `x-checksum-sha256`, `x-amz-meta-sha256`) or from a value
+that says so itself (`sha256:…`). A publisher that states no digest is not a
+failure and never was: the byte count is checked, the download proceeds, and
+the digest of what arrived is recorded so the next install of that bundle is
+checked against a constant. `tests/test_voice_models.py` runs this against two
+real local hosts wired like a hub, because a fake that does not redirect cannot
+tell the two readings apart — which is precisely why the original tests passed.
+
+### A settings row cannot be refreshed by reloading
+
+Section 5 asks that the inactive engine's operational controls be absent from
+the document rather than hidden in it, and the browser honoured that by
+reloading after a switch: ask the server for a document that never contained
+them.
+
+Forge does not build settings markup per request. `OptionHTML` takes a string,
+and this extension's rows are built once, when the extension is imported, and
+that same string is served to every page load for the life of the process. So
+the reloaded page came back with markup for the engine that had been selected
+at *startup*, the page compared it against the engine selected *now*, correctly
+concluded it was stale — and reloaded again. The loop ended when the tab was
+closed. Switching engines then required restarting the WebUI to reach the other
+engine's settings at all.
+
+There is now a `/model-chain/voice/surface` route that builds the settings and
+voices markup on demand, and the browser replaces those nodes with what comes
+back. That keeps section 5 exactly as written — the other engine's controls are
+gone from the document because they were removed from it — without depending on
+a document the host will not rebuild. Nothing in `javascript/voice_chat.js`
+calls `location.reload()` any more, and a test asserts that. A cooldown bounds
+the rebuild to one every three seconds, so that if the mismatch ever somehow
+survives a rebuild, what is left is an occasional request rather than a browser
+that will not stop.
 
 ---
 
@@ -301,11 +370,17 @@ the delivery DSP and the Lab are implemented and tested. Three things in the
 design intent are explicitly *measurements*, and they cannot be made on a
 machine that has none of this installed:
 
-* **Gate S-1's Windows correctness check** is implemented — the installer's
-  self-test runs a fixed-seed SDPA repeatability check and a single-threaded
-  comparison at the released thread policy, and refuses an installation that
-  fails either. It has not been *run* against a real Windows PyTorch build,
-  which is what the gate asks for.
+* **Gate S-1's Windows correctness check** has now run. The runtime installed
+  end to end on Windows 11 / Python 3.13 — eighteen wheels fetched and hash-
+  checked, unpacked into an isolated interpreter without pip, self-test passed:
+  *Sopro 2.0.0, Torch 2.11.0+cpu, NumPy 2.2.6, 4 intra-op / 1 inter-op threads,
+  attention stable*. That is the fixed-seed SDPA repeatability check and the
+  single-threaded comparison at the released thread policy, on a real Windows
+  PyTorch build. What the gate still wants is the same result on more than one
+  machine before it is called met. (The package reports its version as 2.0.0
+  from the 2.0.5 wheel; nothing compares the two, and the preparation
+  fingerprint records what is installed rather than what was asked for, which
+  is the reason that is harmless rather than a coincidence.)
 * **Gate S-3's latency and throughput envelope** — same-machine TTFA, RTF and
   RAM against Kokoro — needs the real closure on the real hardware class. The
   telemetry that would report it is in place and content-free.
@@ -317,7 +392,9 @@ machine that has none of this installed:
 The model artifact hashes are unpinned in the manifest, exactly as Kokoro's and
 Whisper's are, and are resolved against the publisher at install time and
 recorded — `tools/pin_sopro_models.py` turns them into constants once a
-maintainer has fetched them. The runtime closure *is* pinned, because an
+maintainer has fetched them. The bundle's declared size is now the publisher's
+own total (729.2 MiB) rather than the estimate it shipped with, which was
+almost twice that. The runtime closure *is* pinned, because an
 unpinned wheel is a wheel nobody reviewed and the whole preparation fingerprint
 rests on knowing which bytes ran.
 
