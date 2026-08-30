@@ -940,6 +940,10 @@ def settings_html() -> str:
     parts.append(f'<div class="mc-voice-runtime">{ui.escape(found.summary)}</div>')
 
     parts.append(_tier_row(found))
+    # Before the engine branch, because cleaning a recording is not speaking and
+    # has no opinion about which engine does. It was inside it, which meant the
+    # row -- and the only way to install it -- did not exist on Kokoro at all.
+    parts.append(cleanup_html())
 
     if active != engines.KOKORO:
         # Section 5: the inactive engine's operational settings are *absent*,
@@ -948,7 +952,6 @@ def settings_html() -> str:
         # DOM, a theme script or a partial Gradio re-render has nothing to
         # expose, and no request can be built from markup that is not there.
         parts.append(sopro_html())
-        parts.append(cleanup_html())
         parts.append(
             '<div class="mc-voice-note">Voice Chat runs on the CPU and never uses the '
             'graphics card. Sopro brings its own isolated PyTorch runtime, which is kept '
