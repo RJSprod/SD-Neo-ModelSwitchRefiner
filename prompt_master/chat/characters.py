@@ -99,17 +99,105 @@ class Character:
     voice_pitch: float | None = None
     voice_gain: float | None = None
     voice_pause: float | None = None
+    # Sopro's half of the same idea, and flat for the same reason the four
+    # Kokoro fields are: this file is written by :mod:`yamlish`, which is a
+    # deliberately small scalar-only writer shared with oobabooga's format, and
+    # a nested mapping in it would be a mapping nothing could read back.
+    #
+    # Voice Chat has more than one text-to-speech engine now, and a character
+    # may have a voice on each -- but the engine itself is *global*, never a
+    # character property. So these are not "which engine does Ada use"; they are
+    # "what has Ada been given on Sopro", so that switching the global engine
+    # restores the right one instead of erasing the other.
+    #
+    # Absence is the ordinary state and is not a missing value: a character with
+    # nothing here follows Sopro's current defaults, which is what every
+    # character written before this existed does. See
+    # ``mc_voice_engines.character_voice``.
+    sopro_voice: str = ""
+    sopro_speed: float | None = None
+    sopro_pitch: float | None = None
+    sopro_gain: float | None = None
+    sopro_pause: float | None = None
+    sopro_temperature: float | None = None
+    sopro_top_p: float | None = None
+    sopro_top_k: float | None = None
+    sopro_language: str = ""
 
     @property
     def voice_profile(self) -> dict[str, object]:
-        """This character's delivery overrides, in mc_voice_profile's spelling.
+        """This character's Kokoro delivery overrides, in the profile spelling.
 
         A dictionary rather than four attributes because that is what crosses
         into the voice modules, and because ``None`` has to survive the trip:
         the whole point of the four fields is which of them are unset.
+
+        Kokoro's specifically. :attr:`voice_profiles` is the engine-aware view,
+        and ``mc_voice_engines.character_profile`` is what reads the right one
+        for the engine that is selected.
         """
         return {"speed": self.voice_speed, "pitch": self.voice_pitch,
                 "gain": self.voice_gain, "pause": self.voice_pause}
+
+    @property
+    def voices(self) -> dict[str, str]:
+        """The engine-aware view of which voice this character has, per engine.
+
+        Derived rather than stored, so there is exactly one place a voice lives
+        and no second copy to keep in step. Only engines this character has
+        actually been given something on appear, because absence is what
+        inheritance is made of (I-4).
+        """
+        found = {}
+        if self.voice:
+            found["kokoro"] = self.voice
+        if self.sopro_voice:
+            found["sopro"] = self.sopro_voice
+        return found
+
+    @property
+    def voice_profiles(self) -> dict[str, dict]:
+        """The engine-aware view of this character's delivery overrides.
+
+        An engine whose fields are all unset is absent rather than present and
+        empty -- the difference between "follows the default" and "has been
+        configured to nothing", which is the difference the whole inheritance
+        model rests on.
+        """
+        found = {}
+        kokoro = self.voice_profile
+        if any(value is not None for value in kokoro.values()):
+            found["kokoro"] = kokoro
+        sopro = {"speed": self.sopro_speed, "pitch": self.sopro_pitch,
+                 "gain": self.sopro_gain, "pause": self.sopro_pause,
+                 "temperature": self.sopro_temperature, "top_p": self.sopro_top_p,
+                 "top_k": self.sopro_top_k,
+                 "language": self.sopro_language or None}
+        if any(value is not None for value in sopro.values()):
+            found["sopro"] = sopro
+        return found
+
+    @staticmethod
+    def voice_fields(engine: str, voice_id: str, profile: dict) -> dict:
+        """One engine's voice and delivery as this dataclass's own field names.
+
+        The translation between the logical engine-aware shape
+        ``mc_voice_engines`` speaks and the flat fields this file stores. Here
+        rather than in the panel because it is a fact about the *format*, and a
+        second engine added later should have to touch this function and no
+        caller.
+        """
+        offered = dict(profile or {})
+        if str(engine) == "sopro":
+            found = {"sopro_voice": str(voice_id or "").strip(),
+                     "sopro_language": str(offered.get("language") or "")}
+            for name in ("speed", "pitch", "gain", "pause", "temperature", "top_p",
+                         "top_k"):
+                found[f"sopro_{name}"] = offered.get(name)
+            return found
+        return {"voice": str(voice_id or "").strip(),
+                "voice_speed": offered.get("speed"), "voice_pitch": offered.get("pitch"),
+                "voice_gain": offered.get("gain"), "voice_pause": offered.get("pause")}
 
     def to_mapping(self) -> dict[str, object]:
         """The file, in the order it is written.
@@ -131,6 +219,22 @@ class Character:
                            ("voice_pitch", self.voice_pitch),
                            ("voice_gain", self.voice_gain),
                            ("voice_pause", self.voice_pause)):
+            if value is not None:
+                found[key] = value
+        # Sopro's, on the same rule: written only when they hold something, so
+        # a character nobody has configured for Sopro reads as one that has not
+        # been rather than as one configured to today's defaults.
+        if self.sopro_voice:
+            found["sopro_voice"] = self.sopro_voice
+        if self.sopro_language:
+            found["sopro_language"] = self.sopro_language
+        for key, value in (("sopro_speed", self.sopro_speed),
+                           ("sopro_pitch", self.sopro_pitch),
+                           ("sopro_gain", self.sopro_gain),
+                           ("sopro_pause", self.sopro_pause),
+                           ("sopro_temperature", self.sopro_temperature),
+                           ("sopro_top_p", self.sopro_top_p),
+                           ("sopro_top_k", self.sopro_top_k)):
             if value is not None:
                 found[key] = value
         return found
@@ -162,6 +266,15 @@ class Character:
             voice_pitch=_optional_number(values.get("voice_pitch")),
             voice_gain=_optional_number(values.get("voice_gain")),
             voice_pause=_optional_number(values.get("voice_pause")),
+            sopro_voice=_first(values, ("sopro_voice",)),
+            sopro_speed=_optional_number(values.get("sopro_speed")),
+            sopro_pitch=_optional_number(values.get("sopro_pitch")),
+            sopro_gain=_optional_number(values.get("sopro_gain")),
+            sopro_pause=_optional_number(values.get("sopro_pause")),
+            sopro_temperature=_optional_number(values.get("sopro_temperature")),
+            sopro_top_p=_optional_number(values.get("sopro_top_p")),
+            sopro_top_k=_optional_number(values.get("sopro_top_k")),
+            sopro_language=_first(values, ("sopro_language",)),
         )
 
 

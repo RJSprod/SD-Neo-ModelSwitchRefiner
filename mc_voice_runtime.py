@@ -452,7 +452,13 @@ def begin_turn(turn, sid: int = 0, profile=None) -> int:
         _turns[turn.id] = turn
         _busy["tts"] += 1
     try:
-        header = {"op": "tts_begin", "turn": turn.id, "sid": int(sid or 0)}
+        # The backend-qualified stable id travels with every ``tts_begin``,
+        # Kokoro's included, so the shared turn contract is the same on both
+        # engines (T-PROTO-1). ``sid`` rides beside it as this adapter's own
+        # address into its own bank, which is where a sherpa speaker number is
+        # allowed to exist and the only place it does.
+        header = {"op": "tts_begin", "turn": turn.id, "sid": int(sid or 0),
+                  "voice_id": str(getattr(turn, "voice_id", "") or "")}
         header.update(_delivery(profile))
         _write(header, b"")
     except _WorkerGone:

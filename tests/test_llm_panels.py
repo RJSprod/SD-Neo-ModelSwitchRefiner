@@ -2976,10 +2976,34 @@ class TestACharacterHasItsOwnVoice:
         return held
 
     def test_a_saved_voice_survives_the_round_trip(self, characters):
+        """Saved qualified, and kept in step with the legacy field.
+
+        The id the picker sends is backend-qualified now, which is what the
+        shared turn contract carries. ``voice`` is still written as well, so a
+        character saved by this build resolves on a build that predates it.
+        """
         mc_llm_chat_panel._save_character(
             "Ada", "Ada", "a mathematician", "", "", 0.85, 0.95, 512, -1, None,
             "official:af_nicole", False)
-        assert characters.load("Ada").voice == "official:af_nicole"
+        loaded = characters.load("Ada")
+        assert loaded.voice == "kokoro:official:af_nicole"
+        assert loaded.voices["kokoro"] == "kokoro:official:af_nicole"
+
+    def test_editing_one_engine_leaves_the_other_engines_voice_alone(self, characters):
+        """I-3, through the path somebody actually takes: opening a character
+        while Kokoro is selected and pressing Save must not clear the Sopro
+        voice they gave it last week."""
+        from prompt_master.chat.characters import Character
+
+        characters.save(Character(name="Ada", sopro_voice="sopro:clone:abc",
+                                  sopro_speed=0.9))
+        mc_llm_chat_panel._save_character(
+            "Ada", "Ada", "", "", "", 0.85, 0.95, 512, -1, None, "official:af_nicole", False)
+        loaded = characters.load("Ada")
+        assert loaded.sopro_voice == "sopro:clone:abc"
+        assert loaded.voices["sopro"] == "sopro:clone:abc"
+        assert loaded.voice_profiles["sopro"]["speed"] == 0.9
+        assert loaded.voices["kokoro"] == "kokoro:official:af_nicole"
 
     def test_two_characters_can_have_two_voices(self, characters):
         from prompt_master.chat.characters import Character
@@ -2990,8 +3014,8 @@ class TestACharacterHasItsOwnVoice:
         mc_llm_chat_panel._save_character(
             "Grace", "Grace", "", "", "", 0.85, 0.95, 512, -1, None, "official:af_heart",
             False)
-        assert characters.load("Ada").voice == "official:af_nicole"
-        assert characters.load("Grace").voice == "official:af_heart"
+        assert characters.load("Ada").voice == "kokoro:official:af_nicole"
+        assert characters.load("Grace").voice == "kokoro:official:af_heart"
 
     def test_no_delivery_of_its_own_is_four_unset_fields(self, characters):
         """Unset rather than defaulted, which is the whole of how a character
@@ -3017,7 +3041,7 @@ class TestACharacterHasItsOwnVoice:
             1.15, -2.5, 0.0, 0.0)
         fields = mc_llm_chat_panel._open_character("Ada")
         voice = fields[-(3 + len(mc_voice_ui.delivery_controls())):]
-        assert voice[0] == "official:af_nicole"
+        assert voice[0] == "kokoro:official:af_nicole"
         assert voice[1] is True
         assert voice[3] == 1.15 and voice[4] == -2.5
 

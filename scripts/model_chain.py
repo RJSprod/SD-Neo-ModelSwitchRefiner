@@ -42,11 +42,15 @@ import mc_references
 import mc_styles
 import mc_voice_api
 import mc_voice_clone
+import mc_voice_engines
 import mc_voice_models
 import mc_voice_paths
 import mc_voice_profile
 import mc_voice_registry
 import mc_voice_runtime
+import mc_voice_sopro
+import mc_voice_sopro_profile
+import mc_voice_sopro_runtime
 import mc_voice_state
 import mc_voice_ui
 from modules import errors, images, processing, scripts, shared
@@ -616,6 +620,18 @@ if _voice_voices_row is not None:
     _VOICE_OPTIONS["model_chain_voice_voices"] = _voice_voices_row
 
 _VOICE_OPTIONS.update({
+    mc_voice_engines.OPT_ENGINE: shared.OptionInfo(
+        mc_voice_engines.DEFAULT_ENGINE,
+        "Text-to-speech engine",
+        gr.Radio,
+        {"choices": list(mc_voice_engines.ENGINES)},
+    ).info(
+        "which engine speaks, for the whole WebUI. Kokoro is the built-in speaker bank; "
+        "Sopro V2 is an optional streaming engine that makes a voice from a short recording "
+        "and brings its own CPU runtime. Each engine keeps its own voices, default and "
+        "per-character settings, so switching back restores what you had. Chosen with the "
+        "cards in the row above rather than typed. Dictation is not part of this choice"
+    ),
     mc_voice_state.OPT_AUTO_SEND: shared.OptionInfo(
         False,
         "Automatically send dictation",
@@ -711,6 +727,123 @@ _VOICE_OPTIONS.update({
         "extra silence after each sentence of a spoken reply, on top of the model's own. "
         "Only a reply that is streamed sentence by sentence has boundaries to put it at, so "
         "it does not change an audition. Set it in the Delivery block above"
+    ),
+    # Sopro's own settings. Named apart from Kokoro's throughout, which is what
+    # makes I-3 -- "selecting or editing one engine cannot overwrite the other's
+    # state" -- a property of the option names rather than of a check somebody
+    # has to remember to write.
+    mc_voice_sopro.OPT_VOICE: shared.OptionInfo(
+        "",
+        "Sopro default voice",
+        gr.Textbox,
+    ).info(
+        "the stable id of the Sopro voice that reads replies aloud — chosen with Set as "
+        "Default in the Sopro voice list rather than typed. Empty until you create a voice; "
+        "Sopro has no built-in speakers and never falls back to a Kokoro one"
+    ),
+    mc_voice_sopro.OPT_PRECISION: shared.OptionInfo(
+        "full",
+        "Sopro precision",
+        gr.Radio,
+        {"choices": list(mc_voice_sopro.PRECISIONS)},
+    ).info(
+        "full CPU precision, or INT8 for the autoregressive blocks. INT8 is faster and "
+        "lighter; saved voices stay valid either way, because the encoders that produce a "
+        "voice's conditioning are not quantized. Changing it unloads Sopro"
+    ),
+    mc_voice_sopro.OPT_STEPS: shared.OptionInfo(
+        mc_voice_sopro.STEP_CHOICES[0],
+        "Sopro solver steps",
+        gr.Radio,
+        {"choices": list(mc_voice_sopro.STEP_CHOICES)},
+    ).info(
+        "how many steps Sopro's acoustic solver takes. More is slower. A compute setting "
+        "rather than a character trait, so it is global to Sopro"
+    ),
+    mc_voice_sopro.OPT_CHUNK: shared.OptionInfo(
+        64,
+        "Sopro streaming chunk size",
+        gr.Radio,
+        {"choices": list(mc_voice_sopro.CHUNK_CHOICES)},
+    ).info(
+        "how much audio Sopro produces before handing a piece over, in frames. Smaller may "
+        "start sooner and finish later; larger may do the reverse. Only benchmarked values "
+        "are offered"
+    ),
+    mc_voice_sopro_profile.OPT_SPEED: shared.OptionInfo(
+        mc_voice_sopro_profile.CONTROLS["speed"]["default"],
+        "Sopro voice speed",
+        gr.Slider,
+        {"minimum": mc_voice_sopro_profile.CONTROLS["speed"]["minimum"],
+         "maximum": mc_voice_sopro_profile.CONTROLS["speed"]["maximum"],
+         "step": mc_voice_sopro_profile.CONTROLS["speed"]["step"]},
+    ).info(
+        "how fast the Sopro default voice speaks. Sopro has no speaking-rate input of its "
+        "own, so Voice Chat time-scales its output without changing the pitch — separate "
+        "from the Sopro pitch setting, and separate from Kokoro's speed"
+    ),
+    mc_voice_sopro_profile.OPT_PITCH: shared.OptionInfo(
+        mc_voice_sopro_profile.CONTROLS["pitch"]["default"],
+        "Sopro voice pitch (semitones)",
+        gr.Slider,
+        {"minimum": mc_voice_sopro_profile.CONTROLS["pitch"]["minimum"],
+         "maximum": mc_voice_sopro_profile.CONTROLS["pitch"]["maximum"],
+         "step": mc_voice_sopro_profile.CONTROLS["pitch"]["step"]},
+    ).info(
+        "shifts the whole Sopro voice, formants included, so it reads as a different-sized "
+        "speaker. Independent of the speed setting"
+    ),
+    mc_voice_sopro_profile.OPT_GAIN: shared.OptionInfo(
+        mc_voice_sopro_profile.CONTROLS["gain"]["default"],
+        "Sopro voice volume (dB)",
+        gr.Slider,
+        {"minimum": mc_voice_sopro_profile.CONTROLS["gain"]["minimum"],
+         "maximum": mc_voice_sopro_profile.CONTROLS["gain"]["maximum"],
+         "step": mc_voice_sopro_profile.CONTROLS["gain"]["step"]},
+    ).info(
+        "loudness relative to Sopro's own output, limited so a loud setting cannot clip"
+    ),
+    mc_voice_sopro_profile.OPT_PAUSE: shared.OptionInfo(
+        mc_voice_sopro_profile.CONTROLS["pause"]["default"],
+        "Sopro pause between sentences (ms)",
+        gr.Slider,
+        {"minimum": mc_voice_sopro_profile.CONTROLS["pause"]["minimum"],
+         "maximum": mc_voice_sopro_profile.CONTROLS["pause"]["maximum"],
+         "step": mc_voice_sopro_profile.CONTROLS["pause"]["step"]},
+    ).info(
+        "extra silence after each committed sentence of a spoken Sopro reply"
+    ),
+    mc_voice_sopro_profile.OPT_LANGUAGE: shared.OptionInfo(
+        "",
+        "Sopro language hint",
+        gr.Radio,
+        {"choices": [code for code, _label in mc_voice_sopro_profile._language_choices()]},
+    ).info(
+        "a pronunciation hint passed to Sopro, not a translation feature. Empty is Auto"
+    ),
+    mc_voice_sopro_profile.OPT_TEMPERATURE: shared.OptionInfo(
+        "",
+        "Sopro variation (temperature)",
+        gr.Textbox,
+    ).info(
+        "Sopro's sampling temperature. Empty follows the model's own configuration, which "
+        "is what it should normally be. It controls how much one take varies from another; "
+        "it is not an emotion or warmth control, because the model has no such input"
+    ),
+    mc_voice_sopro_profile.OPT_TOP_P: shared.OptionInfo(
+        "",
+        "Sopro top-p",
+        gr.Textbox,
+    ).info(
+        "Sopro's nucleus sampling cut-off. Empty follows the model's own configuration. "
+        "Here for reproducing a particular run rather than for tuning a voice"
+    ),
+    mc_voice_sopro_profile.OPT_TOP_K: shared.OptionInfo(
+        "",
+        "Sopro top-k",
+        gr.Textbox,
+    ).info(
+        "Sopro's top-k sampling cut-off. Empty follows the model's own configuration"
     ),
     mc_voice_clone.OPT_ROOT: shared.OptionInfo(
         "",
@@ -3628,6 +3761,11 @@ def _on_script_unloaded():
     # without.
     try:
         mc_voice_runtime.shutdown()
+        # Both, unconditionally, whichever engine was selected. "No engine
+        # outlives the WebUI" is the requirement, and asking which one was
+        # running is one more thing that can be wrong at the exact moment
+        # nothing may be.
+        mc_voice_sopro_runtime.shutdown()
         # Separately owned, and stopped separately (section 82). A clone is a
         # long CPU job that has nothing to do with speech residency, and its
         # process tree must not outlive this one either -- release blocker nine.

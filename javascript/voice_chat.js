@@ -87,6 +87,17 @@
         cloningInstall: "model-chain/voice/cloning/install",
         cloningStart: "model-chain/voice/cloning/start",
         cloningAbort: "model-chain/voice/cloning/abort",
+        engines: "model-chain/voice/engines",
+        engineSelect: "model-chain/voice/engine/select",
+        sopro: "model-chain/voice/sopro",
+        soproInstall: "model-chain/voice/sopro/install",
+        soproSettings: "model-chain/voice/sopro/settings",
+        soproClone: "model-chain/voice/sopro/clone",
+        soproRebuild: "model-chain/voice/sopro/rebuild",
+        lab: "model-chain/voice/lab",
+        labUpdate: "model-chain/voice/lab/update",
+        labReset: "model-chain/voice/lab/reset",
+        labPlay: "model-chain/voice/lab/play",
     };
 
     // 250 ms. Shorter than this is a tap, and a tap is somebody finding out what
@@ -334,6 +345,26 @@
         window.clearTimeout(voicesTimer);
         console.warn("Model Chain: Voice Chat stopped asking this WebUI anything — "
                      + RELOAD);
+    }
+
+    let engineStale = false;
+
+    // The text-to-speech engine changed under this page -- somebody switched it
+    // in another tab, or in this one before a request already in flight came
+    // back. The document was built for an engine that is no longer selected and
+    // every control in it belongs to that engine, so repainting is not a fix
+    // and reloading is: the server then hands back a document that never
+    // contained them.
+    //
+    // Once, guarded, because several polls can be in flight at the moment of a
+    // switch and a reload storm is worse than a stale panel. Driven by the
+    // server's own `engine_mismatch` flag rather than by the status code: 409
+    // already means several other things on these routes.
+    function engineChanged(payload) {
+        if (!payload || !payload.engine_mismatch || engineStale) return false;
+        engineStale = true;
+        window.setTimeout(function () { window.location.reload(); }, 50);
+        return true;
     }
 
     function refused(response) {
@@ -1345,7 +1376,13 @@
     // page accepted for the session the user is holding. Not permission
     // granted, not a node connected -- audio arriving.
     function acceptChunk(state, samples) {
-        if (!capture || capture !== state) return;
+        // The dictation path keeps exactly one live capture in `capture`, and
+        // this guard is what stops a stream that has been abandoned from still
+        // filling memory. A standalone capture -- the Sopro clone recorder --
+        // is not that stream and is not in that variable: it owns itself, it is
+        // released by the thing that started it, and it is deliberately allowed
+        // to run without becoming the dictation capture.
+        if (!state.standalone && (!capture || capture !== state)) return;
         if (!samples || !samples.length) return;
         if (!state.firstPcmAt) {
             state.firstPcmAt = nowMs();
@@ -1371,7 +1408,7 @@
         state.chunks.push(samples);
     }
 
-    function startCapture(session) {
+    function startCapture(session, standalone) {
         const ctx = audioContext();
         if (!ctx) return Promise.reject(new Error("no audio"));
         // Started here and deliberately not awaited here. A browser raises a
@@ -1387,7 +1424,8 @@
         return openMicrophone().then(function (stream) {
             if (session) session.mediaAt = nowMs();
             const state = {stream: stream, chunks: [], rate: ctx.sampleRate, nodes: [],
-                           track: describeTrack(stream), firstPcmAt: 0, graph: "none"};
+                           track: describeTrack(stream), firstPcmAt: 0, graph: "none",
+                           standalone: !!standalone};
             const source = ctx.createMediaStreamSource(stream);
             state.nodes.push(source);
 
@@ -1730,6 +1768,13 @@
     function eligible(session) {
         if (llmBusy()) {
             session.refused = MESSAGES.busy;
+            return false;
+        }
+        // A Sopro clone recording is open on the Settings page. Two microphone
+        // streams at once is two indicators and two devices, and dictating into
+        // somebody's voice reference is not a thing either of them asked for.
+        if (soproRecorder) {
+            session.refused = "A voice recording is in progress in Settings.";
             return false;
         }
         const known = knownReadiness();
@@ -2503,7 +2548,10 @@
     function paintEngine(payload) {
         const holder = engineHolder();
         if (!holder || !payload) return;
-        const engine = payload.engine || {};
+        // `engine_state`, not `engine`: `engine` is the selected engine's id in
+        // every payload this feature sends, and one key meaning two things is
+        // how the residency line came to be replaced by the string "sopro".
+        const engine = payload.engine_state || {};
         const line = holder.querySelector("[data-mc-voice-engine-line]");
         const button = holder.querySelector("[data-mc-voice-runtime]");
         const states = {
@@ -2537,7 +2585,8 @@
         if (!holder || holder.offsetParent === null || document.hidden) return;
         refreshStatus(true).then(function (payload) {
             paintEngine(payload);
-            const state = (payload && payload.engine && payload.engine.state) || "unloaded";
+            const state = (payload && payload.engine_state
+                           && payload.engine_state.state) || "unloaded";
             const quick = state === "loading" || state === "stopping" || state === "tts"
                 || state === "stt";
             enginePoll = window.setTimeout(pollEngine, quick ? 1000 : 4000);
@@ -2792,8 +2841,17 @@
 
         // The other way in: files somebody already has. Same route, same row,
         // one extra field.
+        //
+        // Sopro's two folder buttons are deliberately excluded: they speak a
+        // different route with a different body, and `wireSopro` handles them.
+        // Attaching this handler to them as well would post every folder twice,
+        // once to a route that would refuse it.
         Array.prototype.forEach.call(
             holder.querySelectorAll("[data-mc-voice-local]"), function (button) {
+                if ((button.getAttribute("data-mc-voice-local") || "")
+                        .indexOf("sopro-") === 0) {
+                    return;
+                }
                 button.addEventListener("click", function (event) {
                     if (event.preventDefault) event.preventDefault();
                     const kind = button.getAttribute("data-mc-voice-local");
@@ -2814,7 +2872,177 @@
             });
 
         wireTiers(holder);
+        wireEngineSelector(holder);
+        wireSopro(holder);
         schedulePaint(holder, 0);
+    }
+
+    // -- the engine selector --------------------------------------------------- //
+    //
+    // One engine speaks for the whole WebUI at a time, and choosing one is a
+    // runtime boundary rather than a preference: the server cancels any speech,
+    // stops whichever TTS worker was running and persists the choice before it
+    // answers.
+    //
+    // The page is then *reloaded* rather than repainted, and that is deliberate.
+    // The design rule is that the inactive engine's operational controls are
+    // absent from the document rather than hidden in it, and the cheapest way to
+    // be certain of that is to ask the server for a document that never
+    // contained them. A switch is a rare, explicit action; a reload is a fair
+    // price for a guarantee that no stale node can be found by a selector.
+
+    function wireEngineSelector(holder) {
+        const panel = holder.querySelector("[data-mc-voice-engines]");
+        if (!panel || panel.dataset.mcVoiceWired === "1") return;
+        panel.dataset.mcVoiceWired = "1";
+
+        // A listener per card rather than one on the panel. Delegation would be
+        // the tidier JavaScript, and the buttons beside these -- Download, Use
+        // this, Install from this folder -- are all wired the same direct way,
+        // so this matches what the rest of this row does.
+        const cards = panel.querySelectorAll("[data-mc-voice-engine-pick]");
+        Array.prototype.forEach.call(cards, function (pick) {
+            pick.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                // The selected engine's card is disabled, so a second press is
+                // not a second switch -- which would cancel speech and stop a
+                // worker for nothing.
+                if (pick.disabled) return;
+                const wanted = pick.getAttribute("data-mc-voice-engine-pick");
+                Array.prototype.forEach.call(cards, function (button) {
+                    button.disabled = true;
+                });
+                post(ROUTES.engineSelect, {engine: wanted}, holder).then(function (payload) {
+                    if (payload && payload.ok) {
+                        window.location.reload();
+                        return;
+                    }
+                    // Put the cards back. A page that disabled both and then
+                    // did not reload would be a page you cannot get back to the
+                    // engine you were on.
+                    Array.prototype.forEach.call(cards, function (button) {
+                        button.disabled = button.getAttribute("data-mc-voice-engine-pick")
+                            === (payload && payload.active);
+                    });
+                    sayInRow(holder, "engines",
+                             (payload && payload.error)
+                                 || "The engine could not be changed.", true);
+                });
+            });
+        });
+    }
+
+    // -- Sopro ----------------------------------------------------------------- //
+
+    let soproTimer = 0;
+
+    function wireSopro(holder) {
+        const row = holder.querySelector('[data-mc-voice-kind="sopro"]');
+        if (!row || row.dataset.mcVoiceWired === "1") return;
+        row.dataset.mcVoiceWired = "1";
+
+        const install = row.querySelector("[data-mc-voice-sopro-install]");
+        if (install) {
+            install.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                install.disabled = true;
+                post(ROUTES.soproInstall, {}, holder).then(function (payload) {
+                    if (payload && payload.error) {
+                        install.disabled = false;
+                        setText(row, "[data-mc-voice-status]", payload.error);
+                        return;
+                    }
+                    pollSopro(holder, row, 1200);
+                });
+            });
+        }
+
+        // The manual half. `startInstall` speaks the Kokoro install route, and
+        // Sopro's is a different route with a different body, so the two Sopro
+        // folder buttons are handled here rather than being made to look like
+        // Kokoro rows that they are not.
+        Array.prototype.forEach.call(
+            holder.querySelectorAll('[data-mc-voice-local^="sopro-"]'), function (button) {
+                button.addEventListener("click", function (event) {
+                    if (event.preventDefault) event.preventDefault();
+                    const kind = button.getAttribute("data-mc-voice-local");
+                    const scope = button.getAttribute("data-mc-voice-scope") || kind;
+                    const box = holder.querySelector(
+                        '[data-mc-voice-folder="' + cssEscape(scope) + '"]');
+                    const folder = box ? (box.value || "").trim() : "";
+                    if (!folder) {
+                        setText(row, "[data-mc-voice-status]",
+                                "Type the folder the downloaded files are in, then press "
+                                + "this again.");
+                        return;
+                    }
+                    button.disabled = true;
+                    post(ROUTES.soproInstall,
+                         {part: kind === "sopro-model" ? "model" : "runtime", folder: folder},
+                         holder).then(function (payload) {
+                        button.disabled = false;
+                        if (payload && payload.error) {
+                            setText(row, "[data-mc-voice-status]", payload.error);
+                            return;
+                        }
+                        pollSopro(holder, row, 1200);
+                    });
+                });
+            });
+
+        const settings = row.querySelector("[data-mc-voice-sopro-settings]");
+        if (settings) {
+            settings.addEventListener("change", function (event) {
+                const select = event.target.closest("[data-mc-voice-sopro-setting]");
+                if (!select) return;
+                const body = {};
+                body[select.getAttribute("data-mc-voice-sopro-setting")] = select.value;
+                post(ROUTES.soproSettings, body, holder).then(function (payload) {
+                    paintSopro(row, payload);
+                });
+            });
+        }
+        whenOnScreen(row, function () { pollSopro(holder, row, 0); });
+    }
+
+    function pollSopro(holder, row, delay) {
+        window.clearTimeout(soproTimer);
+        soproTimer = window.setTimeout(function () {
+            post(ROUTES.sopro, {}, holder).then(function (payload) {
+                paintSopro(row, payload);
+                const progress = payload && payload.progress && payload.progress.sopro;
+                // Only while something is running. A permanent poll on a
+                // settings page is a request a second for as long as the tab
+                // stays open, which is what the Kokoro rows already refuse to do.
+                if (progress && progress.running) pollSopro(holder, row, 1200);
+            }).catch(function () { /* the next paint tries again */ });
+        }, Math.max(0, delay || 0));
+    }
+
+    function setText(root_, selector, text) {
+        const node = root_ ? root_.querySelector(selector) : null;
+        if (node) node.textContent = text || "";
+    }
+
+    function paintSopro(row, payload) {
+        if (!row || !payload || !payload.ok) return;
+        const progress = (payload.progress && payload.progress.sopro) || {};
+        setText(row, '[data-mc-voice-status="sopro"]',
+                progress.running ? progress.text
+                    : (progress.failed && progress.text) || soproMessage(payload));
+        setText(row, "[data-mc-voice-sopro-runtime]", payload.runtime_message);
+        setText(row, "[data-mc-voice-sopro-model]", payload.model_message);
+        const install = row.querySelector("[data-mc-voice-sopro-install]");
+        if (install) {
+            install.disabled = !!progress.running || !payload.platform_supported;
+            install.textContent = payload.installed ? "Installed" : "Install Sopro";
+        }
+    }
+
+    function soproMessage(payload) {
+        if (!payload.platform_supported) return payload.runtime_message || "";
+        if (payload.installed) return "Installed.";
+        return payload.runtime_message || payload.model_message || "";
     }
 
     // The poll used to be a fixed 1.5 seconds, forever, whatever happened. On a
@@ -3292,6 +3520,9 @@
             return response.json().catch(function () {
                 return {ok: false, error: "The WebUI did not answer."};
             });
+        }).then(function (payload) {
+            engineChanged(payload);
+            return payload;
         });
     }
 
@@ -3309,6 +3540,13 @@
         row.appendChild(kind);
         const actions = [["test", "Test"], ["default", "Set as Default"]];
         if (entry.editable) actions.push(["rename", "Rename"]);
+        // Offered only for a voice whose preparation no longer matches the
+        // installed build and whose recording is still here. A stale voice
+        // without one has to be created again, and a button that could not
+        // succeed would be a button somebody presses three times.
+        if (entry.compatible === false && entry.has_source) {
+            actions.push(["rebuild", "Rebuild"]);
+        }
         if (entry.deletable) actions.push(["delete", "Delete"]);
         actions.forEach(function (pair) {
             const button = document.createElement("button");
@@ -3328,13 +3566,20 @@
         const current = payload.default || "";
         if (list) {
             list.textContent = "";
-            const groups = [
-                ["Official — American English",
-                 payload.voices.filter(function (v) { return v.official && v.language === "en-US"; })],
-                ["Official — British English",
-                 payload.voices.filter(function (v) { return v.official && v.language === "en-GB"; })],
-                ["Custom", payload.voices.filter(function (v) { return !v.official; })],
-            ];
+            // Kokoro's list is grouped by accent because its bank is; Sopro's
+            // is one list of voices somebody made, because that is what it is.
+            // Driven by the payload rather than by a flag on the page, so a
+            // list painted before a switch cannot end up with the other
+            // engine's headings over this engine's voices.
+            const groups = payload.engine === "sopro"
+                ? [["Your voices", payload.voices]]
+                : [
+                    ["Official — American English",
+                     payload.voices.filter(function (v) { return v.official && v.language === "en-US"; })],
+                    ["Official — British English",
+                     payload.voices.filter(function (v) { return v.official && v.language === "en-GB"; })],
+                    ["Custom", payload.voices.filter(function (v) { return !v.official; })],
+                ];
             groups.forEach(function (group) {
                 if (!group[1].length) return;
                 const heading = document.createElement("div");
@@ -3421,6 +3666,20 @@
                         .then(function (payload) { applyVoices(holder, payload); });
                     return;
                 }
+                if (kind === "rebuild") {
+                    action.disabled = true;
+                    post(ROUTES.soproRebuild, {voice: voiceId}, holder)
+                        .then(function (payload) {
+                            action.disabled = false;
+                            applyVoices(holder, payload);
+                            if (payload && payload.audio) {
+                                unlock();
+                                play(base64ToBuffer(payload.audio))
+                                    .catch(function () { /* silent */ });
+                            }
+                        });
+                    return;
+                }
                 if (kind === "delete") {
                     if (!window.confirm("Delete this voice? This cannot be undone.")) return;
                     action.disabled = true;
@@ -3470,6 +3729,12 @@
         whenOnScreen(holder, function () {
             refreshVoices(holder);
             wireDelivery(holder);
+            // Only ever present when Sopro is the selected engine, because the
+            // markup they wire is only rendered then. Both are no-ops on a
+            // Kokoro page rather than branches on the engine -- absence is the
+            // scoping (section 5).
+            wireSoproClone(holder);
+            wireLab(holder);
         });
     }
 
@@ -3601,7 +3866,17 @@
 
     function applyVoices(holder, payload) {
         if (payload && payload.error) sayInHolder(holder, payload.error);
-        if (payload && payload.voices) paintVoices(holder, payload);
+        if (!payload) return;
+        // The document was built for one engine and the server is answering for
+        // another, which means somebody switched in a different tab. Reloading
+        // is the only correct response: painting this answer into markup built
+        // for the other engine is exactly the mixed surface the design forbids.
+        const mine = holder.getAttribute("data-mc-voice-engine-id");
+        if (payload.engine && mine && payload.engine !== mine) {
+            window.location.reload();
+            return;
+        }
+        if (payload.voices) paintVoices(holder, payload);
     }
 
     function refreshVoices(holder) {
@@ -3609,6 +3884,363 @@
             applyVoices(holder, payload);
         }).catch(function () { /* the next paint tries again */ });
         refreshCloning(holder);
+    }
+
+    // -- Sopro: making a voice from a recording -------------------------------- //
+    //
+    // Sopro's clone is not Storytime's. There is no separate bundle to install,
+    // no background job to poll and nothing to abort: preparing a reference is
+    // part of the model's ordinary capability, it runs in the same worker that
+    // will later speak the voice, and it takes seconds. So this is one request
+    // that returns the finished voice and an audition of it -- and the audition
+    // is played immediately, because the point of validating through the
+    // production path is that the user hears what Conversation will produce.
+
+    let soproRecorder = null;
+    let soproRecording = null;
+
+    function soproForm(holder) {
+        return holder ? holder.querySelector("[data-mc-voice-sopro-form]") : null;
+    }
+
+    function wireSoproClone(holder) {
+        const form = soproForm(holder);
+        if (!form || form.dataset.mcVoiceWired === "1") return;
+        form.dataset.mcVoiceWired = "1";
+
+        const record = form.querySelector("[data-mc-voice-sopro-record]");
+        if (record) {
+            record.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                if (soproRecorder) {
+                    stopSoproRecording(form, record);
+                    return;
+                }
+                startSoproRecording(form, record);
+            });
+        }
+        const create = form.querySelector("[data-mc-voice-sopro-create]");
+        if (create) {
+            create.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                createSoproVoice(holder, form, create);
+            });
+        }
+    }
+
+    // Reuses the capture primitives dictation uses -- `startCapture`,
+    // `releaseCapture`, `resample` and `encodeWav` -- and deliberately not the
+    // dictation *flow*: this recording is never sent to Whisper, never reaches
+    // the composer, and is not bounded by the dictation gesture's timings.
+    //
+    // It is also not downsampled to 16 kHz on the way out. Dictation resamples
+    // because Whisper wants 16 kHz and everything above 8 kHz is wasted upload;
+    // a voice reference is the one recording where that band is the point, so
+    // this sends the microphone's own rate and lets the server produce Sopro's
+    // canonical 24 kHz from it.
+
+    const SOPRO_MAX_SECONDS = 20;
+
+    function startSoproRecording(form, button) {
+        const note = form.querySelector("[data-mc-voice-sopro-recording]");
+        if (capture) {
+            if (note) note.textContent = "The microphone is already in use for dictation.";
+            return;
+        }
+        unlock();
+        startCapture(null, true).then(function (state) {
+            soproRecorder = state;
+            soproRecording = null;
+            button.textContent = "Stop recording";
+            if (note) note.textContent = "Recording…";
+            // Stopped for them at the top of the supported window. A microphone
+            // left open by somebody who walked away is the failure this bound
+            // exists for, and twenty seconds is the longest reference Sopro
+            // uses anyway.
+            window.setTimeout(function () {
+                if (soproRecorder === state) stopSoproRecording(form, button);
+            }, (SOPRO_MAX_SECONDS + 1) * 1000);
+        }).catch(function (error) {
+            if (note) note.textContent = captureFailure(error);
+        });
+    }
+
+    function stopSoproRecording(form, button) {
+        const note = form.querySelector("[data-mc-voice-sopro-recording]");
+        const state = soproRecorder;
+        soproRecorder = null;
+        button.textContent = "Record here";
+        if (!state) return;
+        let samples;
+        try {
+            samples = resample(state.chunks || [], 0, 0);
+        } catch (error) {
+            samples = null;
+        }
+        releaseCapture(state);
+        if (!samples || !samples.length) {
+            if (note) note.textContent = "Nothing was recorded.";
+            return;
+        }
+        soproRecording = encodeWav(samples, state.rate);
+        const seconds = samples.length / (state.rate || 1);
+        if (note) note.textContent = "Recorded " + seconds.toFixed(1) + " s";
+    }
+
+    function createSoproVoice(holder, form, button) {
+        const name = form.querySelector("[data-mc-voice-sopro-name]");
+        const language = form.querySelector("[data-mc-voice-sopro-language]");
+        const file = form.querySelector("[data-mc-voice-sopro-file]");
+        const chosen = file && file.files && file.files[0];
+        const say = function (text) {
+            const status = holder.querySelector("[data-mc-voice-sopro-clone-status]");
+            if (status) status.textContent = text || "";
+        };
+        if (!name || !(name.value || "").trim()) {
+            say("Give the voice a name.");
+            return;
+        }
+        if (!chosen && !soproRecording) {
+            say("Record something or choose a WAV file first.");
+            return;
+        }
+        button.disabled = true;
+        say("Preparing the voice…");
+        const body = new FormData();
+        body.append("name", name.value);
+        body.append("language", language ? language.value : "");
+        body.append("reference", chosen
+            ? chosen
+            : new Blob([soproRecording], {type: "audio/wav"}), "reference.wav");
+        fetch(url(ROUTES.soproClone), {
+            method: "POST",
+            credentials: "same-origin",
+            headers: headers({}, holder),
+            body: body,
+        }).then(refused).then(function (response) {
+            return response.json();
+        }).then(function (payload) {
+            button.disabled = false;
+            if (!payload || !payload.ok) {
+                say((payload && payload.error) || "That voice could not be created.");
+                return;
+            }
+            say("Created. Playing it back…");
+            name.value = "";
+            soproRecording = null;
+            applyVoices(holder, payload);
+            if (payload.audio) {
+                // The audition that validated the voice, played rather than
+                // regenerated. Regenerating it would be playing a different
+                // take than the one the registry commit was based on.
+                unlock();
+                play(base64ToBuffer(payload.audio)).catch(function () { /* silent */ });
+            }
+        }).catch(function () {
+            button.disabled = false;
+            say("That voice could not be created.");
+        });
+    }
+
+    function base64ToBuffer(text) {
+        const binary = window.atob(String(text || ""));
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) {
+            bytes[index] = binary.charCodeAt(index);
+        }
+        return bytes.buffer;
+    }
+
+    // -- the Voice Lab --------------------------------------------------------- //
+    //
+    // Experimental, and built so it cannot be anything else. There is no save,
+    // no apply and no promote here, and there is no route it could call if
+    // there were: the session lives in the server's memory, it is dropped when
+    // the engine changes or the page is reloaded, and every audition returns a
+    // WAV rather than changing anything.
+
+    let labToken = "";
+    let labPending = 0;
+
+    function labPanel(holder) {
+        return holder ? holder.querySelector("[data-mc-voice-lab]") : null;
+    }
+
+    function wireLab(holder) {
+        const panel = labPanel(holder);
+        if (!panel || panel.dataset.mcVoiceWired === "1") return;
+        panel.dataset.mcVoiceWired = "1";
+
+        // Opened on first expand rather than on page load: the Lab needs the
+        // worker to read a voice's saved style controls, and starting Sopro
+        // because somebody scrolled past a closed `<details>` would be a
+        // settings page that quietly allocates a Torch runtime.
+        panel.addEventListener("toggle", function () {
+            if (panel.open && !labToken) openLab(holder, panel, "");
+        });
+        panel.addEventListener("input", function (event) {
+            const slider = event.target.closest("[data-mc-voice-lab-input]");
+            if (slider) {
+                showLabValue(panel, slider.getAttribute("data-mc-voice-lab-input"),
+                             slider.value);
+                return;
+            }
+            const weight = event.target.closest("[data-mc-voice-lab-blend-weight]");
+            if (weight) {
+                const output = panel.querySelector("[data-mc-voice-lab-blend-value]");
+                if (output) output.textContent = Number(weight.value).toFixed(2);
+            }
+        });
+        panel.addEventListener("change", function (event) {
+            if (event.target.closest("[data-mc-voice-lab-voice]")) {
+                openLab(holder, panel, panel.querySelector(
+                    "[data-mc-voice-lab-voice]").value);
+                return;
+            }
+            sendLab(holder, panel);
+        });
+        panel.addEventListener("click", function (event) {
+            const play_ = event.target.closest("[data-mc-voice-lab-play]");
+            if (play_) {
+                if (event.preventDefault) event.preventDefault();
+                playLab(holder, panel, play_.getAttribute("data-mc-voice-lab-play"), play_);
+                return;
+            }
+            if (event.target.closest("[data-mc-voice-lab-reset]")) {
+                if (event.preventDefault) event.preventDefault();
+                post(ROUTES.labReset, {token: labToken}, holder).then(function (payload) {
+                    paintLab(panel, payload && payload.session);
+                });
+            }
+        });
+    }
+
+    function openLab(holder, panel, voiceId) {
+        post(ROUTES.lab, {token: "", voice: voiceId || ""}, holder).then(function (payload) {
+            if (!payload || !payload.ok) {
+                setText(panel, "[data-mc-voice-lab-metrics]",
+                        (payload && payload.error) || "The Voice Lab could not be opened.");
+                return;
+            }
+            labToken = payload.session.token;
+            fillLabVoices(panel, payload.panel, payload.session);
+            paintLab(panel, payload.session);
+        });
+    }
+
+    function fillLabVoices(panel, info, session) {
+        [["[data-mc-voice-lab-voice]", false], ["[data-mc-voice-lab-blend-voice]", true]]
+            .forEach(function (pair) {
+                const select = panel.querySelector(pair[0]);
+                if (!select) return;
+                const was = select.value;
+                select.textContent = "";
+                if (pair[1]) {
+                    const none = document.createElement("option");
+                    none.value = "";
+                    none.textContent = "No blend";
+                    select.appendChild(none);
+                }
+                (info.voices || []).forEach(function (entry) {
+                    const option = document.createElement("option");
+                    option.value = entry.id;
+                    option.textContent = entry.label;
+                    select.appendChild(option);
+                });
+                select.value = pair[1] ? was : (session.voice_id || was);
+            });
+    }
+
+    function readLab(panel) {
+        const deltas = [];
+        Array.prototype.forEach.call(
+            panel.querySelectorAll("[data-mc-voice-lab-input]"), function (input) {
+                deltas[Number(input.getAttribute("data-mc-voice-lab-input"))] =
+                    Number(input.value);
+            });
+        const blendVoice = panel.querySelector("[data-mc-voice-lab-blend-voice]");
+        const weight = panel.querySelector("[data-mc-voice-lab-blend-weight]");
+        const blend = {voice_id: blendVoice ? blendVoice.value : "",
+                       weight: weight ? Number(weight.value) : 0};
+        Array.prototype.forEach.call(
+            panel.querySelectorAll("[data-mc-voice-lab-blend-field]"), function (box) {
+                blend[box.getAttribute("data-mc-voice-lab-blend-field")] = box.checked;
+            });
+        const fixed = panel.querySelector("[data-mc-voice-lab-fixed-seed]");
+        const seed = panel.querySelector("[data-mc-voice-lab-seed]");
+        const text = panel.querySelector("[data-mc-voice-lab-text]");
+        const voice = panel.querySelector("[data-mc-voice-lab-voice]");
+        return {
+            voice_id: voice ? voice.value : "",
+            deltas: deltas,
+            blend: blend,
+            seed: fixed && fixed.checked && seed ? Number(seed.value) : null,
+            text: text ? text.value : "",
+        };
+    }
+
+    function sendLab(holder, panel) {
+        if (!labToken) return Promise.resolve(null);
+        labPending += 1;
+        return post(ROUTES.labUpdate, {token: labToken, values: readLab(panel)}, holder)
+            .then(function (payload) {
+                labPending -= 1;
+                if (payload && payload.session) paintLab(panel, payload.session, true);
+                return payload;
+            }).catch(function () { labPending -= 1; return null; });
+    }
+
+    function paintLab(panel, session, keepInputs) {
+        if (!panel || !session) return;
+        if (!keepInputs) {
+            (session.deltas || []).forEach(function (value, index) {
+                const input = panel.querySelector(
+                    '[data-mc-voice-lab-input="' + index + '"]');
+                if (input && document.activeElement !== input) input.value = value;
+                showLabValue(panel, index, value);
+            });
+            const text = panel.querySelector("[data-mc-voice-lab-text]");
+            if (text && document.activeElement !== text) text.value = session.text || "";
+        }
+        const metrics = panel.querySelector("[data-mc-voice-lab-metrics]");
+        const last = session.last || {};
+        if (metrics) {
+            metrics.textContent = last.side
+                ? (last.side === "a" ? "A" : "B") + " — first audio "
+                    + last.first_audio_ms + " ms, total " + last.elapsed_ms + " ms, "
+                    + (last.audio_ms / 1000).toFixed(1) + " s of speech, RTF "
+                    + last.rtf + ", " + last.chunks + " chunks"
+                : "";
+        }
+    }
+
+    function showLabValue(panel, index, value) {
+        const output = panel.querySelector('[data-mc-voice-lab-value="' + index + '"]');
+        if (output) output.textContent = Number(value).toFixed(2);
+    }
+
+    function playLab(holder, panel, side, button) {
+        if (!labToken) return;
+        button.disabled = true;
+        sendLab(holder, panel).then(function () {
+            return post(ROUTES.labPlay, {token: labToken, side: side}, holder);
+        }).then(function (payload) {
+            button.disabled = false;
+            if (!payload || !payload.ok) {
+                setText(panel, "[data-mc-voice-lab-metrics]",
+                        (payload && payload.error) || "That audition could not be played.");
+                return;
+            }
+            paintLab(panel, payload.session, true);
+            if (payload.audio) {
+                unlock();
+                play(base64ToBuffer(payload.audio)).catch(function () { /* silent */ });
+            }
+        }).catch(function () {
+            button.disabled = false;
+            setText(panel, "[data-mc-voice-lab-metrics]",
+                    "That audition could not be played.");
+        });
     }
 
     // -- cloning --------------------------------------------------------------- //

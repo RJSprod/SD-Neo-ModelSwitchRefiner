@@ -389,12 +389,16 @@ class TestTheSettingsSection:
         import model_chain  # noqa: F401
 
         registered = {name for name in host.shared.options_templates
-                      if name.startswith("model_chain_voice_")}
+                      if name.startswith("model_chain_voice_")
+                      or name == "model_chain_tts_engine"}
         import mc_voice_clone
+        import mc_voice_engines
         import mc_voice_models
         import mc_voice_paths
         import mc_voice_profile
         import mc_voice_registry
+        import mc_voice_sopro
+        import mc_voice_sopro_profile
 
         known = set(mc_voice_state.OPTIONS) | set(mc_voice_models.OPTIONS.values()) | {
             mc_voice_paths.OPT_ROOT,
@@ -405,8 +409,19 @@ class TestTheSettingsSection:
             mc_voice_profile.OPT_PITCH,
             mc_voice_profile.OPT_GAIN,
             mc_voice_profile.OPT_PAUSE,
+            # The engine selector, which is deliberately not under this
+            # feature's own prefix -- the design intent names the key.
+            mc_voice_engines.OPT_ENGINE,
+            # Sopro's own eight, named apart from Kokoro's four so that editing
+            # one engine's delivery cannot reach the other's storage.
+            mc_voice_sopro.OPT_VOICE,
+            mc_voice_sopro.OPT_PRECISION,
+            mc_voice_sopro.OPT_STEPS,
+            mc_voice_sopro.OPT_CHUNK,
             "model_chain_voice_status",
             "model_chain_voice_voices",
+        } | set(mc_voice_sopro_profile.OPTIONS.values()) | {
+            mc_voice_sopro_profile.OPT_LANGUAGE,
         }
         assert registered == known, (
             "a voice option is registered and never read, or read and never registered")
@@ -517,8 +532,13 @@ class TestACharactersVoiceReachesTheTurn:
 
         monkeypatch.setattr(mc_voice_registry, "resolve", resolve)
         mc_voice_ui.begin_speech(character=self.character(voice="official:af_nicole"))
+        # The registry is still spoken to in its own dialect -- the adapter
+        # strips the backend before it gets there -- and what reaches the turn
+        # is the backend-qualified id the shared protocol carries (T-PROTO-1).
         assert asked == ["official:af_nicole"]
-        assert speaking["voice_id"] == "official:af_nicole"
+        assert speaking["voice_id"] == "kokoro:official:af_nicole"
+        assert speaking["engine"] == "kokoro"
+        assert speaking["handle"] == 6
 
     def test_a_character_with_no_voice_asks_for_the_default(self, speaking, monkeypatch):
         import mc_voice_registry

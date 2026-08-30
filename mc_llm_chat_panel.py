@@ -2377,6 +2377,58 @@ def _editor_fields(character, editing: str, note: str, kind: str = "info") -> li
             _face_value(_character_face(character.name))] + _voice_fields(character)
 
 
+VOICE_ENGINE_FIELDS = ("voice", "voice_speed", "voice_pitch", "voice_gain", "voice_pause",
+                       "sopro_voice", "sopro_speed", "sopro_pitch", "sopro_gain",
+                       "sopro_pause", "sopro_temperature", "sopro_top_p", "sopro_top_k",
+                       "sopro_language")
+"""Every field on a character that belongs to one text-to-speech engine.
+
+Named here because a save has to carry *all* of them forward and only edit the
+active engine's -- and a list built by remembering to add to it is a list that
+loses somebody's Sopro voice the first time a field is added.
+"""
+
+
+def _voice_engine_fields(existing_name: str, voice, delivery: dict) -> dict:
+    """The character's voice fields after an edit, scoped to the active engine.
+
+    The character being edited is read back from the store first, so the engine
+    the user is *not* looking at keeps exactly what it had. A save that built
+    these from the editor alone would silently clear the other engine's voice
+    every time somebody changed a name -- which is I-3 broken by an ordinary,
+    invisible action nobody would connect to the cause.
+
+    Never fatal: a store that will not answer produces a character with only the
+    engine that was edited, which is the same thing a brand-new character has.
+    """
+    import mc_voice_engines as engines
+    from prompt_master.chat.characters import Character
+
+    found = {}
+    try:
+        character = _characters().load(str(existing_name or "").strip())
+    except Exception:
+        character = None
+    if character is not None:
+        for name in VOICE_ENGINE_FIELDS:
+            found[name] = getattr(character, name, None)
+    try:
+        active = engines.active()
+        # Qualified here, at the one place that knows which engine is selected.
+        # A picker sends whatever the voice list gave it, and a list painted
+        # before this build -- or a character imported from an oobabooga file --
+        # sends the engine's own spelling. Both become the backend-qualified id
+        # the shared turn contract carries (I-10).
+        found.update(Character.voice_fields(
+            active, engines.qualify(str(voice or "").strip(), active), delivery))
+    except Exception:
+        logger.warning("Model Chain: could not scope a character's voice to the active "
+                       "engine", exc_info=True)
+        found.update(Character.voice_fields("kokoro", str(voice or "").strip(), delivery))
+    return {name: found.get(name) if name in found else None
+            for name in VOICE_ENGINE_FIELDS}
+
+
 def _voice_fields(character) -> list:
     """The voice controls for ``character``, in the order they are wired.
 
@@ -2519,19 +2571,23 @@ def _save_character(editing, name, context, greeting, system, temperature, top_p
                           f"another name, or press Edit to change that one.", "warn")]
 
     blank = _blank_character()
-    # Four values or four ``None``s, and the difference is the checkbox: a
-    # character with no delivery of its own follows Settings → Voice Chat, and
-    # keeps following it when that changes. See mc_voice_ui.character_profile.
+    # Values or ``None``s, and the difference is the checkbox: a character with
+    # no delivery of its own follows Settings → Voice Chat, and keeps following
+    # it when that changes. See mc_voice_ui.character_profile.
     delivery = mc_voice_ui.character_profile(voice_custom, voice_values)
+    # Scoped to the *selected* engine, and the other engine's voice and profile
+    # are copied through unread. Editing Ada while Sopro is selected cannot
+    # change what Ada sounds like on Kokoro (I-3), and it does not give her a
+    # Sopro profile she never asked for either -- absence is what inheritance is
+    # made of. See Character.voice_fields and _voice_engine_fields below.
+    engine_fields = _voice_engine_fields(editing or wanted, voice, delivery)
     character = Character(
         name=wanted, context=context or "", greeting=greeting or "",
         temperature=_decimal(temperature, blank.temperature),
         top_p=_decimal(top_p, blank.top_p),
         max_reply_tokens=_number(reply_tokens, blank.max_reply_tokens),
         seed=_number(seed, blank.seed), system=system or "",
-        voice=str(voice or "").strip(),
-        voice_speed=delivery.get("speed"), voice_pitch=delivery.get("pitch"),
-        voice_gain=delivery.get("gain"), voice_pause=delivery.get("pause"))
+        **engine_fields)
     try:
         store.save(character, previous_name=None if creating else editing)
     except Exception as exc:

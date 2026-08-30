@@ -2977,6 +2977,21 @@ is anything you or the model said.
 bundle ships, chosen in Settings and auditioned there. On Linux, an optional
 offline cloning tool can add your own.
 
+**And there is a second engine, if you want one.** Sopro V2 Turbo is an
+optional text-to-speech engine that makes a voice from five to twenty seconds of
+you talking — no training job, no separate cloning tool, and about a minute on a
+Windows CPU from pressing record to hearing yourself read a reply. It installs
+itself, runs in a PyTorch runtime of its own that never touches Kokoro's or
+Forge's, and is CPU-only like everything else here.
+
+One engine speaks at a time. Choosing one changes which voice settings appear
+everywhere — this page, the Voice menu, every character — and the other engine's
+controls are *gone from the page* rather than hidden on it. Its voices, default
+and per-character settings are kept exactly as they were and come back when you
+choose it again. Dictation is not part of the choice: Whisper has its own model
+and its own process, and switching engines does not reload it or touch your
+microphone settings.
+
 ### Setting it up
 
 **Settings → Voice Chat** has two downloads:
@@ -3108,6 +3123,73 @@ had ever spoken had been spoken by Alloy. Upgrading corrects it.
 
 A reply snapshots its voice when it starts, so changing the default mid-answer
 applies to the next one rather than switching voices mid-sentence.
+
+### Sopro V2: making a voice from a recording
+
+**Settings → Voice Chat → Text-to-speech engine** has two cards. Choosing
+**Sopro V2** replaces every Kokoro control on the page with Sopro's, cancels any
+speech, and unloads whichever engine was resident — so the one you are not using
+costs nothing but disk.
+
+You can choose it before installing it. That is the state in which its own page
+explains itself and offers **Install Sopro**: about 141 MB of pinned wheels
+(Sopro 2.0.5, PyTorch 2.11.0 CPU, torchaudio, NumPy, safetensors, SentencePiece,
+soundfile) unpacked into an interpreter of its own, then the model artifacts.
+Both halves have an *install from a folder you downloaded yourself* path beside
+them, for a machine that cannot reach PyPI or a proxy that will not pass a
+hundred-megabyte binary — and what you supply is checked against the same hashes
+the download is.
+
+Nothing is promoted until it has proved itself. The staged runtime has to import,
+report the CPU, and pass a fixed-seed attention check at the exact thread policy
+it will run at — because a PyTorch build whose CPU attention is not repeatable
+does not produce slightly worse speech, it produces speech that differs between
+two identical requests, and that is a bug nobody can reproduce and everybody
+blames on the model.
+
+Then **Clone voice**: a name, an optional language hint, and five to twenty
+seconds of one clear speaker — recorded here or a WAV you already have. The
+recording is checked, normalised, prepared, written, *read back from the files it
+just wrote*, and auditioned through exactly the path Conversation uses. Only then
+is the voice saved, and the audition you hear is that one rather than a fresh
+take. If any of it fails, nothing is registered and the recording is not left
+behind.
+
+The recording is kept beside the voice on purpose, so a future Sopro update can
+rebuild it without asking you to record yourself again. Deleting the voice
+deletes the recording.
+
+**Speed on Sopro is not the same thing as speed on Kokoro**, and the page says
+so. Kokoro takes a speaking rate; Sopro has no such input, so Voice Chat
+time-scales its output instead — without changing the pitch, and carrying the
+processing across the pieces Sopro streams so there is no click between them.
+Pitch is separate and composes with it: changing Speed at Pitch 0 does not
+transpose the voice, and changing Pitch does not change how long the sentence
+takes. Measured on a test tone, a 220 Hz fundamental stays at 219.9 Hz from 0.8×
+to 1.5×.
+
+*Variation*, *Top-p* and *Top-k* are Sopro's own sampling controls. They change
+how much one take differs from another. They are **not** emotion, warmth or
+energy controls — the model has no such input, and a slider claiming to be one
+would be making a promise nobody has tested. Left alone they follow the model's
+own configuration.
+
+### The Voice Lab (experimental)
+
+Sopro's speaker encoder produces eight learned numbers it calls `style_ctrl`.
+Nobody has measured what they mean. **Settings → Voice Chat → Voice Lab** is
+where you can find out: eight neutral sliders, a *Conditioning Blend* that
+recombines two voices' speaker conditioning, a fixed seed, and A/B playback so a
+difference you hear is attributable to the control you moved rather than to
+sampling noise.
+
+Nothing in it can be saved. There is no *Apply*, no *Promote* and no route one
+could call if there were: a Lab session lives in memory, is dropped when you
+reload the page or switch engines, works on copies, and writes no setting, no
+character and no voice file. The sliders are numbered rather than named, and
+they stay numbered until repeatable listening tests across several voices
+justify names — naming them now would be inventing a product claim about eight
+numbers nobody has characterised.
 
 ### From an Android phone
 
@@ -3501,14 +3583,26 @@ mc_voice_models.py    the voice trust root: manifest, verified install, status
 mc_voice_state.py     the two persisted switches, and the one place they live
 mc_voice_segment.py   where a reply may safely be cut so a sentence can be spoken
 mc_voice_turn.py      one reply on its way to a speaker: identity, bounds, stopping
-mc_voice_runtime.py   the speech worker process, its pipe, and its five exits
-mc_voice_registry.py  which voices exist, their names, and which number each is
-mc_voice_bank.py      the Kokoro voice bank: metadata, layout, atomic transactions
-mc_voice_clone.py     optional offline cloning, contained and never left running
+mc_voice_engines.py   which engine is selected, and what a voice id means now
 mc_voice_api.py       the browser routes, their auth parity and the audio stream
 mc_voice_ui.py        the Voice chip, overlay and microphone in Conversation
-voice_worker/worker.py     the CPU sidecar: framed stdin/stdout, no network
-voice/managed-voice-models.json  the pinned voice artifact manifest (data only)
+
+mc_voice_kokoro.py    Kokoro behind the facade: qualified ids in, sherpa SIDs in
+mc_voice_runtime.py   the Kokoro worker process, its pipe, and its five exits
+mc_voice_registry.py  which voices exist, their names, and which number each is
+mc_voice_bank.py      the Kokoro voice bank: metadata, layout, atomic transactions
+mc_voice_profile.py   Kokoro's delivery: speed, pitch, volume, pacing
+mc_voice_clone.py     optional offline cloning, contained and never left running
+voice_worker/worker.py     the Kokoro sidecar: framed stdin/stdout, no network
+voice/managed-voice-models.json  the pinned Kokoro artifact manifest (data only)
+
+mc_voice_sopro.py     Sopro: install, status, voice library, clone transaction
+mc_voice_sopro_runtime.py  the Sopro worker process, and the same five exits again
+mc_voice_sopro_profile.py  Sopro's delivery, and which half of it is Sopro's own
+mc_voice_lab.py       the experimental Lab, and why it cannot become a setting
+sopro_worker/worker.py     the Sopro sidecar: the only file that imports Torch
+voice/managed-sopro-models.json  the pinned Sopro closure (data only)
+tools/pin_sopro_models.py  resolves that closure from PyPI (maintainers only)
 mc_creative_krea.py   Creative Mode: settings, roll history, one roll
 mc_creative_panel.py  the Creative control surface, built once for both surfaces
 mc_creative_profiles.py    named Creative configurations and the chosen default
@@ -3557,13 +3651,18 @@ The voice modules stack the same way, and what matters about them is the arrows
 that are *not* there:
 
 ```
-scripts/model_chain.py  ->  mc_voice_api  ->  mc_voice_runtime  ->  voice_worker
-mc_llm_chat_panel       ->  mc_voice_ui        mc_voice_models        (a pipe, a
-                                |                     |               CPU sidecar)
-                          mc_voice_state        mc_voice_paths
+scripts/model_chain.py  ->  mc_voice_api  ->  mc_voice_engines  -+-> mc_voice_runtime
+mc_llm_chat_panel       ->  mc_voice_ui                          |      -> voice_worker
+                                |                                |         (sherpa)
+                          mc_voice_state                         |
+                          mc_voice_paths                         +-> mc_voice_sopro_runtime
+                                                                        -> sopro_worker
+                                                                           (torch)
 
-mc_voice_*   -X->  mc_memory      mc_broker      mc_plan      mc_llm_runtime
-voice_worker -X->  Forge packages     CUDA          the Internet
+mc_voice_*     -X->  mc_memory    mc_broker    mc_plan    mc_llm_runtime
+voice_worker   -X->  Forge packages    CUDA    the Internet    sopro_worker
+sopro_worker   -X->  Forge packages    CUDA    the Internet    voice_worker
+mc_voice_engines -X->  the speech-to-text model, its process, its quality tier
 ```
 
 Voice is not a second model-residency domain. It publishes nothing to the
@@ -3573,11 +3672,25 @@ module with a network transport in it, so "no Internet after setup" is a propert
 of the import graph rather than a promise; `test_voice_independence.py` reads
 that graph and fails on any of the arrows above.
 
-`mc_voice_runtime` duplicates about forty lines of Windows job-object code from
-`mc_llm_runtime` rather than sharing it. That is the deliberate half of the
-trade: a neutral helper would have meant editing the file holding the proven
-llama-server shutdown in order to add a speech feature, which is how a working
-shutdown path acquires a regression.
+The two engines meet at `mc_voice_engines` and nowhere below it. They start
+different interpreters out of different dependency closures, and neither
+worker's file can import the other's — which is what makes "Sopro's PyTorch
+never reaches Kokoro or Forge" a property of the import graph rather than a
+promise. They share the wire format by *agreement* rather than by import, and
+`test_voice_sopro_worker.py` holds that agreement to byte equality.
+
+The last arrow is the one an optional second engine makes easiest to draw by
+accident: speech-to-text is not part of the engine selector. Whisper has its own
+process, its own closure and its own quality tier, and `test_voice_engines.py`
+switches engines repeatedly and proves none of them moved.
+
+`mc_voice_runtime` and `mc_voice_sopro_runtime` each duplicate about forty lines
+of Windows job-object code rather than sharing it — from `mc_llm_runtime` and
+from each other. That is the deliberate half of the trade: a neutral helper
+would have meant editing the file holding the proven llama-server shutdown in
+order to add a speech feature, and then editing the file holding the proven
+Kokoro shutdown in order to add an optional one. That is how a working shutdown
+path acquires a regression.
 
 `mc_memory.py` does not import `mc_broker`, and that is deliberate rather than
 incidental: the image half stays importable, testable and correct on an
@@ -3688,7 +3801,7 @@ including that the three 26B quant tiers each get their own profile, that only
 the two smaller ones buy their cache back with q8_0, and that choosing a
 different quantisation moves no sampler.
 
-Voice Chat adds twelve files, and the ones worth naming are the three that
+Voice Chat adds seventeen files, and the ones worth naming are the four that
 defend an invariant rather than a behaviour.
 
 `test_voice_shutdown.py` is a release gate. Every test in it starts a real parent
@@ -3700,6 +3813,24 @@ the closing pipe is not something it will look at. Nothing is mocked on either
 side, because the whole question is what the operating system does when there is
 nothing left to ask, and the answer has to be "no worker" every time. It finishes
 by reading the process list for anything carrying the worker's own marker.
+
+`test_voice_sopro_shutdown.py` is the same gate for the second engine, and it is
+a separate file rather than a parametrisation because Sopro is a second process
+with a second lifecycle out of a second closure — and the one thing a release
+gate must never do is assume a guarantee proved for one process holds for
+another that shares none of its code. It also starts *both* workers and kills
+the parent, because a state the product does not allow is exactly the state
+worth proving the exit path survives.
+
+That file is worth one more paragraph, because it was wrong twice and both
+failures looked like success. The fake Sopro worker did not arrange
+parent-death containment at all, so every test in it passed while proving
+nothing; and once that was fixed, the kill was still landing while the worker
+was blocked on a read, where EOF ends it perfectly well and the OS mechanism is
+never exercised. Both are fixed — the fake arranges containment the way the real
+one does, and the test waits for a marker the worker writes on entering its busy
+loop — and the gate was then re-run with the real worker's `prctl` call removed,
+to watch it fail. A containment test that cannot fail is not a containment test.
 
 `test_voice_privacy.py` puts a sentinel phrase through a dictation and a
 synthesis, reads back everything the extension logged, and asserts the sentinel
@@ -3753,6 +3884,27 @@ is no sign-in gate: a WebUI with `--gradio-auth` configured still serves a page
 that carries the token, and no route can answer 401. `test_voice_ui.py` walks the built
 Conversation panel and asserts the speech marker is attached with `.success()`
 rather than `.then()`, on all six reply paths, as one shared handler.
+`test_voice_engines.py`, `test_voice_engine_surfaces.py` and
+`test_voice_lab.py` defend the engine boundary from three sides. The first
+asserts the rules — one engine selected, no cross-engine fallback, per-engine
+state that cannot overwrite the other's, and a speech-to-text stack that does
+not move when the engine does. The second renders every surface on both engines
+and reads the markup and the payloads for leakage, because "absent rather than
+hidden" is only checkable by looking. The third moves every Lab control, runs
+auditions, and then hashes the production asset, reads back the default profile
+and resolves a Conversation turn to prove none of it went anywhere — including
+an assertion that the module has grown no `save`, `apply` or `promote`.
+
+`test_voice_sopro_worker.py` measures the delivery DSP rather than describing
+it. Sopro has no speaking-rate parameter, so Speed is Voice Chat's own
+time-scaling, and the obvious implementation transposes the voice. The test
+synthesizes a 220 Hz tone, pushes it through in deliberately awkward chunk
+sizes, and measures the fundamental at 0.8×, 1.0×, 1.25× and 1.5× — and again
+with pitch shifts composed on top. Speed must not move the fundamental, pitch
+must not move the duration, and the largest sample-to-sample step must stay
+where the source's own is, which is what "no click between streamed chunks"
+means when it is a number.
+
 `test_voice_independence.py` reads the import graph: no voice module may import
 the memory planner, the broker, the execution plan or the LLM runtime at any
 depth, only the model manager may import a network transport, and the worker

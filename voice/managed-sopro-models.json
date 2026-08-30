@@ -1,0 +1,656 @@
+{
+  "schema": 1,
+  "version": 1,
+  "runtime": {
+    "package": "sopro",
+    "import_name": "sopro",
+    "version": "2.0.5",
+    "torch_version": "2.11.0",
+    "torchaudio_version": "2.11.0",
+    "provider": "cpu",
+    "license": "Apache-2.0 (Sopro, Samuel Vitorino); BSD-3-Clause (PyTorch, torchaudio, NumPy); Apache-2.0 (safetensors, sentencepiece); BSD-3-Clause (soundfile, cffi, pycparser, MarkupSafe, networkx); BSD-3-Clause (Jinja2, fsspec); Unlicense (filelock); MIT (setuptools, sympy, mpmath, typing-extensions)",
+    "platforms": [
+      {
+        "id": "windows-x86_64-cp310",
+        "system": "windows",
+        "machines": [
+          "amd64",
+          "x86_64"
+        ],
+        "python": "3.10",
+        "artifacts": [
+          {
+            "filename": "sopro-2.0.5-py3-none-any.whl",
+            "local_name": "sopro-2.0.5-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/db/e3/fd952d780d8b50bb21a261ce8b3018a8d8460ded1c6def242af35922ebfc/sopro-2.0.5-py3-none-any.whl",
+            "bytes": 63491,
+            "sha256": "28c9150a42fc51027728685210b74e267658d252fbc065679bfa4d079d08d5fd"
+          },
+          {
+            "filename": "torch-2.11.0-cp310-cp310-win_amd64.whl",
+            "local_name": "torch-2.11.0-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/35/40/2d532e8c0e23705be9d1debce5bc37b68d59a39bda7584c26fe9668076fe/torch-2.11.0-cp310-cp310-win_amd64.whl",
+            "bytes": 114518313,
+            "sha256": "b3c712ae6fb8e7a949051a953fc412fe0a6940337336c3b6f905e905dac5157f"
+          },
+          {
+            "filename": "torchaudio-2.11.0-cp310-cp310-win_amd64.whl",
+            "local_name": "torchaudio-2.11.0-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/cf/f4/8ce2417eac66296e45b7aaa69858403fb6a52b1323f8635ec37b4b0f1fa3/torchaudio-2.11.0-cp310-cp310-win_amd64.whl",
+            "bytes": 328661,
+            "sha256": "7e2da1df4f6fe885c46db350a0dc90a0dff4b54541dff8846faa904d255e2bfe"
+          },
+          {
+            "filename": "numpy-2.2.6-cp310-cp310-win_amd64.whl",
+            "local_name": "numpy-2.2.6-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/a3/dd/4b822569d6b96c39d1215dbae0582fd99954dcbcf0c1a13c61783feaca3f/numpy-2.2.6-cp310-cp310-win_amd64.whl",
+            "bytes": 12904620,
+            "sha256": "f0fd6321b839904e15c46e0d257fdd101dd7f530fe03fd6359c1ea63738703f3"
+          },
+          {
+            "filename": "safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "local_name": "safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/1b/6d/3fba214c1e5e0f69991677ec3bc17023f0421776975e1de0c682dca475e2/safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "bytes": 355540,
+            "sha256": "096ec1a98435df7beb08853bb5aa9081a84f23d0adc67ed1a0a10550f608373f"
+          },
+          {
+            "filename": "sentencepiece-0.2.2-cp310-cp310-win_amd64.whl",
+            "local_name": "sentencepiece-0.2.2-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/26/83/c3547715c29b7e4c84a180a240267f7685dde6f9b981396f16b95405ec9d/sentencepiece-0.2.2-cp310-cp310-win_amd64.whl",
+            "bytes": 1245044,
+            "sha256": "1120e0791540615e650b2e9bea835bf38a7362455d8ab62dee7968219c2d79a0"
+          },
+          {
+            "filename": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+            "local_name": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/ed/97/b39c18ac1df45e755ca22b8b00e872929da5d107998a207a5e4ac831bfda/soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+            "bytes": 1021480,
+            "sha256": "299491d3499460fb1b74bb4bd78b57ffc2d243a5fafa7b6ec1b264875c78453e"
+          },
+          {
+            "filename": "cffi-2.0.0-cp310-cp310-win_amd64.whl",
+            "local_name": "cffi-2.0.0-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/33/fa/072dd15ae27fbb4e06b437eb6e944e75b068deb09e2a2826039e49ee2045/cffi-2.0.0-cp310-cp310-win_amd64.whl",
+            "bytes": 182790,
+            "sha256": "b18a3ed7d5b3bd8d9ef7a8cb226502c6bf8308df1525e1cc676c3680e7176739"
+          },
+          {
+            "filename": "pycparser-2.23-py3-none-any.whl",
+            "local_name": "pycparser-2.23-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a0/e3/59cd50310fc9b59512193629e1984c1f95e5c8ae6e5d8c69532ccc65a7fe/pycparser-2.23-py3-none-any.whl",
+            "bytes": 118140,
+            "sha256": "e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934"
+          },
+          {
+            "filename": "filelock-3.20.0-py3-none-any.whl",
+            "local_name": "filelock-3.20.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/76/91/7216b27286936c16f5b4d0c530087e4a54eead683e6b0b73dd0c64844af6/filelock-3.20.0-py3-none-any.whl",
+            "bytes": 16054,
+            "sha256": "339b4732ffda5cd79b13f4e2711a31b0365ce445d95d243bb996273d072546a2"
+          },
+          {
+            "filename": "typing_extensions-4.15.0-py3-none-any.whl",
+            "local_name": "typing_extensions-4.15.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/18/67/36e9267722cc04a6b9f15c7f3441c2363321a3ea07da7ae0c0707beb2a9c/typing_extensions-4.15.0-py3-none-any.whl",
+            "bytes": 44614,
+            "sha256": "f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548"
+          },
+          {
+            "filename": "setuptools-81.0.0-py3-none-any.whl",
+            "local_name": "setuptools-81.0.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/e1/e3/c164c88b2e5ce7b24d667b9bd83589cf4f3520d97cad01534cd3c4f55fdb/setuptools-81.0.0-py3-none-any.whl",
+            "bytes": 1062021,
+            "sha256": "fdd925d5c5d9f62e4b74b30d6dd7828ce236fd6ed998a08d81de62ce5a6310d6"
+          },
+          {
+            "filename": "sympy-1.14.0-py3-none-any.whl",
+            "local_name": "sympy-1.14.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
+            "bytes": 6299353,
+            "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5"
+          },
+          {
+            "filename": "mpmath-1.3.0-py3-none-any.whl",
+            "local_name": "mpmath-1.3.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl",
+            "bytes": 536198,
+            "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c"
+          },
+          {
+            "filename": "networkx-3.4.2-py3-none-any.whl",
+            "local_name": "networkx-3.4.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/b9/54/dd730b32ea14ea797530a4479b2ed46a6fb250f682a9cfb997e968bf0261/networkx-3.4.2-py3-none-any.whl",
+            "bytes": 1723263,
+            "sha256": "df5d4365b724cf81b8c6a7312509d0c22386097011ad1abe274afd5e9d3bbc5f"
+          },
+          {
+            "filename": "jinja2-3.1.6-py3-none-any.whl",
+            "local_name": "jinja2-3.1.6-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl",
+            "bytes": 134899,
+            "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"
+          },
+          {
+            "filename": "markupsafe-3.0.3-cp310-cp310-win_amd64.whl",
+            "local_name": "markupsafe-3.0.3-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/d6/25/55dc3ab959917602c96985cb1253efaa4ff42f71194bddeb61eb7278b8be/markupsafe-3.0.3-cp310-cp310-win_amd64.whl",
+            "bytes": 15056,
+            "sha256": "c4ffb7ebf07cfe8931028e3e4c85f0357459a3f9f9490886198848f4fa002ec8"
+          },
+          {
+            "filename": "fsspec-2025.9.0-py3-none-any.whl",
+            "local_name": "fsspec-2025.9.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/47/71/70db47e4f6ce3e5c37a607355f80da8860a33226be640226ac52cb05ef2e/fsspec-2025.9.0-py3-none-any.whl",
+            "bytes": 199289,
+            "sha256": "530dc2a2af60a414a832059574df4a6e10cce927f6f4a78209390fe38955cfb7"
+          }
+        ]
+      },
+      {
+        "id": "windows-x86_64-cp311",
+        "system": "windows",
+        "machines": [
+          "amd64",
+          "x86_64"
+        ],
+        "python": "3.11",
+        "artifacts": [
+          {
+            "filename": "sopro-2.0.5-py3-none-any.whl",
+            "local_name": "sopro-2.0.5-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/db/e3/fd952d780d8b50bb21a261ce8b3018a8d8460ded1c6def242af35922ebfc/sopro-2.0.5-py3-none-any.whl",
+            "bytes": 63491,
+            "sha256": "28c9150a42fc51027728685210b74e267658d252fbc065679bfa4d079d08d5fd"
+          },
+          {
+            "filename": "torch-2.11.0-cp311-cp311-win_amd64.whl",
+            "local_name": "torch-2.11.0-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/d1/bd/9912d30b68845256aabbb4a40aeefeef3c3b20db5211ccda653544ada4b6/torch-2.11.0-cp311-cp311-win_amd64.whl",
+            "bytes": 114519675,
+            "sha256": "73e24aaf8f36ab90d95cd1761208b2eb70841c2a9ca1a3f9061b39fc5331b708"
+          },
+          {
+            "filename": "torchaudio-2.11.0-cp311-cp311-win_amd64.whl",
+            "local_name": "torchaudio-2.11.0-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/c9/75/b6d03fc75b409bdaec597274d1bdd4213db716ed16f6801386b31d59c551/torchaudio-2.11.0-cp311-cp311-win_amd64.whl",
+            "bytes": 328658,
+            "sha256": "bb59ba4452bbbe95d75ad3ef18df9824955625f36698ce9a5998a4a9f3c1ba1d"
+          },
+          {
+            "filename": "numpy-2.2.6-cp311-cp311-win_amd64.whl",
+            "local_name": "numpy-2.2.6-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/31/0a/f354fb7176b81747d870f7991dc763e157a934c717b67b58456bc63da3df/numpy-2.2.6-cp311-cp311-win_amd64.whl",
+            "bytes": 12907455,
+            "sha256": "e8213002e427c69c45a52bbd94163084025f533a55a59d6f9c5b820774ef3303"
+          },
+          {
+            "filename": "safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "local_name": "safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/1b/6d/3fba214c1e5e0f69991677ec3bc17023f0421776975e1de0c682dca475e2/safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "bytes": 355540,
+            "sha256": "096ec1a98435df7beb08853bb5aa9081a84f23d0adc67ed1a0a10550f608373f"
+          },
+          {
+            "filename": "sentencepiece-0.2.2-cp311-cp311-win_amd64.whl",
+            "local_name": "sentencepiece-0.2.2-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/ab/62/9e2569867e3dcff7ad6d89642a9615b9801b5cd698abe7df3b490361f66e/sentencepiece-0.2.2-cp311-cp311-win_amd64.whl",
+            "bytes": 1246268,
+            "sha256": "70d4ca6f4d06df7f0ccab6fe4f49c8a712c8c8b6847b4f0af9a0e1dbb0e0337e"
+          },
+          {
+            "filename": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+            "local_name": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/ed/97/b39c18ac1df45e755ca22b8b00e872929da5d107998a207a5e4ac831bfda/soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+            "bytes": 1021480,
+            "sha256": "299491d3499460fb1b74bb4bd78b57ffc2d243a5fafa7b6ec1b264875c78453e"
+          },
+          {
+            "filename": "cffi-2.0.0-cp311-cp311-win_amd64.whl",
+            "local_name": "cffi-2.0.0-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/ae/8f/dc5531155e7070361eb1b7e4c1a9d896d0cb21c49f807a6c03fd63fc877e/cffi-2.0.0-cp311-cp311-win_amd64.whl",
+            "bytes": 182820,
+            "sha256": "66f011380d0e49ed280c789fbd08ff0d40968ee7b665575489afa95c98196ab5"
+          },
+          {
+            "filename": "pycparser-2.23-py3-none-any.whl",
+            "local_name": "pycparser-2.23-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a0/e3/59cd50310fc9b59512193629e1984c1f95e5c8ae6e5d8c69532ccc65a7fe/pycparser-2.23-py3-none-any.whl",
+            "bytes": 118140,
+            "sha256": "e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934"
+          },
+          {
+            "filename": "filelock-3.20.0-py3-none-any.whl",
+            "local_name": "filelock-3.20.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/76/91/7216b27286936c16f5b4d0c530087e4a54eead683e6b0b73dd0c64844af6/filelock-3.20.0-py3-none-any.whl",
+            "bytes": 16054,
+            "sha256": "339b4732ffda5cd79b13f4e2711a31b0365ce445d95d243bb996273d072546a2"
+          },
+          {
+            "filename": "typing_extensions-4.15.0-py3-none-any.whl",
+            "local_name": "typing_extensions-4.15.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/18/67/36e9267722cc04a6b9f15c7f3441c2363321a3ea07da7ae0c0707beb2a9c/typing_extensions-4.15.0-py3-none-any.whl",
+            "bytes": 44614,
+            "sha256": "f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548"
+          },
+          {
+            "filename": "setuptools-81.0.0-py3-none-any.whl",
+            "local_name": "setuptools-81.0.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/e1/e3/c164c88b2e5ce7b24d667b9bd83589cf4f3520d97cad01534cd3c4f55fdb/setuptools-81.0.0-py3-none-any.whl",
+            "bytes": 1062021,
+            "sha256": "fdd925d5c5d9f62e4b74b30d6dd7828ce236fd6ed998a08d81de62ce5a6310d6"
+          },
+          {
+            "filename": "sympy-1.14.0-py3-none-any.whl",
+            "local_name": "sympy-1.14.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
+            "bytes": 6299353,
+            "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5"
+          },
+          {
+            "filename": "mpmath-1.3.0-py3-none-any.whl",
+            "local_name": "mpmath-1.3.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl",
+            "bytes": 536198,
+            "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c"
+          },
+          {
+            "filename": "networkx-3.4.2-py3-none-any.whl",
+            "local_name": "networkx-3.4.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/b9/54/dd730b32ea14ea797530a4479b2ed46a6fb250f682a9cfb997e968bf0261/networkx-3.4.2-py3-none-any.whl",
+            "bytes": 1723263,
+            "sha256": "df5d4365b724cf81b8c6a7312509d0c22386097011ad1abe274afd5e9d3bbc5f"
+          },
+          {
+            "filename": "jinja2-3.1.6-py3-none-any.whl",
+            "local_name": "jinja2-3.1.6-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl",
+            "bytes": 134899,
+            "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"
+          },
+          {
+            "filename": "markupsafe-3.0.3-cp311-cp311-win_amd64.whl",
+            "local_name": "markupsafe-3.0.3-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/83/8a/4414c03d3f891739326e1783338e48fb49781cc915b2e0ee052aa490d586/markupsafe-3.0.3-cp311-cp311-win_amd64.whl",
+            "bytes": 15077,
+            "sha256": "de8a88e63464af587c950061a5e6a67d3632e36df62b986892331d4620a35c01"
+          },
+          {
+            "filename": "fsspec-2025.9.0-py3-none-any.whl",
+            "local_name": "fsspec-2025.9.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/47/71/70db47e4f6ce3e5c37a607355f80da8860a33226be640226ac52cb05ef2e/fsspec-2025.9.0-py3-none-any.whl",
+            "bytes": 199289,
+            "sha256": "530dc2a2af60a414a832059574df4a6e10cce927f6f4a78209390fe38955cfb7"
+          }
+        ]
+      },
+      {
+        "id": "windows-x86_64-cp312",
+        "system": "windows",
+        "machines": [
+          "amd64",
+          "x86_64"
+        ],
+        "python": "3.12",
+        "artifacts": [
+          {
+            "filename": "sopro-2.0.5-py3-none-any.whl",
+            "local_name": "sopro-2.0.5-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/db/e3/fd952d780d8b50bb21a261ce8b3018a8d8460ded1c6def242af35922ebfc/sopro-2.0.5-py3-none-any.whl",
+            "bytes": 63491,
+            "sha256": "28c9150a42fc51027728685210b74e267658d252fbc065679bfa4d079d08d5fd"
+          },
+          {
+            "filename": "torch-2.11.0-cp312-cp312-win_amd64.whl",
+            "local_name": "torch-2.11.0-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/1c/ff/6756f1c7ee302f6d202120e0f4f05b432b839908f9071157302cedfc5232/torch-2.11.0-cp312-cp312-win_amd64.whl",
+            "bytes": 114556047,
+            "sha256": "fbf39280699d1b869f55eac536deceaa1b60bd6788ba74f399cc67e60a5fab10"
+          },
+          {
+            "filename": "torchaudio-2.11.0-cp312-cp312-win_amd64.whl",
+            "local_name": "torchaudio-2.11.0-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/23/a8/941277ecc39f7a0a169d554302a1f1afd87c1d94a8aec828891916cea59a/torchaudio-2.11.0-cp312-cp312-win_amd64.whl",
+            "bytes": 328663,
+            "sha256": "478110f981e5d40a8d82221732c57a56c85a1d5895fb8fe646e86ee15eded3bd"
+          },
+          {
+            "filename": "numpy-2.2.6-cp312-cp312-win_amd64.whl",
+            "local_name": "numpy-2.2.6-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/36/fa/8c9210162ca1b88529ab76b41ba02d433fd54fecaf6feb70ef9f124683f1/numpy-2.2.6-cp312-cp312-win_amd64.whl",
+            "bytes": 12614190,
+            "sha256": "c1f9540be57940698ed329904db803cf7a402f3fc200bfe599334c9bd84a40b2"
+          },
+          {
+            "filename": "safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "local_name": "safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/1b/6d/3fba214c1e5e0f69991677ec3bc17023f0421776975e1de0c682dca475e2/safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "bytes": 355540,
+            "sha256": "096ec1a98435df7beb08853bb5aa9081a84f23d0adc67ed1a0a10550f608373f"
+          },
+          {
+            "filename": "sentencepiece-0.2.2-cp312-cp312-win_amd64.whl",
+            "local_name": "sentencepiece-0.2.2-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/8d/11/753fca2e6b109be3ab7867abf357dfe48677fe726ae5a5363d0b54ca9450/sentencepiece-0.2.2-cp312-cp312-win_amd64.whl",
+            "bytes": 1248030,
+            "sha256": "7c6e7bf684dc12145bfa685d3060beaea55139134ba848289bee514ed42e7383"
+          },
+          {
+            "filename": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+            "local_name": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/ed/97/b39c18ac1df45e755ca22b8b00e872929da5d107998a207a5e4ac831bfda/soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+            "bytes": 1021480,
+            "sha256": "299491d3499460fb1b74bb4bd78b57ffc2d243a5fafa7b6ec1b264875c78453e"
+          },
+          {
+            "filename": "cffi-2.0.0-cp312-cp312-win_amd64.whl",
+            "local_name": "cffi-2.0.0-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/f8/ed/13bd4418627013bec4ed6e54283b1959cf6db888048c7cf4b4c3b5b36002/cffi-2.0.0-cp312-cp312-win_amd64.whl",
+            "bytes": 183557,
+            "sha256": "da68248800ad6320861f129cd9c1bf96ca849a2771a59e0344e88681905916f5"
+          },
+          {
+            "filename": "pycparser-2.23-py3-none-any.whl",
+            "local_name": "pycparser-2.23-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a0/e3/59cd50310fc9b59512193629e1984c1f95e5c8ae6e5d8c69532ccc65a7fe/pycparser-2.23-py3-none-any.whl",
+            "bytes": 118140,
+            "sha256": "e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934"
+          },
+          {
+            "filename": "filelock-3.20.0-py3-none-any.whl",
+            "local_name": "filelock-3.20.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/76/91/7216b27286936c16f5b4d0c530087e4a54eead683e6b0b73dd0c64844af6/filelock-3.20.0-py3-none-any.whl",
+            "bytes": 16054,
+            "sha256": "339b4732ffda5cd79b13f4e2711a31b0365ce445d95d243bb996273d072546a2"
+          },
+          {
+            "filename": "typing_extensions-4.15.0-py3-none-any.whl",
+            "local_name": "typing_extensions-4.15.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/18/67/36e9267722cc04a6b9f15c7f3441c2363321a3ea07da7ae0c0707beb2a9c/typing_extensions-4.15.0-py3-none-any.whl",
+            "bytes": 44614,
+            "sha256": "f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548"
+          },
+          {
+            "filename": "setuptools-81.0.0-py3-none-any.whl",
+            "local_name": "setuptools-81.0.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/e1/e3/c164c88b2e5ce7b24d667b9bd83589cf4f3520d97cad01534cd3c4f55fdb/setuptools-81.0.0-py3-none-any.whl",
+            "bytes": 1062021,
+            "sha256": "fdd925d5c5d9f62e4b74b30d6dd7828ce236fd6ed998a08d81de62ce5a6310d6"
+          },
+          {
+            "filename": "sympy-1.14.0-py3-none-any.whl",
+            "local_name": "sympy-1.14.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
+            "bytes": 6299353,
+            "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5"
+          },
+          {
+            "filename": "mpmath-1.3.0-py3-none-any.whl",
+            "local_name": "mpmath-1.3.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl",
+            "bytes": 536198,
+            "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c"
+          },
+          {
+            "filename": "networkx-3.4.2-py3-none-any.whl",
+            "local_name": "networkx-3.4.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/b9/54/dd730b32ea14ea797530a4479b2ed46a6fb250f682a9cfb997e968bf0261/networkx-3.4.2-py3-none-any.whl",
+            "bytes": 1723263,
+            "sha256": "df5d4365b724cf81b8c6a7312509d0c22386097011ad1abe274afd5e9d3bbc5f"
+          },
+          {
+            "filename": "jinja2-3.1.6-py3-none-any.whl",
+            "local_name": "jinja2-3.1.6-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl",
+            "bytes": 134899,
+            "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"
+          },
+          {
+            "filename": "markupsafe-3.0.3-cp312-cp312-win_amd64.whl",
+            "local_name": "markupsafe-3.0.3-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/aa/5b/bec5aa9bbbb2c946ca2733ef9c4ca91c91b6a24580193e891b5f7dbe8e1e/markupsafe-3.0.3-cp312-cp312-win_amd64.whl",
+            "bytes": 15105,
+            "sha256": "26a5784ded40c9e318cfc2bdb30fe164bdb8665ded9cd64d500a34fb42067b1c"
+          },
+          {
+            "filename": "fsspec-2025.9.0-py3-none-any.whl",
+            "local_name": "fsspec-2025.9.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/47/71/70db47e4f6ce3e5c37a607355f80da8860a33226be640226ac52cb05ef2e/fsspec-2025.9.0-py3-none-any.whl",
+            "bytes": 199289,
+            "sha256": "530dc2a2af60a414a832059574df4a6e10cce927f6f4a78209390fe38955cfb7"
+          }
+        ]
+      },
+      {
+        "id": "windows-x86_64-cp313",
+        "system": "windows",
+        "machines": [
+          "amd64",
+          "x86_64"
+        ],
+        "python": "3.13",
+        "artifacts": [
+          {
+            "filename": "sopro-2.0.5-py3-none-any.whl",
+            "local_name": "sopro-2.0.5-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/db/e3/fd952d780d8b50bb21a261ce8b3018a8d8460ded1c6def242af35922ebfc/sopro-2.0.5-py3-none-any.whl",
+            "bytes": 63491,
+            "sha256": "28c9150a42fc51027728685210b74e267658d252fbc065679bfa4d079d08d5fd"
+          },
+          {
+            "filename": "torch-2.11.0-cp313-cp313-win_amd64.whl",
+            "local_name": "torch-2.11.0-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/66/82/3e3fcdd388fbe54e29fd3f991f36846ff4ac90b0d0181e9c8f7236565f82/torch-2.11.0-cp313-cp313-win_amd64.whl",
+            "bytes": 114555842,
+            "sha256": "4dda3b3f52d121063a731ddb835f010dc137b920d7fec2778e52f60d8e4bf0cd"
+          },
+          {
+            "filename": "torchaudio-2.11.0-cp313-cp313-win_amd64.whl",
+            "local_name": "torchaudio-2.11.0-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/e2/8b/2bbb3dca6ff28cba0de250874d5ef4fc2822c47a934b59b3974cff3219ef/torchaudio-2.11.0-cp313-cp313-win_amd64.whl",
+            "bytes": 328662,
+            "sha256": "986f4df5ed17b003dc52489468601720090e65f964f8bebccf90eb45bba75744"
+          },
+          {
+            "filename": "numpy-2.2.6-cp313-cp313-win_amd64.whl",
+            "local_name": "numpy-2.2.6-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/cb/3b/d58c12eafcb298d4e6d0d40216866ab15f59e55d148a5658bb3132311fcf/numpy-2.2.6-cp313-cp313-win_amd64.whl",
+            "bytes": 12610885,
+            "sha256": "b0544343a702fa80c95ad5d3d608ea3599dd54d4632df855e4c8d24eb6ecfa1c"
+          },
+          {
+            "filename": "safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "local_name": "safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/1b/6d/3fba214c1e5e0f69991677ec3bc17023f0421776975e1de0c682dca475e2/safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+            "bytes": 355540,
+            "sha256": "096ec1a98435df7beb08853bb5aa9081a84f23d0adc67ed1a0a10550f608373f"
+          },
+          {
+            "filename": "sentencepiece-0.2.2-cp313-cp313-win_amd64.whl",
+            "local_name": "sentencepiece-0.2.2-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/09/fa/d2d6369257fd2f0de616b1c7110b73fab409ef61b14f1b9e0010ed325914/sentencepiece-0.2.2-cp313-cp313-win_amd64.whl",
+            "bytes": 1247987,
+            "sha256": "74f0ee601047c0c12a783088b51be4e6214a62ecd9e02278c477433cd16e0ed9"
+          },
+          {
+            "filename": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+            "local_name": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/ed/97/b39c18ac1df45e755ca22b8b00e872929da5d107998a207a5e4ac831bfda/soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+            "bytes": 1021480,
+            "sha256": "299491d3499460fb1b74bb4bd78b57ffc2d243a5fafa7b6ec1b264875c78453e"
+          },
+          {
+            "filename": "cffi-2.0.0-cp313-cp313-win_amd64.whl",
+            "local_name": "cffi-2.0.0-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/37/18/6519e1ee6f5a1e579e04b9ddb6f1676c17368a7aba48299c3759bbc3c8b3/cffi-2.0.0-cp313-cp313-win_amd64.whl",
+            "bytes": 183402,
+            "sha256": "19f705ada2530c1167abacb171925dd886168931e0a7b78f5bffcae5c6b5be75"
+          },
+          {
+            "filename": "pycparser-2.23-py3-none-any.whl",
+            "local_name": "pycparser-2.23-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a0/e3/59cd50310fc9b59512193629e1984c1f95e5c8ae6e5d8c69532ccc65a7fe/pycparser-2.23-py3-none-any.whl",
+            "bytes": 118140,
+            "sha256": "e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934"
+          },
+          {
+            "filename": "filelock-3.20.0-py3-none-any.whl",
+            "local_name": "filelock-3.20.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/76/91/7216b27286936c16f5b4d0c530087e4a54eead683e6b0b73dd0c64844af6/filelock-3.20.0-py3-none-any.whl",
+            "bytes": 16054,
+            "sha256": "339b4732ffda5cd79b13f4e2711a31b0365ce445d95d243bb996273d072546a2"
+          },
+          {
+            "filename": "typing_extensions-4.15.0-py3-none-any.whl",
+            "local_name": "typing_extensions-4.15.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/18/67/36e9267722cc04a6b9f15c7f3441c2363321a3ea07da7ae0c0707beb2a9c/typing_extensions-4.15.0-py3-none-any.whl",
+            "bytes": 44614,
+            "sha256": "f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548"
+          },
+          {
+            "filename": "setuptools-81.0.0-py3-none-any.whl",
+            "local_name": "setuptools-81.0.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/e1/e3/c164c88b2e5ce7b24d667b9bd83589cf4f3520d97cad01534cd3c4f55fdb/setuptools-81.0.0-py3-none-any.whl",
+            "bytes": 1062021,
+            "sha256": "fdd925d5c5d9f62e4b74b30d6dd7828ce236fd6ed998a08d81de62ce5a6310d6"
+          },
+          {
+            "filename": "sympy-1.14.0-py3-none-any.whl",
+            "local_name": "sympy-1.14.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
+            "bytes": 6299353,
+            "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5"
+          },
+          {
+            "filename": "mpmath-1.3.0-py3-none-any.whl",
+            "local_name": "mpmath-1.3.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl",
+            "bytes": 536198,
+            "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c"
+          },
+          {
+            "filename": "networkx-3.4.2-py3-none-any.whl",
+            "local_name": "networkx-3.4.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/b9/54/dd730b32ea14ea797530a4479b2ed46a6fb250f682a9cfb997e968bf0261/networkx-3.4.2-py3-none-any.whl",
+            "bytes": 1723263,
+            "sha256": "df5d4365b724cf81b8c6a7312509d0c22386097011ad1abe274afd5e9d3bbc5f"
+          },
+          {
+            "filename": "jinja2-3.1.6-py3-none-any.whl",
+            "local_name": "jinja2-3.1.6-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl",
+            "bytes": 134899,
+            "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"
+          },
+          {
+            "filename": "markupsafe-3.0.3-cp313-cp313-win_amd64.whl",
+            "local_name": "markupsafe-3.0.3-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/05/73/c4abe620b841b6b791f2edc248f556900667a5a1cf023a6646967ae98335/markupsafe-3.0.3-cp313-cp313-win_amd64.whl",
+            "bytes": 15113,
+            "sha256": "9a1abfdc021a164803f4d485104931fb8f8c1efd55bc6b748d2f5774e78b62c5"
+          },
+          {
+            "filename": "fsspec-2025.9.0-py3-none-any.whl",
+            "local_name": "fsspec-2025.9.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/47/71/70db47e4f6ce3e5c37a607355f80da8860a33226be640226ac52cb05ef2e/fsspec-2025.9.0-py3-none-any.whl",
+            "bytes": 199289,
+            "sha256": "530dc2a2af60a414a832059574df4a6e10cce927f6f4a78209390fe38955cfb7"
+          }
+        ]
+      }
+    ]
+  },
+  "defaults": {
+    "tts": "sopro-v2-turbo-cpu"
+  },
+  "models": {
+    "sopro-v2-turbo-cpu": {
+      "kind": "tts",
+      "label": "Sopro V2 Turbo (CPU)",
+      "engine": "sopro-v2",
+      "repo": "samuel-vitorino/sopro-v2-turbo",
+      "revision": "main",
+      "sample_rate": 24000,
+      "style_ctrl_dim": 8,
+      "languages": [
+        "en",
+        "pt",
+        "fr",
+        "de"
+      ],
+      "license": "Apache-2.0 (Sopro V2 Turbo weights and code, Samuel Vitorino)",
+      "attribution": "Sopro V2 Turbo by Samuel Vitorino (Apache-2.0). Model artifacts from huggingface.co/samuel-vitorino/sopro-v2-turbo.",
+      "summary": "A streaming reference-conditioned model. Clones a voice from a short local recording.",
+      "notes": "Downloaded once and then read from disk. Voice Chat passes Sopro a verified local directory rather than a repository id, so nothing here is resolved again after installation.",
+      "about_bytes": 1400000000,
+      "ram_bytes": 3221225472,
+      "files": [
+        {
+          "filename": "config.json",
+          "local_name": "config.json",
+          "url": "https://huggingface.co/samuel-vitorino/sopro-v2-turbo/resolve/main/config.json",
+          "bytes": null,
+          "sha256": null,
+          "about": "the model geometry, sample rate and generation defaults"
+        },
+        {
+          "filename": "model.safetensors",
+          "local_name": "model.safetensors",
+          "url": "https://huggingface.co/samuel-vitorino/sopro-v2-turbo/resolve/main/model.safetensors",
+          "bytes": null,
+          "sha256": null,
+          "about": "the autoregressive semantic model and the acoustic solver"
+        },
+        {
+          "filename": "semantic_encoder.safetensors",
+          "local_name": "semantic_encoder.safetensors",
+          "url": "https://huggingface.co/samuel-vitorino/sopro-v2-turbo/resolve/main/semantic_encoder.safetensors",
+          "bytes": null,
+          "sha256": null,
+          "about": "the semantic tokeniser a reference recording is encoded with"
+        },
+        {
+          "filename": "speaker_encoder.safetensors",
+          "local_name": "speaker_encoder.safetensors",
+          "url": "https://huggingface.co/samuel-vitorino/sopro-v2-turbo/resolve/main/speaker_encoder.safetensors",
+          "bytes": null,
+          "sha256": null,
+          "about": "the speaker encoder that produces id_emb, style_emb and style_ctrl"
+        },
+        {
+          "filename": "vocoder.safetensors",
+          "local_name": "vocoder.safetensors",
+          "url": "https://huggingface.co/samuel-vitorino/sopro-v2-turbo/resolve/main/vocoder.safetensors",
+          "bytes": null,
+          "sha256": null,
+          "about": "the offline vocoder used to build a reference mel"
+        },
+        {
+          "filename": "vocoder_streaming.safetensors",
+          "local_name": "vocoder_streaming.safetensors",
+          "url": "https://huggingface.co/samuel-vitorino/sopro-v2-turbo/resolve/main/vocoder_streaming.safetensors",
+          "bytes": null,
+          "sha256": null,
+          "about": "the causal vocoder every streamed chunk comes out of"
+        },
+        {
+          "filename": "tokenizer.model",
+          "local_name": "tokenizer.model",
+          "url": "https://huggingface.co/samuel-vitorino/sopro-v2-turbo/resolve/main/tokenizer.model",
+          "bytes": null,
+          "sha256": null,
+          "about": "the SentencePiece text tokeniser"
+        }
+      ],
+      "required_paths": [
+        "config.json",
+        "model.safetensors",
+        "semantic_encoder.safetensors",
+        "speaker_encoder.safetensors",
+        "vocoder.safetensors",
+        "vocoder_streaming.safetensors",
+        "tokenizer.model"
+      ]
+    }
+  }
+}
