@@ -464,9 +464,53 @@ brings from outside. On the same signal the spectral pass moved correlation with
 the clean voice from 0.868 to 0.967 and took about 70% of the hiss out, because
 it has no opinion about what speech is.
 
-So the order is: a signal-agnostic pass that cannot destroy a recording, now;
-a learned one when its interpreter can be pinned *and* the result heard on real
-speech.
+So the order was: a signal-agnostic pass that cannot destroy a recording, first;
+a learned one after it. The second half is now built.
+
+### DeepFilterNet, on an interpreter of its own
+
+The owner chose to have it, and chose how the interpreter should be trusted, so
+here it is: a third isolated runtime, installed and removed on its own, started
+when a recording is being cleaned and stopped two minutes after the last one.
+
+It is **not** a text-to-speech engine and is deliberately outside the selector
+(I-1). Cleaning a recording is not speaking, the choice of speaker has no
+bearing on it, and a third row in a selector that says "one engine speaks at a
+time" would be a third thing that could be "the engine". `mc_voice_cleanup` is
+reachable from either engine's clone form and from neither engine's state.
+
+**What it costs, exactly.** 23 pinned wheels totalling 228 MB, of which
+`torch-2.2.2-cp311-win_amd64` is 198 MB, plus a ~10 MB interpreter and a ~3 MB
+model: **242 MB**. The second Torch is unavoidable — `DeepFilterLib` is a Rust
+extension published for CPython 3.8 to 3.11, so this cannot share Sopro's cp313
+one — and the number is on the settings row rather than behind it, because a
+quarter of a gigabyte to tidy a twenty-second clip is a decision somebody should
+make before pressing anything.
+
+**Why torchaudio 2.2.2 and not the newest.** `df/io.py` imports
+`torchaudio.backend.common.AudioMetaData`, which torchaudio removed after 2.2.
+Pinning the newest pair would install cleanly and fail on the first import. A
+shim that satisfied the import was considered and rejected: it would have saved
+90 MB by allowing torch 2.11, and nothing here can be executed before it reaches
+the owner's machine, so the version DeepFilterNet was actually written against
+is worth more than the saving.
+
+**The interpreter is the one unpinned executable.** python.org is not reachable
+from the workspace the manifest is generated in, so its digest is recorded on
+the machine that first fetches it rather than checked against a constant
+somebody reviewed — the same path the model artifacts already take, agreed to
+explicitly, and weaker than the 23 wheels around it. It is said in the module
+docstring, in the manifest, and in a test.
+
+**What could not be verified here**, and it is the whole of the risk: there is
+no Windows, no cp311 Torch and no model in this workspace, so nothing below the
+model load has ever run. What the tests assert is everything up to it — the
+manifest is complete and pinned, the platform gate is closed, the install
+transaction refuses before touching anything, the framing round-trips against
+the *Sopro* worker's reader, the handshake refuses a wrong backend, a wrong
+protocol, a GPU device and a Linux worker that cannot confirm containment, and
+shutdown is safe when nothing is running. The first real execution is the
+install button.
 
 ---
 

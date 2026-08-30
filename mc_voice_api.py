@@ -149,6 +149,9 @@ SOPRO_SETTINGS_ROUTE = f"{PREFIX}/sopro/settings"
 SOPRO_CLONE_ROUTE = f"{PREFIX}/sopro/clone"
 SOPRO_REBUILD_ROUTE = f"{PREFIX}/sopro/rebuild"
 SOPRO_STARTER_ROUTE = f"{PREFIX}/sopro/starter"
+CLEANUP_ROUTE = f"{PREFIX}/cleanup"
+CLEANUP_INSTALL_ROUTE = f"{PREFIX}/cleanup/install"
+CLEANUP_RUN_ROUTE = f"{PREFIX}/cleanup/run"
 LAB_ROUTE = f"{PREFIX}/lab"
 LAB_UPDATE_ROUTE = f"{PREFIX}/lab/update"
 LAB_RESET_ROUTE = f"{PREFIX}/lab/reset"
@@ -170,6 +173,7 @@ SOPRO_ROUTES = (ENGINES_ROUTE, ENGINE_SELECT_ROUTE, SURFACE_ROUTE,
                 SOPRO_ROUTE, SOPRO_INSTALL_ROUTE,
                 SOPRO_SETTINGS_ROUTE, SOPRO_CLONE_ROUTE, SOPRO_REBUILD_ROUTE,
                 SOPRO_STARTER_ROUTE,
+                CLEANUP_ROUTE, CLEANUP_INSTALL_ROUTE, CLEANUP_RUN_ROUTE,
                 LAB_ROUTE, LAB_UPDATE_ROUTE, LAB_RESET_ROUTE, LAB_PLAY_ROUTE)
 
 ROUTES = (STATUS_ROUTE, STT_ROUTE, TTS_ROUTE, INSTALL_ROUTE, MODELS_ROUTE, PROFILE_ROUTE,
@@ -1461,6 +1465,115 @@ def sopro_clone(name: str, language: str, wav: bytes) -> dict:
             **voices_payload(engine=engines.SOPRO)}
 
 
+def cleanup_payload() -> dict:
+    """What the recording-cleanup row draws, and what the clone form asks.
+
+    Deliberately not scoped to the selected engine: cleaning a recording is not
+    a text-to-speech operation and the engine selector has no opinion about it
+    (I-1). Kokoro's Storytime clone form can use it just as Sopro's can.
+    """
+    import mc_voice_cleanup as cleanup
+    import mc_voice_cleanup_runtime as runtime
+
+    found = cleanup.status()
+    return {
+        "ok": True,
+        "installed": found.ready,
+        "runtime_ready": found.runtime_ready,
+        "model_ready": found.model_ready,
+        "platform_supported": found.platform_supported,
+        "runtime_message": found.runtime_message,
+        "model_message": found.model_message,
+        "message": found.message,
+        "label": cleanup.LABEL,
+        "download_bytes": found.download_bytes,
+        "state": runtime.status(),
+        "progress": {cleanup.KIND: models.progress().get(cleanup.KIND) or {}},
+    }
+
+
+def cleanup_install() -> dict:
+    """Install the cleanup engine. Offloaded and threaded by the route."""
+    import mc_voice_cleanup as cleanup
+
+    try:
+        cleanup.install()
+    except cleanup.CleanupError as exc:
+        raise Refused(409, str(exc)) from None
+    return cleanup_payload()
+
+
+def cleanup_run(wav: bytes) -> bytes:
+    """One recording through DeepFilterNet, as a WAV in and a WAV out.
+
+    The parsing and the re-wrapping happen here rather than in the worker,
+    because the worker's job is a model and the boundary's job is refusing
+    things: a worker that had to understand RIFF would be a worker with a parser
+    in front of its model.
+    """
+    import mc_voice_cleanup_runtime as runtime
+
+    rate, body = _mono_pcm16(wav)
+    logger.info("Model Chain: cleaning %.1f s of audio with %s",
+                len(body) / 2.0 / max(1, rate), "DeepFilterNet")
+    try:
+        cleaned = runtime.clean(body, rate)
+    except runtime.CleanupRuntimeError as exc:
+        logger.warning("Model Chain: a recording could not be cleaned — %s", exc)
+        raise Refused(409, str(exc)) from None
+    return _wav(cleaned, rate)
+
+
+def _mono_pcm16(data: bytes) -> tuple:
+    """A mono PCM16 WAV, taken apart. Its own parser, and narrow on purpose.
+
+    Not :func:`validate_wav`, which is dictation's and accepts 16 kHz only, and
+    not Sopro's ``normalize_reference``, which resamples and enforces a clone
+    window. This one accepts exactly what the page sends -- mono PCM16 at
+    whatever rate the recording had -- and refuses everything else by name.
+    """
+    import struct
+
+    if len(data) > MAX_REFERENCE_BYTES:
+        raise Refused(413, "That recording is too large.")
+    if len(data) < 44 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        raise Refused(400, "That upload is not a WAV recording.")
+    offset, fmt, body = 12, None, b""
+    while offset + 8 <= len(data):
+        name = data[offset:offset + 4]
+        (size,) = struct.unpack_from("<I", data, offset + 4)
+        start = offset + 8
+        if start + size > len(data):
+            raise Refused(400, "That recording's header is malformed.")
+        if name == b"fmt " and size >= 16:
+            fmt = struct.unpack_from("<HHIIHH", data, start)
+        elif name == b"data":
+            body = data[start:start + size]
+        offset = start + size + (size % 2)
+    if fmt is None or not body:
+        raise Refused(400, "That recording is not a complete WAV.")
+    encoding, channels, rate, _bps, _align, bits = fmt
+    if encoding != 1 or bits != 16:
+        raise Refused(400, "Recording cleanup takes uncompressed 16-bit PCM.")
+    if channels != 1:
+        raise Refused(400, "Recording cleanup takes a mono recording.")
+    if rate < 8000 or rate > 192000:
+        raise Refused(400, "That recording's sample rate is not one this build can use.")
+    body = body[:len(body) - (len(body) % 2)]
+    if not body:
+        raise Refused(400, "That recording had no audio in it.")
+    return int(rate), body
+
+
+def _wav(body: bytes, rate: int) -> bytes:
+    """Mono PCM16 samples wrapped as a RIFF/WAVE file."""
+    import struct
+
+    return (b"RIFF" + struct.pack("<I", 36 + len(body)) + b"WAVEfmt "
+            + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+            + b"data" + struct.pack("<I", len(body)) + body)
+
+
 def sopro_starter() -> dict:
     """Make the next starter voice, so a fresh Sopro is not an empty one.
 
@@ -2115,6 +2228,9 @@ def install(_demo=None, app=None) -> bool:
     sopro_starter_route = _json_route(
         SOPRO_STARTER_ROUTE, lambda _payload: sopro_starter(),
         "That starter voice could not be made.")
+    cleanup_status_route = _json_route(
+        CLEANUP_ROUTE, lambda _payload: cleanup_payload(),
+        "The recording cleanup status could not be read.")
     lab_route = _json_route(
         LAB_ROUTE, lambda payload: lab_payload(str(payload.get("token") or ""),
                                                str(payload.get("voice") or "")),
@@ -2130,6 +2246,55 @@ def install(_demo=None, app=None) -> bool:
         LAB_PLAY_ROUTE, lambda payload: lab_audition(str(payload.get("token") or ""),
                                                      str(payload.get("side") or "b")),
         "That Voice Lab audition could not be played.")
+
+    async def cleanup_install_route(request: Request):
+        """Start installing the cleanup engine, and say so immediately.
+
+        In the background for the reason Sopro's is: this is a quarter of a
+        gigabyte, an interpreter and a self-test, and an HTTP request that takes
+        minutes is one a browser gives up on.
+        """
+        try:
+            _checked(request, CLEANUP_INSTALL_ROUTE)
+            import mc_voice_cleanup as cleanup
+
+            already = models.progress().get(cleanup.KIND) or {}
+            if already.get("running"):
+                return JSONResponse({"ok": True, "already": True})
+            if not cleanup.supported_platform():
+                raise Refused(409, cleanup.status().message)
+        except Refused as exc:
+            return _refusal(exc)
+        except Exception:
+            return _failed("a cleanup install could not be started",
+                           "Recording cleanup could not be installed.")
+
+        def run():
+            try:
+                cleanup_install()
+            except Exception:
+                logger.debug("Model Chain: the cleanup install thread ended on an error",
+                             exc_info=True)
+
+        threading.Thread(target=run, name="mc-cleanup-install", daemon=True).start()
+        return JSONResponse({"ok": True, "already": False})
+
+    async def cleanup_run_route(request: Request):
+        """A WAV in, a cleaner WAV out. Multipart, because it carries audio."""
+        try:
+            _checked(request, CLEANUP_RUN_ROUTE)
+            _name, _language, wav = await _reference(request)
+            cleaned = await _offload(cleanup_run, wav)
+        except Refused as exc:
+            return _refusal(exc)
+        except Exception:
+            return _failed("a recording could not be cleaned",
+                           "That recording could not be cleaned.")
+        return Response(content=cleaned, media_type="audio/wav", headers={
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+            "Content-Disposition": "inline",
+        })
 
     async def sopro_install_route(request: Request):
         """Start installing Sopro in the background, and say so immediately.
@@ -2223,6 +2388,9 @@ def install(_demo=None, app=None) -> bool:
                               (SOPRO_CLONE_ROUTE, sopro_clone_route),
                               (SOPRO_REBUILD_ROUTE, sopro_rebuild_route),
                               (SOPRO_STARTER_ROUTE, sopro_starter_route),
+                              (CLEANUP_ROUTE, cleanup_status_route),
+                              (CLEANUP_INSTALL_ROUTE, cleanup_install_route),
+                              (CLEANUP_RUN_ROUTE, cleanup_run_route),
                               (LAB_ROUTE, lab_route),
                               (LAB_UPDATE_ROUTE, lab_update_route),
                               (LAB_RESET_ROUTE, lab_reset_route),

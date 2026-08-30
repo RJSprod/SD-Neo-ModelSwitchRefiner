@@ -112,6 +112,10 @@ CLONING_DIRNAME = "cloning"
 REFERENCE_DIRNAME = "reference"
 
 SOPRO_DIRNAME = "sopro"
+CLEANUP_DIRNAME = "cleanup"
+CLEANUP_WORKER_DIRNAME = "cleanup_worker"
+CLEANUP_MANIFEST_FILENAME = "managed-cleanup-models.json"
+CLEANUP_MODEL_DIRNAME = "model"
 SOPRO_WORKER_DIRNAME = "sopro_worker"
 SOPRO_MANIFEST_FILENAME = "managed-sopro-models.json"
 SOPRO_VOICES_DIRNAME = "voices"
@@ -358,6 +362,49 @@ def sopro_voices_root() -> Path:
 
 def sopro_registry_path() -> Path:
     return sopro_voices_root() / SOPRO_REGISTRY_FILENAME
+
+
+# --------------------------------------------------------------------------- #
+# The cleanup engine
+# --------------------------------------------------------------------------- #
+
+
+def cleanup_root() -> Path:
+    """Everything the cleanup engine owns. Nothing else writes here.
+
+    A third tree beside Kokoro's and Sopro's, for the reason those two are
+    separate from each other: it carries its own interpreter and its own copy of
+    Torch, and an installer that could reach into another engine's closure is an
+    installer that can break a working engine while adding an optional one.
+    """
+    return data_root() / CLEANUP_DIRNAME
+
+
+def cleanup_runtime_root() -> Path:
+    """The cp311 interpreter and the closure unpacked beside it."""
+    return cleanup_root() / RUNTIME_DIRNAME
+
+
+def cleanup_runtime_manifest() -> Path:
+    return cleanup_runtime_root() / INSTALLED_FILENAME
+
+
+def cleanup_model_root() -> Path:
+    """Where DeepFilterNet's own archive is unpacked, and what is handed to
+    ``init_df`` as a path so nothing resolves anything after installation."""
+    return cleanup_root() / CLEANUP_MODEL_DIRNAME
+
+
+def cleanup_staging_root() -> Path:
+    return cleanup_root() / STAGING_DIRNAME
+
+
+def cleanup_worker_script() -> Path:
+    return extension_root() / CLEANUP_WORKER_DIRNAME / "worker.py"
+
+
+def cleanup_manifest_path() -> Path:
+    return extension_root() / MANIFEST_DIRNAME / CLEANUP_MANIFEST_FILENAME
 
 
 def sopro_settings_path() -> Path:

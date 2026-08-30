@@ -96,6 +96,9 @@
         soproClone: "model-chain/voice/sopro/clone",
         soproRebuild: "model-chain/voice/sopro/rebuild",
         soproStarter: "model-chain/voice/sopro/starter",
+        cleanup: "model-chain/voice/cleanup",
+        cleanupInstall: "model-chain/voice/cleanup/install",
+        cleanupRun: "model-chain/voice/cleanup/run",
         lab: "model-chain/voice/lab",
         labUpdate: "model-chain/voice/lab/update",
         labReset: "model-chain/voice/lab/reset",
@@ -4048,7 +4051,8 @@
             });
         }).then(function (decoded) {
             soproClip = {buffer: decoded, start: 0, end: decoded.duration,
-                         label: label || "recording"};
+                         label: label || "recording", how: "page",
+                         engineCleaned: null};
             // A file is usually far longer than Sopro's window, so the opening
             // selection is a usable one rather than the whole thing: somebody
             // who presses Create straight away gets a voice, not a refusal.
@@ -4146,7 +4150,11 @@
                     + CLIP_MAX_SECONDS + " s. Drag the edges in.");
         } else {
             sayTrim(form, shown + " selected — ready to create."
-                    + (soproClip.clean ? " Cleaning is on." : ""));
+                    + (soproClip.clean
+                       ? (soproClip.how === "deepfilternet" && soproClip.engineCleaned
+                          ? " Cleaned with DeepFilterNet."
+                          : " Cleaning is on.")
+                       : ""));
         }
     }
 
@@ -4157,12 +4165,12 @@
     // -- cleaning up a reference recording ------------------------------------ //
     //
     // Sopro clones what it is given, hiss included, and a phone recording made
-    // in a room with a fan in it clones the fan. The obvious answer was
-    // DeepFilterNet, and it cannot be installed here: its Rust extension,
-    // DeepFilterLib, publishes wheels for CPython 3.8 to 3.11 only, and this
-    // WebUI runs on 3.13. Building it from the sdist needs a Rust toolchain,
-    // which is exactly the "resolve something nobody reviewed" this feature
-    // exists not to do.
+    // in a room with a fan in it clones the fan. The obvious answer is
+    // DeepFilterNet, which is not here yet rather than impossible: its Rust
+    // extension ships wheels for CPython 3.10 and 3.11, so it needs an
+    // interpreter of its own and a second copy of Torch beside the one Sopro
+    // already has -- about 150 MB, and nothing that could be verified from the
+    // workspace this was written in. See docs/17-voice-chat-sopro.md.
     //
     // So this is spectral subtraction, in the tab, on the selection that is
     // about to be uploaded. It is not a learned denoiser and does not pretend
@@ -4462,14 +4470,21 @@
             }
         }
         if (!soproClip.clean) return mixed;
-        // Cached against the exact selection: cleaning twenty seconds is a few
-        // hundred milliseconds of arithmetic and the selection does not change
-        // between pressing Play and pressing Create.
-        const key = soproClip.start.toFixed(3) + ":" + soproClip.end.toFixed(3);
-        if (soproClip.cleanedKey !== key) {
-            soproClip.cleaned = denoise(mixed, rate);
-            soproClip.cleanedKey = key;
+        // Cached against the exact selection *and* the method, so switching
+        // between the two recomputes rather than serving the other one's work.
+        const key = soproClip.start.toFixed(3) + ":" + soproClip.end.toFixed(3)
+            + ":" + (soproClip.how || "page");
+        if (soproClip.cleanedKey === key) return soproClip.cleaned;
+        if ((soproClip.how || "page") !== "page") {
+            // DeepFilterNet's answer, when it has been fetched. Asking for it
+            // is asynchronous and this is not, so a selection whose answer has
+            // not arrived yet plays and uploads the page's own pass rather than
+            // silently doing nothing -- and `cleanWithEngine` repaints when it
+            // lands.
+            return soproClip.engineCleaned || denoise(mixed, rate);
         }
+        soproClip.cleaned = denoise(mixed, rate);
+        soproClip.cleanedKey = key;
         return soproClip.cleaned;
     }
 
@@ -4477,6 +4492,76 @@
         const samples = clipSamples();
         if (!samples || !samples.length) return null;
         return encodeWav(samples, soproClip.buffer.sampleRate);
+    }
+
+    // Ask the cleanup engine for this selection, and remember what came back.
+    //
+    // A round trip rather than more arithmetic in the page: DeepFilterNet is a
+    // learned model in a process of its own, on an interpreter of its own, and
+    // the whole reason it exists here is that the page cannot do what it does.
+    function cleanWithEngine(form, holder) {
+        if (!soproClip) return Promise.resolve(false);
+        const key = soproClip.start.toFixed(3) + ":" + soproClip.end.toFixed(3)
+            + ":deepfilternet";
+        if (soproClip.cleanedKey === key) return Promise.resolve(true);
+        const was = soproClip.how;
+        soproClip.how = "page";
+        const plain = clipSamples();
+        soproClip.how = was;
+        if (!plain || !plain.length) return Promise.resolve(false);
+        const rate = soproClip.buffer.sampleRate;
+        sayTrim(form, "Cleaning with DeepFilterNet\u2026");
+        const body = new FormData();
+        body.append("name", "cleanup");
+        body.append("language", "");
+        body.append("reference",
+                    new Blob([encodeWav(plain, rate)], {type: "audio/wav"}), "clip.wav");
+        return fetch(url(ROUTES.cleanupRun), {
+            method: "POST",
+            credentials: "same-origin",
+            headers: headers({}, holder),
+            body: body,
+        }).then(refused).then(function (response) {
+            if (!response.ok) throw new Error("cleanup");
+            return response.arrayBuffer();
+        }).then(function (found) {
+            const samples = wavToFloat32(found);
+            if (!samples || !samples.length) throw new Error("empty");
+            soproClip.engineCleaned = samples;
+            soproClip.cleaned = samples;
+            soproClip.cleanedKey = key;
+            paintTrim(form);
+            return true;
+        }).catch(function () {
+            soproClip.engineCleaned = null;
+            sayTrim(form, "DeepFilterNet could not clean that, so the page's own cleanup "
+                    + "is being used instead.");
+            return false;
+        });
+    }
+
+    // The mono PCM16 the cleanup route answers with, as samples.
+    function wavToFloat32(buffer) {
+        const view = new DataView(buffer);
+        if (view.byteLength < 44) return null;
+        let offset = 12;
+        let start = 0;
+        let length = 0;
+        while (offset + 8 <= view.byteLength) {
+            const id = String.fromCharCode(view.getUint8(offset), view.getUint8(offset + 1),
+                                           view.getUint8(offset + 2), view.getUint8(offset + 3));
+            const size = view.getUint32(offset + 4, true);
+            if (id === "data") { start = offset + 8; length = size; break; }
+            offset += 8 + size + (size % 2);
+        }
+        if (!length || start + length > view.byteLength) return null;
+        const count = Math.floor(length / 2);
+        const found = new Float32Array(count);
+        for (let index = 0; index < count; index += 1) {
+            const value = view.getInt16(start + index * 2, true);
+            found[index] = value < 0 ? value / 0x8000 : value / 0x7fff;
+        }
+        return found;
     }
 
     function playSelection(form, button) {
@@ -4502,7 +4587,7 @@
         source.start(0);
     }
 
-    function wireTrim(form) {
+    function wireTrim(form, holder) {
         const canvas = form.querySelector("[data-mc-voice-wave]");
         const play = form.querySelector("[data-mc-voice-trim-play]");
         const best = form.querySelector("[data-mc-voice-trim-best]");
@@ -4564,12 +4649,26 @@
             });
         }
         const clean = form.querySelector("[data-mc-voice-clean]");
-        if (clean) {
-            clean.addEventListener("change", function () {
-                if (!soproClip) return;
-                soproClip.clean = !!clean.checked;
-                paintTrim(form);
-            });
+        const how = form.querySelector("[data-mc-voice-clean-how]");
+        const chose = function () {
+            if (!soproClip) return;
+            soproClip.clean = !!(clean && clean.checked);
+            soproClip.how = how ? how.value : "page";
+            paintTrim(form);
+            if (soproClip.clean && soproClip.how !== "page") {
+                cleanWithEngine(form, holder);
+            }
+        };
+        if (clean) clean.addEventListener("change", chose);
+        if (how) how.addEventListener("change", chose);
+        // The choice is only a choice when there is something to choose. Asked
+        // once, when the form is wired, rather than polled: installing the
+        // engine is a deliberate act on another row and the page is repainted
+        // when it finishes.
+        if (how) {
+            post(ROUTES.cleanup, {}, holder).then(function (payload) {
+                if (payload && payload.ok && payload.installed) how.hidden = false;
+            }).catch(function () { /* not installed is the ordinary answer */ });
         }
         [[start, "start"], [end, "end"]].forEach(function (pair) {
             if (!pair[0]) return;
@@ -4697,7 +4796,7 @@
                 createSoproVoice(holder, form, create);
             });
         }
-        wireTrim(form);
+        wireTrim(form, holder);
     }
 
     // Reuses the capture primitives dictation uses -- `startCapture`,
