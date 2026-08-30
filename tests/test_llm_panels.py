@@ -897,6 +897,59 @@ class TestWhoSaidWhat:
 
         assert mc_llm_chat_panel._character_face("Ada") is not None
 
+    def test_the_sampling_follows_the_character_being_talked_to(self, store, characters):
+        """The reported bug: the seed had to be set again every time.
+
+        These four already load with a character. Nothing wrote them back
+        without pressing Save character, which is on the editor screen -- and
+        the accordion holding them is not: it is in the flyout, beside whoever
+        you are talking to. So setting a seed there set it for that reply and
+        for nothing after it.
+        """
+        mc_llm_chat_panel._save_character("Ada", "Ada", "", "", "", 0.8, 0.9, 512, 4242,
+                                          None)
+        assert mc_llm_chat_panel._characters().load("Ada").seed == 4242
+
+        mc_llm_chat_panel._remember_sampling("Ada", mc_llm_chat_panel.NOT_EDITING,
+                                             0.7, 0.85, 256, -1)
+
+        found = mc_llm_chat_panel._characters().load("Ada")
+        assert found.seed == -1
+        assert found.max_reply_tokens == 256
+        assert abs(found.temperature - 0.7) < 1e-6
+
+    def test_it_leaves_the_rest_of_the_character_alone(self, store, characters):
+        """A slider is not an edit of the name, the context or the voice."""
+        mc_llm_chat_panel._save_character("Ada", "Ada", "a reader of maps", "hello there",
+                                          "", 0.8, 0.9, 512, 7, None)
+
+        mc_llm_chat_panel._remember_sampling("Ada", mc_llm_chat_panel.NOT_EDITING,
+                                             0.8, 0.9, 512, -1)
+
+        found = mc_llm_chat_panel._characters().load("Ada")
+        assert found.context == "a reader of maps"
+        assert found.greeting == "hello there"
+        assert found.seed == -1
+
+    def test_it_does_not_write_while_the_editor_is_open(self, store, characters):
+        """With the editor open these belong to the edit, and Save and Cancel
+        decide their fate. Writing them out from under Cancel would make Cancel
+        a lie."""
+        mc_llm_chat_panel._save_character("Ada", "Ada", "", "", "", 0.8, 0.9, 512, 7, None)
+
+        mc_llm_chat_panel._remember_sampling("Ada", "Ada", 0.1, 0.1, 64, -1)
+
+        assert mc_llm_chat_panel._characters().load("Ada").seed == 7
+
+    def test_it_does_nothing_without_a_character(self, store, characters):
+        """Nobody selected is not an invitation to write somebody."""
+        before = sorted(mc_llm_chat_panel._characters().names())
+
+        mc_llm_chat_panel._remember_sampling("", mc_llm_chat_panel.NOT_EDITING,
+                                             0.8, 0.9, 512, -1)
+
+        assert sorted(mc_llm_chat_panel._characters().names()) == before
+
     def test_and_emptying_the_box_takes_it_away(self, store, characters):
         from PIL import Image
 

@@ -1124,11 +1124,28 @@ def default_id() -> str:
     voice at all answers with an empty string, and the caller says "create or
     select a Sopro voice" rather than speaking through Kokoro (I-2, section 53).
     """
-    wanted = str(_setting(OPT_VOICE) or "").strip()
+    wanted = str(_read().get("default") or "").strip()
+    if not wanted:
+        # Migration, once: the value an older build stored in a Forge option.
+        wanted = str(_legacy_default() or "").strip()
     if wanted and lookup(wanted) is not None:
         return wanted
     found = entries()
     return found[0]["id"] if found else ""
+
+
+def _legacy_default() -> str:
+    """What an older build left in ``model_chain_voice_sopro_voice_id``.
+
+    Read only; nothing writes there again, which is what makes the settings
+    page harmless.
+    """
+    try:
+        from modules import shared
+
+        return str(getattr(shared.opts, OPT_VOICE, "") or "")
+    except Exception:
+        return ""
 
 
 def default_entry():
@@ -1141,7 +1158,10 @@ def set_default(voice_id: str) -> dict:
     entry = lookup(voice_id)
     if entry is None:
         raise SoproError("That Sopro voice does not exist.")
-    _remember(OPT_VOICE, entry["id"])
+    found = _read()
+    found["default"] = entry["id"]
+    found["schema"] = REGISTRY_SCHEMA
+    _write(found)
     logger.info("Model Chain: the Sopro default voice is now %s", entry["id"])
     return entry
 
@@ -1203,7 +1223,9 @@ def delete(voice_id: str) -> dict:
 
     if default_id() == entry["id"]:
         others = [item for item in entries() if item["id"] != entry["id"]]
-        _remember(OPT_VOICE, others[0]["id"] if others else "")
+        found = _read()
+        found["default"] = others[0]["id"] if others else ""
+        _write(found)
 
     found = _read()
     found["voices"] = [item for item in (found.get("voices") or ())
@@ -1699,10 +1721,12 @@ def create(display_name: str, wav: bytes, language: str = "") -> dict:
         logger.debug("Model Chain: could not refresh the Sopro catalogue after a create",
                      exc_info=True)
 
-    if not _setting(OPT_VOICE):
+    if not str(_read().get("default") or "").strip():
         # The first voice becomes the default, because an installation with one
         # voice and no default is one where Auto Speak silently does nothing.
-        _remember(OPT_VOICE, f"{ENGINE}:clone:{identifier}")
+        stored = _read()
+        stored["default"] = f"{ENGINE}:clone:{identifier}"
+        _write(stored)
     logger.info("Model Chain: a Sopro voice was created — %.1f s reference, audition in "
                 "%d ms", seconds, int(made.get("audition_ms") or 0))
     return {"voice": lookup(f"{ENGINE}:clone:{identifier}"), "audio": made.get("audio") or b""}
@@ -1791,7 +1815,43 @@ def _digest(path: Path) -> str:
     return found.hexdigest()
 
 
+def _settings_read() -> dict:
+    try:
+        found = json.loads(paths.sopro_settings_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+def _settings_write(found: dict) -> None:
+    """Replace Sopro's settings file atomically, like every other file here."""
+    path = paths.sopro_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging = path.with_suffix(".json.new")
+    staging.write_text(json.dumps(found, indent=2), encoding="utf-8")
+    os.replace(staging, path)
+
+
 def _setting(name: str):
+    """One global Sopro setting, out of Sopro's own file.
+
+    These used to be host options, and every one of them had the same defect the
+    default voice had: an option is a *component* on the settings page as well as
+    a stored value, and "Apply settings" writes every component on that page back
+    into the store. The page's copy is stamped when the page is built, so it
+    knows nothing about a slider moved in the delivery panel since -- and putting
+    the old value back is exactly what it did.
+
+    They were also, for the same reason, two controls for one value: one in the
+    panel that is meant to be used and one further down the settings page, each
+    able to overwrite the other. There is one now.
+
+    An option is still read when the file has nothing to say, so an installation
+    configured under an older build keeps what it chose.
+    """
+    found = _settings_read()
+    if name in found:
+        return found[name]
     try:
         from modules import shared
 
@@ -1801,10 +1861,9 @@ def _setting(name: str):
 
 
 def _remember(name: str, value) -> None:
+    found = _settings_read()
+    found[name] = value
     try:
-        from modules import shared
-
-        shared.opts.set(name, value)
-        shared.opts.save(shared.config_filename)
-    except Exception:
+        _settings_write(found)
+    except OSError:
         logger.debug("Model Chain: could not persist a Sopro setting", exc_info=True)

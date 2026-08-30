@@ -41,7 +41,13 @@ is for.
 
 The default
 -----------
-Persisted as a stable id in the host's options, never as a number (section 44).
+A stable id, never a number (section 44), stored in this registry's own file
+rather than in the host's options. It lived in an option once, and that was a
+real defect: an option is a component on the settings page as well as a stored
+value, so Forge's "Apply settings" wrote the page's stamped-at-build-time copy
+back over whatever "Set as Default" had just chosen. An older installation's
+option is still read once, so nobody loses the default they had.
+
 A default that no longer resolves falls back to a known-good official voice and
 says so, because "Voice Chat stopped speaking" is a much worse answer to a
 deleted clone than "the voice you had chosen is gone; using Heart".
@@ -282,6 +288,24 @@ def _uuid_of(voice_id: str) -> str:
 
 
 def _stored_default() -> str:
+    """The default voice id, out of this registry's own file.
+
+    It used to live in the Forge option alone, and that is where a real defect
+    was. An option is a *component* on the settings page as well as a stored
+    value, and "Apply settings" writes every component on that page back into
+    the store -- including this one, whose browser-side value was stamped when
+    the page was built and knows nothing about the "Set as Default" pressed
+    since. Setting a default and then changing anything else on that page put
+    the old value quietly back.
+
+    A default voice is voice-library state rather than something anybody types,
+    so it belongs beside the voices, in a file written atomically here that no
+    settings form can reach. The option is still *read*, once, so an
+    installation that set its default under an older build keeps it.
+    """
+    found = str(_read().get("default") or "").strip()
+    if found:
+        return found
     try:
         from modules import shared
 
@@ -320,7 +344,10 @@ def set_default(voice_id: str) -> dict:
     entry = lookup(voice_id)
     if entry is None:
         raise RegistryError("That voice is not installed.")
-    _remember(OPT_VOICE, entry["id"])
+    found = _read()
+    found["default"] = entry["id"]
+    found["schema"] = SCHEMA
+    _write(found)
     logger.info("Model Chain: Voice default is now %s (%s)", entry["id"], entry["type"])
     return entry
 

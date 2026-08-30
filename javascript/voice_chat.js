@@ -465,6 +465,52 @@
         look();
     }
 
+    // -- repainting without moving the page under somebody ------------------- //
+
+    // Emptying a list and refilling it costs the scroll position of whatever is
+    // scrolling it, and that is not a subtle effect: the browser clamps
+    // `scrollTop` to the content that is there *at that moment*, so a list wiped
+    // to nothing clamps to zero, and refilling it afterwards does not put it
+    // back. Every poll that repainted a voice list therefore threw somebody back
+    // to the top of the flyout, and expanding a section -- which is followed by
+    // a repaint -- did it reliably enough to look like the expanding caused it.
+    //
+    // So every rebuild happens inside this, which notes where the page and the
+    // nearest scrolling ancestor were and puts them back afterwards.
+    function scrollParent(node) {
+        let here = node && node.parentElement;
+        while (here) {
+            let overflow = "";
+            try {
+                overflow = window.getComputedStyle(here).overflowY || "";
+            } catch (error) { /* a detached node has no style */ }
+            if ((overflow === "auto" || overflow === "scroll")
+                    && here.scrollHeight > here.clientHeight) {
+                return here;
+            }
+            here = here.parentElement;
+        }
+        return null;
+    }
+
+    function keepingPlace(node, job) {
+        const scroller = scrollParent(node);
+        const was = scroller ? scroller.scrollTop : 0;
+        const pageWas = (typeof window.scrollY === "number") ? window.scrollY : 0;
+        try {
+            job();
+        } finally {
+            // After the rebuild, when the content is tall enough to hold the
+            // position again.
+            if (scroller && scroller.scrollTop !== was) scroller.scrollTop = was;
+            if (typeof window.scrollTo === "function" && window.scrollY !== pageWas) {
+                try {
+                    window.scrollTo(window.scrollX || 0, pageWas);
+                } catch (error) { /* a harness without a real window */ }
+            }
+        }
+    }
+
     // -- what is installed --------------------------------------------------- //
 
     let readiness = null;
@@ -3341,7 +3387,7 @@
         if (!holder || !payload || !payload.ok) return;
         const list = holder.querySelector("[data-mc-voice-picker-list]");
         const chosen = pickerValue();
-        if (list) {
+        if (list) keepingPlace(list, function () {
             list.textContent = "";
             list.appendChild(defaultRow(chosen, payload));
             const groups = [
@@ -3365,7 +3411,7 @@
                     list.appendChild(pickerRow(entry, chosen));
                 });
             });
-        }
+        });
         holder.dataset.mcVoiceDefault = payload.default || "";
         markPicker(holder);
     }
@@ -3626,7 +3672,7 @@
         if (!holder || !payload) return;
         const list = holder.querySelector("[data-mc-voice-list]");
         const current = payload.default || "";
-        if (list) {
+        if (list) keepingPlace(list, function () {
             list.textContent = "";
             // Kokoro's list is grouped by accent because its bank is; Sopro's
             // is one list of voices somebody made, because that is what it is.
@@ -3652,7 +3698,7 @@
                     list.appendChild(voiceRow(entry, current));
                 });
             });
-        }
+        });
         const chosen = payload.voices.filter(function (v) { return v.id === current; })[0];
         const label = holder.querySelector("[data-mc-voice-current]");
         if (label) {
@@ -4099,7 +4145,8 @@
             sayTrim(form, shown + " selected — Sopro takes at most "
                     + CLIP_MAX_SECONDS + " s. Drag the edges in.");
         } else {
-            sayTrim(form, shown + " selected — ready to create.");
+            sayTrim(form, shown + " selected — ready to create."
+                    + (soproClip.clean ? " Cleaning is on." : ""));
         }
     }
 
@@ -4107,7 +4154,196 @@
     // because Sopro conditions on one speaker and the server would downmix it
     // anyway; the source rate because resampling twice is worse than once and
     // the server does the one that matters.
-    function clipToWav() {
+    // -- cleaning up a reference recording ------------------------------------ //
+    //
+    // Sopro clones what it is given, hiss included, and a phone recording made
+    // in a room with a fan in it clones the fan. The obvious answer was
+    // DeepFilterNet, and it cannot be installed here: its Rust extension,
+    // DeepFilterLib, publishes wheels for CPython 3.8 to 3.11 only, and this
+    // WebUI runs on 3.13. Building it from the sdist needs a Rust toolchain,
+    // which is exactly the "resolve something nobody reviewed" this feature
+    // exists not to do.
+    //
+    // So this is spectral subtraction, in the tab, on the selection that is
+    // about to be uploaded. It is not a learned denoiser and does not pretend
+    // to be: it takes out steady broadband noise -- hiss, hum, fan, room tone --
+    // and leaves everything that is not steady alone. That is most of what a
+    // bad reference recording suffers from, and it costs no dependency at all.
+
+    const FFT_SIZE = 1024;
+    const FFT_HOP = FFT_SIZE / 4;
+    const NOISE_OVERSUBTRACT = 2.5;
+    const NOISE_FLOOR_GAIN = 0.03;
+    const GAIN_SMOOTHING = 0.5;
+
+    // In-place iterative radix-2, which is all a power-of-two window needs.
+    function fft(re, im, inverse) {
+        const n = re.length;
+        for (let i = 1, j = 0; i < n; i += 1) {
+            let bit = n >> 1;
+            for (; j & bit; bit >>= 1) j ^= bit;
+            j ^= bit;
+            if (i < j) {
+                let swap = re[i]; re[i] = re[j]; re[j] = swap;
+                swap = im[i]; im[i] = im[j]; im[j] = swap;
+            }
+        }
+        for (let len = 2; len <= n; len <<= 1) {
+            const angle = (inverse ? 2 : -2) * Math.PI / len;
+            const wr = Math.cos(angle);
+            const wi = Math.sin(angle);
+            for (let start = 0; start < n; start += len) {
+                let cr = 1;
+                let ci = 0;
+                for (let k = 0; k < len / 2; k += 1) {
+                    const ar = re[start + k];
+                    const ai = im[start + k];
+                    const br = re[start + k + len / 2] * cr - im[start + k + len / 2] * ci;
+                    const bi = re[start + k + len / 2] * ci + im[start + k + len / 2] * cr;
+                    re[start + k] = ar + br;
+                    im[start + k] = ai + bi;
+                    re[start + k + len / 2] = ar - br;
+                    im[start + k + len / 2] = ai - bi;
+                    const nr = cr * wr - ci * wi;
+                    ci = cr * wi + ci * wr;
+                    cr = nr;
+                }
+            }
+        }
+        if (inverse) {
+            for (let i = 0; i < n; i += 1) { re[i] /= n; im[i] /= n; }
+        }
+    }
+
+    // A one-pole high-pass at about 80 Hz. Rumble, handling and desk thumps all
+    // live below where a voice does, and none of it survives being cloned into
+    // something the model then reproduces under every sentence.
+    function highPass(samples, rate) {
+        const cut = 80;
+        const rc = 1 / (2 * Math.PI * cut);
+        const dt = 1 / rate;
+        const alpha = rc / (rc + dt);
+        const found = new Float32Array(samples.length);
+        let last = 0;
+        let lastIn = 0;
+        for (let index = 0; index < samples.length; index += 1) {
+            last = alpha * (last + samples[index] - lastIn);
+            lastIn = samples[index];
+            found[index] = last;
+        }
+        return found;
+    }
+
+    function denoise(input, rate) {
+        const samples = highPass(input, rate);
+        const frames = Math.max(1, Math.floor((samples.length - FFT_SIZE) / FFT_HOP) + 1);
+        if (samples.length < FFT_SIZE * 2) return samples;
+        const bins = FFT_SIZE / 2 + 1;
+        const window = new Float32Array(FFT_SIZE);
+        for (let i = 0; i < FFT_SIZE; i += 1) {
+            window[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / FFT_SIZE);
+        }
+        const magnitudes = [];
+        const phasesRe = [];
+        const phasesIm = [];
+        for (let frame = 0; frame < frames; frame += 1) {
+            const re = new Float64Array(FFT_SIZE);
+            const im = new Float64Array(FFT_SIZE);
+            const from = frame * FFT_HOP;
+            for (let i = 0; i < FFT_SIZE; i += 1) re[i] = samples[from + i] * window[i];
+            fft(re, im, false);
+            const mag = new Float64Array(bins);
+            for (let bin = 0; bin < bins; bin += 1) {
+                mag[bin] = Math.sqrt(re[bin] * re[bin] + im[bin] * im[bin]);
+            }
+            magnitudes.push(mag);
+            phasesRe.push(re);
+            phasesIm.push(im);
+        }
+
+        // The noise floor per bin: a low percentile over time. Minimum
+        // statistics rather than "the first half second is silence", because a
+        // recording somebody trimmed themselves usually opens on speech.
+        const noise = new Float64Array(bins);
+        const column = new Float64Array(frames);
+        for (let bin = 0; bin < bins; bin += 1) {
+            for (let frame = 0; frame < frames; frame += 1) column[frame] = magnitudes[frame][bin];
+            const sorted = Array.prototype.slice.call(column).sort(function (a, b) {
+                return a - b;
+            });
+            noise[bin] = sorted[Math.floor(sorted.length * 0.1)] || 0;
+        }
+
+        const out = new Float32Array(samples.length);
+        const weight = new Float32Array(samples.length);
+        const gains = new Float64Array(bins);
+        const smoothed = new Float64Array(bins);
+        const previous = new Float64Array(bins);
+        previous.fill(1);
+        for (let frame = 0; frame < frames; frame += 1) {
+            const mag = magnitudes[frame];
+            const re = phasesRe[frame];
+            const im = phasesIm[frame];
+            for (let bin = 0; bin < bins; bin += 1) {
+                const level = mag[bin];
+                let gain = level > 0
+                    ? (level - NOISE_OVERSUBTRACT * noise[bin]) / level
+                    : 0;
+                if (!(gain > NOISE_FLOOR_GAIN)) gain = NOISE_FLOOR_GAIN;
+                if (gain > 1) gain = 1;
+                gains[bin] = gain;
+            }
+            // Smoothed across frequency and then across time, which is what
+            // keeps this from sounding worse than the noise it removed. An
+            // unsmoothed gain flips between "keep" and "floor" bin by bin and
+            // frame by frame, and the result is musical noise: a shimmer of
+            // tones where there used to be honest hiss. Smoothing is what buys
+            // the moderate over-subtraction above; without it the only way to
+            // remove this much noise is to be aggressive enough to hear.
+            for (let bin = 0; bin < bins; bin += 1) {
+                const low = gains[Math.max(0, bin - 1)];
+                const high = gains[Math.min(bins - 1, bin + 1)];
+                smoothed[bin] = (low + gains[bin] + high) / 3;
+            }
+            for (let bin = 0; bin < bins; bin += 1) {
+                const gain = GAIN_SMOOTHING * previous[bin]
+                    + (1 - GAIN_SMOOTHING) * smoothed[bin];
+                previous[bin] = gain;
+                re[bin] *= gain;
+                im[bin] *= gain;
+                if (bin > 0 && bin < FFT_SIZE / 2) {
+                    // The mirrored half, so the inverse transform comes back real.
+                    re[FFT_SIZE - bin] = re[bin];
+                    im[FFT_SIZE - bin] = -im[bin];
+                }
+            }
+            fft(re, im, true);
+            const from = frame * FFT_HOP;
+            for (let i = 0; i < FFT_SIZE; i += 1) {
+                out[from + i] += re[i] * window[i];
+                weight[from + i] += window[i] * window[i];
+            }
+        }
+        let peak = 0;
+        for (let index = 0; index < out.length; index += 1) {
+            if (weight[index] > 1e-6) out[index] /= weight[index];
+            const size = Math.abs(out[index]);
+            if (size > peak) peak = size;
+        }
+        // Back up to just under full scale. A reference the model conditions on
+        // should not also teach it that this speaker is quiet.
+        if (peak > 1e-4) {
+            const gain = 0.89 / peak;
+            for (let index = 0; index < out.length; index += 1) out[index] *= gain;
+        }
+        return out;
+    }
+
+    // The selection as mono samples, cleaned if that is what is showing. One
+    // function, so what is played and what is uploaded cannot be different
+    // things -- which is the only way "you can hear what you are sending" is a
+    // true sentence rather than a hopeful one.
+    function clipSamples() {
         if (!soproClip) return null;
         const buffer = soproClip.buffer;
         const rate = buffer.sampleRate;
@@ -4127,7 +4363,22 @@
                 mixed[index] /= buffer.numberOfChannels;
             }
         }
-        return encodeWav(mixed, rate);
+        if (!soproClip.clean) return mixed;
+        // Cached against the exact selection: cleaning twenty seconds is a few
+        // hundred milliseconds of arithmetic and the selection does not change
+        // between pressing Play and pressing Create.
+        const key = soproClip.start.toFixed(3) + ":" + soproClip.end.toFixed(3);
+        if (soproClip.cleanedKey !== key) {
+            soproClip.cleaned = denoise(mixed, rate);
+            soproClip.cleanedKey = key;
+        }
+        return soproClip.cleaned;
+    }
+
+    function clipToWav() {
+        const samples = clipSamples();
+        if (!samples || !samples.length) return null;
+        return encodeWav(samples, soproClip.buffer.sampleRate);
     }
 
     function playSelection(form, button) {
@@ -4136,8 +4387,13 @@
         if (!ctx) return;
         unlock();
         stopPlayback();
+        const samples = clipSamples();
+        if (!samples || !samples.length) return;
+        const rate = soproClip.buffer.sampleRate;
+        const held = ctx.createBuffer(1, samples.length, rate);
+        held.getChannelData(0).set(samples);
         const source = ctx.createBufferSource();
-        source.buffer = soproClip.buffer;
+        source.buffer = held;
         source.connect(ctx.destination);
         source.onended = function () {
             if (playing === source) playing = null;
@@ -4145,7 +4401,7 @@
         };
         playing = source;
         if (button) button.textContent = "Stop";
-        source.start(0, soproClip.start, Math.max(0.05, clipDuration()));
+        source.start(0);
     }
 
     function wireTrim(form) {
@@ -4206,6 +4462,14 @@
                 soproClip.start = loudestWindow(soproClip.buffer, CLIP_SUGGESTED);
                 soproClip.end = Math.min(soproClip.buffer.duration,
                                          soproClip.start + CLIP_SUGGESTED);
+                paintTrim(form);
+            });
+        }
+        const clean = form.querySelector("[data-mc-voice-clean]");
+        if (clean) {
+            clean.addEventListener("change", function () {
+                if (!soproClip) return;
+                soproClip.clean = !!clean.checked;
                 paintTrim(form);
             });
         }
@@ -4691,7 +4955,7 @@
         const status = holder.querySelector("[data-mc-voice-cloning-status]");
         if (status) status.textContent = payload.message || "";
         const checks = holder.querySelector("[data-mc-voice-cloning-checks]");
-        if (checks) {
+        if (checks) keepingPlace(checks, function () {
             checks.textContent = "";
             (payload.checks || []).forEach(function (item) {
                 const line = document.createElement("div");
@@ -4700,7 +4964,7 @@
                     + (item.detail ? " — " + item.detail : "");
                 checks.appendChild(line);
             });
-        }
+        });
         const links = holder.querySelector("[data-mc-voice-cloning-links]");
         if (links && !links.children.length && payload.sources) {
             [["Storytime", payload.sources.upstream], ["Kokoro", payload.sources.kokoro]]

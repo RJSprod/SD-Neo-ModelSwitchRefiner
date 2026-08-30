@@ -395,6 +395,9 @@ cloneParts.best = element("clone-best", "BUTTON");
 cloneParts.start = element("clone-start", "INPUT");
 cloneParts.end = element("clone-end", "INPUT");
 cloneParts.state = element("clone-state");
+cloneParts.clean = element("clone-clean", "INPUT");
+cloneParts.clean.type = "checkbox";
+cloneParts.clean.checked = false;
 
 // A canvas that records what was painted on it, so "the waveform was drawn" is
 // a number rather than an assumption.
@@ -425,6 +428,7 @@ cloneParts.form.querySelector = function (selector) {
         "trim-start": cloneParts.start,
         "trim-end": cloneParts.end,
         "trim-state": cloneParts.state,
+        "voice-clean": cloneParts.clean,
     };
     const key = Object.keys(map).filter((name) => selector.indexOf(name) !== -1)[0];
     if (key) return map[key];
@@ -586,10 +590,23 @@ const context = {
         const rate = DECODE_RATE;
         const length = Math.round(DECODE_SECONDS * rate);
         const data = new Float32Array(length);
+        let seed = 1;
         for (let index = 0; index < length; index += 1) {
             const at = index / rate;
             const level = (at >= LOUD_FROM && at < LOUD_FROM + 10) ? 0.5 : 0.01;
-            data[index] = level * Math.sin(2 * Math.PI * 220 * at);
+            // A deterministic hiss on top, so "cleaning removed the noise" is a
+            // number a test can compute rather than a claim.
+            let noise = 0;
+            if (NOISE_LEVEL > 0) {
+                seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+                noise = NOISE_LEVEL * ((seed / 0x7fffffff) * 2 - 1);
+            }
+            // Amplitude-modulated at a syllable rate. A *constant* tone is,
+            // correctly, indistinguishable from steady noise -- spectral
+            // subtraction removes it and is right to -- so a test signal that
+            // did not vary would be testing the wrong thing about speech.
+            const envelope = 0.5 + 0.5 * Math.sin(2 * Math.PI * 4 * at);
+            data[index] = level * envelope * Math.sin(2 * Math.PI * 220 * at) + noise;
         }
         ok({numberOfChannels: 1, length, sampleRate: rate, duration: length / rate,
             getChannelData: () => data});
@@ -629,6 +646,7 @@ globalThis.FormData = function () {
     this.append = function (name, value, filename) {
         uploads.push({name, filename: filename || null,
                       text: typeof value === "string" ? value : null,
+                      raw: (value && value._bytes) || null,
                       bytes: value && value._bytes ? value._bytes.length : null});
     };
 };
@@ -638,7 +656,8 @@ globalThis.FormData = function () {
 function lastUploadedWav() {
     const found = uploads.filter((entry) => entry.name === "reference").pop();
     if (!found) return null;
-    return {bytes: found.bytes, seconds: (found.bytes - 44) / 2 / DECODE_RATE};
+    return {bytes: found.bytes, seconds: (found.bytes - 44) / 2 / DECODE_RATE,
+            b64: UPLOAD_BYTES ? Buffer.from(found.raw).toString("base64") : null};
 }
 globalThis.URL = {createObjectURL: () => "blob:worklet", revokeObjectURL() {}};
 
@@ -1030,6 +1049,10 @@ DEFAULTS = {
     "DECODE_SECONDS": "1",
     "DECODE_RATE": "24000",
     "LOUD_FROM": "0",
+    "NOISE_LEVEL": "0",
+    # Returning the uploaded WAV costs a base64 of it on stdout, so only the one
+    # test that measures the audio asks for it.
+    "UPLOAD_BYTES": "false",
     "WORKLET_AVAILABLE": "true",
     # Whether `addModule` succeeds. False models a browser that refuses the
     # module -- a duplicate registration, a Content-Security-Policy that will not
@@ -3254,6 +3277,80 @@ class TestBringingAnAudioFile:
         assert not [r for r in found["requests"]
                     if r.get("url", "").endswith("/sopro/clone")]
         assert "5 to 20 seconds" in found["cloneStatus"], found["cloneStatus"]
+
+    def test_cleaning_takes_the_hiss_out_and_leaves_the_voice(self):
+        """The measured claim, not the hopeful one.
+
+        DeepFilterNet was the obvious answer and cannot be installed here --
+        its Rust extension publishes wheels for CPython 3.8 to 3.11 and this
+        WebUI runs 3.13 — so this is spectral subtraction in the page. It only
+        earns its checkbox if it actually improves the recording, which is a
+        number: the ratio between the tone the speaker is and the hiss they are
+        not, in the audio that leaves the page.
+        """
+        import base64
+        import struct
+
+        import numpy
+
+        def uploaded(clean: str) -> numpy.ndarray:
+            found = run("""
+                await tick();
+                cloneParts.file.files = [new Blob([new Uint8Array(2048)])];
+                cloneParts.file.fire("change");
+                await tick();
+                cloneParts.clean.checked = """ + clean + """;
+                cloneParts.clean.fire("change");
+                cloneParts.name.value = "Ada";
+                cloneParts.create.fire("click");
+                await tick();
+                console.log(JSON.stringify(report()));
+            """, VOICES_PRESENT="true", VOICES_VISIBLE="true", DECODE_SECONDS="6",
+                DECODE_RATE="8000", LOUD_FROM="0", NOISE_LEVEL="0.06",
+                UPLOAD_BYTES="true")
+            raw = base64.b64decode(found["uploaded"]["b64"])
+            count = (len(raw) - 44) // 2
+            return numpy.array(struct.unpack("<%dh" % count, raw[44:44 + count * 2]),
+                               dtype=float) / 32768.0
+
+        def tone_to_hiss(samples: numpy.ndarray) -> float:
+            spectrum = numpy.abs(numpy.fft.rfft(samples * numpy.hanning(len(samples))))
+            freqs = numpy.fft.rfftfreq(len(samples), 1 / 8000.0)
+            # Means, not sums: the tone lives in a handful of bins and the
+            # hiss band in a thousand, and summing would compare a bandwidth
+            # rather than a level.
+            tone = spectrum[(freqs > 200) & (freqs < 240)].mean()
+            # A band with nothing in it but the hiss we added.
+            hiss = spectrum[(freqs > 1500) & (freqs < 3500)].mean()
+            return float(tone / max(hiss, 1e-9))
+
+        before = uploaded("false")
+        after = uploaded("true")
+        plain = tone_to_hiss(before)
+        cleaned = tone_to_hiss(after)
+
+        # About 6 dB on this signal. Deliberately not more: the settings behind
+        # it are moderate on purpose, because the way to score better here is to
+        # over-subtract, and over-subtraction is heard as musical noise in the
+        # reference the voice is then built from.
+        assert cleaned > plain * 1.8, (
+            f"cleaning barely changed anything: {plain:.1f} -> {cleaned:.1f}")
+
+        # And the speaker is still in there. A denoiser that scores well by
+        # removing everything is not a denoiser.
+        spectrum = numpy.abs(numpy.fft.rfft(after * numpy.hanning(len(after))))
+        freqs = numpy.fft.rfftfreq(len(after), 1 / 8000.0)
+        loudest = freqs[int(numpy.argmax(spectrum))]
+        assert 200 < loudest < 240, f"the voice did not survive; peak at {loudest:.0f} Hz"
+
+    def test_the_checkbox_changes_what_is_uploaded(self):
+        found = self.choose("""
+            cloneParts.clean.checked = true;
+            cloneParts.clean.fire("change");
+            console.log(JSON.stringify(report()));
+        """, DECODE_SECONDS="12", NOISE_LEVEL="0.05")
+
+        assert "Cleaning is on" in found["trimState"], found["trimState"]
 
     def test_a_file_the_browser_cannot_decode_says_so(self):
         found = self.choose("console.log(JSON.stringify(report()));",

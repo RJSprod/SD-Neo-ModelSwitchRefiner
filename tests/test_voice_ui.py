@@ -423,8 +423,30 @@ class TestTheSettingsSection:
         } | set(mc_voice_sopro_profile.OPTIONS.values()) | {
             mc_voice_sopro_profile.OPT_LANGUAGE,
         }
-        assert registered == known, (
-            "a voice option is registered and never read, or read and never registered")
+        assert registered <= known, (
+            "a voice option is registered on the settings page and never read")
+
+    def test_sopros_settings_are_not_also_rows_on_the_settings_page(self, host):
+        """One control per value, which is what the second one cost.
+
+        A host option is a component on the settings page as well as a stored
+        value, and "Apply settings" writes every component on that page back into
+        the store using the copy the browser was given when the page was built.
+        So each of Sopro's twelve had a twin further down the page that knew
+        nothing about the panel above it, and pressing Apply put the default
+        voice, the delivery and the engine settings back as they were. They live
+        in Sopro's own files now and are set in one place.
+        """
+        import model_chain  # noqa: F401
+        import mc_voice_sopro
+        import mc_voice_sopro_profile
+
+        theirs = {mc_voice_sopro.OPT_VOICE, mc_voice_sopro.OPT_PRECISION,
+                  mc_voice_sopro.OPT_STEPS, mc_voice_sopro.OPT_CHUNK,
+                  mc_voice_sopro_profile.OPT_LANGUAGE}
+        theirs |= set(mc_voice_sopro_profile.OPTIONS.values())
+        clashing = theirs & set(host.shared.options_templates)
+        assert not clashing, sorted(clashing)
 
     def test_the_default_voice_is_a_stable_id_and_not_a_number(self, host):
         """Section 113. The V1 manifest stored a numeric speaker and a name that
