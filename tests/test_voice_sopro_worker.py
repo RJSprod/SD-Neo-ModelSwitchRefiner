@@ -126,7 +126,7 @@ class TestTheOneWayThePolicyMoves:
     """I-12 asks for a policy that is *measured*, fixed, and never auto-tuned
     from runtime measurements. Those are three requirements and only the third
     forbids anything here: a benchmark is how the first one is satisfied, and
-    ``tools/sweep_sopro_threads.py`` cannot sweep a constant.
+    the Run validation button cannot sweep a constant.
 
     What has to stay true is that an installation never quietly runs a policy
     nobody measured — so the override is bounded, and it is loud.

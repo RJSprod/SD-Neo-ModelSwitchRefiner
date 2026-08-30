@@ -377,7 +377,7 @@ OVERRIDE_INTEROP = "MC_SOPRO_INTEROP_THREADS"
 I-12 says the policy is *measured*, fixed, and never auto-tuned from runtime
 measurements. Those are three requirements and only the third one forbids
 anything here: a benchmark that sweeps thread counts is how the first one is
-satisfied, and ``tools/sweep_sopro_threads.py`` cannot sweep a constant. So the
+satisfied, and the Run validation button cannot sweep a constant. So the
 count may be set from the environment -- by that tool, or by somebody who has
 run it and wants to keep the answer.
 
@@ -2208,7 +2208,7 @@ def benchmark(stdin=None) -> int:
     The half of I-12 that is easy to miss: the released CPU policy has to be a
     *measured* one, and 4 intra-op threads was chosen to match Kokoro's lane
     rather than because Sopro was measured against 6 or 8. This is how it gets
-    measured, and ``tools/sweep_sopro_threads.py`` is what drives it.
+    measured, and :mod:`mc_voice_sopro_bench` is what drives it.
 
     Two lengths rather than one, because a single real-time factor conflates two
     costs that respond to completely different things. Synthesis time on this

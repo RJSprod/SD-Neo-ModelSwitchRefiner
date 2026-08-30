@@ -263,13 +263,23 @@ runtime measurements. Only the third was actually true — four intra-op threads
 was chosen to match Kokoro's synthesis lane so that a same-machine comparison
 between the engines meant something, and never measured against six or eight.
 
-`tools/sweep_sopro_threads.py` is the missing measurement. It spawns the
-isolated interpreter once per configuration — a fresh process every time, because
-OpenMP sizes its pool at the first parallel region and
-`set_num_interop_threads` refuses outright after one, so a sweep that reused a
-process would be measuring the first thread count several times under different
-labels — speaks a short line and a long one at each, fits the model above, and
-prints the break-even Speed for each configuration.
+**Run validation**, in Voice Chat Settings → Engine settings, is the missing
+measurement. It spawns the isolated interpreter once per configuration — a fresh
+process every time, because OpenMP sizes its pool at the first parallel region
+and `set_num_interop_threads` refuses outright after one, so a sweep that reused
+a process would be measuring the first thread count several times under
+different labels — speaks a short line and a long one at each, fits the model
+above, and writes the break-even Speed for every configuration to
+`model_chain.log`.
+
+It began as `tools/sweep_sopro_threads.py` and that was the wrong shape. A
+script needs Forge's own interpreter, run from the Forge root, with Forge's data
+root resolvable; all three are invisible until one is wrong, and when one *is*
+wrong it reports "the isolated Sopro runtime is not installed" about a runtime
+that is installed perfectly well — which is what happened the first time anybody
+tried to run it. Nothing about the measurement wanted to be a command line. The
+button runs in the process that already resolved those paths, so it cannot
+resolve them differently.
 
 It changes nothing. Moving the released policy is still a deliberate edit to
 `INTRAOP_THREADS`, made by somebody who has read a table. The only new lever at

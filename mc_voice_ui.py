@@ -1212,9 +1212,12 @@ def _sopro_engine_settings(settings: dict, found) -> str:
         '<label>Precision</label>'
         + choices("precision", settings["precision"],
                   [item["id"] for item in settings["precisions"]], precision_labels)
-        + '<p class="mc-voice-note">INT8 quantizes the autoregressive blocks and is faster '
-          'and lighter on the CPU. Your saved voices stay valid either way — only the '
-          'warmed streaming caches are rebuilt.</p>'
+        + '<p class="mc-voice-note">INT8 quantizes the autoregressive blocks, so the model '
+          'is lighter in memory. Whether it is also <em>faster</em> depends on the machine '
+          '— on some CPUs it is measurably slower, because a narrower multiply can cost '
+          'more in conversion than it saves. Run the validation below to find out which '
+          'yours is. Your saved voices stay valid either way; only the warmed streaming '
+          'caches are rebuilt.</p>'
         '</div>'
         '<div class="mc-voice-field">'
         '<label>Solver steps</label>'
@@ -1230,10 +1233,40 @@ def _sopro_engine_settings(settings: dict, found) -> str:
           'Only benchmarked values are offered.</p>'
         '</div>'
         f'<p class="mc-voice-note">CPU threads are fixed at four working threads and one '
-        f'coordinating thread for this build, chosen from measurements and reported in the '
-        f'log rather than tuned here. Build fingerprint '
+        f'coordinating thread for this build, reported in the log rather than tuned here. '
+        f'Build fingerprint '
         f'<code>{ui.escape(found.fingerprint or "not installed")}</code>.</p>'
-        '</details>')
+        + _sopro_validation()
+        + '</details>')
+
+
+def _sopro_validation() -> str:
+    """One button that measures this machine and writes the table to the log.
+
+    Here rather than in a tool, because the tool it replaces needed Forge's own
+    interpreter, run from the Forge root, with Forge's data root resolvable --
+    and when one of those was wrong it reported the isolated runtime as missing,
+    about a runtime that was installed. A button in the process that already
+    resolved those paths cannot get them wrong.
+
+    Inside Engine settings because that is what it measures and what its answer
+    would change. It is the only control in this panel that alters nothing:
+    it starts processes, times them, prints a table and stops.
+    """
+    return (
+        '<div class="mc-voice-field" data-mc-voice-sopro-validate-row>'
+        '<label>Validate this machine</label>'
+        '<p class="mc-voice-note">Measures Sopro at each precision and thread count on '
+        'this CPU and writes the table to <code>model_chain.log</code>. It changes no '
+        'setting — the number to read is the break-even Speed, above which speech is '
+        'produced more slowly than it is heard. Takes a few minutes, unloads Sopro while '
+        'it runs, and needs a voice to speak with.</p>'
+        '<button type="button" class="mc-voice-install" data-mc-voice-sopro-validate>'
+        'Run validation</button>'
+        '<div class="mc-voice-status" data-mc-voice-sopro-validate-status></div>'
+        '<pre class="mc-voice-validate-table" data-mc-voice-sopro-validate-table hidden>'
+        '</pre>'
+        '</div>')
 
 
 def delivery_controls() -> list:

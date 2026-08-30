@@ -275,6 +275,21 @@ settingsParts.cleanupRow.querySelector = function (selector) {
     return null;
 };
 
+// The Sopro validation row. One button, a status line and a table -- and it is
+// the one control in that panel that must change nothing at all, so what is
+// modelled here is the polling and the painting rather than any effect.
+settingsParts.validateRow = element("validate-row");
+settingsParts.validateRow["data-mc-voice-sopro-validate-row"] = "";
+settingsParts.validateButton = element("validate-run", "BUTTON");
+settingsParts.validateStatus = element("validate-status");
+settingsParts.validateTable = element("validate-table");
+settingsParts.validateRow.querySelector = function (selector) {
+    if (selector.indexOf("sopro-validate-status") !== -1) return settingsParts.validateStatus;
+    if (selector.indexOf("sopro-validate-table") !== -1) return settingsParts.validateTable;
+    if (selector.indexOf("sopro-validate") !== -1) return settingsParts.validateButton;
+    return null;
+};
+
 settingsParts.enginePanel = element("engines");
 settingsParts.enginePanel["data-mc-voice-engines"] = "";
 settingsParts.engineCards = {
@@ -314,6 +329,7 @@ settingsRow.querySelector = function (selector) {
     if (selector === '[data-mc-voice-folder="tts"]') return settingsParts.ttsFolder;
     if (selector === "[data-mc-voice-engines]") return settingsParts.enginePanel;
     if (selector.indexOf('kind="cleanup"') !== -1) return settingsParts.cleanupRow;
+    if (selector.indexOf("sopro-validate-row") !== -1) return settingsParts.validateRow;
     if (selector === '[data-mc-voice-kind="sopro"]') return null;
     if (selector === '[data-mc-voice-tiers="stt"]') return settingsParts.tierList;
     if (selector === '[data-mc-voice-chosen="stt"]') return settingsParts.chosenLabel;
@@ -972,6 +988,11 @@ function report(extra) {
         trimEnd: cloneParts.end.value,
         cloneStatus: cloneParts.status.textContent,
         cleanHowHidden: cloneParts.how.hidden,
+        validateDisabled: settingsParts.validateButton.disabled,
+        validateLabel: settingsParts.validateButton.textContent,
+        validateStatus: settingsParts.validateStatus.textContent,
+        validateTable: settingsParts.validateTable.textContent,
+        validateTableHidden: settingsParts.validateTable.hidden,
         cleanupInstallDisabled: settingsParts.cleanupInstall.disabled,
         cleanupStatus: settingsParts.cleanupStatus.textContent,
         painted: painted.length,
@@ -3141,6 +3162,150 @@ class TestTheRecordingCleanupRow:
         """, SETTINGS_PRESENT="true")
 
         assert "241.7 MB" in found["cleanupStatus"], found["cleanupStatus"]
+
+
+class TestTheSoproValidationRow:
+    """The measurement button. It starts a sweep, polls it, and paints a table.
+
+    What it must never do is imply it changed something — the sweep's whole
+    claim to be compatible with I-12 is that it acts on nothing — and what it
+    must never do *to the user* is look idle for the four minutes it takes.
+    """
+
+    @staticmethod
+    def _answers(**rows):
+        answers = status_answer()
+        answers["voice/sopro/validate"] = {"json": dict({"ok": True}, **rows)}
+        return json.dumps(answers)
+
+    def test_pressing_it_asks_the_server_to_start(self):
+        found = run("""
+            await tick();
+            requests.length = 0;
+            settingsParts.validateButton.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+        posts = [r for r in found["requests"]
+                 if r.get("url", "").endswith("/sopro/validate")]
+        assert posts, "the button did nothing"
+        assert json.loads(posts[0]["bodyText"]).get("start") is True
+
+    def test_a_second_press_while_it_runs_does_not_start_it_twice(self):
+        """A sweep is minutes of CPU. Starting a second one would make both
+        wrong, because two Sopro processes on one CPU measure each other."""
+        found = run("""
+            await tick();
+            requests.length = 0;
+            settingsParts.validateButton.fire("click");
+            settingsParts.validateButton.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+        starts = [r for r in found["requests"]
+                  if r.get("url", "").endswith("/sopro/validate")
+                  and json.loads(r["bodyText"]).get("start")]
+        assert len(starts) == 1, starts
+
+    def test_while_it_runs_the_button_says_so(self):
+        """Four silent minutes is a button somebody presses again."""
+        found = run("""
+            await tick();
+            settingsParts.validateButton.fire("click");
+            await tick();
+            await hold(1200);
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true",
+             ANSWERS=self._answers(running=True, step=2, total=8,
+                                   message="int8, 6 threads…", rows=[]))
+        assert found["validateDisabled"] is True
+        assert found["validateLabel"] == "Measuring…"
+        assert "2 of 8" in found["validateStatus"], found["validateStatus"]
+
+    def test_a_refusal_puts_the_button_back(self):
+        found = run("""
+            await tick();
+            settingsParts.validateButton.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true",
+             ANSWERS=self._answers(ok=False, error="There is no Sopro voice."))
+        assert found["validateDisabled"] is False
+        assert "no Sopro voice" in found["validateStatus"], found["validateStatus"]
+
+    def test_the_finished_answer_names_the_fastest_and_points_at_the_log(self):
+        found = run("""
+            await tick();
+            settingsParts.validateButton.fire("click");
+            await tick();
+            await hold(1200);
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true",
+             ANSWERS=self._answers(
+                 running=False, done=True, step=8, total=8, rows=[],
+                 best={"precision": "full", "threads": 8, "rtf": 0.612,
+                       "break_even_speed": 1.634}))
+        assert found["validateDisabled"] is False
+        assert found["validateLabel"] == "Run validation"
+        assert "full" in found["validateStatus"]
+        assert "1.63x" in found["validateStatus"], found["validateStatus"]
+        assert "model_chain.log" in found["validateStatus"]
+
+    def test_the_table_is_drawn_as_well_as_logged(self):
+        """The log is what gets sent on, but somebody who just waited four
+        minutes should not have to open a file to see the answer."""
+        found = run("""
+            await tick();
+            settingsParts.validateButton.fire("click");
+            await tick();
+            await hold(1200);
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true",
+             ANSWERS=self._answers(running=False, done=True, rows=[
+                 {"precision": "full", "threads": 4, "rate": 0.798, "rtf": 0.858,
+                  "break_even_speed": 1.166},
+                 {"precision": "int8", "threads": 4, "rate": 1.122, "rtf": 1.124,
+                  "break_even_speed": 0.889}]))
+        assert found["validateTableHidden"] is False
+        assert "0.858" in found["validateTable"], found["validateTable"]
+        assert "1.12x" in found["validateTable"] or "0.89x" in found["validateTable"], \
+            found["validateTable"]
+
+    def test_a_configuration_that_failed_is_a_row_rather_than_a_crash(self):
+        """One precision this Torch build cannot do must not cost the table the
+        rows that worked."""
+        found = run("""
+            await tick();
+            settingsParts.validateButton.fire("click");
+            await tick();
+            await hold(1200);
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true",
+             ANSWERS=self._answers(running=False, done=True, rows=[
+                 {"precision": "full", "threads": 4, "rate": 0.8, "rtf": 0.86,
+                  "break_even_speed": 1.16},
+                 {"precision": "int8", "asked_threads": 4, "rtf": None,
+                  "error": "no int8 kernels"}]))
+        assert "no int8 kernels" in found["validateTable"], found["validateTable"]
+        assert "0.86" in found["validateTable"]
+
+    def test_it_stops_polling_once_the_sweep_is_over(self):
+        """An idle panel that kept asking would be a request every second and a
+        half for as long as the flyout is open."""
+        found = run("""
+            await tick();
+            settingsParts.validateButton.fire("click");
+            await tick();
+            await hold(2000);
+            const settled = requests.filter(
+                (r) => (r.url || "").indexOf("sopro/validate") !== -1).length;
+            await hold(8000);
+            const later = requests.filter(
+                (r) => (r.url || "").indexOf("sopro/validate") !== -1).length;
+            console.log(JSON.stringify(report({settled, later})));
+        """, SETTINGS_PRESENT="true",
+             ANSWERS=self._answers(running=False, done=True, rows=[]))
+        assert found["later"] == found["settled"], (found["settled"], found["later"])
 
 
 class TestTheEngineSelector:

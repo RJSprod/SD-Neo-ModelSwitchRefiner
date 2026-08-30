@@ -149,6 +149,7 @@ SOPRO_SETTINGS_ROUTE = f"{PREFIX}/sopro/settings"
 SOPRO_CLONE_ROUTE = f"{PREFIX}/sopro/clone"
 SOPRO_REBUILD_ROUTE = f"{PREFIX}/sopro/rebuild"
 SOPRO_STARTER_ROUTE = f"{PREFIX}/sopro/starter"
+SOPRO_VALIDATE_ROUTE = f"{PREFIX}/sopro/validate"
 CLEANUP_ROUTE = f"{PREFIX}/cleanup"
 CLEANUP_INSTALL_ROUTE = f"{PREFIX}/cleanup/install"
 CLEANUP_RUN_ROUTE = f"{PREFIX}/cleanup/run"
@@ -172,7 +173,7 @@ the active engine, which is what keeps the browser's own code engine-neutral.
 SOPRO_ROUTES = (ENGINES_ROUTE, ENGINE_SELECT_ROUTE, SURFACE_ROUTE,
                 SOPRO_ROUTE, SOPRO_INSTALL_ROUTE,
                 SOPRO_SETTINGS_ROUTE, SOPRO_CLONE_ROUTE, SOPRO_REBUILD_ROUTE,
-                SOPRO_STARTER_ROUTE,
+                SOPRO_STARTER_ROUTE, SOPRO_VALIDATE_ROUTE,
                 CLEANUP_ROUTE, CLEANUP_INSTALL_ROUTE, CLEANUP_RUN_ROUTE,
                 LAB_ROUTE, LAB_UPDATE_ROUTE, LAB_RESET_ROUTE, LAB_PLAY_ROUTE)
 
@@ -1514,6 +1515,42 @@ def sopro_clone(name: str, language: str, wav: bytes) -> dict:
             **voices_payload(engine=engines.SOPRO)}
 
 
+def sopro_validate(start: bool = False) -> dict:
+    """Poll, or start, the Sopro validation sweep.
+
+    One route for both because the panel only ever wants one of two things and
+    a second path would be a second thing to authenticate. ``start`` is what the
+    button sends; everything else is the poll behind it.
+
+    Threaded rather than awaited: this loads a model once per configuration and
+    speaks fourteen seconds at each, which is minutes. An HTTP request that
+    takes minutes is one a browser gives up on, and a browser that gave up
+    would leave a sweep running with nobody watching it.
+    """
+    import mc_voice_sopro_bench as bench
+
+    if not start:
+        return {"ok": True, **bench.state()}
+    found = bench.state()
+    if found.get("running"):
+        return {"ok": True, "already": True, **found}
+
+    def go():
+        try:
+            bench.run()
+        except Exception:
+            logger.debug("Model Chain: the Sopro validation thread ended on an error",
+                         exc_info=True)
+
+    threading.Thread(target=go, name="mc-sopro-validate", daemon=True).start()
+    # The thread has not necessarily reached its own state update yet, so this
+    # answers with what the panel needs to start polling rather than with a
+    # snapshot that might still say "not running" and stop it.
+    return {"ok": True, "already": False, "running": True, "done": False,
+            "step": 0, "total": 0, "rows": [], "error": "",
+            "message": "Starting…", "best": None}
+
+
 def cleanup_payload() -> dict:
     """What the recording-cleanup row draws, and what the clone form asks.
 
@@ -2277,6 +2314,10 @@ def install(_demo=None, app=None) -> bool:
     sopro_starter_route = _json_route(
         SOPRO_STARTER_ROUTE, lambda _payload: sopro_starter(),
         "That starter voice could not be made.")
+    sopro_validate_route = _json_route(
+        SOPRO_VALIDATE_ROUTE,
+        lambda payload: sopro_validate(bool(payload.get("start"))),
+        "The Sopro validation could not be run.")
     cleanup_status_route = _json_route(
         CLEANUP_ROUTE, lambda _payload: cleanup_payload(),
         "The recording cleanup status could not be read.")
@@ -2437,6 +2478,7 @@ def install(_demo=None, app=None) -> bool:
                               (SOPRO_CLONE_ROUTE, sopro_clone_route),
                               (SOPRO_REBUILD_ROUTE, sopro_rebuild_route),
                               (SOPRO_STARTER_ROUTE, sopro_starter_route),
+                              (SOPRO_VALIDATE_ROUTE, sopro_validate_route),
                               (CLEANUP_ROUTE, cleanup_status_route),
                               (CLEANUP_INSTALL_ROUTE, cleanup_install_route),
                               (CLEANUP_RUN_ROUTE, cleanup_run_route),
