@@ -3876,6 +3876,65 @@ class TestTheStartupBuffer:
         targets = _startup_targets(found)
         assert targets == [700], found["consoleInfo"]
 
+    def test_an_underrun_on_a_cancelled_turn_still_raises_the_target(self):
+        """The turn somebody gives up on is the turn that stuttered.
+
+        The envelope used to be adjusted only where the stream ran to its end,
+        so a reply the listener stopped taught it nothing at all -- and a
+        listener stops the replies that stutter. A log from a machine that
+        could not keep up showed the same 700 ms head start on turn after turn
+        for exactly this reason: every one of those turns was cancelled.
+        """
+        found = run("""
+            turnField.value = "T1";
+            await pump(6);
+            advanceAudio(60); NOW += 1000;
+            await pump(4);
+            stop.fire("click", {});
+            await pump(2);
+            turnField.value = "T2";
+            turnField.fire("input", {});
+            await pump(10);
+            stop.fire("click", {});
+            await pump(2);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=0.25, count=400, headers=ANY_TURN,
+                                    stall=True))
+        rows = _playbacks(found)
+        assert len(rows) == 2, found["consoleInfo"]
+        assert rows[0]["playback_end_reason"] == "cancelled", rows[0]
+        assert rows[0]["underrun_count"] >= 1, rows[0]
+        assert rows[1]["startup_buffer_ms"] > rows[0]["startup_buffer_ms"], rows
+
+    def test_a_turn_cut_short_without_stuttering_does_not_relax_the_target(self):
+        """Raising and relaxing are not symmetrical, and this is the asymmetry.
+
+        Underruns are evidence however the turn ended -- the speaker fell
+        silent and the listener heard it. A clean run is evidence only if it
+        was allowed to finish: a reply stopped two seconds in has not shown
+        that anything works, and letting it lower the buffer would let a user
+        who interrupts a lot talk the page into a head start too short for the
+        first reply they actually listen to.
+        """
+        found = run("""
+            for (let i = 0; i < 7; i += 1) {
+                turnField.value = "";
+                await pump(2);
+                turnField.value = "T" + i;
+                turnField.fire("input", {});
+                await pump(4);
+                stop.fire("click", {});
+                await pump(2);
+            }
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=0.25, count=400, headers=ANY_TURN,
+                                    stall=True))
+        targets = _startup_targets(found)
+        assert len(targets) == 7, found["consoleInfo"]
+        assert _underruns(found) == [0] * 7, found["consoleInfo"]
+        assert targets == [targets[0]] * 7, targets
+
+
     def test_the_playback_report_carries_durations_and_nothing_else(self):
         """Content-free, and in one clock domain: every number is a difference
         between two `performance.now()` readings taken in this page. The turn id
@@ -3898,6 +3957,122 @@ class TestTheStartupBuffer:
             if name in ("kind", "turn", "playback_end_reason"):
                 continue
             assert value is None or isinstance(value, int), (name, value)
+
+
+class TestRebufferingAfterTheQueueRunsDry:
+    """Section 22. What a head start cannot buy.
+
+    A producer slower than real time owes the listener a little more silence
+    every second, without bound -- so no fixed prebuffer fixes it, and sizing
+    one for the longest reply would tax every short one. What is fixable is the
+    shape: a page that resumes on the first block to arrive after a dry queue
+    is guaranteed to run dry again on the next block, which is how one
+    shortfall becomes a rattle for the rest of the reply.
+
+    These measure the hold that replaces it. The numbers are exact because the
+    threshold is exact: at 24 kHz a quarter-second block is 6000 samples, and
+    the first hold is one second, so three blocks wait and the fourth releases
+    all four.
+    """
+
+    #: Enough blocks that the stream is still producing after the queue is
+    #: drained, and `stall` so it never ends and releases the hold for the
+    #: wrong reason.
+    LONG = dict(seconds=0.25, count=400, headers=ANY_TURN, stall=True)
+
+    @staticmethod
+    def _drain_and_read(extra=""):
+        return """
+            turnField.value = "T1";
+            await pump(6);
+            const primed = scheduled.filter((i) => i.source.buffer.length).length;
+            // Past everything scheduled: the speaker has finished the queue and
+            // the stream is still producing, which is the definition of a dry
+            // queue. NOW moves with it or the reader stays parked on its
+            // high-water timer and no block arrives to find the silence.
+            advanceAudio(13); NOW += 1000;
+            await pump(4);
+            const after = scheduled.filter((i) => i.source.buffer.length).length;
+            %s
+            console.log(JSON.stringify(report({primed, after})));
+        """ % (extra,)
+
+    def test_three_blocks_are_not_enough_to_resume_on(self):
+        """0.75 s against a 1 s hold. Nothing is played.
+
+        This is the test the old behaviour fails: it scheduled every block as
+        it arrived, so these three would have been three more scraps of speech
+        in front of three more gaps.
+        """
+        found = run(self._drain_and_read(),
+                    ANSWERS=stream_answers(**dict(self.LONG, count=51)))
+        assert found["primed"] == 48, found["consoleInfo"]
+        assert found["after"] == 48, "the page resumed on less than it needs"
+
+    def test_the_fourth_block_releases_all_four(self):
+        """1.0 s exactly. Held together and released together, so the speaker
+        restarts with a second of speech in hand rather than a quarter."""
+        found = run(self._drain_and_read(),
+                    ANSWERS=stream_answers(**dict(self.LONG, count=52)))
+        assert found["primed"] == 48, found["consoleInfo"]
+        assert found["after"] == 52, found["consoleInfo"]
+
+    def test_the_end_of_the_stream_releases_a_hold_that_never_filled(self):
+        """A rebuffer that swallowed the last sentence would be a worse bug
+        than the stutter it exists to prevent."""
+        found = run(self._drain_and_read(),
+                    # The same three blocks as the first test, but this stream
+                    # ends rather than stalling.
+                    ANSWERS=stream_answers(**dict(self.LONG, count=51, stall=False)))
+        assert found["after"] == 51, found["consoleInfo"]
+
+    def test_the_hold_doubles_each_time_it_proves_too_short(self):
+        """One second was not enough, so two; and it stops at six rather than
+        growing until the page is buffering more than it plays."""
+        found = run("""
+            turnField.value = "T1";
+            await pump(6);
+            for (let i = 0; i < 6; i += 1) {
+                advanceAudio(13); NOW += 1000;
+                await pump(3);
+            }
+            stop.fire("click", {});
+            await pump(2);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(**self.LONG))
+        row = _playbacks(found)[0]
+        assert row["rebuffer_count"] == 6, row
+        assert row["rebuffer_target_ms"] == 6000, row
+
+    def test_a_turn_that_never_runs_dry_never_rebuffers(self):
+        """The hold costs nothing on a machine that keeps up, which is the
+        whole reason it is a response to silence rather than a bigger
+        prebuffer paid on every reply."""
+        found = run("await speak('T1'); console.log(JSON.stringify(report()));",
+                    ANSWERS=stream_answers(seconds=0.25, count=8))
+        row = _playbacks(found)[0]
+        assert row["underrun_count"] == 0, row
+        assert row["rebuffer_count"] == 0, row
+        assert row["rebuffer_target_ms"] == 0, row
+
+    def test_the_two_counts_are_reported_separately(self):
+        """They answer different questions: how often the speaker ran dry, and
+        how often this page chose to stay quiet rather than resume into the
+        next gap. A turn where they track each other is a producer that cannot
+        keep up at all, which is not a buffering problem."""
+        found = run("""
+            turnField.value = "T1";
+            await pump(6);
+            advanceAudio(13); NOW += 1000;
+            await pump(4);
+            stop.fire("click", {});
+            await pump(2);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(**self.LONG))
+        row = _playbacks(found)[0]
+        assert row["underrun_count"] == 1, row
+        assert row["rebuffer_count"] == 1, row
+        assert row["rebuffer_target_ms"] == 1000, row
 
 
 class TestPlaybackTelemetry:

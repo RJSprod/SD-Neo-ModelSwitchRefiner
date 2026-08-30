@@ -768,8 +768,57 @@ def _log_turn(turn) -> None:
                     found["segment_2_callback_blocks"], found["segment_2_audio_ms"],
                     found["max_segment_index"], found["max_segment_ms"],
                     found["rtf"], found["first_audio_ms"])
+        _log_shortfall(turn, found)
     except Exception:
         logger.debug("Model Chain: could not record voice turn metrics", exc_info=True)
+
+
+def _log_shortfall(turn, found: dict) -> None:
+    """Say it out loud when speech is being made slower than it is heard.
+
+    An RTF above 1 is the whole of "the audio is choppy on long replies" and
+    the previous two lines already carry the number -- but only as a ratio
+    among a dozen other numbers, with nothing to say what it means or what
+    moves it. Somebody reading a log to find out why their speech stutters
+    should not have to know that 1.16 is the bad side of 1.
+
+    Speed is named because on this engine Speed is usually the answer. Sopro V2
+    has no model-native speaking rate (``sopro_worker.worker`` says so at
+    length), so Speed is a time-compression applied *after* the model has
+    produced full-length audio: the work is unchanged and the result is
+    shorter, which multiplies the real-time factor by exactly the speed. A
+    1.35x setting turns an engine running comfortably at 0.86 into one running
+    at 1.16, and no buffer can hide a producer that never catches up. The line
+    below reports what the model actually produced next to what came out, so
+    the arithmetic is on the page rather than left as an exercise.
+
+    Never fatal, and deliberately not a warning: an RTF above 1 is a machine
+    being slow, not the extension being broken.
+    """
+    rtf = found.get("rtf")
+    audio = found.get("audio_seconds") or 0.0
+    if not rtf or rtf <= 1.0 or audio <= 0.0:
+        return
+    speed = 1.0
+    try:
+        speed = float((turn.profile or {}).get("speed") or 1.0)
+    except (TypeError, ValueError):
+        speed = 1.0
+    shortfall = round((rtf - 1.0) * audio, 1)
+    if speed > 1.0:
+        logger.info(
+            "Model Chain: Voice produced speech slower than it plays — RTF %s, about "
+            "%.1f s of silence owed across %.1f s of audio. Speed is %.2fx and is "
+            "applied after synthesis, so the model generated %.1f s of audio to yield "
+            "%.1f s; at Speed 1.00x the same turn would have measured about RTF %s. "
+            "Lower Speed if replies stutter.",
+            rtf, shortfall, audio, speed, audio * speed, audio,
+            round(rtf / speed, 3))
+        return
+    logger.info(
+        "Model Chain: Voice produced speech slower than it plays — RTF %s, about "
+        "%.1f s of silence owed across %.1f s of audio. Speed is already 1.00x, so "
+        "this machine is simply not synthesising in real time.", rtf, shortfall, audio)
 
 
 def _sources() -> dict:
@@ -983,7 +1032,7 @@ TELEMETRY = {
     "playback": ("turn_seen_to_headers_ms", "headers_to_first_pcm_ms",
                  "first_pcm_to_playback_ms", "startup_buffer_ms", "underrun_count",
                  "first_underrun_after_play_ms", "max_underrun_gap_ms",
-                 "total_underrun_gap_ms"),
+                 "total_underrun_gap_ms", "rebuffer_count", "rebuffer_target_ms"),
     "capture": ("mic_request_ms", "stream_ready_ms", "first_pcm_ms", "engaged_ms",
                 "preroll_ms", "recorded_ms"),
 }

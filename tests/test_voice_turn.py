@@ -20,6 +20,8 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 import mc_voice_turn as turns
 
 
@@ -559,3 +561,97 @@ class TestTheClientWatchdog:
         finally:
             turns.CLIENT_WAIT = original
         assert turn.reason != "no client"
+
+
+class TestSayingSpeechIsSlowerThanRealTime:
+    """An RTF above 1 is the whole of "the audio is choppy on long replies".
+
+    The two summary lines already carry the number, but only as a ratio among a
+    dozen others, with nothing to say which side of 1 is the bad side or what
+    moves it. A user reading a log to find out why their speech stutters should
+    not have to work out that 1.16 means the machine is falling further behind
+    every second it speaks.
+
+    Speed is named because on this engine Speed usually *is* the answer. Sopro
+    V2 has no model-native speaking rate, so Speed is a time-compression
+    applied after the model has produced full-length audio: the work does not
+    change and the result is shorter, which multiplies the real-time factor by
+    exactly the speed. 1.35x turns an engine running comfortably at 0.86 into
+    one running at 1.16.
+    """
+
+    @pytest.fixture
+    def captured(self, caplog):
+        """Everything the extension's logger emitted, at every level."""
+        import logging
+
+        caplog.set_level(logging.DEBUG, logger="model_chain")
+        return caplog
+
+    @pytest.fixture
+    def _api(self):
+        import mc_voice_api
+
+        return mc_voice_api
+
+    class FakeTurn:
+        def __init__(self, speed=None):
+            self.profile = {"speed": speed} if speed is not None else None
+
+    @staticmethod
+    def _lines(captured):
+        return [record.getMessage() for record in captured.records
+                if "slower than it plays" in record.getMessage()]
+
+    def test_a_turn_that_keeps_up_says_nothing(self, captured, _api):
+        _api._log_shortfall(self.FakeTurn(1.0), {"rtf": 0.86, "audio_seconds": 38.0})
+        assert not self._lines(captured), "a machine that kept up was told off"
+
+    def test_a_turn_exactly_at_real_time_says_nothing(self, captured, _api):
+        """1.0 is keeping up. The boundary is worth pinning because the whole
+        line hangs off which way it goes."""
+        _api._log_shortfall(self.FakeTurn(1.0), {"rtf": 1.0, "audio_seconds": 38.0})
+        assert not self._lines(captured)
+
+    def test_the_shortfall_is_reported_as_seconds_of_silence(self, captured, _api):
+        """A ratio is not a quantity anybody can act on. Seconds owed is."""
+        _api._log_shortfall(self.FakeTurn(1.0), {"rtf": 1.161, "audio_seconds": 38.0})
+        line = self._lines(captured)[0]
+        # (1.161 - 1) * 38.0, to one decimal.
+        assert "6.1 s of silence" in line, line
+
+    def test_speed_above_one_is_named_with_the_arithmetic(self, captured, _api):
+        """Both halves of it: what the model actually produced, and what the
+        same turn would have measured without the compression."""
+        _api._log_shortfall(self.FakeTurn(1.35), {"rtf": 1.161, "audio_seconds": 38.0})
+        line = self._lines(captured)[0]
+        assert "1.35x" in line, line
+        assert "51.3 s of audio to yield 38.0 s" in line, line
+        assert "RTF 0.86" in line, line
+        assert "Lower Speed" in line, line
+
+    def test_at_neutral_speed_the_machine_is_named_instead(self, captured, _api):
+        """Blaming a slider the user has not touched would send them to fix
+        the wrong thing."""
+        _api._log_shortfall(self.FakeTurn(1.0), {"rtf": 1.161, "audio_seconds": 38.0})
+        line = self._lines(captured)[0]
+        assert "already 1.00x" in line, line
+        assert "not synthesising in real time" in line, line
+
+    def test_a_turn_with_no_profile_at_all_is_still_reported(self, captured, _api):
+        """A turn from an engine that carries no delivery, or one that failed
+        before the profile was resolved. The shortfall is still true."""
+        _api._log_shortfall(self.FakeTurn(), {"rtf": 1.2, "audio_seconds": 10.0})
+        assert self._lines(captured)
+
+    def test_a_turn_with_no_audio_is_not_divided_by(self, captured, _api):
+        _api._log_shortfall(self.FakeTurn(1.35), {"rtf": None, "audio_seconds": 0.0})
+        assert not self._lines(captured)
+
+    def test_the_line_carries_no_text_from_the_reply(self, captured, _api):
+        """Section 36 applies here as much as to the two lines above it: this
+        one is written on the hot path and reads from the turn."""
+        turn = self.FakeTurn(1.35)
+        turn.profile = dict(turn.profile, note="the user said pineapple")
+        _api._log_shortfall(turn, {"rtf": 1.2, "audio_seconds": 10.0})
+        assert "pineapple" not in " ".join(self._lines(captured))
