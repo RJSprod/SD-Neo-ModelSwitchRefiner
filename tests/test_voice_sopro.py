@@ -257,6 +257,170 @@ class TestReferenceValidation:
         assert sopro.MAX_REFERENCE_SECONDS != mc_voice_clone.MAX_REFERENCE_SECONDS
 
 
+
+def reference_wav(seconds: float, rate: int, channels: int, encoding: int, bits: int,
+                  extensible: bool = False, level: float = 0.35) -> bytes:
+    """One tone, written the way the named encoding writes it.
+
+    Built here rather than taken from the ``spoken_wav`` fixture because the
+    whole point of these tests is the container: the fixture only knows how to
+    write the one format that already worked.
+    """
+    import math
+    import struct as _struct
+
+    frames = int(rate * seconds)
+    samples = [level * math.sin(2 * math.pi * 220 * index / rate)
+               for index in range(frames) for _ in range(channels)]
+    if encoding == 1 and bits == 8:
+        body = bytes(max(0, min(255, int(value * 127) + 128)) for value in samples)
+    elif encoding == 1 and bits == 16:
+        body = b"".join(_struct.pack("<h", int(value * 32767)) for value in samples)
+    elif encoding == 1 and bits == 24:
+        body = b"".join(int(value * 8388607).to_bytes(3, "little", signed=True)
+                        for value in samples)
+    elif encoding == 1 and bits == 32:
+        body = b"".join(_struct.pack("<i", int(value * 2147483647)) for value in samples)
+    elif encoding == 3 and bits == 32:
+        body = b"".join(_struct.pack("<f", value) for value in samples)
+    elif encoding == 3 and bits == 64:
+        body = b"".join(_struct.pack("<d", value) for value in samples)
+    else:
+        # Something this build has no codec for. The bytes do not matter; the
+        # header is what is being refused.
+        body = bytes(len(samples) * max(1, bits // 8))
+
+    block = channels * max(1, bits // 8)
+    tag = 0xFFFE if extensible else encoding
+    fmt = _struct.pack("<HHIIHH", tag, channels, rate, rate * block, block, bits)
+    if extensible:
+        # cbSize, valid bits, channel mask, then the SubFormat GUID whose first
+        # two bytes carry the real format tag.
+        fmt += _struct.pack("<HHI", 22, bits, 3 if channels == 2 else 4)
+        fmt += (_struct.pack("<H", encoding) + b"\x00\x00"
+                + b"\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71")
+    chunks = (b"fmt " + _struct.pack("<I", len(fmt)) + fmt
+              + b"data" + _struct.pack("<I", len(body)) + body)
+    return b"RIFF" + _struct.pack("<I", 4 + len(chunks)) + b"WAVE" + chunks
+
+
+class TestTheEncodingsAPersonActuallyHas:
+    """The reference decoder against the files recorders and editors produce.
+
+    The regression: this accepted ``WAVE_FORMAT_PCM`` at exactly sixteen bits
+    and nothing else, so a recording that had been through any editor -- 24-bit,
+    32-bit float, or ordinary 16-bit PCM wrapped in ``WAVE_FORMAT_EXTENSIBLE``,
+    which is what a writer reaches for the moment a file is not plain -- was
+    refused with a sentence about what Sopro wanted and no word about what the
+    file was. Sopro still wants mono 24 kHz PCM16; this function's job is to
+    produce that, and narrowing a sample is the same work as the downmix and
+    the resample it already did.
+    """
+
+    CASES = [
+        ("16-bit PCM", dict(encoding=1, bits=16)),
+        ("16-bit PCM in EXTENSIBLE", dict(encoding=1, bits=16, extensible=True)),
+        ("24-bit PCM", dict(encoding=1, bits=24)),
+        ("32-bit PCM", dict(encoding=1, bits=32)),
+        ("32-bit float", dict(encoding=3, bits=32)),
+        ("32-bit float in EXTENSIBLE", dict(encoding=3, bits=32, extensible=True)),
+        ("64-bit float", dict(encoding=3, bits=64)),
+        ("8-bit PCM", dict(encoding=1, bits=8)),
+    ]
+
+    @pytest.mark.parametrize("label,shape", CASES, ids=[name for name, _ in CASES])
+    def test_it_becomes_canonical_mono_24k(self, voice_root, label, shape):
+        found, seconds = sopro.normalize_reference(
+            reference_wav(8.0, 48000, 1, **shape))
+
+        assert found[:4] == b"RIFF"
+        (encoding,) = struct.unpack_from("<H", found, 20)
+        (channels,) = struct.unpack_from("<H", found, 22)
+        (rate,) = struct.unpack_from("<I", found, 24)
+        (bits,) = struct.unpack_from("<H", found, 34)
+        assert (encoding, channels, rate, bits) == (1, 1, sopro.TARGET_RATE, 16)
+        assert 7.5 < seconds < 8.5, label
+
+    @pytest.mark.parametrize("label,shape", CASES, ids=[name for name, _ in CASES])
+    def test_the_audio_survives_the_conversion(self, voice_root, label, shape):
+        """A decoder that returned silence would pass the shape checks above and
+        then fail Sopro's level gate -- so this asserts the level directly, at
+        roughly the 0.35 the tone was written at."""
+        found, _seconds = sopro.normalize_reference(reference_wav(8.0, 48000, 1, **shape))
+
+        import array
+
+        samples = array.array("h")
+        samples.frombytes(found[44:])
+        peak = max(abs(value) for value in samples) / 32768.0
+        assert 0.25 < peak < 0.45, f"{label} decoded to a peak of {peak:.3f}"
+
+    def test_a_stereo_float_recording_is_downmixed(self, voice_root):
+        found, seconds = sopro.normalize_reference(
+            reference_wav(8.0, 44100, 2, encoding=3, bits=32))
+
+        (channels,) = struct.unpack_from("<H", found, 22)
+        assert channels == 1
+        assert 7.5 < seconds < 8.5
+
+    def test_a_compressed_recording_is_refused_and_named(self, voice_root):
+        """Refusing is right -- decoding it needs a codec this module should not
+        grow -- but the sentence has to say what the file is, which is the half
+        that lets somebody fix it."""
+        with pytest.raises(sopro.SoproError) as raised:
+            sopro.normalize_reference(reference_wav(8.0, 44100, 1, encoding=0x0011, bits=4))
+
+        assert "IMA ADPCM" in str(raised.value)
+
+    def test_an_unknown_encoding_is_named_by_its_number(self, voice_root):
+        with pytest.raises(sopro.SoproError) as raised:
+            sopro.normalize_reference(reference_wav(8.0, 44100, 1, encoding=0x2001, bits=16))
+
+        assert "0x2001" in str(raised.value)
+
+    def test_a_float_recording_carrying_nan_does_not_crash(self, voice_root):
+        """A NaN is what a badly-written float WAV puts where a sample goes, and
+        `int(nan)` raises. Silence is the only honest substitute."""
+        import struct as _struct
+
+        good = reference_wav(8.0, 24000, 1, encoding=3, bits=32)
+        head = good[:44]
+        body = bytearray(good[44:])
+        body[0:4] = _struct.pack("<f", float("nan"))
+        found, _seconds = sopro.normalize_reference(bytes(head) + bytes(body))
+
+        assert found[:4] == b"RIFF"
+
+    def test_a_float_recording_above_unity_is_clipped_rather_than_wrapped(self,
+                                                                          voice_root):
+        """A float WAV may exceed 1.0. Scaling that by 32767 and truncating to
+        int16 wraps a loud peak round to a loud peak of the opposite sign, which
+        is an audible click in the reference the whole voice is built from."""
+        found, _seconds = sopro.normalize_reference(
+            reference_wav(8.0, 24000, 1, encoding=3, bits=32, level=1.8))
+
+        import array
+
+        samples = array.array("h")
+        samples.frombytes(found[44:])
+        assert max(samples) == 32767
+        assert min(samples) >= -32768
+        # Wrapping shows up as neighbouring samples at opposite extremes.
+        assert not any(abs(samples[i] - samples[i + 1]) > 40000
+                       for i in range(len(samples) - 1))
+
+    def test_extensible_with_a_truncated_header_is_refused(self, voice_root):
+        """The SubFormat GUID is where the real tag lives; a fmt chunk too short
+        to hold one is malformed, not a licence to guess PCM."""
+        good = reference_wav(8.0, 24000, 1, encoding=1, bits=16)
+        broken = bytearray(good)
+        struct.pack_into("<H", broken, 20, 0xFFFE)
+        with pytest.raises(sopro.SoproError) as raised:
+            sopro.normalize_reference(bytes(broken))
+
+        assert "malformed" in str(raised.value)
+
+
 class TestNames:
     def test_a_name_that_is_not_a_name_is_refused(self, voice_root):
         for bad in ("", "   ", "../etc/passwd", "a" * 100, "voice\x00name"):

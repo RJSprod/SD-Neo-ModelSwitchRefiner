@@ -540,6 +540,74 @@ class TestACharactersVoiceReachesTheTurn:
         assert speaking["engine"] == "kokoro"
         assert speaking["handle"] == 6
 
+    def test_a_voice_that_cannot_be_resolved_is_said_once_without_a_traceback(
+            self, speaking, monkeypatch, caplog):
+        """"No voice has been created yet" is a state, not a fault.
+
+        It is true on every reply until somebody creates one, and it used to
+        raise into the catch-all -- so a user whose engine had no voice got a
+        full traceback per assistant turn, at WARNING, burying the failures that
+        warning exists to surface. One throttled sentence says the same thing.
+        """
+        import logging
+
+        import mc_voice_registry
+
+        def refuse(voice_id=""):
+            raise mc_voice_registry.RegistryError("No voice has been created yet.")
+
+        monkeypatch.setattr(mc_voice_registry, "resolve", refuse)
+        mc_voice_ui._quiet.clear()
+        with caplog.at_level(logging.INFO, logger="model_chain"):
+            assert mc_voice_ui.begin_speech(character=self.character()) is None
+
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING], \
+            "an ordinary state was logged as a warning with a traceback"
+        said = [r.getMessage() for r in caplog.records]
+        assert any("No voice has been created yet." in line for line in said), said
+
+    def test_a_fault_still_reads_like_a_fault(self, speaking, monkeypatch, caplog):
+        """The other half of the distinction, in the branch next door.
+
+        A voice bank that is broken raises something the adapter never declared,
+        and that must keep its warning and its traceback -- quieting it would be
+        trading one unreadable log for another.
+        """
+        import logging
+
+        import mc_voice_registry
+
+        def collapse(voice_id=""):
+            raise RuntimeError("no bank")
+
+        monkeypatch.setattr(mc_voice_registry, "resolve", collapse)
+        mc_voice_ui._quiet.clear()
+        with caplog.at_level(logging.INFO, logger="model_chain"):
+            assert mc_voice_ui.begin_speech(character=self.character()) is None
+
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warnings, "a genuine fault was quieted"
+        assert any(r.exc_info for r in warnings), "the traceback was lost"
+
+    def test_that_sentence_is_not_repeated_on_every_reply(self, speaking, monkeypatch,
+                                                          caplog):
+        import logging
+
+        import mc_voice_registry
+
+        monkeypatch.setattr(mc_voice_registry, "resolve",
+                            lambda voice_id="": (_ for _ in ()).throw(
+                                mc_voice_registry.RegistryError(
+                                    "No voice has been created yet.")))
+        mc_voice_ui._quiet.clear()
+        with caplog.at_level(logging.INFO, logger="model_chain"):
+            for _ in range(4):
+                mc_voice_ui.begin_speech(character=self.character())
+
+        said = [r.getMessage() for r in caplog.records
+                if "has been created yet" in r.getMessage()]
+        assert len(said) == 1, said
+
     def test_a_character_with_no_voice_asks_for_the_default(self, speaking, monkeypatch):
         import mc_voice_registry
 

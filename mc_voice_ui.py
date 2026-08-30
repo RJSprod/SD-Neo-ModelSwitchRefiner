@@ -209,7 +209,21 @@ def begin_speech(character=None, persona=None, opening: str = ""):
             _quietly(f"{engines.label(active)} is not installed")
             return None
         profiles = engines.profiles(active)
-        voice_id, entry = engines.resolve(voice_of(character, active), active)
+        try:
+            voice_id, entry = engines.resolve(voice_of(character, active), active)
+        except engines.refusals(active) as exc:
+            # A voice the adapter *refuses* to resolve is a state, not a fault:
+            # no voice has been created on this engine yet, or the character's
+            # one was deleted. Both are ordinary, both stay true on every reply
+            # until somebody acts, and both used to raise into the catch-all
+            # below -- so the first user to meet one got a full traceback at
+            # WARNING per assistant turn, burying the failures that warning is
+            # there to surface. Anything the adapter did *not* declare still
+            # goes to the catch-all, because a broken voice bank is a fault and
+            # has to keep reading like one.
+            logger.debug("Model Chain: the voice could not be resolved", exc_info=True)
+            _quietly(str(exc) or f"{engines.label(active)} has no voice to speak with")
+            return None
         delivery = profiles.resolve(profile_of(character, active))
         found = turns.create(voice_id=voice_id, sid=int(entry.get("_sid") or 0),
                              handle=_handle(active, entry), engine=active,

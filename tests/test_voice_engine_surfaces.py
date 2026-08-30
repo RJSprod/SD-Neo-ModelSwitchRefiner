@@ -245,3 +245,72 @@ def test_sopros_two_manual_sections_say_which_is_which(host, voice_root, kokoro_
     assert "Or install the model artifacts from files you download yourself" in settings
     assert "<summary>Or install from files you download yourself</summary>" not in settings
 
+
+def test_the_startup_line_describes_the_engine_that_is_selected(host, voice_root,
+                                                                kokoro_bundle,
+                                                                voice_registry, caplog):
+    """The log's one-line summary used to describe sherpa, Whisper and Kokoro
+    whatever engine was selected.
+
+    So a log sent after "Voice Chat does not work" could not answer the first
+    question anybody asks of it -- is the engine that is supposed to be speaking
+    installed, and does it have a voice to speak with -- and one real report was
+    diagnosed from a traceback further down instead.
+    """
+    import logging
+
+    import mc_voice_api as api
+
+    engines.select("sopro")
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="model_chain"):
+        api._log_engine()
+
+    said = " ".join(record.getMessage() for record in caplog.records)
+    assert "Sopro" in said
+    assert "not installed" in said
+    assert "0 voice(s)" in said
+    assert "silent until one is created" in said
+
+
+def test_the_startup_line_names_kokoro_when_kokoro_is_selected(host, voice_root,
+                                                               kokoro_bundle,
+                                                               voice_registry, caplog):
+    import logging
+
+    import mc_voice_api as api
+
+    engines.select("kokoro")
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="model_chain"):
+        api._log_engine()
+
+    said = " ".join(record.getMessage() for record in caplog.records)
+    assert "Kokoro" in said
+
+
+def test_a_refused_clone_is_written_down_and_not_only_answered(host, voice_root,
+                                                               kokoro_bundle,
+                                                               voice_registry, caplog):
+    """The diagnostic hole behind a real report.
+
+    The clone route answered the browser with an exact reason -- "that WAV is
+    not something Sopro can read" -- and logged nothing at all, so the log the
+    user sent said only that a reply had not been spoken. A refusal nobody can
+    reconstruct afterwards is a refusal that reads as "nothing worked".
+    """
+    import logging
+
+    import mc_voice_api as api
+
+    engines.select("sopro")
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="model_chain"):
+        with pytest.raises(api.Refused) as raised:
+            api.sopro_clone("Ada", "en", b"not a wav at all")
+
+    assert raised.value.status == 400
+    said = [record.getMessage() for record in caplog.records]
+    assert any("is being created" in line for line in said), said
+    assert any("was not created" in line for line in said), said
+

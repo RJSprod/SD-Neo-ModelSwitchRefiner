@@ -1338,6 +1338,90 @@ def set_test_text(text: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
+WAVE_PCM, WAVE_FLOAT, WAVE_EXTENSIBLE = 0x0001, 0x0003, 0xFFFE
+
+ENCODING_NAMES = {0x0002: "ADPCM", 0x0006: "A-law", 0x0007: "u-law",
+                  0x0011: "IMA ADPCM", 0x0031: "GSM", 0x0055: "MP3-in-WAV"}
+
+
+def _encoding_label(encoding: int, bits: int) -> str:
+    """What a refusal should call the thing it is refusing.
+
+    "Sopro accepts uncompressed 16-bit PCM" told somebody what was wanted and
+    not what they had, which is the half of the sentence that would have let
+    them fix it.
+    """
+    if encoding == WAVE_PCM:
+        return f"{bits}-bit PCM"
+    if encoding == WAVE_FLOAT:
+        return f"{bits}-bit floating point"
+    named = ENCODING_NAMES.get(int(encoding))
+    return named or f"encoding 0x{int(encoding):04X}"
+
+
+def _clipped(value: float) -> int:
+    # NaN compares unequal to itself, and reaches here from a float WAV whose
+    # producer wrote one. Silence is the only honest sample to put in its place.
+    if value != value:
+        return 0
+    return max(-32768, min(32767, int(value * 32767.0)))
+
+
+def _decode_pcm16(body: bytes, encoding: int, bits: int):
+    """Interleaved samples as signed 16-bit, whatever the file stored them as.
+
+    A reference recording arrives from whatever produced it, and that is rarely
+    plain 16-bit PCM. An editor that cleans up a clip writes 24-bit or 32-bit
+    float as a matter of course, and a great many writers wrap even ordinary
+    16-bit PCM in ``WAVE_FORMAT_EXTENSIBLE``. Refusing all of those -- as this
+    did, for one user, on a file that was fine -- was refusing the recording
+    somebody actually has over a property the rest of this function is about to
+    normalise away. It already downmixes and resamples; narrowing a sample is
+    the same kind of work and no more of a judgement call.
+
+    ``None`` for an encoding that is genuinely not decodable here, which after
+    this is a compressed one: those need a codec, and a codec is a dependency
+    this module does not have and should not grow.
+    """
+    import array
+    import sys as _sys
+
+    swap = _sys.byteorder == "big"
+    if encoding == WAVE_PCM and bits == 8:
+        # The one unsigned width the format has, with 128 as silence.
+        return array.array("h", [(value - 128) << 8 for value in body])
+    if encoding == WAVE_PCM and bits == 16:
+        found = array.array("h")
+        found.frombytes(body[: len(body) - (len(body) % 2)])
+        if swap:
+            found.byteswap()
+        return found
+    if encoding == WAVE_PCM and bits == 24:
+        usable = len(body) - (len(body) % 3)
+        # The top two bytes of each little-endian triple, which is the 16-bit
+        # sample: truncation rather than rounding, because a reference is about
+        # to be peak-normalised and a half-LSB is not audible in it.
+        return array.array("h", [
+            int.from_bytes(body[index + 1:index + 3], "little", signed=True)
+            for index in range(0, usable, 3)])
+    if encoding == WAVE_PCM and bits == 32:
+        found = array.array("i")
+        found.frombytes(body[: len(body) - (len(body) % 4)])
+        if swap:
+            found.byteswap()
+        return array.array("h", [value >> 16 for value in found])
+    if encoding == WAVE_FLOAT and bits in (32, 64):
+        found = array.array("f" if bits == 32 else "d")
+        width = bits // 8
+        found.frombytes(body[: len(body) - (len(body) % width)])
+        if swap:
+            found.byteswap()
+        # Clamped rather than scaled to the peak: a float WAV is allowed to
+        # exceed unity and a reference that did would otherwise wrap around.
+        return array.array("h", [_clipped(value) for value in found])
+    return None
+
+
 def normalize_reference(data: bytes) -> tuple:
     """A recording as canonical mono 24 kHz PCM16, or a refusal that says why.
 
@@ -1345,6 +1429,14 @@ def normalize_reference(data: bytes) -> tuple:
     is it a WAV at all, is it a size this build accepts, is it an encoding this
     build decodes, is it long enough to condition on, is it short enough, and is
     there actually a voice in it.
+
+    What it decodes is deliberately wider than what Sopro wants, because the two
+    are different questions. Sopro wants mono 24 kHz PCM16; a person has
+    whatever their recorder or editor produced, which is routinely 24-bit,
+    32-bit float, or 16-bit PCM wrapped in ``WAVE_FORMAT_EXTENSIBLE``. This
+    already downmixes and resamples, so narrowing a sample is the same kind of
+    work -- and refusing a good recording for its container was, for one user,
+    the whole of "I could not create a voice".
 
     Its own decoder rather than :mod:`mc_voice_clone`'s, and that is I-6 rather
     than duplication for its own sake: that module is Kokoro's Storytime path,
@@ -1361,6 +1453,7 @@ def normalize_reference(data: bytes) -> tuple:
         raise SoproError("That file is not a WAV recording.")
 
     offset, fmt, body = 12, None, b""
+    fmt_start, fmt_size = 0, 0
     while offset + 8 <= len(data):
         name = data[offset:offset + 4]
         (size,) = struct.unpack_from("<I", data, offset + 4)
@@ -1369,6 +1462,7 @@ def normalize_reference(data: bytes) -> tuple:
             raise SoproError("That recording's header is malformed.")
         if name == b"fmt " and size >= 16:
             fmt = struct.unpack_from("<HHIIHH", data, start)
+            fmt_start, fmt_size = start, size
         elif name == b"data":
             body = data[start:start + size]
         offset = start + size + (size % 2)
@@ -1376,8 +1470,15 @@ def normalize_reference(data: bytes) -> tuple:
         raise SoproError("That recording is not a complete WAV.")
 
     encoding, channels, rate, _bps, _align, bits = fmt
-    if encoding != 1 or bits != 16:
-        raise SoproError("Sopro accepts uncompressed 16-bit PCM WAV recordings.")
+    if encoding == WAVE_EXTENSIBLE:
+        # The wrapper a writer reaches for as soon as a file has more than two
+        # channels or more than sixteen bits -- and, in practice, for plenty of
+        # ordinary 16-bit stereo too. The real format tag is the first two bytes
+        # of the SubFormat GUID, and reading it is the difference between
+        # accepting a perfectly good recording and refusing it for its wrapper.
+        if fmt_size < 40:
+            raise SoproError("That recording's header is malformed.")
+        (encoding,) = struct.unpack_from("<H", data, fmt_start + 24)
     if channels not in (1, 2):
         raise SoproError("Sopro accepts mono or stereo recordings.")
     if rate < 8000 or rate > 192000:
@@ -1385,12 +1486,15 @@ def normalize_reference(data: bytes) -> tuple:
 
     import array
 
-    samples = array.array("h")
-    samples.frombytes(body[: len(body) - (len(body) % (2 * channels))])
+    samples = _decode_pcm16(body, int(encoding), int(bits))
+    if samples is None:
+        raise SoproError(
+            f"That recording is {_encoding_label(int(encoding), int(bits))}, which Sopro "
+            f"cannot read here. Save it as uncompressed PCM or floating-point WAV.")
+    if not len(samples):
+        raise SoproError("That recording is not a complete WAV.")
     import sys as _sys
 
-    if _sys.byteorder == "big":
-        samples.byteswap()
     if channels == 2:
         samples = array.array("h", [(samples[index] + samples[index + 1]) // 2
                                     for index in range(0, len(samples) - 1, 2)])

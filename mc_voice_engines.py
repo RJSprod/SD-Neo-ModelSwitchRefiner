@@ -264,6 +264,36 @@ def installed(engine: str = "") -> bool:
         return False
 
 
+def refusals(engine: str = "") -> tuple:
+    """The exception types ``engine``'s adapter raises to *refuse* rather than fail.
+
+    A refusal is a state: no voice has been created on this engine yet, or the
+    character's voice was deleted. It is ordinary, it is what the design's own
+    failure table says happens, and it stays true on every turn until somebody
+    acts on it. A fault is none of those things.
+
+    Keeping the two apart is what stops either burying the other. Logged as one
+    kind, a broken voice bank is indistinguishable from an engine nobody has
+    made a voice for yet -- and the first user to meet the second got a full
+    traceback per assistant reply, which is how a log stops being readable.
+    """
+    wanted = str(engine or active())
+    found = [EngineError]
+    try:
+        if wanted == SOPRO:
+            import mc_voice_sopro as sopro
+
+            found.append(sopro.SoproError)
+        else:
+            import mc_voice_registry as registry
+
+            found.append(registry.RegistryError)
+    except Exception:
+        logger.debug("Model Chain: could not read %s's refusal types", wanted,
+                     exc_info=True)
+    return tuple(found)
+
+
 def refuse_mismatch(engine: str) -> str:
     """``engine`` if it is the active one, or raise. Section 5, server-side.
 
