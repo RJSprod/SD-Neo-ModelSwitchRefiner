@@ -428,6 +428,55 @@ engine still got spectral subtraction unless they noticed a second dropdown.
 
 ---
 
+## Create built the voice, saved it, and then played it
+
+The note under the button said "you will hear the finished voice before it is
+saved". It was not true. `create()` prepared the voice, wrote the registry
+entry, made it the default if it was the first, refreshed the worker's
+catalogue, and *then* returned the audition for the page to play. Hearing it was
+a receipt.
+
+The seam this needed was already there and was not being used. Section 23's flow
+is six steps and only the sixth writes anything a user can afterwards see —
+which is why the failure path has always been a single `rmtree`. A voice with a
+directory, a retained recording and prepared conditioning but no registry entry
+is not a half-saved voice; it is a voice that does not exist yet, and it costs
+one directory to stop existing.
+
+So steps 1–5 are `prepare_preview` and step 6 is `save_preview`, with a person
+in between:
+
+| | writes | undone by |
+|---|---|---|
+| `prepare_preview` | a UUID directory, the retained WAV, the conditioning | `discard_preview` |
+| `save_preview` | the registry entry, the catalogue, maybe the default | nothing — this is the commit |
+
+The audition somebody hears is the one that preparation actually produced,
+played back from the same bytes. Re-synthesising it after the fact would be a
+different take from the one being judged.
+
+Four things follow that are not obvious:
+
+* **One preview at a time.** A second discards the first. Two unregistered
+  directories is two things to reason about and nobody asked for the second.
+* **The token has to match.** Without it a browser sitting on an old panel could
+  save a voice the user had already replaced with another preview — the one way
+  this split could produce a voice nobody chose.
+* **A refused save keeps the preview; a discard drops it locally first.** The
+  asymmetry is deliberate: the user said keep, so the thing to keep must still
+  be there to try again — and the user said no, so a failed round trip must not
+  leave a Save button for it.
+* **Shutdown discards.** The directory holds a recording of somebody and nothing
+  in the registry points at it, so if the process that knew about it exits
+  without removing it, nothing ever will. The decision was "not yet", and a
+  WebUI that closed on "not yet" has answered it.
+
+`create()` survives as prepare-then-save in one call, for starter voices: they
+are Kokoro reading a fixed script, so there is no recording anybody chose and
+nothing to audition before deciding.
+
+---
+
 ## What is stored for a cloned voice, and what is not
 
 ```

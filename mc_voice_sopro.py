@@ -1918,8 +1918,66 @@ def create_starter_voice() -> dict:
     return {"created": display, "remaining": len(starter_names()), "voice": made["voice"]}
 
 
-def create(display_name: str, wav: bytes, language: str = "") -> dict:
-    """Make a Sopro voice from a reference recording. The whole transaction.
+_preview_lock = threading.Lock()
+_preview = {}
+"""The one voice that has been built but not yet kept.
+
+Section 23 already had the seam this needs and was not using it: everything up
+to the registry write leaves nothing anybody can see, which is why the failure
+path here has always been a single ``rmtree``. A voice with a directory, a
+retained recording and prepared conditioning, but no registry entry, is not a
+half-saved voice -- it is a voice that does not exist yet and costs one
+directory to stop existing.
+
+So creating and keeping are now two steps with a person in between. The
+audition somebody hears is the one this exact preparation produced, played back
+from the same bytes, rather than a re-synthesis from a voice that has already
+been written down -- which is the only version of "preview before you save"
+that is actually a preview.
+
+One at a time, deliberately. A second preview discards the first: two
+unregistered directories is two things to reason about and nobody asked for the
+second one.
+"""
+
+
+def preview_state() -> dict:
+    """What is pending, without the audio. Safe to log and to poll."""
+    with _preview_lock:
+        if not _preview:
+            return {"pending": False}
+        return {"pending": True, "name": _preview.get("name", ""),
+                "seconds": _preview.get("seconds", 0.0),
+                "audition_ms": _preview.get("audition_ms", 0)}
+
+
+def discard_preview(token: str = "") -> bool:
+    """Throw away the pending preview, and the directory it built.
+
+    An empty token discards whatever is pending, which is what the shutdown and
+    supersede paths want; a non-empty one has to match, so a stale browser tab
+    cannot delete the preview a newer one is looking at.
+    """
+    with _preview_lock:
+        if not _preview:
+            return False
+        if token and token != _preview.get("token"):
+            return False
+        identifier = _preview.get("uuid") or ""
+        name = _preview.get("name") or ""
+        _preview.clear()
+    if identifier:
+        root = paths.sopro_voice_root(identifier)
+        # The same guard the failure path uses: never remove a directory this
+        # module did not build inside its own root.
+        if paths.sopro_inside(root):
+            shutil.rmtree(root, ignore_errors=True)
+        logger.info("Model Chain: a Sopro voice preview was discarded — %s", name or "?")
+    return True
+
+
+def prepare_preview(display_name: str, wav: bytes, language: str = "") -> dict:
+    """Build a voice and audition it, without writing it down. Steps 1 to 5.
 
     Section 23's flow, and every step of it can fail without leaving anything
     behind:
@@ -1931,12 +1989,13 @@ def create(display_name: str, wav: bytes, language: str = "") -> dict:
         4  the normalized WAV is retained beside the voice, so a later
            compatible Sopro can rebuild without asking for a new recording;
         5  the worker prepares, writes both assets, reads them back *from the
-           files it wrote*, and streams a production audition;
-        6  and only then is a registry entry written.
+           files it wrote*, and streams a production audition.
 
     Step 5 is not ceremony (section 27). A preparation that returned without an
     exception proves nothing about whether the file it wrote can be read back
     after a restart, and reading it back is the only way to know.
+
+    :func:`save_preview` is step 6.
     """
     name = check_name(display_name)
     wanted = str(language or "").strip().lower()
@@ -1945,6 +2004,11 @@ def create(display_name: str, wav: bytes, language: str = "") -> dict:
     found = status()
     if not found.ready:
         raise SoproError("Sopro is not installed, so it cannot create a voice.")
+
+    # Before the work, not after: a preview that failed halfway would otherwise
+    # leave the previous one pending and the panel showing a Save button for a
+    # voice the user has already replaced.
+    discard_preview()
 
     identifier = uuid.uuid4().hex
     normalized, seconds = normalize_reference(wav)
@@ -1970,13 +2034,50 @@ def create(display_name: str, wav: bytes, language: str = "") -> dict:
             shutil.rmtree(root, ignore_errors=True)
         raise
 
+    token = uuid.uuid4().hex
+    with _preview_lock:
+        _preview.update({
+            "token": token,
+            "uuid": identifier,
+            "name": name,
+            "language": wanted,
+            "fingerprint": found.fingerprint,
+            "seconds": round(float(seconds), 2),
+            "sample_rate": int(made.get("sample_rate") or TARGET_RATE),
+            "audition_ms": int(made.get("audition_ms") or 0),
+        })
+    logger.info("Model Chain: a Sopro voice was prepared for preview — %.1f s reference, "
+                "audition in %d ms; it is not saved yet",
+                seconds, int(made.get("audition_ms") or 0))
+    return {"token": token, "name": name, "seconds": round(float(seconds), 2),
+            "audio": made.get("audio") or b""}
+
+
+def save_preview(token: str) -> dict:
+    """Keep the pending preview. Step 6, and the only step that writes anything
+    a user can afterwards see.
+
+    The token has to match. Without it a browser that had been sitting on an
+    old panel could save a voice the user had already replaced with another
+    preview, which is the one way this split could produce a voice nobody chose.
+    """
+    with _preview_lock:
+        if not _preview:
+            raise SoproError("There is no voice waiting to be saved. Create one first.")
+        if str(token or "") != _preview.get("token"):
+            raise SoproError("That preview is no longer the one waiting to be saved. "
+                             "Create the voice again.")
+        pending = dict(_preview)
+        _preview.clear()
+
+    identifier = pending["uuid"]
     record = {
         "uuid": identifier,
-        "display_name": name,
-        "language": wanted,
-        "fingerprint": found.fingerprint,
-        "source_seconds": round(float(seconds), 2),
-        "sample_rate": int(made.get("sample_rate") or TARGET_RATE),
+        "display_name": pending["name"],
+        "language": pending["language"],
+        "fingerprint": pending["fingerprint"],
+        "source_seconds": pending["seconds"],
+        "sample_rate": pending["sample_rate"],
         "schema": REGISTRY_SCHEMA,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -1999,9 +2100,22 @@ def create(display_name: str, wav: bytes, language: str = "") -> dict:
         stored = _read()
         stored["default"] = f"{ENGINE}:clone:{identifier}"
         _write(stored)
-    logger.info("Model Chain: a Sopro voice was created — %.1f s reference, audition in "
-                "%d ms", seconds, int(made.get("audition_ms") or 0))
-    return {"voice": lookup(f"{ENGINE}:clone:{identifier}"), "audio": made.get("audio") or b""}
+    logger.info("Model Chain: a Sopro voice was saved — %s, %.1f s reference",
+                pending["name"], pending["seconds"])
+    return {"voice": lookup(f"{ENGINE}:clone:{identifier}")}
+
+
+def create(display_name: str, wav: bytes, language: str = "") -> dict:
+    """Prepare and keep in one call, for callers with nobody to ask.
+
+    Starter voices come through here: they are made from Kokoro reading a fixed
+    script, so there is no recording anybody chose and nothing to audition
+    before deciding. Everything a person supplies goes through
+    :func:`prepare_preview` and :func:`save_preview` instead.
+    """
+    made = prepare_preview(display_name, wav, language)
+    kept = save_preview(made["token"])
+    return {"voice": kept["voice"], "audio": made.get("audio") or b""}
 
 
 def rebuild(voice_id: str) -> dict:
