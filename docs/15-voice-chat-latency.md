@@ -181,6 +181,56 @@ One subtlety fixed on the way past: a turn now keeps the target it started with.
 Reading the shared value while blocks are arriving meant an underrun could
 deepen the queue of the very sentence that was already playing.
 
+### What a head start cannot buy
+
+Added after Sopro V2 shipped, because Sopro on CPU is the first engine here that
+can run *slower than real time* and a startup buffer turns out to be the wrong
+instrument for that entirely.
+
+A fixed head start hides a bounded shortfall. When the producer is slower than
+real time the shortfall is not bounded — it grows for every second the reply
+lasts — so no prebuffer fixes it, and sizing one for the longest possible reply
+would tax every short one. A reported case: RTF 1.16, a 38-second reply, six
+seconds of silence owed. The ceiling of 2.0 s covers about fourteen seconds of
+that reply and nothing after it.
+
+What *was* fixable is the shape of the failure. The old code resumed on the first
+block to arrive after the queue emptied, with 20 ms of lead — which guarantees
+the block after it is late too. One shortfall became a rattle for the rest of the
+turn: **56 separate silences** in that reply, averaging a twentieth of a second
+each, which is heard as a broken speaker rather than a slow one.
+
+So a dry queue is now treated as a rebuffer. Blocks are held until there is a
+second of them, the hold doubles each time it proves too short, and it stops at
+six. The listener gets a handful of pauses between sentences instead of a
+continuous stutter, and on a machine only slightly behind, the first pause is the
+only one. `rebuffer_count` and `rebuffer_target_ms` go into the playback report
+beside `underrun_count`, because "the speaker ran dry" and "this page chose to
+stay quiet and refill" are different events and a turn where they track each
+other is a producer that cannot keep up at all.
+
+This is the one adjustment deliberately *not* deferred to the next turn. The
+startup buffer is, for the reason two paragraphs up. A rebuffer is the opposite
+case: the speaker has already fallen silent, and the only question left is
+whether it resumes into another gap.
+
+### The envelope learns from every ending
+
+The adaptation above was reached only from `finishSpeech`, so it ran only when a
+stream reached its end. A turn the listener stopped taught it nothing — and the
+turn a listener stops is the turn that stuttered. A log from the machine in the
+case above showed the same 700 ms head start on three consecutive turns with 10,
+56 and 11 underruns between them, because every one of those turns was cancelled
+before it could report.
+
+Raising and relaxing are not symmetrical, though, and the fix has to keep that
+straight. Underruns are evidence however the turn ended: the speaker did fall
+silent and the listener did hear it. A clean run is evidence only if it was
+allowed to finish — a reply stopped two seconds in has not shown that anything
+works, and letting it relax the target would let a user who interrupts a lot talk
+the page into a head start too short for the first reply they actually listen to.
+So: raise on any ending, relax only on a clean one.
+
 
 ## 5. The microphone, and what "recording" is a claim about
 
@@ -259,15 +309,17 @@ Content-free, both sides, and named rather than filtered — a field is absent
 from a log until somebody puts it there deliberately.
 
 Server, per turn: whether the worker was warm at the start, how long warming
-took, the first two segments' character counts, how long the synthesis lane
+took, whether speech was produced slower than it plays and by how many seconds
+of owed silence, the first two segments' character counts, how long the synthesis lane
 stood idle between segment one and segment two, which way the worker delivered,
 the block counts for the first two segments and how soon the first block
 arrived. The block count doubles as the sentence count, because
 `max_num_sentences` is one.
 
 Browser, per turn: how long after the turn was seen the stream opened, the first
-sample arrived and playback began, the startup buffer used, and the underrun
-count. Per recording: milliseconds from the engagement to the worklet, the
+sample arrived and playback began, the startup buffer used, the underrun count
+and the total and longest gaps, and how many times the page rebuffered and what
+hold it had reached. Per recording: milliseconds from the engagement to the worklet, the
 microphone, the graph, the readiness answer, the first sample and the release —
 which is what separates a slow permission prompt from a slow module load from a
 device that simply takes a second to wake.

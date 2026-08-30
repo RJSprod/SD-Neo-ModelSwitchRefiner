@@ -200,6 +200,44 @@ fractional read position and the overlap tail all survive between calls.
 
 At speed 1.0 and pitch 0 neither object is constructed at all.
 
+### Speed costs real-time factor, one for one
+
+The consequence of Speed being DSP rather than a model parameter, and it is not
+obvious from the slider: the model still generates the full-length audio. Speed
+throws part of it away afterwards. So the compute is unchanged and the result is
+shorter, which multiplies the real-time factor by exactly the speed.
+
+That is the difference between an engine that streams and one that stutters.
+Measured on the reference Windows CPU machine (16 logical cores, four intra-op
+threads), a 38-second reply:
+
+| Speed | Model audio | Delivered | Compute | RTF |
+|------:|------------:|----------:|--------:|----:|
+| 1.00 | 51.3 s | 51.3 s | 44.2 s | 0.86 |
+| 1.35 | 51.3 s | 38.0 s | 44.2 s | 1.16 |
+
+At 0.86 the producer gains about a seventh of a second of headroom for every
+second it speaks, and a 0.7 s prebuffer is never touched again. At 1.16 it
+*loses* about a sixth of a second per second, without bound: 6.1 seconds of
+silence owed across that reply, which no fixed prebuffer can cover because the
+debt grows for as long as the reply lasts. The failure is invisible on short
+replies and unmissable on long ones, which is exactly how it was reported.
+
+Two things follow, and both are implemented rather than written down:
+
+* The turn summary says so. When RTF exceeds 1, `_log_shortfall` writes a third
+  line naming the seconds of silence owed, and — when Speed is above neutral —
+  what the model actually produced, what came out, and what the same turn would
+  have measured at 1.00x. A user whose speech stutters should not have to know
+  which side of 1 is the bad side.
+* The browser stops trying to hide it with a head start and starts rebuffering
+  instead. See `docs/15-voice-chat-latency.md`.
+
+What is deliberately *not* done is capping Speed, or lowering it silently when
+the machine is slow. Speed above real time is a legitimate setting on a fast
+machine and an unattended one on a slow one, and I-12 forbids picking a number
+from a measured real-time factor. The user is told; the user decides.
+
 ---
 
 ## What is stored for a cloned voice, and what is not

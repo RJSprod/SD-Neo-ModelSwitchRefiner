@@ -678,6 +678,36 @@
         clean: 0,
     };
 
+    // Section 22. What a head start cannot buy.
+    //
+    // START is a fixed lead, and a fixed lead only ever hides a *bounded*
+    // shortfall. When the producer is slower than real time the shortfall is
+    // not bounded: it grows for as long as the reply lasts, so a buffer deep
+    // enough for a ten-second reply still runs dry partway through a
+    // forty-second one. Sizing START for the longest reply would mean paying
+    // that latency on every short one, which is the wrong trade in both
+    // directions.
+    //
+    // What *is* fixable is the shape of the failure. Resuming on the first
+    // block to arrive after the queue has emptied guarantees the block after
+    // it is late as well, so one shortfall becomes a rattle that lasts the
+    // rest of the turn -- fifty-odd gaps of a twentieth of a second each,
+    // which is heard as a broken speaker rather than as a slow one. So a dry
+    // queue is treated as a rebuffer: blocks are held until there are REBUFFER
+    // seconds of them, and the hold doubles every time it turns out to have
+    // been too short. The listener gets a few pauses between sentences instead,
+    // and on a machine only slightly behind, the first pause is the only one.
+    //
+    // This is the one adjustment that is deliberately *not* deferred to the
+    // next turn. START is, because a head start that grows mid-sentence is a
+    // gap the listener did not need to hear. A rebuffer is the opposite: the
+    // speaker has already fallen silent, and the only question left is whether
+    // it resumes into another gap.
+    const REBUFFER = {
+        first: 1.0,
+        max: 6.0,
+    };
+
     function raiseStartBuffer() {
         BUFFER.start = Math.min(BUFFER.max, Math.round((BUFFER.start + 0.4) * 10) / 10);
         BUFFER.clean = 0;
@@ -711,6 +741,15 @@
             pending: [],
             pendingSeconds: 0,
             draining: false,
+            // The mid-turn rebuffer. `starving` means the queue reached zero
+            // while the stream was still producing, so blocks are being held
+            // rather than played; `rebufferTarget` is how many seconds of them
+            // it takes to resume, and it doubles each time the hold proves too
+            // short. Both are per turn: a machine that fell behind on one
+            // reply is not condemned to a deep hold on the next one.
+            starving: false,
+            rebufferTarget: 0,
+            rebuffers: 0,
             // Marks, all on this browser's own monotonic clock and all
             // durations from `seenAt`. They are what tells "the server was slow"
             // apart from "this page took a third of a second to notice", which
@@ -859,13 +898,36 @@
         if (!samples.length || state.ended) return;
         state.pending.push({samples: samples, rate: rate});
         state.pendingSeconds += samples.length / (rate || 24000);
+        // The stream is over. Whatever is held goes now, however little it is
+        // and whatever the hold was waiting for -- there is nothing left to
+        // wait for, and a rebuffer that swallowed the last sentence would be
+        // a worse bug than the stutter it exists to prevent.
+        if (state.draining) {
+            release(state);
+            return;
+        }
         // The turn's own target, captured when it started. Reading BUFFER.start
         // here instead would let an underrun raise the target of the very turn
         // that is already playing, which is a buffer that grows in the middle
         // of a sentence rather than before the next one.
-        if (!state.started && state.pendingSeconds < state.startTarget && !state.draining) {
+        if (!state.started) {
+            if (state.pendingSeconds < state.startTarget) return;
+            release(state);
             return;
         }
+        // Playing, and this block arrived to find nothing scheduled ahead of
+        // it: the speaker is already silent. Releasing now would put one block
+        // of speech in front of the next gap, so instead the hold starts here
+        // and this block waits with the ones behind it.
+        if (!state.starving && queuedSeconds(state) <= 0) {
+            state.starving = true;
+            state.rebuffers += 1;
+            state.rebufferTarget = state.rebufferTarget
+                ? Math.min(REBUFFER.max, state.rebufferTarget * 2)
+                : REBUFFER.first;
+        }
+        if (state.starving && state.pendingSeconds < state.rebufferTarget) return;
+        state.starving = false;
         release(state);
     }
 
@@ -1075,6 +1137,15 @@
                 ? Math.round(state.firstUnderrunAt - state.releasedAt) : null,
             max_underrun_gap_ms: Math.round(state.underrunMax * 1000),
             total_underrun_gap_ms: Math.round(state.underrunTotal * 1000),
+            // Two counts rather than one, because they answer different
+            // questions. `underrun_count` is how often the speaker ran dry;
+            // `rebuffer_count` is how often this page decided to stay quiet
+            // and refill rather than resume into the next gap. A turn with
+            // many underruns and few rebuffers is a producer that is a little
+            // behind; one where the two track each other is a producer that
+            // cannot keep up at all, and no amount of buffering will fix it.
+            rebuffer_count: state.rebuffers,
+            rebuffer_target_ms: Math.round(state.rebufferTarget * 1000),
             playback_end_reason: reason || state.endReason || "finished",
         };
     }
@@ -1104,16 +1175,34 @@
         } catch (error) { /* nor is a fetch this browser would not make */ }
     }
 
+    // Every ending, not only the tidy one. The envelope used to be adjusted in
+    // `finishSpeech`, which is reached only when the stream runs to its end --
+    // so a turn the listener stopped taught it nothing. That is exactly
+    // backwards: the reply somebody gives up on is the reply that stuttered,
+    // and the log from a machine that could not keep up showed a 700 ms head
+    // start on turn after turn because every one of those turns was cancelled
+    // before it could report.
+    //
+    // Raising and relaxing are not symmetrical, though. Underruns are evidence
+    // however the turn ended -- the speaker did fall silent, and the listener
+    // did hear it. A clean run is only evidence if it was allowed to finish: a
+    // turn stopped two seconds in has not shown that anything works, so it may
+    // raise the target but never lower it.
+    function learnFrom(state, finished) {
+        if (state.underruns) raiseStartBuffer();
+        else if (finished) relaxStartBuffer();
+    }
+
     function reportPlayback(state, reason) {
         if (!state || state.reported) return;
         state.reported = true;
+        learnFrom(state, reason === "finished");
         sendReport(playbackReport(state, reason));
     }
 
     function finishSpeech(state) {
         if (speech !== state) return;
         reportPlayback(state, "finished");
-        if (state.underruns) raiseStartBuffer(); else relaxStartBuffer();
         // The reader is done but the speaker is not: what is scheduled still has
         // to play out before the composer stops showing Stop.
         const remaining = Math.max(0, queuedSeconds(state) * 1000) + 120;
