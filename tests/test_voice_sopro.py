@@ -315,6 +315,155 @@ class TestTheCpuThreadSetting:
         assert sopro.intraop_threads() == 2
 
 
+def _tone_energy(samples, rate, freq, width=4096):
+    """Energy at one frequency, by Hann-windowed correlation.
+
+    Written out rather than reached for from NumPy so that this measurement
+    runs wherever the tests do, and so that it exercises no part of what it is
+    measuring.
+    """
+    import cmath
+    import math as _math
+
+    start = max(0, len(samples) // 2 - width // 2)
+    chunk = samples[start:start + width]
+    assert len(chunk) == width, (
+        f"the analysis window is {len(chunk)} of {width}; the test signal is too short "
+        f"and this measurement would silently read zero")
+    total = 0j
+    for index in range(width):
+        shaped = 0.5 - 0.5 * _math.cos(2 * _math.pi * index / width)
+        total += chunk[index] * shaped * cmath.exp(-2j * _math.pi * freq * index / rate)
+    return abs(total) ** 2
+
+
+def _tone(freq, rate, seconds=2.0, amplitude=12000):
+    import array
+    import math as _math
+
+    return array.array("h", [int(amplitude * _math.sin(2 * _math.pi * freq * t / rate))
+                             for t in range(int(rate * seconds))])
+
+
+def _decibels(got, reference):
+    import math as _math
+
+    return 10 * _math.log10(got / reference + 1e-30)
+
+
+def _linear_resample(samples, rate, target):
+    """The resampler this build shipped with, kept so the test can fail.
+
+    Four lines, no filter. It is here rather than in the module because a
+    regression test for "the resampler aliases" needs something that aliases to
+    prove it can tell the difference -- otherwise a threshold of -40 dB is a
+    number nobody has ever seen fail.
+    """
+    import array
+
+    wanted = int(len(samples) * target / float(rate))
+    ratio = len(samples) / float(max(1, wanted))
+    out = array.array("h", bytes(2 * wanted))
+    for index in range(wanted):
+        position = index * ratio
+        left = int(position)
+        right = min(left + 1, len(samples) - 1)
+        weight = position - left
+        out[index] = int(samples[left] * (1.0 - weight) + samples[right] * weight)
+    return out
+
+
+class TestTheResampler:
+    """Section 25, and the largest single thing that was wrong with a clone.
+
+    Almost every recording anybody clones from is 44.1 or 48 kHz and Sopro wants
+    24. The resampler that shipped was linear interpolation with no anti-alias
+    filter at all, which does not attenuate what it cannot represent -- it folds
+    it. Everything a microphone captured between 12 and 24 kHz came back mirrored
+    into 0-12 kHz on top of the voice, at full amplitude: mic self-noise, room
+    hiss, and sibilance, which is precisely where "s" and "sh" and "t" live.
+
+    The conditioning is computed from these samples, so a clone inherited it
+    permanently. Measured below rather than described.
+    """
+
+    #: A tone above the new Nyquist folds to (24000 - freq). 15 kHz lands at
+    #: 9 kHz, in the middle of the speech band, which is what makes this audible
+    #: rather than academic.
+    SOURCE_RATE = 48000
+    ABOVE_NYQUIST = 15000
+    FOLDS_TO = 9000
+
+    def test_the_shipped_linear_resampler_folded_it_back_at_full_amplitude(self):
+        """The defect, pinned. Not a claim about the past: this runs the old
+        four lines and measures them, so the threshold in the next test is one
+        that has actually been seen to fail."""
+        tone = _tone(self.ABOVE_NYQUIST, self.SOURCE_RATE)
+        reference = _tone_energy(tone, self.SOURCE_RATE, self.ABOVE_NYQUIST)
+        folded = _tone_energy(_linear_resample(tone, self.SOURCE_RATE, 24000),
+                              24000, self.FOLDS_TO)
+        assert _decibels(folded, reference) > -3.0, (
+            "the old resampler was supposed to alias at roughly full amplitude")
+
+    def test_a_tone_above_the_new_nyquist_is_gone(self):
+        tone = _tone(self.ABOVE_NYQUIST, self.SOURCE_RATE)
+        reference = _tone_energy(tone, self.SOURCE_RATE, self.ABOVE_NYQUIST)
+        folded = _tone_energy(sopro._resample(tone, self.SOURCE_RATE, 24000),
+                              24000, self.FOLDS_TO)
+        assert _decibels(folded, reference) < -60.0, _decibels(folded, reference)
+
+    def test_the_pure_python_path_filters_too(self):
+        """Narrower, because the same twenty-four zero crossings in a loop would
+        take most of a minute -- but a different universe from no filter."""
+        tone = _tone(self.ABOVE_NYQUIST, self.SOURCE_RATE, seconds=0.5)
+        reference = _tone_energy(tone, self.SOURCE_RATE, self.ABOVE_NYQUIST)
+        count = int(len(tone) * 24000 / self.SOURCE_RATE)
+        folded = _tone_energy(
+            sopro._resample_slowly(tone, self.SOURCE_RATE, 24000, count),
+            24000, self.FOLDS_TO)
+        assert _decibels(folded, reference) < -40.0, _decibels(folded, reference)
+
+    def test_speech_band_content_comes_through_untouched(self):
+        """A filter that removed the aliasing by removing the top of the voice
+        would measure just as well on the test above and be worse than the bug."""
+        for freq in (200, 1000, 3000, 6000):
+            tone = _tone(freq, self.SOURCE_RATE)
+            reference = _tone_energy(tone, self.SOURCE_RATE, freq)
+            kept = _tone_energy(sopro._resample(tone, self.SOURCE_RATE, 24000),
+                                24000, freq)
+            assert abs(_decibels(kept, reference)) < 0.5, (freq,
+                                                           _decibels(kept, reference))
+
+    def test_44100_is_handled_as_well_as_48000(self):
+        """The commoner rate, and the harder one: the ratio is not an integer,
+        so every output sample lands between two input ones."""
+        tone = _tone(15000, 44100)
+        reference = _tone_energy(tone, 44100, 15000)
+        # 44100 -> 24000 folds 15 kHz to 24000 - 15000 = 9 kHz as well.
+        folded = _tone_energy(sopro._resample(tone, 44100, 24000), 24000, 9000)
+        assert _decibels(folded, reference) < -60.0, _decibels(folded, reference)
+
+    def test_the_length_is_the_ratio(self):
+        import array
+
+        source = array.array("h", [0] * 48000)
+        assert len(sopro._resample(source, 48000, 24000)) == 24000
+
+    def test_upsampling_does_not_alias_either(self):
+        """16 kHz recordings exist, and going up must not mirror the top of the
+        source band into the new headroom."""
+        tone = _tone(7000, 16000)
+        reference = _tone_energy(tone, 16000, 7000)
+        kept = _tone_energy(sopro._resample(tone, 16000, 24000), 24000, 7000)
+        assert abs(_decibels(kept, reference)) < 1.0, _decibels(kept, reference)
+
+    def test_a_rate_that_needs_no_change_is_left_alone(self):
+        import array
+
+        source = array.array("h", [1, -1, 300, -300] * 100)
+        assert sopro._resample(source, 24000, 24000) is source
+
+
 class TestReferenceValidation:
     def test_a_recording_shorter_than_the_window_is_refused(self, voice_root, spoken_wav):
         with pytest.raises(sopro.SoproError) as raised:

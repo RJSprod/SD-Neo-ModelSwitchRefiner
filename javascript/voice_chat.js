@@ -4450,9 +4450,23 @@
 
     const FFT_SIZE = 1024;
     const FFT_HOP = FFT_SIZE / 4;
-    const NOISE_OVERSUBTRACT = 2.5;
-    const NOISE_FLOOR_GAIN = 0.03;
+    // Section 25. Numbers chosen for a cleaning pass that must not damage a
+    // *cloning reference*, which is a stricter job than making a recording
+    // pleasant to listen to: whatever this removes from the timbre, the model
+    // conditions on the hole and reproduces it under every sentence forever.
+    //
+    // 2.5 was too much. Subtracting two and a half times the estimated noise
+    // floor from every bin eats the low-energy parts of real speech -- consonant
+    // bursts, the tails of vowels, breath -- and the -30 dB floor under it meant
+    // the bins it emptied went almost silent, which is where musical noise comes
+    // from. Both are pulled back: less removed, and what is removed is removed
+    // less deeply.
+    const NOISE_OVERSUBTRACT = 1.5;
+    const NOISE_FLOOR_GAIN = 0.10;
     const GAIN_SMOOTHING = 0.5;
+    // What fraction of frames, taken quietest-first by broadband energy, is
+    // treated as containing no speech.
+    const NOISE_FRAMES = 0.2;
 
     // In-place iterative radix-2, which is all a power-of-two window needs.
     function fft(re, im, inverse) {
@@ -4629,18 +4643,34 @@
             phasesIm.push(im);
         }
 
-        // The noise floor per bin: a low percentile over time. Minimum
-        // statistics rather than "the first half second is silence", because a
-        // recording somebody trimmed themselves usually opens on speech.
-        const noise = new Float64Array(bins);
-        const column = new Float64Array(frames);
-        for (let bin = 0; bin < bins; bin += 1) {
-            for (let frame = 0; frame < frames; frame += 1) column[frame] = magnitudes[frame][bin];
-            const sorted = Array.prototype.slice.call(column).sort(function (a, b) {
-                return a - b;
-            });
-            noise[bin] = sorted[Math.floor(sorted.length * 0.1)] || 0;
+        // The noise floor, from the frames that hold no speech.
+        //
+        // This used to be a per-bin percentile over the whole clip: for each
+        // bin independently, the 10th percentile of its magnitude over time.
+        // That is not a noise floor, it is the tenth-quietest moment of that
+        // frequency -- and in fifteen seconds of near-continuous speech the
+        // tenth percentile of a vowel bin is quiet *speech*. So the estimate
+        // was inflated by the voice, and then multiplied by the
+        // over-subtraction factor and taken back out of the voice.
+        //
+        // Frames are ranked by broadband energy instead and the quietest fifth
+        // -- the pauses, the breaths between phrases -- are averaged per bin.
+        // That is an estimate of the room rather than of the speaker, which is
+        // the thing being subtracted.
+        const energies = [];
+        for (let frame = 0; frame < frames; frame += 1) {
+            let total = 0;
+            for (let bin = 0; bin < bins; bin += 1) total += magnitudes[frame][bin];
+            energies.push({frame: frame, total: total});
         }
+        energies.sort(function (a, b) { return a.total - b.total; });
+        const quiet = Math.max(1, Math.floor(frames * NOISE_FRAMES));
+        const noise = new Float64Array(bins);
+        for (let index = 0; index < quiet; index += 1) {
+            const mag = magnitudes[energies[index].frame];
+            for (let bin = 0; bin < bins; bin += 1) noise[bin] += mag[bin];
+        }
+        for (let bin = 0; bin < bins; bin += 1) noise[bin] /= quiet;
 
         const out = new Float32Array(samples.length);
         const weight = new Float32Array(samples.length);
@@ -4719,7 +4749,16 @@
     // function, so what is played and what is uploaded cannot be different
     // things -- which is the only way "you can hear what you are sending" is a
     // true sentence rather than a hopeful one.
-    function clipSamples() {
+    // The selection, downmixed, and nothing else done to it. Split out of
+    // `clipSamples` because asking for the untouched audio used to mean setting
+    // `how` to "page" and calling the cleaning path -- which returns the
+    // page's *denoised* audio, not the raw selection. `cleanWithEngine` did
+    // exactly that, so choosing DeepFilterNet ran spectral subtraction first
+    // and then handed the result to a learned denoiser as though it were a
+    // recording. Two denoisers in series, the second one treating the first
+    // one's musical noise as signal. That is the whole of "the cleanup makes
+    // it worse" when the better engine was selected.
+    function rawClip() {
         if (!soproClip) return null;
         const buffer = soproClip.buffer;
         const rate = buffer.sampleRate;
@@ -4739,6 +4778,13 @@
                 mixed[index] /= buffer.numberOfChannels;
             }
         }
+        return mixed;
+    }
+
+    function clipSamples() {
+        const mixed = rawClip();
+        if (!mixed) return null;
+        const rate = soproClip.buffer.sampleRate;
         if (!soproClip.clean) return mixed;
         // Cached against the exact selection *and* the method, so switching
         // between the two recomputes rather than serving the other one's work.
@@ -4751,7 +4797,12 @@
             // not arrived yet plays and uploads the page's own pass rather than
             // silently doing nothing -- and `cleanWithEngine` repaints when it
             // lands.
-            return soproClip.engineCleaned || denoise(mixed, rate);
+            // Raw, not the page's pass, when the answer has not landed. The
+            // substitute for "the engine you chose has not answered yet" must
+            // never be "the engine you did not choose", or Create quietly
+            // uploads something other than what the label says and what you
+            // last heard.
+            return soproClip.engineCleaned || mixed;
         }
         soproClip.cleaned = denoise(mixed, rate);
         soproClip.cleanedKey = key;
@@ -4774,10 +4825,10 @@
         const key = soproClip.start.toFixed(3) + ":" + soproClip.end.toFixed(3)
             + ":deepfilternet";
         if (soproClip.cleanedKey === key) return Promise.resolve(true);
-        const was = soproClip.how;
-        soproClip.how = "page";
-        const plain = clipSamples();
-        soproClip.how = was;
+        // The untouched selection. DeepFilterNet is a learned denoiser and it
+        // wants a recording, not something another denoiser has already been
+        // over.
+        const plain = rawClip();
         if (!plain || !plain.length) return Promise.resolve(false);
         const rate = soproClip.buffer.sampleRate;
         sayTrim(form, "Cleaning with DeepFilterNet\u2026");
@@ -4834,13 +4885,29 @@
         return found;
     }
 
-    function playSelection(form, button) {
+    // `which` is "raw" or "clean", and it is the whole point of there being two
+    // buttons: A and B under two fingers, neither depending on the state of a
+    // checkbox. "clean" is exactly what Create would upload, so the comparison
+    // is the real one rather than an approximation of it.
+    function playSelection(form, button, which) {
         if (!soproClip) return;
         const ctx = audioContext();
         if (!ctx) return;
+        const label = button ? (button.dataset.mcVoiceLabel
+                                || button.textContent) : "";
+        if (button) button.dataset.mcVoiceLabel = label;
+        // A second press stops, rather than starting a second copy over the
+        // first. Pressing the other button while this one plays also stops it,
+        // because both go through `stopPlayback`.
+        const wasPlaying = playing;
         unlock();
         stopPlayback();
-        const samples = clipSamples();
+        resetPlayLabels(form);
+        if (wasPlaying && button && button.dataset.mcVoicePlaying === "1") {
+            button.dataset.mcVoicePlaying = "";
+            return;
+        }
+        const samples = (which === "clean") ? clipSamples() : rawClip();
         if (!samples || !samples.length) return;
         const rate = soproClip.buffer.sampleRate;
         const held = ctx.createBuffer(1, samples.length, rate);
@@ -4850,16 +4917,33 @@
         source.connect(ctx.destination);
         source.onended = function () {
             if (playing === source) playing = null;
-            if (button) button.textContent = "Play selection";
+            if (button) {
+                button.textContent = label;
+                button.dataset.mcVoicePlaying = "";
+            }
         };
         playing = source;
-        if (button) button.textContent = "Stop";
+        if (button) {
+            button.textContent = "Stop";
+            button.dataset.mcVoicePlaying = "1";
+        }
         source.start(0);
+    }
+
+    function resetPlayLabels(form) {
+        ["[data-mc-voice-trim-play]", "[data-mc-voice-trim-play-clean]"].forEach(
+            function (selector) {
+                const found = form.querySelector(selector);
+                if (!found || !found.dataset.mcVoiceLabel) return;
+                found.textContent = found.dataset.mcVoiceLabel;
+                found.dataset.mcVoicePlaying = "";
+            });
     }
 
     function wireTrim(form, holder) {
         const canvas = form.querySelector("[data-mc-voice-wave]");
         const play = form.querySelector("[data-mc-voice-trim-play]");
+        const playClean = form.querySelector("[data-mc-voice-trim-play-clean]");
         const best = form.querySelector("[data-mc-voice-trim-best]");
         const start = form.querySelector("[data-mc-voice-trim-start]");
         const end = form.querySelector("[data-mc-voice-trim-end]");
@@ -4901,7 +4985,31 @@
                     play.textContent = "Play selection";
                     return;
                 }
-                playSelection(form, play);
+                playSelection(form, play, "raw");
+            });
+        }
+        if (playClean) {
+            playClean.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                if (!soproClip) return;
+                // Cleaning is what this button means, so it turns it on rather
+                // than refusing to play when the box is unticked. Anything else
+                // makes the comparison a two-step.
+                if (!soproClip.clean) {
+                    soproClip.clean = true;
+                    const box = form.querySelector("[data-mc-voice-clean]");
+                    if (box) box.checked = true;
+                    paintTrim(form);
+                }
+                if ((soproClip.how || "page") !== "page" && !soproClip.engineCleaned) {
+                    // The engine's answer is what this button promises, so it
+                    // waits for it rather than playing the other cleaner.
+                    cleanWithEngine(form, holder).then(function () {
+                        playSelection(form, playClean, "clean");
+                    });
+                    return;
+                }
+                playSelection(form, playClean, "clean");
             });
         }
         if (best) {
@@ -4920,6 +5028,7 @@
         }
         const clean = form.querySelector("[data-mc-voice-clean]");
         const how = form.querySelector("[data-mc-voice-clean-how]");
+        if (playClean) playClean.hidden = false;
         const chose = function () {
             if (!soproClip) return;
             soproClip.clean = !!(clean && clean.checked);
@@ -4936,8 +5045,18 @@
         // engine is a deliberate act on another row and the page is repainted
         // when it finishes.
         if (how) {
+            // Default to the better one when it is there. The page's own pass
+            // is the fallback for an installation without the engine, not a
+            // recommendation -- and leaving it selected meant somebody who had
+            // deliberately installed DeepFilterNet still got spectral
+            // subtraction unless they noticed a second dropdown.
+            how.value = "page";
             post(ROUTES.cleanup, {}, holder).then(function (payload) {
-                if (payload && payload.ok && payload.installed) how.hidden = false;
+                if (payload && payload.ok && payload.installed) {
+                    how.hidden = false;
+                    how.value = "deepfilternet";
+                    if (soproClip) soproClip.how = "deepfilternet";
+                }
             }).catch(function () { /* not installed is the ordinary answer */ });
         }
         [[start, "start"], [end, "end"]].forEach(function (pair) {

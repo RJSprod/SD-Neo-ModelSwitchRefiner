@@ -1491,6 +1491,14 @@ def _sopro_voices_html() -> str:
         f'<div class="mc-voice-trim-row">'
         f'<button type="button" class="mc-voice-entry-action" data-mc-voice-trim-play>'
         f'Play selection</button>'
+        # Two buttons rather than one whose meaning depends on a checkbox.
+        # Comparing the raw selection with the cleaned one used to mean ticking
+        # a box, playing, unticking and playing again -- and with the engine
+        # selected the cleaned answer arrives asynchronously, so the same press
+        # gave different audio depending on when you made it. Judging a cleaner
+        # by ear needs A and B under two fingers.
+        f'<button type="button" class="mc-voice-entry-action" '
+        f'data-mc-voice-trim-play-clean hidden>Play cleaned</button>'
         f'<button type="button" class="mc-voice-entry-action" data-mc-voice-trim-best>'
         f'Pick 15 s for me</button>'
         f'<label class="mc-voice-lab-check">'
@@ -1499,8 +1507,8 @@ def _sopro_voices_html() -> str:
         # choice between one thing and one thing that is not there is not a
         # choice. The page-side pass is always available and is the default.
         f'<select data-mc-voice-clean-how class="mc-voice-clean-how" hidden>'
-        f'<option value="page">in this page (fast)</option>'
         f'<option value="deepfilternet">with DeepFilterNet (better)</option>'
+        f'<option value="page">in this page (fast)</option>'
         f'</select>'
         f'<label for="mc-voice-trim-start">Start</label>'
         f'<input type="number" id="mc-voice-trim-start" data-mc-voice-trim-start '
@@ -1515,10 +1523,16 @@ def _sopro_voices_html() -> str:
         f'<div class="mc-voice-trim-state" data-mc-voice-trim-state role="status" '
         f'aria-live="polite"></div>'
         f'<p class="mc-voice-note">Cleaning takes out steady background noise — hiss, '
-        f'hum, a fan, room tone — and lifts the level. It is ordinary spectral '
-        f'subtraction rather than a learned denoiser, it runs here in the page, and '
-        f'you can hear it: tick it and press Play selection, then untick and play '
-        f'again. What is uploaded is whatever you can hear.</p>'
+        f'hum, a fan, room tone — and lifts the level. <strong>Judge it by ear before '
+        f'you use it:</strong> Play selection is the recording untouched, Play cleaned '
+        f'is exactly what Create would upload. If they sound the same, leave cleaning '
+        f'off; if the cleaned one sounds thinner, hollow, or has a faint warble behind '
+        f'it, leave it off too. A cloning reference is not a recording you are going to '
+        f'listen to — the model conditions on it, so whatever a cleaner takes out of the '
+        f'timbre comes back under every sentence that voice ever says. DeepFilterNet is '
+        f'a learned denoiser in its own process and is the better of the two; the '
+        f'in-page pass is spectral subtraction and is there for when the engine is not '
+        f'installed.</p>'
         f'</div>'
         f'<button type="button" class="mc-voice-install" data-mc-voice-sopro-create>'
         f'Create voice</button>'

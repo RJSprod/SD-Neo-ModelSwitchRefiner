@@ -421,6 +421,10 @@ cloneParts.note = element("clone-note");
 cloneParts.trim = element("clone-trim");
 cloneParts.trim.hidden = true;
 cloneParts.play = element("clone-play", "BUTTON");
+cloneParts.play.textContent = "Play selection";
+cloneParts.playClean = element("clone-play-clean", "BUTTON");
+cloneParts.playClean.textContent = "Play cleaned";
+cloneParts.playClean.hidden = true;
 cloneParts.best = element("clone-best", "BUTTON");
 cloneParts.start = element("clone-start", "INPUT");
 cloneParts.end = element("clone-end", "INPUT");
@@ -456,6 +460,9 @@ cloneParts.form.querySelector = function (selector) {
         "sopro-create": cloneParts.create,
         "sopro-recording": cloneParts.note,
         "voice-wave": cloneParts.canvas,
+        // Before "trim-play", because `[data-mc-voice-trim-play-clean]` contains
+        // it and a first-match map would otherwise hand back the raw button.
+        "trim-play-clean": cloneParts.playClean,
         "trim-play": cloneParts.play,
         "trim-best": cloneParts.best,
         "trim-start": cloneParts.start,
@@ -706,6 +713,14 @@ function lastUploadedWav() {
     return {bytes: found.bytes, seconds: (found.bytes - 44) / 2 / DECODE_RATE,
             b64: UPLOAD_BYTES ? Buffer.from(found.raw).toString("base64") : null};
 }
+// Every upload under a given field name, newest last, as base64. What the
+// cleanup engine is *sent* is the whole question in one of the tests below, and
+// `lastUploadedWav` only ever looked at the field Create uses.
+function uploadedBase64(name) {
+    return uploads.filter((entry) => entry.name === name && entry.raw)
+        .map((entry) => Buffer.from(entry.raw).toString("base64"));
+}
+
 globalThis.URL = {createObjectURL: () => "blob:worklet", revokeObjectURL() {}};
 
 // defineProperty rather than assignment: node 22 publishes navigator as a
@@ -3689,6 +3704,193 @@ class TestBringingAnAudioFile:
         """, DECODE_SECONDS="12", NOISE_LEVEL="0.05")
 
         assert "Cleaning is on" in found["trimState"], found["trimState"]
+
+    # ---- what the cleanup engine is handed ------------------------------- #
+
+    #: Cleanup installed, and a run route that answers with a short WAV. What
+    #: comes back does not matter to these tests; what goes *out* does.
+    @staticmethod
+    def _engine_answers():
+        answers = json.loads(DEFAULTS["ANSWERS"])
+        answers["voice/cleanup"] = {"json": {"ok": True, "installed": True,
+                                             "message": "Installed",
+                                             "runtime_message": "", "model_message": "",
+                                             "platform_supported": True,
+                                             "progress": {}}}
+        answers["voice/cleanup/run"] = {"json": {"ok": True}}
+        return json.dumps(answers)
+
+    def test_deepfilternet_is_handed_the_recording_not_the_page_s_denoised_copy(self):
+        """The bug behind "the cleanup makes it worse", and the reason it was
+        worst with the *better* engine selected.
+
+        `cleanWithEngine` wanted the untouched selection and got it by setting
+        `how` to "page" and calling `clipSamples` — which, with cleaning on,
+        returns the page's spectrally-subtracted audio. So choosing DeepFilterNet
+        ran spectral subtraction and then fed the result to a learned denoiser as
+        though it were a recording: two denoisers in series, the second treating
+        the first one's musical noise as signal.
+
+        Asserted as byte equality against what Create uploads with cleaning off,
+        because those are the same samples through the same encoder — identical
+        if the engine gets the recording, different the moment anything has been
+        done to it.
+        """
+        found = self.choose("""
+            cloneParts.start.value = "2"; cloneParts.start.fire("input");
+            cloneParts.end.value = "8";   cloneParts.end.fire("input");
+            cloneParts.name.value = "Ada";
+            cloneParts.create.fire("click");
+            await tick();
+            const plain = uploadedBase64("reference");
+            uploads.length = 0;
+            cloneParts.clean.checked = true;
+            cloneParts.how.value = "deepfilternet";
+            cloneParts.clean.fire("change");
+            await tick();
+            const toEngine = uploadedBase64("reference");
+            // The same selection through the page's own cleaner, so this test
+            // carries its own proof that byte equality is a discriminating
+            // check rather than one that would pass whatever happened.
+            uploads.length = 0;
+            cloneParts.how.value = "page";
+            cloneParts.how.fire("change");
+            await tick();
+            cloneParts.create.fire("click");
+            await tick();
+            const pageCleaned = uploadedBase64("reference");
+            console.log(JSON.stringify(report({plain, toEngine, pageCleaned})));
+        """, DECODE_SECONDS="12", NOISE_LEVEL="0.05", UPLOAD_BYTES="true",
+             ANSWERS=self._engine_answers())
+
+        assert found["plain"], "nothing was uploaded by Create, so there is no baseline"
+        assert found["toEngine"], "the cleanup engine was never asked"
+        assert found["pageCleaned"], "the page's own cleaner produced nothing"
+        assert found["pageCleaned"][-1] != found["plain"][-1], (
+            "cleaning changed nothing, so this test could not tell the two apart "
+            "and its main assertion would pass however the engine was fed")
+        assert found["toEngine"][-1] == found["plain"][-1], (
+            "the cleanup engine was handed audio that had already been denoised")
+
+    def test_the_better_engine_is_selected_when_it_is_installed(self):
+        """Leaving the page's own pass selected meant somebody who had gone to
+        the trouble of installing DeepFilterNet still got spectral subtraction
+        unless they noticed a second dropdown."""
+        found = self.choose("""
+            await tick();
+            console.log(JSON.stringify(report({how: cloneParts.how.value,
+                                               hidden: cloneParts.how.hidden})));
+        """, ANSWERS=self._engine_answers())
+
+        assert found["hidden"] is False
+        assert found["how"] == "deepfilternet", found["how"]
+
+    def test_without_the_engine_the_page_s_own_pass_is_what_there_is(self):
+        found = self.choose("""
+            await tick();
+            console.log(JSON.stringify(report({how: cloneParts.how.value,
+                                               hidden: cloneParts.how.hidden})));
+        """)
+        assert found["hidden"] is True
+        assert found["how"] == "page"
+
+    def test_a_selection_whose_engine_answer_has_not_arrived_uploads_the_recording(self):
+        """Never the other cleaner. The substitute for "the engine you chose has
+        not answered yet" must not be "the engine you did not choose", or Create
+        silently uploads something other than what the label says."""
+        answers = json.loads(self._engine_answers())
+        answers["voice/cleanup/run"] = {"stall": True, "chunks": []}
+        found = self.choose("""
+            cloneParts.start.value = "2"; cloneParts.start.fire("input");
+            cloneParts.end.value = "14";  cloneParts.end.fire("input");
+            cloneParts.name.value = "Ada";
+            cloneParts.create.fire("click");
+            await tick();
+            const plain = uploadedBase64("reference");
+            uploads.length = 0;
+            cloneParts.clean.checked = true;
+            cloneParts.how.value = "deepfilternet";
+            cloneParts.clean.fire("change");
+            await tick();
+            uploads.length = 0;
+            cloneParts.create.fire("click");
+            await tick();
+            const sent = uploadedBase64("reference");
+            console.log(JSON.stringify(report({plain, sent})));
+        """, DECODE_SECONDS="20", NOISE_LEVEL="0.05", UPLOAD_BYTES="true",
+             ANSWERS=json.dumps(answers))
+
+        assert found["sent"], "nothing was uploaded"
+        assert found["sent"][-1] == found["plain"][-1], (
+            "a pending engine answer was substituted with the page's own cleaner")
+
+    # ---- hearing the difference ------------------------------------------ #
+
+    def test_there_are_two_play_buttons_and_they_play_different_audio(self):
+        """A and B under two fingers. One button whose meaning depended on a
+        checkbox could not be used to judge a cleaner by ear, which is the only
+        way anybody can judge one."""
+        found = self.choose("""
+            cloneParts.clean.checked = true;
+            cloneParts.clean.fire("change");
+            await tick();
+            scheduled.length = 0;
+            cloneParts.play.fire("click");
+            await tick();
+            const raw = scheduled.map((item) => item.source.buffer.getChannelData(0)[500]);
+            cloneParts.play.fire("click");
+            await tick();
+            scheduled.length = 0;
+            cloneParts.playClean.fire("click");
+            await tick();
+            const clean = scheduled.map((item) => item.source.buffer.getChannelData(0)[500]);
+            console.log(JSON.stringify(report({raw, clean})));
+        """, DECODE_SECONDS="12", NOISE_LEVEL="0.05")
+
+        assert found["raw"], "Play selection played nothing"
+        assert found["clean"], "Play cleaned played nothing"
+        assert found["raw"][0] != found["clean"][0], (
+            "both buttons played the same samples")
+
+    def test_play_cleaned_turns_cleaning_on_by_itself(self):
+        """Its name is a promise. Requiring the checkbox first would make the
+        comparison a two-step and defeat the point of the second button."""
+        found = self.choose("""
+            cloneParts.playClean.fire("click");
+            await tick();
+            console.log(JSON.stringify(report({checked: cloneParts.clean.checked})));
+        """, DECODE_SECONDS="12")
+
+        assert found["checked"] is True
+
+    def test_pressing_play_again_stops_it(self):
+        found = self.choose("""
+            cloneParts.play.fire("click");
+            await tick();
+            const playingLabel = cloneParts.play.textContent;
+            cloneParts.play.fire("click");
+            await tick();
+            console.log(JSON.stringify(report({playingLabel,
+                                               after: cloneParts.play.textContent})));
+        """, DECODE_SECONDS="12")
+
+        assert found["playingLabel"] == "Stop", found["playingLabel"]
+        assert found["after"] == "Play selection", found["after"]
+
+    def test_the_other_button_stops_the_one_that_is_playing(self):
+        """Two buttons that could both be playing at once would be two clips
+        over each other, which is not a comparison."""
+        found = self.choose("""
+            cloneParts.play.fire("click");
+            await tick();
+            cloneParts.playClean.fire("click");
+            await tick();
+            console.log(JSON.stringify(report({raw: cloneParts.play.textContent,
+                                               clean: cloneParts.playClean.textContent})));
+        """, DECODE_SECONDS="12")
+
+        assert found["raw"] == "Play selection", found["raw"]
+        assert found["clean"] == "Stop", found["clean"]
 
     def test_a_file_the_browser_cannot_decode_says_so(self):
         found = self.choose("console.log(JSON.stringify(report()));",
