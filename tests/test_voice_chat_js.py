@@ -262,6 +262,19 @@ settingsParts.chosenLabel = element("stt-chosen");
 
 // The text-to-speech engine selector. Two cards; the selected one is disabled,
 // which is what stops somebody re-selecting the engine they already have.
+// The recording-cleanup row. It shipped with markup, a route, a module, a
+// worker and a runtime, and no click handler -- so pressing Install did nothing
+// at all. Modelled here so that is a test rather than a report.
+settingsParts.cleanupRow = element("cleanup-row");
+settingsParts.cleanupRow["data-mc-voice-kind"] = "cleanup";
+settingsParts.cleanupInstall = element("cleanup-install", "BUTTON");
+settingsParts.cleanupStatus = element("cleanup-status");
+settingsParts.cleanupRow.querySelector = function (selector) {
+    if (selector.indexOf("cleanup-install") !== -1) return settingsParts.cleanupInstall;
+    if (selector.indexOf("mc-voice-status") !== -1) return settingsParts.cleanupStatus;
+    return null;
+};
+
 settingsParts.enginePanel = element("engines");
 settingsParts.enginePanel["data-mc-voice-engines"] = "";
 settingsParts.engineCards = {
@@ -300,6 +313,7 @@ settingsRow.querySelector = function (selector) {
     if (selector === '[data-mc-voice-folder="stt"]') return settingsParts.sttFolder;
     if (selector === '[data-mc-voice-folder="tts"]') return settingsParts.ttsFolder;
     if (selector === "[data-mc-voice-engines]") return settingsParts.enginePanel;
+    if (selector.indexOf('kind="cleanup"') !== -1) return settingsParts.cleanupRow;
     if (selector === '[data-mc-voice-kind="sopro"]') return null;
     if (selector === '[data-mc-voice-tiers="stt"]') return settingsParts.tierList;
     if (selector === '[data-mc-voice-chosen="stt"]') return settingsParts.chosenLabel;
@@ -958,6 +972,8 @@ function report(extra) {
         trimEnd: cloneParts.end.value,
         cloneStatus: cloneParts.status.textContent,
         cleanHowHidden: cloneParts.how.hidden,
+        cleanupInstallDisabled: settingsParts.cleanupInstall.disabled,
+        cleanupStatus: settingsParts.cleanupStatus.textContent,
         painted: painted.length,
         uploaded: lastUploadedWav(),
         requests: requests.map((r) => ({url: r.url, kind: r.kind,
@@ -1093,6 +1109,13 @@ DEFAULTS = {
             "chunks": [[1, 0, 2, 0, 3], [0, 4, 0], [5, 0, 6, 0]],
         },
         "voice/cancel": {"json": {"ok": True, "cancelled": True}},
+        "voice/cleanup/install": {"json": {"ok": True, "already": False}},
+        "voice/cleanup": {"json": {"ok": True, "installed": False,
+                                   "platform_supported": True,
+                                   "runtime_message": "Not installed",
+                                   "model_message": "Not installed",
+                                   "message": "Not installed — about 241.7 MB",
+                                   "progress": {"cleanup": {}}}},
         "voice/surface": {"json": {"ok": True, "engine": "sopro",
                                    "engine_label": "Sopro V2",
                                    "settings": "<div class='mc-voice-settings'></div>",
@@ -3056,6 +3079,68 @@ class TestTheEngineRow:
                     SETTINGS_PRESENT="true")
         assert found["settings"]["runtimeButton"] == "Installed"
         assert found["settings"]["runtimeDisabled"] is True
+
+
+class TestTheRecordingCleanupRow:
+    """The row that shipped with everything except a listener.
+
+    Markup, route, module, worker and runtime were all present and pressing
+    Install did nothing whatsoever -- no request, no error, no log line. The
+    generic install handler posts a *kind* to Kokoro's route and this engine has
+    a route of its own, so it was never going to be picked up by it.
+    """
+
+    def test_pressing_install_actually_asks_the_server(self):
+        found = run("""
+            await tick();
+            requests.length = 0;
+            settingsParts.cleanupInstall.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+
+        posts = [r for r in found["requests"]
+                 if r.get("url", "").endswith("/cleanup/install")]
+        assert len(posts) == 1, "the button did nothing"
+
+    def test_a_second_press_while_it_runs_does_not_start_it_twice(self):
+        found = run("""
+            await tick();
+            requests.length = 0;
+            settingsParts.cleanupInstall.fire("click");
+            settingsParts.cleanupInstall.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+
+        posts = [r for r in found["requests"]
+                 if r.get("url", "").endswith("/cleanup/install")]
+        assert len(posts) == 1, posts
+
+    def test_a_refusal_puts_the_button_back(self):
+        """A row that disabled its only button and then said nothing would be a
+        row nobody can retry from."""
+        answers = status_answer()
+        answers["voice/cleanup/install"] = {
+            "status": 409, "json": {"ok": False, "error": "not on this platform"}}
+        found = run("""
+            await tick();
+            settingsParts.cleanupInstall.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+
+        assert found["cleanupInstallDisabled"] is False
+        assert "not on this platform" in found["cleanupStatus"], found["cleanupStatus"]
+
+    def test_it_paints_what_the_status_route_says(self):
+        found = run("""
+            await tick();
+            await hold(200);
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+
+        assert "241.7 MB" in found["cleanupStatus"], found["cleanupStatus"]
 
 
 class TestTheEngineSelector:

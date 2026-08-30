@@ -2985,6 +2985,7 @@
         wireTiers(holder);
         wireEngineSelector(holder);
         wireSopro(holder);
+        wireCleanup(holder);
         schedulePaint(holder, 0);
     }
 
@@ -3046,6 +3047,76 @@
     // -- Sopro ----------------------------------------------------------------- //
 
     let soproTimer = 0;
+
+    // The recording-cleanup row: install, and a poll while it is installing.
+    //
+    // Its own wiring rather than the generic `[data-mc-voice-install]` handler,
+    // because that one posts a *kind* to Kokoro's install route and this engine
+    // has a route of its own. Which is exactly how it came to be unwired: the
+    // markup, the route, the module, the worker and the runtime were all there,
+    // and pressing the button did nothing at all.
+    let cleanupTimer = 0;
+
+    function wireCleanup(holder) {
+        const row = holder.querySelector('[data-mc-voice-kind="cleanup"]');
+        if (!row || row.dataset.mcVoiceWired === "1") return;
+        row.dataset.mcVoiceWired = "1";
+
+        const install = row.querySelector("[data-mc-voice-cleanup-install]");
+        if (install) {
+            install.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                if (install.disabled) return;
+                install.disabled = true;
+                setText(row, "[data-mc-voice-status]", "Starting…");
+                post(ROUTES.cleanupInstall, {}, holder).then(function (payload) {
+                    if (!payload || !payload.ok) {
+                        install.disabled = false;
+                        setText(row, "[data-mc-voice-status]",
+                                (payload && payload.error) || "That could not be started.");
+                        return;
+                    }
+                    pollCleanup(holder, row, 800);
+                }).catch(function () {
+                    install.disabled = false;
+                    setText(row, "[data-mc-voice-status]", "That could not be started.");
+                });
+            });
+        }
+        whenOnScreen(row, function () { pollCleanup(holder, row, 0); });
+    }
+
+    function pollCleanup(holder, row, delay) {
+        window.clearTimeout(cleanupTimer);
+        cleanupTimer = window.setTimeout(function () {
+            post(ROUTES.cleanup, {}, holder).then(function (payload) {
+                paintCleanup(row, payload);
+                const progress = payload && payload.progress && payload.progress.cleanup;
+                // Only while something is running. A quarter of a gigabyte takes
+                // minutes and says so; an idle row asks for nothing.
+                if (progress && progress.running) pollCleanup(holder, row, 1200);
+            }).catch(function () { /* the next paint tries again */ });
+        }, Math.max(0, delay || 0));
+    }
+
+    function paintCleanup(row, payload) {
+        if (!row || !payload || !payload.ok) return;
+        setText(row, "[data-mc-voice-cleanup-runtime]", payload.runtime_message);
+        setText(row, "[data-mc-voice-cleanup-model]", payload.model_message);
+        const progress = (payload.progress && payload.progress.cleanup) || {};
+        const running = !!progress.running;
+        setText(row, "[data-mc-voice-status]",
+                running ? (progress.text || "Installing…") : payload.message);
+        const bar = row.querySelector("[data-mc-voice-progress-bar]");
+        const track = row.querySelector("[data-mc-voice-progress]");
+        if (track) track.hidden = !running;
+        if (bar) bar.style.width = Math.round((progress.fraction || 0) * 100) + "%";
+        const install = row.querySelector("[data-mc-voice-cleanup-install]");
+        if (install) {
+            install.disabled = running || payload.installed || !payload.platform_supported;
+            install.textContent = payload.installed ? "Installed" : "Install cleanup";
+        }
+    }
 
     function wireSopro(holder) {
         const row = holder.querySelector('[data-mc-voice-kind="sopro"]');

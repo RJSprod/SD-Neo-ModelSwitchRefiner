@@ -28,6 +28,7 @@ import mc_voice_api
 import mc_voice_models
 import mc_voice_state
 import mc_voice_profile
+import mc_voice_paths as paths
 import mc_voice_ui
 
 
@@ -447,6 +448,35 @@ class TestTheSettingsSection:
         theirs |= set(mc_voice_sopro_profile.OPTIONS.values())
         clashing = theirs & set(host.shared.options_templates)
         assert not clashing, sorted(clashing)
+
+    def test_every_button_this_module_draws_is_wired_to_something(self):
+        """A button nothing listens to is dead, and looks exactly like a working
+        one until somebody presses it.
+
+        This has now happened twice. The recording-cleanup row shipped with its
+        markup, its route, its module, its worker and its runtime all present and
+        no click handler at all, so pressing Install did nothing whatsoever --
+        no request, no error, no log line, nothing to diagnose. The engine
+        selector's cards went the same way earlier for a different reason.
+
+        Read off the source rather than off rendered markup on purpose: this has
+        to cover every branch of every row, including the ones that only render
+        on the engine that is not selected in this test.
+        """
+        import re
+
+        markup = (paths.extension_root() / "mc_voice_ui.py").read_text(encoding="utf-8")
+        script = (paths.extension_root() / "javascript" / "voice_chat.js").read_text(
+            encoding="utf-8")
+
+        attributes = set(re.findall(r"<button\b[^>]*?(data-mc-voice-[a-z-]+)", markup))
+        assert len(attributes) > 15, "the scan found almost no buttons; it has stopped working"
+        # The bracket matters. Looking for the bare name would find it
+        # inside a longer one, which is how the first version of this
+        # test passed against a build that had been broken on purpose.
+        unwired = sorted(name for name in attributes
+                         if ("[" + name) not in script)
+        assert not unwired, f"drawn but nothing listens: {unwired}"
 
     def test_the_default_voice_is_a_stable_id_and_not_a_number(self, host):
         """Section 113. The V1 manifest stored a numeric speaker and a name that
