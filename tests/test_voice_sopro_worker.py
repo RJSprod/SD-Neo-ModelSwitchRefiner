@@ -122,6 +122,72 @@ class TestTheFixedCpuPolicy:
             if hasattr(kokoro_worker, "TTS_THREADS") else True
 
 
+class TestTheOneWayThePolicyMoves:
+    """I-12 asks for a policy that is *measured*, fixed, and never auto-tuned
+    from runtime measurements. Those are three requirements and only the third
+    forbids anything here: a benchmark is how the first one is satisfied, and
+    ``tools/sweep_sopro_threads.py`` cannot sweep a constant.
+
+    What has to stay true is that an installation never quietly runs a policy
+    nobody measured — so the override is bounded, and it is loud.
+    """
+
+    def test_nothing_in_the_environment_means_the_released_policy(self, monkeypatch):
+        monkeypatch.delenv(sopro_worker.OVERRIDE_INTRAOP, raising=False)
+        monkeypatch.delenv(sopro_worker.OVERRIDE_INTEROP, raising=False)
+        intraop, interop, overridden = sopro_worker.effective_policy(note=False)
+        assert (intraop, interop) == (sopro_worker.INTRAOP_THREADS,
+                                      sopro_worker.INTEROP_THREADS)
+        assert overridden is False
+
+    def test_an_override_is_taken_and_declares_itself(self, monkeypatch):
+        monkeypatch.setenv(sopro_worker.OVERRIDE_INTRAOP, "8")
+        intraop, _interop, overridden = sopro_worker.effective_policy(note=False)
+        assert intraop == 8
+        assert overridden is True, "a swept run would have been logged as released"
+
+    def test_asking_for_the_released_number_is_not_an_override(self, monkeypatch):
+        """A sweep that includes 4 in its list must not make that row read as a
+        configuration nobody shipped."""
+        monkeypatch.setenv(sopro_worker.OVERRIDE_INTRAOP,
+                           str(sopro_worker.INTRAOP_THREADS))
+        intraop, _interop, overridden = sopro_worker.effective_policy(note=False)
+        assert intraop == sopro_worker.INTRAOP_THREADS
+        assert overridden is False
+
+    @pytest.mark.parametrize("value", ["0", "-1", "65", "4096", "", "  ", "eight",
+                                       "4.5", "0x8"])
+    def test_a_value_that_is_not_a_usable_count_keeps_the_released_one(
+            self, monkeypatch, value):
+        """Bounded rather than trusted. Zero and negatives reach
+        ``torch.set_num_threads`` as-is, and four thousand threads is a machine
+        spending all of its time in barriers."""
+        monkeypatch.setenv(sopro_worker.OVERRIDE_INTRAOP, value)
+        intraop, _interop, overridden = sopro_worker.effective_policy(note=False)
+        assert intraop == sopro_worker.INTRAOP_THREADS
+        assert overridden is False
+
+    def test_the_parent_pins_openmp_to_whatever_the_child_will_use(self, monkeypatch):
+        """The subtle one. ``worker_environment`` sets OMP_NUM_THREADS before
+        the child starts, and OpenMP has usually sized its pool before any of
+        our code runs — so a parent that pinned the released four while the
+        child asked Torch for eight would measure neither number."""
+        import mc_voice_sopro as sopro
+
+        monkeypatch.setenv(sopro_worker.OVERRIDE_INTRAOP, "8")
+        found = sopro.worker_environment()
+        assert found["OMP_NUM_THREADS"] == "8", found
+        assert found["MKL_NUM_THREADS"] == "8"
+        assert found["OPENBLAS_NUM_THREADS"] == "8"
+
+    def test_with_no_override_the_parent_pins_the_released_number(self, monkeypatch):
+        import mc_voice_sopro as sopro
+
+        monkeypatch.delenv(sopro_worker.OVERRIDE_INTRAOP, raising=False)
+        found = sopro.worker_environment()
+        assert found["OMP_NUM_THREADS"] == str(sopro_worker.INTRAOP_THREADS)
+
+
 class TestDelivery:
     def test_a_neutral_profile_asks_for_nothing(self):
         found = sopro_worker.Delivery()
