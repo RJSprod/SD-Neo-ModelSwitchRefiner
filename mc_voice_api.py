@@ -148,6 +148,7 @@ SOPRO_INSTALL_ROUTE = f"{PREFIX}/sopro/install"
 SOPRO_SETTINGS_ROUTE = f"{PREFIX}/sopro/settings"
 SOPRO_CLONE_ROUTE = f"{PREFIX}/sopro/clone"
 SOPRO_REBUILD_ROUTE = f"{PREFIX}/sopro/rebuild"
+SOPRO_STARTER_ROUTE = f"{PREFIX}/sopro/starter"
 LAB_ROUTE = f"{PREFIX}/lab"
 LAB_UPDATE_ROUTE = f"{PREFIX}/lab/update"
 LAB_RESET_ROUTE = f"{PREFIX}/lab/reset"
@@ -168,6 +169,7 @@ the active engine, which is what keeps the browser's own code engine-neutral.
 SOPRO_ROUTES = (ENGINES_ROUTE, ENGINE_SELECT_ROUTE, SURFACE_ROUTE,
                 SOPRO_ROUTE, SOPRO_INSTALL_ROUTE,
                 SOPRO_SETTINGS_ROUTE, SOPRO_CLONE_ROUTE, SOPRO_REBUILD_ROUTE,
+                SOPRO_STARTER_ROUTE,
                 LAB_ROUTE, LAB_UPDATE_ROUTE, LAB_RESET_ROUTE, LAB_PLAY_ROUTE)
 
 ROUTES = (STATUS_ROUTE, STT_ROUTE, TTS_ROUTE, INSTALL_ROUTE, MODELS_ROUTE, PROFILE_ROUTE,
@@ -1459,6 +1461,30 @@ def sopro_clone(name: str, language: str, wav: bytes) -> dict:
             **voices_payload(engine=engines.SOPRO)}
 
 
+def sopro_starter() -> dict:
+    """Make the next starter voice, so a fresh Sopro is not an empty one.
+
+    One per request, and the answer says how many are left, because four
+    preparations in one call is a request that takes minutes and a browser that
+    gives up in the middle of it.
+    """
+    import mc_voice_engines as engines
+    import mc_voice_sopro as sopro
+
+    _active(engines.SOPRO)
+    try:
+        made = sopro.create_starter_voice()
+    except sopro.SoproError as exc:
+        logger.warning("Model Chain: a Sopro starter voice was not made — %s", exc)
+        raise Refused(400, str(exc)) from None
+    except Exception as exc:
+        logger.warning("Model Chain: a Sopro starter voice could not be made", exc_info=True)
+        raise Refused(500, str(exc) or "That starter voice could not be made.") from None
+    return {"ok": True, "created": made.get("created") or "",
+            "remaining": int(made.get("remaining") or 0),
+            **voices_payload(engine=engines.SOPRO)}
+
+
 def sopro_rebuild(voice_id: str) -> dict:
     """Prepare a stale voice again from its retained recording. Section 55."""
     import mc_voice_engines as engines
@@ -2086,6 +2112,9 @@ def install(_demo=None, app=None) -> bool:
     sopro_rebuild_route = _json_route(
         SOPRO_REBUILD_ROUTE, lambda payload: sopro_rebuild(str(payload.get("voice") or "")),
         "That voice could not be rebuilt.")
+    sopro_starter_route = _json_route(
+        SOPRO_STARTER_ROUTE, lambda _payload: sopro_starter(),
+        "That starter voice could not be made.")
     lab_route = _json_route(
         LAB_ROUTE, lambda payload: lab_payload(str(payload.get("token") or ""),
                                                str(payload.get("voice") or "")),
@@ -2193,6 +2222,7 @@ def install(_demo=None, app=None) -> bool:
                               (SOPRO_SETTINGS_ROUTE, sopro_settings_route),
                               (SOPRO_CLONE_ROUTE, sopro_clone_route),
                               (SOPRO_REBUILD_ROUTE, sopro_rebuild_route),
+                              (SOPRO_STARTER_ROUTE, sopro_starter_route),
                               (LAB_ROUTE, lab_route),
                               (LAB_UPDATE_ROUTE, lab_update_route),
                               (LAB_RESET_ROUTE, lab_reset_route),

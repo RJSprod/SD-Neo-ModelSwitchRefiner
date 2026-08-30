@@ -372,8 +372,70 @@ voicesParts.deliveryPanel.querySelectorAll = function (selector) {
     }
     return [];
 };
+// The Sopro clone form and the trimmer inside it. A file arrives, the browser
+// decodes it, the page draws it and the person picks a stretch of it; what is
+// uploaded is that stretch, encoded here. None of that existed in this harness
+// because none of it existed in the page.
+const cloneParts = {};
+cloneParts.form = element("clone-form");
+cloneParts.status = element("clone-status");
+cloneParts.name = element("clone-name", "INPUT");
+cloneParts.language = element("clone-language", "SELECT");
+cloneParts.language.value = "en";
+cloneParts.file = element("clone-file", "INPUT");
+cloneParts.file.type = "file";
+cloneParts.file.files = [];
+cloneParts.record = element("clone-record", "BUTTON");
+cloneParts.create = element("clone-create", "BUTTON");
+cloneParts.note = element("clone-note");
+cloneParts.trim = element("clone-trim");
+cloneParts.trim.hidden = true;
+cloneParts.play = element("clone-play", "BUTTON");
+cloneParts.best = element("clone-best", "BUTTON");
+cloneParts.start = element("clone-start", "INPUT");
+cloneParts.end = element("clone-end", "INPUT");
+cloneParts.state = element("clone-state");
+
+// A canvas that records what was painted on it, so "the waveform was drawn" is
+// a number rather than an assumption.
+const painted = [];
+cloneParts.canvas = element("clone-wave", "CANVAS");
+cloneParts.canvas.height = 96;
+cloneParts.canvas.clientWidth = 300;
+cloneParts.canvas.getBoundingClientRect = () => ({left: 0, width: 300, height: 96});
+cloneParts.canvas.getContext = function () {
+    return {
+        globalAlpha: 1, fillStyle: "",
+        clearRect() { painted.push("clear"); },
+        fillRect(x, y, w, h) { painted.push({x, y, w, h}); },
+    };
+};
+
+cloneParts.form.querySelector = function (selector) {
+    const map = {
+        "sopro-name": cloneParts.name,
+        "sopro-language": cloneParts.language,
+        "sopro-file": cloneParts.file,
+        "sopro-record": cloneParts.record,
+        "sopro-create": cloneParts.create,
+        "sopro-recording": cloneParts.note,
+        "voice-wave": cloneParts.canvas,
+        "trim-play": cloneParts.play,
+        "trim-best": cloneParts.best,
+        "trim-start": cloneParts.start,
+        "trim-end": cloneParts.end,
+        "trim-state": cloneParts.state,
+    };
+    const key = Object.keys(map).filter((name) => selector.indexOf(name) !== -1)[0];
+    if (key) return map[key];
+    if (selector.indexOf("mc-voice-trim]") !== -1) return cloneParts.trim;
+    return null;
+};
+
 voicesRow.querySelector = function (selector) {
     if (selector.indexOf("mc-voice-delivery]") !== -1) return voicesParts.deliveryPanel;
+    if (selector.indexOf("sopro-form") !== -1) return cloneParts.form;
+    if (selector.indexOf("sopro-clone-status") !== -1) return cloneParts.status;
     return null;
 };
 
@@ -393,6 +455,9 @@ globalThis.document = {
 };
 globalThis.gradioApp = () => globalThis.document;
 globalThis.window = globalThis;
+// The waveform takes its ink from the element's own colour, which is how it
+// stays legible on a theme this stylesheet has never met.
+globalThis.getComputedStyle = () => ({color: "#888"});
 const reloads = [];
 globalThis.location = {pathname: "/", origin: "https://forge.example",
                        reload: () => { reloads.push(NOW); }};
@@ -515,7 +580,19 @@ const context = {
         return source;
     },
     decodeAudioData(buffer, ok, fail) {
-        if (DECODE_WORKS) ok({duration: 1}); else fail(new Error("nope"));
+        if (!DECODE_WORKS) { fail(new Error("nope")); return; }
+        // Quiet everywhere except one ten-second stretch, so "pick 15 s for me"
+        // has an answer a test can name rather than a shape it happens to land on.
+        const rate = DECODE_RATE;
+        const length = Math.round(DECODE_SECONDS * rate);
+        const data = new Float32Array(length);
+        for (let index = 0; index < length; index += 1) {
+            const at = index / rate;
+            const level = (at >= LOUD_FROM && at < LOUD_FROM + 10) ? 0.5 : 0.01;
+            data[index] = level * Math.sin(2 * Math.PI * 220 * at);
+        }
+        ok({numberOfChannels: 1, length, sampleRate: rate, duration: length / rate,
+            getChannelData: () => data});
     },
     destination: {},
 };
@@ -526,7 +603,43 @@ globalThis.AudioWorkletNode = function () {
     globalThis.workletNode = node;
     return node;
 };
-globalThis.Blob = function () {};
+// A Blob that actually holds its bytes, and a FormData that remembers what was
+// put in it. Both were stubs, which is why nothing here had ever asserted what
+// leaves the page when a voice is created.
+globalThis.Blob = function (parts, options) {
+    const chunks = (parts || []).map(function (part) {
+        if (part instanceof ArrayBuffer) return new Uint8Array(part);
+        if (part && part.buffer instanceof ArrayBuffer) return new Uint8Array(part.buffer);
+        if (part && part._bytes) return part._bytes;
+        return new Uint8Array(0);
+    });
+    let size = 0;
+    chunks.forEach(function (chunk) { size += chunk.length; });
+    const joined = new Uint8Array(size);
+    let at = 0;
+    chunks.forEach(function (chunk) { joined.set(chunk, at); at += chunk.length; });
+    this.size = size;
+    this.type = (options && options.type) || "";
+    this._bytes = joined;
+    this.arrayBuffer = function () { return Promise.resolve(joined.buffer); };
+};
+
+const uploads = [];
+globalThis.FormData = function () {
+    this.append = function (name, value, filename) {
+        uploads.push({name, filename: filename || null,
+                      text: typeof value === "string" ? value : null,
+                      bytes: value && value._bytes ? value._bytes.length : null});
+    };
+};
+
+// What a WAV the page built actually says about itself, so a test can assert the
+// trim rather than trusting the byte count.
+function lastUploadedWav() {
+    const found = uploads.filter((entry) => entry.name === "reference").pop();
+    if (!found) return null;
+    return {bytes: found.bytes, seconds: (found.bytes - 44) / 2 / DECODE_RATE};
+}
 globalThis.URL = {createObjectURL: () => "blob:worklet", revokeObjectURL() {}};
 
 // defineProperty rather than assignment: node 22 publishes navigator as a
@@ -803,6 +916,13 @@ async function hold(ms, sampleCount, level) {
 function report(extra) {
     return Object.assign({
         reloads: reloads.length,
+        trimHidden: cloneParts.trim.hidden,
+        trimState: cloneParts.state.textContent,
+        trimStart: cloneParts.start.value,
+        trimEnd: cloneParts.end.value,
+        cloneStatus: cloneParts.status.textContent,
+        painted: painted.length,
+        uploaded: lastUploadedWav(),
         requests: requests.map((r) => ({url: r.url, kind: r.kind,
                                         headers: r.headers,
                                         constraints: r.constraints,
@@ -905,6 +1025,11 @@ DEFAULTS = {
     "CONTEXT_STATE": '"running"',
     "RESUME_WORKS": "true",
     "DECODE_WORKS": "true",
+    # How long the fake decoder says the chosen file is, at what rate, and where
+    # the loud part of it starts. The trimmer's whole job is expressed in these.
+    "DECODE_SECONDS": "1",
+    "DECODE_RATE": "24000",
+    "LOUD_FROM": "0",
     "WORKLET_AVAILABLE": "true",
     # Whether `addModule` succeeds. False models a browser that refuses the
     # module -- a duplicate registration, a Content-Security-Policy that will not
@@ -3024,6 +3149,131 @@ class TestTheEngineChangedUnderThisPage:
         scenario: a settings row Forge built once cannot be refreshed by asking
         the browser for the same document again."""
         assert "location.reload" not in SCRIPT.read_text(encoding="utf-8")
+
+
+class TestBringingAnAudioFile:
+    """Any format the browser plays, trimmed in the page, uploaded as one WAV.
+
+    What this replaces: a file input that took `.wav` only and a server that
+    wanted between five and twenty seconds of 16-bit PCM. Both constraints are
+    real -- Sopro conditions on a short mono reference -- but they were handed
+    to the person as homework, and the first user to meet them was told his
+    forty-second MP3-turned-WAV was the wrong sample format and then, once that
+    was fixed, that it was the wrong length. The browser already has a decoder
+    for every format it can play and this file already had a WAV encoder, so
+    both jobs move into the page.
+    """
+
+    def choose(self, scenario: str, **overrides) -> dict:
+        return run("""
+            await tick();
+            cloneParts.file.files = [new Blob([new Uint8Array(2048)])];
+            cloneParts.file.fire("change");
+            await tick();
+            """ + scenario, VOICES_PRESENT="true", VOICES_VISIBLE="true", **overrides)
+
+    def test_a_file_is_decoded_drawn_and_offered_for_trimming(self):
+        found = self.choose("console.log(JSON.stringify(report()));",
+                            DECODE_SECONDS="40", LOUD_FROM="0")
+
+        assert found["trimHidden"] is False, "the trimmer stayed hidden"
+        assert found["painted"] > 10, "no waveform was drawn"
+        assert "selected" in found["trimState"], found["trimState"]
+
+    def test_a_long_file_opens_on_a_selection_that_will_work(self):
+        """Not the whole thing. A forty-second file selected end to end is a
+        refusal on the first press of Create, which is the experience this
+        whole surface exists to remove."""
+        found = self.choose("console.log(JSON.stringify(report()));",
+                            DECODE_SECONDS="40")
+
+        assert float(found["trimStart"]) == 0.0
+        assert float(found["trimEnd"]) == 15.0
+        assert "ready to create" in found["trimState"], found["trimState"]
+
+    def test_a_short_file_is_taken_whole_and_says_it_is_too_short(self):
+        found = self.choose("console.log(JSON.stringify(report()));",
+                            DECODE_SECONDS="3")
+
+        assert float(found["trimEnd"]) == 3.0
+        assert "at least 5 s" in found["trimState"], found["trimState"]
+
+    def test_what_is_uploaded_is_the_selection_and_not_the_file(self):
+        """The point of the whole exercise: forty seconds go in, fifteen come
+        out, as one mono 16-bit PCM WAV built in the tab."""
+        found = self.choose("""
+            cloneParts.name.value = "Ada";
+            cloneParts.create.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, DECODE_SECONDS="40")
+
+        posts = [r for r in found["requests"] if r.get("url", "").endswith("/sopro/clone")]
+        assert len(posts) == 1, found["cloneStatus"]
+        uploaded = found["uploaded"]
+        assert uploaded is not None
+        assert abs(uploaded["seconds"] - 15.0) < 0.1, uploaded
+
+    def test_the_boxes_move_the_selection_and_the_upload_follows(self):
+        found = self.choose("""
+            cloneParts.start.value = "4";
+            cloneParts.start.fire("input");
+            cloneParts.end.value = "14";
+            cloneParts.end.fire("input");
+            cloneParts.name.value = "Ada";
+            cloneParts.create.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, DECODE_SECONDS="40")
+
+        assert abs(found["uploaded"]["seconds"] - 10.0) < 0.1, found["uploaded"]
+
+    def test_pick_fifteen_seconds_finds_the_part_with_speech_in_it(self):
+        """The loudest window, not the first one. A clip that opens with ten
+        seconds of room tone is the ordinary case for a file somebody exports
+        from a phone, and taking the front of it clones the room."""
+        found = self.choose("""
+            cloneParts.best.fire("click");
+            console.log(JSON.stringify(report()));
+        """, DECODE_SECONDS="40", LOUD_FROM="20")
+
+        assert 15.0 <= float(found["trimStart"]) <= 25.0, found["trimStart"]
+
+    def test_a_selection_outside_the_window_is_refused_before_the_network(self):
+        found = self.choose("""
+            cloneParts.start.value = "0";
+            cloneParts.start.fire("input");
+            cloneParts.end.value = "2";
+            cloneParts.end.fire("input");
+            cloneParts.name.value = "Ada";
+            cloneParts.create.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, DECODE_SECONDS="40")
+
+        assert not [r for r in found["requests"]
+                    if r.get("url", "").endswith("/sopro/clone")]
+        assert "5 to 20 seconds" in found["cloneStatus"], found["cloneStatus"]
+
+    def test_a_file_the_browser_cannot_decode_says_so(self):
+        found = self.choose("console.log(JSON.stringify(report()));",
+                            DECODE_WORKS="false")
+
+        assert found["trimHidden"] is True
+        assert "could not be read as audio" in found["trimState"], found["trimState"]
+
+    def test_create_without_a_recording_asks_for_one(self):
+        found = run("""
+            await tick();
+            cloneParts.name.value = "Ada";
+            cloneParts.create.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true")
+
+        assert not [r for r in found["requests"]
+                    if r.get("url", "").endswith("/sopro/clone")]
+        assert "record something" in found["cloneStatus"].lower(), found["cloneStatus"]
 
 
 class TestTheFolderButtonComesBack:

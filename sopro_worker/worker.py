@@ -300,22 +300,49 @@ def _containment(parent_pid: int) -> str:
             raise SystemExit(0)
         return "pdeathsig"
     if os.name == "nt":
-        try:
-            import ctypes
-
-            inside = ctypes.c_int(0)
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            handle = kernel32.GetCurrentProcess()
-            if not kernel32.IsProcessInJob(handle, None, ctypes.byref(inside)):
-                raise OSError(ctypes.get_last_error(), "IsProcessInJob failed")
-        except Exception as exc:  # noqa: BLE001 - reported, never raised onward
-            _note(f"could not confirm job containment: {exc.__class__.__name__}")
-            return "pipe"
-        if not inside.value:
-            _note("this process is not in a job object")
-            return "pipe"
-        return "job"
+        return _in_a_job()
     return "pipe"
+
+
+def _in_a_job() -> str:
+    """Whether the kernel agrees this process is in a job. Three answers.
+
+    ``job`` the kernel says yes; ``none`` the kernel says no; ``unknown`` the
+    question could not be put at all.
+
+    The third used to be folded into the second and reported as ``pipe``, and
+    the parent refused to start on it. That cost a real user the whole feature:
+    containment had been arranged and was being enforced, and the worker was
+    turned away for failing to confirm it. The parent proves containment itself
+    now, against its own job handle; this is corroboration and says which of the
+    three it actually is.
+
+    The argument types are declared because a HANDLE is not a C ``int`` on
+    64-bit Windows, and ``GetCurrentProcess`` returns the pseudo-handle -1 --
+    the one value where getting that wrong matters most.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE,
+                                            ctypes.POINTER(wintypes.BOOL)]
+        kernel32.IsProcessInJob.restype = wintypes.BOOL
+        inside = wintypes.BOOL(0)
+        if not kernel32.IsProcessInJob(kernel32.GetCurrentProcess(), None,
+                                       ctypes.byref(inside)):
+            raise OSError(ctypes.get_last_error(), "IsProcessInJob failed")
+    except Exception as exc:  # noqa: BLE001 - reported, never raised onward
+        _note(f"could not ask whether this process is in a job: "
+              f"{exc.__class__.__name__}: {exc}")
+        return "unknown"
+    if not inside.value:
+        _note("the kernel says this process is not in a job object")
+        return "none"
+    return "job"
 
 
 # --------------------------------------------------------------------------- #
