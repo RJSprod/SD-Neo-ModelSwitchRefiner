@@ -294,6 +294,55 @@ The selected engine failing is never permission to use the other one.
 
 ---
 
+## What the second real attempt disproved
+
+The install worked. `engines.installed("sopro")` returned true on the user's
+machine — the traceback in their log is from *past* that check — so the runtime
+and the model were both there. What they could not do was create a voice, and
+the log said nothing about why.
+
+### The reference decoder refused the file they had
+
+`normalize_reference` accepted `WAVE_FORMAT_PCM` at exactly sixteen bits and
+nothing else. The recording was a `.wav` that had been through an editor, and
+that is the one case where a WAV is almost never plain: editors write 24-bit or
+32-bit float as a matter of course, and a great many writers wrap even ordinary
+16-bit PCM in `WAVE_FORMAT_EXTENSIBLE`, where the real format tag lives in the
+first two bytes of a SubFormat GUID rather than in the format field. All three
+were refused.
+
+That was the wrong boundary. Sopro wants mono 24 kHz PCM16 and this function's
+whole job is to produce it — it already downmixes stereo and resamples any rate
+between 8 and 192 kHz. Narrowing a sample is the same kind of work. It now
+decodes 8-, 16-, 24- and 32-bit PCM and 32- and 64-bit float, unwraps
+`EXTENSIBLE`, clamps float samples that exceed unity rather than letting them
+wrap, and treats a NaN as silence. What is still refused is a *compressed*
+encoding, which needs a codec this module should not grow — and the refusal now
+names what the file is (`IMA ADPCM`, `encoding 0x2001`) rather than only what
+was wanted, which is the half of the sentence somebody can act on.
+
+### None of it was written down
+
+The clone route answered the browser with an exact reason and logged nothing.
+The install path logs every step; the clone path logged only success. So the
+log that arrived said a reply had not been spoken and nothing about the three
+attempts to create the voice that would have spoken it. Refusals are logged
+now, with the attempt in front of them.
+
+Two smaller things in the same report, both reporting rather than behaviour:
+
+* The start-up summary described the sherpa runtime, Whisper and Kokoro
+  whatever engine was selected. It now also says which engine *is* selected
+  and, for Sopro, whether its runtime and model are installed and how many
+  voices exist — so the first line of a log answers the first question anybody
+  asks of it.
+* "No voice has been created yet" reached the log as a full traceback at
+  WARNING, on every assistant turn, for as long as the state lasted. It is a
+  state the design's own failure table calls ordinary; it is now one throttled
+  sentence, with the traceback kept at debug.
+
+---
+
 ## Two things the first real install disproved
 
 Both were found by installing this on Windows rather than by reading it, and

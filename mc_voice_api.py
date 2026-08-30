@@ -1289,6 +1289,37 @@ def select_engine(engine: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 
+def _log_engine() -> None:
+    """Say, at start-up, what the *selected* engine's state is.
+
+    The line beneath this one describes the sherpa runtime, Whisper and Kokoro,
+    because that is what :func:`mc_voice_models.status` knows about. When Sopro
+    is the selected engine that line is true and about something else, and a log
+    somebody sends after "Voice Chat does not work" cannot answer the first
+    question anybody would ask of it: is the engine that is meant to be
+    speaking installed, and does it have a voice?
+    """
+    import mc_voice_engines as engines
+
+    try:
+        active = engines.active()
+        if active != engines.SOPRO:
+            logger.info("Model Chain: Voice Chat text-to-speech engine — %s",
+                        engines.label(active))
+            return
+        import mc_voice_sopro as sopro
+
+        found = sopro.status()
+        voices = len(sopro.entries())
+        logger.info("Model Chain: Voice Chat text-to-speech engine — %s, runtime %s, "
+                    "model %s, %d voice(s)%s", engines.label(active),
+                    "installed" if found.runtime_ready else "not installed",
+                    "installed" if found.model_ready else "not installed", voices,
+                    "" if voices else " — replies stay silent until one is created")
+    except Exception:
+        logger.debug("Model Chain: could not describe the selected engine", exc_info=True)
+
+
 def surface_payload() -> dict:
     """The settings markup for the engine that is selected *now*.
 
@@ -1405,11 +1436,20 @@ def sopro_clone(name: str, language: str, wav: bytes) -> dict:
     import mc_voice_sopro as sopro
 
     _active(engines.SOPRO)
+    logger.info("Model Chain: a Sopro voice is being created from a %d byte recording",
+                len(wav or b""))
     if len(wav or b"") > sopro.MAX_REFERENCE_BYTES:
+        logger.warning("Model Chain: a Sopro voice was not created — the recording is "
+                       "larger than %d bytes", sopro.MAX_REFERENCE_BYTES)
         raise Refused(413, "That recording is too large.")
     try:
         made = sopro.create(str(name or ""), wav or b"", str(language or ""))
     except sopro.SoproError as exc:
+        # Written down as well as answered. A refusal that only ever reached the
+        # clone form's status line is a refusal nobody can diagnose from a log
+        # afterwards -- which is how "that WAV is not 16-bit PCM" reached its
+        # first user as "nothing worked", with a log that said nothing at all.
+        logger.warning("Model Chain: a Sopro voice was not created — %s", exc)
         raise Refused(400, str(exc)) from None
     except Exception as exc:
         logger.warning("Model Chain: a Sopro voice could not be created", exc_info=True)
@@ -2171,6 +2211,7 @@ def install(_demo=None, app=None) -> bool:
     logger.info("Model Chain: Voice Chat routes registered at %s", ", ".join(ROUTES))
     logger.info("Model Chain: Voice Chat data directory is %s", paths.data_root())
     logger.info("Model Chain: Voice Chat host — %s", models.describe_host())
+    _log_engine()
     logger.info("Model Chain: Voice Chat status — runtime %s, speech-to-text %s, "
                 "text-to-speech %s", found.runtime_message, found.stt_message,
                 found.tts_message)
