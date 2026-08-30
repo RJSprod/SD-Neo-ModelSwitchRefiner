@@ -74,6 +74,7 @@ OPT_VOICE = "model_chain_voice_sopro_voice_id"
 OPT_PRECISION = "model_chain_voice_sopro_precision"
 OPT_STEPS = "model_chain_voice_sopro_steps"
 OPT_CHUNK = "model_chain_voice_sopro_chunk_frames"
+OPT_THREADS = "model_chain_voice_sopro_intraop_threads"
 
 PRECISIONS = ("full", "int8")
 """What the pinned Sopro release supports. ``from_pretrained`` takes
@@ -86,6 +87,23 @@ larger values as a quality/compute trade. Only a tested set is offered, because
 a free integer here is a control that can make Sopro slower than real time."""
 
 CHUNK_CHOICES = (32, 64, 128)
+
+THREAD_CHOICES = (2, 4, 6, 8, 12, 16)
+"""The intra-op counts the validation sweep measures, and the ones offerable.
+
+A setting rather than an environment variable, which is where this started and
+was the wrong place for it: Precision is already a user control that changes
+compute, RAM and which warmed caches survive, and there is no principle that
+makes thread count different in kind. What I-12 forbids is the *code* choosing
+a number from a measured real-time factor. A person reading a table and picking
+a row is exactly what "one measured, fixed policy" asks for -- and asking that
+person to set MC_SOPRO_INTRAOP_THREADS on Windows is asking them not to bother.
+
+The released default stays :data:`sopro_worker.worker.INTRAOP_THREADS`. This
+list only says which values may be *offered*, and :func:`thread_choices` cuts it
+to what the machine actually has, because offering eight threads on a four-core
+laptop is offering a slower configuration with a faster-looking number.
+"""
 """Streaming chunk sizes, in frames. The reviewed default is 64 and the value
 must be a multiple of the model's hop ratio -- which the worker checks against
 the loaded model rather than against a constant here. Smaller chunks may improve
@@ -436,12 +454,23 @@ def worker_environment() -> dict:
     # is set these caps have to track it, or OpenMP sizes its pool at the
     # released four while Torch is asked for eight and the measurement belongs
     # to neither number.
-    intraop, _interop, _overridden = protocol.effective_policy(note=False)
+    intraop, _interop, overridden = protocol.effective_policy(note=False)
+    if not overridden:
+        # The chosen setting, when there is no benchmark override in force. The
+        # child reads the same value back out of this environment, so the pool
+        # OpenMP sizes and the count Torch is given are one number.
+        intraop = intraop_threads()
     return {
         "CUDA_VISIBLE_DEVICES": "",
         "HIP_VISIBLE_DEVICES": "",
         "ROCR_VISIBLE_DEVICES": "",
         "PYTORCH_NO_CUDA_MEMORY_CACHING": "1",
+        # The child reads this back and hands it to Torch, so the count OpenMP
+        # sized its pool for and the count Torch was given are the same number
+        # by construction rather than by two functions agreeing. When it equals
+        # the released policy the child reports "released"; when it does not,
+        # every line it writes says so.
+        protocol.OVERRIDE_INTRAOP: str(intraop),
         "OMP_NUM_THREADS": str(intraop),
         "MKL_NUM_THREADS": str(intraop),
         "OPENBLAS_NUM_THREADS": str(intraop),
@@ -491,6 +520,43 @@ def steps() -> int:
     return found if found in STEP_CHOICES else STEP_CHOICES[0]
 
 
+def intraop_threads() -> int:
+    """The intra-op thread count in force: the setting, or the released policy.
+
+    The environment override still wins over both, because that is what the
+    sweep uses to measure a configuration this installation has not chosen.
+    """
+    from sopro_worker import worker as protocol
+
+    asked, _interop, overridden = protocol.effective_policy(note=False)
+    if overridden:
+        return asked
+    try:
+        found = int(_setting(OPT_THREADS) or 0)
+    except (TypeError, ValueError):
+        found = 0
+    return found if found in thread_choices() else protocol.INTRAOP_THREADS
+
+
+def thread_choices() -> tuple:
+    """The counts worth offering here. Never more than the machine has.
+
+    Oversubscribing is not a neutral mistake -- more threads than cores is more
+    time in barriers, so it would put a row in the dropdown that is reliably
+    worse than the one above it. Clamping the *choices* is not auto-tuning: no
+    measurement is consulted and nothing is selected, the list simply stops
+    where the hardware does.
+    """
+    from sopro_worker import worker as protocol
+
+    cores = os.cpu_count() or protocol.INTRAOP_THREADS
+    found = tuple(value for value in THREAD_CHOICES if value <= cores)
+    # The released policy is always offerable, whatever the machine reports --
+    # a dropdown that could not express the shipped configuration would be a
+    # dropdown somebody could not get back to.
+    return found or (protocol.INTRAOP_THREADS,)
+
+
 def chunk_frames() -> int:
     try:
         found = int(_setting(OPT_CHUNK) or 0)
@@ -534,10 +600,20 @@ def engine_settings() -> dict:
         "step_choices": list(STEP_CHOICES),
         "chunk_frames": chunk_frames(),
         "chunk_choices": list(CHUNK_CHOICES),
+        "threads": intraop_threads(),
+        "thread_choices": list(thread_choices()),
+        "released_threads": _released_threads(),
     }
 
 
-def set_engine_settings(precision_id: str = "", solver_steps=None, chunk=None) -> dict:
+def _released_threads() -> int:
+    from sopro_worker import worker as protocol
+
+    return int(protocol.INTRAOP_THREADS)
+
+
+def set_engine_settings(precision_id: str = "", solver_steps=None, chunk=None,
+                        threads=None) -> dict:
     """Change a global Sopro runtime setting and stop the worker if it matters.
 
     Stopped rather than reconfigured: precision is chosen at model load, and the
@@ -569,6 +645,16 @@ def set_engine_settings(precision_id: str = "", solver_steps=None, chunk=None) -
         if value in CHUNK_CHOICES and value != chunk_frames():
             _remember(OPT_CHUNK, value)
             changed.append("streaming chunk size")
+    if threads is not None:
+        try:
+            value = int(threads)
+        except (TypeError, ValueError):
+            value = 0
+        # Against the offerable list rather than the constant, so a number a
+        # browser invented cannot become a thread count.
+        if value in thread_choices() and value != intraop_threads():
+            _remember(OPT_THREADS, value)
+            changed.append("CPU thread count")
     if changed:
         try:
             import mc_voice_sopro_runtime as runtime

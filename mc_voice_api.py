@@ -1469,13 +1469,14 @@ def sopro_install(part: str = "", folder: str = "") -> dict:
     return sopro_payload()
 
 
-def sopro_settings(precision: str = "", steps=None, chunk_frames=None) -> dict:
+def sopro_settings(precision: str = "", steps=None, chunk_frames=None,
+                   threads=None) -> dict:
     import mc_voice_engines as engines
     import mc_voice_sopro as sopro
 
     _active(engines.SOPRO)
     try:
-        sopro.set_engine_settings(precision, steps, chunk_frames)
+        sopro.set_engine_settings(precision, steps, chunk_frames, threads)
     except sopro.SoproError as exc:
         raise Refused(400, str(exc)) from None
     return sopro_payload()
@@ -2306,7 +2307,8 @@ def install(_demo=None, app=None) -> bool:
     sopro_settings_route = _json_route(
         SOPRO_SETTINGS_ROUTE,
         lambda payload: sopro_settings(str(payload.get("precision") or ""),
-                                       payload.get("steps"), payload.get("chunk_frames")),
+                                       payload.get("steps"), payload.get("chunk_frames"),
+                                       payload.get("threads")),
         "That Sopro setting could not be changed.")
     sopro_rebuild_route = _json_route(
         SOPRO_REBUILD_ROUTE, lambda payload: sopro_rebuild(str(payload.get("voice") or "")),
