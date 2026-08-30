@@ -82,6 +82,7 @@ this docstring merely asserts.
 
 from __future__ import annotations
 
+import base64
 import logging
 import secrets
 import struct
@@ -139,11 +140,39 @@ CLONING_STATUS_ROUTE = f"{PREFIX}/cloning/status"
 CLONING_START_ROUTE = f"{PREFIX}/cloning/start"
 CLONING_ABORT_ROUTE = f"{PREFIX}/cloning/abort"
 
+ENGINES_ROUTE = f"{PREFIX}/engines"
+ENGINE_SELECT_ROUTE = f"{PREFIX}/engine/select"
+SOPRO_ROUTE = f"{PREFIX}/sopro"
+SOPRO_INSTALL_ROUTE = f"{PREFIX}/sopro/install"
+SOPRO_SETTINGS_ROUTE = f"{PREFIX}/sopro/settings"
+SOPRO_CLONE_ROUTE = f"{PREFIX}/sopro/clone"
+SOPRO_REBUILD_ROUTE = f"{PREFIX}/sopro/rebuild"
+LAB_ROUTE = f"{PREFIX}/lab"
+LAB_UPDATE_ROUTE = f"{PREFIX}/lab/update"
+LAB_RESET_ROUTE = f"{PREFIX}/lab/reset"
+LAB_PLAY_ROUTE = f"{PREFIX}/lab/play"
+"""Sopro's own routes, under their own prefix.
+
+Separate paths rather than an ``engine`` parameter on the existing ones,
+wherever the operation only exists on one engine. Cloning a Sopro voice and
+running a Lab audition have no Kokoro meaning at all, and a shared route that
+branched on a parameter would be a route whose refusals had to explain which
+half of itself was unavailable.
+
+Where an operation *is* shared -- listing voices, setting a default, renaming,
+deleting, auditioning -- the path stays the same and the payload is scoped to
+the active engine, which is what keeps the browser's own code engine-neutral.
+"""
+
+SOPRO_ROUTES = (ENGINES_ROUTE, ENGINE_SELECT_ROUTE, SOPRO_ROUTE, SOPRO_INSTALL_ROUTE,
+                SOPRO_SETTINGS_ROUTE, SOPRO_CLONE_ROUTE, SOPRO_REBUILD_ROUTE,
+                LAB_ROUTE, LAB_UPDATE_ROUTE, LAB_RESET_ROUTE, LAB_PLAY_ROUTE)
+
 ROUTES = (STATUS_ROUTE, STT_ROUTE, TTS_ROUTE, INSTALL_ROUTE, MODELS_ROUTE, PROFILE_ROUTE,
           STREAM_ROUTE, CANCEL_ROUTE, TELEMETRY_ROUTE,
           RUNTIME_ROUTE, VOICES_ROUTE, VOICE_DEFAULT_ROUTE, VOICE_TEST_ROUTE,
           VOICE_RENAME_ROUTE, VOICE_DELETE_ROUTE, CLONING_INSTALL_ROUTE,
-          CLONING_STATUS_ROUTE, CLONING_START_ROUTE, CLONING_ABORT_ROUTE)
+          CLONING_STATUS_ROUTE, CLONING_START_ROUTE, CLONING_ABORT_ROUTE) + SOPRO_ROUTES
 
 TOKEN_HEADER = "x-model-chain-voice"
 
@@ -183,7 +212,7 @@ def session_token() -> str:
 # --------------------------------------------------------------------------- #
 
 
-def remember_reply(text: str, voice_id: str = "", profile=None) -> str:
+def remember_reply(text: str, voice_id: str = "", profile=None, engine: str = "") -> str:
     """Take an immutable snapshot of a completed reply. Returns its token.
 
     The snapshot is the design decision (R2-5, I-13). A message index would have
@@ -208,6 +237,13 @@ def remember_reply(text: str, voice_id: str = "", profile=None) -> str:
         _expire(now)
         _targets[token] = {"text": snapshot, "created": now, "session": _token,
                            "voice": str(voice_id or ""),
+                           # Which engine is part of the snapshot too, and for
+                           # the same reason the voice is: the engine can be
+                           # switched between the reply finishing and the
+                           # browser asking for audio, and a reply spoken by
+                           # whichever engine happens to be selected *then* is
+                           # a reply in a voice nobody chose.
+                           "engine": str(engine or ""),
                            "profile": dict(profile) if profile else None}
     return token
 
@@ -248,10 +284,42 @@ def forget_targets() -> None:
 class Refused(Exception):
     """A request that is not going to reach an inference engine."""
 
-    def __init__(self, status: int, reason: str):
+    def __init__(self, status: int, reason: str, mismatch: bool = False):
         super().__init__(reason)
         self.status = status
         self.reason = reason
+        self.mismatch = bool(mismatch)
+        """Whether this refusal is specifically "the engine changed under you".
+
+        Flagged rather than inferred from the status code, because 409 already
+        means several other things on these routes -- a turn that was over
+        before anything listened to it, an install that is already running, a
+        Lab session that expired -- and a browser that reloaded the page for
+        every one of them would be a browser that reloads the page when a
+        slider is pressed twice.
+        """
+
+
+def _active(engine: str = "") -> str:
+    """The active engine, or a refusal a browser can act on. Section 5.
+
+    :func:`mc_voice_engines.refuse_mismatch` raises its own exception, and left
+    to itself it would reach the route handler's catch-all and come back as a
+    500. That is the wrong answer to the wrong question: a mismatch is not "that
+    failed", it is "the page you are looking at is out of date", and it is the
+    one refusal the browser responds to by reloading.
+
+    Every engine-scoped entry point goes through here rather than calling the
+    facade directly, so there is one place the answer is decided.
+    """
+    import mc_voice_engines as engines
+
+    try:
+        return engines.refuse_mismatch(engine)
+    except engines.ActiveEngineMismatch as exc:
+        raise Refused(409, str(exc), mismatch=True) from None
+    except engines.EngineError as exc:
+        raise Refused(400, str(exc)) from None
 
 
 def validate_wav(data: bytes) -> dict:
@@ -498,31 +566,90 @@ def status_payload() -> dict:
     Settings shows, so a user reading one and a user reading the other are being
     told the same thing.
     """
+    import mc_voice_engines as engines
+
     found = models.status()
-    return {
+    active = engines.active()
+    payload = {
         "ok": True,
-        "ready": found.ready,
+        # STT is outside the engine selector and stays that way. Every field
+        # below about speech-to-text is reported whichever TTS engine is
+        # selected, because switching Kokoro to Sopro must not reload Whisper,
+        # change its tier or reset the microphone (I-7).
         "runtime_ready": found.runtime_ready,
         "stt_ready": found.stt_ready,
-        "tts_ready": found.tts_ready,
         "platform_supported": found.platform_supported,
         "runtime_message": found.runtime_message,
         "stt_message": found.stt_message,
-        "tts_message": found.tts_message,
         "auto_send": state.auto_send(),
         "auto_speak": state.auto_speak(),
         "busy": found.busy,
         "progress": models.progress(),
         "sources": _sources(),
-        # Live residency, which "installed" never answered. Section 30, and it
-        # is cheap on purpose: reading it starts nothing.
-        "engine": runtime.engine(),
         "stt_model": {"id": found.stt_id, "label": found.stt_label, "tier": found.stt_tier},
-        "voice": _default_voice(),
-        "delivery": _delivery_summary(),
         "speaking": turns.busy(),
+        "engines": engines.state(),
         "not_ready_message": ("Voice Chat is not set up. Install both models in "
                               "Settings → Voice Chat."),
+    }
+    # Only the selected engine's operational block is built, so a stale DOM, a
+    # theme script or a partial re-render has nothing to expose (section 5).
+    # The inactive engine appears in ``engines`` as a name and a blurb and
+    # nowhere else.
+    payload.update(_engine_block(active))
+    return engines.scope(payload, active)
+
+
+def _engine_block(active: str) -> dict:
+    """The active TTS engine's operational state, and only that engine's.
+
+    Both branches answer the same four questions -- is it installed, what does
+    it say about that, is a worker resident, and which voice speaks next -- so
+    every surface that draws them is engine-neutral above this line and engine-
+    specific below it.
+    """
+    import mc_voice_engines as engines
+
+    if active == engines.SOPRO:
+        import mc_voice_sopro as sopro
+        import mc_voice_sopro_runtime as sopro_runtime
+
+        found = sopro.status()
+        return {
+            "ready": found.ready,
+            "tts_ready": found.ready,
+            "tts_message": found.message,
+            # ``engine_state``, not ``engine``. ``engine`` is the selected
+            # engine's *id* in every payload this feature sends, and it used to
+            # be this residency object in the status payload alone -- so the
+            # scoping filter, which sets ``engine`` to the id, silently replaced
+            # the Voice flyout's Loaded/Unloaded line with the string "sopro".
+            # One key, one meaning.
+            "engine_state": sopro_runtime.engine(),
+            "voice": _default_voice(),
+            "delivery": _delivery_summary(),
+            "sopro": {
+                "installed": found.ready,
+                "runtime_ready": found.runtime_ready,
+                "model_ready": found.model_ready,
+                "runtime_message": found.runtime_message,
+                "model_message": found.model_message,
+                "platform_supported": found.platform_supported,
+                "fingerprint": found.fingerprint,
+                "settings": sopro.engine_settings(),
+                "defaults": sopro_runtime.defaults(),
+                "warnings": sopro.warnings(),
+            },
+        }
+    found = models.status()
+    return {
+        "ready": found.ready,
+        "tts_ready": found.tts_ready,
+        "tts_message": found.tts_message,
+        "engine_state": runtime.engine(),
+        "voice": _default_voice(),
+        "delivery": _delivery_summary(),
+        "kokoro": {"installed": found.tts_ready, "message": found.tts_message},
     }
 
 
@@ -534,9 +661,10 @@ def _delivery_summary() -> str:
     cannot answer while somebody is listening.
     """
     try:
-        import mc_voice_profile as voice_profile
+        import mc_voice_engines as engines
 
-        return voice_profile.describe(voice_profile.stored())
+        profiles = engines.profiles()
+        return profiles.describe(profiles.stored())
     except Exception:
         logger.debug("Model Chain: could not read the voice delivery profile", exc_info=True)
         return ""
@@ -550,9 +678,9 @@ def _default_voice() -> dict:
     one is never to be trusted anyway.
     """
     try:
-        import mc_voice_registry as registry
+        import mc_voice_engines as engines
 
-        entry = registry.default_entry()
+        entry = engines.adapter().default_entry()
         if entry is None:
             return {"id": "", "name": ""}
         return {"id": entry["id"], "name": entry["display_name"], "label": entry["label"],
@@ -729,31 +857,51 @@ def speak(token: str) -> bytes:
     if not found:
         raise Refused(404, "There is nothing waiting to be read aloud.")
     text = found["text"]
-    sid, _entry = _resolve_target(found)
+    import mc_voice_engines as engines
+
+    wanted = str(found.get("engine") or "") or engines.active()
+    if wanted != engines.active():
+        # The engine was switched while this reply was waiting to be spoken.
+        # Refused rather than re-resolved: there is no cross-engine fallback
+        # (I-2), and speaking a reply that was written for one engine through
+        # the other is exactly the silent substitution that rule forbids.
+        raise Refused(409, f"The text-to-speech engine changed to "
+                           f"{engines.label()} while that reply was waiting, so it was not "
+                           f"read aloud.")
+    voice_id, entry = _resolve_target(found, wanted)
     try:
-        audio = runtime.synthesize(text, sid=sid, profile=found.get("profile"))
-    except runtime.VoiceRuntimeError as exc:
-        raise Refused(503, str(exc)) from None
-    logger.info("Model Chain: Voice TTS finished — %d characters, %d bytes of audio",
-                len(text), len(audio))
+        if wanted == engines.SOPRO:
+            import mc_voice_sopro_runtime as sopro_runtime
+
+            audio = sopro_runtime.synthesize(text, voice_id, profile=found.get("profile"))
+        else:
+            audio = runtime.synthesize(text, sid=int(entry.get("_sid") or 0),
+                                       profile=found.get("profile"))
+    except Exception as exc:
+        if isinstance(exc, Refused):
+            raise
+        raise Refused(503, str(exc) or "That reply could not be read aloud.") from None
+    logger.info("Model Chain: Voice TTS finished — %d characters, %d bytes of audio on %s",
+                len(text), len(audio), engines.label(wanted))
     return audio
 
 
-def _resolve_target(found: dict):
-    """The numeric speaker a remembered reply is to be spoken by.
+def _resolve_target(found: dict, engine: str):
+    """``(qualified id, entry)`` for a remembered reply, on its own engine.
 
-    Through the registry, always -- the only path from a name to a number in
-    this feature, and never a number that came from anywhere else.
-    :func:`mc_voice_registry.resolve` already answers a voice that has since
-    been deleted with the default, so the one failure left here is that nothing
-    at all is installed, which is a sentence rather than speaker 0.
+    Through the active engine's adapter, always -- the only path from a stable
+    id to anything an engine can address, and never a number that came from
+    anywhere else (section 56). The adapter already answers a voice that has
+    since been deleted with that engine's default, so the one failure left here
+    is that the engine has no usable voice at all, which is a sentence rather
+    than speaker 0.
     """
-    import mc_voice_registry as registry
+    import mc_voice_engines as engines
 
     try:
-        return registry.resolve(found.get("voice") or "")
-    except registry.RegistryError as exc:
-        raise Refused(503, str(exc)) from None
+        return engines.resolve(found.get("voice") or "", engine)
+    except Exception as exc:
+        raise Refused(503, str(exc) or "No voice is installed.") from None
 
 
 # --------------------------------------------------------------------------- #
@@ -900,16 +1048,29 @@ def telemetry(payload: dict) -> dict:
 
 
 def set_runtime(action: str) -> dict:
-    """Load or unload the Voice Worker. Section 31."""
+    """Load or unload the *active* engine's worker. Section 31.
+
+    The active one, resolved here rather than named, because the button lives in
+    a flyout that says which engine it belongs to and pressing it must not load
+    the other one. On an installation that has never selected Sopro this reaches
+    exactly the code it always did.
+    """
+    import mc_voice_engines as engines
+
+    active = engines.active()
+    lifecycle = engines.runtime(active)
     wanted = str(action or "").strip().casefold()
-    if wanted == "load":
-        try:
-            return {"ok": True, "engine": runtime.load()}
-        except runtime.VoiceRuntimeError as exc:
-            raise Refused(503, str(exc)) from None
-    if wanted == "unload":
-        return {"ok": True, "engine": runtime.unload("unloaded from the Voice panel")}
-    raise Refused(400, "Voice Chat can load or unload its speech engine.")
+    if wanted not in ("load", "unload"):
+        raise Refused(400, "Voice Chat can load or unload its speech engine.")
+    try:
+        if wanted == "load":
+            return {"ok": True, "engine": active, "engine_state": lifecycle.load()}
+        return {"ok": True, "engine": active,
+                "engine_state": lifecycle.unload("unloaded from the Voice panel")}
+    except Exception as exc:
+        if isinstance(exc, Refused):
+            raise
+        raise Refused(503, str(exc) or "The speech engine could not be changed.") from None
 
 
 # --------------------------------------------------------------------------- #
@@ -917,94 +1078,136 @@ def set_runtime(action: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def voices_payload(test_text=None) -> dict:
-    """Everything the Settings voice list draws. Section 71.
+def voices_payload(test_text=None, engine: str = "") -> dict:
+    """Everything the Settings voice list draws, for the active engine only.
+
+    Scoped rather than filtered on the page (section 5): a browser asking this
+    while Kokoro is selected is never told what Sopro voices exist, so a stale
+    DOM has nothing to reveal and no request built from one can name a voice
+    from the other engine.
 
     ``test_text`` is saved when it is given, which is how the editable Test Text
-    field persists without a second route: a user who types a phrase and never
-    presses Test still has it next time.
+    field persists without a second route -- and it is the one genuinely
+    engine-neutral value here, because "what should a test voice say" is a
+    property of the person rather than of the engine.
     """
-    import mc_voice_registry as registry
+    import mc_voice_engines as engines
 
+    active = _active(engine)
+    adapter = engines.adapter(active)
     if test_text is not None:
         try:
-            registry.set_test_text(str(test_text))
+            adapter.set_test_text(str(test_text))
         except Exception:
             logger.debug("Model Chain: could not save the voice test text", exc_info=True)
     try:
-        found = registry.entries()
+        found = adapter.entries()
     except Exception:
         logger.warning("Model Chain: the voice registry could not be read", exc_info=True)
-        return {"ok": False, "error": "The voice list could not be read.", "voices": []}
+        return {"ok": False, "error": "The voice list could not be read.", "voices": [],
+                "engine": active}
     return {
         "ok": True,
+        "engine": active,
+        "engine_label": engines.label(active),
         "voices": [_public(entry) for entry in found],
-        "default": registry.default_id(),
-        "test_text": registry.test_text(),
-        "capacity": registry.capacity(),
-        "warnings": registry.warnings(),
+        "default": adapter.default_id(),
+        "test_text": adapter.test_text(),
+        "capacity": adapter.capacity(),
+        "warnings": adapter.warnings(),
     }
 
 
 def _public(entry: dict) -> dict:
     """One registry entry as the browser sees it.
 
-    The SID is not in it. A browser that knew the number could ask for a
-    reserved slot or an unregistered speaker, and the answer to that is not to
-    validate the number harder -- it is not to publish it.
+    The engine's own address is not in it -- Kokoro's SID under ``_sid``,
+    anything else an adapter carries privately. A browser that knew the number
+    could ask for a reserved slot or an unregistered speaker, and the answer to
+    that is not to validate the number harder, it is not to publish it
+    (section 56).
+
+    Built by *naming* what may be published rather than by removing what may
+    not, so a field an adapter adds later is absent until somebody adds it here
+    on purpose.
     """
-    return {key: entry[key] for key in
-            ("id", "display_name", "label", "type", "official", "language", "accent",
-             "editable", "deletable")}
+    found = {key: entry.get(key) for key in
+             ("id", "display_name", "label", "type", "official", "language", "accent",
+              "editable", "deletable", "engine")}
+    for key in ("created_at", "source_seconds", "compatible", "has_source", "has_lab",
+                "fingerprint"):
+        if key in entry:
+            found[key] = entry[key]
+    return found
 
 
-def set_default_voice(voice_id: str) -> dict:
-    import mc_voice_registry as registry
+def set_default_voice(voice_id: str, engine: str = "") -> dict:
+    import mc_voice_engines as engines
 
+    active = _active(engine)
+    if not engines.belongs(voice_id, active):
+        raise Refused(400, f"That is not a {engines.label(active)} voice.")
     try:
-        registry.set_default(str(voice_id or ""))
-    except registry.RegistryError as exc:
-        raise Refused(400, str(exc)) from None
-    return voices_payload()
+        engines.adapter(active).set_default(str(voice_id or ""))
+    except Exception as exc:
+        raise Refused(400, str(exc) or "That voice could not be set as the default.") from None
+    return voices_payload(engine=active)
 
 
-def rename_voice(voice_id: str, display_name: str) -> dict:
-    import mc_voice_registry as registry
+def rename_voice(voice_id: str, display_name: str, engine: str = "") -> dict:
+    import mc_voice_engines as engines
 
+    active = _active(engine)
+    if not engines.belongs(voice_id, active):
+        raise Refused(400, f"That is not a {engines.label(active)} voice.")
     try:
-        registry.rename(str(voice_id or ""), str(display_name or ""))
-    except registry.RegistryError as exc:
-        raise Refused(400, str(exc)) from None
-    return voices_payload()
+        engines.adapter(active).rename(str(voice_id or ""), str(display_name or ""))
+    except Exception as exc:
+        raise Refused(400, str(exc) or "That voice could not be renamed.") from None
+    return voices_payload(engine=active)
 
 
-def delete_voice(voice_id: str) -> dict:
-    import mc_voice_registry as registry
+def delete_voice(voice_id: str, engine: str = "") -> dict:
+    """Delete one voice, from the active engine's library and nowhere else.
 
+    Explicit and engine-local (section 8): deleting a Sopro voice cannot touch a
+    Kokoro bank and the reverse is equally true, which the ownership check below
+    makes structural rather than a rule somebody remembers.
+    """
+    import mc_voice_engines as engines
+
+    active = _active(engine)
+    if not engines.belongs(voice_id, active):
+        raise Refused(400, f"That is not a {engines.label(active)} voice.")
     try:
-        registry.delete(str(voice_id or ""))
-    except registry.RegistryError as exc:
-        raise Refused(400, str(exc)) from None
-    return voices_payload()
+        engines.adapter(active).delete(str(voice_id or ""))
+    except Exception as exc:
+        raise Refused(400, str(exc) or "That voice could not be deleted.") from None
+    return voices_payload(engine=active)
 
 
-def test_voice(voice_id: str, text: str = "", profile=None) -> bytes:
+def test_voice(voice_id: str, text: str = "", profile=None, engine: str = "") -> bytes:
     """Audition one voice through the ordinary production runtime.
 
-    "Ordinary" is the requirement (section 45): a Test that went down a
-    different path would be a Test that could pass for a voice which cannot
-    actually be spoken in a reply. So this is the same sherpa worker, the same
-    bank and the same numeric speaker the next assistant turn would use.
+    "Ordinary" is the requirement (section 36, section 45): a Test that went
+    down a different path would be a Test that could pass for a voice which
+    cannot actually be spoken in a reply. So this is the same worker, the same
+    reconstruction and the same delivery the next assistant turn would use --
+    on both engines, through the same function.
     """
-    import mc_voice_registry as registry
+    import mc_voice_engines as engines
 
-    wanted = str(text or "").strip()[:registry.MAX_TEST_CHARS] or registry.test_text()
+    active = _active(engine)
+    adapter = engines.adapter(active)
+    profiles = engines.profiles(active)
+
+    wanted = str(text or "").strip()[:MAX_TEST_CHARS] or adapter.test_text()
     if str(text or "").strip():
-        registry.set_test_text(wanted)
+        adapter.set_test_text(wanted)
     try:
-        sid, _entry = registry.resolve(str(voice_id or ""))
-    except registry.RegistryError as exc:
-        raise Refused(404, str(exc)) from None
+        resolved, entry = engines.resolve(str(voice_id or ""), active)
+    except Exception as exc:
+        raise Refused(404, str(exc) or "No voice is installed.") from None
     # An audition of a voice whose delivery is being edited has to *be* that
     # delivery, or the sliders are being adjusted against a sound they do not
     # produce. A body with no profile in it means the default voice's own,
@@ -1013,16 +1216,248 @@ def test_voice(voice_id: str, text: str = "", profile=None) -> bytes:
     if profile is not None:
         if not isinstance(profile, dict):
             raise Refused(400, "That is not a delivery profile.")
-        import mc_voice_profile as voice_profile
-
-        delivery = voice_profile.resolve(profile)
+        delivery = profiles.resolve(profile)
     try:
-        audio = runtime.synthesize(wanted, sid=sid, profile=delivery)
-    except runtime.VoiceRuntimeError as exc:
-        raise Refused(503, str(exc)) from None
-    logger.info("Model Chain: a voice was auditioned — %d characters, %d bytes of audio",
-                len(wanted), len(audio))
+        if active == engines.SOPRO:
+            import mc_voice_sopro_runtime as sopro_runtime
+
+            audio = sopro_runtime.synthesize(wanted, resolved, profile=delivery)
+        else:
+            audio = runtime.synthesize(wanted, sid=int(entry.get("_sid") or 0),
+                                       profile=delivery)
+    except Exception as exc:
+        raise Refused(503, str(exc) or "That voice could not be auditioned.") from None
+    logger.info("Model Chain: a voice was auditioned on %s — %d characters, %d bytes of "
+                "audio", engines.label(active), len(wanted), len(audio))
     return audio
+
+
+MAX_TEST_CHARS = 400
+"""The ceiling on an audition, shared by both engines because it is a property
+of the control rather than of a model."""
+
+
+# --------------------------------------------------------------------------- #
+# The engine selector
+# --------------------------------------------------------------------------- #
+
+
+def engines_payload() -> dict:
+    """Which TTS engines exist, and which one is selected. Section 4.
+
+    The one payload where both engine names appear at the same time, and it
+    carries nothing operational about either: an id, a label, a sentence, and
+    whether it is installed. Everything a panel needs beyond that comes from
+    :func:`status_payload`, which only ever describes the selected one.
+    """
+    import mc_voice_engines as engines
+
+    return {"ok": True, **engines.state()}
+
+
+def select_engine(engine: str) -> dict:
+    """Change the active TTS engine. The whole runtime boundary. Section 4.
+
+    Cancels speech, stops whichever TTS worker was running, persists the choice,
+    and answers with the new state so every surface redraws from the truth. It
+    never starts a download, never loads a model, and never switches back
+    because the newly selected engine is not installed -- that state exists so
+    that engine's own page can explain and install itself.
+
+    STT is untouched (I-7). Nothing in this call path reaches Whisper's process,
+    its tier or the microphone.
+    """
+    import mc_voice_engines as engines
+
+    try:
+        found = engines.select(str(engine or ""))
+    except engines.EngineError as exc:
+        raise Refused(400, str(exc)) from None
+    try:
+        import mc_voice_lab as lab
+
+        lab.forget_all("the text-to-speech engine changed")
+    except Exception:
+        logger.debug("Model Chain: could not discard Voice Lab sessions", exc_info=True)
+    return {"ok": True, **found, **status_payload()}
+
+
+# --------------------------------------------------------------------------- #
+# Sopro
+# --------------------------------------------------------------------------- #
+
+
+def sopro_payload() -> dict:
+    """Everything the Sopro settings surface draws. Refused when Kokoro is active.
+
+    Refused rather than returned empty, because the two are different bugs and
+    only one of them is this route's: an empty payload reads as "Sopro has
+    nothing", and a mismatch reads as "your page is out of date", which is what
+    it is.
+    """
+    import mc_voice_engines as engines
+    import mc_voice_sopro as sopro
+    import mc_voice_sopro_runtime as sopro_runtime
+
+    _active(engines.SOPRO)
+    found = sopro.status()
+    return {
+        "ok": True,
+        "engine": engines.SOPRO,
+        "installed": found.ready,
+        "runtime_ready": found.runtime_ready,
+        "model_ready": found.model_ready,
+        "runtime_message": found.runtime_message,
+        "model_message": found.model_message,
+        "platform_supported": found.platform_supported,
+        "label": found.label,
+        "fingerprint": found.fingerprint,
+        "download_bytes": found.download_bytes,
+        "ram_bytes": found.ram_bytes,
+        "settings": sopro.engine_settings(),
+        "defaults": sopro_runtime.defaults(),
+        "state": sopro_runtime.engine(),
+        "languages": [{"id": code, "label": label} for code, label in sopro.LANGUAGES],
+        "clone": {"min_seconds": sopro.MIN_REFERENCE_SECONDS,
+                  "max_seconds": sopro.MAX_REFERENCE_SECONDS,
+                  "max_bytes": sopro.MAX_REFERENCE_BYTES},
+        "sources": {"runtime": sopro.sources("runtime"), "model": sopro.sources("model")},
+        "warnings": sopro.warnings(),
+        "progress": models.progress(),
+    }
+
+
+def sopro_install(part: str = "", folder: str = "") -> dict:
+    """Install Sopro. One button for both halves, or one half from a folder.
+
+    Offloaded by the route in front, because this downloads a hundred and forty
+    megabytes and building an isolated interpreter is not something to do on an
+    event loop.
+    """
+    import mc_voice_sopro as sopro
+
+    refused = sopro.refusal(manual=bool(folder))
+    if refused:
+        raise Refused(409, refused)
+    try:
+        if folder:
+            sopro.install_from(str(part or "runtime"), str(folder))
+        else:
+            sopro.install()
+    except sopro.SoproError as exc:
+        raise Refused(409, str(exc)) from None
+    return sopro_payload()
+
+
+def sopro_settings(precision: str = "", steps=None, chunk_frames=None) -> dict:
+    import mc_voice_engines as engines
+    import mc_voice_sopro as sopro
+
+    _active(engines.SOPRO)
+    try:
+        sopro.set_engine_settings(precision, steps, chunk_frames)
+    except sopro.SoproError as exc:
+        raise Refused(400, str(exc)) from None
+    return sopro_payload()
+
+
+def sopro_clone(name: str, language: str, wav: bytes) -> dict:
+    """Create a Sopro voice from a reference recording. Returns the audition.
+
+    The audio comes back with the payload rather than through a second route, so
+    the user hears the voice that was just validated rather than one synthesized
+    a moment later from a cache that might have changed (section 27).
+    """
+    import mc_voice_engines as engines
+    import mc_voice_sopro as sopro
+
+    _active(engines.SOPRO)
+    if len(wav or b"") > sopro.MAX_REFERENCE_BYTES:
+        raise Refused(413, "That recording is too large.")
+    try:
+        made = sopro.create(str(name or ""), wav or b"", str(language or ""))
+    except sopro.SoproError as exc:
+        raise Refused(400, str(exc)) from None
+    except Exception as exc:
+        logger.warning("Model Chain: a Sopro voice could not be created", exc_info=True)
+        raise Refused(500, str(exc) or "That voice could not be created.") from None
+    return {"ok": True, "voice": _public(made["voice"]),
+            "audio": base64.b64encode(made.get("audio") or b"").decode("ascii"),
+            **voices_payload(engine=engines.SOPRO)}
+
+
+def sopro_rebuild(voice_id: str) -> dict:
+    """Prepare a stale voice again from its retained recording. Section 55."""
+    import mc_voice_engines as engines
+    import mc_voice_sopro as sopro
+
+    _active(engines.SOPRO)
+    try:
+        made = sopro.rebuild(str(voice_id or ""))
+    except sopro.SoproError as exc:
+        raise Refused(400, str(exc)) from None
+    return {"ok": True, "voice": _public(made["voice"]),
+            "audio": base64.b64encode(made.get("audio") or b"").decode("ascii"),
+            **voices_payload(engine=engines.SOPRO)}
+
+
+# --------------------------------------------------------------------------- #
+# The Voice Lab
+# --------------------------------------------------------------------------- #
+
+
+def lab_payload(token: str = "", voice_id: str = "") -> dict:
+    """Open or read a Voice Lab session. Experimental state, never saved.
+
+    A route of its own rather than a mode of the voice routes, which is section
+    39's separation made visible at the API boundary: nothing here writes an
+    option, a character or a voice asset, and there is no parameter by which it
+    could be asked to.
+    """
+    import mc_voice_lab as lab
+
+    try:
+        found = lab.session(token).public() if token else lab.open_session(voice_id)
+        return {"ok": True, "panel": lab.panel(), "session": found}
+    except lab.LabError as exc:
+        raise Refused(409, str(exc)) from None
+
+
+def lab_update(token: str, values: dict) -> dict:
+    import mc_voice_lab as lab
+
+    try:
+        return {"ok": True, "session": lab.update(token, **dict(values or {}))}
+    except lab.LabError as exc:
+        raise Refused(409, str(exc)) from None
+
+
+def lab_reset(token: str) -> dict:
+    import mc_voice_lab as lab
+
+    try:
+        return {"ok": True, "session": lab.reset(token)}
+    except lab.LabError as exc:
+        raise Refused(409, str(exc)) from None
+
+
+def lab_audition(token: str, side: str = "b") -> dict:
+    """Play A or B. The audio rides in the payload beside the run's numbers.
+
+    Together rather than in two calls, because the whole point of the surface is
+    the comparison: a first-audio time that arrived separately from the audio it
+    describes would be a number nobody could attribute to a take.
+    """
+    import mc_voice_lab as lab
+
+    try:
+        made = lab.audition(token, side)
+    except lab.LabError as exc:
+        raise Refused(409, str(exc)) from None
+    except Exception as exc:
+        raise Refused(503, str(exc) or "That audition could not be played.") from None
+    return {"ok": True, "session": made["state"],
+            "audio": base64.b64encode(made.get("audio") or b"").decode("ascii")}
 
 
 # --------------------------------------------------------------------------- #
@@ -1109,7 +1544,7 @@ def models_payload(kind: str = "stt", select: str = "") -> dict:
             "models": found, "progress": models.progress().get(wanted) or {}}
 
 
-def profile_payload(profile=None) -> dict:
+def profile_payload(profile=None, engine: str = "") -> dict:
     """How the default voice is delivered, and a way to change it.
 
     One route for both directions, like the voices list: a body with a
@@ -1118,14 +1553,17 @@ def profile_payload(profile=None) -> dict:
     sent, so a value the host refused shows the slider snapping back instead of
     lying about it.
     """
-    import mc_voice_profile as voice_profile
+    import mc_voice_engines as engines
 
+    active = _active(engine)
+    voice_profile = engines.profiles(active)
     if profile is not None:
         if not isinstance(profile, dict):
             raise Refused(400, "That is not a delivery profile.")
         voice_profile.remember(profile)
     found = voice_profile.stored()
-    return {"ok": True, "profile": found, "controls": voice_profile.CONTROLS,
+    return {"ok": True, "engine": active, "profile": found,
+            "controls": voice_profile.CONTROLS,
             "fields": list(voice_profile.FIELDS),
             "summary": voice_profile.describe(found)}
 
@@ -1219,7 +1657,13 @@ def install(_demo=None, app=None) -> bool:
         return False
 
     def _refusal(exc):
-        return JSONResponse({"ok": False, "error": exc.reason}, status_code=exc.status)
+        found = {"ok": False, "error": exc.reason}
+        if getattr(exc, "mismatch", False):
+            # The one refusal the page reacts to structurally rather than by
+            # showing a message: its whole document belongs to an engine that
+            # is no longer selected.
+            found["engine_mismatch"] = True
+        return JSONResponse(found, status_code=exc.status)
 
     def _failed(what: str, message: str, status: int = 500):
         logger.warning("Model Chain: %s", what, exc_info=True)
@@ -1386,7 +1830,8 @@ def install(_demo=None, app=None) -> bool:
             # reply is being spoken must not put a disk write on the loop the
             # audio stream is being read from.
             return JSONResponse(await _offload(profile_payload,
-                                               payload.get("profile")))
+                                               payload.get("profile"),
+                                               str(payload.get("engine") or "")))
         except Refused as exc:
             return _refusal(exc)
         except Exception:
@@ -1399,7 +1844,8 @@ def install(_demo=None, app=None) -> bool:
             payload = await _json(request)
             wanted = payload.get("test_text")
             return JSONResponse(await _offload(voices_payload,
-                                               None if wanted is None else str(wanted)))
+                                               None if wanted is None else str(wanted),
+                                               str(payload.get("engine") or "")))
         except Refused as exc:
             return _refusal(exc)
         except Exception:
@@ -1420,13 +1866,21 @@ def install(_demo=None, app=None) -> bool:
 
         return handler
 
+    # ``engine`` is carried by every mutation so a page drawn before somebody
+    # switched is refused rather than applied to whichever engine is selected
+    # now (section 5). An absent one means "whatever is active", which is what
+    # an ordinary in-sync page sends.
     voice_default = _voice_action(
-        VOICE_DEFAULT_ROUTE, lambda payload: set_default_voice(payload.get("voice")))
+        VOICE_DEFAULT_ROUTE,
+        lambda payload: set_default_voice(payload.get("voice"),
+                                          str(payload.get("engine") or "")))
     voice_rename = _voice_action(
         VOICE_RENAME_ROUTE,
-        lambda payload: rename_voice(payload.get("voice"), payload.get("display_name")))
+        lambda payload: rename_voice(payload.get("voice"), payload.get("display_name"),
+                                     str(payload.get("engine") or "")))
     voice_delete = _voice_action(
-        VOICE_DELETE_ROUTE, lambda payload: delete_voice(payload.get("voice")))
+        VOICE_DELETE_ROUTE,
+        lambda payload: delete_voice(payload.get("voice"), str(payload.get("engine") or "")))
 
     async def voice_test(request: Request):
         try:
@@ -1434,7 +1888,8 @@ def install(_demo=None, app=None) -> bool:
             payload = await _json(request)
             audio = await _offload(test_voice, str(payload.get("voice") or ""),
                                    str(payload.get("text") or ""),
-                                   payload.get("profile"))
+                                   payload.get("profile"),
+                                   str(payload.get("engine") or ""))
         except Refused as exc:
             return _refusal(exc)
         except Exception:
@@ -1517,6 +1972,119 @@ def install(_demo=None, app=None) -> bool:
             raise Refused(400, "That request did not carry a recording.") from None
         return (str(payload.get("name") or ""), str(payload.get("language") or ""), wav)
 
+    def _json_route(route: str, call, failure: str):
+        """One POST that reads a JSON body, runs off the loop, and answers JSON.
+
+        Six of the routes below differ only in which function they call and
+        what they say when it fails, so they are built rather than written out.
+        A refusal keeps its own status -- an active-engine mismatch is a 409 a
+        page reacts to by reloading its panel, not a 500 it shows as an error.
+        """
+
+        async def handler(request: Request):
+            try:
+                _checked(request, route)
+                payload = await _json(request)
+                return JSONResponse(await _offload(call, payload))
+            except Refused as exc:
+                return _refusal(exc)
+            except Exception:
+                return _failed(f"a Voice Chat request to {route} failed", failure)
+
+        return handler
+
+    voice_engines = _json_route(
+        ENGINES_ROUTE, lambda _payload: engines_payload(),
+        "The text-to-speech engines could not be read.")
+    voice_engine_select = _json_route(
+        ENGINE_SELECT_ROUTE, lambda payload: select_engine(payload.get("engine")),
+        "The text-to-speech engine could not be changed.")
+    sopro_status_route = _json_route(
+        SOPRO_ROUTE, lambda _payload: sopro_payload(),
+        "Sopro's status could not be read.")
+    sopro_settings_route = _json_route(
+        SOPRO_SETTINGS_ROUTE,
+        lambda payload: sopro_settings(str(payload.get("precision") or ""),
+                                       payload.get("steps"), payload.get("chunk_frames")),
+        "That Sopro setting could not be changed.")
+    sopro_rebuild_route = _json_route(
+        SOPRO_REBUILD_ROUTE, lambda payload: sopro_rebuild(str(payload.get("voice") or "")),
+        "That voice could not be rebuilt.")
+    lab_route = _json_route(
+        LAB_ROUTE, lambda payload: lab_payload(str(payload.get("token") or ""),
+                                               str(payload.get("voice") or "")),
+        "The Voice Lab could not be opened.")
+    lab_update_route = _json_route(
+        LAB_UPDATE_ROUTE, lambda payload: lab_update(str(payload.get("token") or ""),
+                                                     payload.get("values") or {}),
+        "That Voice Lab control could not be changed.")
+    lab_reset_route = _json_route(
+        LAB_RESET_ROUTE, lambda payload: lab_reset(str(payload.get("token") or "")),
+        "The Voice Lab could not be reset.")
+    lab_play_route = _json_route(
+        LAB_PLAY_ROUTE, lambda payload: lab_audition(str(payload.get("token") or ""),
+                                                     str(payload.get("side") or "b")),
+        "That Voice Lab audition could not be played.")
+
+    async def sopro_install_route(request: Request):
+        """Start installing Sopro in the background, and say so immediately.
+
+        In the background because this is a hundred and forty megabytes plus a
+        virtual environment plus a self-test, and an HTTP request that takes
+        minutes is a request a phone's browser will give up on. Everything that
+        can be decided *before* the thread starts is decided here, so a refusal
+        the caller is waiting for reaches that caller instead of a log.
+        """
+        try:
+            _checked(request, SOPRO_INSTALL_ROUTE)
+            payload = await _json(request)
+            import mc_voice_sopro as sopro
+
+            folder = str(payload.get("folder") or "").strip()
+            part = str(payload.get("part") or "").strip() or "runtime"
+            already = models.progress().get("sopro") or {}
+            if already.get("running"):
+                return JSONResponse({"ok": True, "already": True})
+            refused = sopro.refusal(manual=bool(folder))
+            if refused:
+                logger.warning("Model Chain: Sopro refused to install — %s", refused)
+                raise Refused(409, refused)
+        except Refused as exc:
+            return _refusal(exc)
+        except Exception:
+            return _failed("a Sopro install could not be started",
+                           "Sopro could not be installed.")
+
+        def run():
+            try:
+                sopro_install(part, folder)
+            except Exception:
+                # Already logged with its reason and already recorded where the
+                # Settings row will draw it -- see mc_voice_models._claim.
+                logger.debug("Model Chain: the Sopro install thread ended on an error",
+                             exc_info=True)
+
+        threading.Thread(target=run, name="mc-sopro-install", daemon=True).start()
+        return JSONResponse({"ok": True, "already": False})
+
+    async def sopro_clone_route(request: Request):
+        """The Sopro clone route. Multipart, because it carries a recording.
+
+        The same shape as Kokoro's cloning route and for the same reasons: the
+        name and the language ride beside the file so a clone is one atomic
+        thing to accept or refuse, and a reference recording is never written
+        for a job whose name was going to be rejected anyway.
+        """
+        try:
+            _checked(request, SOPRO_CLONE_ROUTE)
+            name, language, wav = await _reference(request)
+            return JSONResponse(await _offload(sopro_clone, name, language, wav))
+        except Refused as exc:
+            return _refusal(exc)
+        except Exception:
+            return _failed("a Sopro voice could not be created",
+                           "That voice could not be created.")
+
     async def cloning_abort_route(request: Request):
         try:
             _checked(request, CLONING_ABORT_ROUTE)
@@ -1540,7 +2108,18 @@ def install(_demo=None, app=None) -> bool:
                               (CLONING_INSTALL_ROUTE, cloning_install_route),
                               (CLONING_STATUS_ROUTE, cloning_status),
                               (CLONING_START_ROUTE, cloning_start_route),
-                              (CLONING_ABORT_ROUTE, cloning_abort_route)):
+                              (CLONING_ABORT_ROUTE, cloning_abort_route),
+                              (ENGINES_ROUTE, voice_engines),
+                              (ENGINE_SELECT_ROUTE, voice_engine_select),
+                              (SOPRO_ROUTE, sopro_status_route),
+                              (SOPRO_INSTALL_ROUTE, sopro_install_route),
+                              (SOPRO_SETTINGS_ROUTE, sopro_settings_route),
+                              (SOPRO_CLONE_ROUTE, sopro_clone_route),
+                              (SOPRO_REBUILD_ROUTE, sopro_rebuild_route),
+                              (LAB_ROUTE, lab_route),
+                              (LAB_UPDATE_ROUTE, lab_update_route),
+                              (LAB_RESET_ROUTE, lab_reset_route),
+                              (LAB_PLAY_ROUTE, lab_play_route)):
             if path not in existing:
                 app.add_api_route(path, handler, methods=["POST"])
     except Exception:

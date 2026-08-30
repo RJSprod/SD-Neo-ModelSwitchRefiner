@@ -297,7 +297,7 @@ class TestMetrics:
         assert found["voice_type"] == "official"
         assert set(found) == {"source_chars", "base_chars", "segments", "chunks",
                               "audio_seconds", "compute_seconds", "rtf", "first_segment_ms",
-                              "first_audio_ms", "cancelled", "voice_type", "sid",
+                              "first_audio_ms", "cancelled", "voice_type", "sid", "backend",
                               "worker_warm_at_turn_start", "runtime_prepare_ms",
                               "streaming", "callback_blocks",
                               "max_segment_ms", "max_segment_index",

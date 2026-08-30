@@ -111,6 +111,49 @@ REGISTRY_FILENAME = "registry.json"
 CLONING_DIRNAME = "cloning"
 REFERENCE_DIRNAME = "reference"
 
+SOPRO_DIRNAME = "sopro"
+SOPRO_WORKER_DIRNAME = "sopro_worker"
+SOPRO_MANIFEST_FILENAME = "managed-sopro-models.json"
+SOPRO_VOICES_DIRNAME = "voices"
+SOPRO_REGISTRY_FILENAME = "registry.json"
+SOPRO_REFERENCE_FILENAME = "reference.wav"
+SOPRO_PRODUCTION_FILENAME = "production.safetensors"
+SOPRO_PRODUCTION_META = "production.json"
+SOPRO_LAB_FILENAME = "lab-conditioning.safetensors"
+"""Sopro's whole subtree, under one directory of its own.
+
+A sibling of ``runtime/`` and ``models/`` rather than a set of files mixed into
+them, and section 16's dependency separation is the reason. Kokoro's runtime is
+two unpacked wheels; Sopro's is a hundred and forty megabytes of PyTorch, and
+the two must be installable, verifiable, upgradable and *deletable* without
+either one being able to leave the other half-installed.
+
+    sopro/
+        runtime/                        installed.json + the isolated closure
+            installed.json
+        models/<bundle id>/             config.json, safetensors, tokenizer
+        voices/
+            registry.json               stable ids, names, fingerprints
+            <uuid>/
+                reference.wav           the retained normalized recording
+                production.safetensors  cond_vec + semantic_tokens + mel
+                production.json         level_db, shapes, schema, fingerprint
+                lab-conditioning.safetensors   id_emb/style_emb/style_ctrl
+        .downloads/                     staging only
+
+``reference.wav`` is the second audio directory under this root, and it is the
+same documented exception ``reference/`` is: a clone's own recording, kept so
+that a later compatible Sopro can rebuild the prepared tensors without asking
+somebody to record themselves again (section 30). It is never a dictation and
+never a spoken reply, and deleting the voice deletes it.
+
+The three files in a voice directory are three different lifetimes and that is
+why they are three files. ``production.safetensors`` is what Conversation reads.
+``lab-conditioning.safetensors`` is what the Voice Lab reads and may be
+regenerated or deleted without touching production (section 14). The WAV outlives
+both and is what either can be rebuilt from.
+"""
+
 
 def extension_root() -> Path:
     """The extension directory, which is where this file is."""
@@ -255,6 +298,105 @@ def reference_root() -> Path:
 
 def reference_file(identifier: str) -> Path:
     return _contained(reference_root(), f"{_uuid(identifier)}.wav")
+
+
+# --------------------------------------------------------------------------- #
+# Sopro
+# --------------------------------------------------------------------------- #
+
+
+def sopro_root() -> Path:
+    """Everything Sopro owns, under one directory. Nothing else writes here."""
+    return data_root() / SOPRO_DIRNAME
+
+
+def sopro_runtime_root() -> Path:
+    """The isolated Torch/Sopro closure. Never imported by Forge or by Kokoro."""
+    return sopro_root() / RUNTIME_DIRNAME
+
+
+def sopro_runtime_manifest() -> Path:
+    return sopro_runtime_root() / INSTALLED_FILENAME
+
+
+def sopro_models_root() -> Path:
+    return sopro_root() / MODELS_DIRNAME
+
+
+def sopro_model_root(identifier: str) -> Path:
+    """One installed Sopro model bundle. ``identifier`` is checked, not trusted."""
+    return _contained(sopro_models_root(), identifier)
+
+
+def sopro_staging_root() -> Path:
+    return sopro_root() / STAGING_DIRNAME
+
+
+def sopro_staging_for(identifier: str, nonce: str) -> Path:
+    return _contained(sopro_staging_root(), f"{identifier}-{nonce}")
+
+
+def sopro_worker_script() -> Path:
+    """The Sopro sidecar entry point, inside the extension rather than the data root.
+
+    Its own file rather than a mode of the Kokoro worker, because the two are
+    launched by *different interpreters* out of different closures. A single
+    script would be one file that has to be importable under both, which is one
+    import away from a Torch runtime that reaches for sherpa or the reverse.
+    """
+    return extension_root() / SOPRO_WORKER_DIRNAME / "worker.py"
+
+
+def sopro_manifest_path() -> Path:
+    """The checked-in trust root for every Sopro artifact this build may fetch."""
+    return extension_root() / MANIFEST_DIRNAME / SOPRO_MANIFEST_FILENAME
+
+
+def sopro_voices_root() -> Path:
+    return sopro_root() / SOPRO_VOICES_DIRNAME
+
+
+def sopro_registry_path() -> Path:
+    return sopro_voices_root() / SOPRO_REGISTRY_FILENAME
+
+
+def sopro_voice_root(identifier: str) -> Path:
+    """One saved Sopro voice's directory, addressed by server-generated UUID.
+
+    Never by display name, never by anything a browser sent, and checked here
+    anyway -- the registry is a file on disk and a corrupted one must not be
+    able to address a path outside this root (section 57).
+    """
+    return _contained(sopro_voices_root(), _uuid(identifier))
+
+
+def sopro_voice_file(identifier: str, name: str) -> Path:
+    """One file inside one voice directory, by a name this module owns.
+
+    ``name`` is compared against the four constants rather than joined, so a
+    registry entry that named ``../../config.json`` reaches a refusal instead
+    of a path.
+    """
+    known = (SOPRO_REFERENCE_FILENAME, SOPRO_PRODUCTION_FILENAME,
+             SOPRO_PRODUCTION_META, SOPRO_LAB_FILENAME)
+    if str(name) not in known:
+        raise ValueError(f"unknown Sopro voice file: {name!r}")
+    return sopro_voice_root(identifier) / str(name)
+
+
+def sopro_inside(candidate) -> bool:
+    """Whether ``candidate`` is under the Sopro subtree.
+
+    Read before every delete. Section 57: voice deletion verifies that every
+    path to be removed resolves under the Sopro voice root before removing it,
+    and a function that answers that is better than the comparison written out
+    at each call site.
+    """
+    try:
+        Path(candidate).resolve().relative_to(sopro_root())
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _uuid(identifier: str) -> str:

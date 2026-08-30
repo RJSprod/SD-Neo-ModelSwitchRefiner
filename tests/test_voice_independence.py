@@ -34,6 +34,12 @@ FORBIDDEN = ("mc_memory", "mc_broker", "mc_plan", "mc_llm_runtime")
 model runtime. Voice may not import any of them at any depth."""
 
 WORKER = ROOT / "voice_worker" / "worker.py"
+SOPRO_WORKER = ROOT / "sopro_worker" / "worker.py"
+
+WORKERS = (WORKER, SOPRO_WORKER)
+"""Both sidecars. Each is run by path under a *different* interpreter out of a
+*different* dependency closure, and neither may import the other's engine, the
+other's file, or anything from this extension."""
 
 
 def imported_names(path: Path) -> set[str]:
@@ -86,22 +92,44 @@ class TestTheImportGraph:
             f"{path.name} imports {sorted(offending)}. Voice Chat runs beside Forge and does "
             f"not participate in its memory decisions — see invariant I-3.")
 
-    def test_the_worker_imports_only_the_standard_library_at_module_level(self):
-        """The parent imports this file to read the frame format. It must be
-        importable under Forge's interpreter, where the speech engine is not
-        installed and never will be."""
-        found = module_level_imports(WORKER)
-        assert "sherpa_onnx" not in found
+    @pytest.mark.parametrize("path", WORKERS, ids=lambda p: p.parent.name)
+    def test_a_worker_imports_only_the_standard_library_at_module_level(self, path):
+        """The parent imports each of these to read the frame format. Both have
+        to be importable under Forge's interpreter, where neither speech engine
+        is installed and never will be."""
+        found = module_level_imports(path)
+        for engine in ("sherpa_onnx", "torch", "torchaudio", "sopro", "numpy",
+                       "safetensors"):
+            assert engine not in found, (
+                f"{path.parent.name}/worker.py imports {engine} at module level; the "
+                f"parent process has no speech runtime and would fail to start.")
         for name in found:
             assert name in sys.stdlib_module_names, (
-                f"voice_worker/worker.py imports {name} at module level; it has to be "
-                f"importable by the parent process, which has no voice runtime.")
+                f"{path.parent.name}/worker.py imports {name} at module level; it has to "
+                f"be importable by the parent process, which has no voice runtime.")
 
-    def test_the_worker_does_not_import_the_extension(self):
-        for name in imported_names(WORKER):
+    @pytest.mark.parametrize("path", WORKERS, ids=lambda p: p.parent.name)
+    def test_a_worker_does_not_import_the_extension(self, path):
+        for name in imported_names(path):
             assert not name.startswith("mc_"), (
-                f"the voice worker imports {name}; it runs under a different interpreter "
-                f"which cannot see this extension's modules.")
+                f"{path.parent.name}/worker.py imports {name}; it runs under a different "
+                f"interpreter which cannot see this extension's modules.")
+
+    def test_neither_worker_can_reach_the_others_closure(self):
+        """I-6, where it would actually be broken.
+
+        The two sidecars are separate files precisely so that one file cannot be
+        importable under both closures -- because one file that had to be is one
+        import away from a Torch runtime reaching for sherpa, or the reverse,
+        and neither closure would ever be verifiable again. They share the wire
+        format by agreement, and ``tests/test_voice_sopro_worker.py`` holds that
+        agreement to byte equality.
+        """
+        kokoro = imported_names(WORKER)
+        sopro = imported_names(SOPRO_WORKER)
+        assert "sopro_worker" not in kokoro and "sopro" not in kokoro
+        assert "voice_worker" not in sopro and "sherpa_onnx" not in sopro
+        assert "torch" not in kokoro and "torchaudio" not in kokoro
 
     def test_only_the_model_manager_reaches_the_network(self):
         """One door out, and it is the one with the hashes behind it.
@@ -170,6 +198,49 @@ class TestTheWorkerAsksForTheCpu:
         environ = mc_voice_models.worker_environment()
         assert environ["CUDA_VISIBLE_DEVICES"] == ""
         assert environ["HIP_VISIBLE_DEVICES"] == ""
+
+    def test_sopros_environment_hides_every_gpu_too(self):
+        """I-9. Sopro's first release is CPU-only and must not claim or consume
+        Forge's VRAM, and a Torch build that would happily have found a device
+        finds none to enumerate."""
+        import mc_voice_sopro
+
+        environ = mc_voice_sopro.worker_environment()
+        assert environ["CUDA_VISIBLE_DEVICES"] == ""
+        assert environ["HIP_VISIBLE_DEVICES"] == ""
+        assert environ["ROCR_VISIBLE_DEVICES"] == ""
+
+    @pytest.mark.sopro(handshake={"device": "cuda"})
+    def test_a_sopro_worker_reporting_a_gpu_is_refused(self, fake_sopro_worker):
+        """Fail closed, the same way Kokoro's does. A runtime that came back
+        saying "cuda" is a runtime that would quietly take VRAM from the image
+        being generated."""
+        import mc_voice_sopro_runtime
+
+        with pytest.raises(mc_voice_sopro_runtime.SoproRuntimeError, match="CPU only"):
+            mc_voice_sopro_runtime.ensure_started()
+        assert not mc_voice_sopro_runtime.status()["running"], (
+            "the refused Sopro worker is still running")
+
+    @pytest.mark.sopro(handshake={"parent_death": "pipe"})
+    def test_a_sopro_worker_without_containment_is_refused(self, fake_sopro_worker):
+        """A speech process that outlives the WebUI is not something this
+        feature will leave running, so a platform in the support contract that
+        cannot confirm its containment fails the start."""
+        import mc_voice_sopro_runtime
+
+        with pytest.raises(mc_voice_sopro_runtime.SoproRuntimeError, match="lifetime"):
+            mc_voice_sopro_runtime.ensure_started()
+        assert not mc_voice_sopro_runtime.status()["running"]
+
+    @pytest.mark.sopro(handshake={"backend": "kokoro"})
+    def test_a_worker_claiming_the_other_backend_is_refused(self, fake_sopro_worker):
+        """Section 18: the parent refuses a handshake for a backend other than
+        the globally selected engine."""
+        import mc_voice_sopro_runtime
+
+        with pytest.raises(mc_voice_sopro_runtime.SoproRuntimeError, match="backend"):
+            mc_voice_sopro_runtime.ensure_started()
 
     @pytest.mark.voice(handshake={"provider": "cuda"})
     def test_a_worker_reporting_a_gpu_provider_is_refused(self, fake_worker):

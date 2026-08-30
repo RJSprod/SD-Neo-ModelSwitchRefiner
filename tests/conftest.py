@@ -1233,6 +1233,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "voice(**plan): how the fake Voice Worker should behave for this test.")
+    config.addinivalue_line(
+        "markers",
+        "sopro(**plan): how the fake Sopro worker should behave for this test.")
 
 
 @pytest.fixture
@@ -1304,6 +1307,250 @@ def fake_worker(tmp_path, monkeypatch, voice_root, request):
     mc_voice_runtime.stop("test finished")
     mc_voice_runtime._failures.clear()
     os.environ.pop("MC_FAKE_VOICE", None)
+
+
+FAKE_SOPRO_WORKER = r'''#!/usr/bin/env python3
+# A Sopro worker that speaks the real protocol and holds no tensors.
+#
+# Faithful in the places the parent actually depends on -- the framing, the
+# handshake fields, the containment it arranges for itself, the turn operations,
+# cancellation and the prepare transaction -- and a stub everywhere else. The
+# point of these tests is the lifecycle, the containment and the engine
+# boundary, none of which needs a hundred and forty megabytes of PyTorch.
+import json
+import os
+import struct
+import sys
+import time
+
+PLAN = json.loads(os.environ.get("MC_FAKE_SOPRO", "{}"))
+LENGTH = struct.Struct(">I")
+
+
+def read_frame(stream):
+    head = stream.read(4)
+    if len(head) < 4:
+        return None
+    (size,) = LENGTH.unpack(head)
+    header = json.loads(stream.read(size).decode("utf-8"))
+    (size,) = LENGTH.unpack(stream.read(4))
+    return header, (stream.read(size) if size else b"")
+
+
+def write_frame(stream, header, payload=b""):
+    raw = json.dumps(header).encode("utf-8")
+    stream.write(LENGTH.pack(len(raw)))
+    stream.write(raw)
+    stream.write(LENGTH.pack(len(payload)))
+    if payload:
+        stream.write(payload)
+    stream.flush()
+
+
+def containment(parent_pid):
+    """The same arrangement the real Sopro worker makes, in the same place.
+
+    Not a stub, and the reason is a real near-miss: with this left out, every
+    test in ``test_voice_sopro_shutdown.py`` passed while proving nothing, and
+    the only way that showed up was sabotaging the *real* worker and watching
+    the suite stay green. A fake that does not arrange containment is a fake
+    that cannot fail a containment test.
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            import ctypes
+            import signal
+
+            libc = ctypes.CDLL("libc.so.6", use_errno=True)
+            if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+                return "pipe"
+        except Exception:
+            return "pipe"
+        if parent_pid and os.getppid() != parent_pid:
+            raise SystemExit(0)
+        return "pdeathsig"
+    if os.name == "nt":
+        return "job"
+    return "pipe"
+
+
+def wav(seconds=0.2, rate=24000):
+    count = int(seconds * rate)
+    body = b"\\x00\\x00" * count
+    return (b"RIFF" + struct.pack("<I", 36 + len(body)) + b"WAVEfmt "
+            + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+            + b"data" + struct.pack("<I", len(body)) + body)
+
+
+def main():
+    marker = PLAN.get("alive_marker")
+    if marker:
+        with open(marker, "a", encoding="utf-8") as handle:
+            handle.write("%d\\n" % os.getpid())
+    stdin, stdout = sys.stdin.buffer, sys.stdout.buffer
+    while True:
+        frame = read_frame(stdin)
+        if frame is None:
+            return 0
+        header, payload = frame
+        operation = header.get("op")
+        if operation == "shutdown":
+            write_frame(stdout, {"id": header.get("id"), "ok": True})
+            return 0
+        if operation == "init":
+            found = containment(int(header.get("parent_pid") or 0))
+            reply = {
+                "id": header.get("id"), "ok": True, "op": "ready",
+                "protocol_version": PLAN.get("protocol_version", 1),
+                "backend": PLAN.get("backend", "sopro"),
+                "parent_death": PLAN.get("parent_death", found),
+                "device": PLAN.get("device", "cpu"),
+                "model_id": "sopro-v2-turbo-cpu",
+                "fingerprint": (header.get("config") or {}).get("fingerprint", ""),
+                "sopro_version": "2.0.5", "torch_version": "2.11.0",
+                "precision": (header.get("config") or {}).get("precision", "full"),
+                "sample_rate": 24000, "hop_ratio": 4, "style_ctrl_dim": 8,
+                "voices": len((header.get("config") or {}).get("voices") or {}),
+                "streaming": "chunk", "intraop_threads": 4, "interop_threads": 1,
+                "defaults": {"temperature": 0.8, "top_p": 0.9, "top_k": 25,
+                             "steps": 2, "chunk_frames": 64},
+                "load_seconds": 0.0,
+            }
+            reply.update(PLAN.get("handshake") or {})
+            write_frame(stdout, reply)
+            continue
+        if operation == "catalog":
+            write_frame(stdout, {"id": header.get("id"), "ok": True,
+                                 "voices": len(header.get("voices") or {})})
+            continue
+        if operation == "warm":
+            write_frame(stdout, {"id": header.get("id"), "ok": True, "cache_state": "warm"})
+            continue
+        if operation == "prepare":
+            root = header.get("root") or ""
+            os.makedirs(root, exist_ok=True)
+            for name in ("production.safetensors", "lab-conditioning.safetensors"):
+                with open(os.path.join(root, name), "wb") as handle:
+                    handle.write(b"\\x08\\x00\\x00\\x00\\x00\\x00\\x00\\x00{}      ")
+            meta = {"schema": 1, "fingerprint": PLAN.get("fingerprint", ""),
+                    "sample_rate": 24000, "level_db": -19.8, "hop_ratio": 4,
+                    "style_ctrl_dim": 8,
+                    "production": {"mel": {"shape": [1, 100, 64], "dtype": "float32"}},
+                    "lab": {}}
+            with open(os.path.join(root, "production.json"), "w", encoding="utf-8") as handle:
+                json.dump(meta, handle)
+            write_frame(stdout, {"id": header.get("id"), "ok": True, "metadata": meta,
+                                 "sample_rate": 24000, "audition_ms": 12}, wav())
+            continue
+        if operation == "tts":
+            if PLAN.get("busy"):
+                # Standing in for a solver call: this process stops reading its
+                # input entirely, which is the state in which pipe EOF is not
+                # something it will notice. The only thing left that can end it
+                # is the operating system.
+                #
+                # The marker is how the test knows it has got here. Killing the
+                # parent a moment too early would find this process still
+                # blocked on ``read_frame``, where EOF ends it and the OS
+                # mechanism is never exercised -- a containment test that passes
+                # without testing containment.
+                busy_at = PLAN.get("busy_marker")
+                if busy_at:
+                    with open(busy_at, "w", encoding="utf-8") as handle:
+                        handle.write("%d\n" % os.getpid())
+                while True:
+                    time.sleep(0.05)
+            write_frame(stdout, {"id": header.get("id"), "ok": True, "sample_rate": 24000},
+                        wav())
+            continue
+        if operation == "lab":
+            write_frame(stdout, {"id": header.get("id"), "ok": True, "sample_rate": 24000,
+                                 "first_audio_ms": 30, "elapsed_ms": 60, "audio_ms": 200,
+                                 "rtf": 0.3, "chunks": 3}, wav())
+            continue
+        if operation == "lab_style":
+            write_frame(stdout, {"id": header.get("id"), "ok": True,
+                                 "style_ctrl": [0.1, -0.2, 0.0, 0.3, 0.0, 0.0, 0.0, 0.0]})
+            continue
+        if operation == "tts_begin":
+            turn = header.get("turn")
+            write_frame(stdout, {"op": "tts_ready", "turn": turn, "sample_rate": 24000,
+                                 "cache_state": "warm", "streaming": "chunk"})
+            continue
+        if operation == "tts_text":
+            turn = header.get("turn")
+            write_frame(stdout, {"op": "tts_audio", "turn": turn, "seq": 1,
+                                 "sample_rate": 24000}, b"\\x00\\x00" * 2400)
+            write_frame(stdout, {"op": "tts_segment_done", "turn": turn, "seq": 1,
+                                 "chars": len(payload), "first_audio_ms": 20,
+                                 "segment_ms": 40, "samples": 2400, "chunks": 1,
+                                 "sample_rate": 24000, "speed_dsp": "neutral",
+                                 "pitch_dsp": "neutral"})
+            continue
+        if operation == "tts_finish":
+            write_frame(stdout, {"op": "tts_done", "turn": header.get("turn"), "seq": 1,
+                                 "samples": 2400})
+            continue
+        if operation == "tts_cancel":
+            write_frame(stdout, {"op": "tts_cancelled", "turn": header.get("turn"), "seq": 0})
+            continue
+        write_frame(stdout, {"id": header.get("id"), "ok": False, "error": "unknown"})
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+@pytest.fixture
+def sopro_installed(voice_root, monkeypatch):
+    """Sopro reported as installed, without a byte of Torch on disk.
+
+    Everything :mod:`mc_voice_sopro_runtime` checks before starting a worker --
+    readiness, the interpreter, the platform, the fingerprint -- is answered
+    here, so the tests are about the boundary rather than about having a
+    hundred and forty megabytes of wheels.
+    """
+    import mc_voice_sopro
+
+    found = mc_voice_sopro.Status(
+        platform_supported=True, runtime_ready=True, model_ready=True,
+        runtime_message="Installed", model_message="Installed",
+        fingerprint="fingerprint01234")
+    monkeypatch.setattr(mc_voice_sopro, "status", lambda: found)
+    monkeypatch.setattr(mc_voice_sopro, "runtime_python", lambda: Path(sys.executable))
+    return found
+
+
+@pytest.fixture
+def fake_sopro_worker(tmp_path, monkeypatch, voice_root, sopro_installed, request):
+    """A started-on-demand Sopro worker that is a Python script, not a model."""
+    import mc_voice_engines
+    import mc_voice_paths
+    import mc_voice_sopro
+    import mc_voice_sopro_runtime
+
+    marker = request.node.get_closest_marker("sopro")
+    plan = dict(marker.kwargs) if marker else {}
+    plan.setdefault("alive_marker", str(tmp_path / "sopro-alive.txt"))
+    plan.setdefault("fingerprint", sopro_installed.fingerprint)
+
+    script = tmp_path / "fake_sopro_worker.py"
+    script.write_text(FAKE_SOPRO_WORKER, encoding="utf-8")
+    monkeypatch.setattr(mc_voice_paths, "sopro_worker_script", lambda: script)
+    monkeypatch.setattr(mc_voice_sopro, "worker_environment",
+                        lambda: {"MC_FAKE_SOPRO": json.dumps(plan)})
+    monkeypatch.setattr(mc_voice_sopro, "worker_config",
+                        lambda: {"model_root": str(voice_root / "sopro" / "models"),
+                                 "model_id": "sopro-v2-turbo-cpu", "precision": "full",
+                                 "steps": 2, "chunk_frames": 64,
+                                 "fingerprint": sopro_installed.fingerprint, "voices": {}})
+    mc_voice_engines.select("sopro")
+
+    yield plan
+
+    mc_voice_sopro_runtime.stop("test finished")
+    mc_voice_sopro_runtime._failures.clear()
 
 
 @pytest.fixture
@@ -1429,9 +1676,20 @@ def _forget_voice_options():
     options reset would be a second ``host`` fixture applied to tests that never
     asked for one.
     """
+    import mc_voice_engines
     import mc_voice_registry
+    import mc_voice_sopro
+    import mc_voice_sopro_profile
 
-    keys = (mc_voice_registry.OPT_VOICE, mc_voice_registry.OPT_TEST_TEXT)
+    # The engine selector is here for the reason the other two are, only more
+    # so: it is global, it decides which surfaces every later test draws, and a
+    # test that selected Sopro and did not put it back would make every Kokoro
+    # test after it fail for a reason that has nothing to do with Kokoro.
+    keys = (mc_voice_registry.OPT_VOICE, mc_voice_registry.OPT_TEST_TEXT,
+            mc_voice_engines.OPT_ENGINE, mc_voice_sopro.OPT_VOICE,
+            mc_voice_sopro.OPT_PRECISION, mc_voice_sopro.OPT_STEPS,
+            mc_voice_sopro.OPT_CHUNK, mc_voice_sopro_profile.OPT_LANGUAGE) \
+        + tuple(mc_voice_sopro_profile.OPTIONS.values())
     try:
         import modules.shared as shared
     except Exception:  # pragma: no cover - a suite without the fake host

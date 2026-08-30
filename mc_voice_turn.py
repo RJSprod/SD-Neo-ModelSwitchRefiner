@@ -125,11 +125,29 @@ class VoiceTurn:
     """One reply's speech, from the first chunk to the last sample."""
 
     def __init__(self, voice_id: str = "", sid: int = 0, labels=(), page: str = "",
-                 speaker=None, max_source_chars: int = MAX_SOURCE_CHARS, profile=None):
+                 speaker=None, max_source_chars: int = MAX_SOURCE_CHARS, profile=None,
+                 engine: str = "", handle=None):
         self.id = secrets.token_urlsafe(18)
         self.page = str(page or "")
         self.voice_id = str(voice_id or "")
+        self.engine = str(engine or "kokoro")
+        """Which text-to-speech engine this turn was frozen onto.
+
+        Frozen, like the voice and the profile, and for the same reason: an
+        engine switched while a reply is already speaking affects the *next*
+        turn (section 47). A turn that re-read the selector halfway through
+        would be a reply that changes voice in the middle of a sentence.
+        """
         self.sid = int(sid or 0)
+        self.voice_handle = self.sid if handle is None else handle
+        """What the active engine's adapter needs in order to speak this voice.
+
+        Opaque here, on purpose. For Kokoro it is a numeric sherpa speaker; for
+        Sopro it is the backend-qualified stable id. This module never looks
+        inside it, which is what makes "no shared caller depends on a Kokoro
+        SID" a property of the code rather than a rule somebody follows
+        (I-10, section 18).
+        """
         self.profile = dict(profile) if profile else None
         """The delivery this reply is spoken with, resolved when the turn was
         created. Held rather than read at ``begin_turn`` for the reason the
@@ -499,12 +517,17 @@ class VoiceTurn:
             return
         self._speaker = speaker or self._speaker
         if self._speaker is None:
-            # The runtime by default, imported here rather than at module scope:
-            # this module is imported by the runtime's unload path, and a
-            # circular import at start-up would cost Conversation its panel.
-            import mc_voice_runtime
+            # The *active engine's* runtime by default, imported here rather
+            # than at module scope: this module is imported by both runtimes'
+            # unload paths, and a circular import at start-up would cost
+            # Conversation its panel. Resolved through the facade rather than
+            # named, so a turn created while Sopro is selected speaks through
+            # Sopro and one created while Kokoro is selected speaks through
+            # Kokoro -- and there is no third branch in which it speaks through
+            # the other one (I-2).
+            import mc_voice_engines
 
-            self._speaker = mc_voice_runtime
+            self._speaker = mc_voice_engines.runtime(self.engine)
         self._pump = threading.Thread(target=self._run, name="mc-voice-turn", daemon=True)
         self._pump.start()
 
@@ -520,7 +543,8 @@ class VoiceTurn:
             if first is None:
                 self.cancel(self.reason or "empty")
                 return
-            self.sample_rate = int(speaker.begin_turn(self, self.sid, self.profile) or 0)
+            self.sample_rate = int(
+                speaker.begin_turn(self, self.voice_handle, self.profile) or 0)
             began = True
             self.synthesis_started = True
             self._compute_started = time.monotonic()
@@ -656,8 +680,14 @@ class VoiceTurn:
             "max_segment_ms": self._max_unit["ms"] or None,
             "max_segment_index": self._max_unit["index"] or None,
             "cancelled": self.reason,
-            "voice_type": "clone" if self.voice_id.startswith("clone:") else "official",
-            "sid": self.sid,
+            "backend": self.engine,
+            "voice_type": "clone" if ":clone:" in self.voice_id
+                          or self.voice_id.startswith("clone:") else "official",
+            # Kokoro's own address, reported because a shared log comparing two
+            # engines has to be able to say which speaker in the bank produced a
+            # Kokoro run. Absent for an engine that has no such thing, rather
+            # than reported as zero -- which would read as speaker 0.
+            "sid": self.sid if self.engine == "kokoro" else None,
             **self._unit_metrics(),
         }
 
@@ -763,7 +793,7 @@ accumulate one dictionary entry per reply.
 
 
 def create(voice_id: str = "", sid: int = 0, labels=(), page: str = "",
-           speaker=None, profile=None) -> VoiceTurn:
+           speaker=None, profile=None, engine: str = "", handle=None) -> VoiceTurn:
     """Make a turn the active one, cancelling whatever was active before.
 
     Cancelling the previous turn here rather than leaving it is section 24's
@@ -774,7 +804,7 @@ def create(voice_id: str = "", sid: int = 0, labels=(), page: str = "",
     global _active_id
 
     turn = VoiceTurn(voice_id=voice_id, sid=sid, labels=labels, page=page, speaker=speaker,
-                     profile=profile)
+                     profile=profile, engine=engine, handle=handle)
     previous = None
     with _lock:
         _expire()

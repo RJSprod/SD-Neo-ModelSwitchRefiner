@@ -9,3 +9,15 @@ venv/
 # and editing the tracked manifest in place would turn every later pull into a
 # merge conflict in a file full of hashes.
 voice/managed-voice-models.local.json
+
+# The LLM and Voice data directories, which land here rather than in a WebUI
+# data folder when the suite runs without a host. Test artifacts, never source:
+# nothing in either is written by anything but a run, and a committed one would
+# be somebody else's avatars and logs.
+model_chain_llm/
+model_chain_voice/
+
+# Sopro artifact pins filled in by tools/pin_sopro_models.py, for the same
+# reason the Kokoro ones are untracked: they are a property of a machine that
+# could reach the publishers.
+voice/managed-sopro-models.local.json

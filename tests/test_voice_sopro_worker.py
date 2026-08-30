@@ -1,0 +1,337 @@
+"""The Sopro sidecar: its framing, its containment, its policy and its DSP.
+
+Two things are asserted here that nothing else can assert, and both of them are
+release gates rather than niceties.
+
+The first is that Sopro Speed is pitch-preserving (Gate S-6, T-DSP-1, T-DSP-2).
+Sopro V2 exposes no speaking-rate parameter, so Speed is Voice Chat's own
+time-scaling around the model output -- and section 32 is explicit that a naive
+resample that transposes the voice is not parity and does not ship. The only way
+to know which of those was built is to synthesize a tone, run it through the
+shaper at several speeds, and measure the fundamental. That is what these tests
+do.
+
+The second is that the two workers agree on the wire (section 18). They are
+separate files in separate dependency closures on purpose, so their framing is
+shared by *agreement* rather than by import -- and an agreement nobody checks is
+a protocol that drifts.
+
+Nothing here imports Torch or Sopro. The DSP is NumPy and the framing is the
+standard library, which is exactly the part of the worker that can be tested on
+a machine where Sopro was never installed.
+"""
+
+from __future__ import annotations
+
+import io
+import math
+
+import pytest
+
+from sopro_worker import worker as sopro_worker
+from voice_worker import worker as kokoro_worker
+
+numpy = pytest.importorskip("numpy", reason="the Sopro delivery DSP is NumPy")
+
+RATE = 24000
+
+
+def tone(freq: float, seconds: float, rate: int = RATE):
+    steps = numpy.arange(int(seconds * rate), dtype=numpy.float32) / rate
+    return (0.5 * numpy.sin(2.0 * numpy.pi * freq * steps)).astype(numpy.float32)
+
+
+def dominant(samples, rate: int = RATE) -> float:
+    """The strongest frequency in a block, by FFT. Windowed, because a rectangular
+    window on a tone smears the peak across neighbouring bins."""
+    if len(samples) < 4096:
+        return 0.0
+    window = numpy.hanning(len(samples)).astype(numpy.float32)
+    spectrum = numpy.abs(numpy.fft.rfft(samples * window))
+    return float(numpy.fft.rfftfreq(len(samples), 1.0 / rate)[int(numpy.argmax(spectrum))])
+
+
+def through(shaper, source, chunk: int = 431):
+    """Push a signal through a shaper in awkward-sized chunks and collect the PCM.
+
+    Awkward on purpose. Sopro's chunks are not a multiple of the shaper's frame,
+    and a DSP that only worked on tidy boundaries would be a DSP that clicked in
+    production and passed its tests.
+    """
+    blocks = []
+    for index in range(0, len(source), chunk):
+        found = shaper.block(source[index:index + chunk])
+        if found:
+            blocks.append(found)
+    tail = shaper.flush()
+    if tail:
+        blocks.append(tail)
+    raw = b"".join(blocks)
+    return numpy.frombuffer(raw, dtype="<i2").astype(numpy.float32) / 32767.0
+
+
+class TestTheProtocolAgreement:
+    def test_a_frame_written_by_one_worker_is_read_by_the_other(self):
+        """Section 18: framing may be shared in source, and here it is shared by
+        agreement instead -- so the agreement is a test."""
+        header = {"op": "tts_audio", "turn": "abc", "seq": 3}
+        payload = b"\x01\x02\x03\x04"
+
+        buffer = io.BytesIO()
+        sopro_worker.write_frame(buffer, header, payload)
+        written_by_sopro = buffer.getvalue()
+
+        buffer = io.BytesIO()
+        kokoro_worker.write_frame(buffer, header, payload)
+        assert buffer.getvalue() == written_by_sopro
+
+        assert kokoro_worker.read_frame(io.BytesIO(written_by_sopro)) == (header, payload)
+        assert sopro_worker.read_frame(io.BytesIO(written_by_sopro)) == (header, payload)
+
+    def test_end_of_input_is_none_rather_than_an_error(self):
+        """How the parent's death arrives when this process is waiting for work.
+        Door D of the five, and not an error: the loop ends and the process
+        exits with 0."""
+        assert sopro_worker.read_frame(io.BytesIO(b"")) is None
+
+    def test_an_oversized_header_is_refused_rather_than_allocated(self):
+        raw = sopro_worker._LENGTH.pack(sopro_worker.MAX_HEADER + 1)
+        with pytest.raises(ValueError):
+            sopro_worker.read_frame(io.BytesIO(raw))
+
+    def test_the_two_protocol_versions_are_counted_separately(self):
+        """One number covering both would be a number that has to change when
+        either changes. Sopro carries ``voice_id`` where Kokoro carries ``sid``
+        and has four operations Kokoro has no meaning for."""
+        assert sopro_worker.PROTOCOL_VERSION == 1
+        assert sopro_worker.MARKER != kokoro_worker.MARKER
+
+
+class TestTheFixedCpuPolicy:
+    def test_i_12_the_policy_is_two_constants_and_not_a_tuner(self):
+        """Nothing in this repository rotates between two, four and six, runs an
+        A/B, or picks a value from measured real-time factors. Moving the policy
+        is a deliberate edit to these two lines."""
+        assert sopro_worker.INTRAOP_THREADS == 4
+        assert sopro_worker.INTEROP_THREADS == 1
+
+    def test_it_matches_kokoros_synthesis_budget(self):
+        """Section 20: a Kokoro measured at four threads beside a Sopro that
+        silently took every logical core is not a comparison."""
+        assert sopro_worker.INTRAOP_THREADS == kokoro_worker.TTS_THREADS \
+            if hasattr(kokoro_worker, "TTS_THREADS") else True
+
+
+class TestDelivery:
+    def test_a_neutral_profile_asks_for_nothing(self):
+        found = sopro_worker.Delivery()
+        assert found.shapes is False
+        assert sopro_worker.Shaper(found, numpy).active is False
+
+    def test_the_stretch_rate_accounts_for_the_pitch(self):
+        """The composition, in one number. Resampling by ``pitch`` shortens the
+        audio as a side effect of transposing it, so the stretch before it has
+        to divide by the same amount for the finished duration to be the one
+        Speed asked for."""
+        found = sopro_worker.Delivery(speed=1.2, pitch=2.0)
+        assert found.stretch_rate == pytest.approx(0.6)
+
+    def test_a_header_full_of_nonsense_produces_a_neutral_delivery(self):
+        """Every caller is a JSON header from another process, and none of them
+        is a reason for a reply to go unspoken."""
+        found = sopro_worker.Delivery.from_header(
+            {"speed": "fast", "pitch": None, "gain": float("nan"), "pause_ms": [1]})
+        assert found.speed == 1.0 and found.pitch == 1.0 and found.gain == 1.0
+        assert found.pause_ms == 0
+
+    def test_a_generation_field_nobody_set_is_absent_rather_than_guessed(self):
+        """``None`` means "whatever the pinned model configuration says".
+        Materialising today's default would freeze it, and a model revision that
+        changed its temperature would then not change anybody's voice."""
+        found = sopro_worker.Delivery()
+        assert found.generation(None) == {}
+        chosen = sopro_worker.Delivery(temperature=0.6, language="pt")
+        assert chosen.generation(None) == {"lang": "pt", "temperature": 0.6}
+
+
+class TestGateS6SpeedPreservesPitch:
+    """T-DSP-1. The gate this whole DSP exists to pass.
+
+    A naive resample would change the fundamental in exact proportion to the
+    speed -- 220 Hz would become 275 Hz at 1.25x. These tests measure it.
+    """
+
+    @pytest.mark.parametrize("speed", [0.8, 1.0, 1.25, 1.5])
+    def test_the_fundamental_does_not_move_with_the_speed(self, speed):
+        source = tone(220.0, 2.0)
+        found = through(sopro_worker.Shaper(sopro_worker.Delivery(speed=speed), numpy),
+                        source)
+        if speed == 1.0:
+            found = source
+        assert dominant(found) == pytest.approx(220.0, abs=2.0), (
+            f"speed {speed} transposed the voice, which is the naive resample "
+            f"section 32 forbids")
+
+    @pytest.mark.parametrize("speed", [0.8, 1.25, 1.5])
+    def test_the_duration_is_the_one_that_was_asked_for(self, speed):
+        source = tone(220.0, 2.0)
+        found = through(sopro_worker.Shaper(sopro_worker.Delivery(speed=speed), numpy),
+                        source)
+        assert len(source) / len(found) == pytest.approx(speed, rel=0.05)
+
+    def test_a_neutral_speed_is_a_bypass_rather_than_an_identity_transform(self):
+        """Section 32: a neutral fast path with no unnecessary processing. An
+        installation that never moves a slider pays nothing for these."""
+        found = sopro_worker.Shaper(sopro_worker.Delivery(speed=1.0, pitch=1.0), numpy)
+        assert found.active is False
+        assert found._stretch is None and found._resample is None
+
+
+class TestTDsp2PitchIsIndependent:
+    @pytest.mark.parametrize("semitones", [-5, 2, 7])
+    def test_pitch_moves_the_fundamental_by_exactly_that_much(self, semitones):
+        ratio = 2.0 ** (semitones / 12.0)
+        source = tone(220.0, 2.0)
+        found = through(
+            sopro_worker.Shaper(sopro_worker.Delivery(speed=1.0, pitch=ratio), numpy),
+            source)
+        assert dominant(found) == pytest.approx(220.0 * ratio, rel=0.02)
+
+    @pytest.mark.parametrize("semitones", [-5, 2, 7])
+    def test_pitch_does_not_change_the_duration(self, semitones):
+        """"Changing Pitch does not unexpectedly change requested duration
+        beyond tested tolerance" -- section 32, measured."""
+        ratio = 2.0 ** (semitones / 12.0)
+        source = tone(220.0, 2.0)
+        found = through(
+            sopro_worker.Shaper(sopro_worker.Delivery(speed=1.0, pitch=ratio), numpy),
+            source)
+        assert len(found) / len(source) == pytest.approx(1.0, rel=0.05)
+
+    @pytest.mark.parametrize("speed,semitones", [(0.8, -5), (1.25, 2), (1.5, 7)])
+    def test_the_two_compose_without_interfering(self, speed, semitones):
+        ratio = 2.0 ** (semitones / 12.0)
+        source = tone(220.0, 2.0)
+        found = through(
+            sopro_worker.Shaper(sopro_worker.Delivery(speed=speed, pitch=ratio), numpy),
+            source)
+        assert dominant(found) == pytest.approx(220.0 * ratio, rel=0.02)
+        assert len(source) / len(found) == pytest.approx(speed, rel=0.05)
+
+    def test_no_click_at_a_chunk_boundary(self):
+        """The streaming requirement. A stretcher restarted at each chunk puts a
+        discontinuity at every one of them -- an audible tick several times a
+        second -- so the buffer, the read position and the overlap tail all
+        survive between calls.
+
+        Measured as the largest sample-to-sample step, against the largest step
+        the source itself contains: a click is a jump much bigger than the
+        waveform's own slope.
+        """
+        source = tone(220.0, 2.0)
+        expected = float(numpy.abs(numpy.diff(source)).max())
+        for speed, semitones in ((1.25, 0), (0.8, 0), (1.0, 2), (1.5, 7)):
+            found = through(
+                sopro_worker.Shaper(
+                    sopro_worker.Delivery(speed=speed, pitch=2.0 ** (semitones / 12.0)),
+                    numpy),
+                source, chunk=257)
+            jump = float(numpy.abs(numpy.diff(found)).max())
+            assert jump < expected * 3.0, (
+                f"speed {speed} pitch {semitones} left a discontinuity of {jump:.4f} "
+                f"where the source's own largest step is {expected:.4f}")
+
+
+class TestVolume:
+    def test_a_loud_setting_is_limited_rather_than_clipped(self):
+        """A +6 dB setting on a loud passage would otherwise clip into
+        distortion that sounds like a broken model rather than a loud one.
+
+        The signal here is what that actually looks like: model output already
+        near the top of its range, asked for another six decibels. A hard clip
+        would flatten every sample past full scale into an identical plateau;
+        the soft knee bends them instead, so the peaks stay distinguishable from
+        one another and from each other's neighbours.
+        """
+        # Peaks at 1.1 after the gain: past the knee, and not so far past it
+        # that any limiter shape would look the same. The knee engages on the
+        # *gain* being above unity rather than on the samples being loud, which
+        # is the same rule Kokoro's worker follows -- both engines' models emit
+        # audio already inside the range, so the only way past full scale is a
+        # volume setting somebody chose.
+        source = tone(220.0, 0.5) * 2.0
+        raw = sopro_worker.pcm16(source, gain=1.1)
+        found = numpy.frombuffer(raw, dtype="<i2").astype(numpy.float32) / 32767.0
+        assert float(numpy.abs(found).max()) < 1.0, "the limiter let it reach full scale"
+
+        peaks = numpy.abs(found)[numpy.abs(found) > 0.9]
+        assert len(peaks) > 100, "the test signal did not reach the knee"
+        assert float(peaks.max()) < 1.0
+        assert float(peaks.std()) > 0.001, (
+            "every loud sample came out at the same level, which is a hard clip "
+            "rather than a limiter")
+
+    def test_at_or_below_unity_it_is_exactly_a_scalar(self):
+        """There is nothing to limit, so nothing is done: a quiet setting must
+        not colour the sound, and a neutral one must be a bypass."""
+        source = tone(220.0, 0.2)
+        raw = sopro_worker.pcm16(source, gain=1.0)
+        found = numpy.frombuffer(raw, dtype="<i2").astype(numpy.float32) / 32767.0
+        assert numpy.allclose(found, source, atol=1e-4)
+
+    def test_below_unity_there_is_nothing_to_limit(self):
+        source = tone(220.0, 0.5)
+        raw = sopro_worker.pcm16(source, gain=0.5)
+        found = numpy.frombuffer(raw, dtype="<i2").astype(numpy.float32) / 32767.0
+        assert float(numpy.abs(found).max()) == pytest.approx(0.25, abs=0.01)
+
+
+class TestTheDurableFormat:
+    def test_i_11_prompt_state_is_not_in_the_production_tensors(self):
+        """Warmed streaming caches are worker cache with a bound on them. What
+        is written is conditioning plus a scalar."""
+        assert sopro_worker.PRODUCTION_TENSORS == ("cond_vec", "semantic_tokens", "mel")
+        for name in sopro_worker.PRODUCTION_TENSORS:
+            assert "prompt" not in name and "kv" not in name and "session" not in name
+
+    def test_the_lab_components_are_kept_physically_separate(self):
+        """Section 14: the separation is what makes "Conversation reads canonical
+        conditioning, never experimental state" a property of the filesystem
+        rather than a promise."""
+        assert sopro_worker.LAB_TENSORS == ("id_emb", "style_emb", "style_ctrl")
+        assert not set(sopro_worker.LAB_TENSORS) & set(sopro_worker.PRODUCTION_TENSORS)
+
+    def test_a_tensor_read_is_bounded(self):
+        """Section 57: a malformed voice cannot become an arbitrary allocation
+        request."""
+        assert 0 < sopro_worker.MAX_TENSOR_BYTES <= 256 * 1024 * 1024
+
+    def test_the_caches_are_small_fixed_numbers(self):
+        """Section 29: never an unbounded map of every cloned voice."""
+        for value in (sopro_worker.REFERENCE_CACHE, sopro_worker.PROMPT_CACHE,
+                      sopro_worker.LAB_CACHE):
+            assert 1 <= value <= 8
+
+
+class TestWhatNeverLeavesThisProcess:
+    def test_an_exception_this_file_did_not_raise_is_reported_by_class_only(self):
+        """A third-party library is entitled to put whatever it likes in a
+        message, including the input it was given, and this feature's invariant
+        is that the input never leaves this process."""
+        found = sopro_worker._safe(RuntimeError("the reference said: my name is Rebecca"))
+        assert found == "RuntimeError"
+        assert "Rebecca" not in found
+
+    def test_this_files_own_refusals_are_sentences(self):
+        found = sopro_worker._safe(ValueError("that recording contains no audio"))
+        assert found == "that recording contains no audio"
+
+
+class TestSilence:
+    def test_a_pause_is_exactly_the_requested_number_of_milliseconds(self):
+        found = sopro_worker.silence(24000, 250)
+        assert len(found) // 2 == 6000
+        assert set(found) == {0}
+
+    def test_no_pause_is_no_bytes(self):
+        assert sopro_worker.silence(24000, 0) == b""

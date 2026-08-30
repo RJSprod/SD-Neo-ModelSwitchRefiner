@@ -4910,3 +4910,120 @@
         background-color: color-mix(in srgb, currentColor 8%, transparent);
     }
 }
+
+
+/* --------------------------------------------------------------------------
+   The text-to-speech engine selector, Sopro's settings and the Voice Lab
+
+   Two cards rather than a drop-down, for the same reason the speech-to-text
+   tiers are cards: the choice is not between two labels, it is between a
+   built-in speaker bank that is probably already installed and a streaming
+   model that clones a voice and brings a hundred and forty megabytes of PyTorch
+   with it. Nobody can make that choice from a list of names.
+
+   Nothing here hides the inactive engine. The server does not render it, so
+   there is no rule in this file about not showing it -- which is the point:
+   a stylesheet that hid an engine would be an engine one stray override could
+   reveal.
+   -------------------------------------------------------------------------- */
+
+.mc-voice-engine-cards {
+    display: grid;
+    gap: 0.5em;
+    grid-template-columns: repeat(auto-fit, minmax(17em, 1fr));
+    margin-top: 0.4em;
+}
+
+.mc-voice-engine-card {
+    background: none;
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    color: inherit;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    font: inherit;
+    gap: 0.3em;
+    padding: 0.6em 0.7em;
+    text-align: left;
+}
+
+/* The selected one, marked the way the chosen speech-to-text tier is: a border
+   and an inset rule rather than a fill, because a fill is a background colour
+   and this stylesheet does not name those. */
+.mc-voice-engine-card-active {
+    border-color: var(--color-accent, currentColor);
+    box-shadow: inset 0 0 0 1px var(--color-accent, currentColor);
+    cursor: default;
+}
+
+.mc-voice-engine-card-name {
+    font-weight: 600;
+}
+
+.mc-voice-engine-card-state {
+    font-size: 0.8em;
+    opacity: 0.75;
+}
+
+.mc-voice-engine-card-blurb {
+    font-size: 0.85em;
+    opacity: 0.85;
+}
+
+.mc-voice-engine-name {
+    font-weight: 600;
+}
+
+.mc-voice-sopro-parts {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2em;
+    margin: 0.4em 0;
+}
+
+.mc-voice-sopro-recording {
+    font-size: 0.85em;
+    margin-left: 0.6em;
+    opacity: 0.8;
+}
+
+/* The Voice Lab. A closed `<details>` by default and marked experimental at the
+   top of it, because section 44 asks for it to be hard to mistake a Lab result
+   for a character's saved voice. The notice is a block rather than a footnote
+   for the same reason. */
+.mc-voice-lab > summary {
+    cursor: pointer;
+    font-weight: 600;
+    padding: 0.3em 0;
+}
+
+.mc-voice-lab-notice {
+    border: 1px solid var(--color-accent, currentColor);
+    border-radius: var(--radius-sm, 4px);
+    font-size: 0.9em;
+    margin: 0.4em 0 0.6em;
+    padding: 0.5em 0.6em;
+}
+
+.mc-voice-lab-sliders {
+    display: grid;
+    gap: 0.3em 0.8em;
+    grid-template-columns: repeat(auto-fit, minmax(15em, 1fr));
+    margin: 0.5em 0;
+}
+
+.mc-voice-lab-check {
+    align-items: center;
+    display: inline-flex;
+    font-size: 0.9em;
+    gap: 0.3em;
+    margin-right: 0.8em;
+}
+
+.mc-voice-lab-metrics {
+    font-size: 0.85em;
+    font-variant-numeric: tabular-nums;
+    min-height: 1.2em;
+    opacity: 0.85;
+}

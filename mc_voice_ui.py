@@ -199,21 +199,27 @@ def begin_speech(character=None, persona=None, opening: str = ""):
             # that is simply not spoken and nothing written down anywhere.
             _quietly("\"Speak replies automatically\" is off")
             return None
-        if not models.status().tts_ready:
-            _quietly("the text-to-speech model is not installed")
-            return None
-        import mc_voice_profile as profiles
-        import mc_voice_registry as registry
+        import mc_voice_engines as engines
 
-        sid, entry = registry.resolve(voice_of(character))
-        delivery = profiles.resolve(profile_of(character))
-        found = turns.create(voice_id=entry["id"], sid=sid, labels=_labels(character, persona),
-                             profile=delivery)
+        # Resolved once, here, and frozen onto the turn: the engine, the voice
+        # and the delivery. Section 47 -- changing Settings while a reply is
+        # already speaking affects the next turn, not half of the current one.
+        active = engines.active()
+        if not engines.installed(active):
+            _quietly(f"{engines.label(active)} is not installed")
+            return None
+        profiles = engines.profiles(active)
+        voice_id, entry = engines.resolve(voice_of(character, active), active)
+        delivery = profiles.resolve(profile_of(character, active))
+        found = turns.create(voice_id=voice_id, sid=int(entry.get("_sid") or 0),
+                             handle=_handle(active, entry), engine=active,
+                             labels=_labels(character, persona), profile=delivery)
         found.base_chars = len(str(opening or ""))
         found.start()
         _last_run["turn"] = found.id
-        logger.info("Model Chain: Voice will read this reply aloud — %s, speaker %d, %s, "
-                    "turn %s", entry["id"], sid, profiles.describe(delivery), found.id[:8])
+        logger.info("Model Chain: Voice will read this reply aloud — %s on %s, %s, turn %s",
+                    voice_id, engines.label(active), profiles.describe(delivery),
+                    found.id[:8])
         return found
     except Exception:
         # Warning rather than debug, and this is the correction that matters:
@@ -225,31 +231,56 @@ def begin_speech(character=None, persona=None, opening: str = ""):
         return None
 
 
-def voice_of(character) -> str:
-    """The stable voice id a character asks for, or ``""`` for the default.
+def _handle(engine: str, entry) -> object:
+    """What the engine's adapter needs to speak this voice, and nothing more.
+
+    A sherpa speaker number for Kokoro, the qualified stable id for Sopro. It
+    is built here, at the one place that has just resolved the voice, and the
+    turn carries it without ever looking inside -- which is what keeps a numeric
+    SID out of the shared turn contract (I-10).
+    """
+    import mc_voice_engines as engines
+
+    if str(engine) == engines.SOPRO:
+        return str((entry or {}).get("id") or "")
+    return int((entry or {}).get("_sid") or 0)
+
+
+def voice_of(character, engine: str = "") -> str:
+    """The stable voice id a character asks for on ``engine``, or ``""``.
 
     Read defensively off whatever the panel handed over. This runs inside the
     generator that produces a reply, and a character object from an older build,
     a ``None``, or a hand-edited file with a number where an id belongs are all
-    the same answer: use the default voice.
+    the same answer: use that engine's default voice.
+
+    A character configured for the other engine only answers ``""`` here, which
+    is inheritance by absence rather than translation (I-4): a Kokoro speaker
+    number means nothing to Sopro and pretending otherwise would be the
+    cross-engine confusion I-2 forbids.
     """
     try:
-        return str(getattr(character, "voice", "") or "").strip()
+        import mc_voice_engines as engines
+
+        return engines.character_voice(character, engine or engines.active())
     except Exception:
+        logger.debug("Model Chain: could not read a character's voice", exc_info=True)
         return ""
 
 
-def profile_of(character) -> dict:
-    """A character's delivery overrides, or an empty set of them.
+def profile_of(character, engine: str = "") -> dict:
+    """A character's delivery overrides for ``engine``, or an empty set of them.
 
     Empty is the ordinary case and is not a failure: it is what every character
-    written before this existed has, and it is what makes them follow the
-    default voice's delivery.
+    written before this existed has, and what makes them follow that engine's
+    current default delivery.
     """
     try:
-        found = getattr(character, "voice_profile", None)
-        return dict(found) if isinstance(found, dict) else {}
+        import mc_voice_engines as engines
+
+        return engines.character_profile(character, engine or engines.active())
     except Exception:
+        logger.debug("Model Chain: could not read a character's delivery", exc_info=True)
         return {}
 
 
@@ -407,9 +438,9 @@ def _slider_label(control: dict) -> str:
 
 def _field_names() -> tuple:
     try:
-        import mc_voice_profile as profiles
+        import mc_voice_engines as engines
 
-        return tuple(profiles.FIELDS)
+        return tuple(engines.profiles().FIELDS)
     except Exception:
         return ()
 
@@ -436,12 +467,20 @@ def character_state(character) -> dict:
     One function so the four places that fill the editor -- opening it, opening
     it on a new character, cancelling, and switching who you are talking to --
     cannot disagree about whether a character has a delivery of its own.
+
+    Drawn from the *active* engine's saved state and from nothing else (section
+    7). Switching the global engine redraws this section from that engine's own
+    values; it does not translate a Kokoro pitch into a Sopro one, and a
+    character with a Kokoro voice and no Sopro voice opens with no voice
+    selected rather than with the wrong one.
     """
-    overrides = profile_of(character)
+    import mc_voice_engines as engines
+
+    active = engines.active()
+    overrides = profile_of(character, active)
     has_own = any(value is not None for value in overrides.values())
     try:
-        import mc_voice_profile as profiles
-
+        profiles = engines.profiles(active)
         # ``resolve`` answers with the default for every field the character
         # does not set, so this is the effective delivery in both cases -- the
         # sliders open where the sound the user is listening to actually is,
@@ -451,25 +490,26 @@ def character_state(character) -> dict:
     except Exception:
         logger.debug("Model Chain: could not read a character's delivery", exc_info=True)
         effective, names = {}, ()
-    return {"voice": voice_of(character), "custom": has_own,
+    return {"voice": voice_of(character, active), "custom": has_own, "engine": active,
             "values": [effective.get(name) for name in names]}
 
 
 def character_profile(custom, values) -> dict:
-    """The four overrides to save, from the checkbox and the four sliders.
+    """The overrides to save, from the checkbox and the sliders.
 
-    Unchecked is four ``None``s rather than four defaults, and that is the
-    difference the whole inheritance model rests on: a character that follows
-    Settings has to keep following it when Settings changes.
+    Unchecked is every field ``None`` rather than every field at today's
+    default, and that is the difference the whole inheritance model rests on: a
+    character that follows Settings has to keep following it when Settings
+    changes (I-4).
     """
     names = _field_names()
     if not custom or not names:
         return {name: None for name in names}
     offered = dict(zip(names, list(values or [])))
     try:
-        import mc_voice_profile as profiles
+        import mc_voice_engines as engines
 
-        return profiles.overrides(offered)
+        return engines.profiles().overrides(offered)
     except Exception:
         logger.debug("Model Chain: could not read the delivery sliders", exc_info=True)
         return {name: None for name in names}
@@ -487,28 +527,43 @@ def engine_panel() -> str:
     What is rendered here is only the first frame, so a flyout opened on a page
     whose JavaScript has not run yet still says something true.
     """
-    found = runtime.engine()
+    import mc_voice_engines as engines
+
+    active = engines.active()
+    label = engines.label(active)
+    if active == engines.SOPRO:
+        import mc_voice_sopro_runtime as sopro_runtime
+
+        found = sopro_runtime.engine()
+    else:
+        found = runtime.engine()
     labels = {
-        "unloaded": "\u25cb Unloaded — loads automatically on next voice use",
+        "unloaded": f"\u25cb Unloaded — loads automatically on next voice use",
         "loading": "\u25cc Loading speech models…",
         "idle": "\u25cf Loaded — CPU, idle",
         "stt": "\u25cf Loaded — Listening",
         "tts": "\u25cf Loaded — Speaking",
+        "speaking": "\u25cf Loaded — Speaking",
+        "preparing": "\u25cf Preparing a voice…",
         "stopping": "\u25cc Unloading…",
-        "error": "\u25cf The speech engine could not start",
+        "error": f"\u25cf {label} could not start",
     }
     action = "unload" if found.get("loaded") else "load"
     voice = ""
     try:
-        import mc_voice_registry as registry
-
-        entry = registry.default_entry()
+        entry = engines.adapter(active).default_entry()
         voice = entry["label"] if entry else ""
     except Exception:
         logger.debug("Model Chain: could not read the default voice", exc_info=True)
+    # The engine's *name* is here and its settings are not. Section 9: the
+    # overlay stays operational rather than becoming a second settings page, and
+    # it must never be a place where both engines' configurations are displayed.
+    # The only way from here to the other engine is the link to Settings.
     return (
-        f'<div class="mc-voice-engine">'
+        f'<div class="mc-voice-engine" data-mc-voice-engine-id="{ui.escape(active)}">'
         f'<div class="mc-voice-engine-head">Voice engine</div>'
+        f'<div class="mc-voice-engine-name" data-mc-voice-engine-name>'
+        f'{ui.escape(label)}</div>'
         f'<div class="mc-voice-engine-state" data-mc-voice-engine-line>'
         f'{ui.escape(labels.get(found.get("state") or "unloaded", labels["unloaded"]))}</div>'
         f'<button type="button" class="mc-voice-runtime" data-mc-voice-runtime="{action}">'
@@ -520,16 +575,23 @@ def engine_panel() -> str:
 
 def readiness_notice() -> str:
     """One line for the overlay, drawn from the same status Settings reads."""
+    import mc_voice_engines as engines
+
     found = models.status()
-    if found.ready:
+    active = engines.active()
+    speaks = engines.installed(active)
+    if found.stt_ready and speaks:
         return ui.notice("Ready.")
     if not found.platform_supported:
         return ui.notice(found.runtime_message, "warn")
-    missing = [name for name, ok in (("speech to text", found.stt_ready),
-                                     ("text to speech", found.tts_ready)) if not ok]
-    if not found.runtime_ready and not missing:
-        return ui.notice("Setup required — install the voice models in Settings → Voice Chat.",
-                         "warn")
+    # Named separately because they are separate installations with separate
+    # lifecycles (I-6): dictation can work perfectly while the selected speech
+    # engine is not installed, and a single "not set up" would hide that.
+    missing = []
+    if not found.stt_ready:
+        missing.append("speech to text")
+    if not speaks:
+        missing.append(f"{engines.label(active)} text to speech")
     return ui.notice(f"Setup required — {' and '.join(missing) or 'the voice runtime'} "
                      f"still to install. Settings → Voice Chat.", "warn")
 
@@ -617,7 +679,10 @@ def speech_marker(take_reply, character_named=None):
                 return ""
             if not state.auto_speak():
                 return ""
-            if not models.status().tts_ready:
+            import mc_voice_engines as engines
+
+            active = engines.active()
+            if not engines.installed(active):
                 return ""
             # Which voice, and how, snapshotted with the words -- see
             # :func:`mc_voice_api.remember_reply`. Resolved now rather than when
@@ -630,10 +695,10 @@ def speech_marker(take_reply, character_named=None):
                 except Exception:
                     logger.debug("Model Chain: could not read the character to speak as",
                                  exc_info=True)
-            import mc_voice_profile as profiles
-
-            return api.remember_reply(str(text), voice_id=voice_of(character),
-                                      profile=profiles.resolve(profile_of(character)))
+            profiles = engines.profiles(active)
+            return api.remember_reply(
+                str(text), voice_id=voice_of(character, active),
+                profile=profiles.resolve(profile_of(character, active)), engine=active)
         except Exception:
             logger.debug("Model Chain: Voice Chat could not prepare a spoken reply",
                          exc_info=True)
@@ -813,9 +878,14 @@ def settings_html() -> str:
     inside Conversation and has no hidden Gradio component of its own to read
     it from.
     """
+    import mc_voice_engines as engines
+
     found = models.status()
+    active = engines.active()
     parts = [f'<div class="mc-voice-settings" '
-             f'data-mc-voice-key="{ui.escape(api.session_token())}">']
+             f'data-mc-voice-key="{ui.escape(api.session_token())}" '
+             f'data-mc-voice-engine-id="{ui.escape(active)}">',
+             engine_selector_html()]
 
     # The engine gets a row of its own with a button of its own. It used to be
     # a line of text, on the reasoning that it is an implementation detail of
@@ -849,6 +919,21 @@ def settings_html() -> str:
     parts.append(f'<div class="mc-voice-runtime">{ui.escape(found.summary)}</div>')
 
     parts.append(_tier_row(found))
+
+    if active != engines.KOKORO:
+        # Section 5: the inactive engine's operational settings are *absent*,
+        # not collapsed. The Kokoro install row, its bundle name and its manual
+        # section are not rendered at all while Sopro is selected -- so a stale
+        # DOM, a theme script or a partial Gradio re-render has nothing to
+        # expose, and no request can be built from markup that is not there.
+        parts.append(sopro_html())
+        parts.append(
+            '<div class="mc-voice-note">Voice Chat runs on the CPU and never uses the '
+            'graphics card. Sopro brings its own isolated PyTorch runtime, which is kept '
+            'separate from Forge\'s and from Kokoro\'s. After it is installed it needs no '
+            'Internet connection at all.</div>')
+        parts.append("</div>")
+        return "".join(parts)
 
     for kind, heading in (("tts", "Text to speech"),):
         label, addresses = "", []
@@ -896,6 +981,177 @@ def settings_html() -> str:
 # --------------------------------------------------------------------------- #
 
 
+def engine_selector_html() -> str:
+    """The one place both engine names are meant to be visible at once. Section 4.
+
+    A pair of cards rather than a drop-down, because the choice is not between
+    two labels: it is between a built-in speaker bank that is probably already
+    installed and a streaming model that clones a voice from a recording and
+    brings a hundred and forty megabytes of PyTorch with it. Nobody can make
+    that choice from a list of names.
+
+    Selecting an engine that is not installed is allowed and is *not* an error
+    state (section 17). The selected engine's own page then says it is not
+    installed and offers to install it; Kokoro does not reappear as an
+    operational panel because Sopro is not ready yet, and nothing switches back
+    on its own.
+    """
+    import mc_voice_engines as engines
+
+    found = engines.state()
+    cards = []
+    for entry in found["engines"]:
+        mark = "mc-voice-engine-card-active" if entry["active"] else ""
+        cards.append(
+            f'<button type="button" class="mc-voice-engine-card {mark}" '
+            f'data-mc-voice-engine-pick="{ui.escape(entry["id"])}"'
+            f'{" disabled" if entry["active"] else ""}>'
+            f'<span class="mc-voice-engine-card-name">{ui.escape(entry["label"])}</span>'
+            f'<span class="mc-voice-engine-card-state">'
+            f'{"Selected" if entry["active"] else ("Installed" if entry["installed"] else "Not installed")}'
+            f'</span>'
+            f'<span class="mc-voice-engine-card-blurb">{ui.escape(entry["blurb"])}</span>'
+            f'</button>')
+    return (
+        '<div class="mc-voice-row" data-mc-voice-engines>'
+        '<div class="mc-voice-head">'
+        '<div class="mc-voice-heading">Text-to-speech engine</div>'
+        f'<div class="mc-voice-default" data-mc-voice-engine-current>'
+        f'{ui.escape(found["label"])}</div>'
+        '</div>'
+        '<p class="mc-voice-note">One engine speaks for the whole WebUI at a time. '
+        'Choosing one changes which voice settings appear everywhere — in this page, in '
+        'the Voice menu and in every character. The other engine keeps its own voices, '
+        'default and character settings exactly as they were, and they come back when you '
+        'choose it again.</p>'
+        f'<div class="mc-voice-engine-cards">{"".join(cards)}</div>'
+        '<p class="mc-voice-note">Dictation is not part of this choice. Whisper has its '
+        'own model and its own process, and switching between Kokoro and Sopro does not '
+        'reload it, change its quality or touch your microphone settings.</p>'
+        '</div>')
+
+
+def sopro_html() -> str:
+    """The whole Sopro settings surface: install, engine settings, and nothing else.
+
+    Drawn only when Sopro is the selected engine, and the voice library, the
+    clone form and the Voice Lab live in :func:`voices_html` beneath it -- the
+    same split Kokoro has, so the two engines' pages have the same shape even
+    though almost nothing in them is shared.
+
+    Static markup here is the first frame; ``javascript/voice_chat.js`` repaints
+    it from ``/voice/sopro``. A page whose JavaScript has not run still says
+    something true.
+    """
+    import mc_voice_sopro as sopro
+
+    try:
+        found = sopro.status()
+        runtime_sources = sopro.sources("runtime")
+        model_sources = sopro.sources("model")
+        settings = sopro.engine_settings()
+        entry = sopro.bundle()
+    except Exception:
+        logger.debug("Model Chain: could not describe Sopro", exc_info=True)
+        return ('<div class="mc-voice-row" data-mc-voice-kind="sopro">'
+                '<div class="mc-voice-head"><div class="mc-voice-heading">Sopro V2</div>'
+                '<div class="mc-voice-status">Sopro could not be described. This is a '
+                'problem with the extension rather than with your installation.</div>'
+                '</div></div>')
+
+    return (
+        f'<div class="mc-voice-row" data-mc-voice-kind="sopro">'
+        f'<div class="mc-voice-head">'
+        f'<div class="mc-voice-heading">Sopro V2 Turbo</div>'
+        f'<div class="mc-voice-default">{ui.escape(entry.label)}, CPU only</div>'
+        f'<div class="mc-voice-status" data-mc-voice-status="sopro">'
+        f'{ui.escape(found.message)}</div>'
+        f'<button type="button" class="mc-voice-install" data-mc-voice-sopro-install>'
+        f'{"Installed" if found.ready else "Install Sopro"}</button>'
+        f'</div>'
+        f'<p class="mc-voice-note">A streaming model that makes a voice from a short '
+        f'recording you make here — no separate cloning tool, no training job. It brings '
+        f'its own isolated PyTorch runtime '
+        f'({ui.escape(models._bytes_label(sum(int(item.size or 0) for item in (sopro.platform().artifacts if sopro.platform() else ())) or 0))}) '
+        f'and its model artifacts '
+        f'({ui.escape(models._bytes_label(entry.download_bytes))}, approximate until the '
+        f'download starts). Both are separate from Kokoro and from Forge: installing this '
+        f'changes nothing about either, and removing it changes nothing either.</p>'
+        f'<div class="mc-voice-sopro-parts">'
+        f'<div class="mc-voice-check" data-mc-voice-sopro-runtime>'
+        f'{ui.escape(found.runtime_message)}</div>'
+        f'<div class="mc-voice-check" data-mc-voice-sopro-model>'
+        f'{ui.escape(found.model_message)}</div>'
+        f'</div>'
+        + _manual_section(
+            "sopro-runtime", runtime_sources,
+            "The Install button above does all of this for you. This is here for a machine "
+            "that cannot reach PyPI — no Internet, or a proxy that will not pass a "
+            "hundred-megabyte binary. Download every file into one folder and give Voice "
+            "Chat that folder. The original filenames are fine, and each one is checked "
+            "against a hash committed in this extension.",
+            "C:\\Users\\you\\Downloads\\sopro-runtime")
+        + _manual_section(
+            "sopro-model", model_sources,
+            "The model artifacts. Download these seven files into one folder and give Voice "
+            "Chat that folder. No account or access token is needed.",
+            "C:\\Users\\you\\Downloads\\sopro-model")
+        + _sopro_engine_settings(settings, found)
+        + '</div>')
+
+
+def _sopro_engine_settings(settings: dict, found) -> str:
+    """Precision, solver steps and streaming chunk size. Global to Sopro.
+
+    Not per character and not per voice (section 34): each of these changes
+    compute, memory and which warmed streaming caches are still valid for the
+    whole worker, and a character setting that quietly reloaded the model would
+    be a character setting nobody could reason about. Changing one stops the
+    worker; the next reply starts it again.
+    """
+    def choices(name: str, current, values, labels=None) -> str:
+        options = "".join(
+            f'<option value="{ui.escape(str(value))}"'
+            f'{" selected" if str(value) == str(current) else ""}>'
+            f'{ui.escape(str((labels or {}).get(value, value)))}</option>'
+            for value in values)
+        return (f'<select data-mc-voice-sopro-setting="{ui.escape(name)}">{options}</select>')
+
+    precision_labels = {item["id"]: item["label"] for item in settings["precisions"]}
+    return (
+        '<details class="mc-voice-manual" data-mc-voice-sopro-settings>'
+        '<summary>Engine settings</summary>'
+        '<p class="mc-voice-note">These change how Sopro runs rather than how a character '
+        'sounds, so they apply to every Sopro voice. Changing one unloads Sopro; the next '
+        'reply loads it again.</p>'
+        '<div class="mc-voice-field">'
+        '<label>Precision</label>'
+        + choices("precision", settings["precision"],
+                  [item["id"] for item in settings["precisions"]], precision_labels)
+        + '<p class="mc-voice-note">INT8 quantizes the autoregressive blocks and is faster '
+          'and lighter on the CPU. Your saved voices stay valid either way — only the '
+          'warmed streaming caches are rebuilt.</p>'
+        '</div>'
+        '<div class="mc-voice-field">'
+        '<label>Solver steps</label>'
+        + choices("steps", settings["steps"], settings["step_choices"])
+        + '<p class="mc-voice-note">How many steps the acoustic solver takes. More is '
+          'slower. This is a compute setting, not a character trait.</p>'
+        '</div>'
+        '<div class="mc-voice-field">'
+        '<label>Streaming chunk size</label>'
+        + choices("chunk_frames", settings["chunk_frames"], settings["chunk_choices"])
+        + '<p class="mc-voice-note">How much audio Sopro produces before handing a piece '
+          'over. Smaller may start sooner and finish later; larger may do the reverse. '
+          'Only benchmarked values are offered.</p>'
+        '</div>'
+        f'<p class="mc-voice-note">CPU threads are fixed at four working threads and one '
+        f'coordinating thread for this build, chosen from measurements and reported in the '
+        f'log rather than tuned here. Build fingerprint '
+        f'<code>{ui.escape(found.fingerprint or "not installed")}</code>.</p>'
+        '</details>')
+
+
 def delivery_controls() -> list:
     """The four sliders, as data, in the order both surfaces draw them.
 
@@ -904,8 +1160,9 @@ def delivery_controls() -> list:
     setting that silently changed when it was edited in the other place.
     """
     try:
-        import mc_voice_profile as profiles
+        import mc_voice_engines as engines
 
+        profiles = engines.profiles()
         return [dict(profiles.CONTROLS[name], name=name) for name in profiles.FIELDS]
     except Exception:
         logger.debug("Model Chain: could not read the voice delivery controls", exc_info=True)
@@ -924,9 +1181,11 @@ def _delivery_block() -> str:
     row. The first frame is drawn here so that a page whose JavaScript has not
     run yet still says something true.
     """
-    try:
-        import mc_voice_profile as profiles
+    import mc_voice_engines as engines
 
+    active = engines.active()
+    try:
+        profiles = engines.profiles(active)
         current = profiles.stored()
         summary = profiles.describe(current)
     except Exception:
@@ -967,20 +1226,212 @@ def _delivery_block() -> str:
         '<button type="button" class="mc-voice-entry-action" data-mc-voice-delivery-reset>'
         'Reset</button>'
         '</div>'
+        + _delivery_note(active)
+        + '</div>')
+
+
+def _delivery_note(engine: str) -> str:
+    """The paragraph that says which of these controls is the model's own.
+
+    Section 37 makes this part of correctness rather than decoration, and the
+    two engines need different sentences because the same four labels mean
+    different things: Kokoro takes a speed argument and Sopro does not, so
+    Sopro's Speed is Voice Chat's own time-scaling and the text has to say so
+    rather than let somebody assume a model control.
+    """
+    import mc_voice_engines as engines
+
+    if engine == engines.SOPRO:
+        return (
+            '<p class="mc-voice-note">Sopro has no speaking-rate input of its own, so '
+            'Speed is applied by Voice Chat: the audio is time-scaled without changing '
+            'the pitch, and the processing carries across the pieces Sopro streams so '
+            'there is no click between them. Pitch is separate and composes with it — '
+            'changing Speed at Pitch 0 does not transpose the voice, and changing Pitch '
+            'does not change how long the sentence takes. Volume and pacing are Voice '
+            'Chat\'s too.</p>'
+            '<p class="mc-voice-note">Variation is Sopro\'s own sampling temperature, and '
+            'Top-p and Top-k are its sampling cut-offs. They control how much a take '
+            'varies from another take. They are not emotion, warmth or energy controls — '
+            'the model has no such input, and a slider that claimed to be one would be '
+            'making a promise nobody has tested. Left alone they follow the model\'s own '
+            'configuration.</p>')
+    return (
         '<p class="mc-voice-note">Kokoro exposes one of these itself — speed, which changes '
         'how the model articulates rather than only how fast it plays. Pitch, volume and '
         'pacing are applied by Voice Chat to the audio the model produced: pitch by '
         'resynthesising faster and reading the result back slower, which moves the formants '
         'with it and reads as a different-sized speaker. There is no emotion control, '
-        'because Kokoro-82M has no emotion input — a slider for one would do nothing.</p>'
-        '</div>')
+        'because Kokoro-82M has no emotion input — a slider for one would do nothing.</p>')
+
+
+def _sopro_voices_html() -> str:
+    """Sopro's voice library, clone form, delivery controls and Voice Lab.
+
+    The same product operations Kokoro's block offers -- list, audition, set as
+    default, assign to a character, rename, delete -- plus the two Sopro has
+    that Kokoro does not: making a voice from a recording taken here, and
+    rebuilding a voice whose preparation no longer matches the installed build.
+
+    The Lab is last and is a ``<details>`` that starts closed, because it is
+    experimental and section 44 asks for it to be hard to mistake for the
+    ordinary controls. It is in this document only because Sopro is selected;
+    it does not exist in Kokoro's.
+    """
+    import mc_voice_sopro as sopro
+
+    languages = "".join(
+        f'<option value="{ui.escape(code)}">{ui.escape(label)}</option>'
+        for code, label in sopro.LANGUAGES)
+    return (
+        f'<div class="mc-voice-voices" data-mc-voice-key="{ui.escape(api.session_token())}" '
+        f'data-mc-voice-engine-id="{ui.escape(sopro.ENGINE)}">'
+        '<div class="mc-voice-row">'
+        '<div class="mc-voice-head">'
+        '<div class="mc-voice-heading">Sopro voices</div>'
+        '<div class="mc-voice-default" data-mc-voice-current>Loading…</div>'
+        '</div>'
+        '<div class="mc-voice-testline">'
+        '<label for="mc-voice-test-text">Test text</label>'
+        '<input type="text" id="mc-voice-test-text" data-mc-voice-test-text '
+        'spellcheck="false" maxlength="400" />'
+        '</div>'
+        '<div class="mc-voice-warnings" data-mc-voice-warnings></div>'
+        '<div class="mc-voice-list" data-mc-voice-list></div>'
+        '</div>'
+        + _delivery_block()
+        + f'<div class="mc-voice-row" data-mc-voice-sopro-clone>'
+        f'<div class="mc-voice-head">'
+        f'<div class="mc-voice-heading">Clone voice</div>'
+        f'<div class="mc-voice-status" data-mc-voice-sopro-clone-status></div>'
+        f'</div>'
+        f'<p class="mc-voice-note">Sopro makes a voice from a short reference recording. '
+        f'This is part of how the model normally works — there is no training job and '
+        f'nothing extra to install. It runs on the CPU in the same process that will '
+        f'later speak the voice, and takes seconds rather than hours.</p>'
+        f'<p class="mc-voice-note mc-voice-consent">Only clone a voice you own or have '
+        f'permission to clone. The recording stays on this PC, beside the voice, so that a '
+        f'future Sopro update can rebuild the voice without asking you to record again. '
+        f'Deleting the voice deletes the recording.</p>'
+        f'<div class="mc-voice-clone-form" data-mc-voice-sopro-form>'
+        f'<div class="mc-voice-field">'
+        f'<label for="mc-voice-sopro-name">Name</label>'
+        f'<input type="text" id="mc-voice-sopro-name" data-mc-voice-sopro-name '
+        f'maxlength="48" spellcheck="false" />'
+        f'</div>'
+        f'<div class="mc-voice-field">'
+        f'<label for="mc-voice-sopro-language">Language hint</label>'
+        f'<select id="mc-voice-sopro-language" data-mc-voice-sopro-language>{languages}'
+        f'</select>'
+        f'<p class="mc-voice-note">A pronunciation hint, not a translation. Auto is the '
+        f'right answer unless you know otherwise.</p>'
+        f'</div>'
+        f'<div class="mc-voice-field">'
+        f'<label for="mc-voice-sopro-file">Reference recording</label>'
+        f'<input type="file" id="mc-voice-sopro-file" accept=".wav,audio/wav,audio/x-wav" '
+        f'data-mc-voice-sopro-file />'
+        f'<button type="button" class="mc-voice-entry-action" data-mc-voice-sopro-record>'
+        f'Record here</button>'
+        f'<span class="mc-voice-sopro-recording" data-mc-voice-sopro-recording></span>'
+        f'</div>'
+        f'<button type="button" class="mc-voice-install" data-mc-voice-sopro-create>'
+        f'Create voice</button>'
+        f'<p class="mc-voice-note">'
+        f'{int(sopro.MIN_REFERENCE_SECONDS)} to {int(sopro.MAX_REFERENCE_SECONDS)} seconds '
+        f'of one clear speaker, at a natural speaking pace, in a room without much '
+        f'background noise. The recording is checked, normalised and prepared here; you '
+        f'will hear the finished voice before it is saved.</p>'
+        f'</div>'
+        f'</div>'
+        + _lab_html()
+        + '</div>')
+
+
+def _lab_html() -> str:
+    """The Voice Lab. Experimental, closed by default, and labelled as both.
+
+    Section 38: it exists only while Sopro is the active engine, and it does not
+    appear in the Conversation overlay, the character editor or any ordinary
+    voice picker. Section 44: it has to be difficult to mistake a Lab result for
+    a character's saved voice, so the notice is the first thing in it and Reset
+    All is always present.
+
+    The sliders are numbered rather than named. Naming them after emotions or
+    vocal traits before repeatable tests justify those names would be inventing
+    a product claim about eight learned latent values, which is precisely what
+    section 41 forbids.
+    """
+    import mc_voice_lab as lab
+
+    sliders = "".join(
+        f'<div class="mc-voice-slider" data-mc-voice-lab-slider="{index}">'
+        f'<label for="mc-voice-lab-{index}">Style control {index + 1}</label>'
+        f'<input type="range" id="mc-voice-lab-{index}" '
+        f'min="{-lab.DELTA_LIMIT}" max="{lab.DELTA_LIMIT}" step="0.05" value="0" '
+        f'data-mc-voice-lab-input="{index}" />'
+        f'<output data-mc-voice-lab-value="{index}">0</output>'
+        f'</div>'
+        for index in range(lab.STYLE_CONTROLS))
+    return (
+        '<details class="mc-voice-row mc-voice-lab" data-mc-voice-lab>'
+        '<summary>Voice Lab (experimental)</summary>'
+        '<div class="mc-voice-lab-notice">'
+        'These controls affect only this audition. They are not used in Conversation and '
+        'are not saved to characters or to the default voice.'
+        '</div>'
+        '<p class="mc-voice-note">The eight style controls below are learned latent values '
+        'inside Sopro. They are not emotions, energy, warmth or breathiness — nobody has '
+        'measured what they mean, which is what this surface is for. Conditioning Blend '
+        'recombines speaker conditioning while keeping the first voice\'s reference '
+        'context; it is not proven identity or style transfer.</p>'
+        '<div class="mc-voice-field">'
+        '<label for="mc-voice-lab-voice">Voice</label>'
+        '<select id="mc-voice-lab-voice" data-mc-voice-lab-voice></select>'
+        '</div>'
+        '<div class="mc-voice-field">'
+        '<label for="mc-voice-lab-text">Audition text</label>'
+        '<input type="text" id="mc-voice-lab-text" data-mc-voice-lab-text maxlength="400" />'
+        '</div>'
+        f'<div class="mc-voice-lab-sliders">{sliders}</div>'
+        '<div class="mc-voice-field">'
+        '<label>Conditioning Blend</label>'
+        '<select data-mc-voice-lab-blend-voice><option value="">No blend</option></select>'
+        '<label class="mc-voice-lab-check">'
+        '<input type="checkbox" data-mc-voice-lab-blend-field="id_emb" /> identity</label>'
+        '<label class="mc-voice-lab-check">'
+        '<input type="checkbox" data-mc-voice-lab-blend-field="style_emb" /> style</label>'
+        '<label class="mc-voice-lab-check">'
+        '<input type="checkbox" data-mc-voice-lab-blend-field="style_ctrl" />'
+        ' style controls</label>'
+        '<input type="range" min="0" max="1" step="0.05" value="0" '
+        'data-mc-voice-lab-blend-weight />'
+        '<output data-mc-voice-lab-blend-value>0</output>'
+        '</div>'
+        '<div class="mc-voice-field">'
+        '<label class="mc-voice-lab-check">'
+        '<input type="checkbox" data-mc-voice-lab-fixed-seed /> Fixed seed</label>'
+        '<input type="number" data-mc-voice-lab-seed value="1234" min="0" '
+        'max="2147483647" />'
+        '<p class="mc-voice-note">A fixed seed makes A and B differ because of the control '
+        'you moved rather than because of sampling noise.</p>'
+        '</div>'
+        '<div class="mc-voice-slider-actions">'
+        '<button type="button" class="mc-voice-entry-action" data-mc-voice-lab-play="a">'
+        'Play A (saved voice)</button>'
+        '<button type="button" class="mc-voice-entry-action" data-mc-voice-lab-play="b">'
+        'Play B (experiment)</button>'
+        '<button type="button" class="mc-voice-entry-action" data-mc-voice-lab-reset>'
+        'Reset all</button>'
+        '</div>'
+        '<div class="mc-voice-lab-metrics" data-mc-voice-lab-metrics></div>'
+        '</details>')
 
 
 def _value_label(name: str, value) -> str:
     try:
-        import mc_voice_profile as profiles
+        import mc_voice_engines as engines
 
-        return profiles.value_label(name, value)
+        return engines.profiles().value_label(name, value)
     except Exception:
         return str(value)
 
@@ -989,18 +1440,32 @@ def voices_html() -> str:
     """Voice selection, auditioning, renaming, deleting, and cloning.
 
     A second HTML block on the Settings page, drawn and redrawn by
-    ``javascript/voice_chat.js`` from ``/voice/voices`` and
-    ``/voice/cloning/status``. Static markup here is the first frame and the
-    shape; everything live is painted by the browser, for the same reason the
-    install row is -- Forge's settings system stores options, it does not host
-    Gradio controls with handlers.
+    ``javascript/voice_chat.js`` from ``/voice/voices``. Static markup here is
+    the first frame and the shape; everything live is painted by the browser,
+    for the same reason the install row is -- Forge's settings system stores
+    options, it does not host Gradio controls with handlers.
 
-    What is *not* here is any voice data. The list is fetched, so a page that
-    was open when a clone finished shows it on its next paint rather than
-    needing a reload, and no speaker id is ever put in the document (section 56).
+    Engine-scoped from the first byte. When Kokoro is selected this renders the
+    Kokoro list, the Kokoro delivery sliders and the Storytime cloning panel;
+    when Sopro is selected it renders Sopro's list, Sopro's delivery and
+    generation controls, Sopro's clone form and the Voice Lab -- and the other
+    engine's markup is *not in the document* (section 5). Switching engines
+    reloads this page, which is how the browser gets a document with the other
+    engine's controls genuinely absent rather than hidden.
+
+    What is *not* here on either branch is any voice data. The list is fetched,
+    so a page that was open when a clone finished shows it on its next paint
+    rather than needing a reload, and no engine-native address is ever put in
+    the document (section 56).
     """
+    import mc_voice_engines as engines
+
+    active = engines.active()
+    if active == engines.SOPRO:
+        return _sopro_voices_html()
     return (
-        f'<div class="mc-voice-voices" data-mc-voice-key="{ui.escape(api.session_token())}">'
+        f'<div class="mc-voice-voices" data-mc-voice-key="{ui.escape(api.session_token())}" '
+        f'data-mc-voice-engine-id="{ui.escape(active)}">'
         '<div class="mc-voice-row">'
         '<div class="mc-voice-head">'
         '<div class="mc-voice-heading">Voices</div>'

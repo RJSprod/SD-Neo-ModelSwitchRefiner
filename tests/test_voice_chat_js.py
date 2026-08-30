@@ -260,6 +260,31 @@ settingsParts.tierList.querySelector = function (selector) {
 };
 settingsParts.chosenLabel = element("stt-chosen");
 
+// The text-to-speech engine selector. Two cards; the selected one is disabled,
+// which is what stops somebody re-selecting the engine they already have.
+settingsParts.enginePanel = element("engines");
+settingsParts.enginePanel["data-mc-voice-engines"] = "";
+settingsParts.engineCards = {
+    kokoro: element("engine-kokoro", "BUTTON"),
+    sopro: element("engine-sopro", "BUTTON"),
+};
+settingsParts.engineCards.kokoro["data-mc-voice-engine-pick"] = "kokoro";
+settingsParts.engineCards.sopro["data-mc-voice-engine-pick"] = "sopro";
+settingsParts.engineCards.kokoro.disabled = true;
+settingsParts.enginePanel.querySelectorAll = function (selector) {
+    if (selector === "[data-mc-voice-engine-pick]") {
+        return [settingsParts.engineCards.kokoro, settingsParts.engineCards.sopro];
+    }
+    return [];
+};
+settingsParts.enginePanel.querySelector = function () { return null; };
+settingsParts.engineCards.kokoro.closest = function (selector) {
+    return selector === "[data-mc-voice-engine-pick]" ? settingsParts.engineCards.kokoro : null;
+};
+settingsParts.engineCards.sopro.closest = function (selector) {
+    return selector === "[data-mc-voice-engine-pick]" ? settingsParts.engineCards.sopro : null;
+};
+
 const settingsRow = element("settings");
 settingsRow["data-mc-voice-key"] = "PAGE-TOKEN";
 settingsRow.querySelector = function (selector) {
@@ -274,6 +299,8 @@ settingsRow.querySelector = function (selector) {
     if (selector === '[data-mc-voice-install="tts"]') return settingsParts.ttsButton;
     if (selector === '[data-mc-voice-folder="stt"]') return settingsParts.sttFolder;
     if (selector === '[data-mc-voice-folder="tts"]') return settingsParts.ttsFolder;
+    if (selector === "[data-mc-voice-engines]") return settingsParts.enginePanel;
+    if (selector === '[data-mc-voice-kind="sopro"]') return null;
     if (selector === '[data-mc-voice-tiers="stt"]') return settingsParts.tierList;
     if (selector === '[data-mc-voice-chosen="stt"]') return settingsParts.chosenLabel;
     if (selector.indexOf("data-mc-voice-tier=") !== -1) {
@@ -366,7 +393,9 @@ globalThis.document = {
 };
 globalThis.gradioApp = () => globalThis.document;
 globalThis.window = globalThis;
-globalThis.location = {pathname: "/", origin: "https://forge.example"};
+const reloads = [];
+globalThis.location = {pathname: "/", origin: "https://forge.example",
+                       reload: () => { reloads.push(NOW); }};
 globalThis.isSecureContext = SECURE;
 globalThis.gradio_config = GRADIO_CONFIG;
 
@@ -773,6 +802,7 @@ async function hold(ms, sampleCount, level) {
 
 function report(extra) {
     return Object.assign({
+        reloads: reloads.length,
         requests: requests.map((r) => ({url: r.url, kind: r.kind,
                                         headers: r.headers,
                                         constraints: r.constraints,
@@ -916,6 +946,8 @@ DEFAULTS = {
                                "auto_send": False}},
         "voice/tts": {"audio": None},
         "voice/install": {"json": {"ok": True, "already": False}},
+        "voice/engine/select": {"json": {"ok": True, "active": "sopro",
+                                         "label": "Sopro V2", "engines": []}},
         "voice/models": {"json": {
             "ok": True, "kind": "stt", "chosen": "whisper-small-int8", "progress": {},
             "models": [
@@ -2852,6 +2884,121 @@ class TestTheEngineRow:
                     SETTINGS_PRESENT="true")
         assert found["settings"]["runtimeButton"] == "Installed"
         assert found["settings"]["runtimeDisabled"] is True
+
+
+class TestTheEngineSelector:
+    """Choosing an engine is a runtime boundary, not a preference.
+
+    The server cancels speech, stops whichever worker was running and persists
+    the choice before it answers, and the page then *reloads* rather than
+    repaints. That is deliberate: the inactive engine's controls have to be
+    absent from the document rather than hidden in it, and the cheapest way to
+    be certain of that is to ask the server for a document that never contained
+    them.
+    """
+
+    def test_choosing_an_engine_posts_it_and_reloads(self):
+        found = run("""
+            await tick();
+            requests.length = 0;
+            settingsParts.engineCards.sopro.fire("click");
+            await tick();
+            await hold(200);
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+
+        posts = [r for r in found["requests"]
+                 if r.get("url", "").endswith("/engine/select")]
+        assert len(posts) == 1
+        assert json.loads(posts[0]["bodyText"]) == {"engine": "sopro"}
+        assert found["reloads"] == 1
+
+    def test_the_selected_engine_cannot_be_re_selected(self):
+        """Its card is disabled, so a second press is not a second switch --
+        which would cancel speech and stop a worker for nothing."""
+        found = run("""
+            await tick();
+            requests.length = 0;
+            settingsParts.engineCards.kokoro.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true")
+
+        assert not [r for r in found["requests"]
+                    if r.get("url", "").endswith("/engine/select")]
+        assert found["reloads"] == 0
+
+    def test_a_refused_switch_re_enables_the_cards_and_does_not_reload(self):
+        """A page that disabled both cards and then reloaded on a failure would
+        be a page you cannot get back to the engine you were on."""
+        answers = status_answer()
+        answers["voice/engine/select"] = {
+            "status": 400, "json": {"ok": False, "error": "no", "active": "kokoro"}}
+        found = run("""
+            await tick();
+            settingsParts.engineCards.sopro.fire("click");
+            await tick();
+            await hold(200);
+            console.log(JSON.stringify(report({
+                soproDisabled: settingsParts.engineCards.sopro.disabled,
+            })));
+        """, SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+
+        assert found["reloads"] == 0
+        assert found["soproDisabled"] is False
+
+
+class TestTheEngineChangedUnderThisPage:
+    """Somebody switched the engine in another tab.
+
+    Every control in this document belongs to an engine that is no longer
+    selected, so repainting is not a fix. The server says so with a flag rather
+    than only a status code, because 409 already means several other things on
+    these routes -- a Lab session that expired, an install already running, a
+    turn that was over before anything listened to it -- and a page that
+    reloaded for all of them would reload when a button is pressed twice.
+    """
+
+    def test_a_flagged_refusal_reloads_the_page(self):
+        answers = status_answer()
+        answers["voice/voices"] = {
+            "status": 409,
+            "json": {"ok": False, "error": "Kokoro is no longer selected.",
+                     "engine_mismatch": True}}
+        found = run("""
+            await tick();
+            await hold(200);
+            console.log(JSON.stringify(report()));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true", ANSWERS=json.dumps(answers))
+        assert found["reloads"] == 1
+
+    def test_an_ordinary_refusal_does_not(self):
+        answers = status_answer()
+        answers["voice/voices"] = {
+            "status": 409, "json": {"ok": False, "error": "That is already running."}}
+        found = run("""
+            await tick();
+            await hold(200);
+            console.log(JSON.stringify(report()));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true", ANSWERS=json.dumps(answers))
+        assert found["reloads"] == 0
+
+    def test_it_reloads_once_however_many_requests_were_in_flight(self):
+        """Several polls can be in the air at the moment of a switch, and a
+        reload storm is worse than a stale panel."""
+        answers = status_answer()
+        answers["voice/voices"] = {
+            "status": 409,
+            "json": {"ok": False, "error": "gone", "engine_mismatch": True}}
+        answers["voice/profile"] = {
+            "status": 409,
+            "json": {"ok": False, "error": "gone", "engine_mismatch": True}}
+        found = run("""
+            await tick();
+            await hold(400);
+            console.log(JSON.stringify(report()));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true", ANSWERS=json.dumps(answers))
+        assert found["reloads"] == 1
 
 
 class TestTheFolderButtonComesBack:
