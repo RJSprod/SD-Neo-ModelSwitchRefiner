@@ -177,3 +177,71 @@ def test_load_and_unload_follow_the_selected_engine(host, voice_root, kokoro_bun
     engines.select("sopro")
     assert api.set_runtime("unload")["engine"] == "sopro"
     assert asked == ["kokoro", "sopro"]
+
+
+def test_the_surface_route_answers_for_the_engine_selected_now(host, voice_root,
+                                                               kokoro_bundle,
+                                                               voice_registry):
+    """The fix for a browser that reloaded itself until the tab was closed.
+
+    Forge builds a settings row's HTML once, when the extension is imported, and
+    hands that same string to every page load for the life of the process. So
+    the document a reload came back to was still built for the engine that was
+    selected at startup, the page decided it was stale -- correctly -- and
+    reloaded again. What breaks the loop is markup built *now*, which is what
+    this route is: both calls below happen in one process, and they differ.
+    """
+    import mc_voice_api as api
+
+    engines.select("kokoro")
+    first = api.surface_payload()
+    engines.select("sopro")
+    second = api.surface_payload()
+
+    assert first["engine"] == "kokoro" and second["engine"] == "sopro"
+    assert first["settings"] != second["settings"]
+    assert "data-mc-voice-sopro-install" not in first["settings"]
+    assert "data-mc-voice-sopro-install" in second["settings"]
+    # And the voices half with it, or the page would swap one and keep the
+    # other engine's voice list beside it.
+    assert "Conditioning Blend" in second["voices"]
+    assert "Conditioning Blend" not in first["voices"]
+
+
+def test_the_surface_carries_the_engine_id_the_page_compares_against(host, voice_root,
+                                                                     kokoro_bundle,
+                                                                     voice_registry):
+    """A swap that did not update the id would mismatch again on the next poll,
+    which is the loop wearing different clothes."""
+    import mc_voice_api as api
+
+    for wanted in ("kokoro", "sopro"):
+        engines.select(wanted)
+        found = api.surface_payload()
+        assert f'data-mc-voice-engine-id="{wanted}"' in found["settings"]
+        assert f'data-mc-voice-engine-id="{wanted}"' in found["voices"]
+        assert found["engine"] == api.voices_payload()["engine"]
+
+
+def test_sopros_two_manual_sections_say_which_is_which(host, voice_root, kokoro_bundle,
+                                                       voice_registry, monkeypatch):
+    """Both used to read "Or install from files you download yourself", one
+    directly under the other, which says nothing about which installs the
+    PyTorch runtime and which installs the model.
+
+    The addresses are stood in for because this row only lists them on a
+    platform the Sopro closure is pinned for, and the labels are not a property
+    of the platform.
+    """
+    import mc_voice_sopro as sopro
+
+    monkeypatch.setattr(sopro, "sources", lambda kind: [
+        {"url": f"https://example.invalid/{kind}.bin", "filename": f"{kind}.bin",
+         "save_as": f"{kind}.bin"}])
+    engines.select("sopro")
+    settings = mc_voice_ui.sopro_html()
+
+    assert "Or install the PyTorch runtime from files you download yourself" in settings
+    assert "Or install the model artifacts from files you download yourself" in settings
+    assert "<summary>Or install from files you download yourself</summary>" not in settings
+

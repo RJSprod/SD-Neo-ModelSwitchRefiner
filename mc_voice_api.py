@@ -142,6 +142,7 @@ CLONING_ABORT_ROUTE = f"{PREFIX}/cloning/abort"
 
 ENGINES_ROUTE = f"{PREFIX}/engines"
 ENGINE_SELECT_ROUTE = f"{PREFIX}/engine/select"
+SURFACE_ROUTE = f"{PREFIX}/surface"
 SOPRO_ROUTE = f"{PREFIX}/sopro"
 SOPRO_INSTALL_ROUTE = f"{PREFIX}/sopro/install"
 SOPRO_SETTINGS_ROUTE = f"{PREFIX}/sopro/settings"
@@ -164,7 +165,8 @@ deleting, auditioning -- the path stays the same and the payload is scoped to
 the active engine, which is what keeps the browser's own code engine-neutral.
 """
 
-SOPRO_ROUTES = (ENGINES_ROUTE, ENGINE_SELECT_ROUTE, SOPRO_ROUTE, SOPRO_INSTALL_ROUTE,
+SOPRO_ROUTES = (ENGINES_ROUTE, ENGINE_SELECT_ROUTE, SURFACE_ROUTE,
+                SOPRO_ROUTE, SOPRO_INSTALL_ROUTE,
                 SOPRO_SETTINGS_ROUTE, SOPRO_CLONE_ROUTE, SOPRO_REBUILD_ROUTE,
                 LAB_ROUTE, LAB_UPDATE_ROUTE, LAB_RESET_ROUTE, LAB_PLAY_ROUTE)
 
@@ -1287,6 +1289,37 @@ def select_engine(engine: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 
+def surface_payload() -> dict:
+    """The settings markup for the engine that is selected *now*.
+
+    Forge builds a settings row's HTML once, when the extension is imported, and
+    hands that same string to every page load for the life of the process. So a
+    document served after an engine switch still carries the engine that was
+    selected at startup, and reloading cannot change that -- which is how the
+    first version of this shipped a browser that reloaded, found the same stale
+    markup, decided it was stale, and reloaded again for as long as the tab
+    stayed open.
+
+    This is the way out that keeps section 5 intact rather than trading it away.
+    The browser asks for the surface, gets markup built for the engine selected
+    now, and *replaces* the stale nodes with it. The inactive engine's controls
+    are absent from the document afterwards because they were removed from it,
+    which is the same guarantee a fresh document would have given and the only
+    one available in a settings page that is built once per process.
+    """
+    import mc_voice_engines as engines
+    import mc_voice_ui
+
+    active = engines.active()
+    return {
+        "ok": True,
+        "engine": active,
+        "engine_label": engines.label(active),
+        "settings": mc_voice_ui.settings_html(),
+        "voices": mc_voice_ui.voices_html(),
+    }
+
+
 def sopro_payload() -> dict:
     """Everything the Sopro settings surface draws. Refused when Kokoro is active.
 
@@ -1999,6 +2032,9 @@ def install(_demo=None, app=None) -> bool:
     voice_engine_select = _json_route(
         ENGINE_SELECT_ROUTE, lambda payload: select_engine(payload.get("engine")),
         "The text-to-speech engine could not be changed.")
+    voice_surface = _json_route(
+        SURFACE_ROUTE, lambda _payload: surface_payload(),
+        "The Voice Chat settings could not be redrawn.")
     sopro_status_route = _json_route(
         SOPRO_ROUTE, lambda _payload: sopro_payload(),
         "Sopro's status could not be read.")
@@ -2111,6 +2147,7 @@ def install(_demo=None, app=None) -> bool:
                               (CLONING_ABORT_ROUTE, cloning_abort_route),
                               (ENGINES_ROUTE, voice_engines),
                               (ENGINE_SELECT_ROUTE, voice_engine_select),
+                              (SURFACE_ROUTE, voice_surface),
                               (SOPRO_ROUTE, sopro_status_route),
                               (SOPRO_INSTALL_ROUTE, sopro_install_route),
                               (SOPRO_SETTINGS_ROUTE, sopro_settings_route),

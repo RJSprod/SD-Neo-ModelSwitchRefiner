@@ -713,7 +713,7 @@ def speech_marker(take_reply, character_named=None):
 
 
 def _manual_section(kind: str, addresses: list, blurb: str, placeholder: str,
-                    model: str = "") -> str:
+                    model: str = "", title: str = "") -> str:
     """The "or install from files you download yourself" half of a row.
 
     Every row has one now, the engine included: the failure that made the engine
@@ -728,6 +728,12 @@ def _manual_section(kind: str, addresses: list, blurb: str, placeholder: str,
     and pressing Install under the high tier would read whatever was typed under
     the low one. The request still carries the kind, because that is what the
     install route installs; the model rides beside it.
+
+    ``title`` names what this section installs, for a row that has more than one
+    of them. Sopro's row has two -- the runtime and the model artifacts -- and
+    with the default text both collapsed sections read "Or install from files
+    you download yourself", one directly above the other, which says nothing
+    about which is which.
     """
     if not addresses:
         return ""
@@ -742,7 +748,8 @@ def _manual_section(kind: str, addresses: list, blurb: str, placeholder: str,
         for item in addresses)
     return (
         f'<details class="mc-voice-manual">'
-        f'<summary>Or install from files you download yourself</summary>'
+        f'<summary>{ui.escape(title or "Or install from files you download yourself")}'
+        f'</summary>'
         f'<p>{blurb}</p>'
         f'<ul class="mc-voice-links">{links}</ul>'
         f'<div class="mc-voice-folder-row">'
@@ -1090,12 +1097,14 @@ def sopro_html() -> str:
             "hundred-megabyte binary. Download every file into one folder and give Voice "
             "Chat that folder. The original filenames are fine, and each one is checked "
             "against a hash committed in this extension.",
-            "C:\\Users\\you\\Downloads\\sopro-runtime")
+            "C:\\Users\\you\\Downloads\\sopro-runtime",
+            title="Or install the PyTorch runtime from files you download yourself")
         + _manual_section(
             "sopro-model", model_sources,
             "The model artifacts. Download these seven files into one folder and give Voice "
             "Chat that folder. No account or access token is needed.",
-            "C:\\Users\\you\\Downloads\\sopro-model")
+            "C:\\Users\\you\\Downloads\\sopro-model",
+            title="Or install the model artifacts from files you download yourself")
         + _sopro_engine_settings(settings, found)
         + '</div>')
 
