@@ -4157,12 +4157,12 @@
     // -- cleaning up a reference recording ------------------------------------ //
     //
     // Sopro clones what it is given, hiss included, and a phone recording made
-    // in a room with a fan in it clones the fan. The obvious answer was
-    // DeepFilterNet, and it cannot be installed here: its Rust extension,
-    // DeepFilterLib, publishes wheels for CPython 3.8 to 3.11 only, and this
-    // WebUI runs on 3.13. Building it from the sdist needs a Rust toolchain,
-    // which is exactly the "resolve something nobody reviewed" this feature
-    // exists not to do.
+    // in a room with a fan in it clones the fan. The obvious answer is
+    // DeepFilterNet, which is not here yet rather than impossible: its Rust
+    // extension ships wheels for CPython 3.10 and 3.11, so it needs an
+    // interpreter of its own and a second copy of Torch beside the one Sopro
+    // already has -- about 150 MB, and nothing that could be verified from the
+    // workspace this was written in. See docs/17-voice-chat-sopro.md.
     //
     // So this is spectral subtraction, in the tab, on the selection that is
     // about to be uploaded. It is not a learned denoiser and does not pretend
