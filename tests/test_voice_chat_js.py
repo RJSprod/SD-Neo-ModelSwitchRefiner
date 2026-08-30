@@ -608,6 +608,17 @@ const context = {
             const envelope = 0.5 + 0.5 * Math.sin(2 * Math.PI * 4 * at);
             data[index] = level * envelope * Math.sin(2 * Math.PI * 220 * at) + noise;
         }
+        // Driven into the rails, and stabbed with impulses: the two things a
+        // phone recording arrives with that are not noise at all.
+        if (CLIP_DRIVE !== 1) {
+            for (let index = 0; index < length; index += 1) {
+                data[index] = Math.max(-1, Math.min(1, data[index] * CLIP_DRIVE));
+            }
+        }
+        for (let click = 0; click < CLICKS; click += 1) {
+            const at = Math.floor((click + 1) * length / (CLICKS + 1));
+            data[at] = (click % 2) ? 0.99 : -0.99;
+        }
         ok({numberOfChannels: 1, length, sampleRate: rate, duration: length / rate,
             getChannelData: () => data});
     },
@@ -1053,6 +1064,8 @@ DEFAULTS = {
     # Returning the uploaded WAV costs a base64 of it on stdout, so only the one
     # test that measures the audio asks for it.
     "UPLOAD_BYTES": "false",
+    "CLIP_DRIVE": "1",
+    "CLICKS": "0",
     "WORKLET_AVAILABLE": "true",
     # Whether `addModule` succeeds. False models a browser that refuses the
     # module -- a duplicate registration, a Content-Security-Policy that will not
@@ -3342,6 +3355,74 @@ class TestBringingAnAudioFile:
         freqs = numpy.fft.rfftfreq(len(after), 1 / 8000.0)
         loudest = freqs[int(numpy.argmax(spectrum))]
         assert 200 < loudest < 240, f"the voice did not survive; peak at {loudest:.0f} Hz"
+
+    def upload(self, **overrides) -> "numpy.ndarray":
+        """The audio this page actually sends, decoded."""
+        import base64
+        import struct
+
+        import numpy
+
+        settings = {"DECODE_SECONDS": "6", "DECODE_RATE": "8000", "LOUD_FROM": "0",
+                    "UPLOAD_BYTES": "true"}
+        settings.update(overrides)
+        found = run("""
+            await tick();
+            cloneParts.file.files = [new Blob([new Uint8Array(2048)])];
+            cloneParts.file.fire("change");
+            await tick();
+            cloneParts.clean.checked = true;
+            cloneParts.clean.fire("change");
+            cloneParts.name.value = "Ada";
+            cloneParts.create.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true", **settings)
+        raw = base64.b64decode(found["uploaded"]["b64"])
+        count = (len(raw) - 44) // 2
+        return numpy.array(struct.unpack("<%dh" % count, raw[44:44 + count * 2]),
+                           dtype=float) / 32768.0
+
+    def test_a_clipped_recording_does_not_arrive_with_its_flat_tops(self):
+        """A run of samples at the rail is a peak the recorder could not write
+        down, and leaving it is leaving a square wave in the reference the voice
+        is built from -- broadband, harsh, and faithfully learned."""
+        import numpy
+
+        found = self.upload(CLIP_DRIVE="4", NOISE_LEVEL="0.01")
+
+        # The longest run of samples sitting at the same near-full-scale value.
+        loud = numpy.abs(found) > 0.9 * numpy.abs(found).max()
+        longest = 0
+        run_length = 0
+        for flag in loud:
+            run_length = run_length + 1 if flag else 0
+            longest = max(longest, run_length)
+        assert longest <= 4, f"a flat top {longest} samples long survived"
+
+    def test_clicks_are_taken_out(self):
+        import numpy
+
+        with_clicks = self.upload(CLICKS="12", NOISE_LEVEL="0.01", CLIP_DRIVE="1")
+        without = self.upload(CLICKS="0", NOISE_LEVEL="0.01", CLIP_DRIVE="1")
+
+        # A click is a step between neighbours far larger than the waveform
+        # makes on its own, so the biggest step is what it shows up in.
+        clicky = numpy.abs(numpy.diff(with_clicks)).max()
+        plain = numpy.abs(numpy.diff(without)).max()
+        assert clicky < plain * 2.0, (
+            f"the impulses survived: biggest step {clicky:.3f} against {plain:.3f}")
+
+    def test_a_quiet_recording_comes_back_at_a_usable_level(self):
+        """Peak normalisation alone turns the speech down to make room for one
+        door slam. What a reference wants is a consistent speech level."""
+        import numpy
+
+        found = self.upload(NOISE_LEVEL="0.005")
+        rms = float(numpy.sqrt((found ** 2).mean()))
+
+        assert 0.04 < rms < 0.2, f"levelled to {rms:.3f} RMS"
+        assert numpy.abs(found).max() <= 0.96
 
     def test_the_checkbox_changes_what_is_uploaded(self):
         found = self.choose("""

@@ -4215,6 +4215,93 @@
         }
     }
 
+    // Three things spectral subtraction cannot touch, because none of them is
+    // noise: a click is one broken sample, clipping is a peak that was never
+    // recorded, and a quiet recording is quiet everywhere including under the
+    // speech. Each is ordinary in a phone recording and each survives a
+    // denoiser perfectly intact.
+
+    const CLICK_SPREAD = 4.0;
+    const CLICK_FLOOR = 0.02;
+    const CLIP_LEVEL = 0.985;
+    const CLIP_MIN_RUN = 3;
+    const TARGET_RMS = 0.1;
+    const PEAK_CEILING = 0.95;
+
+    // A second-difference test, which is what tells a click from loud audio.
+    //
+    // Band-limited sound moves smoothly between samples: the step it takes from
+    // one to the next can be large, but the *change* in that step is small. A
+    // click is the opposite -- one sample somewhere the waveform was never
+    // going -- so it shows up as a second difference far larger than the first
+    // differences on either side of it. Comparing against a plain amplitude
+    // threshold instead would take the top off every plosive.
+    function repairClicks(samples) {
+        const found = Float32Array.from(samples);
+        for (let index = 2; index < samples.length - 2; index += 1) {
+            const predicted = (samples[index - 1] + samples[index + 1]) / 2;
+            const local = Math.max(Math.abs(samples[index - 1] - samples[index - 2]),
+                                   Math.abs(samples[index + 2] - samples[index + 1]));
+            if (Math.abs(samples[index] - predicted)
+                    > CLICK_SPREAD * local + CLICK_FLOOR) {
+                found[index] = predicted;
+            }
+        }
+        return found;
+    }
+
+    // A run of samples pinned at full scale is a peak the recorder could not
+    // write down. Leaving the flat top in place leaves a square wave in the
+    // reference -- broadband, harsh, and exactly the sort of thing a voice
+    // model will faithfully learn -- so an arc goes back over it. The bulge is
+    // bounded and grows with the length of the run, because a longer flat top
+    // means more of the peak went missing.
+    function repairClipping(samples) {
+        const found = Float32Array.from(samples);
+        let index = 0;
+        while (index < found.length) {
+            if (Math.abs(found[index]) < CLIP_LEVEL) { index += 1; continue; }
+            let end = index;
+            while (end < found.length && Math.abs(found[end]) >= CLIP_LEVEL) end += 1;
+            const width = end - index;
+            if (width >= CLIP_MIN_RUN && index > 0 && end < found.length) {
+                const before = found[index - 1];
+                const after = found[end];
+                const sign = found[index] >= 0 ? 1 : -1;
+                const bulge = Math.min(0.25, 0.02 * width);
+                for (let step = 0; step < width; step += 1) {
+                    const phase = (step + 1) / (width + 1);
+                    found[index + step] = before + (after - before) * phase
+                        + sign * bulge * Math.sin(Math.PI * phase);
+                }
+            }
+            index = end;
+        }
+        return found;
+    }
+
+    // An RMS target with a peak ceiling, rather than peak normalisation alone.
+    // Peak normalisation on a recording with one door slam in it turns the
+    // speech down to make room for the slam; what a reference wants is a
+    // consistent *speech* level, with the ceiling only there to stop it
+    // clipping on the way out.
+    function levelOut(samples) {
+        let sum = 0;
+        let peak = 0;
+        for (let index = 0; index < samples.length; index += 1) {
+            const value = samples[index];
+            sum += value * value;
+            const size = Math.abs(value);
+            if (size > peak) peak = size;
+        }
+        const rms = Math.sqrt(sum / Math.max(1, samples.length));
+        if (!(rms > 1e-6) || !(peak > 1e-6)) return samples;
+        let gain = TARGET_RMS / rms;
+        if (peak * gain > PEAK_CEILING) gain = PEAK_CEILING / peak;
+        for (let index = 0; index < samples.length; index += 1) samples[index] *= gain;
+        return samples;
+    }
+
     // A one-pole high-pass at about 80 Hz. Rumble, handling and desk thumps all
     // live below where a voice does, and none of it survives being cloned into
     // something the model then reproduces under every sentence.
@@ -4235,7 +4322,10 @@
     }
 
     function denoise(input, rate) {
-        const samples = highPass(input, rate);
+        // Repairs first: a click or a flat top is a broken sample rather than
+        // noise, and feeding either into the noise estimate below teaches it
+        // that broadband energy is normal here.
+        const samples = highPass(repairClipping(repairClicks(input)), rate);
         const frames = Math.max(1, Math.floor((samples.length - FFT_SIZE) / FFT_HOP) + 1);
         if (samples.length < FFT_SIZE * 2) return samples;
         const bins = FFT_SIZE / 2 + 1;
@@ -4324,19 +4414,27 @@
                 weight[from + i] += window[i] * window[i];
             }
         }
-        let peak = 0;
+        // The first and last window's worth of samples have only partial
+        // overlap, so their weight is a fraction of the steady-state one and
+        // dividing by it amplifies them into a spike at each end. That spike is
+        // then the loudest thing in the clip, and the levelling below turns the
+        // whole recording down to make room for it. So the divisor is floored
+        // at half the steady-state weight, and the ends are faded.
+        let full = 0;
+        for (let index = 0; index < weight.length; index += 1) {
+            if (weight[index] > full) full = weight[index];
+        }
+        const floor = Math.max(full * 0.5, 1e-6);
         for (let index = 0; index < out.length; index += 1) {
-            if (weight[index] > 1e-6) out[index] /= weight[index];
-            const size = Math.abs(out[index]);
-            if (size > peak) peak = size;
+            out[index] /= Math.max(weight[index], floor);
         }
-        // Back up to just under full scale. A reference the model conditions on
-        // should not also teach it that this speaker is quiet.
-        if (peak > 1e-4) {
-            const gain = 0.89 / peak;
-            for (let index = 0; index < out.length; index += 1) out[index] *= gain;
+        const fade = Math.min(Math.floor(rate * 0.005), Math.floor(out.length / 4));
+        for (let step = 0; step < fade; step += 1) {
+            const ramp = step / fade;
+            out[step] *= ramp;
+            out[out.length - 1 - step] *= ramp;
         }
-        return out;
+        return levelOut(out);
     }
 
     // The selection as mono samples, cleaned if that is what is showing. One
