@@ -1296,14 +1296,33 @@ def install_cloning(on_status=None, on_progress=None, folder=None) -> None:
                                         expectations)
         _sanity_check(staging, entry.cloning_required_paths,
                       "The PocketTTS voice-cloning weights")
-        # Copied into the installed model directory one file at a time rather
+        # Moved into the installed model directory one file at a time rather
         # than promoted over it: the official half is already there and working,
         # and a directory rename would take it away for the length of the move.
-        for item in entry.cloning_artifacts:
-            source = staging / item.local_name
-            destination = target / item.local_name
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(source, destination)
+        #
+        # Which means this loop is the one step here that is not a rename, so it
+        # is the one step that can stop half way. What it added is undone on the
+        # way out -- what it *replaced* is not, because a file that was already
+        # there was already this build's and restoring a copy of it would mean
+        # keeping a copy of it. Today there is one artifact and the partial state
+        # is unreachable; the second one is what this is for.
+        added = []
+        try:
+            for item in entry.cloning_artifacts:
+                source = staging / item.local_name
+                destination = target / item.local_name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if not destination.exists():
+                    added.append(destination)
+                os.replace(source, destination)
+        except BaseException:
+            for destination in added:
+                try:
+                    destination.unlink()
+                except OSError:
+                    logger.debug("Model Chain: could not undo a partial PocketTTS "
+                                 "cloning install", exc_info=True)
+            raise
         _write_json(target / CLONING_MARKER, {
             "schema": SCHEMA,
             "repo": entry.cloning_repo,
@@ -1632,22 +1651,29 @@ def _write_local_config(entry: Bundle) -> None:
         return
     found = json.loads(json.dumps(stored))
     names = dict(entry.config or {})
-    public = names.get("weights_path_without_voice_cloning") or ""
+    public = str(names.get("weights_path_without_voice_cloning") or "")
     for key, where in LOCATIONS.items():
         name = str(names.get(key) or "")
         candidate = (root / name) if name else None
-        if candidate is None or not candidate.is_file():
-            if key == "weights_path" and public and (root / public).is_file():
-                # No gated half on this machine. Pointed at the public weights
-                # rather than left naming a file that is not there, because
-                # upstream only falls back when a *download* fails.
-                _place(found, where, str(root / public))
-                continue
-            _place(found, where, None)
+        if candidate is not None and candidate.is_file():
+            _place(found, where, str(candidate))
             continue
-        _place(found, where, str(candidate))
-    located = [key for key, where in LOCATIONS.items()
-               if str(_at(found, where) or "").startswith(("hf://", "http://", "https://"))]
+        if key == "weights_path" and public and (root / public).is_file():
+            # No gated half on this machine. Pointed at the public weights
+            # rather than left naming a file that is not there, because upstream
+            # only falls back when a *download* fails.
+            _place(found, where, str(root / public))
+            continue
+        # Refused rather than written as null. Upstream's schema makes the
+        # tokenizer's location required and treats a null ``weights_path`` as
+        # "load nothing", so a config with a hole in it is a pydantic traceback
+        # or a silently uninitialised model -- neither of which says which file
+        # is missing.
+        raise PocketError(f"PocketTTS's model directory has no "
+                          f"{name or key.replace('_', ' ')}, so its local configuration "
+                          f"was not written. Install the PocketTTS model again.")
+    located = sorted(key for key, value in _flatten(found)
+                     if str(value).startswith(("hf://", "http://", "https://")))
     if located:
         # A location this build does not know how to replace, which means the
         # manifest's ``config`` block and upstream's document have drifted apart.
@@ -1665,14 +1691,22 @@ def _write_local_config(entry: Bundle) -> None:
                      exc_info=True)
 
 
-def _at(found: dict, where: tuple):
-    """One nested value, or ``None`` for a path that is not there."""
-    node = found
-    for name in where:
-        if not isinstance(node, dict):
-            return None
-        node = node.get(name)
-    return node
+def _flatten(found, prefix: str = ""):
+    """Every leaf in a nested document, as ``(dotted key, value)`` pairs.
+
+    Depth-first and total, because the check it feeds is about the whole
+    document rather than the three keys this module replaces: upstream owns
+    everything else in it, and a location that appeared somewhere new would be a
+    location the worker could resolve (I-PKT-20).
+    """
+    if isinstance(found, dict):
+        for key, value in found.items():
+            yield from _flatten(value, f"{prefix}.{key}" if prefix else str(key))
+    elif isinstance(found, (list, tuple)):
+        for value in found:
+            yield from _flatten(value, prefix)
+    else:
+        yield prefix, found
 
 
 def uninstall() -> Status:

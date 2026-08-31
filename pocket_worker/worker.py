@@ -1129,10 +1129,13 @@ class Engine:
                 _note(f"model reports {rate} Hz; the parent expected {self.sample_rate}")
             self.sample_rate = rate
         if getattr(self.model, "has_voice_cloning", True) is False:
-            # Upstream's own answer, and it beats the parent's file check. It
-            # sets this when the cloning-capable weights could not be read and it
-            # fell back to the ones without them, which is a state a directory
-            # listing cannot see.
+            # Upstream's own answer, and where it disagrees with the parent's
+            # file check it wins. In released 3.0.2 this can only go false when
+            # *fetching* the cloning weights fails, which a local path never
+            # does -- so today it is a belt rather than a branch anybody reaches.
+            # It is here because the alternative is a Clone button that offers
+            # itself to a model that cannot clone, and because the cost of being
+            # wrong in that direction is somebody recording their voice twice.
             self.cloning_ready = False
             _note("this model was loaded without voice-cloning weights")
         # Asserted rather than assumed. The environment empties every GPU

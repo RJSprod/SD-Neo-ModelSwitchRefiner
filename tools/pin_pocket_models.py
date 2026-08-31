@@ -18,8 +18,8 @@ this engine that difference is not academic: a saved voice state is a tensor
 written by one build and read back by another, so "the same PocketTTS" has to
 mean the same bytes rather than the same version string. This repository
 therefore pins exact builds and the fingerprint of every byte, and this tool is
-how that list is produced without anybody transcribing fifty-two SHA-256 digests
-by hand.
+how that list is produced without anybody transcribing a hundred and twelve
+SHA-256 digests by hand.
 
     python tools/pin_pocket_models.py --check      # report, change nothing
     python tools/pin_pocket_models.py              # rewrite the closure
@@ -715,8 +715,8 @@ def platforms(entries: tuple, declared: list, state: State, committed: dict, say
     """One fully pinned wheel closure per platform the manifest advertises.
 
     Each release is read from PyPI once and then selected from four times, so a
-    thirteen-package closure across four minors is thirteen requests rather than
-    fifty-two.
+    twenty-eight-package closure across four minors is twenty-eight requests
+    rather than a hundred and twelve.
     """
     if not declared:
         raise PinError("the manifest advertises no platforms")

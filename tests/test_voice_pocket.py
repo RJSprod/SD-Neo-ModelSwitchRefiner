@@ -776,6 +776,53 @@ class TestTheTransactionsFailurePathsLeaveNothingOrphaned:
             assert any(str(failure) in line for line in said), \
                 f"nothing said why cloning was skipped for {failure!r}"
 
+    def test_a_half_finished_cloning_copy_undoes_what_it_added(
+            self, host, installed, worker, monkeypatch, tmp_path):
+        """The one step in this transaction that is not a rename, and so the one
+        that can stop half way: the gated weights are moved into the installed
+        model directory file by file rather than promoted over it, because a
+        directory rename would take the working official half away for the
+        length of the move."""
+        entry = installed["models"]["english"]
+        entry["cloning_files"] = [
+            {"filename": "a.safetensors", "local_name": "cloning-a.safetensors",
+             "url": "https://example.invalid/a"},
+            {"filename": "b.safetensors", "local_name": "cloning-b.safetensors",
+             "url": "https://example.invalid/b"},
+        ]
+        entry["cloning_required_paths"] = ["cloning-a.safetensors", "cloning-b.safetensors"]
+
+        def adopted(artifacts, folder, destination, say, what):
+            destination.mkdir(parents=True, exist_ok=True)
+            for item in artifacts:
+                (destination / item.local_name).write_bytes(
+                    b"\x08\x00\x00\x00\x00\x00\x00\x00{}      ")
+            return {item.local_name: "a" * 64 for item in artifacts}
+
+        monkeypatch.setattr(pocket, "_adopt", adopted)
+
+        moved = []
+        real = pocket.os.replace
+
+        def flaky(source, destination):
+            moved.append(str(destination))
+            if len(moved) == 2:
+                raise OSError("the disk filled up")
+            return real(source, destination)
+
+        monkeypatch.setattr(pocket.os, "replace", flaky)
+        target = paths.pocket_model_root("english")
+        before = sorted(one.name for one in target.iterdir())
+
+        with pytest.raises(OSError):
+            pocket.install_cloning(folder=str(tmp_path))
+
+        monkeypatch.setattr(pocket.os, "replace", real)
+        assert sorted(one.name for one in target.iterdir()) == before, \
+            "a half-finished cloning install left a file behind"
+        assert not (target / pocket.CLONING_MARKER).exists()
+        assert pocket.status().cloning_ready is False
+
     def test_a_gate_the_user_has_not_accepted_is_a_state_and_not_a_failure(
             self, host, installed, worker, monkeypatch):
         for name in ("install_runtime", "install_model", "install_voices"):
@@ -882,6 +929,17 @@ class TestTheWorkerIsPointedAtLocalFilesAndNothingElse:
 
         assert found["weights_path"] == str(root / "model.safetensors")
         assert found["weights_path_without_voice_cloning"] == str(root / "model.safetensors")
+
+    def test_a_missing_file_is_a_sentence_rather_than_a_hole_in_the_config(
+            self, host, cloning):
+        """Upstream's schema makes the tokenizer's location required and reads a
+        null ``weights_path`` as "load nothing", so writing the gap would be a
+        pydantic traceback or a silently uninitialised model -- neither of which
+        says which file is missing."""
+        with pytest.raises(pocket.PocketError) as raised:
+            self._localise(paths.pocket_model_root("english"))
+        assert "tokenizer.model" in str(raised.value)
+        assert not paths.pocket_model_config("english").exists()
 
     def test_it_is_written_where_upstream_will_agree_to_open_it(self, host, cloning):
         """``load_model`` refuses a config whose suffix is not ``.yaml`` or
