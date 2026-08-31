@@ -927,7 +927,8 @@ class Gated(VoiceError):
         super().__init__(
             f"{self.filename} is behind the publisher's access gate (HTTP {self.status}). "
             f"Accept the model's conditions on the publisher's page with your own account, "
-            f"then start this WebUI with HF_TOKEN set in its environment.")
+            f"then give Voice Chat an access token — Settings → Voice Chat → Access "
+            f"token — or start this WebUI with HF_TOKEN set in its environment.")
 
 
 @dataclass(frozen=True)
@@ -960,17 +961,110 @@ class _StopAtRedirect(urllib.request.HTTPRedirectHandler):
 
 
 CREDENTIAL_VARIABLES = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN")
-"""Where a gated publisher's token may be read from, and the only places.
-
-The process environment, in the parent, at the moment a download is about to
-happen. Not a settings file, not config.json, not a manifest, not a browser
-body, and not the worker's environment: a worker's job is inference from
-verified local files and it has no business holding a credential for a host it
-will never contact (I-PKT-20, I-PKT-21, section 45).
+"""Environment variables a gated publisher's token may be read from.
 
 Nothing writes these. If one is set, somebody set it for this process on
-purpose, which is the only consent this module is in a position to observe.
+purpose, which is the clearest consent this module can observe -- and it lasts
+exactly as long as the process, which is the other half of why it is the
+default.
 """
+
+CREDENTIAL_HOSTS = ("huggingface.co", "www.huggingface.co")
+"""The one publisher a stored token is ever offered to.
+
+A token is for the host that issued it. This list is why a manifest that grew a
+second download host could not quietly start sending somebody's Hugging Face
+credential to it, and why :func:`_credential` takes the URL rather than being
+asked for "the token".
+"""
+
+
+def stored_credential() -> str:
+    """The token somebody asked Voice Chat to remember, or ``""``.
+
+    Read from disk on every call rather than cached. A user who presses Forget
+    expects the next download to stop using it, and a module that had it in
+    memory would keep using it until something restarted.
+    """
+    try:
+        found = json.loads(paths.credential_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return str((found or {}).get("token") or "").strip() if isinstance(found, dict) else ""
+
+
+def remember_credential(token: str) -> dict:
+    """Keep a publisher token for later installs. Returns what may be shown.
+
+    Written with the file created ``0600`` from the start rather than tightened
+    afterwards, because a chmod after the write is a window in which the token
+    is world readable. On Windows the mode is advisory and the protection is
+    that the file is under the user's own data root; that is stated in the panel
+    rather than implied.
+
+    What comes back never contains the token. The panel gets "there is one, and
+    it ends 1a2b", which is enough for somebody to recognise the key they
+    pasted and useless to anybody reading over their shoulder.
+    """
+    wanted = str(token or "").strip()
+    if not wanted:
+        raise VoiceError("Paste an access token first.")
+    if any(character.isspace() for character in wanted):
+        raise VoiceError("That does not look like an access token — it has spaces in it.")
+    if len(wanted) < 8 or len(wanted) > 512:
+        raise VoiceError("That does not look like an access token.")
+    path = paths.credential_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging = path.with_name(path.name + ".new")
+    # Opened by descriptor with the mode in the open, so the bytes are never on
+    # disk under a broader mode than this, not even for an instant.
+    handle = os.open(str(staging), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as writer:
+            json.dump({"schema": 1, "host": CREDENTIAL_HOSTS[0], "token": wanted}, writer)
+    except BaseException:
+        try:
+            os.remove(staging)
+        except OSError:
+            pass
+        raise
+    os.replace(staging, path)
+    logger.info("Model Chain: Voice Chat stored a publisher access token for %s",
+                CREDENTIAL_HOSTS[0])
+    return credential_state()
+
+
+def forget_credential() -> dict:
+    """Remove the stored token. Idempotent, and never raises for a missing file."""
+    path = paths.credential_path()
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return credential_state()
+    except OSError as exc:
+        raise VoiceError(f"That token could not be removed ({exc.__class__.__name__}). "
+                         f"Delete {path.name} in the Voice Chat folder by hand.") from None
+    logger.info("Model Chain: Voice Chat forgot its stored publisher access token")
+    return credential_state()
+
+
+def credential_state() -> dict:
+    """What the panel may know about the token. Never the token.
+
+    ``ends`` is the last four characters and exists so somebody can tell which
+    of their keys is in here without being shown it. Everything else is a
+    boolean or a name.
+    """
+    stored = stored_credential()
+    environment = [name for name in CREDENTIAL_VARIABLES
+                   if str(os.environ.get(name) or "").strip()]
+    return {
+        "stored": bool(stored),
+        "ends": stored[-4:] if len(stored) >= 8 else "",
+        "from_environment": bool(environment),
+        "environment_variable": environment[0] if environment else "",
+        "host": CREDENTIAL_HOSTS[0],
+    }
 
 
 def _credential(url: str) -> str:
@@ -986,8 +1080,15 @@ def _credential(url: str) -> str:
         # The manifests this reads are this repository's own, so this is not a
         # case that arises -- which is exactly why it is cheap to refuse.
         return ""
-    if parts.netloc.casefold() not in ("huggingface.co", "www.huggingface.co"):
+    if parts.netloc.casefold() not in CREDENTIAL_HOSTS:
         return ""
+    # The stored one first. It is the most recent thing a person did on purpose
+    # -- they pasted it into this feature's own settings -- and a saved token
+    # that a stale environment variable silently overrode would be a Save that
+    # appeared to do nothing.
+    found = stored_credential()
+    if found:
+        return found
     for name in CREDENTIAL_VARIABLES:
         found = str(os.environ.get(name) or "").strip()
         if found:

@@ -3204,12 +3204,22 @@ precomputed official voice states, installed locally and never fetched again, so
 a fresh installation can speak the moment it finishes downloading. **Clone
 voice** is separate, because Pocket's cloning-capable weights are a *different*
 upstream repository behind an access gate — you accept its conditions on the
-publisher's page with your own account and start the WebUI with `HF_TOKEN` in
-its environment, and then it is one Install button like everything else. Without
-that, official voices still work and the clone panel tells you what is missing
-rather than offering a button that cannot work. Your token is read from the
-environment, sent only to the publisher, removed before the signed download
-redirect, and never written anywhere.
+publisher's page with your own account and give Voice Chat an access token, and
+then it is one Install button like everything else. Without that, official
+voices still work and the clone panel tells you what is missing rather than
+offering a button that cannot work.
+
+**Where the token comes from.** Paste it once under *Settings → Voice Chat →
+Access token* and Voice Chat keeps it for every gated download, for every
+engine; or set `HF_TOKEN` in the environment you start the WebUI from and leave
+the field empty. The saved one wins when both exist, because it is the more
+recent thing you did on purpose. A saved token is written to a file in the Voice
+Chat folder that only your account can read, and the panel can only ever tell
+you its last four characters — there is no request anywhere that returns it.
+Either way it is sent only to the publisher, stripped before the signed download
+redirect, never given to a speech process, and never written to the log. The
+difference worth knowing: an environment variable dies with the shell that set
+it, and a saved token sits there until you press **Forget it**.
 
 **Speed, Pitch, Volume and Pause are Voice Chat's**, exactly as they are on
 Sopro, because the reviewed Pocket API has no speaking-rate input either.

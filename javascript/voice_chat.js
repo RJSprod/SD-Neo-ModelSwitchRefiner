@@ -109,6 +109,10 @@
         cloneDiscard: "model-chain/voice/clone/discard",
         pocket: "model-chain/voice/pocket",
         pocketInstall: "model-chain/voice/pocket/install",
+        // One token for every engine's gated downloads. Write-only from here:
+        // nothing this script can call returns it, and the status it paints
+        // comes back as "stored, ends 1a2b" rather than as the token.
+        credential: "model-chain/voice/credential",
         cleanup: "model-chain/voice/cleanup",
         cleanupInstall: "model-chain/voice/cleanup/install",
         cleanupRun: "model-chain/voice/cleanup/run",
@@ -3197,6 +3201,7 @@
         wireSopro(holder);
         wirePocket(holder);
         wireCleanup(holder);
+        wireCredential(holder);
         wireValidate(holder);
         schedulePaint(holder, 0);
     }
@@ -3374,6 +3379,70 @@
             const rows = payload.rows || [];
             table.hidden = !rows.length;
             if (rows.length) table.textContent = validateTable(rows);
+        }
+    }
+
+    function wireCredential(holder) {
+        // Save and Forget, and nothing that reads. The field is a password
+        // input so a browser will not autofill it into a form somewhere else
+        // and a screen recorder does not capture it; it is cleared the moment
+        // the request is sent, so the token is not sitting in the DOM waiting
+        // for the next person to open the settings tab.
+        const row = holder.querySelector('[data-mc-voice-kind="credential"]');
+        if (!row) return;
+
+        function paint(payload) {
+            if (!payload) return;
+            if (payload.error) {
+                setText(row, '[data-mc-voice-status="credential"]', payload.error);
+                return;
+            }
+            if (payload.stored) {
+                setText(row, '[data-mc-voice-status="credential"]',
+                        "Saved — a token ending " + (payload.ends || "")
+                        + " is used for gated downloads.");
+            } else if (payload.from_environment) {
+                setText(row, '[data-mc-voice-status="credential"]',
+                        "Not saved — " + (payload.environment_variable || "the environment")
+                        + " is set in this WebUI's environment and is used instead.");
+            } else {
+                setText(row, '[data-mc-voice-status="credential"]',
+                        "Not saved — gated downloads will be refused with a sentence "
+                        + "about access.");
+            }
+        }
+
+        const save = row.querySelector("[data-mc-voice-save-token]");
+        if (save) {
+            save.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                const box = row.querySelector("[data-mc-voice-token]");
+                const token = box ? (box.value || "").trim() : "";
+                if (!token) {
+                    setText(row, '[data-mc-voice-status="credential"]',
+                            "Paste an access token first.");
+                    return;
+                }
+                if (box) box.value = "";
+                save.disabled = true;
+                post(ROUTES.credential, {action: "save", token: token},
+                     holder).then(function (payload) {
+                    save.disabled = false;
+                    paint(payload);
+                });
+            });
+        }
+
+        const forget = row.querySelector("[data-mc-voice-forget-token]");
+        if (forget) {
+            forget.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                forget.disabled = true;
+                post(ROUTES.credential, {action: "forget"}, holder).then(function (payload) {
+                    forget.disabled = false;
+                    paint(payload);
+                });
+            });
         }
     }
 

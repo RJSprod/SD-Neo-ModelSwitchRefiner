@@ -615,8 +615,8 @@ def _status() -> Status:
         found.cloning_message = (
             f"Not installed. PocketTTS's voice-cloning weights are a gated repository: "
             f"accept the conditions at huggingface.co/{entry.cloning_repo} with your own "
-            f"account, then start this WebUI with HF_TOKEN set in its environment and "
-            f"press Install. Official PocketTTS voices work without this.")
+            f"account, then save an access token under Settings → Voice Chat → Access "
+            f"token and press Install. Official PocketTTS voices work without this.")
     return found
 
 
