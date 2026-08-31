@@ -520,6 +520,26 @@ class TestTheQuietAModelPutsRoundASegmentIsCutBack:
             700 - worker.KEEP_LEAD_MS - worker.KEEP_TAIL_MS, abs=40)
         assert abs(one["trimmed_ms"] - two["trimmed_ms"]) < 40
 
+    def test_a_pause_that_runs_on_inside_a_segment_is_cut_back(self):
+        """Where the gap somebody hears actually is.
+
+        A committed segment is a hundred and something characters, which is two
+        or three sentences, so most sentence boundaries are inside one. A pause
+        past the cap is dead air rather than delivery; under it, it is the
+        model's own timing and is left alone.
+        """
+        class Paused(self.Padded):
+            def samples(self):
+                rate = self.sample_rate
+                return ([0.5] * (rate // 2)
+                        + [0.0] * int(rate * 1.05)
+                        + [0.5] * (rate // 2))
+
+        found, metrics = self.spoken(Paused(lead=0.0, tail=0.0))
+        assert metrics["gap_ms"] == pytest.approx(1050, abs=40)
+        assert len(found) == pytest.approx(
+            int(24000 * (1.0 + worker.KEEP_GAP_MS / 1000.0)), abs=24000 * 0.03)
+
     def test_the_level_follows_the_segment_rather_than_being_fixed(self):
         """A voice recorded with room tone still has its padding recognised."""
         tts = self.Padded(lead=0.3, level=0.005)

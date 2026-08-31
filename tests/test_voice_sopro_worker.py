@@ -429,21 +429,23 @@ class TestTheQuietAModelPutsRoundAUnitIsCutBack:
         expected = self.RATE + int(self.RATE * sopro_worker.KEEP_TAIL_MS / 1000)
         assert abs(found.size - expected) < self.RATE * 0.02
 
-    def test_quiet_inside_a_unit_is_prosody_and_is_left_alone(self):
-        source = numpy.concatenate([tone(220.0, 0.2), self.quiet(0.3), tone(220.0, 0.2)])
+    def test_a_pause_short_enough_to_be_delivery_is_left_alone(self):
+        source = numpy.concatenate([tone(220.0, 0.2), self.quiet(0.15), tone(220.0, 0.2)])
         trim = sopro_worker.Trim(self.RATE)
         found = self.through(trim, source)
         assert trim.dropped == 0
         assert abs(found.size - source.size) < self.RATE * 0.02
 
-    def test_a_long_pause_inside_a_unit_is_still_left_alone(self):
-        """Longer than the hold, so it cannot all be waited out. It still
-        arrives, because held audio spills through rather than accumulating."""
-        source = numpy.concatenate([tone(220.0, 0.1), self.quiet(1.5), tone(220.0, 0.1)])
+    def test_a_pause_that_runs_on_is_cut_back_to_the_cap(self):
+        """Past the cap it is dead air rather than delivery, and most sentence
+        boundaries in a reply are inside a unit rather than at a join."""
+        source = numpy.concatenate([tone(220.0, 0.2), self.quiet(1.05), tone(220.0, 0.2)])
         trim = sopro_worker.Trim(self.RATE)
         found = self.through(trim, source)
-        assert trim.dropped == 0
-        assert abs(found.size - source.size) < self.RATE * 0.02
+        assert trim.gap_ms == pytest.approx(1050, abs=30)
+        assert found.size == pytest.approx(
+            int(self.RATE * (0.4 + sopro_worker.KEEP_GAP_MS / 1000.0)),
+            abs=self.RATE * 0.03)
 
     def test_speech_is_never_cut(self):
         trim = sopro_worker.Trim(self.RATE)
@@ -487,14 +489,15 @@ class TestTheQuietAModelPutsRoundAUnitIsCutBack:
                                                - sopro_worker.KEEP_TAIL_MS, abs=40)
         assert abs(one.dropped_ms - two.dropped_ms) < 40
 
-    def test_a_pause_inside_a_unit_is_measured_and_left_alone(self):
+    def test_a_pause_inside_a_unit_is_measured_as_well_as_shortened(self):
         source = numpy.concatenate([tone(220.0, 0.2) * 1.8, self.quiet(0.5, 0.01),
                                     tone(220.0, 0.2) * 1.8])
         trim = sopro_worker.Trim(self.RATE)
         found = self.through(trim, source)
         assert trim.gap_ms == pytest.approx(500, abs=30)
-        assert trim.dropped == 0
-        assert abs(found.size - source.size) < self.RATE * 0.02
+        assert found.size == pytest.approx(
+            int(self.RATE * (0.4 + sopro_worker.KEEP_GAP_MS / 1000.0)),
+            abs=self.RATE * 0.03)
 
     def test_a_rate_of_nothing_is_a_pass_through_rather_than_a_crash(self):
         source = numpy.concatenate([self.quiet(0.1), tone(220.0, 0.1)])

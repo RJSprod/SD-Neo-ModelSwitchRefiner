@@ -991,6 +991,21 @@ def quiet(seconds: float, level: float = 0.0, rate: int = RATE):
     return numpy.full(int(seconds * rate), level, dtype=numpy.float32)
 
 
+def longest_quiet(samples, level: float):
+    """The longest contiguous run of samples under ``level``."""
+    best = (0, 0)
+    start = None
+    for index in range(samples.size + 1):
+        under = index < samples.size and abs(float(samples[index])) < level
+        if under and start is None:
+            start = index
+        elif not under and start is not None:
+            if index - start > best[1] - best[0]:
+                best = (start, index)
+            start = None
+    return samples[best[0]:best[1]]
+
+
 def through_trim(trim, source, chunk: int = 431, module=None):
     """Push a unit through a trim in awkward-sized chunks and collect the PCM."""
     module = module or pocket_worker
@@ -1035,21 +1050,58 @@ class TestTheQuietAModelPutsRoundAUnitIsCutBack:
         assert trim.dropped_ms == pytest.approx(900 - 60 - 120, abs=30)
         assert found.size + trim.dropped * 1 == pytest.approx(source.size, abs=RATE * 0.02)
 
-    def test_quiet_inside_a_unit_is_prosody_and_is_left_alone(self):
-        """Only the two ends are padding. A pause between clauses is the model
-        saying something, and cutting it would be rewriting the delivery."""
-        source = numpy.concatenate([tone(220.0, 0.2), quiet(0.3), tone(220.0, 0.2)])
-        found = through_trim(pocket_worker.Trim(RATE), source)
-        assert abs(found.size - source.size) < RATE * 0.02
-
-    def test_a_long_pause_inside_a_unit_is_still_left_alone(self):
-        """Longer than the hold, so it cannot all be waited out. It still
-        arrives, because held audio spills through rather than accumulating."""
-        source = numpy.concatenate([tone(220.0, 0.1), quiet(1.5), tone(220.0, 0.1)])
+    def test_a_pause_short_enough_to_be_delivery_is_left_alone(self):
+        """A pause between two clauses is the model saying something. Under the
+        cap it is not touched at all -- cutting it would rewrite the delivery."""
+        source = numpy.concatenate([tone(220.0, 0.2), quiet(0.15), tone(220.0, 0.2)])
         trim = pocket_worker.Trim(RATE)
         found = through_trim(trim, source)
-        assert abs(found.size - source.size) < RATE * 0.02
         assert trim.dropped == 0
+        assert abs(found.size - source.size) < RATE * 0.02
+
+    def test_a_pause_that_runs_on_is_cut_back_to_the_cap(self):
+        """Past the cap it is dead air rather than delivery.
+
+        This is the case the machine reported: pauses of 480, 720 and 1050 ms
+        *inside* units whose two ends carried almost no quiet at all. Most
+        sentence boundaries in a reply are inside a unit, so this is where the
+        gap somebody hears actually lives.
+        """
+        source = numpy.concatenate([tone(220.0, 0.2), quiet(1.05), tone(220.0, 0.2)])
+        trim = pocket_worker.Trim(RATE)
+        found = through_trim(trim, source)
+        assert trim.gap_ms == pytest.approx(1050, abs=30)
+        assert found.size == pytest.approx(
+            int(RATE * (0.4 + pocket_worker.KEEP_GAP_MS / 1000.0)), abs=RATE * 0.03)
+
+    def test_a_pause_a_listener_asked_to_be_longer_is_longer(self):
+        """"Pause between sentences" adds to the cap as well as to the joins, so
+        the control means the same thing wherever the sentence boundary falls."""
+        source = numpy.concatenate([tone(220.0, 0.2), quiet(1.05), tone(220.0, 0.2)])
+        found = through_trim(pocket_worker.Trim(RATE, gap_ms=200 + 300), source)
+        assert found.size == pytest.approx(int(RATE * (0.4 + 0.5)), abs=RATE * 0.03)
+
+    def test_the_splice_across_a_shortened_pause_is_not_a_step(self):
+        """The cut is a crossfade, because a step in a waveform is a click.
+
+        The signal is a pause at a level a step across would be audible at --
+        two different levels either side, so butting them together would leave a
+        jump this measures the absence of.
+        """
+        source = numpy.concatenate([tone(220.0, 0.2) * 1.8,
+                                    quiet(0.4, 0.04), quiet(0.4, -0.04),
+                                    tone(220.0, 0.2) * 1.8])
+        found = through_trim(pocket_worker.Trim(RATE), source)
+        # Inside the pause only, and contiguously: the tone either side has a
+        # slope of its own, and what is at issue is the join between the two
+        # halves of the cut.
+        # Ten milliseconds in from each end of it, because the fixture's own
+        # tone stops abruptly where it crosses the level and that step is in the
+        # source rather than in the splice.
+        hush = longest_quiet(found, 0.1)[240:-240]
+        assert hush.size > RATE * 0.1, "the pause is not in the output to look at"
+        assert float(numpy.abs(numpy.diff(hush)).max()) < 0.01, (
+            "the pause was spliced with a step in it")
 
     def test_speech_is_never_cut(self):
         source = tone(220.0, 1.0)
@@ -1183,21 +1235,20 @@ class TestQuietIsMeasuredAgainstTheSpeechAndNotAgainstTheFloor:
         assert one.floor_db > two.floor_db + 20, "the fixtures are not different"
         assert abs(one.dropped_ms - two.dropped_ms) < 40
 
-    def test_a_pause_inside_the_unit_is_measured_and_left_alone(self):
-        """The number that says whether a gap is even this class's to fix.
+    def test_a_pause_inside_the_unit_is_measured_as_well_as_shortened(self):
+        """The number that said where the gap actually was.
 
-        A pause the model put between two clauses is prosody. It is reported so
-        that a reply whose sentences are half a second apart can say whether
-        that half second is at the joins, where something can be done about it,
-        or inside a unit, where the answer is a different one.
+        It is reported whether or not it is cut, because a reply whose sentences
+        are half a second apart is a different problem depending on where that
+        half second sits -- and nothing in the log could tell those apart.
         """
         source = numpy.concatenate([tone(220.0, 0.2) * 1.8, quiet(0.5, self.PAD),
                                     tone(220.0, 0.2) * 1.8])
         trim = pocket_worker.Trim(RATE)
         found = through_trim(trim, source)
         assert trim.gap_ms == pytest.approx(500, abs=30)
-        assert trim.dropped == 0
-        assert abs(found.size - source.size) < RATE * 0.02
+        assert found.size == pytest.approx(
+            int(RATE * (0.4 + pocket_worker.KEEP_GAP_MS / 1000.0)), abs=RATE * 0.03)
 
     def test_the_trailing_run_is_not_counted_as_a_pause_inside(self):
         """A tail is a tail. Only a run that speech comes back after is a gap."""

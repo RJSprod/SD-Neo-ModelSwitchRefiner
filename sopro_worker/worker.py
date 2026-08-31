@@ -450,21 +450,46 @@ rather than trimmed, too shy and the unit's audio waits :data:`MAX_LEAD_HOLD_MS`
 and then goes out untrimmed.
 """
 
-MAX_HOLD_MS = 600
+KEEP_GAP_MS = 200
+GAP_SPLICE_MS = 8
+"""How long a pause *inside* a unit may be, and how it is shortened.
+
+This was the answer in the end, and the first two rounds of this class were
+looking in the wrong place. A machine reported it: quiet at the two ends of a
+unit measured between 10 and 310 milliseconds, most of it under the amount kept
+anyway -- while the longest pause *inside* the same units ran 480, 720, 1050.
+The gap a listener hears between two sentences is almost never at a join. A
+committed unit is a hundred and something characters, which is two or three
+sentences, so most sentence boundaries are inside one.
+
+So a pause is kept, up to this much, and what runs on past it is dead air rather
+than delivery. Two hundred milliseconds is chosen to match what a unit boundary
+already comes to -- ``KEEP_TAIL_MS`` plus the next unit's ``KEEP_LEAD_MS`` --
+because the listener should not be able to hear where this feature's units
+begin and end. The delivery's own "Pause between sentences" is added to both, so
+that control finally means the same thing wherever the sentence boundary falls.
+
+The cut is spliced rather than butted. What is kept is the beginning of the
+pause and the last :data:`GAP_SPLICE_MS` before the next word, crossfaded onto
+each other, so the listener hears the pause run straight into the approach to
+that word. Cutting to the onset instead would put a step where the two ends
+meet, and this file exists because a step is a click.
+"""
+
 MAX_LEAD_HOLD_MS = 400
 SCAN_MS = 10
-"""How much quiet may be held back, and how finely it is judged.
+"""How long the front of a unit may be waited on, and how finely it is judged.
 
-Trailing quiet has to be held to be trimmed -- nothing knows it is *trailing*
-until the unit ends. Held audio is audio the listener does not have yet, so the
-hold is bounded: past 600 ms it spills through and only the last 600 ms is ever
-in hand.
+Only the *beginning* of a pause is ever kept, so everything past it can be
+dropped where it is found rather than held. That is what keeps the delay this
+class adds down to a fraction of a second whatever the model does: a pause of
+any length costs the listener the same short wait.
 
-Before the first word the bound is tighter, and it is a deadline rather than a
-spill. A unit whose opening cannot be told from its noise floor gives up waiting
-after 400 ms, sends what it has untrimmed, and carries on -- so the cost of not
-being able to tell is 400 ms once, at the front of that unit, rather than a
-trailing trim that never happens.
+Before the first word there is nothing to compare against yet, so the bound
+there is a deadline instead. A unit whose opening cannot be told from its own
+noise gives up waiting after 400 ms, sends what it has untrimmed, and carries
+on -- so the cost of not being able to tell is 400 ms once, at the front of that
+unit, rather than a trailing trim that never happens.
 
 Ten milliseconds is the window the level is judged over, because a single sample
 says nothing and a whole model chunk is eighty.
@@ -495,12 +520,14 @@ class Trim:
     """
 
     def __init__(self, rate: int, lead_ms: int = KEEP_LEAD_MS,
-                 tail_ms: int = KEEP_TAIL_MS, floor: int = 0):
+                 tail_ms: int = KEEP_TAIL_MS, floor: int = 0,
+                 gap_ms: int = KEEP_GAP_MS):
         self.rate = max(0, int(rate or 0))
         self.scan = max(1, int(self.rate * SCAN_MS / 1000))
         self.lead = int(self.rate * max(0, int(lead_ms)) / 1000)
         self.tail = int(self.rate * max(0, int(tail_ms)) / 1000)
-        self.hold = max(self.tail, int(self.rate * MAX_HOLD_MS / 1000))
+        self.gap = max(self.tail, int(self.rate * max(0, int(gap_ms)) / 1000))
+        self.splice = max(1, int(self.rate * GAP_SPLICE_MS / 1000))
         self.lead_hold = max(self.lead, int(self.rate * MAX_LEAD_HOLD_MS / 1000))
         self.dropped = 0
         self.quiet_found = 0
@@ -531,6 +558,7 @@ class Trim:
         what seeds the next one."""
         self._pending = _int16(b"")
         self._quiet = _int16(b"")
+        self._edge = _int16(b"")
         self._opened = False
         self._peak = 0
         self._run = 0
@@ -581,7 +609,7 @@ class Trim:
             window = self._pending[:]
             del self._pending[:]
             self._judge(window, out)
-        self.quiet_found += len(self._quiet)
+        self.quiet_found += self._run if self._opened else len(self._quiet)
         if self._opened and len(self._quiet) > self.tail:
             # Only when the unit opened. In a unit where nothing was ever told
             # apart from its noise floor, nothing has been shown to be padding,
@@ -604,23 +632,17 @@ class Trim:
             self._before(window, peak, out)
             return
         if peak > self._quiet_level():
-            # Speech. Whatever quiet was being held is a gap *inside* the unit
-            # and is passed on untouched -- only the two ends are this class's
-            # business. Its length is kept, because it is the one number that
-            # says whether a gap somebody can hear is this class's to fix.
+            # Speech, and with it the end of whatever pause came before it. Its
+            # length is kept whether or not it was shortened, because it is the
+            # one number that says where a gap somebody can hear actually is.
             if self._run > self.longest:
                 self.longest = self._run
+            out.extend(self._resume())
             self._run = 0
-            out.extend(self._quiet)
-            del self._quiet[:]
             out.extend(window)
             return
         self._run += len(window)
-        self._quiet.extend(window)
-        if len(self._quiet) > self.hold:
-            spill = len(self._quiet) - self.hold
-            out.extend(self._quiet[:spill])
-            del self._quiet[:spill]
+        self._hush(window)
 
     def _before(self, window, peak: int, out) -> None:
         """A window from before the first word, and whether it is still one."""
@@ -661,6 +683,50 @@ class Trim:
         self._opened = True
         out.extend(self._quiet)
         del self._quiet[:]
+
+    def _hush(self, window) -> None:
+        """A quiet window, once the unit has started.
+
+        The beginning of the pause is kept and the rest is dropped where it is
+        found rather than held, because only the beginning is ever going to be
+        sent -- :data:`KEEP_GAP_MS` of it inside the unit, :data:`KEEP_TAIL_MS`
+        of it at the end. The last few milliseconds are the exception: they are
+        kept in ``_edge`` for the splice, because they are the approach to
+        whatever word comes next.
+        """
+        room = max(0, self.gap - len(self._quiet))
+        if room:
+            self._quiet.extend(window[:room])
+        if len(window) > room:
+            self.dropped += len(window) - room
+        self._edge.extend(window)
+        if len(self._edge) > self.splice:
+            del self._edge[:len(self._edge) - self.splice]
+
+    def _resume(self):
+        """The pause that has just ended, at the length it is allowed to be.
+
+        Short enough and it is returned untouched -- a pause between two clauses
+        is the model's delivery and belongs to the listener. Longer, and what
+        comes back is its beginning with the last :data:`GAP_SPLICE_MS` before
+        the next word crossfaded onto the end, so the join is a fade rather than
+        a step.
+        """
+        held, self._quiet = self._quiet, _int16(b"")
+        edge, self._edge = self._edge, _int16(b"")
+        if self._run <= len(held):
+            return held
+        fade = min(self.splice, len(edge), len(held) // 2)
+        if fade <= 0:
+            return held
+        window = _ramp(fade)
+        start = len(held) - fade
+        for index in range(fade):
+            rising = window[index]
+            held[start + index] = int(held[start + index] * (1.0 - rising)
+                                      + edge[index] * rising)
+        held.extend(edge[fade:])
+        return held
 
     def _quiet_level(self) -> int:
         """What counts as quiet once the unit has started."""
@@ -1792,7 +1858,8 @@ class Engine:
             reference, _state = self.reference(voice_id)
             self.warm(voice_id, found)
         shaper = Shaper(found, self._numpy)
-        trim = Trim(self.sample_rate, floor=self._quiet_floor.get(voice_id, 0))
+        trim = Trim(self.sample_rate, floor=self._quiet_floor.get(voice_id, 0),
+                    gap_ms=KEEP_GAP_MS + found.pause_ms)
         seam = Seam(self.sample_rate)
         arguments = found.generation(self.generation)
         if self.steps and "steps" not in arguments:
