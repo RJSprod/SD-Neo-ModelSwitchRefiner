@@ -430,3 +430,25 @@ class TestRequestsReachAWorkerThatIsInsideAGeneration:
             runtime.ensure_started()
         assert "several times in a row" in str(raised.value)
         runtime._failures.clear()
+
+
+class TestTheLaneIsNeverHeldByATurnThatIsAlreadyOver:
+    def test_a_stop_on_the_last_word_does_not_hold_the_lane(self, host,
+                                                            fake_pocket_worker):
+        """The reply can finish between the turn thread deciding to interrupt
+        and the interrupt reaching this module. A drain record made for a turn
+        the worker has already closed is a record nothing will ever close, so
+        the lane would stay held until the failsafe rather than until the next
+        sentence."""
+        turn = Turn()
+        runtime.begin_turn(turn, "pocket:official:alba", None)
+        runtime.send_segment(turn, "Hello.")
+        wait_until(lambda: turn.audio, what="audio")
+        runtime.finish_turn(turn)
+        wait_until(lambda: turn.finished, what="tts_done")
+        turn.synthesis_done = True
+        turn.cancel("user")
+        runtime.interrupt_turn(turn)
+        assert runtime.status()["draining"] is False
+        assert runtime.status()["busy"] is False
+        assert turn.draining is False

@@ -636,6 +636,16 @@ def interrupt_turn(turn) -> None:
     ``tts_done``, or the pipe ending. Never by a timer (I-PKT-13).
     """
     identifier = getattr(turn, "id", "")
+    if getattr(turn, "synthesis_done", False):
+        # The reply finished between the turn thread deciding to interrupt and
+        # this call. Nothing is in the model, nothing more will arrive for this
+        # turn, and a drain record for it would be a record the worker has no
+        # reason to ever close -- so the lane would stay held until the failsafe
+        # rather than until the next sentence. Narrow, and worth a line: it is
+        # a Stop pressed on the last word.
+        with _state_lock:
+            _turns.pop(identifier, None)
+        return
     with _state_lock:
         known = _turns.pop(identifier, None)
         if known is None and identifier not in _draining:
