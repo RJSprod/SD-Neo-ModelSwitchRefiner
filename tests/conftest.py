@@ -1236,6 +1236,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "sopro(**plan): how the fake Sopro worker should behave for this test.")
+    config.addinivalue_line(
+        "markers",
+        "pocket(**plan): how the fake PocketTTS worker should behave for this test.")
 
 
 @pytest.fixture
@@ -1553,6 +1556,276 @@ def fake_sopro_worker(tmp_path, monkeypatch, voice_root, sopro_installed, reques
     mc_voice_sopro_runtime._failures.clear()
 
 
+FAKE_POCKET_WORKER = r'''#!/usr/bin/env python3
+# A PocketTTS worker that speaks the real protocol and holds no tensors.
+#
+# Faithful in the places the parent actually depends on -- the framing, the
+# handshake fields, the containment it arranges for itself, the turn operations
+# and, above all, the drain -- and a stub everywhere else. The point of these
+# tests is the lifecycle, the containment and the interruption contract, none of
+# which needs a PyTorch closure.
+#
+# The drain is the part that has to be faithful rather than convenient. On
+# ``tts_interrupt`` this worker answers "draining" and then, after a delay the
+# test chooses, "complete" -- because the parent's whole waiting state is
+# cleared by that second frame and by nothing else, and a fake that answered
+# both at once would be a fake that could not fail the test.
+import json
+import os
+import struct
+import sys
+import threading
+import time
+
+PLAN = json.loads(os.environ.get("MC_FAKE_POCKET", "{}"))
+LENGTH = struct.Struct(">I")
+LOCK = threading.Lock()
+
+
+def read_frame(stream):
+    head = stream.read(4)
+    if len(head) < 4:
+        return None
+    (size,) = LENGTH.unpack(head)
+    header = json.loads(stream.read(size).decode("utf-8"))
+    (size,) = LENGTH.unpack(stream.read(4))
+    return header, (stream.read(size) if size else b"")
+
+
+def write_frame(stream, header, payload=b""):
+    raw = json.dumps(header).encode("utf-8")
+    with LOCK:
+        stream.write(LENGTH.pack(len(raw)))
+        stream.write(raw)
+        stream.write(LENGTH.pack(len(payload)))
+        if payload:
+            stream.write(payload)
+        stream.flush()
+
+
+def containment(parent_pid):
+    """The same arrangement the real Pocket worker makes, in the same place.
+
+    Not a stub, and the reason is the near-miss the Sopro fake records: with
+    this left out, every containment test passes while proving nothing, and the
+    only way that shows up is sabotaging the real worker and watching the suite
+    stay green.
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            import ctypes
+            import signal
+
+            libc = ctypes.CDLL("libc.so.6", use_errno=True)
+            if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+                return "pipe"
+        except Exception:
+            return "pipe"
+        if parent_pid and os.getppid() != parent_pid:
+            raise SystemExit(0)
+        return "pdeathsig"
+    if os.name == "nt":
+        return "job"
+    return "pipe"
+
+
+def wav(seconds=0.2, rate=24000):
+    count = int(seconds * rate)
+    body = b"\x00\x00" * count
+    return (b"RIFF" + struct.pack("<I", 36 + len(body)) + b"WAVEfmt "
+            + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+            + b"data" + struct.pack("<I", len(body)) + body)
+
+
+def main():
+    marker = PLAN.get("alive_marker")
+    if marker:
+        with open(marker, "a", encoding="utf-8") as handle:
+            handle.write("%d\n" % os.getpid())
+    stdin, stdout = sys.stdin.buffer, sys.stdout.buffer
+    speaking = set()
+    while True:
+        frame = read_frame(stdin)
+        if frame is None:
+            return 0
+        header, payload = frame
+        operation = header.get("op")
+        if operation == "shutdown":
+            write_frame(stdout, {"id": header.get("id"), "ok": True})
+            return 0
+        if operation == "init":
+            found = containment(int(header.get("parent_pid") or 0))
+            config = header.get("config") or {}
+            reply = {
+                "id": header.get("id"), "ok": True, "op": "ready",
+                "protocol": PLAN.get("protocol", 1),
+                "engine": PLAN.get("engine", "pocket"),
+                "backend": PLAN.get("backend", "pocket-tts-native"),
+                "pocket_version": "3.0.2", "upstream_build_id": "f5fa841",
+                "torch_version": "2.5.0",
+                "sample_rate": PLAN.get("sample_rate", 24000),
+                "provider": PLAN.get("provider", "cpu"),
+                "device": PLAN.get("device", "cpu"),
+                "containment": PLAN.get("containment", found),
+                "model_id": config.get("model_id", "english"),
+                "model_fingerprint": config.get("fingerprint", ""),
+                "quantization": config.get("precision", "full"),
+                "sampler_steps": config.get("sampler_steps", 1),
+                "streaming": True,
+                "interrupt_mode": PLAN.get("interrupt_mode", "drain_unit"),
+                "thread_policy": "PocketTTS sets its own CPU thread policy",
+                "voice_state_schema": 1,
+                "voices": len(config.get("voices") or {}),
+                "defaults": {"temperature": 0.3, "sampler_steps": 1},
+            }
+            reply.update(PLAN.get("handshake") or {})
+            write_frame(stdout, reply)
+            continue
+        if operation == "catalog":
+            write_frame(stdout, {"id": header.get("id"), "ok": True,
+                                 "voices": len(header.get("voices") or {})})
+            continue
+        if operation == "warm":
+            write_frame(stdout, {"id": header.get("id"), "ok": True, "state": "warm"})
+            continue
+        if operation == "prepare":
+            root = header.get("root") or ""
+            os.makedirs(root, exist_ok=True)
+            with open(os.path.join(root, "state.safetensors"), "wb") as handle:
+                handle.write(b"\x08\x00\x00\x00\x00\x00\x00\x00{}      ")
+            write_frame(stdout, {"id": header.get("id"), "ok": True, "sample_rate": 24000,
+                                 "state_bytes": 24, "audition_ms": 12}, wav())
+            continue
+        if operation == "tts":
+            if PLAN.get("busy"):
+                # Standing in for a generation call: this process stops reading
+                # its input entirely, which is the state in which pipe EOF is
+                # not something it will notice. The only thing left that can end
+                # it is the operating system.
+                busy_at = PLAN.get("busy_marker")
+                if busy_at:
+                    with open(busy_at, "w", encoding="utf-8") as handle:
+                        handle.write("%d\n" % os.getpid())
+                while True:
+                    time.sleep(0.05)
+            write_frame(stdout, {"id": header.get("id"), "ok": True, "sample_rate": 24000},
+                        wav())
+            continue
+        if operation == "tts_begin":
+            turn = header.get("turn")
+            speaking.add(turn)
+            write_frame(stdout, {"op": "tts_ready", "turn": turn, "sample_rate": 24000,
+                                 "streaming": "chunk", "interrupt_mode": "drain_unit"})
+            continue
+        if operation == "tts_text":
+            turn = header.get("turn")
+            if turn not in speaking:
+                continue
+            write_frame(stdout, {"op": "tts_audio", "turn": turn,
+                                 "sample_rate": 24000}, b"\x00\x00" * 2400)
+            write_frame(stdout, {"op": "tts_segment", "turn": turn, "blocks": 1,
+                                 "first_block_ms": 20, "synth_ms": 40, "audio_ms": 100,
+                                 "streaming": "chunk"})
+            continue
+        if operation == "tts_end":
+            turn = header.get("turn")
+            if turn in speaking:
+                speaking.discard(turn)
+                write_frame(stdout, {"op": "tts_done", "turn": turn})
+            continue
+        if operation == "tts_interrupt":
+            turn = header.get("turn")
+            speaking.discard(turn)
+            write_frame(stdout, {"op": "tts_interrupted", "turn": turn,
+                                 "state": "draining", "interrupt_mode": "drain_unit"})
+
+            def finish(turn=turn):
+                # The delay is what makes this a drain rather than a cancel.
+                # Zero would still pass a test of the frames and would prove
+                # nothing about the state the parent holds in between.
+                time.sleep(float(PLAN.get("drain_seconds", 0.15)))
+                # More audio arrives *during* the drain. The parent must consume
+                # and discard it rather than playing it or blocking on it, and a
+                # fake that fell silent here could not tell the two apart.
+                for _index in range(3):
+                    write_frame(stdout, {"op": "tts_audio", "turn": turn,
+                                         "sample_rate": 24000}, b"\x00\x00" * 2400)
+                write_frame(stdout, {"op": "tts_interrupted", "turn": turn,
+                                     "state": "complete", "interrupt_mode": "drain_unit",
+                                     "chars": 42, "audio_ms": 300, "dropped_units": 1})
+
+            if not PLAN.get("never_finishes"):
+                threading.Thread(target=finish, daemon=True).start()
+            continue
+        write_frame(stdout, {"id": header.get("id"), "ok": False, "error": "unknown"})
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+@pytest.fixture
+def pocket_installed(voice_root, monkeypatch):
+    """PocketTTS reported as installed, without a byte of Torch on disk.
+
+    Everything :mod:`mc_voice_pocket_runtime` checks before starting a worker --
+    readiness, the interpreter, the platform, the fingerprint -- is answered
+    here, so the tests are about the boundary rather than about having a PyTorch
+    closure.
+    """
+    import mc_voice_pocket
+
+    found = mc_voice_pocket.Status(
+        platform_supported=True, runtime_ready=True, speech_model_ready=True,
+        official_voices_ready=True, cloning_ready=True,
+        runtime_message="Installed", model_message="Installed",
+        cloning_message="Installed", model_id="english",
+        fingerprint="pocketprint01234")
+    monkeypatch.setattr(mc_voice_pocket, "status", lambda: found)
+    monkeypatch.setattr(mc_voice_pocket, "runtime_python", lambda: Path(sys.executable))
+    return found
+
+
+@pytest.fixture
+def fake_pocket_worker(tmp_path, monkeypatch, voice_root, pocket_installed, request):
+    """A started-on-demand PocketTTS worker that is a Python script, not a model.
+
+    Parametrise it with ``@pytest.mark.pocket(...)`` -- ``drain_seconds`` to
+    control how long an abandoned unit takes, ``never_finishes`` to make one
+    that never reports its lane free, ``busy`` to make one that stops reading
+    its input entirely.
+    """
+    import mc_voice_engines
+    import mc_voice_paths
+    import mc_voice_pocket
+    import mc_voice_pocket_runtime
+
+    marker = request.node.get_closest_marker("pocket")
+    plan = dict(marker.kwargs) if marker else {}
+    plan.setdefault("alive_marker", str(tmp_path / "pocket-alive.txt"))
+
+    script = tmp_path / "fake_pocket_worker.py"
+    script.write_text(FAKE_POCKET_WORKER, encoding="utf-8")
+    monkeypatch.setattr(mc_voice_paths, "pocket_worker_script", lambda: script)
+    monkeypatch.setattr(mc_voice_pocket, "worker_environment",
+                        lambda: {"MC_FAKE_POCKET": json.dumps(plan)})
+    monkeypatch.setattr(mc_voice_pocket, "worker_config",
+                        lambda: {"model_root": str(voice_root / "pocket" / "models"),
+                                 "config_path": str(voice_root / "pocket" / "model.json"),
+                                 "model_id": "english", "precision": "full",
+                                 "sampler_steps": 1,
+                                 "fingerprint": pocket_installed.fingerprint,
+                                 "state_schema": 1, "sample_rate": 24000,
+                                 "cloning_ready": True, "voices": {}})
+    mc_voice_engines.select("pocket")
+
+    yield plan
+
+    mc_voice_pocket_runtime.stop("test finished")
+    mc_voice_pocket_runtime._failures.clear()
+
+
 @pytest.fixture
 def kokoro_bundle(voice_root, monkeypatch):
     """A Kokoro bundle that is the right *shape* and weighs nothing.
@@ -1677,6 +1950,8 @@ def _forget_voice_options():
     asked for one.
     """
     import mc_voice_engines
+    import mc_voice_pocket
+    import mc_voice_pocket_profile
     import mc_voice_registry
     import mc_voice_sopro
     import mc_voice_sopro_profile
@@ -1688,8 +1963,14 @@ def _forget_voice_options():
     keys = (mc_voice_registry.OPT_VOICE, mc_voice_registry.OPT_TEST_TEXT,
             mc_voice_engines.OPT_ENGINE, mc_voice_sopro.OPT_VOICE,
             mc_voice_sopro.OPT_PRECISION, mc_voice_sopro.OPT_STEPS,
-            mc_voice_sopro.OPT_CHUNK, mc_voice_sopro_profile.OPT_LANGUAGE) \
-        + tuple(mc_voice_sopro_profile.OPTIONS.values())
+            mc_voice_sopro.OPT_CHUNK, mc_voice_sopro_profile.OPT_LANGUAGE,
+            # Pocket's engine settings live in its own file rather than in an
+            # option, so only the delivery names are here -- and they are here
+            # for the reason every other name is: an option a test set and did
+            # not put back is an option the next test inherits.
+            mc_voice_pocket.OPT_VOICE) \
+        + tuple(mc_voice_sopro_profile.OPTIONS.values()) \
+        + tuple(mc_voice_pocket_profile.OPTIONS.values())
     try:
         import modules.shared as shared
     except Exception:  # pragma: no cover - a suite without the fake host
