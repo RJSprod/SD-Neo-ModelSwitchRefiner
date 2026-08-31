@@ -1932,6 +1932,11 @@ def pocket_payload() -> dict:
         "draining": bool(live.get("draining")),
         "engine_busy": bool(live.get("busy")),
         "clone": _clone_hints(engines.POCKET),
+        # Beside the window rather than only on the voices payload: the form
+        # that reads the window writes the engine's name into the sentences
+        # about it, and a window without a name to put on it is how "Sopro
+        # takes at most 20 s" ended up under a PocketTTS waveform.
+        "engine_label": engines.label(engines.POCKET),
         "sources": {"runtime": pocket.sources("runtime"),
                     "model": pocket.sources("model"),
                     "voices": pocket.sources("voices"),

@@ -3729,6 +3729,10 @@
 
     function paintPocket(row, payload) {
         if (!row || !payload || !payload.ok) return;
+        // This payload carries the clone window too, and it is the one that
+        // arrives first on a Settings page: the voices poll belongs to the
+        // panel with the voice list on it, and the clone form is on this one.
+        noteCloneWindow(payload);
         const progress = (payload.progress && payload.progress.pocket) || {};
         setText(row, '[data-mc-voice-status="pocket"]',
                 progress.running ? progress.text
@@ -4617,7 +4621,7 @@
             swapSurface();
             return;
         }
-        noteIdealClip(payload);
+        noteCloneWindow(payload);
         if (payload.voices) paintVoices(holder, payload);
     }
 
@@ -4648,27 +4652,33 @@
     // one narrow thing to validate and the person keeps every format they own.
     let soproClip = null;
 
-    const CLIP_MIN_SECONDS = 5;
-    const CLIP_MAX_SECONDS = 20;
-    // As much reference as the pipeline will carry. More conditioning is the
-    // cheapest quality this engine has -- it costs nothing at synthesis time,
-    // only twenty seconds of somebody's recording instead of fifteen -- so the
-    // selection opens at the ceiling and shrinks only when the file is shorter
-    // than that.
-    let clipSuggested = CLIP_MAX_SECONDS;
+    // The reference window, and every number in it belongs to whichever engine
+    // this form is cloning for. It used to be two constants -- five and twenty,
+    // Sopro's -- so the PocketTTS clone form opened a twenty-second selection on
+    // an engine that takes fifteen, and told somebody about it in a sentence
+    // with the word "Sopro" in it. The server has been sending the right
+    // numbers under `clone` the whole time and this read one of the three.
+    //
+    // The values below are the fallback for a form drawn before the first
+    // answer arrives, not a policy: `noteCloneWindow` replaces them.
+    const clipWindow = {min: 5, max: 20, ideal: 0, label: "This engine"};
 
-    // What the *model* says it was built to condition on. Sopro reports it as
-    // `ref_seconds` and nothing had ever read it. It no longer picks the
-    // selection -- the ceiling does -- but it is still the only figure in the
-    // system that comes from the engine rather than from us, so it is kept and
-    // shown when it disagrees with what is selected. A number the model volunteers
-    // and the interface hides is how the fifteen-second guess survived this long.
-    let idealClip = 0;
-
-    function noteIdealClip(payload) {
-        const found = payload && payload.clone && Number(payload.clone.ideal_seconds);
-        if (!found || !isFinite(found) || found <= 0) return;
-        idealClip = Math.max(CLIP_MIN_SECONDS, Math.min(CLIP_MAX_SECONDS, found));
+    function noteCloneWindow(payload) {
+        if (!payload) return;
+        const hints = payload.clone || {};
+        const label = String(payload.engine_label || "").trim();
+        if (label) clipWindow.label = label;
+        const read = function (name, low, high) {
+            const found = Number(hints[name]);
+            return (isFinite(found) && found > 0)
+                ? Math.max(low, Math.min(high, found)) : 0;
+        };
+        // Bounds before ideal, because the ideal is clamped into them.
+        const min = read("min_seconds", 0.5, 600);
+        const max = read("max_seconds", 0.5, 600);
+        if (min) clipWindow.min = min;
+        if (max) clipWindow.max = Math.max(clipWindow.min, max);
+        clipWindow.ideal = read("ideal_seconds", clipWindow.min, clipWindow.max);
     }
 
     function clipDuration() {
@@ -4702,11 +4712,14 @@
             soproClip = {buffer: decoded, start: 0, end: decoded.duration,
                          label: label || "recording", how: "page",
                          engineCleaned: null};
-            // A file is usually far longer than Sopro's window, so the opening
-            // selection is a usable one rather than the whole thing: somebody
-            // who presses Create straight away gets a voice, not a refusal.
-            if (decoded.duration > CLIP_MAX_SECONDS) {
-                soproClip.end = clipSuggested;
+            // A file is usually far longer than the engine's window, so the
+            // opening selection is a usable one rather than the whole thing:
+            // somebody who presses Create straight away gets a voice, not a
+            // refusal. It opens at the ceiling, because conditioning is built
+            // from whatever it is given and more of it costs nothing at
+            // speaking time -- only more of somebody's recording.
+            if (decoded.duration > clipWindow.max) {
+                soproClip.end = clipWindow.max;
             }
             if (trim) trim.hidden = false;
             paintTrim(form);
@@ -4789,14 +4802,20 @@
             if (document.activeElement !== end) end.value = soproClip.end.toFixed(1);
         }
         drawWave(form);
+        // The number on "Pick N s for me" is rendered by Python from whichever
+        // engine's constants that page was built with, and it is the length
+        // this button actually picks -- so it is rewritten here rather than
+        // left to disagree with the selection it produces.
+        const best = form.querySelector("[data-mc-voice-trim-best]");
+        if (best) best.textContent = "Pick " + clipWindow.max + " s for me";
         const chosen = clipDuration();
         const shown = chosen.toFixed(1) + " s of " + total.toFixed(1) + " s";
-        if (chosen < CLIP_MIN_SECONDS) {
-            sayTrim(form, shown + " selected — Sopro needs at least "
-                    + CLIP_MIN_SECONDS + " s. Drag the edges wider.");
-        } else if (chosen > CLIP_MAX_SECONDS) {
-            sayTrim(form, shown + " selected — Sopro takes at most "
-                    + CLIP_MAX_SECONDS + " s. Drag the edges in.");
+        if (chosen < clipWindow.min) {
+            sayTrim(form, shown + " selected — " + clipWindow.label
+                    + " needs at least " + clipWindow.min + " s. Drag the edges wider.");
+        } else if (chosen > clipWindow.max) {
+            sayTrim(form, shown + " selected — " + clipWindow.label
+                    + " takes at most " + clipWindow.max + " s. Drag the edges in.");
         } else {
             // The engine's own figure, said once and only when it disagrees
             // with what is selected by more than a second. It does not change
@@ -4804,7 +4823,8 @@
             // number here that came from the model rather than from us, and
             // silently discarding it is how the old fifteen-second guess lasted
             // as long as it did.
-            const differs = idealClip && Math.abs(chosen - idealClip) > 1.0;
+            const differs = clipWindow.ideal
+                            && Math.abs(chosen - clipWindow.ideal) > 1.0;
             sayTrim(form, shown + " selected — ready to create."
                     + (soproClip.clean
                        ? (soproClip.how === "deepfilternet" && soproClip.engineCleaned
@@ -4812,7 +4832,8 @@
                           : " Cleaning is on.")
                        : "")
                     + (differs
-                       ? " This Sopro build reports " + idealClip.toFixed(0)
+                       ? " This " + clipWindow.label + " build reports "
+                         + clipWindow.ideal.toFixed(0)
                          + " s as the length it was built to condition on."
                        : ""));
         }
@@ -5339,31 +5360,79 @@
         const end = form.querySelector("[data-mc-voice-trim-end]");
 
         if (canvas) {
-            let dragging = false;
+            // Two gestures on one canvas, and which one a press means is
+            // decided by where it lands.
+            //
+            // Dragging *outside* the selection draws a new one, which is what
+            // this always did. Dragging *inside* it slides the whole window
+            // along at the length it already has -- because the length is
+            // almost always the one thing somebody does not want to change.
+            // The window opens at the engine's ceiling, so "find the good
+            // fifteen seconds" was a gesture that had to re-draw exactly
+            // fifteen seconds by hand, twice, to move it a little to the right.
+            let mode = "";
             let anchor = 0;
+            let span = 0;
+            let grip = 0;
             const at = function (event) {
                 const box = canvas.getBoundingClientRect();
                 const ratio = box.width ? (event.clientX - box.left) / box.width : 0;
                 const total = soproClip ? soproClip.buffer.duration : 0;
                 return Math.max(0, Math.min(total, ratio * total));
             };
+            // Inside means inside, not near: an edge is where somebody who
+            // wants a *different* length starts, and stealing that press for a
+            // slide would take the only gesture that can change the length.
+            const inside = function (where) {
+                return !!soproClip && clipDuration() > 0
+                       && where > soproClip.start && where < soproClip.end;
+            };
+            const cursor = function (name) {
+                if (canvas.style) canvas.style.cursor = name;
+            };
             canvas.addEventListener("pointerdown", function (event) {
                 if (!soproClip) return;
-                dragging = true;
                 anchor = at(event);
-                soproClip.start = anchor;
-                soproClip.end = anchor;
+                if (inside(anchor)) {
+                    mode = "slide";
+                    span = clipDuration();
+                    grip = anchor - soproClip.start;
+                    cursor("grabbing");
+                } else {
+                    mode = "draw";
+                    soproClip.start = anchor;
+                    soproClip.end = anchor;
+                }
                 if (canvas.setPointerCapture) canvas.setPointerCapture(event.pointerId);
                 paintTrim(form);
             });
             canvas.addEventListener("pointermove", function (event) {
-                if (!dragging || !soproClip) return;
+                if (!soproClip) return;
                 const here = at(event);
-                soproClip.start = Math.min(anchor, here);
-                soproClip.end = Math.max(anchor, here);
+                if (!mode) {
+                    // Nothing is being dragged, so the only job is to say what
+                    // a press would do before it is one.
+                    cursor(inside(here) ? "grab" : "crosshair");
+                    return;
+                }
+                if (mode === "slide") {
+                    // The length is carried, not recomputed, so a slide that
+                    // runs into either end stops there with the window intact
+                    // rather than squashing it against the edge.
+                    const total = soproClip.buffer.duration;
+                    const from = Math.max(0, Math.min(total - span, here - grip));
+                    soproClip.start = from;
+                    soproClip.end = from + span;
+                } else {
+                    soproClip.start = Math.min(anchor, here);
+                    soproClip.end = Math.max(anchor, here);
+                }
                 paintTrim(form);
             });
-            const release = function () { dragging = false; };
+            const release = function (event) {
+                if (mode === "slide") cursor(inside(at(event)) ? "grab" : "crosshair");
+                mode = "";
+            };
             canvas.addEventListener("pointerup", release);
             canvas.addEventListener("pointercancel", release);
         }
@@ -5410,9 +5479,9 @@
                 // "the part with speech in it" that costs one pass over the
                 // samples. Not clever, and much better than the first fifteen
                 // when a clip opens with silence or a count-in.
-                soproClip.start = loudestWindow(soproClip.buffer, clipSuggested);
+                soproClip.start = loudestWindow(soproClip.buffer, clipWindow.max);
                 soproClip.end = Math.min(soproClip.buffer.duration,
-                                         soproClip.start + clipSuggested);
+                                         soproClip.start + clipWindow.max);
                 paintTrim(form);
             });
         }
@@ -5668,11 +5737,11 @@
             return;
         }
         const chosen = clipDuration();
-        if (chosen < CLIP_MIN_SECONDS || chosen > CLIP_MAX_SECONDS) {
+        if (chosen < clipWindow.min || chosen > clipWindow.max) {
             // Said here as well as under the waveform, because this is the
             // button somebody pressed and the answer belongs next to it.
-            say("Sopro clones from " + CLIP_MIN_SECONDS + " to " + CLIP_MAX_SECONDS
-                + " seconds. " + chosen.toFixed(1) + " s is selected.");
+            say(clipWindow.label + " clones from " + clipWindow.min + " to "
+                + clipWindow.max + " seconds. " + chosen.toFixed(1) + " s is selected.");
             return;
         }
         const wav = clipToWav();
