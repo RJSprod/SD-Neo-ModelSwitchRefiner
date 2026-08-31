@@ -51,7 +51,6 @@ import gradio as gr
 import mc_llm_ui as ui
 import mc_voice_api as api
 import mc_voice_models as models
-import mc_voice_runtime as runtime
 import mc_voice_state as state
 import mc_voice_turn as turns
 
@@ -406,11 +405,19 @@ def character_panel() -> dict:
     ``_save_character`` reads -- so the selection is saved with the rest of the
     character by the ordinary Save, with no second store and no second button.
 
-    The four sliders are Gradio's own, because they are ordinary values with no
-    liveness to them. They are behind a checkbox rather than always in force:
-    unchecked means this character has no delivery of its own and follows
-    Settings → Voice Chat, which is what every character written before this
-    existed does and what most of them should keep doing.
+    The delivery sliders are Gradio's own, because they are ordinary values with
+    no liveness to them. There is no fixed number of them: the active engine's
+    profile module says which fields it has and how far each one goes, so Kokoro
+    draws four, Sopro seven and PocketTTS five, and Variation appears on the two
+    that have a sampling control to expose. They are behind a checkbox rather
+    than always in force: unchecked means this character has no delivery of its
+    own and follows Settings → Voice Chat, which is what every character written
+    before this existed does and what most of them should keep doing.
+
+    What is *not* here on any engine is an engine setting. Precision, decode
+    steps, chunk size and the model are global to the worker and changing one
+    stops it, so a character carrying them would be a character whose turn to
+    speak restarted a subprocess (I-PKT-23, section 13).
     """
     controls = {}
     with gr.Accordion("Voice", open=False, elem_classes=ui.classes("advanced")):
@@ -428,7 +435,7 @@ def character_panel() -> dict:
         custom = gr.Checkbox(
             label="Give this character its own delivery", value=False,
             elem_id=ui.ident("chat", "character-voice-custom"),
-            info="Off, it speaks the way Settings → Voice Chat says. On, the four settings "
+            info="Off, it speaks the way Settings → Voice Chat says. On, the settings "
                  "below are this character's and nothing else changes them.")
         with gr.Group(visible=False,
                       elem_id=ui.ident("chat", "character-voice-delivery")) as delivery:
@@ -487,9 +494,11 @@ def character_state(character) -> dict:
 
     Drawn from the *active* engine's saved state and from nothing else (section
     7). Switching the global engine redraws this section from that engine's own
-    values; it does not translate a Kokoro pitch into a Sopro one, and a
-    character with a Kokoro voice and no Sopro voice opens with no voice
-    selected rather than with the wrong one.
+    values; it does not translate a Kokoro pitch into a Sopro or a PocketTTS
+    one, and a character with a Kokoro voice and no PocketTTS voice opens with
+    no voice selected rather than with the wrong one. The field list comes from
+    the same place, so an engine with a Variation control shows one and an
+    engine without does not.
     """
     import mc_voice_engines as engines
 
@@ -548,12 +557,18 @@ def engine_panel() -> str:
 
     active = engines.active()
     label = engines.label(active)
-    if active == engines.SOPRO:
-        import mc_voice_sopro_runtime as sopro_runtime
-
-        found = sopro_runtime.engine()
-    else:
-        found = runtime.engine()
+    # Through the facade rather than "Sopro, or else Kokoro". The residency
+    # object belongs to the selected engine's own runtime module, and an ``else``
+    # that reached for Kokoro's was how a third engine came to report Kokoro's
+    # Loaded/Unloaded line under its own name (I-PKT-30). Never raises: this is
+    # the first frame of a flyout, and an engine whose runtime module cannot be
+    # imported is an engine that is not loaded.
+    try:
+        found = engines.runtime(active).engine()
+    except Exception:
+        logger.debug("Model Chain: could not read the voice engine's residency",
+                     exc_info=True)
+        found = {}
     labels = {
         "unloaded": f"\u25cb Unloaded — loads automatically on next voice use",
         "loading": "\u25cc Loading speech models…",
@@ -943,26 +958,39 @@ def settings_html() -> str:
     parts.append(f'<div class="mc-voice-runtime">{ui.escape(found.summary)}</div>')
 
     parts.append(_tier_row(found))
-    # Before the engine branch, because cleaning a recording is not speaking and
-    # has no opinion about which engine does. It was inside it, which meant the
-    # row -- and the only way to install it -- did not exist on Kokoro at all.
+    # Before the engine's own panel, because cleaning a recording is not
+    # speaking and has no opinion about which engine does it. It was inside the
+    # engine branch once, which meant the row -- and the only way to install it
+    # -- did not exist on Kokoro at all.
     parts.append(cleanup_html())
 
-    if active != engines.KOKORO:
-        # Section 5: the inactive engine's operational settings are *absent*,
-        # not collapsed. The Kokoro install row, its bundle name and its manual
-        # section are not rendered at all while Sopro is selected -- so a stale
-        # DOM, a theme script or a partial Gradio re-render has nothing to
-        # expose, and no request can be built from markup that is not there.
-        parts.append(sopro_html())
-        parts.append(
-            '<div class="mc-voice-note">Voice Chat runs on the CPU and never uses the '
-            'graphics card. Sopro brings its own isolated PyTorch runtime, which is kept '
-            'separate from Forge\'s and from Kokoro\'s. After it is installed it needs no '
-            'Internet connection at all.</div>')
-        parts.append("</div>")
-        return "".join(parts)
+    # Section 5: the inactive engines' operational settings are *absent*, not
+    # collapsed. Only the selected engine's panel is rendered at all -- so a
+    # stale DOM, a theme script or a partial Gradio re-render has nothing to
+    # expose, and no request can be built from markup that is not there.
+    #
+    # A registry rather than a branch, and the difference is the whole of I-10:
+    # ``if sopro: ... else: ...`` reads as a choice between two engines right up
+    # until there is a third, at which point ``else`` silently means Kokoro and a
+    # PocketTTS installation is offered Kokoro's download button. An engine with
+    # no entry in :data:`_ENGINE_PANELS` renders nothing, which is a surface
+    # somebody notices, rather than another engine's, which is a surface nobody
+    # does.
+    parts.append(_panel(_ENGINE_PANELS, active, "settings surface"))
+    parts.append("</div>")
+    return "".join(parts)
 
+
+def _kokoro_panel() -> str:
+    """Kokoro's half of the Settings row: one bundle, one button, one folder box.
+
+    Its own function for the same reason Sopro's and Pocket's are: what used to
+    make this the ``else`` of a two-engine branch was not that Kokoro is the
+    default but that it was written first, and a default is not a fallback. It is
+    now one entry in :data:`_ENGINE_PANELS` beside the other two.
+    """
+    found = models.status()
+    parts = []
     for kind, heading in (("tts", "Text to speech"),):
         label, addresses = "", []
         if found.platform_supported:
@@ -1000,7 +1028,6 @@ def settings_html() -> str:
         'card. It has no sign-in of its own and needs no account, API key or access token '
         '— not for this WebUI, and not for the sites these files come from. After they are '
         'installed it needs no Internet connection at all.</div>')
-    parts.append("</div>")
     return "".join(parts)
 
 
@@ -1010,19 +1037,23 @@ def settings_html() -> str:
 
 
 def engine_selector_html() -> str:
-    """The one place both engine names are meant to be visible at once. Section 4.
+    """The one place every engine name is meant to be visible at once. Section 4.
 
-    A pair of cards rather than a drop-down, because the choice is not between
-    two labels: it is between a built-in speaker bank that is probably already
-    installed and a streaming model that clones a voice from a recording and
-    brings a hundred and forty megabytes of PyTorch with it. Nobody can make
-    that choice from a list of names.
+    A card each rather than a drop-down, because the choice is not between
+    labels: it is between a built-in speaker bank that is probably already
+    installed and two streaming models that clone a voice from a recording and
+    bring their own PyTorch with them. Nobody can make that choice from a list
+    of names.
+
+    Built from ``mc_voice_engines.SPECS`` rather than written out here, so a
+    fourth engine is a row in that tuple and not an edit to this function
+    (I-PKT-30).
 
     Selecting an engine that is not installed is allowed and is *not* an error
     state (section 17). The selected engine's own page then says it is not
-    installed and offers to install it; Kokoro does not reappear as an
-    operational panel because Sopro is not ready yet, and nothing switches back
-    on its own.
+    installed and offers to install it; no other engine reappears as an
+    operational panel because this one is not ready yet, and nothing switches
+    back on its own.
     """
     import mc_voice_engines as engines
 
@@ -1049,13 +1080,13 @@ def engine_selector_html() -> str:
         '</div>'
         '<p class="mc-voice-note">One engine speaks for the whole WebUI at a time. '
         'Choosing one changes which voice settings appear everywhere — in this page, in '
-        'the Voice menu and in every character. The other engine keeps its own voices, '
-        'default and character settings exactly as they were, and they come back when you '
-        'choose it again.</p>'
+        'the Voice menu and in every character. The engines you are not using keep their '
+        'own voices, defaults and character settings exactly as they were, and they come '
+        'back when you choose one of them again.</p>'
         f'<div class="mc-voice-engine-cards">{"".join(cards)}</div>'
         '<p class="mc-voice-note">Dictation is not part of this choice. Whisper has its '
-        'own model and its own process, and switching between Kokoro and Sopro does not '
-        'reload it, change its quality or touch your microphone settings.</p>'
+        'own model and its own process, and changing which engine speaks does not reload '
+        'it, change its quality or touch your microphone settings.</p>'
         '</div>')
 
 
@@ -1127,7 +1158,253 @@ def sopro_html() -> str:
             "C:\\Users\\you\\Downloads\\sopro-model",
             title="Or install the model artifacts from files you download yourself")
         + _sopro_engine_settings(settings, found)
-        + '</div>')
+        + '</div>'
+        # The closing paragraph belongs to the engine rather than to the page.
+        # It used to live in :func:`settings_html`, which meant that function
+        # had to know which engine needed which sentence -- exactly the branch
+        # :data:`_ENGINE_PANELS` exists to remove.
+        + '<div class="mc-voice-note">Voice Chat runs on the CPU and never uses the '
+          'graphics card. Sopro brings its own isolated PyTorch runtime, which is kept '
+          'separate from Forge\'s, from Kokoro\'s and from PocketTTS\'s. After it is '
+          'installed it needs no Internet connection at all.</div>')
+
+
+def pocket_html() -> str:
+    """The whole PocketTTS settings surface: install, five readinesses, engine settings.
+
+    Drawn only when Pocket is the selected engine. Its voice library, delivery
+    sliders and clone workspace live in :func:`voices_html` beneath it -- the
+    same split Kokoro and Sopro have, so all three engines' pages have one shape
+    even though almost nothing in them is shared.
+
+    Five states rather than one boolean, and that is the whole reason this
+    function is not a copy of :func:`sopro_html`. Section 24 asks for the
+    platform, the isolated runtime, the speech model, the official voice states
+    and the gated cloning weights to be reported separately, because a machine
+    whose speech works and whose Clone button does not is not "half installed":
+    it is a machine that has not accepted an upstream licence, and a single
+    "Installed" or "Not installed" line is the panel hiding the one fact that
+    decides what to do next (I-PKT-23).
+
+    Static markup here is the first frame; ``javascript/voice_chat.js`` repaints
+    it from ``/model-chain/voice/pocket``. A page whose JavaScript has not run
+    still says something true.
+    """
+    import mc_voice_pocket as pocket
+
+    try:
+        found = pocket.status()
+        settings = pocket.engine_settings()
+        entry = pocket.bundle()
+        pinned = pocket.pinned()
+        chosen = pocket.platform()
+        addresses = {part: pocket.sources(part)
+                     for part in ("runtime", "model", "voices", "cloning")}
+    except Exception:
+        logger.debug("Model Chain: could not describe PocketTTS", exc_info=True)
+        return ('<div class="mc-voice-row" data-mc-voice-kind="pocket">'
+                '<div class="mc-voice-head">'
+                '<div class="mc-voice-heading">PocketTTS</div>'
+                '<div class="mc-voice-status">PocketTTS could not be described. This is a '
+                'problem with the extension rather than with your installation.</div>'
+                '</div></div>')
+
+    closure = sum(int(item.size or 0) for item in (chosen.artifacts if chosen else ()))
+    # Composed here rather than added to :class:`mc_voice_pocket.Status`, because
+    # the official voice states are the one readiness whose remedy is a sentence
+    # rather than a message the adapter already writes: they either arrived with
+    # the model or they did not.
+    if not found.platform_supported:
+        voices_message = found.model_message
+    elif found.official_voices_ready:
+        voices_message = "Installed — PocketTTS's reviewed official voices."
+    else:
+        voices_message = ("Not installed — until they are, PocketTTS can only speak with "
+                          "voices you cloned yourself.")
+
+    return (
+        f'<div class="mc-voice-row" data-mc-voice-kind="pocket">'
+        f'<div class="mc-voice-head">'
+        f'<div class="mc-voice-heading">PocketTTS</div>'
+        f'<div class="mc-voice-default">{ui.escape(entry.label)}, CPU only</div>'
+        f'<div class="mc-voice-status" data-mc-voice-status="pocket">'
+        f'{ui.escape(found.message)}</div>'
+        f'<button type="button" class="mc-voice-install" data-mc-voice-pocket-install'
+        f'{" disabled" if not found.platform_supported else ""}>'
+        f'{"Installed" if found.ready else "Install PocketTTS"}</button>'
+        f'</div>'
+        f'<p class="mc-voice-note">A streaming model that speaks with reviewed official '
+        f'voices and can make a voice of its own from a short recording you take here. It '
+        f'brings its own isolated PyTorch runtime '
+        f'({ui.escape(models._bytes_label(closure))}) and its model artifacts '
+        f'({ui.escape(models._bytes_label(entry.download_bytes))}, approximate until the '
+        f'download starts). Both are separate from Kokoro, from Sopro and from Forge: '
+        f'installing this changes nothing about any of them, and removing it changes '
+        f'nothing either.</p>'
+        # Four check lines rather than Sopro's two, in the order somebody would
+        # fix them: nothing below the runtime can be true without it.
+        f'<div class="mc-voice-sopro-parts">'
+        f'<div class="mc-voice-check" data-mc-voice-pocket-runtime>'
+        f'{ui.escape(found.runtime_message)}</div>'
+        f'<div class="mc-voice-check" data-mc-voice-pocket-model>'
+        f'{ui.escape(found.model_message)}</div>'
+        f'<div class="mc-voice-check" data-mc-voice-pocket-voices>'
+        f'{ui.escape(voices_message)}</div>'
+        f'<div class="mc-voice-check" data-mc-voice-pocket-cloning>'
+        f'{ui.escape(found.cloning_message)}</div>'
+        f'</div>'
+        # Said plainly rather than left to be discovered from a button that
+        # refuses. An unpinned closure is a wheel nobody reviewed, the whole
+        # voice-state fingerprint rests on knowing which bytes ran, and this
+        # build will not fetch one -- so the folder box below is not an escape
+        # hatch here, it is the way in (section 23.1).
+        + ('' if pinned or not found.platform_supported else
+           '<p class="mc-voice-note">This build has not pinned a PocketTTS runtime closure '
+           'yet, so the Install button above will not download one: an artifact this '
+           'repository makes no claim about is an artifact it will not fetch. Until a '
+           'maintainer has pinned it, installing from a folder you filled yourself is the '
+           'way in, and it is the section below.</p>')
+        + _manual_section(
+            "pocket-runtime", addresses["runtime"],
+            "The Install button above does all of this for you. This is here for a machine "
+            "that cannot reach PyPI — no Internet, or a proxy that will not pass a "
+            "hundred-megabyte binary. Download every file into one folder and give Voice "
+            "Chat that folder. The original filenames are fine, and each one is checked "
+            "against a hash committed in this extension.",
+            "C:\\Users\\you\\Downloads\\pocket-runtime",
+            title="Or install the PyTorch runtime from files you download yourself")
+        + _manual_section(
+            "pocket-model", addresses["model"],
+            "The model artifacts. Download these into one folder and give Voice Chat that "
+            "folder. No account or access token is needed for this half.",
+            "C:\\Users\\you\\Downloads\\pocket-model",
+            title="Or install the model artifacts from files you download yourself")
+        + _manual_section(
+            "pocket-voices", addresses["voices"],
+            "The official voice states, one file each. They are what PocketTTS speaks with "
+            "before you have cloned anything, and they are prepared for the model above "
+            "rather than for a machine.",
+            "C:\\Users\\you\\Downloads\\pocket-voices",
+            title="Or install the official voices from files you download yourself")
+        + _manual_section(
+            "pocket-cloning", addresses["cloning"],
+            "The voice-cloning weights. Knowing the address is not the thing the gate "
+            "protects — accepting the conditions upstream is — so these are listed for "
+            "somebody who has already done that and would rather move the files across "
+            "than hand this WebUI an access token.",
+            "C:\\Users\\you\\Downloads\\pocket-cloning",
+            title="Or install the voice-cloning weights from files you download yourself")
+        + _pocket_engine_settings(settings, found)
+        + '</div>'
+        + '<div class="mc-voice-note">Voice Chat runs on the CPU and never uses the '
+          'graphics card. PocketTTS brings its own isolated PyTorch runtime, kept separate '
+          'from Forge\'s, from Kokoro\'s and from Sopro\'s. Its official voices need no '
+          'account of any kind; only the voice-cloning weights are gated, and that gate is '
+          'accepted upstream rather than here. After everything is installed it needs no '
+          'Internet connection at all.</div>')
+
+
+def _pocket_engine_settings(settings: dict, found) -> str:
+    """Precision, generation quality and the model. Global to PocketTTS.
+
+    Not per character and not per voice (I-PKT-23, section 13): each of these
+    changes compute, memory and which prepared voice states are still valid for
+    the whole worker, and a character setting that quietly reloaded the model
+    would be a character setting nobody could reason about. Changing one stops
+    the worker; the next reply, test or preview starts it again.
+
+    There is deliberately no thread control and no validation sweep. Released
+    PocketTTS manages its own CPU execution policy and exposes nothing supported
+    to set, so what belongs here is the sentence :func:`mc_voice_pocket.thread_policy`
+    writes rather than a slider accepting arbitrary integers (section 16.4) --
+    a control whose value the engine ignores is a control that lies about what it
+    did. And a sweep over precisions and thread counts is a measurement of a
+    lever this engine does not have.
+
+    The model row appears only when there is more than one to choose between.
+    The setting is persisted from day one even so, because "PocketTTS means
+    English" must not end up encoded in stable storage: a later release that
+    adds a language should be a manifest entry and this select appearing, not a
+    migration (section 16.3).
+    """
+    def choices(name: str, current, values, labels=None) -> str:
+        options = "".join(
+            f'<option value="{ui.escape(str(value))}"'
+            f'{" selected" if str(value) == str(current) else ""}>'
+            f'{ui.escape(str((labels or {}).get(value, value)))}</option>'
+            for value in values)
+        return f'<select data-mc-voice-pocket-setting="{ui.escape(name)}">{options}</select>'
+
+    precision_labels = {item["id"]: item["label"] for item in settings["precisions"]}
+    # Each option's own sentence, from the adapter rather than repeated here.
+    # Neither of them claims a speed, and that is the point: upstream reports a
+    # faster x86 INT8 path and it may well hold, but Sopro's identical-looking
+    # setting measured 40% the other way on the first machine anybody tried
+    # (GATE P-5, I-PKT-26).
+    precision_help = "".join(
+        f'<p class="mc-voice-note"><strong>{ui.escape(item["label"])}</strong> — '
+        f'{ui.escape(item["help"])}</p>'
+        for item in settings["precisions"])
+    # The number stays beside the name. A label is a shorthand and this setting
+    # is a compute trade, so hiding the value would hide the thing being traded.
+    step_labels = {
+        item["id"]: f'{item["label"]} — {item["id"]} step'
+                    f'{"" if int(item["id"]) == 1 else "s"}'
+        for item in settings["step_choices"]}
+    model_labels = {item["id"]: item["label"] for item in settings["model_choices"]}
+
+    return (
+        '<details class="mc-voice-manual" data-mc-voice-pocket-settings>'
+        '<summary>Engine settings</summary>'
+        '<p class="mc-voice-note">These change how PocketTTS runs rather than how a '
+        'character sounds, so they apply to every PocketTTS voice. Changing one stops '
+        'PocketTTS; the next reply starts it again. None of them is a character setting, '
+        'and none of them is a per-voice setting.</p>'
+        '<div class="mc-voice-field">'
+        '<label>Precision</label>'
+        + choices("precision", settings["precision"],
+                  [item["id"] for item in settings["precisions"]], precision_labels)
+        + '<p class="mc-voice-note">Neither of these claims to be the faster one. Upstream '
+          'reports lower memory and quicker x86 inference for its INT8 path and that may '
+          'well hold here, but the identical-looking setting on the other streaming engine '
+          'measured 40% the <em>other</em> way on the first machine anybody tried — so this '
+          'build measures before it says, and the turn summary in '
+          '<code>model_chain.log</code> reports the real-time factor either way.</p>'
+        + precision_help
+        + '</div>'
+        '<div class="mc-voice-field">'
+        '<label>Generation quality</label>'
+        + choices("steps", settings["steps"],
+                  [item["id"] for item in settings["step_choices"]], step_labels)
+        + '<p class="mc-voice-note">How many decode steps the sampler takes. PocketTTS '
+          'ships at one, which is the fast end, and the extra steps are a compute trade '
+          'rather than a character trait: more of them costs more CPU per sentence and is '
+          'the first thing to <em>lower</em> if replies start pausing mid-sentence. Only '
+          'tested values are offered, because an arbitrary number is a number nobody has '
+          'listened to.</p>'
+        '</div>'
+        + ('' if len(settings["model_choices"]) < 2 else
+           '<div class="mc-voice-field">'
+           '<label>Model</label>'
+           + choices("model_id", settings["model_id"],
+                     [item["id"] for item in settings["model_choices"]], model_labels)
+           + '<p class="mc-voice-note">Which PocketTTS model speaks. The model is the '
+             'language, so this is not a per-character setting: changing it stops '
+             'PocketTTS and the voices prepared for the old one have to be rebuilt, which '
+             'the voice library says when it applies.</p>'
+           '</div>')
+        # A note, not a control. Kept in this section because this is where
+        # somebody comes looking for it, and answered honestly rather than left
+        # to be inferred from an absence.
+        + '<div class="mc-voice-field">'
+          '<label>CPU threads</label>'
+          f'<p class="mc-voice-note">{ui.escape(settings["thread_policy"])} If a later '
+          f'PocketTTS release exposes one, it becomes a tested setting here rather than a '
+          f'box that has been accepting numbers all along.</p>'
+          '</div>'
+        + f'<p class="mc-voice-note">Build fingerprint '
+          f'<code>{ui.escape(found.fingerprint or "not installed")}</code>.</p>'
+        + '</details>')
 
 
 def cleanup_html() -> str:
@@ -1290,11 +1567,13 @@ def _sopro_validation() -> str:
 
 
 def delivery_controls() -> list:
-    """The four sliders, as data, in the order both surfaces draw them.
+    """The delivery sliders, as data, in the order both surfaces draw them.
 
-    Read from :mod:`mc_voice_profile` rather than repeated here, because a range
-    that differed between the settings page and the character screen would be a
-    setting that silently changed when it was edited in the other place.
+    Read from the active engine's profile module rather than repeated here,
+    because a range that differed between the settings page and the character
+    screen would be a setting that silently changed when it was edited in the
+    other place. The count is the engine's: four on Kokoro, seven on Sopro,
+    five on PocketTTS, and nothing here may assume one of them.
     """
     try:
         import mc_voice_engines as engines
@@ -1307,12 +1586,13 @@ def delivery_controls() -> list:
 
 
 def _delivery_block() -> str:
-    """How the default voice is delivered: four sliders and what they do.
+    """How the default voice is delivered: the engine's sliders and what they do.
 
     Full width and fully labelled here, because this is the settings page and
-    there is room. The same four controls appear in the character screen in a
-    compact form -- one grid, no help text -- for the same reason the voice list
-    does: that surface is a flyout on a phone.
+    there is room. The same controls appear in the character screen in a compact
+    form -- one grid, no help text -- for the same reason the voice list does:
+    that surface is a flyout on a phone. How many of them there are is the
+    active engine's answer and never this function's.
 
     Painted by the browser from ``/voice/profile`` like everything else in this
     row. The first frame is drawn here so that a page whose JavaScript has not
@@ -1371,28 +1651,22 @@ def _delivery_note(engine: str) -> str:
     """The paragraph that says which of these controls is the model's own.
 
     Section 37 makes this part of correctness rather than decoration, and the
-    two engines need different sentences because the same four labels mean
-    different things: Kokoro takes a speed argument and Sopro does not, so
-    Sopro's Speed is Voice Chat's own time-scaling and the text has to say so
-    rather than let somebody assume a model control.
-    """
-    import mc_voice_engines as engines
+    three engines need three different sentences because the same labels mean
+    different things: Kokoro takes a speed argument, Sopro and PocketTTS do not,
+    so on those two Speed is Voice Chat's own time-scaling and the text has to
+    say so rather than let somebody assume a model control.
 
-    if engine == engines.SOPRO:
-        return (
-            '<p class="mc-voice-note">Sopro has no speaking-rate input of its own, so '
-            'Speed is applied by Voice Chat: the audio is time-scaled without changing '
-            'the pitch, and the processing carries across the pieces Sopro streams so '
-            'there is no click between them. Pitch is separate and composes with it — '
-            'changing Speed at Pitch 0 does not transpose the voice, and changing Pitch '
-            'does not change how long the sentence takes. Volume and pacing are Voice '
-            'Chat\'s too.</p>'
-            '<p class="mc-voice-note">Variation is Sopro\'s own sampling temperature, and '
-            'Top-p and Top-k are its sampling cut-offs. They control how much a take '
-            'varies from another take. They are not emotion, warmth or energy controls — '
-            'the model has no such input, and a slider that claimed to be one would be '
-            'making a promise nobody has tested. Left alone they follow the model\'s own '
-            'configuration.</p>')
+    A registry for the same reason :data:`_ENGINE_PANELS` is one. The version of
+    this function with an ``if sopro`` and a fall-through told PocketTTS users
+    that Kokoro exposes speed -- a paragraph that was wrong about every sentence
+    in it, on the one surface whose whole job is to say who owns which control.
+    An engine with no entry gets no paragraph, which is a gap somebody notices.
+    """
+    note = _DELIVERY_NOTES.get(engine)
+    return note() if note is not None else ""
+
+
+def _kokoro_delivery_note() -> str:
     return (
         '<p class="mc-voice-note">Kokoro exposes one of these itself — speed, which changes '
         'how the model articulates rather than only how fast it plays. Pitch, volume and '
@@ -1400,6 +1674,50 @@ def _delivery_note(engine: str) -> str:
         'resynthesising faster and reading the result back slower, which moves the formants '
         'with it and reads as a different-sized speaker. There is no emotion control, '
         'because Kokoro-82M has no emotion input — a slider for one would do nothing.</p>')
+
+
+def _sopro_delivery_note() -> str:
+    return (
+        '<p class="mc-voice-note">Sopro has no speaking-rate input of its own, so '
+        'Speed is applied by Voice Chat: the audio is time-scaled without changing '
+        'the pitch, and the processing carries across the pieces Sopro streams so '
+        'there is no click between them. Pitch is separate and composes with it — '
+        'changing Speed at Pitch 0 does not transpose the voice, and changing Pitch '
+        'does not change how long the sentence takes. Volume and pacing are Voice '
+        'Chat\'s too.</p>'
+        '<p class="mc-voice-note">Variation is Sopro\'s own sampling temperature, and '
+        'Top-p and Top-k are its sampling cut-offs. They control how much a take '
+        'varies from another take. They are not emotion, warmth or energy controls — '
+        'the model has no such input, and a slider that claimed to be one would be '
+        'making a promise nobody has tested. Left alone they follow the model\'s own '
+        'configuration.</p>')
+
+
+def _pocket_delivery_note() -> str:
+    """What PocketTTS actually offers, said in the terms its profile module uses.
+
+    Four of these five controls are Voice Chat's and one is the model's, and
+    section 14 asks for that to be on the surface rather than inferred: the
+    reviewed PocketTTS generation call takes a voice state, a text string and
+    sampling controls, and has no rate, pitch, gain or emotion argument at all.
+    """
+    return (
+        '<p class="mc-voice-note">Speed, Pitch, Volume and Pause are Voice Chat\'s '
+        'controls rather than PocketTTS\'s. The model has no rate, pitch or gain input, '
+        'so Speed is a pitch-preserving time-scale applied to the audio it produces, '
+        'carried across the pieces PocketTTS streams so there is no click between them; '
+        'Pitch composes with it, so changing Speed at Pitch 0 does not transpose the '
+        'voice and changing Pitch does not change how long the sentence takes. Volume is '
+        'limited so a loud setting cannot clip, and Pause is silence added after each '
+        'committed sentence.</p>'
+        '<p class="mc-voice-note">Variation is PocketTTS\'s own sampling temperature and '
+        'is the only one of the five the model reads. Higher values vary one take more; '
+        'lower values are more repeatable. It is not an emotion, warmth, energy or '
+        'identity control — the model has no such input, and a slider claiming to be one '
+        'would be a promise nobody has tested. It also trades against how much a cloned '
+        'voice still sounds like its reference, so if a clone is not recognisable enough, '
+        'lower this before anything else. Left alone it follows the model\'s own '
+        'default.</p>')
 
 
 def _sopro_voices_html() -> str:
@@ -1660,6 +1978,202 @@ def _lab_html() -> str:
         '</details>')
 
 
+def _pocket_voices_html() -> str:
+    """PocketTTS's voice library, delivery controls and clone workspace.
+
+    The same product operations the other two engines offer -- list, audition,
+    set as default, assign to a character, rename, delete -- plus rebuilding a
+    voice whose prepared data no longer matches the model and precision now
+    selected, which is the operation a fingerprint makes necessary and
+    :func:`mc_voice_pocket.warnings` is what asks for.
+
+    What is deliberately not in this document: a Voice Lab, a starter-voice
+    button, a Storytime cloning panel and a validation sweep. The first two are
+    Sopro's, the third is Kokoro's and the fourth measures a lever PocketTTS
+    does not expose -- and section 5 is that the inactive engine's controls are
+    absent rather than hidden, so none of them appears here in any form.
+
+    No voice data is in the markup on any branch. The list is fetched from
+    ``/model-chain/voice/voices``, so a page that was open when a clone finished
+    shows it on its next paint, and no engine-native address is ever put in the
+    document (section 56).
+    """
+    import mc_voice_pocket as pocket
+
+    try:
+        found = pocket.status()
+    except Exception:
+        logger.debug("Model Chain: could not read the PocketTTS installation",
+                     exc_info=True)
+        found = None
+    return (
+        f'<div class="mc-voice-voices" data-mc-voice-key="{ui.escape(api.session_token())}" '
+        f'data-mc-voice-engine-id="{ui.escape(pocket.ENGINE)}">'
+        '<div class="mc-voice-row">'
+        '<div class="mc-voice-head">'
+        '<div class="mc-voice-heading">PocketTTS voices</div>'
+        '<div class="mc-voice-default" data-mc-voice-current>Loading…</div>'
+        '</div>'
+        '<div class="mc-voice-testline">'
+        '<label for="mc-voice-test-text">Test text</label>'
+        '<input type="text" id="mc-voice-test-text" data-mc-voice-test-text '
+        'spellcheck="false" maxlength="400" />'
+        '</div>'
+        # Said once here rather than repeated on every row the browser paints.
+        # An official voice offering a Rename that always failed would be worse
+        # than no Rename at all (section 10), so the rows it draws carry only
+        # the actions that voice really has.
+        '<p class="mc-voice-note">The reviewed official voices come first, then any you '
+        'made yourself. All of them can be set as the default, auditioned and given to a '
+        'character. Only your own can be renamed, deleted or rebuilt — an official voice '
+        'ships prepared for its model and is replaced by installing it again.</p>'
+        '<div class="mc-voice-warnings" data-mc-voice-warnings></div>'
+        '<div class="mc-voice-list" data-mc-voice-list></div>'
+        '</div>'
+        + _delivery_block()
+        + _pocket_clone_html(found)
+        + '</div>')
+
+
+def _pocket_clone_html(found) -> str:
+    """The reference workspace, or the sentence that says why there is not one.
+
+    Two branches and no third, because PocketTTS's cloning weights are a gated
+    upstream repository and "the button is there but every press is refused" is
+    the shape section 30 exists to prevent: a capability the engine has is not
+    the same question as a readiness this machine has (see
+    :func:`mc_voice_pocket.capabilities` and ``cloning_ready``). When the weights
+    are not installed this renders what is missing and how it is obtained, and
+    no Create button at all.
+
+    The workspace itself is Sopro's, deliberately: a file or a take recorded
+    here, decoded and trimmed in the tab, cleaned if the recording needs it,
+    and previewed before anything is written. What is different is the absence
+    of a language hint -- the PocketTTS model *is* the language and it is
+    engine-global (section 16.3) -- and that Save, Discard and Create speak the
+    engine-neutral ``/model-chain/voice/clone/*`` routes rather than an
+    engine-specific one.
+    """
+    import mc_voice_pocket as pocket
+
+    head = (
+        f'<div class="mc-voice-row" data-mc-voice-pocket-clone>'
+        f'<div class="mc-voice-head">'
+        f'<div class="mc-voice-heading">Clone voice</div>'
+        f'<div class="mc-voice-status" data-mc-voice-pocket-clone-status>'
+        f'{ui.escape((found.cloning_message if found is not None else "") or "")}</div>'
+        f'</div>')
+    if found is None or not found.cloning_ready:
+        return (
+            head
+            + '<p class="mc-voice-note">PocketTTS can make a voice from a short recording, '
+              'and this installation cannot do it yet. The weights that half of the model '
+              'needs are published as a separate <em>gated</em> repository: the files are '
+              'named in this extension, but access to them is granted by accepting the '
+              'publisher\'s conditions with your own account, upstream, rather than by '
+              'anything this WebUI can do on your behalf.</p>'
+              '<p class="mc-voice-note">The line above says what is missing and where. '
+              'Once the conditions are accepted, Install PocketTTS in Settings → Voice '
+              'Chat fetches the rest, or the manual section in that row installs it from '
+              'files you moved across yourself. Nothing else here changes: official '
+              'PocketTTS voices speak perfectly well without it, and the other engines are '
+              'not affected.</p>'
+              '</div>')
+    return (
+        head
+        + f'<p class="mc-voice-note">PocketTTS makes a voice from a short reference '
+          f'recording. This is part of how the model normally works — there is no training '
+          f'job and nothing further to install. It runs on the CPU in the same process '
+          f'that will later speak the voice, and takes seconds rather than hours.</p>'
+          f'<p class="mc-voice-note mc-voice-consent">Only clone a voice you own or have '
+          f'permission to clone. The recording stays on this PC, beside the voice, so that '
+          f'a later PocketTTS build can rebuild the voice without asking you to record '
+          f'again. Deleting the voice deletes the recording.</p>'
+          f'<div class="mc-voice-clone-form" data-mc-voice-pocket-form>'
+          f'<div class="mc-voice-field">'
+          f'<label for="mc-voice-pocket-name">Name</label>'
+          f'<input type="text" id="mc-voice-pocket-name" data-mc-voice-pocket-name '
+          f'maxlength="48" spellcheck="false" />'
+          f'</div>'
+        # No language hint. The model is the language and it is engine-global,
+        # so a per-voice selector here would be a control that either did
+        # nothing or quietly disagreed with Engine settings (section 16.3).
+        + f'<div class="mc-voice-field">'
+          f'<label for="mc-voice-pocket-file">Recording</label>'
+          f'<input type="file" id="mc-voice-pocket-file" '
+          f'accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.oga,.opus,.flac,.webm,.mp4" '
+          f'data-mc-voice-pocket-file />'
+          f'<button type="button" class="mc-voice-entry-action" '
+          f'data-mc-voice-pocket-record>Record here</button>'
+          f'<span class="mc-voice-pocket-recording" data-mc-voice-pocket-recording></span>'
+          f'</div>'
+        # The trimmer is engine-neutral and stays so: it decodes whatever the
+        # browser can play, draws it, and hands back the selection as one mono
+        # PCM WAV. Nothing in it knows which engine asked.
+        + f'<div class="mc-voice-trim" data-mc-voice-trim hidden>'
+          f'<canvas class="mc-voice-wave" data-mc-voice-wave height="96" '
+          f'aria-label="Waveform of the chosen recording. Drag to choose the part to '
+          f'clone, or use the start and end boxes below."></canvas>'
+          f'<div class="mc-voice-trim-row">'
+          f'<button type="button" class="mc-voice-entry-action" data-mc-voice-trim-play>'
+          f'Play selection</button>'
+          f'<button type="button" class="mc-voice-entry-action" '
+          f'data-mc-voice-trim-play-clean hidden>Play cleaned</button>'
+          f'<button type="button" class="mc-voice-entry-action" data-mc-voice-trim-best>'
+          f'Pick {int(pocket.IDEAL_REFERENCE_SECONDS)} s for me</button>'
+          f'<label class="mc-voice-lab-check">'
+          f'<input type="checkbox" data-mc-voice-clean /> Clean up the recording</label>'
+          f'<select data-mc-voice-clean-how class="mc-voice-clean-how" hidden>'
+          f'<option value="deepfilternet">with DeepFilterNet (better)</option>'
+          f'<option value="page">in this page (fast)</option>'
+          f'</select>'
+          f'<label for="mc-voice-trim-start">Start</label>'
+          f'<input type="number" id="mc-voice-trim-start" data-mc-voice-trim-start '
+          f'min="0" step="0.1" inputmode="decimal" />'
+          f'<label for="mc-voice-trim-end">End</label>'
+          f'<input type="number" id="mc-voice-trim-end" data-mc-voice-trim-end '
+          f'min="0" step="0.1" inputmode="decimal" />'
+          f'</div>'
+          f'<div class="mc-voice-trim-state" data-mc-voice-trim-state role="status" '
+          f'aria-live="polite"></div>'
+          f'<p class="mc-voice-note">Cleaning takes out steady background noise — hiss, '
+          f'hum, a fan, room tone — and lifts the level. <strong>Judge it by ear before '
+          f'you use it:</strong> Play selection is the recording untouched, Play cleaned '
+          f'is exactly what Create would upload. A cloning reference is not a recording '
+          f'you are going to listen to — the model conditions on it, so whatever a cleaner '
+          f'takes out of the timbre comes back under every sentence that voice ever '
+          f'says.</p>'
+          f'</div>'
+          f'<button type="button" class="mc-voice-install" data-mc-voice-pocket-create>'
+          f'Create preview</button>'
+        # Preview, then Save or Discard, and nothing is registered in between.
+        # A preview that had already written the registry entry would make
+        # listening a receipt rather than a decision (section 26.2).
+        + '<div class="mc-voice-preview" data-mc-voice-pocket-preview hidden>'
+          '<p class="mc-voice-note" data-mc-voice-pocket-preview-note></p>'
+          '<button type="button" class="mc-voice-entry-action" '
+          'data-mc-voice-pocket-preview-play>Play again</button>'
+          '<button type="button" class="mc-voice-install" '
+          'data-mc-voice-pocket-preview-save>Save voice</button>'
+          '<button type="button" class="mc-voice-entry-action" '
+          'data-mc-voice-pocket-preview-discard>Discard</button>'
+          '</div>'
+        # The numbers come from the adapter rather than from this file, because
+        # the ideal reference length is a release measurement (GATE P-CLONE-1)
+        # and a figure baked into a page is a figure that goes stale the first
+        # time somebody measures it (section 26.1).
+        + f'<p class="mc-voice-note">'
+          f'{int(pocket.MIN_REFERENCE_SECONDS)} to '
+          f'{int(pocket.MAX_REFERENCE_SECONDS)} seconds of one clear speaker, at a natural '
+          f'speaking pace, in a room without much background noise — about '
+          f'{int(pocket.IDEAL_REFERENCE_SECONDS)} seconds is what this build asks for. '
+          f'Create preview builds the voice and reads a line back to you; nothing is saved '
+          f'until you press Save voice, and Discard removes the whole thing including the '
+          f'recording it kept.</p>'
+          f'</div>'
+          f'</div>')
+
+
 def _value_label(name: str, value) -> str:
     try:
         import mc_voice_engines as engines
@@ -1678,24 +2192,41 @@ def voices_html() -> str:
     for the same reason the install row is -- Forge's settings system stores
     options, it does not host Gradio controls with handlers.
 
-    Engine-scoped from the first byte. When Kokoro is selected this renders the
-    Kokoro list, the Kokoro delivery sliders and the Storytime cloning panel;
-    when Sopro is selected it renders Sopro's list, Sopro's delivery and
-    generation controls, Sopro's clone form and the Voice Lab -- and the other
-    engine's markup is *not in the document* (section 5). Switching engines
-    reloads this page, which is how the browser gets a document with the other
-    engine's controls genuinely absent rather than hidden.
+    Engine-scoped from the first byte. Kokoro's selection renders the Kokoro
+    list, its delivery sliders and the Storytime cloning panel; Sopro's renders
+    Sopro's list, its delivery and generation controls, its clone form and the
+    Voice Lab; PocketTTS's renders its own list, its five delivery controls and
+    its clone workspace, and no Lab, no starter voices and no Storytime. The
+    engines that are not selected are *not in the document* (section 5).
+    Switching engines reloads this page, which is how the browser gets a
+    document with the other engines' controls genuinely absent rather than
+    hidden.
 
-    What is *not* here on either branch is any voice data. The list is fetched,
-    so a page that was open when a clone finished shows it on its next paint
-    rather than needing a reload, and no engine-native address is ever put in
-    the document (section 56).
+    What is *not* here on any branch is voice data. The list is fetched, so a
+    page that was open when a clone finished shows it on its next paint rather
+    than needing a reload, and no engine-native address is ever put in the
+    document (section 56).
+    """
+    import mc_voice_engines as engines
+
+    # The same registry rule the Settings row follows. The branch this replaced
+    # read "Sopro, or else Kokoro", so PocketTTS was handed Kokoro's voice list
+    # and the whole Storytime cloning panel with it -- markup for an engine that
+    # was not selected, which is precisely what section 5 forbids.
+    return _panel(_ENGINE_VOICES, engines.active(), "voice library")
+
+
+def _kokoro_voices_html() -> str:
+    """Kokoro's list, its delivery sliders and the Storytime cloning panel.
+
+    Its own function rather than the fall-through it used to be. Storytime is
+    Kokoro's cloning window and nothing else's: it is a separate download with a
+    separate lifecycle, and an engine that reached this markup by not being
+    Sopro would be offered a clone it cannot run.
     """
     import mc_voice_engines as engines
 
     active = engines.active()
-    if active == engines.SOPRO:
-        return _sopro_voices_html()
     return (
         f'<div class="mc-voice-voices" data-mc-voice-key="{ui.escape(api.session_token())}" '
         f'data-mc-voice-engine-id="{ui.escape(active)}">'
@@ -1774,3 +2305,69 @@ def voices_html() -> str:
         '</div>'
         '</div>'
         '</div>')
+
+
+# --------------------------------------------------------------------------- #
+# The per-engine renderer registry
+# --------------------------------------------------------------------------- #
+#
+# I-10, applied to markup. Two engines can be drawn with ``if sopro: ... else:
+# ...`` and nobody notices, because "the other one" is unambiguous; a third
+# engine is where that stops being a shortcut and becomes a defect, because
+# ``else`` silently means Kokoro. PocketTTS was handed Sopro's entire install
+# surface on the Settings row and Kokoro's Storytime cloning panel in the voices
+# row, from two branches that each looked correct in isolation.
+#
+# So the mapping is explicit and lookup is a miss rather than a fall-through: an
+# engine with no entry renders nothing. Nothing is a surface somebody notices
+# and reports; another engine's controls is a surface nobody notices until a
+# request built from them is refused.
+#
+# The keys are spelled out rather than read from :mod:`mc_voice_engines` because
+# this module imports that one lazily -- fourteen times, inside the functions
+# that need it -- and a dict built at import time would make that import
+# unconditional for a panel that may never draw a voice control. They are the
+# ids in ``mc_voice_engines.SPECS``, and ``tests/test_voice_ui.py`` asserts that
+# every one of them still is.
+
+
+def _panel(registry: dict, engine: str, what: str) -> str:
+    """Render ``engine``'s section from ``registry``, or nothing at all.
+
+    Never raises and never substitutes. An engine this build has no renderer for
+    is a gap in this file rather than a reason to draw another engine's markup,
+    and it is logged at debug so that the gap has a name in ``model_chain.log``
+    instead of only an empty rectangle on the page.
+    """
+    render = registry.get(engine)
+    if render is None:
+        logger.debug("Model Chain: %s has no %s of its own", engine or "no engine", what)
+        return ""
+    return render()
+
+
+_ENGINE_PANELS = {
+    "kokoro": _kokoro_panel,
+    "sopro": sopro_html,
+    "pocket": pocket_html,
+}
+"""Which engine draws which section of the Settings install row."""
+
+_ENGINE_VOICES = {
+    "kokoro": _kokoro_voices_html,
+    "sopro": _sopro_voices_html,
+    "pocket": _pocket_voices_html,
+}
+"""Which engine draws which voice library, delivery block and clone surface."""
+
+_DELIVERY_NOTES = {
+    "kokoro": _kokoro_delivery_note,
+    "sopro": _sopro_delivery_note,
+    "pocket": _pocket_delivery_note,
+}
+"""Which engine owns which of the delivery controls, said in its own words.
+
+Correctness rather than decoration (section 37): the same five labels mean
+different things on three engines, and the paragraph that told a PocketTTS user
+Kokoro exposes speed was wrong about every sentence in it.
+"""

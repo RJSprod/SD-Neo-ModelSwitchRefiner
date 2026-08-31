@@ -14,6 +14,52 @@ import pytest
 import mc_voice_engines as engines
 import mc_voice_ui
 
+OPERATIONAL = {
+    "kokoro": ('data-mc-voice-install="tts"', "Download default TTS",
+               "data-mc-voice-cloning", "Storytime"),
+    "sopro": ("data-mc-voice-sopro-install", "data-mc-voice-sopro-setting",
+              "data-mc-voice-sopro-settings", "data-mc-voice-sopro-create",
+              "data-mc-voice-sopro-form", "data-mc-voice-sopro-clone",
+              "data-mc-voice-starter-make", "data-mc-voice-sopro-validate",
+              "data-mc-voice-lab", "Style control", "Conditioning Blend"),
+    "pocket": ("data-mc-voice-pocket-install", "data-mc-voice-pocket-setting",
+               "data-mc-voice-pocket-settings", "data-mc-voice-pocket-create",
+               "data-mc-voice-pocket-form", "data-mc-voice-pocket-clone",
+               "data-mc-voice-pocket-record", "data-mc-voice-pocket-preview"),
+}
+"""Each engine's operational controls, by the hook the browser finds them with.
+
+Attributes and control names rather than engine *labels*, because the engine
+selector is the one neutral surface allowed to name every engine at once
+(section 4) and a matrix built out of labels would forbid the selector.
+"""
+
+
+def _surfaces() -> str:
+    """Every server-rendered surface of the engine selected now, concatenated."""
+    return (mc_voice_ui.settings_html() + mc_voice_ui.voices_html()
+            + mc_voice_ui.engine_panel())
+
+
+def test_no_engines_operational_controls_appear_on_another_engines_surfaces(
+        host, voice_root, kokoro_bundle, voice_registry):
+    """T-ENG-1 as a matrix rather than as a pair of hand-written tests.
+
+    The pair was correct and stopped being enough the moment there were three
+    engines: a two-engine assertion cannot see a third engine falling through to
+    the first, which is exactly what "Sopro, or else Kokoro" did to PocketTTS on
+    both of the surfaces below. Driven from :data:`OPERATIONAL`, so a fourth
+    engine is a row in that dict rather than another test to remember.
+    """
+    for chosen in ("kokoro", "sopro", "pocket"):
+        engines.select(chosen)
+        drawn = _surfaces()
+        for other, markers in OPERATIONAL.items():
+            if other == chosen:
+                continue
+            for forbidden in markers:
+                assert forbidden not in drawn, f"{forbidden} while {chosen} is selected"
+
 
 def test_kokoro_surfaces_render_and_carry_no_sopro_controls(host, voice_root,
                                                             kokoro_bundle, voice_registry):
@@ -23,8 +69,9 @@ def test_kokoro_surfaces_render_and_carry_no_sopro_controls(host, voice_root,
     overlay = mc_voice_ui.engine_panel()
     both = settings + voices + overlay
     assert "Kokoro" in settings
-    # The selector is the one place both names appear.
+    # The selector is the one place every name appears.
     assert settings.count("Sopro") >= 1
+    assert settings.count("PocketTTS") >= 1
     for forbidden in ("data-mc-voice-sopro-install", "data-mc-voice-lab",
                       "data-mc-voice-sopro-create", "Style control",
                       "Conditioning Blend", "data-mc-voice-sopro-setting"):
@@ -48,6 +95,31 @@ def test_sopro_surfaces_render_and_carry_no_kokoro_controls(host, voice_root,
                       "data-mc-voice-cloning", "Storytime"):
         assert forbidden not in settings + voices + overlay, forbidden
     print("\nsopro settings bytes:", len(settings), "voices bytes:", len(voices))
+
+
+def test_pocket_surfaces_render_and_carry_no_kokoro_or_sopro_controls(host, voice_root,
+                                                                      kokoro_bundle,
+                                                                      voice_registry):
+    """The third engine, drawn from its own renderer rather than from an ``else``.
+
+    Before the registry this rendered Sopro's entire install surface on the
+    Settings row -- two manual sections, an engine-settings block and a
+    validation button for a lever PocketTTS does not have -- and Kokoro's voice
+    list with the whole Storytime cloning panel beneath it, because both
+    branches read "the other engine" and meant it.
+    """
+    engines.select("pocket")
+    settings = mc_voice_ui.settings_html()
+    voices = mc_voice_ui.voices_html()
+    overlay = mc_voice_ui.engine_panel()
+    assert 'data-mc-voice-kind="pocket"' in settings
+    assert "data-mc-voice-pocket-install" in settings
+    assert "data-mc-voice-pocket-settings" in settings
+    assert "PocketTTS voices" in voices
+    assert "data-mc-voice-pocket-clone" in voices
+    for forbidden in OPERATIONAL["kokoro"] + OPERATIONAL["sopro"]:
+        assert forbidden not in settings + voices + overlay, forbidden
+    print("\npocket settings bytes:", len(settings), "voices bytes:", len(voices))
 
 
 def test_the_status_payload_carries_only_the_selected_engine(host, voice_root,
@@ -74,7 +146,7 @@ def test_the_status_payload_carries_only_the_selected_engine(host, voice_root,
     assert "sopro" in found
 
 
-def test_speech_to_text_is_reported_on_both_engines(host, voice_root, kokoro_bundle,
+def test_speech_to_text_is_reported_on_every_engine(host, voice_root, kokoro_bundle,
                                                     voice_registry):
     """I-7. Dictation is outside the selector, so every speech-to-text field is
     in the payload whichever engine is selected -- a browser that lost its
@@ -82,13 +154,12 @@ def test_speech_to_text_is_reported_on_both_engines(host, voice_root, kokoro_bun
     the invariant forbids."""
     import mc_voice_api as api
 
-    engines.select("kokoro")
-    before = {key: api.status_payload()[key]
-              for key in ("stt_ready", "stt_message", "stt_model", "runtime_ready")}
-    engines.select("sopro")
-    after = {key: api.status_payload()[key]
-             for key in ("stt_ready", "stt_message", "stt_model", "runtime_ready")}
-    assert before == after
+    wanted = ("stt_ready", "stt_message", "stt_model", "runtime_ready")
+    seen = []
+    for chosen in ("kokoro", "sopro", "pocket"):
+        engines.select(chosen)
+        seen.append({key: api.status_payload()[key] for key in wanted})
+    assert seen[0] == seen[1] == seen[2]
 
 
 def test_a_mutation_naming_the_other_engine_is_refused(host, voice_root, kokoro_bundle,
@@ -157,7 +228,7 @@ def test_the_residency_object_survives_the_scoping_filter(host, voice_root, koko
     """
     import mc_voice_api as api
 
-    for chosen in ("kokoro", "sopro"):
+    for chosen in ("kokoro", "sopro", "pocket"):
         engines.select(chosen)
         found = api.status_payload()
         assert found["engine"] == chosen
@@ -170,6 +241,7 @@ def test_load_and_unload_follow_the_selected_engine(host, voice_root, kokoro_bun
     """The button lives in a flyout that says which engine it belongs to, so
     pressing it must not load the other one."""
     import mc_voice_api as api
+    import mc_voice_pocket_runtime
     import mc_voice_runtime
     import mc_voice_sopro_runtime
 
@@ -178,12 +250,13 @@ def test_load_and_unload_follow_the_selected_engine(host, voice_root, kokoro_bun
                         lambda reason="": asked.append("kokoro") or {"state": "unloaded"})
     monkeypatch.setattr(mc_voice_sopro_runtime, "unload",
                         lambda reason="": asked.append("sopro") or {"state": "unloaded"})
+    monkeypatch.setattr(mc_voice_pocket_runtime, "unload",
+                        lambda reason="": asked.append("pocket") or {"state": "unloaded"})
 
-    engines.select("kokoro")
-    assert api.set_runtime("unload")["engine"] == "kokoro"
-    engines.select("sopro")
-    assert api.set_runtime("unload")["engine"] == "sopro"
-    assert asked == ["kokoro", "sopro"]
+    for chosen in ("kokoro", "sopro", "pocket"):
+        engines.select(chosen)
+        assert api.set_runtime("unload")["engine"] == chosen
+    assert asked == ["kokoro", "sopro", "pocket"]
 
 
 def test_the_surface_route_answers_for_the_engine_selected_now(host, voice_root,
@@ -222,7 +295,7 @@ def test_the_surface_carries_the_engine_id_the_page_compares_against(host, voice
     which is the loop wearing different clothes."""
     import mc_voice_api as api
 
-    for wanted in ("kokoro", "sopro"):
+    for wanted in ("kokoro", "sopro", "pocket"):
         engines.select(wanted)
         found = api.surface_payload()
         assert f'data-mc-voice-engine-id="{wanted}"' in found["settings"]

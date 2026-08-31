@@ -707,3 +707,342 @@ class TestACharactersVoiceReachesTheTurn:
         assert mc_voice_ui.voice_of(Older()) == ""
         assert mc_voice_ui.profile_of(Older()) == {}
         assert mc_voice_ui.begin_speech(character=Older()) is not None
+
+
+class TestThePocketSurface:
+    """The PocketTTS settings surface, and the fall-through it replaced.
+
+    Selecting PocketTTS used to draw Sopro's entire install row -- its two
+    manual sections, its engine settings, its validation button -- and then
+    Kokoro's voice list with the Storytime cloning panel under it, from two
+    branches that each read "the other engine" and meant it. Every test here is
+    about something the registry now has to keep true rather than about
+    decoration.
+    """
+
+    @staticmethod
+    def _ready(**changed):
+        """A PocketTTS installation that is complete, for a panel to describe.
+
+        The test machine is not one this build ships a PocketTTS closure for, so
+        every readiness is false and the panel correctly says so. That is the
+        right first frame and the wrong fixture for asserting what an installed
+        panel offers, which is what this stands in for.
+        """
+        import mc_voice_pocket as pocket
+
+        found = pocket.Status(
+            platform_supported=True, runtime_ready=True, speech_model_ready=True,
+            official_voices_ready=True, cloning_ready=True, label="PocketTTS English",
+            fingerprint="pkt-1234", model_id="english",
+            runtime_message="Installed — PocketTTS 3.0.2, Torch 2.6.0, CPU only.",
+            model_message="Installed — PocketTTS English.",
+            cloning_message="Installed — you can clone a voice from a recording.")
+        for name, value in changed.items():
+            setattr(found, name, value)
+        return found
+
+    def test_the_panel_reports_five_readinesses_and_not_one_boolean(self):
+        """Section 24. A machine whose speech works and whose Clone button does
+        not is not "half installed", and one line saying "Not installed" is the
+        panel hiding the fact that decides what to do next."""
+        import mc_voice_engines as engines
+
+        engines.select("pocket")
+        markup = mc_voice_ui.settings_html()
+        for hook in ("data-mc-voice-pocket-runtime", "data-mc-voice-pocket-model",
+                     "data-mc-voice-pocket-voices", "data-mc-voice-pocket-cloning"):
+            assert hook in markup, hook
+        assert 'data-mc-voice-status="pocket"' in markup
+
+    def test_an_unpinned_build_says_so_and_says_the_folder_is_the_way_in(self, monkeypatch):
+        """A closure this repository makes no claim about is one it will not
+        fetch, and being told that beats pressing a button that refuses."""
+        import mc_voice_engines as engines
+        import mc_voice_pocket as pocket
+
+        monkeypatch.setattr(pocket, "status", lambda: self._ready(runtime_ready=False))
+        monkeypatch.setattr(pocket, "pinned", lambda: False)
+        engines.select("pocket")
+        markup = mc_voice_ui.settings_html()
+        assert "has not pinned a PocketTTS runtime closure yet" in markup
+        assert "folder you filled yourself" in markup
+
+    def test_a_pinned_build_does_not_repeat_the_warning(self, monkeypatch):
+        import mc_voice_engines as engines
+        import mc_voice_pocket as pocket
+
+        monkeypatch.setattr(pocket, "status", lambda: self._ready())
+        monkeypatch.setattr(pocket, "pinned", lambda: True)
+        engines.select("pocket")
+        assert "has not pinned a PocketTTS runtime closure yet" \
+            not in mc_voice_ui.settings_html()
+
+    def test_each_installable_part_has_a_folder_of_its_own_that_says_which(self,
+                                                                          monkeypatch):
+        """Four collapsed sections all reading "Or install from files you
+        download yourself" would say nothing about which installs what, and the
+        four folder boxes would all be found by one selector."""
+        import mc_voice_engines as engines
+        import mc_voice_pocket as pocket
+
+        monkeypatch.setattr(pocket, "sources", lambda part="runtime": [
+            {"url": f"https://example.invalid/{part}.bin", "filename": f"{part}.bin",
+             "save_as": f"{part}.bin"}])
+        engines.select("pocket")
+        markup = mc_voice_ui.settings_html()
+        for part in ("runtime", "model", "voices", "cloning"):
+            assert f'data-mc-voice-local="pocket-{part}"' in markup, part
+            assert f'data-mc-voice-folder="pocket-{part}"' in markup, part
+        for title in ("Or install the PyTorch runtime from files you download yourself",
+                      "Or install the model artifacts from files you download yourself",
+                      "Or install the official voices from files you download yourself",
+                      "Or install the voice-cloning weights from files you download "
+                      "yourself"):
+            assert f"<summary>{title}</summary>" in markup, title
+
+    def test_the_engine_settings_are_precision_and_quality_and_nothing_per_character(self):
+        """I-PKT-23. These change compute, memory and which prepared voice states
+        are still valid for the whole worker."""
+        import mc_voice_engines as engines
+
+        engines.select("pocket")
+        markup = mc_voice_ui.settings_html()
+        assert 'data-mc-voice-pocket-setting="precision"' in markup
+        assert 'data-mc-voice-pocket-setting="steps"' in markup
+        assert "<option value=\"full\"" in markup and "<option value=\"int8\"" in markup
+
+    def test_neither_precision_claims_a_speed_nobody_has_measured(self):
+        """GATE P-5, I-PKT-26. Upstream reports a faster INT8 path and it may
+        well hold; the identical-looking setting on the other streaming engine
+        measured 40% the other way on the first machine anybody tried."""
+        import mc_voice_engines as engines
+
+        engines.select("pocket")
+        markup = mc_voice_ui.settings_html()
+        assert "Neither of these claims to be the faster one" in markup
+
+    def test_the_step_choices_keep_their_numbers_beside_their_names(self):
+        """A label is a shorthand and this setting is a compute trade, so hiding
+        the value would hide the thing being traded."""
+        import mc_voice_engines as engines
+        import mc_voice_pocket as pocket
+
+        engines.select("pocket")
+        markup = mc_voice_ui.settings_html()
+        for value in pocket.STEP_CHOICES:
+            plural = "" if value == 1 else "s"
+            assert f"{pocket.STEP_LABELS[value]} — {value} step{plural}" in markup
+
+    def test_there_is_a_thread_note_and_no_thread_control(self):
+        """Section 16.4. Released PocketTTS exposes nothing supported to set, so
+        a slider here would be a control that lies about what it did."""
+        import mc_voice_engines as engines
+        import mc_voice_pocket as pocket
+
+        engines.select("pocket")
+        markup = mc_voice_ui.settings_html()
+        assert pocket.thread_policy() in markup
+        assert 'data-mc-voice-pocket-setting="threads"' not in markup
+        assert "data-mc-voice-sopro-setting" not in markup
+
+    def test_the_model_row_appears_only_when_there_is_more_than_one_to_choose(self,
+                                                                             monkeypatch):
+        """The setting is persisted from day one even so: "PocketTTS means
+        English" must not end up encoded in stable storage (section 16.3)."""
+        import mc_voice_engines as engines
+        import mc_voice_pocket as pocket
+
+        engines.select("pocket")
+        one = pocket.engine_settings()
+        assert len(one["model_choices"]) == 1
+        assert 'data-mc-voice-pocket-setting="model_id"' not in \
+            mc_voice_ui.settings_html()
+
+        two = dict(one, model_choices=[{"id": "english", "label": "PocketTTS English"},
+                                       {"id": "french", "label": "PocketTTS French"}])
+        monkeypatch.setattr(pocket, "engine_settings", lambda: two)
+        assert 'data-mc-voice-pocket-setting="model_id"' in mc_voice_ui.settings_html()
+
+    def test_there_is_no_validation_sweep_because_there_is_no_lever_to_sweep(self):
+        import mc_voice_engines as engines
+
+        engines.select("pocket")
+        markup = mc_voice_ui.settings_html()
+        assert "data-mc-voice-sopro-validate" not in markup
+        assert "Run validation" not in markup
+
+    def test_the_voices_row_offers_pockets_five_delivery_controls(self):
+        import mc_voice_engines as engines
+        import mc_voice_pocket_profile
+
+        engines.select("pocket")
+        markup = mc_voice_ui.voices_html()
+        for name in mc_voice_pocket_profile.FIELDS:
+            assert f'data-mc-voice-slider-input="{name}"' in markup, name
+        assert 'data-mc-voice-slider-input="temperature"' in markup
+
+    def test_the_delivery_note_says_which_four_are_not_the_models(self):
+        """Section 14. The reviewed PocketTTS generation call has no rate, pitch,
+        gain or emotion argument at all, so four of these five are Voice Chat's
+        and the surface has to say so rather than let somebody assume."""
+        import mc_voice_engines as engines
+
+        engines.select("pocket")
+        markup = mc_voice_ui.voices_html()
+        assert "Speed, Pitch, Volume and Pause are Voice Chat" in markup
+        assert "sampling temperature" in markup
+        assert "not an emotion, warmth, energy or identity control" in markup
+        # And not the paragraph written for the engine that does take a speed.
+        assert "no emotion control" not in markup
+        assert "Kokoro exposes one of these itself" not in markup
+
+    def test_a_gated_cloning_install_explains_itself_rather_than_offering_a_button(self):
+        """Section 30. A capability the engine has is not a readiness this
+        machine has, and a Create button that cannot work is worse than none."""
+        import mc_voice_engines as engines
+
+        engines.select("pocket")
+        markup = mc_voice_ui.voices_html()
+        assert "data-mc-voice-pocket-clone" in markup
+        assert "gated" in markup
+        assert "data-mc-voice-pocket-create" not in markup
+        assert "data-mc-voice-pocket-form" not in markup
+
+    def test_the_clone_workspace_appears_once_the_gated_weights_are_installed(self,
+                                                                              monkeypatch):
+        import mc_voice_engines as engines
+        import mc_voice_pocket as pocket
+
+        monkeypatch.setattr(pocket, "status", lambda: self._ready())
+        engines.select("pocket")
+        markup = mc_voice_ui.voices_html()
+        for hook in ("data-mc-voice-pocket-form", "data-mc-voice-pocket-name",
+                     "data-mc-voice-pocket-file", "data-mc-voice-pocket-record",
+                     "data-mc-voice-pocket-create", "data-mc-voice-pocket-preview",
+                     "data-mc-voice-pocket-preview-save",
+                     "data-mc-voice-pocket-preview-discard",
+                     "data-mc-voice-trim", "data-mc-voice-wave"):
+            assert hook in markup, hook
+        # The reference envelope comes from the adapter, because the ideal
+        # length is a release measurement and a number baked into a page is a
+        # number that goes stale (section 26.1).
+        assert f"Pick {int(pocket.IDEAL_REFERENCE_SECONDS)} s for me" in markup
+        assert f"{int(pocket.MIN_REFERENCE_SECONDS)} to " \
+               f"{int(pocket.MAX_REFERENCE_SECONDS)} seconds" in markup
+        # No language hint: the PocketTTS model is the language and it is
+        # engine-global, so a per-voice selector would be a control that either
+        # did nothing or disagreed with Engine settings.
+        assert "data-mc-voice-pocket-language" not in markup
+
+    def test_the_pocket_voice_row_carries_no_lab_no_starter_voices_and_no_storytime(self,
+                                                                                    monkeypatch):
+        import mc_voice_engines as engines
+        import mc_voice_pocket as pocket
+
+        monkeypatch.setattr(pocket, "status", lambda: self._ready())
+        engines.select("pocket")
+        markup = mc_voice_ui.voices_html()
+        for forbidden in ("data-mc-voice-lab", "Style control", "Conditioning Blend",
+                          "data-mc-voice-starter-make", "Starter voices",
+                          "data-mc-voice-cloning", "Storytime",
+                          "data-mc-voice-clone-start"):
+            assert forbidden not in markup, forbidden
+
+    def test_the_first_frame_carries_no_voice_and_no_rename_or_delete(self):
+        """Section 56 and section 10 together. The list is fetched, so no
+        engine-native address is in the document; and an official voice offering
+        a Rename that always failed would be worse than no Rename at all."""
+        import mc_voice_engines as engines
+
+        engines.select("pocket")
+        markup = mc_voice_ui.voices_html()
+        assert "data-mc-voice-list" in markup and "data-mc-voice-warnings" in markup
+        assert "data-mc-voice-action" not in markup
+        assert "pocket:official:" not in markup
+
+
+class TestTheRendererRegistry:
+    """I-10, applied to markup: a miss draws nothing rather than another engine."""
+
+    def test_every_renderer_names_an_engine_this_build_actually_has(self):
+        import mc_voice_engines as engines
+
+        for registry in (mc_voice_ui._ENGINE_PANELS, mc_voice_ui._ENGINE_VOICES,
+                         mc_voice_ui._DELIVERY_NOTES):
+            # Every one, and only those. A subset would be an engine the
+            # selector offers and the page cannot draw; a superset would be a
+            # renderer for something that is not an engine any more. Both are
+            # gaps this file is the only place that could have (I-PKT-30).
+            assert set(registry) == set(engines.ENGINES)
+
+    def test_an_engine_with_no_renderer_draws_nothing_at_all(self):
+        """Nothing is a surface somebody notices and reports. Another engine's
+        controls is a surface nobody notices until a request built from them is
+        refused."""
+        assert mc_voice_ui._panel(mc_voice_ui._ENGINE_PANELS, "not-an-engine",
+                                  "settings surface") == ""
+        assert mc_voice_ui._panel(mc_voice_ui._ENGINE_VOICES, "", "voice library") == ""
+        assert mc_voice_ui._delivery_note("not-an-engine") == ""
+
+    def test_each_engine_gets_its_own_delivery_paragraph(self):
+        """Section 37. The same labels mean different things on three engines,
+        and the paragraph that told a PocketTTS user Kokoro exposes speed was
+        wrong about every sentence in it."""
+        notes = {name: mc_voice_ui._delivery_note(name)
+                 for name in ("kokoro", "sopro", "pocket")}
+        assert len(set(notes.values())) == 3
+        assert "Kokoro exposes one of these itself" in notes["kokoro"]
+        assert "Sopro has no speaking-rate input of its own" in notes["sopro"]
+        assert "are Voice Chat" in notes["pocket"]
+
+
+class TestTheCharacterEditorFollowsTheEngine:
+    """Section 7. The editor is drawn from the active engine's own profile."""
+
+    def test_it_draws_pockets_five_sliders_including_variation(self):
+        import mc_voice_engines as engines
+        import mc_voice_pocket_profile as profile
+
+        engines.select("pocket")
+        build()
+        for name in profile.FIELDS:
+            slider = find(None, f"mc-llm-chat-character-voice-{name}")
+            assert slider is not None, name
+            assert slider.minimum == profile.CONTROLS[name]["minimum"]
+            assert slider.maximum == profile.CONTROLS[name]["maximum"]
+        assert find(None, "mc-llm-chat-character-voice-temperature") is not None
+
+    def test_it_draws_no_engine_setting_on_any_engine(self):
+        """I-PKT-23. Precision, decode steps and the model are global to the
+        worker and changing one stops it, so a character carrying them would be
+        a character whose turn to speak restarted a subprocess."""
+        import mc_voice_engines as engines
+
+        engines.select("pocket")
+        build()
+        for name in ("precision", "steps", "threads", "model", "sampler_steps"):
+            assert find(None, f"mc-llm-chat-character-voice-{name}") is None, name
+
+    def test_an_unset_field_is_none_rather_than_todays_default(self):
+        """I-4. A character that follows Settings has to keep following it when
+        Settings changes, so unchecked is every field ``None``."""
+        import mc_voice_engines as engines
+        import mc_voice_pocket_profile as profile
+
+        engines.select("pocket")
+        assert mc_voice_ui.character_profile(False, [1.5] * len(profile.FIELDS)) == \
+            {name: None for name in profile.FIELDS}
+
+    def test_a_character_with_no_pocket_voice_opens_with_none_selected(self):
+        """It does not translate a Kokoro pitch into a PocketTTS one, and it
+        does not offer a Kokoro voice on a PocketTTS page."""
+        import mc_voice_engines as engines
+        import mc_voice_pocket_profile as profile
+        from prompt_master.chat.characters import Character
+
+        engines.select("pocket")
+        found = mc_voice_ui.character_state(Character(name="Ada", voice="official:af_heart"))
+        assert found["engine"] == "pocket"
+        assert found["voice"] == ""
+        assert len(found["values"]) == len(profile.FIELDS)
