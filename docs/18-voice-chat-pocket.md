@@ -283,6 +283,60 @@ loud, and what the engine is called in the sentence that refuses it.
 
 ---
 
+## The click at the end of a sentence
+
+Reported from a real machine: on a long reply, a small pop at the end of some
+sentences. It is not the buffer running dry — that is counted, and it sounds
+like a gap rather than a tick — and it is not the segmenter. It is the join.
+
+PocketTTS stops a generation a couple of frames after the end-of-speech token
+and leaves it there. Upstream's `_autoregressive_generation` breaks out of its
+loop mid-stride, and the next generation's `_decode_audio_worker` calls
+`init_states` on a fresh Mimi decoder, so:
+
+* a unit's **last** sample is wherever the waveform happened to be, and
+* the next unit's **first** sample is wherever a zero-initialised decoder puts
+  it.
+
+Voice Chat plays units back sample-exact and one after another, which turns that
+pair into a step in the waveform — and a step is a click. It is small, it lands
+at the end of a sentence, and on a long reply it happens once per sentence. A
+residual DC offset in the decoder output, which codec decoders have, makes it
+louder.
+
+`Seam` is the answer and it is eight milliseconds long. Each committed unit is
+ramped up over its first `DECLICK_MS` and down over its last, with a raised
+cosine rather than a straight line so there is no corner at either end. Ramping
+the *end* means knowing which block is the last one, which streaming does not
+know until the generator is exhausted — so a unit's final eight milliseconds are
+withheld inside `Seam` and released by `flush()` when the unit ends. Eight
+milliseconds of added latency once per sentence is not audible; the click is.
+
+What it costs is the first and last eight milliseconds of each unit, which for
+this model is the padding either side of the end-of-speech token rather than
+speech. What it does not do is fade per *chunk*: that would put a fade several
+times a second in the middle of a word, which is why the seam is scoped to the
+unit and not to the block.
+
+The same join exists in Kokoro and in Sopro — each synthesises one unit and
+stops — so each worker carries its own copy, held to its own edge tests, the
+same way the speed and pitch DSP is duplicated above.
+
+One consequence worth writing down: for Kokoro the number of blocks that leave
+`Engines.stream` is no longer the number sherpa handed back, because the seam
+adds a closing block of its own. The callback-granularity metric is about
+sherpa's hand-backs, so it is now counted where they happen — inside
+`Engines.stream` — and returned to the lane rather than inferred from how many
+times the lane's `on_audio` was called.
+
+What this does **not** fix is the other half of "it sounds like separate
+chunks": each unit is its own generation, so prosody restarts at every sentence.
+Upstream's own long-text path has the same seam and the same restart, and its
+`TODO` about teacher forcing across chunks is the fix for it. That is a model
+change, not a DSP one.
+
+---
+
 ## There is no thread control, and a sentence where one would be
 
 PocketTTS 3.0.2 calls `torch.set_num_threads(1)` itself and takes its

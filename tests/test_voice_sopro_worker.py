@@ -393,6 +393,69 @@ class TestWhatNeverLeavesThisProcess:
         assert found == "that recording contains no audio"
 
 
+class TestAUnitEndsAtSilenceRatherThanWhereverItWas:
+    """The pop between sentences, and the thing that removes it.
+
+    A unit is one decode. Sopro stops when the unit is said and the next unit is
+    decoded from a session that has no memory of this one, so a unit's last
+    sample is wherever the waveform happened to be and the next unit's first is
+    wherever a fresh session starts. This feature plays units back sample-exact
+    and one after another, which turns that pair into a step -- and a step in a
+    waveform is a click at the end of a sentence.
+
+    The signal below is DC on purpose: the worst case, roughly what a decoder's
+    residual offset looks like, and nothing but a ramp removes it.
+    """
+
+    def unit(self, seam, source, chunk: int = 431):
+        out = bytearray()
+        for start in range(0, len(source), chunk):
+            out += seam.block(sopro_worker.pcm16(source[start:start + chunk]))
+        out += seam.flush()
+        return numpy.frombuffer(bytes(out), dtype="<i2").astype(numpy.float32) / 32767.0
+
+    def test_a_unit_starts_and_ends_at_silence(self):
+        found = self.unit(sopro_worker.Seam(24000),
+                          numpy.full(4800, 0.5, dtype=numpy.float32))
+        assert abs(float(found[0])) < 1e-3
+        assert abs(float(found[-1])) < 1e-3
+
+    def test_the_step_a_join_would_have_carried_is_gone(self):
+        found = self.unit(sopro_worker.Seam(24000),
+                          numpy.full(4800, 0.5, dtype=numpy.float32))
+        joined = numpy.concatenate([found, found])
+        assert float(numpy.abs(numpy.diff(joined)).max()) < 0.01
+
+    def test_nothing_is_lost_to_the_ramp(self):
+        source = numpy.full(4800, 0.5, dtype=numpy.float32)
+        assert self.unit(sopro_worker.Seam(24000), source).size == source.size
+
+    def test_the_middle_of_the_unit_is_untouched(self):
+        source = numpy.full(4800, 0.5, dtype=numpy.float32)
+        found = self.unit(sopro_worker.Seam(24000), source)
+        span = sopro_worker.Seam(24000).span
+        assert float(numpy.abs(found[span:-span] - 0.5).max()) < 1e-3
+
+    def test_a_unit_shorter_than_the_ramp_still_starts_and_ends_at_silence(self):
+        seam = sopro_worker.Seam(24000)
+        source = numpy.full(seam.span // 3, 0.5, dtype=numpy.float32)
+        found = self.unit(seam, source, chunk=17)
+        assert found.size == source.size
+        assert abs(float(found[0])) < 1e-3
+        assert abs(float(found[-1])) < 1e-3
+
+    def test_the_ramp_does_not_follow_the_models_chunk_sizes(self):
+        source = numpy.full(4800, 0.5, dtype=numpy.float32)
+        whole = self.unit(sopro_worker.Seam(24000), source, chunk=len(source))
+        pieces = self.unit(sopro_worker.Seam(24000), source, chunk=137)
+        assert whole.size == pieces.size
+        assert float(numpy.abs(whole - pieces).max()) < 1e-3
+
+    def test_a_rate_of_nothing_is_a_pass_through_rather_than_a_crash(self):
+        source = numpy.full(480, 0.5, dtype=numpy.float32)
+        assert self.unit(sopro_worker.Seam(0), source).size == source.size
+
+
 class TestSilence:
     def test_a_pause_is_exactly_the_requested_number_of_milliseconds(self):
         found = sopro_worker.silence(24000, 250)

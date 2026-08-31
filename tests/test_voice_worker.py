@@ -26,6 +26,17 @@ import pytest
 from voice_worker import worker
 
 
+BATCH = 480
+"""How many samples a fake batch carries -- twenty milliseconds at 24 kHz.
+
+Longer than :data:`voice_worker.worker.DECLICK_MS` on purpose. A segment's last
+few milliseconds are withheld by ``Seam`` until the segment ends, so a fixture
+whose whole synthesis was shorter than that ramp would be a fixture in which no
+audio ever reaches the parent -- and tests about what happens *after* audio has
+been sent would then be testing the opposite case.
+"""
+
+
 class Audio:
     def __init__(self, samples, rate=24000):
         self.samples = samples
@@ -43,9 +54,10 @@ class Tts:
     num_speakers = 53
     sample_rate = 24000
 
-    def __init__(self, callback_error=None, batches=2):
+    def __init__(self, callback_error=None, batches=2, level=0.5):
         self.callback_error = callback_error
         self.batches = batches
+        self.level = float(level)
         self.calls = []
 
     def generate(self, text, sid=0, speed=1.0, callback=None):
@@ -55,10 +67,10 @@ class Tts:
             if self.callback_error is not None:
                 raise self.callback_error
             for _batch in range(self.batches):
-                if callback([0.5] * 4, 0.5) == 0:
+                if callback([self.level] * BATCH, 0.5) == 0:
                     break
             return Audio([])
-        return Audio([0.25] * 8)
+        return Audio([0.25] * (2 * BATCH))
 
 
 def engines(tts):
@@ -86,7 +98,7 @@ class TestTheStreamingCapability:
             sample_rate = 24000
 
             def generate(self, text, sid=0, speed=1.0):
-                return Audio([0.25] * 8)
+                return Audio([0.25] * (2 * BATCH))
 
         assert engines(Old())._callback_supported() is False
 
@@ -106,16 +118,24 @@ class TestTheStreamingCapability:
 class TestSpeakingEitherWay:
     def collect(self, found, text="Hello there."):
         blocks = []
-        produced = found.stream(text, 3, worker.NEUTRAL,
-                                lambda block, rate: blocks.append((block, rate)) or True)
-        return blocks, produced
+        metrics = found.stream(text, 3, worker.NEUTRAL,
+                               lambda block, rate: blocks.append((block, rate)) or True)
+        return blocks, metrics
 
     def test_a_callback_runtime_streams_each_batch(self):
+        """Two batches handed back, and both are passed on as they arrive.
+
+        Three blocks leave rather than two, and the third is ``Seam``'s: a
+        segment's last few milliseconds are withheld until the segment ends so
+        that it can be ramped down into whatever follows it. What must not
+        change is the audio -- every sample sherpa produced still goes out.
+        """
         found = engines(Tts())
         found.streaming = "callback"
-        blocks, produced = self.collect(found)
-        assert len(blocks) == 2
-        assert produced == 8
+        blocks, metrics = self.collect(found)
+        assert metrics["blocks"] == 2
+        assert len(blocks) == 3
+        assert metrics["samples"] == 2 * BATCH
 
     def test_a_runtime_without_numpy_still_speaks_the_segment(self):
         """The behaviour that matters. Segment-at-a-time is coarser than
@@ -123,9 +143,9 @@ class TestSpeakingEitherWay:
         sentence at a time, so speech still starts before the reply is over."""
         found = engines(Tts(callback_error=ImportError("No module named 'numpy'")))
         found.streaming = "callback"
-        blocks, produced = self.collect(found)
+        blocks, metrics = self.collect(found)
         assert blocks, "a reply was lost instead of being spoken the coarser way"
-        assert produced == 8
+        assert metrics["samples"] == 2 * BATCH
         assert found.streaming == "segment", "the fallback was not remembered"
 
     def test_the_fallback_is_remembered_rather_than_retried_every_segment(self):
@@ -142,9 +162,9 @@ class TestSpeakingEitherWay:
         class Broken(Tts):
             def generate(self, text, sid=0, speed=1.0, callback=None):
                 if callback is not None:
-                    callback([0.5] * 4, 0.5)
+                    callback([0.5] * BATCH, 0.5)
                     raise RuntimeError("the pipe went away")
-                return Audio([0.25] * 8)
+                return Audio([0.25] * (2 * BATCH))
 
         found = engines(Broken())
         found.streaming = "callback"
@@ -272,26 +292,35 @@ class TestCallbackGranularity:
         def generate(self, text, sid=0, speed=1.0, callback=None):
             batches = max(1, text.count(".") + text.count("?") + text.count("!"))
             if callback is None:
-                return Audio([0.25] * (8 * batches))
+                return Audio([0.25] * (BATCH * batches))
             for _batch in range(batches):
-                if callback([0.5] * 4, 0.5) == 0:
+                if callback([0.5] * BATCH, 0.5) == 0:
                     return Audio([])
             return Audio([])
 
     def blocks_for(self, text):
+        """How many times sherpa handed audio back for ``text``.
+
+        The count comes from ``stream`` rather than from the number of blocks
+        that left it, because those are no longer the same number: ``Seam``
+        withholds a segment's last few milliseconds and releases them in a block
+        of its own. Sherpa's hand-backs are what this whole class is about.
+        """
         found = engines(self.Sentences())
         found.streaming = "callback"
         seen = []
-        found.stream(text, 3, worker.NEUTRAL, lambda block, rate: seen.append(block) or True)
-        return seen
+        metrics = found.stream(text, 3, worker.NEUTRAL,
+                               lambda block, rate: seen.append(block) or True)
+        assert seen, "nothing was spoken at all"
+        return metrics["blocks"]
 
     def test_one_sentence_arrives_in_one_batch(self):
         """The measurement that stops callback mode being oversold: for a
         one-sentence segment the first batch *is* the whole synthesis."""
-        assert len(self.blocks_for("Yes, that is possible.")) == 1
+        assert self.blocks_for("Yes, that is possible.") == 1
 
     def test_a_multi_sentence_segment_arrives_in_several(self):
-        assert len(self.blocks_for("One. Two. Three. Four.")) == 4
+        assert self.blocks_for("One. Two. Three. Four.") == 4
 
     def test_the_probe_records_what_it_cost(self):
         found = worker.Engines({})
@@ -389,6 +418,74 @@ class TestPcm16:
     def test_empty_input_is_empty_output(self):
         assert worker.pcm16([]) == b""
         assert worker.pcm16(None) == b""
+
+
+class TestASegmentEndsAtSilenceRatherThanWhereverItWas:
+    """The pop between sentences, and the thing that removes it.
+
+    A segment is one sentence's forward pass. Where the waveform happens to be
+    when the sentence runs out is where the samples stop, and the next sentence
+    is a fresh pass that starts wherever it starts. This feature plays segments
+    back sample-exact and one after another, with no gap between them unless
+    somebody asked for one -- so the join between two of them is a step, and a
+    step in a waveform is a click at the end of a sentence.
+
+    The batches below are DC on purpose. It is the worst case and it is what a
+    residual offset actually looks like; nothing but a ramp removes it.
+    """
+
+    def spoken(self, tts, delivery=None):
+        """One segment's PCM as signed samples, decoded without NumPy.
+
+        Without NumPy because this runtime has none -- see the module docstring
+        -- and a test that reached for it here would be testing a Python this
+        worker never runs on.
+        """
+        import array
+        import sys
+
+        found = engines(tts)
+        found.streaming = "callback"
+        blocks = []
+        found.stream("Hello there.", 3, delivery or worker.NEUTRAL,
+                     lambda block, rate: blocks.append(block) or True)
+        numbers = array.array("h")
+        numbers.frombytes(b"".join(blocks))
+        if sys.byteorder == "big":
+            numbers.byteswap()
+        return numbers
+
+    def test_a_segment_starts_and_ends_at_silence(self):
+        found = self.spoken(Tts())
+        assert len(found) == 2 * BATCH, "audio was lost to the ramp"
+        assert abs(found[0]) < 300, f"a segment opened at {found[0]}"
+        assert abs(found[-1]) < 300, f"a segment closed at {found[-1]}"
+
+    def test_the_step_a_join_would_have_carried_is_gone(self):
+        """The measurement rather than the assertion: no sample-to-sample step.
+
+        Without the ramp both edges sit at half full scale, so the join on
+        either side of the segment is a step of that size. What is left is the
+        ramp's own slope, which is two orders of magnitude smaller.
+        """
+        joined = list(self.spoken(Tts(level=0.5))) + list(self.spoken(Tts(level=-0.5)))
+        steps = [abs(joined[index + 1] - joined[index]) for index in range(len(joined) - 1)]
+        assert max(steps) < 32767 * 0.01
+
+    def test_the_middle_of_the_segment_is_untouched(self):
+        """A ramp at the edges, and nothing anywhere else."""
+        found = self.spoken(Tts())
+        span = worker.Seam(24000).span
+        middle = list(found)[span:-span]
+        assert middle, "the fixture is shorter than two ramps"
+        assert min(middle) > 32767 * 0.49
+
+    def test_a_shaped_segment_is_ramped_as_well(self):
+        """Pitch and volume change the samples; they do not change the edges."""
+        found = self.spoken(Tts(), delivery=worker.Delivery(pitch=1.1, gain=2.0))
+        assert len(found), "a shaped segment produced no audio"
+        assert abs(found[0]) < 300
+        assert abs(found[-1]) < 300
 
 
 # --------------------------------------------------------------------------- #

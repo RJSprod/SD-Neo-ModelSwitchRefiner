@@ -263,6 +263,131 @@ def silence(rate: int, milliseconds: int) -> bytes:
     return b"\x00\x00" * count
 
 
+DECLICK_MS = 8
+"""How long a committed unit takes to reach full level, and to leave it again.
+
+A unit does not end the way a recording ends. Sopro decodes one committed unit
+and stops; where the waveform happens to be at the last chunk is where the
+samples stop, and the next unit is decoded from a session that has no memory of
+this one. Played back the way this feature plays speech -- sample-exact, one
+unit after another, no gap -- the join between the two is a step, and a step in
+a waveform is a click. It is small, it lands at the end of a sentence, and on a
+long reply it happens once per sentence.
+
+Eight milliseconds is chosen to be longer than the step and shorter than a
+phoneme. A ramp that long puts the click's energy below about sixty hertz,
+where it stops being a tick, and what it takes the edge off is a unit's first
+and last eight milliseconds -- which is the quiet either side of a sentence
+rather than the sentence. Materially shorter stops removing the click;
+materially longer starts eating the consonant.
+"""
+
+
+def _int16(pcm: bytes):
+    """PCM16 bytes as a mutable array of samples, in this machine's order."""
+    import array
+
+    numbers = array.array("h")
+    numbers.frombytes(pcm)
+    if sys.byteorder == "big":
+        numbers.byteswap()
+    return numbers
+
+
+def _wire(numbers) -> bytes:
+    """Samples back as little-endian PCM16. Mutates ``numbers`` on a big-endian host."""
+    if sys.byteorder == "big":
+        numbers.byteswap()
+    return numbers.tobytes()
+
+
+def _ramp(count: int):
+    """A raised cosine from silence to unity, ``count`` samples long.
+
+    Raised rather than linear because a linear ramp has a corner at each end,
+    and a corner is a discontinuity in the first derivative -- quieter than a
+    step, and still audible on a quiet tail.
+    """
+    import math
+
+    if count <= 0:
+        return []
+    return [0.5 - 0.5 * math.cos(math.pi * (index + 0.5) / count)
+            for index in range(count)]
+
+
+class Seam:
+    """One committed unit's two edges, ramped so that its joins are not clicks.
+
+    A unit is one decode. Its last sample is wherever the waveform was when the
+    unit ended and its first is wherever a fresh session starts, and this
+    feature plays units back with no gap between them -- so the join is a step,
+    and a step is a click. See :data:`DECLICK_MS`.
+
+    Streaming makes this less trivial than a fade. The *end* of the unit has to
+    be ramped down, and nothing knows which block is the last one until the
+    synthesis is over -- so a unit's final :data:`DECLICK_MS` are withheld here
+    and released by :meth:`flush` when the unit ends. Eight milliseconds of
+    added latency once per sentence is not something anybody can hear. A click
+    is.
+
+    It works on PCM16 bytes rather than on float samples because every path
+    into it has already become bytes by the time it arrives, and a ramp is
+    exact either way.
+
+    One per unit, and the *unit* is the right scope: a pause may follow it, a
+    cancellation may throw it away, and the next one is synthesised with no
+    memory of this one. Ramping per block instead would fade several times a
+    second in the middle of a word.
+    """
+
+    def __init__(self, rate: int, milliseconds: int = DECLICK_MS):
+        self.span = max(0, int(int(rate or 0) * max(0, int(milliseconds)) / 1000))
+        self._window = _ramp(self.span)
+        self._held = bytearray()
+        self._risen = 0
+
+    def block(self, pcm: bytes) -> bytes:
+        """Whatever of ``pcm`` is certainly not this unit's final milliseconds."""
+        if not self.span:
+            return pcm or b""
+        if pcm:
+            self._held.extend(pcm)
+        keep = self.span * 2
+        if len(self._held) <= keep:
+            return b""
+        ready = bytes(self._held[:len(self._held) - keep])
+        del self._held[:len(ready)]
+        return self._rise(ready)
+
+    def flush(self) -> bytes:
+        """The unit's final milliseconds, ramped down into the silence after it."""
+        if not self.span:
+            return b""
+        held, self._held = bytes(self._held), bytearray()
+        tail = self._rise(held)
+        if not tail:
+            return b""
+        numbers = _int16(tail)
+        count = len(numbers)
+        window = self._window if count >= self.span else _ramp(count)
+        last = count - 1
+        for index in range(count):
+            numbers[last - index] = int(numbers[last - index] * window[index])
+        return _wire(numbers)
+
+    def _rise(self, pcm: bytes) -> bytes:
+        """``pcm`` with whatever of the opening ramp has not been spent yet."""
+        if not pcm or self._risen >= self.span:
+            return pcm
+        numbers = _int16(pcm)
+        count = min(len(numbers), self.span - self._risen)
+        for index in range(count):
+            numbers[index] = int(numbers[index] * self._window[self._risen + index])
+        self._risen += count
+        return _wire(numbers)
+
+
 # --------------------------------------------------------------------------- #
 # Dying with the parent
 # --------------------------------------------------------------------------- #
@@ -1387,6 +1512,7 @@ class Engine:
             reference, _state = self.reference(voice_id)
             self.warm(voice_id, found)
         shaper = Shaper(found, self._numpy)
+        seam = Seam(self.sample_rate)
         arguments = found.generation(self.generation)
         if self.steps and "steps" not in arguments:
             arguments["steps"] = int(self.steps)
@@ -1401,7 +1527,7 @@ class Engine:
         stream = self.tts.stream(text, ref=reference, **arguments)
         try:
             for chunk in stream:
-                block = self._as_pcm(chunk, shaper)
+                block = seam.block(self._as_pcm(chunk, shaper))
                 chunks += 1
                 if not first:
                     first = time.monotonic() - started
@@ -1421,8 +1547,15 @@ class Engine:
             except Exception:
                 pass
         if not stopped:
-            tail = shaper.flush() if shaper.active else b""
-            if tail:
+            # The shaper's own tail is more of this unit's audio and goes
+            # through the seam like every other block. ``seam.flush`` is what
+            # actually ends the unit: the milliseconds it withheld, ramped down
+            # to silence, so the join to whatever comes next -- the pause, the
+            # next sentence, or the end of the reply -- is not a step.
+            for tail in (seam.block(shaper.flush()) if shaper.active else b"",
+                         seam.flush()):
+                if not tail:
+                    continue
                 produced += len(tail) // 2
                 on_audio(tail, self.sample_rate)
         return {

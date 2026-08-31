@@ -226,6 +226,90 @@ class TestVolumeAndPause:
         assert set(found) == {0}
 
 
+def unit(seam, source, chunk: int = 431):
+    """Push one unit's samples through a seam and collect what came out."""
+    out = bytearray()
+    for start in range(0, len(source), chunk):
+        out += seam.block(pocket_worker.pcm16(source[start:start + chunk]))
+    out += seam.flush()
+    return numpy.frombuffer(bytes(out), dtype="<i2").astype(numpy.float32) / 32767.0
+
+
+class TestAUnitEndsAtSilenceRatherThanWhereverItWas:
+    """The pop between sentences, and the thing that removes it.
+
+    Upstream stops generating a couple of frames after the end-of-speech token
+    and leaves it there -- ``_autoregressive_generation`` breaks out of its loop
+    mid-stride, and the next generation's ``_decode_audio_worker`` calls
+    ``init_states`` on a fresh Mimi decoder. So a unit's last sample is wherever
+    the waveform happened to be, and the next unit's first sample is wherever a
+    zero-initialised decoder puts it. This feature plays units back sample-exact
+    and one after another, which turns that pair into a step, and a step in a
+    waveform is a click at the end of a sentence.
+
+    The signal below is DC on purpose. It is the worst case, it is roughly what
+    a decoder's residual offset looks like, and no amount of filtering removes a
+    step that a ramp does not.
+    """
+
+    def test_a_unit_starts_and_ends_at_silence(self):
+        found = unit(pocket_worker.Seam(RATE), numpy.full(4800, 0.5, dtype=numpy.float32))
+        assert abs(float(found[0])) < 1e-3
+        assert abs(float(found[-1])) < 1e-3
+
+    def test_the_step_a_join_would_have_carried_is_gone(self):
+        """The measurement, rather than the assertion: no sample-to-sample step.
+
+        Without the ramp the first and last samples are 0.5 and the joins on
+        either side of the unit are steps of that size. What is left afterwards
+        is the ramp's own slope, which is three orders of magnitude smaller and
+        is what "below sixty hertz" means in a difference.
+        """
+        found = unit(pocket_worker.Seam(RATE), numpy.full(4800, 0.5, dtype=numpy.float32))
+        joined = numpy.concatenate([found, found])
+        assert float(numpy.abs(numpy.diff(joined)).max()) < 0.01
+
+    def test_nothing_is_lost_to_the_ramp(self):
+        source = numpy.full(4800, 0.5, dtype=numpy.float32)
+        assert unit(pocket_worker.Seam(RATE), source).size == source.size
+
+    def test_the_middle_of_the_unit_is_untouched(self):
+        """A ramp at the edges, and nothing anywhere else."""
+        source = numpy.full(4800, 0.5, dtype=numpy.float32)
+        found = unit(pocket_worker.Seam(RATE), source)
+        span = pocket_worker.Seam(RATE).span
+        middle = found[span:-span]
+        assert float(numpy.abs(middle - 0.5).max()) < 1e-3
+
+    def test_a_unit_shorter_than_the_ramp_still_starts_and_ends_at_silence(self):
+        """One decoded frame and nothing more -- a refusal, or a very short word."""
+        seam = pocket_worker.Seam(RATE)
+        source = numpy.full(seam.span // 3, 0.5, dtype=numpy.float32)
+        found = unit(seam, source, chunk=17)
+        assert found.size == source.size
+        assert abs(float(found[0])) < 1e-3
+        assert abs(float(found[-1])) < 1e-3
+
+    def test_the_ramp_is_the_same_length_whatever_the_blocks_are(self):
+        """The model's chunk sizes are not the seam's business.
+
+        Fed in one block or in seventeen awkward ones, the same samples come out
+        -- because a ramp tied to block boundaries would fade several times a
+        second in the middle of a word instead of once at the end of a sentence.
+        """
+        source = numpy.full(4800, 0.5, dtype=numpy.float32)
+        whole = unit(pocket_worker.Seam(RATE), source, chunk=len(source))
+        pieces = unit(pocket_worker.Seam(RATE), source, chunk=137)
+        assert whole.size == pieces.size
+        assert float(numpy.abs(whole - pieces).max()) < 1e-3
+
+    def test_a_rate_of_nothing_is_a_pass_through_rather_than_a_crash(self):
+        """A worker that never learned its sample rate still speaks."""
+        seam = pocket_worker.Seam(0)
+        source = numpy.full(480, 0.5, dtype=numpy.float32)
+        assert unit(seam, source).size == source.size
+
+
 class TestTheDeliveryHeader:
     def test_an_absent_temperature_stays_absent(self):
         """I-PKT-25. ``None`` reaches the model as "your own default"."""
@@ -717,8 +801,9 @@ class FakeModel:
     so this reads them per chunk and records what it saw.
     """
 
-    def __init__(self, chunks=5, temp=0.3, sampler_decode_steps=1):
+    def __init__(self, chunks=5, temp=0.3, sampler_decode_steps=1, level=0.0):
         self.chunks = int(chunks)
+        self.level = float(level)
         self.exhausted = False
         self.calls = []
         self.seen = []
@@ -741,7 +826,7 @@ class FakeModel:
             for _index in range(self.chunks):
                 self.seen.append({"temp": self.temp,
                                   "sampler_decode_steps": self.sampler_decode_steps})
-                yield numpy.zeros(240, dtype=numpy.float32)
+                yield numpy.full(240, self.level, dtype=numpy.float32)
             self.exhausted = True
 
         return produce()
@@ -773,13 +858,22 @@ class TestTheEngineKeepsConsumingWhileMuted:
         assert offered == [], "audio was offered while muted"
         assert found["blocks"] == 5
 
-    def test_an_unmuted_unit_offers_every_block(self):
+    def test_an_unmuted_unit_offers_every_sample(self):
+        """Every sample, rather than every block.
+
+        The block count is not the claim and never was: :class:`Seam` withholds
+        a unit's last few milliseconds until the unit ends, so the boundaries
+        between offered blocks no longer line up with the model's chunks. What
+        has to hold is that nothing is lost -- four chunks of audio in, four
+        chunks of audio out.
+        """
         model = FakeModel(chunks=4)
         engine = pocket_engine(model)
         offered = []
         engine.stream("Hello.", "v", pocket_worker.NEUTRAL, offered.append, lambda: True)
         assert model.exhausted
-        assert len(offered) == 4
+        assert offered, "no audio was offered"
+        assert sum(len(block) for block in offered) == 4 * 240 * 2
 
     def test_generation_always_asks_for_a_copy_of_the_base_state(self):
         """I-PKT-16 / GATE P-11. A cached base state must stay a base state.
@@ -839,6 +933,58 @@ class TestTheEngineKeepsConsumingWhileMuted:
                           explode, lambda: True)
         assert model.temp == 0.3
         assert model.exhausted, "the generator was abandoned rather than drained"
+
+
+class TestTwoUnitsInARowSoundLikeOneReply:
+    """The seam where a listener actually hears it: sentence to sentence.
+
+    A reply is spoken as a run of committed units, each one its own generation,
+    and the browser schedules their PCM back to back with no gap between them.
+    So the audio a listener hears is the concatenation, and the concatenation is
+    where the click was.
+    """
+
+    def speak(self, engine, listening=lambda: True, delivery=None):
+        offered = []
+        engine.stream("Hello.", "v", delivery or pocket_worker.NEUTRAL,
+                      offered.append, listening)
+        return numpy.frombuffer(b"".join(offered), dtype="<i2").astype(numpy.float32) / 32767.0
+
+    def test_the_join_between_two_units_is_not_a_step(self):
+        engine = pocket_engine(FakeModel(chunks=6, level=0.5))
+        first = self.speak(engine)
+        engine.model = FakeModel(chunks=6, level=-0.5)
+        second = self.speak(engine)
+        joined = numpy.concatenate([first, second])
+        assert joined.size == 12 * 240
+        # Without the ramp this join is a step of a whole unit -- 0.5 to -0.5.
+        assert float(numpy.abs(numpy.diff(joined)).max()) < 0.01
+
+    def test_a_unit_reaches_the_pause_after_it_at_silence(self):
+        """A pause is only a pause if the speech walks into it.
+
+        Stepping from a unit's last sample straight to a block of zeros is the
+        same click as stepping to the next sentence, and setting a pause is how
+        somebody asks for a *gap* rather than for a tick.
+        """
+        engine = pocket_engine(FakeModel(chunks=4, level=0.5))
+        found = self.speak(engine, delivery=delivery(pause_ms=100))
+        assert found.size == 4 * 240 + int(RATE * 0.1)
+        assert float(numpy.abs(numpy.diff(found)).max()) < 0.01
+        assert float(numpy.abs(found[-int(RATE * 0.1):]).max()) == 0.0
+
+    def test_a_shaped_unit_is_ramped_as_well(self):
+        """Speed and pitch change the samples; they do not change the edges."""
+        engine = pocket_engine(FakeModel(chunks=8, level=0.5))
+        found = self.speak(engine, delivery=delivery(speed=1.25, pitch=1.1, gain=2.0))
+        assert found.size, "a shaped unit produced no audio"
+        assert abs(float(found[0])) < 1e-3
+        assert abs(float(found[-1])) < 1e-3
+
+    def test_a_drained_unit_still_offers_nothing(self):
+        """The ramp is audio, and a drained unit's audio is thrown away too."""
+        engine = pocket_engine(FakeModel(chunks=4, level=0.5))
+        assert self.speak(engine, listening=lambda: False).size == 0
 
 
 class TestTheVoiceStateCacheIsBounded:
