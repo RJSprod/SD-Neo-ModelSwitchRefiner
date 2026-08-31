@@ -312,7 +312,10 @@ class TestNothingIsWrittenToDisk:
         import ast
 
         root = Path(__file__).resolve().parent.parent
-        for path in list(root.glob("mc_voice_*.py")) + [root / "voice_worker" / "worker.py"]:
+        for path in (list(root.glob("mc_voice_*.py"))
+                     + [root / "voice_worker" / "worker.py",
+                        root / "sopro_worker" / "worker.py",
+                        root / "pocket_worker" / "worker.py"]):
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if isinstance(node, ast.Import):
                     assert all(a.name != "tempfile" for a in node.names), path.name
@@ -439,3 +442,110 @@ class TestWhatTheBrowserIsTold:
         assert found["text"] == DICTATED
         assert "request_id" in found
         assert DICTATED not in found["request_id"]
+
+
+# --------------------------------------------------------------------------- #
+# The third engine's diagnostics
+# --------------------------------------------------------------------------- #
+
+
+class TestPocketSaysNothingItShouldNot:
+    """I-PKT-27, and the fields section 36 allows.
+
+    Pocket adds two things nothing else in this feature had: a credential the
+    installer may hold, and a *drain* whose measurements are logged after a
+    Stop. Both are places content could escape that nobody had had to think
+    about before, so both are checked here rather than assumed.
+    """
+
+    def test_the_worker_hands_back_a_class_name_rather_than_a_library_message(self):
+        """A third-party library is entitled to put the input it was given into
+        an exception message -- a path, a tensor shape, or the text that was
+        being spoken. What the parent is told is chosen here instead."""
+        from pocket_worker import worker as pocket
+
+        class Boom(Exception):
+            def __str__(self):
+                return f"failed on /home/someone/clones/abc/reference.wav: {SPOKEN}"
+
+        assert SPOKEN not in pocket._safe(Boom())
+        assert pocket._safe(Boom()) == "Boom"
+
+    def test_the_workers_own_refusals_survive_because_they_are_already_safe(self):
+        from pocket_worker import worker as pocket
+
+        assert pocket._safe(ValueError("That voice's prepared data is missing.")) == \
+            "That voice's prepared data is missing."
+
+    def test_the_runtime_turns_a_class_name_into_a_sentence_with_no_content(self):
+        import mc_voice_pocket_runtime as pocket_runtime
+
+        for reason in ("RuntimeError", "OSError", "MemoryError", "something unexpected"):
+            found = pocket_runtime._readable(reason)
+            assert SPOKEN not in found
+            assert DICTATED not in found
+            assert found
+
+    def test_the_drain_metrics_are_numbers_and_enumerations_only(self, host):
+        """Section 36's allowed list gained six fields for this engine. Every
+        one of them is a duration, a count or a mode name."""
+        import mc_voice_turn as turns
+
+        turn = turns.create(voice_id="pocket:clone:abc", engine="pocket",
+                            interrupt_mode="drain_unit")
+        turn.add_text(f"Hello there, {SPOKEN}, and that is the end of the sentence. ")
+        turn.cancel("user")
+        turn.interrupting(chars=len(SPOKEN), audio_ms=300)
+        turn.interrupted()
+        found = turn.metrics()
+        assert SPOKEN not in repr(found)
+        assert found["interrupt_mode"] == "drain_unit"
+        for name in ("stop_to_silence_ms", "stop_to_ready_ms", "interrupted_unit_chars",
+                     "interrupted_unit_audio_ms", "discarded_chunks"):
+            value = found[name]
+            assert value is None or isinstance(value, int), (name, value)
+
+    def test_the_configuration_line_names_settings_and_nothing_else(self):
+        import mc_voice_pocket_runtime as pocket_runtime
+
+        found = pocket_runtime.config_line()
+        assert SPOKEN not in found
+        assert "/" not in found or "torch.set_num_threads" in found
+
+    def test_no_credential_can_be_written_anywhere(self):
+        """I-PKT-21. The token is read from the environment by the installer and
+        never persisted -- so the check is that nothing *writes* one, which is a
+        property of the source rather than of a run."""
+        import re
+
+        root = Path(__file__).resolve().parent.parent
+        names = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN")
+        for path in (root / "mc_voice_pocket.py", root / "mc_voice_pocket_runtime.py",
+                     root / "pocket_worker" / "worker.py"):
+            source = path.read_text(encoding="utf-8")
+            for name in names:
+                for line in source.splitlines():
+                    if name not in line:
+                        continue
+                    # Reading, naming in prose, and *removing* are all fine. A
+                    # write, a log line or a payload is not.
+                    assert not re.search(r"(_remember|_write_json|logger\.|json\.dumps)",
+                                         line), (path.name, line)
+
+    def test_the_worker_environment_carries_no_credential(self):
+        import mc_voice_pocket as pocket
+
+        environ = pocket.worker_environment()
+        for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"):
+            assert name not in environ
+
+    def test_a_status_payload_carries_no_path_and_no_token(self, host, voice_root):
+        import json
+
+        import mc_voice_pocket as pocket
+        import mc_voice_paths as paths
+
+        text = json.dumps(pocket.public_status())
+        assert str(paths.data_root()) not in text
+        assert "hf_" not in text
+        assert ".safetensors" not in text
