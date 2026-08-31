@@ -361,8 +361,10 @@ end-to-end and become the gap a listener hears between one sentence and the
 next.
 
 `Trim` cuts each unit's leading quiet back to `KEEP_LEAD_MS` and its trailing
-quiet back to `KEEP_TAIL_MS` — 60 and 120 milliseconds — and reports how much it
-removed as `trimmed_ms` on the unit's log row, beside `audio_ms`. Quiet *inside*
+quiet back to `KEEP_TAIL_MS` — 60 and 120 milliseconds, so a sentence boundary
+comes to about 180 ms of quiet, which is the short end of what read speech
+actually does — and reports how much it removed as `trimmed_ms` on the unit's
+log row, beside `audio_ms`. Quiet *inside*
 a unit is not touched: a pause the model put between two clauses is prosody, and
 only the two ends are padding. Trailing quiet cannot be known to be trailing
 until the unit ends, so it is held here and released by `flush()`, bounded by
@@ -377,15 +379,39 @@ the trim buys is that the gap becomes a fixed, small, *chosen* one — and
 delivery, on top of a baseline that no longer varies with what the model
 happened to generate.
 
-**What counts as quiet is not a fixed number.** A cloned voice carries its
-reference recording's room tone, so a floor low enough for a studio recording
-finds no quiet at all in a voice cloned from a laptop microphone — and the gap
-stays exactly where the trim was supposed to remove it. Once a unit has started,
-quiet is two per cent of the loudest sample so far (about 34 dB down), bounded
-into [`QUIET_FLOOR`, `QUIET_CEILING`]. At the *start* of a unit that rule is
-meaningless — the loudest sample so far may be the room tone itself — so the
-unit opens on an absolute `SPEECH_FLOOR` of about -30 dBFS instead, and
-everything before that first word is padding.
+**What counts as quiet is anchored to the floor, not to the peak.** The first
+version of this anchored it to the peak — two per cent of the loudest sample,
+bounded above by about -34 dBFS — and on a real machine it trimmed *exactly
+nothing*: every unit came back `trimmed_ms=0`. The reason is the voice. A cloned
+voice reproduces its reference recording's room tone, so what a listener hears
+as silence between two sentences is not silence at all; it is that room tone,
+sitting well above a line drawn from the peak.
+
+So the line is drawn from the bottom instead: three times the quietest ten
+milliseconds seen so far in the unit, which is where the room tone lives. It
+follows a noisy clone up and a clean model down and never has to be guessed at.
+Two bounds keep it honest — never below `QUIET_FLOOR` (about -48 dBFS, so a unit
+of digital silence does not put the line at zero), and never above an eighth of
+the loudest sample so far, which is the guard for a unit containing no silence
+at all: if the quietest thing in it is a soft consonant, three times *that*
+would call a whole syllable quiet.
+
+**The front of a unit needs the previous unit.** Deciding a unit has *started*
+cannot use the same rule, because at that point the loudest thing seen may be
+the room tone itself. It uses an absolute `SPEECH_FLOOR` of about -30 dBFS —
+and, when there is one, the floor the last unit in this voice measured, times
+`OPEN_MULTIPLE`. Room tone loud enough to pass for speech opens the unit on its
+first window, and a unit that has already opened has no lead left to trim; the
+seeded floor is what moves the bar above it. So the first unit of a voice can
+only trim its tail, and every unit after it trims both ends. The engine keeps
+one measured floor per voice for exactly this, because a noise floor is a
+property of the voice rather than of the sentence.
+
+**It reports what it saw, not only what it did.** `quiet_ms` and `floor_db` sit
+beside `trimmed_ms` on the unit's log row, because the first version of this
+trimmed nothing and the log could not say why. A unit reporting a floor of -26
+dBFS and half a second of quiet it did not cut is a different problem from one
+reporting no quiet at all.
 
 **Order matters, and it is tested.** The trim runs *before* `Seam`. The seam
 ends a unit with a few milliseconds of ramp down to silence; trimming after it

@@ -496,11 +496,12 @@ class TestTheQuietAModelPutsRoundASegmentIsCutBack:
 
     def test_the_level_follows_the_segment_rather_than_being_fixed(self):
         """A voice recorded with room tone still has its padding recognised."""
-        tts = self.Padded(level=0.005)
+        tts = self.Padded(lead=0.3, level=0.005)
         assert 0.005 * 32767 > worker.QUIET_FLOOR, "the fixture is not a real test"
         _found, metrics = self.spoken(tts)
         assert metrics["trimmed_ms"] == pytest.approx(
-            900 - worker.KEEP_LEAD_MS - worker.KEEP_TAIL_MS, abs=40)
+            700 - worker.KEEP_LEAD_MS - worker.KEEP_TAIL_MS, abs=40)
+        assert metrics["floor_db"] == pytest.approx(-46, abs=2)
 
 
 class TestASegmentEndsAtSilenceRatherThanWhereverItWas:

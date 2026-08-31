@@ -1192,6 +1192,8 @@ def _dispatch_turn(operation: str, header: dict, payload: bytes) -> None:
                      synth_ms=int(header.get("synth_ms") or 0),
                      audio_ms=int(header.get("audio_ms") or 0),
                      trimmed_ms=int(header.get("trimmed_ms") or 0),
+                     quiet_ms=int(header.get("quiet_ms") or 0),
+                     floor_db=int(header.get("floor_db") or 0),
                      streaming=str(header.get("streaming") or ""))
             except Exception:
                 logger.debug("Model Chain: a PocketTTS unit's timing could not be recorded",
