@@ -434,6 +434,55 @@ to its own tests — the same duplication rule as the speed and pitch DSP.
 
 ---
 
+## Where the gap actually was
+
+Three rounds of trimming a unit's two ends made the reply a little tighter and
+did not fix what somebody could hear. The measurement added in the third round
+is what finally said why:
+
+```
+n=2   chars=99   audio_ms=8160   quiet_ms=30   trimmed_ms=0   gap_ms=540
+n=5   chars=161  audio_ms=13280  quiet_ms=100  trimmed_ms=0   gap_ms=720
+n=8   chars=141  audio_ms=10640  quiet_ms=30   trimmed_ms=0   gap_ms=1050
+```
+
+`quiet_ms` is the quiet at the unit's two *ends* — 10 to 310 milliseconds,
+mostly under the amount that is kept anyway. `gap_ms` is the longest pause
+*inside* the same unit: 480, 720, 1050. The gap a listener hears between two
+sentences is almost never at a join, and every version of `Trim` before this one
+was working on the joins.
+
+The reason is arithmetic that was in front of us the whole time. A committed
+unit is a hundred and something characters — two or three sentences — so **most
+sentence boundaries fall inside a unit**, where the model generates the pause
+itself and where nothing about the unit's edges can reach.
+
+So a pause inside a unit is now kept up to `KEEP_GAP_MS`, and what runs on past
+that is dead air rather than delivery. Two hundred milliseconds, chosen to match
+what a unit boundary already comes to (`KEEP_TAIL_MS` plus the next unit's
+`KEEP_LEAD_MS`), because a listener should not be able to hear where this
+feature's units begin and end. "Pause between sentences" is added to both, so
+that control finally means the same thing wherever the boundary falls.
+
+Two things about the cut:
+
+**It is spliced, not butted.** What is kept is the beginning of the pause and
+the last `GAP_SPLICE_MS` before the next word, crossfaded onto each other, so
+the listener hears the pause run straight into the approach to that word.
+Cutting to the onset instead would leave a step where the two ends meet, which
+is the click this file already exists to prevent.
+
+**Nothing is held for the length of a pause.** Only the beginning of a pause is
+ever going to be sent, so everything past it is dropped where it is found rather
+than accumulated. A pause of any length costs the listener the same short wait,
+which is what keeps a second of model silence from becoming a second of latency.
+
+What is deliberately *not* done is removing pauses under the cap. A pause
+between two clauses is the model's delivery, and a reply with none of them reads
+as hurried rather than as continuous.
+
+---
+
 ## There is no thread control, and a sentence where one would be
 
 PocketTTS 3.0.2 calls `torch.set_num_threads(1)` itself and takes its
