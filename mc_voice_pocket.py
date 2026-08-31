@@ -263,6 +263,7 @@ class Bundle:
     cloning_repo: str
     revision: str
     cloning_revision: str
+    voice_revision: str
     license: str
     attribution: str
     summary: str
@@ -388,6 +389,10 @@ def bundle(identifier: str = "") -> Bundle:
         # written before the difference was noticed.
         cloning_revision=str(entry.get("cloning_revision") or entry.get("revision")
                              or "main"),
+        # A third one, and upstream's again: the voice embeddings were added to
+        # the public repository after the weights, so its own configuration
+        # names a later commit for them than for the model.
+        voice_revision=str(entry.get("voice_revision") or entry.get("revision") or "main"),
         license=str(entry.get("license") or ""),
         attribution=str(entry.get("attribution") or ""),
         summary=str(entry.get("summary") or ""),

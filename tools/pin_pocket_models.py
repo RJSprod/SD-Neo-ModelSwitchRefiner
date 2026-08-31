@@ -276,13 +276,18 @@ class Voice:
     path: str
 
 
+VOICE_PATH = "languages/{language}/embeddings/{name}.safetensors"
+"""Where a precomputed official voice state lives, from upstream's own code.
+
+``pocket_tts.utils.utils.get_predefined_voice`` builds exactly this, and it is
+worth reading rather than guessing: an earlier version of this table said
+``voices/<name>.safetensors``, which is not a path this repository serves, and
+named three voices that do not exist. Both were invented, and both would have
+failed the whole voice half of an install.
+"""
+
 VOICES = (
-    Voice("alba", "Alba", "en", "Scottish", "voices/alba.safetensors"),
-    Voice("marlow", "Marlow", "en", "English (Received Pronunciation)",
-          "voices/marlow.safetensors"),
-    Voice("juno", "Juno", "en", "American (General American)",
-          "voices/juno.safetensors"),
-    Voice("rhys", "Rhys", "en", "Welsh", "voices/rhys.safetensors"),
+    Voice("alba", "Alba", "en", "", VOICE_PATH.format(language="english", name="alba")),
 )
 """The official voice bank, written down rather than discovered.
 
@@ -294,6 +299,18 @@ repository serves that is not named here is reported by :func:`_extras` and left
 alone, and a state named here that the repository no longer serves fails the
 run -- a catalogue that offers four voices and can speak three is a catalogue
 where choosing the wrong one is silence.
+
+One entry, deliberately, and it is the shortest list that still ships a working
+engine. Upstream advertises twenty-six names in
+``_ORIGINS_OF_PREDEFINED_VOICES`` and most of them are English, but which of
+them have an English *embedding* in the repository is a question only the
+repository can answer -- and the all-or-nothing rule above means one name that
+is not served costs the user every voice. So this ships the one name there is
+independent evidence for, on the reviewed default, and :func:`_extras` prints
+the rest of the directory on the first ``--model`` run for a maintainer to
+review and add. ``accent`` is empty for the same reason: it is not something
+this repository can source, and a made-up one is what the last three entries
+here were.
 """
 
 VOICE_LICENSE = "CC-BY-4.0 (PocketTTS voice states, Kyutai)"
@@ -963,10 +980,17 @@ def model(entry: dict, state: State, committed: dict, say) -> dict:
         if declared.config_key:
             config[declared.config_key] = declared.local_name
 
+    # The voice states are pinned at a revision of their own, and that is
+    # upstream's arrangement rather than an oversight here: its own config names
+    # one commit for the weights and the tokenizer and another for the
+    # embeddings, which were added to the repository later. Resolving them at
+    # the weights' commit would ask for files that are not there yet.
+    voice_commit, voice_served = repository(
+        repo, str(entry.get("voice_revision") or entry.get("revision") or "main"), "", say)
     voices = []
     for voice in VOICES:
-        _must_serve(repo, commit, served, voice.path)
-        artifact = _hub_artifact(repo, commit, voice.path,
+        _must_serve(repo, voice_commit, voice_served, voice.path)
+        artifact = _hub_artifact(repo, voice_commit, voice.path,
                                  f"{voice.identifier}{STATE_SUFFIX}", "")
         _agree(state, committed, artifact, f"{MODEL_ID}/voices")
         say(f"  {voice.path}: {_describe(artifact)}")
@@ -978,11 +1002,15 @@ def model(entry: dict, state: State, committed: dict, say) -> dict:
             "license": VOICE_LICENSE,
             "attribution": VOICE_ATTRIBUTION.format(display_name=voice.display_name,
                                                     repo=repo),
-            "source": BLOB.format(repo=repo, revision=commit, path=voice.path),
+            "source": BLOB.format(repo=repo, revision=voice_commit, path=voice.path),
             "artifact": artifact,
         })
-    _extras(repo, served, ({voice.path for voice in VOICES}
-                           | {declared.path for declared in MODEL_FILES}), say)
+    _extras(repo, served, {declared.path for declared in MODEL_FILES}, say)
+    # Reported separately and from the embeddings' own commit, because this is
+    # the listing a maintainer reads to fill the voice bank in: everything under
+    # ``embeddings/`` that this build does not name yet is a voice somebody can
+    # review and add.
+    _extras(repo, voice_served, {voice.path for voice in VOICES}, say)
 
     found["public_commit"] = commit
     found["files"] = files

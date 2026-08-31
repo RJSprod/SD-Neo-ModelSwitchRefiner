@@ -443,17 +443,20 @@ platform that fails at install time instead of at review time. `scipy` is pinned
 at 1.15.3 for the mirror image of the same reason: 1.16 dropped Python 3.10,
 which this manifest still advertises.
 
-The **model, official voice and cloning artifacts are not recorded yet**,
-because the machine that pinned the closure could not reach huggingface.co. That
-is a state rather than an oversight: an artifact this repository makes no claim
-about is an artifact it will not download, so the model half of the install
-refuses with a sentence naming `tools/pin_pocket_models.py --model`, which a
-maintainer runs with `HF_TOKEN` set and the Kyutai conditions accepted. A closed
-gate there leaves the public half resolved and written.
+The **model, official voice and cloning artifacts are declared but not hashed**,
+because the machine that wrote the manifest could not reach huggingface.co. The
+difference from the closure is worth stating rather than glossing: an artifact
+with a digest here is checked against a number this repository committed to, and
+one without is checked against the digest its publisher reports at install time.
+Both refuse a file that arrives wrong; only the first refuses a publisher that
+changed its mind. `tools/pin_pocket_models.py --model`, run on a machine that
+can reach the hub, turns the second into the first — with `HF_TOKEN` set and the
+Kyutai conditions accepted if the gated half is wanted, and a closed gate there
+leaves the public half resolved and written.
 
-Their **locations and revisions are** recorded, though, and from upstream's own
-statement rather than from a model card somebody read. The `english.yaml` that
-ships inside the 3.0.2 wheel names three files:
+Their **locations and revisions** are upstream's own statement rather than a
+model card somebody read. The `english.yaml` that ships inside the 3.0.2 wheel
+names three files:
 
 ```
 weights_path:                        hf://kyutai/pocket-tts/languages/english/model.safetensors@39592ff2…
@@ -462,9 +465,31 @@ flow_lm.lookup_table.tokenizer_path: hf://kyutai/pocket-tts-without-voice-clonin
 ```
 
 Two repositories at **two different commits**, which is upstream's arrangement
-and not an oversight here — so the manifest carries a revision per repository
-and the pinner resolves each against its own. Following `main` would install
-bytes that shipped configuration was not written for.
+and not an oversight here. There is a **third**: `get_predefined_voice` in
+`pocket_tts/utils/utils.py` resolves an official voice to
+
+```
+hf://kyutai/pocket-tts-without-voice-cloning/languages/<language>/embeddings/<name>.safetensors@e81d79e8…
+```
+
+— the same public repository as the weights, at a later commit, because the
+embeddings were added to it afterwards. So the manifest carries a revision per
+*artifact group* rather than per repository, and the pinner resolves each
+against its own. Following `main` would install bytes that shipped
+configuration was not written for.
+
+That same file is where the official voice bank comes from. An earlier version
+of this table was invented — it named `marlow`, `juno` and `rhys`, which do not
+exist, under `voices/<name>.safetensors`, which is not a path the repository
+serves. Upstream advertises twenty-six names in
+`_ORIGINS_OF_PREDEFINED_VOICES`; which of them have an *English* embedding is a
+question only the repository can answer, and the all-or-nothing rule on the
+voice bank means one name that is not served costs the user every voice rather
+than one. So the manifest ships the single name there is independent evidence
+for — `alba`, which is also the reviewed default — and the `--model` run prints
+the whole `embeddings/` directory for a maintainer to review and add. Their
+accents are not in the manifest either: that is not something this repository
+can source, and a made-up one is exactly what the three invented entries were.
 
 Install-from-a-folder works either way, and what is supplied has its digests
 recorded and becomes the constant the next install is checked against.
