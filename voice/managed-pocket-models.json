@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "version": 1,
+  "pinned": false,
+  "notes": "PROVISIONAL. The runtime closure below is written down but not yet resolved: every artifact list is empty and no digest is recorded, so the managed install refuses and says why. A maintainer on a machine that can reach pypi.org and huggingface.co runs tools/pin_pocket_models.py, which fills in filenames, byte counts and SHA-256 digests from the publishers and sets \"pinned\" to true. Until then Pocket installs only from a folder somebody filled themselves, and what they supply is checked against required_paths and has its digests recorded. This is GATE P-1: no unreviewed wheel is fetched dynamically, and an artifact this repository makes no claim about is an artifact it will not download.",
+  "runtime": {
+    "package": "pocket-tts",
+    "import_name": "pocket_tts",
+    "version": "3.0.2",
+    "upstream_commit": "f5fa841aa8702d7f15ea9e344bec5290bf42a446",
+    "upstream_released": "2026-08-25",
+    "torch_version": "2.5.0",
+    "provider": "cpu",
+    "python_requires": ">=3.10,<3.15",
+    "license": "Apache-2.0 (PocketTTS, Kyutai); BSD-3-Clause (PyTorch); BSD-3-Clause (NumPy); Apache-2.0 (safetensors)",
+    "attribution": "PocketTTS by Kyutai. Package pocket-tts 3.0.2 from PyPI; PyPI provenance ties that release to upstream commit f5fa841aa8702d7f15ea9e344bec5290bf42a446.",
+    "closure": [
+      ["pocket-tts", "3.0.2", "pure"],
+      ["torch", "2.5.0", "binary"],
+      ["numpy", "2.2.6", "binary"],
+      ["safetensors", "0.8.0", "abi3"],
+      ["sentencepiece", "0.2.2", "binary"],
+      ["filelock", "3.16.1", "pure"],
+      ["typing-extensions", "4.12.2", "pure"],
+      ["sympy", "1.13.1", "pure"],
+      ["mpmath", "1.3.0", "pure"],
+      ["networkx", "3.4.2", "pure"],
+      ["jinja2", "3.1.4", "pure"],
+      ["MarkupSafe", "3.0.2", "binary"],
+      ["fsspec", "2024.10.0", "pure"]
+    ],
+    "closure_notes": "The smallest tested inference-complete closure rather than everything pocket-tts declares. Upstream's project metadata also lists a server and a CLI; the import path Voice Chat uses needs neither, and section 23.1 says the closure is the smallest tested inference-complete one. torchao is deliberately absent: INT8 quantization is offered only once GATE P-5 has measured it on release hardware, and adding an optional accelerator before then would be pinning a dependency nothing has run.",
+    "platforms": [
+      {
+        "id": "windows-x86_64-cp310",
+        "system": "windows",
+        "machines": ["amd64", "x86_64"],
+        "python": "3.10",
+        "artifacts": []
+      },
+      {
+        "id": "windows-x86_64-cp311",
+        "system": "windows",
+        "machines": ["amd64", "x86_64"],
+        "python": "3.11",
+        "artifacts": []
+      },
+      {
+        "id": "windows-x86_64-cp312",
+        "system": "windows",
+        "machines": ["amd64", "x86_64"],
+        "python": "3.12",
+        "artifacts": []
+      },
+      {
+        "id": "windows-x86_64-cp313",
+        "system": "windows",
+        "machines": ["amd64", "x86_64"],
+        "python": "3.13",
+        "artifacts": []
+      }
+    ]
+  },
+  "defaults": {
+    "model": "english",
+    "voice": "alba"
+  },
+  "models": {
+    "english": {
+      "kind": "tts",
+      "label": "PocketTTS English",
+      "engine": "pocket-tts-native",
+      "language": "en",
+      "public_repo": "kyutai/pocket-tts-without-voice-cloning",
+      "cloning_repo": "kyutai/pocket-tts",
+      "revision": "main",
+      "sample_rate": 24000,
+      "recommended_temperature": 0.3,
+      "license": "CC-BY-4.0 (PocketTTS model weights, Kyutai)",
+      "attribution": "PocketTTS English by Kyutai. Public model assets from huggingface.co/kyutai/pocket-tts-without-voice-cloning; the voice-cloning weights are a separate gated repository whose conditions have to be accepted upstream.",
+      "summary": "A streaming CPU model. Speaks with precomputed official voice states, and clones a voice from a short local recording once the gated weights are installed.",
+      "notes": "Downloaded once and then read from disk. Voice Chat writes a local config whose every path names a verified local file, so nothing here is resolved again after installation and no hf:// or https:// location ever reaches the worker.",
+      "about_bytes": 0,
+      "ram_bytes": 2147483648,
+      "files": [],
+      "required_paths": [],
+      "cloning_files": [],
+      "cloning_required_paths": [],
+      "config": {
+        "weights_path_without_voice_cloning": "",
+        "weights_path": "",
+        "tokenizer_path": ""
+      },
+      "voices": []
+    }
+  }
+}

@@ -133,6 +133,15 @@ class Artifact:
     sha256: str | None
     archive: str = ""
     strip_root: str = ""
+    authorized: bool = False
+    """Whether this artifact sits behind a publisher's access gate.
+
+    Set by a manifest, never by a browser. It is the only thing that makes this
+    module attach a credential to a request, and it attaches one *only* to the
+    publisher host named in the URL -- see :func:`_credential` for where the
+    token may come from and :class:`_DropCredentialOnHop` for the redirect it
+    is removed at (I-PKT-21, section 23.4).
+    """
 
     @property
     def pinned(self) -> bool:
@@ -902,6 +911,25 @@ def _read_json(path: Path):
 # --------------------------------------------------------------------------- #
 
 
+class Gated(VoiceError):
+    """A publisher that answered "you may not have this yet".
+
+    Its own class because the answer is a product state rather than a fault: the
+    artifact exists, this build knows where it is, and what is missing is an
+    acceptance somebody has to make upstream and a token this process has to be
+    given. An installer that reported it as "the download failed" would be
+    telling a user to retry the one thing that cannot work.
+    """
+
+    def __init__(self, filename: str, status: int):
+        self.filename = str(filename or "")
+        self.status = int(status or 0)
+        super().__init__(
+            f"{self.filename} is behind the publisher's access gate (HTTP {self.status}). "
+            f"Accept the model's conditions on the publisher's page with your own account, "
+            f"then start this WebUI with HF_TOKEN set in its environment.")
+
+
 @dataclass(frozen=True)
 class Expected:
     """What one artifact should turn out to be, and who said so.
@@ -931,6 +959,61 @@ class _StopAtRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+CREDENTIAL_VARIABLES = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN")
+"""Where a gated publisher's token may be read from, and the only places.
+
+The process environment, in the parent, at the moment a download is about to
+happen. Not a settings file, not config.json, not a manifest, not a browser
+body, and not the worker's environment: a worker's job is inference from
+verified local files and it has no business holding a credential for a host it
+will never contact (I-PKT-20, I-PKT-21, section 45).
+
+Nothing writes these. If one is set, somebody set it for this process on
+purpose, which is the only consent this module is in a position to observe.
+"""
+
+
+def _credential(url: str) -> str:
+    """The bearer token for ``url``'s publisher, or an empty string.
+
+    Read fresh each time rather than cached, so that a token removed from the
+    environment stops being used without a restart, and so that this module
+    never holds one longer than the request that needs it.
+    """
+    if _host(url) not in ("huggingface.co", "www.huggingface.co"):
+        return ""
+    for name in CREDENTIAL_VARIABLES:
+        found = str(os.environ.get(name) or "").strip()
+        if found:
+            return found
+    return ""
+
+
+class _DropCredentialOnHop(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect, but never carry a credential across a host boundary.
+
+    This is the whole of T-INSTALL-P5, and it has to be written down because
+    the default behaviour is the opposite: :mod:`urllib` copies every header
+    except ``Content-Length`` and ``Content-Type`` onto the redirected request,
+    so an ``Authorization`` added for huggingface.co would be sent verbatim to
+    whichever storage host the 302 names.
+
+    That host does not need it -- a gated hub answers with a *signed* delivery
+    URL, which is the point of the redirect -- and sending it anyway would hand
+    somebody's Hugging Face token to a CDN operator as a matter of routine.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        made = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if made is None or _host(newurl) == _host(req.full_url):
+            return made
+        for name in list(made.headers):
+            if str(name).casefold() == "authorization":
+                made.headers.pop(name, None)
+        made.unredirected_hdrs.pop("Authorization", None)
+        return made
+
+
 def _host(url: str) -> str:
     return urllib.parse.urlsplit(url).netloc.casefold()
 
@@ -939,7 +1022,7 @@ def _header_map(answer) -> dict:
     return {str(name).casefold(): value for name, value in answer.headers.items()}
 
 
-def _head(url: str, hops: int = 5) -> tuple[int, dict]:
+def _head(url: str, hops: int = 5, authorized: bool = False) -> tuple[int, dict]:
     """A HEAD whose answer is the *publisher's*, not a delivery host's.
 
     Redirects are followed only while they stay on the host that was asked, and
@@ -961,9 +1044,14 @@ def _head(url: str, hops: int = 5) -> tuple[int, dict]:
     here = url
     status, found = 0, {}
     for _ in range(max(int(hops), 1)):
-        request = urllib.request.Request(
-            here, method="HEAD",
-            headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"})
+        headers = {"User-Agent": USER_AGENT, "Accept-Encoding": "identity"}
+        # Only ever on the host this loop is still on: ``here`` advances only
+        # while the redirect stays same-host, so the credential cannot follow a
+        # hop it should not.
+        token = _credential(here) if authorized else ""
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(here, method="HEAD", headers=headers)
         try:
             with contextlib.closing(opener.open(request, timeout=TIMEOUT)) as answer:
                 return int(getattr(answer, "status", 200) or 200), _header_map(answer)
@@ -1065,11 +1153,19 @@ def _resolve(artifact: Artifact) -> Expected:
     if artifact.sha256 and artifact.size:
         return Expected(artifact.size, artifact.sha256, "this extension's manifest")
     try:
-        status, headers = _head(artifact.url)
+        status, headers = _head(artifact.url, authorized=artifact.authorized)
     except Exception as exc:
         logger.warning("Model Chain: Voice Chat could not ask the publisher about %s — %s: %s",
                        artifact.filename, exc.__class__.__name__, exc)
         return Expected(artifact.size, artifact.sha256, "nothing (the publisher did not answer)")
+    if status in (401, 403) and artifact.authorized:
+        # A different failure from "the publisher is down", and it has a
+        # different remedy: somebody has to accept the model's conditions
+        # upstream, or make a token available to this process. Raised rather
+        # than degraded to a byte count, so the install stops here with a
+        # sentence the panel can show instead of failing later on a hash
+        # nobody could have matched (T-INSTALL-P4).
+        raise Gated(artifact.filename, status)
     if status >= 400:
         logger.warning("Model Chain: Voice Chat asked the publisher about %s and got HTTP %s",
                        artifact.filename, status)
@@ -1735,11 +1831,25 @@ def _download(artifact: Artifact, destination: Path, report, expected: "Expected
     # before anything disagrees. Twice the expected size, or a flat ceiling when
     # nothing would say.
     ceiling = (expected.size or 0) * 2 or (4 * 1024 * 1024 * 1024)
-    request = urllib.request.Request(
-        artifact.url,
-        headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"})
+    headers = {"User-Agent": USER_AGENT, "Accept-Encoding": "identity"}
+    token = _credential(artifact.url) if artifact.authorized else ""
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(artifact.url, headers=headers)
+    # The default opener would carry that ``Authorization`` onto the signed
+    # delivery URL a gated hub redirects to. The credentialed path does not,
+    # which is the difference between fetching a gated file and handing a
+    # credential to a CDN (I-PKT-21, T-INSTALL-P5). An artifact with no token
+    # takes ``urlopen`` exactly as it always has, so the unchanged path is
+    # unchanged down to the function it calls.
+    def _open():
+        if token:
+            return urllib.request.build_opener(_DropCredentialOnHop).open(
+                request, timeout=TIMEOUT)
+        return urllib.request.urlopen(request, timeout=TIMEOUT)
+
     try:
-        with contextlib.closing(urllib.request.urlopen(request, timeout=TIMEOUT)) as response:
+        with contextlib.closing(_open()) as response:
             with open(partial, "wb") as handle:
                 while True:
                     block = response.read(CHUNK)
@@ -1756,8 +1866,20 @@ def _download(artifact: Artifact, destination: Path, report, expected: "Expected
     except VoiceError:
         partial.unlink(missing_ok=True)
         raise
+    except urllib.error.HTTPError as answer:
+        status = int(getattr(answer, "code", 0) or 0)
+        with contextlib.closing(answer):
+            pass
+        partial.unlink(missing_ok=True)
+        if status in (401, 403) and artifact.authorized:
+            raise Gated(artifact.filename, status) from None
+        raise VoiceError(f"{artifact.filename} could not be downloaded (HTTP {status}). "
+                         f"Nothing was installed and Voice Chat is unchanged.") from None
     except Exception as exc:
         partial.unlink(missing_ok=True)
+        # The class and the message, never the request: a urllib error for a
+        # gated URL can carry the URL, and a signed delivery URL is a
+        # credential of its own for as long as it is valid (section 36).
         raise VoiceError(f"{artifact.filename} could not be downloaded "
                          f"({exc.__class__.__name__}: {exc}). Nothing was installed and "
                          f"Voice Chat is unchanged.") from None
