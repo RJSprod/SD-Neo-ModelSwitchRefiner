@@ -1057,6 +1057,8 @@ function report(extra) {
         trimState: cloneParts.state.textContent,
         trimStart: cloneParts.start.value,
         trimEnd: cloneParts.end.value,
+        trimBest: cloneParts.best.textContent,
+        waveCursor: cloneParts.canvas.style.cursor || "",
         cloneStatus: cloneParts.status.textContent,
         cleanHowHidden: cloneParts.how.hidden,
         validateDisabled: settingsParts.validateButton.disabled,
@@ -4092,6 +4094,235 @@ class TestTheReferenceLengthTheModelWants:
         found = self.choose(2)
         assert "5 s as the length it was built to condition on" in found["trimState"], \
             found["trimState"]
+
+
+class TestTheReferenceWindowBelongsToTheEngine:
+    """Five and twenty were Sopro's, and the trimmer is not Sopro's.
+
+    The clone form is engine-neutral markup used by every engine that clones,
+    and it carried two constants -- a five-second minimum and a twenty-second
+    ceiling -- taken from the first engine that needed them. So the PocketTTS
+    form opened a twenty-second selection on an engine whose ceiling is fifteen,
+    offered "Pick 10 s for me" beside it, and explained the mismatch in a
+    sentence with the word "Sopro" in it.
+
+    The server has been sending ``min_seconds``, ``max_seconds`` and
+    ``ideal_seconds`` under ``clone`` on the same payload the whole time, and
+    this read one of the three.
+    """
+
+    @staticmethod
+    def _answers(minimum=5, maximum=15, ideal=10, label="PocketTTS"):
+        answers = json.loads(DEFAULTS["ANSWERS"])
+        payload = dict(answers["voice/voices"]["json"])
+        payload["clone"] = {"min_seconds": minimum, "max_seconds": maximum,
+                            "ideal_seconds": ideal}
+        payload["engine_label"] = label
+        answers["voice/voices"] = {"json": payload}
+        return json.dumps(answers)
+
+    def choose(self, scenario="console.log(JSON.stringify(report()));",
+               seconds="40", **hints):
+        return run("""
+            await tick();
+            await hold(200);
+            cloneParts.file.files = [new Blob([new Uint8Array(2048)])];
+            cloneParts.file.fire("change");
+            await tick();
+            """ + scenario, VOICES_PRESENT="true", VOICES_VISIBLE="true",
+                   DECODE_SECONDS=seconds, ANSWERS=self._answers(**hints))
+
+    def test_the_selection_opens_at_this_engines_ceiling(self):
+        found = self.choose()
+        assert float(found["trimStart"]) == 0.0
+        assert float(found["trimEnd"]) == 15.0, found["trimEnd"]
+
+    def test_the_pick_button_offers_this_engines_ceiling(self):
+        """The label is rendered by Python from whichever engine's constants
+        that page was built with, and it is the length the button picks."""
+        found = self.choose()
+        assert found["trimBest"] == "Pick 15 s for me", found["trimBest"]
+
+    def test_too_long_for_this_engine_is_said_in_this_engines_name(self):
+        found = self.choose("""
+            cloneParts.end.value = "18";
+            cloneParts.end.fire("input");
+            console.log(JSON.stringify(report()));
+        """)
+        assert "PocketTTS takes at most 15 s" in found["trimState"], found["trimState"]
+
+    def test_too_short_for_this_engine_is_said_in_this_engines_name(self):
+        found = self.choose("""
+            cloneParts.end.value = "2";
+            cloneParts.end.fire("input");
+            console.log(JSON.stringify(report()));
+        """)
+        assert "PocketTTS needs at least 5 s" in found["trimState"], found["trimState"]
+
+    def test_the_models_own_figure_is_reported_as_this_engines(self):
+        found = self.choose()
+        assert "This PocketTTS build reports 10 s" in found["trimState"], \
+            found["trimState"]
+
+    def test_the_refusal_beside_create_names_the_engine_and_its_window(self):
+        found = self.choose("""
+            cloneParts.end.value = "2";
+            cloneParts.end.fire("input");
+            cloneParts.name.value = "Ada";
+            cloneParts.create.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """)
+        assert "PocketTTS clones from 5 to 15 seconds" in found["cloneStatus"], \
+            found["cloneStatus"]
+        assert not [r for r in found["requests"] if "clone" in r.get("url", "")], \
+            "a selection outside the engine's window reached the network"
+
+    def test_an_engine_that_says_nothing_keeps_a_working_window(self):
+        """A form drawn before the first answer arrives still has to work."""
+        found = run("""
+            await tick();
+            cloneParts.file.files = [new Blob([new Uint8Array(2048)])];
+            cloneParts.file.fire("change");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true", DECODE_SECONDS="40")
+        assert float(found["trimEnd"]) == 20.0, found["trimEnd"]
+
+
+class TestSlidingTheSelectionAlongTheWaveform:
+    """The gesture that was missing, and why it was the annoying part.
+
+    The selection opens at the engine's ceiling, which is almost always the
+    length somebody wants — what they want to change is *where* it is. Drawing
+    was the only gesture on the canvas, so moving a fifteen-second window a
+    little to the right meant drawing fifteen seconds by hand, looking at the
+    readout, and drawing it again.
+
+    So a press inside the selection slides it at the length it already has, and
+    a press outside still draws a new one. Which gesture a press means is
+    decided by where it lands, and an edge is left to the draw, because the
+    draw is the only way to change the length.
+
+    The canvas in this harness is 300 px wide over a 40-second clip, so a
+    second is seven and a half pixels and the arithmetic below is exact.
+    """
+
+    def drag(self, moves, seconds="40"):
+        return run("""
+            await tick();
+            cloneParts.file.files = [new Blob([new Uint8Array(2048)])];
+            cloneParts.file.fire("change");
+            await tick();
+            """ + moves + """
+            console.log(JSON.stringify(report()));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true", DECODE_SECONDS=seconds)
+
+    def test_a_press_inside_the_selection_slides_it_and_keeps_its_length(self):
+        # Down at 10 s, up at 25 s: fifteen seconds to the right, and the
+        # twenty-second window arrives as a twenty-second window.
+        found = self.drag("""
+            cloneParts.canvas.fire("pointerdown", {pointerId: 90, clientX: 75});
+            cloneParts.canvas.fire("pointermove", {pointerId: 90, clientX: 187.5});
+            cloneParts.canvas.fire("pointerup", {pointerId: 90, clientX: 187.5});
+        """)
+        assert abs(float(found["trimStart"]) - 15.0) < 0.2, found["trimStart"]
+        assert abs(float(found["trimEnd"]) - 35.0) < 0.2, found["trimEnd"]
+
+    def test_a_slide_that_runs_off_the_end_stops_with_the_window_intact(self):
+        """Clamped as a window rather than squashed against the edge: the length
+        is carried through the gesture, not recomputed from the pointer."""
+        found = self.drag("""
+            cloneParts.canvas.fire("pointerdown", {pointerId: 91, clientX: 75});
+            cloneParts.canvas.fire("pointermove", {pointerId: 91, clientX: 3000});
+            cloneParts.canvas.fire("pointerup", {pointerId: 91, clientX: 3000});
+        """)
+        assert abs(float(found["trimStart"]) - 20.0) < 0.2, found["trimStart"]
+        assert abs(float(found["trimEnd"]) - 40.0) < 0.2, found["trimEnd"]
+
+    def test_a_slide_backwards_stops_at_the_beginning(self):
+        found = self.drag("""
+            cloneParts.canvas.fire("pointerdown", {pointerId: 92, clientX: 75});
+            cloneParts.canvas.fire("pointermove", {pointerId: 92, clientX: -500});
+            cloneParts.canvas.fire("pointerup", {pointerId: 92, clientX: -500});
+        """)
+        assert float(found["trimStart"]) == 0.0, found["trimStart"]
+        assert abs(float(found["trimEnd"]) - 20.0) < 0.2, found["trimEnd"]
+
+    def test_a_press_outside_the_selection_still_draws_a_new_one(self):
+        """The gesture that was there first, and the only one that can change
+        the length. Down at 30 s and up at 35 s is a five-second selection."""
+        found = self.drag("""
+            cloneParts.canvas.fire("pointerdown", {pointerId: 93, clientX: 225});
+            cloneParts.canvas.fire("pointermove", {pointerId: 93, clientX: 262.5});
+            cloneParts.canvas.fire("pointerup", {pointerId: 93, clientX: 262.5});
+        """)
+        assert abs(float(found["trimStart"]) - 30.0) < 0.2, found["trimStart"]
+        assert abs(float(found["trimEnd"]) - 35.0) < 0.2, found["trimEnd"]
+
+    def test_the_pointer_is_captured_so_sliding_off_the_canvas_still_works(self):
+        found = run("""
+            await tick();
+            cloneParts.file.files = [new Blob([new Uint8Array(2048)])];
+            cloneParts.file.fire("change");
+            await tick();
+            cloneParts.canvas.fire("pointerdown", {pointerId: 94, clientX: 75});
+            console.log(JSON.stringify({captured: cloneParts.canvas.captured}));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true", DECODE_SECONDS="40")
+        assert found["captured"] == 94, found
+
+    def test_the_canvas_says_which_gesture_a_press_would_be(self):
+        """Before it is one. The two gestures are in the same place and look
+        the same, so the pointer is what tells them apart."""
+        over = self.drag("""
+            cloneParts.canvas.fire("pointermove", {pointerId: 95, clientX: 75});
+        """)
+        assert over["waveCursor"] == "grab", over["waveCursor"]
+
+        past = self.drag("""
+            cloneParts.canvas.fire("pointermove", {pointerId: 96, clientX: 225});
+        """)
+        assert past["waveCursor"] == "crosshair", past["waveCursor"]
+
+        during = self.drag("""
+            cloneParts.canvas.fire("pointerdown", {pointerId: 97, clientX: 75});
+            cloneParts.canvas.fire("pointermove", {pointerId: 97, clientX: 90});
+        """)
+        assert during["waveCursor"] == "grabbing", during["waveCursor"]
+
+    def test_a_selection_with_no_length_is_drawn_rather_than_slid(self):
+        """After a press that has not moved yet the selection is a point, and a
+        point somebody presses again is somebody starting over."""
+        found = self.drag("""
+            cloneParts.start.value = "10";
+            cloneParts.start.fire("input");
+            cloneParts.end.value = "10";
+            cloneParts.end.fire("input");
+            cloneParts.canvas.fire("pointerdown", {pointerId: 98, clientX: 75});
+            cloneParts.canvas.fire("pointermove", {pointerId: 98, clientX: 150});
+            cloneParts.canvas.fire("pointerup", {pointerId: 98, clientX: 150});
+        """)
+        assert abs(float(found["trimStart"]) - 10.0) < 0.2, found["trimStart"]
+        assert abs(float(found["trimEnd"]) - 20.0) < 0.2, found["trimEnd"]
+
+    def test_the_upload_is_whatever_the_slide_left_selected(self):
+        """The gesture is not a decoration on the canvas: what leaves the page
+        is the window where somebody put it."""
+        found = run("""
+            await tick();
+            cloneParts.file.files = [new Blob([new Uint8Array(2048)])];
+            cloneParts.file.fire("change");
+            await tick();
+            cloneParts.canvas.fire("pointerdown", {pointerId: 99, clientX: 75});
+            cloneParts.canvas.fire("pointermove", {pointerId: 99, clientX: 187.5});
+            cloneParts.canvas.fire("pointerup", {pointerId: 99, clientX: 187.5});
+            cloneParts.name.value = "Ada";
+            cloneParts.create.fire("click");
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, VOICES_PRESENT="true", VOICES_VISIBLE="true", DECODE_SECONDS="40")
+        assert abs(found["uploaded"]["seconds"] - 20.0) < 0.1, found["uploaded"]
+
 
 
 class TestPreviewingAVoiceBeforeKeepingIt:

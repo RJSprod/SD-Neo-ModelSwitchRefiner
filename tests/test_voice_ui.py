@@ -927,7 +927,14 @@ class TestThePocketSurface:
         # The reference envelope comes from the adapter, because the ideal
         # length is a release measurement and a number baked into a page is a
         # number that goes stale (section 26.1).
-        assert f"Pick {int(pocket.IDEAL_REFERENCE_SECONDS)} s for me" in markup
+        #
+        # The *ceiling* rather than the ideal, because that is the length this
+        # button picks and the length the selection opens at: conditioning is
+        # built from whatever it is given, and more of it costs nothing at
+        # speaking time. The page rewrites this label from the engine's own
+        # answer as soon as it has one; what is rendered here is what somebody
+        # sees before the first poll lands, and it should not disagree.
+        assert f"Pick {int(pocket.MAX_REFERENCE_SECONDS)} s for me" in markup
         assert f"{int(pocket.MIN_REFERENCE_SECONDS)} to " \
                f"{int(pocket.MAX_REFERENCE_SECONDS)} seconds" in markup
         # No language hint: the PocketTTS model is the language and it is

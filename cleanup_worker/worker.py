@@ -52,6 +52,31 @@ itself. The engine is meant to be running only while it is being used, and a
 worker holding a Torch runtime for an afternoon because somebody cleaned one
 clip is the thing that promise is about."""
 
+ATTENUATION_LIMIT_DB = 20.0
+"""How much noise this cleaner is allowed to take out, in decibels.
+
+DeepFilterNet's own default is *no* limit: the mask it predicts is applied in
+full, and everything it does not model as speech goes to nothing. That is the
+right default for a recording somebody is going to listen to and the wrong one
+for a cloning reference, which is not a recording at all -- the model conditions
+on it, so whatever comes out of the timbre comes back under every sentence that
+voice ever says. A voice cleaned to nothing but its speech clones as a voice
+with nothing but its speech in it.
+
+Twenty decibels is not a taste. It is the same ceiling the in-page cleaner has
+had since it was written: its ``NOISE_FLOOR_GAIN`` of 0.10 means a bin it
+empties still keeps a tenth of what was there, which is -20 dB. Matching it
+leaves the two cleaners taking out the same *amount* and differing only in how
+well they choose what to take -- which is the comparison the two Play buttons in
+the panel are for, and the one worth having.
+
+Upstream applies it as a mix rather than a different mask
+(``enhanced = original * lim + enhanced * (1 - lim)``, ``lim = 10 ** -(dB/20)``),
+so a tenth of the original spectrum survives untouched. That is the part a
+learned denoiser cannot be talked out of removing, and it is the part a cloning
+model needs.
+"""
+
 INTRAOP_THREADS = 4
 INTEROP_THREADS = 1
 
@@ -197,6 +222,25 @@ def _in_a_job() -> str:
 # --------------------------------------------------------------------------- #
 
 
+def _attenuation(enhance) -> dict:
+    """``atten_lim_db`` for this build's ``enhance``, or nothing if it has none.
+
+    Asked of the signature rather than found out by calling, because a
+    ``TypeError`` raised *inside* ``enhance`` and one raised by handing it a
+    keyword it does not take are indistinguishable from out here and want
+    opposite handling. A build without the parameter cleans the way it always
+    did, which is worse for this job and much better than not cleaning at all.
+    """
+    import inspect
+
+    try:
+        if "atten_lim_db" in inspect.signature(enhance).parameters:
+            return {"atten_lim_db": ATTENUATION_LIMIT_DB}
+    except (TypeError, ValueError):
+        pass
+    return {}
+
+
 class Engine:
     """DeepFilterNet, loaded once, from a directory this extension verified.
 
@@ -251,6 +295,10 @@ class Engine:
         Resampled to 48 kHz and back because that is what the model works at,
         and doing it here rather than asking the caller keeps one rate
         conversion in one place with one set of rounding.
+
+        Enhanced with a limit on how much it may take out -- see
+        :data:`ATTENUATION_LIMIT_DB`. Without one this call suppresses in full,
+        which is what a listener wants and not what a voice clone wants.
         """
         import torchaudio
         from df.enhance import enhance
@@ -261,7 +309,7 @@ class Engine:
         if rate != MODEL_RATE:
             samples = torchaudio.functional.resample(samples, rate, MODEL_RATE)
         with torch.no_grad():
-            found = enhance(self.model, self.state, samples)
+            found = enhance(self.model, self.state, samples, **_attenuation(enhance))
         if rate != MODEL_RATE:
             found = torchaudio.functional.resample(found, MODEL_RATE, rate)
         found = found.squeeze(0).clamp(-1.0, 1.0)

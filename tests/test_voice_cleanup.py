@@ -12,6 +12,9 @@ the runtime stops.
 from __future__ import annotations
 
 import json
+import math
+import pathlib
+import re
 
 import pytest
 
@@ -78,6 +81,74 @@ class TestTheManifest:
         assert artifacts[-1].sha256 is None
         assert not artifacts[-1].pinned
         assert all(item.pinned for item in artifacts[:-1])
+
+
+class TestHowMuchItIsAllowedToTakeOut:
+    """A cleaner for a cloning reference is not a cleaner for a listener.
+
+    DeepFilterNet applies its predicted mask in full by default: everything it
+    does not model as speech goes to nothing. That is right for a recording
+    somebody is going to play and wrong for a reference, which the model
+    conditions on -- whatever comes out of the timbre comes back under every
+    sentence that voice ever says. Reported from a real machine, in those words:
+    the in-page cleaner helped and DeepFilterNet did not.
+
+    The in-page pass has had a floor since it was written and this call had
+    none, which made "with DeepFilterNet (better)" the more destructive of two
+    options offered as a choice between careful and quick.
+    """
+
+    def test_the_limit_matches_the_in_page_cleaners_own_floor(self):
+        """Not a taste. ``NOISE_FLOOR_GAIN`` of 0.10 is -20 dB, and matching it
+        leaves both cleaners taking out the same amount and differing only in
+        how well they choose what to take."""
+        script = (pathlib.Path(__file__).resolve().parent.parent
+                  / "javascript" / "voice_chat.js").read_text(encoding="utf-8")
+        floor = re.search(r"const NOISE_FLOOR_GAIN = ([0-9.]+);", script)
+        assert floor, "the in-page cleaner no longer has a floor to match"
+        decibels = -20.0 * math.log10(float(floor.group(1)))
+        assert abs(worker.ATTENUATION_LIMIT_DB - decibels) < 0.5, (
+            f"the two cleaners no longer stop at the same place: "
+            f"{worker.ATTENUATION_LIMIT_DB} dB against {decibels:.1f} dB")
+
+    def test_a_build_that_takes_the_limit_is_given_it(self):
+        def enhance(model, df_state, audio, pad=True, atten_lim_db=None):
+            return audio
+
+        assert worker._attenuation(enhance) == {
+            "atten_lim_db": worker.ATTENUATION_LIMIT_DB}
+
+    def test_a_build_without_it_cleans_the_way_it_always_did(self):
+        """Worse for this job, and much better than not cleaning at all."""
+        def enhance(model, df_state, audio, pad=True):
+            return audio
+
+        assert worker._attenuation(enhance) == {}
+
+    def test_a_callable_whose_signature_cannot_be_read_is_left_alone(self):
+        assert worker._attenuation(print) == {}
+
+    def test_the_keyword_is_upstreams_and_was_read_off_upstream(self):
+        """``enhance(model, df_state, audio, pad=True, atten_lim_db=None)``.
+
+        Checked against the pinned 0.5.6 wheel's own ``df/enhance.py`` when this
+        was written, rather than remembered -- and what it does there is a mix
+        rather than a different mask::
+
+            lim = 10 ** (-abs(atten_lim_db) / 20)
+            enhanced = original * lim + enhanced * (1 - lim)
+
+        which is why a limit in decibels means "keep this much of what was
+        there" and why it lines up with a spectral floor expressed the same way.
+        What this test can hold on to without the wheel is the spelling: a
+        keyword passed under the wrong name is silently accepted by nothing and
+        would take the limit with it.
+        """
+        import inspect
+
+        source = inspect.getsource(worker.Engine.clean)
+        assert "**_attenuation(enhance)" in source, source
+        assert "atten_lim_db" in inspect.getsource(worker._attenuation)
 
 
 class TestWhereItWillNotRun:
