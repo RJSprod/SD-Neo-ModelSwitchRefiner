@@ -2,7 +2,7 @@
   "schema": 1,
   "version": 4,
   "pinned": true,
-  "notes": "The runtime closure below is resolved: every wheel is named, sized and hashed from pypi.org, so the managed install fetches exactly what this repository claims and refuses anything else. Model and voice artifacts carry the publisher's digest where the hub reports one and are attested over HTTPS at install time where it does not, and either way the digest of what actually arrived is recorded. Regenerate this file with tools/pin_pocket_models.py; it is the only thing that should write it. This is GATE P-1 satisfied: no unreviewed wheel is fetched dynamically.",
+  "notes": "The runtime closure is pinned byte for byte: every wheel is named, sized and hashed from pypi.org, its completeness was measured against a real pocket-tts install, and tools/pin_pocket_models.py refuses a closure whose pins contradict one another. The model, official voice and cloning artifacts are DECLARED BUT NOT HASHED. Their repositories, paths and revisions are upstream's own, read out of pocket_tts/config/english.yaml and pocket_tts/utils/utils.py inside the 3.0.2 wheel -- three different commits, one for the weights and tokenizer, one for the cloning-capable weights, one for the voice embeddings. What is missing is the sizes and digests, because the machine that wrote this could not reach huggingface.co. That is a weaker claim than the closure's and the difference is worth stating: an artifact with a digest here is checked against a number this repository committed to, and one without is checked against the digest its publisher reports at install time. Both refuse a file that arrives wrong; only the first refuses a publisher that changed its mind. Run `python tools/pin_pocket_models.py --model` on a machine that can reach the hub to record the sizes and digests and turn the first claim into the second -- with HF_TOKEN set and the Kyutai conditions accepted if the gated half is wanted; a closed gate leaves the public half resolved. The official voice bank has one entry on purpose. Upstream advertises twenty-six names and most are English, but which have an English embedding in the repository is a question only the repository can answer, and a name that is not served costs the user every voice rather than one. The --model run prints the whole embeddings directory for a maintainer to review and add. Installing from a folder you filled yourself works either way, and records the digests of what it was given.",
   "runtime": {
     "package": "pocket-tts",
     "import_name": "pocket_tts",
@@ -1075,17 +1075,63 @@
       "notes": "Downloaded once and then read from disk. The two revisions are upstream's own, read out of pocket_tts/config/english.yaml inside the 3.0.2 wheel: the package pins the public weights and tokenizer at one commit and the cloning-capable weights at another, and following main instead would install bytes the shipped configuration was not written for. Voice Chat's installer copies that same configuration out of the runtime and rewrites its three locations to the local files it verified, so nothing is resolved again after installation and no hf:// or https:// location ever reaches the worker.",
       "about_bytes": 0,
       "ram_bytes": 2147483648,
-      "files": [],
-      "required_paths": [],
-      "cloning_files": [],
-      "cloning_required_paths": [],
+      "files": [
+        {
+          "filename": "languages/english/model.safetensors",
+          "local_name": "model.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/d29db7978e464fb90cb3359ee0c69a273b9142cc/languages/english/model.safetensors",
+          "bytes": 0,
+          "sha256": ""
+        },
+        {
+          "filename": "languages/english/tokenizer.model",
+          "local_name": "tokenizer.model",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/d29db7978e464fb90cb3359ee0c69a273b9142cc/languages/english/tokenizer.model",
+          "bytes": 0,
+          "sha256": ""
+        }
+      ],
+      "required_paths": [
+        "model.safetensors",
+        "tokenizer.model"
+      ],
+      "cloning_files": [
+        {
+          "filename": "languages/english/model.safetensors",
+          "local_name": "model-voice-cloning.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts/resolve/39592ff23c9ef80098bb74895d104c26275fe2c9/languages/english/model.safetensors",
+          "bytes": 0,
+          "sha256": ""
+        }
+      ],
+      "cloning_required_paths": [
+        "model-voice-cloning.safetensors"
+      ],
       "config": {
         "weights_path": "model-voice-cloning.safetensors",
         "weights_path_without_voice_cloning": "model.safetensors",
         "tokenizer_path": "tokenizer.model"
       },
-      "voices": [],
-      "cloning_revision": "39592ff23c9ef80098bb74895d104c26275fe2c9"
+      "voices": [
+        {
+          "id": "alba",
+          "display_name": "Alba",
+          "language": "en",
+          "accent": "",
+          "license": "CC-BY-4.0 (PocketTTS voice states, Kyutai)",
+          "attribution": "PocketTTS official voice Alba by Kyutai (CC-BY-4.0). Precomputed voice state from huggingface.co/kyutai/pocket-tts-without-voice-cloning, installed locally and never fetched at speech time.",
+          "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/blob/e81d79e8194ad4c7ce879c87a4258ef20cbf2487/languages/english/embeddings/alba.safetensors",
+          "artifact": {
+            "filename": "languages/english/embeddings/alba.safetensors",
+            "local_name": "alba.safetensors",
+            "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e81d79e8194ad4c7ce879c87a4258ef20cbf2487/languages/english/embeddings/alba.safetensors",
+            "bytes": 0,
+            "sha256": ""
+          }
+        }
+      ],
+      "cloning_revision": "39592ff23c9ef80098bb74895d104c26275fe2c9",
+      "voice_revision": "e81d79e8194ad4c7ce879c87a4258ef20cbf2487"
     }
   }
 }

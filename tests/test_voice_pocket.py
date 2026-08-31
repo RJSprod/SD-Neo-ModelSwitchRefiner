@@ -437,8 +437,24 @@ class TestTheVoiceLibrary:
         assert pocket.lookup("sopro:clone:abcdef") is None
         assert pocket.lookup("kokoro:official:af_heart") is None
 
-    def test_with_no_voices_at_all_it_refuses_rather_than_crossing_engines(self, host,
-                                                                           voice_root):
+    def test_with_no_voices_at_all_it_refuses_rather_than_crossing_engines(
+            self, host, voice_root, installed, monkeypatch):
+        """I-PKT-2. An installation with no Pocket voice answers with nothing and
+        says so, rather than falling through to Kokoro's bank.
+
+        The empty catalogue is arranged here rather than borrowed from the
+        shipped manifest. It used to be borrowed, which meant this passed for as
+        long as the manifest happened to have recorded no official voices --
+        and stopped testing anything the moment one was declared.
+        """
+        empty = json.loads(json.dumps(installed))
+        empty["models"]["english"]["voices"] = []
+        monkeypatch.setattr(pocket, "manifest", lambda refresh=False: empty)
+        monkeypatch.setattr(pocket, "_manifest_cache", empty)
+        for state in paths.pocket_official_root("english").glob("*.safetensors"):
+            state.unlink()
+
+        assert pocket.default_id() == ""
         with pytest.raises(pocket.PocketError) as raised:
             pocket.resolve("")
         assert "no voice to speak with" in str(raised.value)
