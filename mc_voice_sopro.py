@@ -83,9 +83,27 @@ PRECISIONS = ("full", "int8")
 is the whole set."""
 
 STEP_CHOICES = (2, 4, 8)
-"""Acoustic solver steps. The reviewed V2 default is 2 and upstream documents
-larger values as a quality/compute trade. Only a tested set is offered, because
-a free integer here is a control that can make Sopro slower than real time."""
+STEP_DEFAULT = 8
+"""Acoustic solver steps, and the one this build ships at.
+
+Upstream's reviewed V2 default is 2 and it documents larger values as a
+quality/compute trade. This build shipped at 2 as well, and that was the wrong
+end of the trade for what Voice Chat is doing here: 2 is the setting that makes
+a *streaming* engine keep up on an unknown machine, and the thing people
+actually complain about is that a cloned voice does not sound enough like them.
+The solver is the main quality control the engine has, so it now defaults to the
+top of the range and the cost is a setting away.
+
+That cost is real and worth stating: 8 is roughly four times the solver work of
+2, and on a machine already near real time it will push the real-time factor
+past 1 -- which the playback side now survives (it rebuffers rather than
+stutters) but which is heard as pauses. The Engine settings note says so, and
+the validation button measures it.
+
+Named rather than indexed. This was ``STEP_CHOICES[0]``, so the shipped default
+was a property of the *order* of a tuple -- reordering it for the UI would have
+silently changed what every untouched installation runs.
+"""
 
 CHUNK_CHOICES = (32, 64, 128)
 
@@ -518,7 +536,7 @@ def steps() -> int:
         found = int(_setting(OPT_STEPS) or 0)
     except (TypeError, ValueError):
         found = 0
-    return found if found in STEP_CHOICES else STEP_CHOICES[0]
+    return found if found in STEP_CHOICES else STEP_DEFAULT
 
 
 def intraop_threads() -> int:

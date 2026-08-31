@@ -4260,6 +4260,7 @@
             swapSurface();
             return;
         }
+        noteIdealClip(payload);
         if (payload.voices) paintVoices(holder, payload);
     }
 
@@ -4292,7 +4293,26 @@
 
     const CLIP_MIN_SECONDS = 5;
     const CLIP_MAX_SECONDS = 20;
-    const CLIP_SUGGESTED = 15;
+    // As much reference as the pipeline will carry. More conditioning is the
+    // cheapest quality this engine has -- it costs nothing at synthesis time,
+    // only twenty seconds of somebody's recording instead of fifteen -- so the
+    // selection opens at the ceiling and shrinks only when the file is shorter
+    // than that.
+    let clipSuggested = CLIP_MAX_SECONDS;
+
+    // What the *model* says it was built to condition on. Sopro reports it as
+    // `ref_seconds` and nothing had ever read it. It no longer picks the
+    // selection -- the ceiling does -- but it is still the only figure in the
+    // system that comes from the engine rather than from us, so it is kept and
+    // shown when it disagrees with what is selected. A number the model volunteers
+    // and the interface hides is how the fifteen-second guess survived this long.
+    let idealClip = 0;
+
+    function noteIdealClip(payload) {
+        const found = payload && payload.clone && Number(payload.clone.ideal_seconds);
+        if (!found || !isFinite(found) || found <= 0) return;
+        idealClip = Math.max(CLIP_MIN_SECONDS, Math.min(CLIP_MAX_SECONDS, found));
+    }
 
     function clipDuration() {
         if (!soproClip) return 0;
@@ -4329,7 +4349,7 @@
             // selection is a usable one rather than the whole thing: somebody
             // who presses Create straight away gets a voice, not a refusal.
             if (decoded.duration > CLIP_MAX_SECONDS) {
-                soproClip.end = CLIP_SUGGESTED;
+                soproClip.end = clipSuggested;
             }
             if (trim) trim.hidden = false;
             paintTrim(form);
@@ -4421,11 +4441,22 @@
             sayTrim(form, shown + " selected — Sopro takes at most "
                     + CLIP_MAX_SECONDS + " s. Drag the edges in.");
         } else {
+            // The engine's own figure, said once and only when it disagrees
+            // with what is selected by more than a second. It does not change
+            // anything -- longer is the deliberate default -- but it is the one
+            // number here that came from the model rather than from us, and
+            // silently discarding it is how the old fifteen-second guess lasted
+            // as long as it did.
+            const differs = idealClip && Math.abs(chosen - idealClip) > 1.0;
             sayTrim(form, shown + " selected — ready to create."
                     + (soproClip.clean
                        ? (soproClip.how === "deepfilternet" && soproClip.engineCleaned
                           ? " Cleaned with DeepFilterNet."
                           : " Cleaning is on.")
+                       : "")
+                    + (differs
+                       ? " This Sopro build reports " + idealClip.toFixed(0)
+                         + " s as the length it was built to condition on."
                        : ""));
         }
     }
@@ -5022,9 +5053,9 @@
                 // "the part with speech in it" that costs one pass over the
                 // samples. Not clever, and much better than the first fifteen
                 // when a clip opens with silence or a count-in.
-                soproClip.start = loudestWindow(soproClip.buffer, CLIP_SUGGESTED);
+                soproClip.start = loudestWindow(soproClip.buffer, clipSuggested);
                 soproClip.end = Math.min(soproClip.buffer.duration,
-                                         soproClip.start + CLIP_SUGGESTED);
+                                         soproClip.start + clipSuggested);
                 paintTrim(form);
             });
         }

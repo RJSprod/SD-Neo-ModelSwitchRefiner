@@ -1193,6 +1193,8 @@ def _sopro_engine_settings(settings: dict, found) -> str:
     be a character setting nobody could reason about. Changing one stops the
     worker; the next reply starts it again.
     """
+    import mc_voice_sopro as sopro
+
     def choices(name: str, current, values, labels=None) -> str:
         options = "".join(
             f'<option value="{ui.escape(str(value))}"'
@@ -1222,8 +1224,15 @@ def _sopro_engine_settings(settings: dict, found) -> str:
         '<div class="mc-voice-field">'
         '<label>Solver steps</label>'
         + choices("steps", settings["steps"], settings["step_choices"])
-        + '<p class="mc-voice-note">How many steps the acoustic solver takes. More is '
-          'slower. This is a compute setting, not a character trait.</p>'
+        + f'<p class="mc-voice-note">How many steps the acoustic solver takes, and the '
+          f'main quality control this engine has. It ships at '
+          f'{sopro.STEP_DEFAULT}, the top of the range, because a clone that does not '
+          f'sound like the person is the complaint worth spending compute on. The cost '
+          f'is roughly proportional — {sopro.STEP_DEFAULT} steps is about four times the '
+          f'solver work of {min(sopro.STEP_CHOICES)} — so on a slower machine this is '
+          f'the first thing to <em>lower</em> if replies start pausing mid-sentence. '
+          f'Run the validation below to see what it costs here. A compute setting, not '
+          f'a character trait.</p>'
         '</div>'
         '<div class="mc-voice-field">'
         '<label>Streaming chunk size</label>'
@@ -1499,8 +1508,11 @@ def _sopro_voices_html() -> str:
         # by ear needs A and B under two fingers.
         f'<button type="button" class="mc-voice-entry-action" '
         f'data-mc-voice-trim-play-clean hidden>Play cleaned</button>'
+        # No number in the markup. Fifteen was a guess baked in at build time;
+        # the model reports the length it was built to condition on, and the
+        # page rewrites this label with it as soon as it knows.
         f'<button type="button" class="mc-voice-entry-action" data-mc-voice-trim-best>'
-        f'Pick 15 s for me</button>'
+        f'Pick {int(sopro.MAX_REFERENCE_SECONDS)} s for me</button>'
         f'<label class="mc-voice-lab-check">'
         f'<input type="checkbox" data-mc-voice-clean /> Clean up the recording</label>'
         # Shown only when the engine is installed, because a control offering a
@@ -1553,7 +1565,10 @@ def _sopro_voices_html() -> str:
         + f'<p class="mc-voice-note">'
         f'{int(sopro.MIN_REFERENCE_SECONDS)} to {int(sopro.MAX_REFERENCE_SECONDS)} seconds '
         f'of one clear speaker, at a natural speaking pace, in a room without much '
-        f'background noise. Create preview builds the voice and reads a line back to '
+        f'background noise — and nearer {int(sopro.MAX_REFERENCE_SECONDS)} than '
+        f'{int(sopro.MIN_REFERENCE_SECONDS)} if you have it, because the conditioning is '
+        f'built from whatever you give it and more of it costs nothing at speaking time. '
+        f'Create preview builds the voice and reads a line back to '
         f'you; nothing is saved until you press Save voice, and Discard removes the '
         f'whole thing including the recording it kept.</p>'
         f'</div>'

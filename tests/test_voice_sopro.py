@@ -222,6 +222,51 @@ class TestEngineSettings:
         assert kokoro_profile.stored() == before
 
 
+class TestTheSolverStepDefault:
+    """The main quality control this engine has, and which end of it ships.
+
+    Upstream's reviewed V2 default is 2 and it documents larger values as a
+    quality/compute trade. This build shipped at 2 as well, which is the setting
+    that makes a *streaming* engine keep up on an unknown machine — and the
+    thing people actually report is that a cloned voice does not sound enough
+    like them. It now ships at the top of the range.
+    """
+
+    def test_an_untouched_installation_gets_the_top_of_the_range(self, host, voice_root):
+        assert sopro.steps() == max(sopro.STEP_CHOICES)
+        assert sopro.STEP_DEFAULT == max(sopro.STEP_CHOICES)
+
+    def test_the_default_is_named_rather_than_an_index_into_the_choices(self):
+        """It was ``STEP_CHOICES[0]``, so the shipped default was a property of
+        the *order* of a tuple: reordering it for the UI would have silently
+        changed what every untouched installation runs.
+
+        Read out of the function's own source rather than out of the file, so a
+        mention in a docstring elsewhere explaining the history does not make
+        this pass or fail.
+        """
+        import inspect
+
+        body = inspect.getsource(sopro.steps)
+        assert "STEP_CHOICES[0]" not in body, body
+        assert "STEP_DEFAULT" in body, body
+
+    def test_a_stored_choice_still_wins(self, host, voice_root, monkeypatch):
+        import mc_voice_sopro_runtime as runtime
+
+        monkeypatch.setattr(runtime, "stop", lambda reason="": None)
+        sopro.set_engine_settings(solver_steps=2)
+        assert sopro.steps() == 2
+
+    def test_a_stored_value_that_is_not_offered_falls_back_to_the_default(
+            self, host, voice_root):
+        """Not to the first choice, which is what made this worth naming: a
+        corrupt or older settings file must land on the shipped setting rather
+        than on whichever value happens to be written first."""
+        sopro._remember(sopro.OPT_STEPS, 5)
+        assert sopro.steps() == sopro.STEP_DEFAULT
+
+
 class TestTheCpuThreadSetting:
     """The lever the validation sweep exists to inform, made selectable.
 
