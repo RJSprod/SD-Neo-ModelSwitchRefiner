@@ -875,6 +875,30 @@ def set_engine_settings(precision_id: str = "", sampler_steps=None,
     return engine_settings()
 
 
+def apply_engine_settings(values: dict = None) -> dict:
+    """One engine setting change, in the names the *wire* uses.
+
+    A second entry point beside :func:`set_engine_settings`, and the reason is
+    the generic route in front of it: one route serves every engine that has
+    settings, so what it forwards has to be a stable vocabulary rather than
+    whichever Python parameter names this module happens to use. ``precision``,
+    ``steps`` and ``model_id`` are that vocabulary here, and they are the names
+    the panel sends.
+
+    An unknown key is refused rather than ignored. A page drawn for a build
+    whose panel had a control this one does not is a stale surface, and
+    answering it with silence would be answering it with "applied".
+    """
+    offered = {str(key): value for key, value in dict(values or {}).items()}
+    known = {"precision", "steps", "model_id"}
+    unknown = sorted(set(offered) - known)
+    if unknown:
+        raise PocketError(f"{unknown[0]!r} is not a PocketTTS engine setting.")
+    return set_engine_settings(precision_id=str(offered.get("precision") or ""),
+                               sampler_steps=offered.get("steps"),
+                               wanted_model=str(offered.get("model_id") or ""))
+
+
 def _retire(reason: str) -> None:
     """Silence whatever Pocket is saying, then stop its worker. Never raises.
 

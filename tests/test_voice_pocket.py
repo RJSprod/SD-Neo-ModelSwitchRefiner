@@ -693,3 +693,35 @@ class TestNoPayloadCarriesAPath:
         text = json.dumps(pocket.public_status())
         assert str(paths.data_root()) not in text
         assert ".safetensors" not in text
+
+
+class TestTheWireVocabularyIsStable:
+    """Section 30. One route serves every engine that has settings, so what it
+    forwards has to be a vocabulary rather than whichever Python parameter
+    names a module happens to use."""
+
+    def test_the_wire_names_reach_the_right_settings(self, host, installed, worker):
+        found = pocket.apply_engine_settings({"precision": "int8", "steps": 3})
+        assert found["precision"] == "int8"
+        assert found["steps"] == 3
+
+    def test_a_control_this_engine_does_not_have_is_refused(self, host, installed,
+                                                            worker):
+        """A page drawn for a build whose panel had a control this one does not
+        is a stale surface, and answering it with silence would be answering it
+        with "applied"."""
+        with pytest.raises(pocket.PocketError) as raised:
+            pocket.apply_engine_settings({"threads": 8})
+        assert "threads" in str(raised.value)
+
+    def test_sopro_answers_the_same_vocabulary_where_it_shares_one(self, host,
+                                                                   voice_root,
+                                                                   monkeypatch):
+        import mc_voice_sopro as sopro
+        import mc_voice_sopro_runtime as sopro_runtime
+
+        monkeypatch.setattr(sopro_runtime, "stop", lambda reason="": None)
+        found = sopro.apply_engine_settings({"precision": "int8"})
+        assert found["precision"] == "int8"
+        with pytest.raises(sopro.SoproError):
+            sopro.apply_engine_settings({"model_id": "something"})

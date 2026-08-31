@@ -686,6 +686,25 @@ def set_engine_settings(precision_id: str = "", solver_steps=None, chunk=None,
     return engine_settings()
 
 
+def apply_engine_settings(values: dict = None) -> dict:
+    """One engine setting change, in the names the *wire* uses.
+
+    A second entry point beside :func:`set_engine_settings`, added when a third
+    engine made one generic route serve all of them: what that route forwards
+    has to be a stable vocabulary rather than whichever Python parameter names
+    this module happens to use. Sopro's own ``/sopro/settings`` route still
+    calls the function below directly and is unchanged.
+    """
+    offered = {str(key): value for key, value in dict(values or {}).items()}
+    known = {"precision", "steps", "chunk_frames", "threads"}
+    unknown = sorted(set(offered) - known)
+    if unknown:
+        raise SoproError(f"{unknown[0]!r} is not a Sopro engine setting.")
+    return set_engine_settings(str(offered.get("precision") or ""),
+                               offered.get("steps"), offered.get("chunk_frames"),
+                               offered.get("threads"))
+
+
 # --------------------------------------------------------------------------- #
 # Installation
 # --------------------------------------------------------------------------- #

@@ -1695,15 +1695,15 @@ def engine_settings(values: dict = None, engine: str = "") -> dict:
 
     active = _active(engine)
     adapter = _capable(active, "engine_settings", "have engine settings")
-    offered = {str(key): value for key, value in dict(values or {}).items()}
+    apply = getattr(adapter, "apply_engine_settings", None)
+    if apply is None:
+        raise Refused(409, f"{engines.label(active)} does not have engine settings.")
     try:
-        found = adapter.set_engine_settings(**offered)
-    except TypeError:
-        # A setting this engine has no parameter for. Refused as a stale
-        # surface rather than as a fault: the page was drawn for a build whose
-        # panel had a control this one does not.
-        raise Refused(400, f"That is not a {engines.label(active)} setting.") from None
+        found = apply(dict(values or {}))
     except engines.refusals(active) as exc:
+        # A control this engine does not have, or a value it will not believe.
+        # Both are stale surfaces rather than faults: the page was drawn for a
+        # build whose panel is not this one's.
         raise Refused(400, str(exc) or "That setting could not be changed.") from None
     logger.info("Model Chain: a %s engine setting was changed", engines.label(active))
     return {"ok": True, "engine": active, "settings": found,
