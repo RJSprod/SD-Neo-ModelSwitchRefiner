@@ -441,7 +441,8 @@ class VoiceTurn:
                          exc_info=True)
 
     def note_segment(self, blocks: int = 0, first_block_ms: int = 0, streaming: str = "",
-                     synth_ms: int = 0, audio_ms: int = 0, trimmed_ms: int = 0) -> None:
+                     synth_ms: int = 0, audio_ms: int = 0, trimmed_ms: int = 0,
+                     quiet_ms: int = 0, floor_db: int = 0) -> None:
         """What one segment cost the worker, in counts and milliseconds.
 
         The distinction section 4 asks to be preserved. A handshake that says
@@ -454,11 +455,14 @@ class VoiceTurn:
         exactly nothing, and it should read that way in a log rather than as a
         win.
 
-        ``trimmed_ms`` is how much quiet the worker cut off this unit's two
-        ends. It belongs beside ``audio_ms`` rather than in a note of its own,
-        because the two together are the whole of "why is there a gap here":
-        audio that is not speech is a gap the listener hears, and this is how
-        much of it the engine produced and did not get to keep.
+        ``quiet_ms``, ``trimmed_ms`` and ``floor_db`` are the gap between two
+        sentences, measured. How much quiet the engine put at this unit's two
+        ends, how much of it the worker cut back, and how loud this voice's own
+        noise floor turned out to be. They belong beside ``audio_ms`` rather
+        than in a note of their own, because together they are the whole of "why
+        is there a gap here" -- and the three of them are what tells a unit that
+        was padded and trimmed apart from one that was padded and *not* trimmed,
+        which is a question about the floor rather than about the padding.
 
         ``synth_ms`` is the rest of the answer and the reason this row exists at
         all. Four numbers on one line -- how long the text took to arrive, how
@@ -484,6 +488,8 @@ class VoiceTurn:
                     "synth_ms": max(0, int(synth_ms or 0)),
                     "audio_ms": max(0, int(audio_ms or 0)),
                     "trimmed_ms": max(0, int(trimmed_ms or 0)),
+                    "quiet_ms": max(0, int(quiet_ms or 0)),
+                    "floor_db": min(0, int(floor_db or 0)),
                     "streaming": self.streaming,
                 })
                 if row["synth_ms"] > self._max_unit["ms"]:
@@ -866,11 +872,13 @@ def _log_unit(turn_id: str, row: dict) -> None:
         index = int(row.get("index") or 0)
         line = ("Model Chain: Voice TTS segment — turn %s, n=%d, chars=%s, "
                 "ready_wait_ms=%s, synth_ms=%s, first_block_ms=%s, callback_blocks=%s, "
-                "audio_ms=%s, trimmed_ms=%s, streaming=%s")
+                "audio_ms=%s, quiet_ms=%s, trimmed_ms=%s, floor_db=%s, "
+                "streaming=%s")
         values = (str(turn_id or "")[:8], index, row.get("chars"), row.get("ready_wait_ms"),
                   row.get("synth_ms"), row.get("first_block_ms"),
                   row.get("callback_blocks"), row.get("audio_ms"),
-                  row.get("trimmed_ms"), row.get("streaming") or "unknown")
+                  row.get("quiet_ms"), row.get("trimmed_ms"), row.get("floor_db"),
+                  row.get("streaming") or "unknown")
         if index <= 2 or int(row.get("synth_ms") or 0) >= SLOW_SEGMENT_MS:
             logger.info(line, *values)
         else:

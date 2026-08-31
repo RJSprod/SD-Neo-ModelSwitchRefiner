@@ -457,11 +457,11 @@ class TestTheQuietAModelPutsRoundAUnitIsCutBack:
         it at all."""
         room = 0.005
         assert room * 32767 > sopro_worker.QUIET_FLOOR, "the fixture is not a real test"
-        source = numpy.concatenate([self.quiet(0.5, room), tone(220.0, 1.0),
+        source = numpy.concatenate([self.quiet(0.3, room), tone(220.0, 1.0),
                                     self.quiet(0.4, room)])
         trim = sopro_worker.Trim(self.RATE)
         self.through(trim, source)
-        assert trim.dropped_ms == pytest.approx(900 - sopro_worker.KEEP_LEAD_MS
+        assert trim.dropped_ms == pytest.approx(700 - sopro_worker.KEEP_LEAD_MS
                                                 - sopro_worker.KEEP_TAIL_MS, abs=40)
 
     def test_a_rate_of_nothing_is_a_pass_through_rather_than_a_crash(self):

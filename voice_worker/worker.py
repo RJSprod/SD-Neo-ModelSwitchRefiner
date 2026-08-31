@@ -610,6 +610,8 @@ class Engines:
         self.num_speakers = 0
         self.sample_rate = 0
         self.bank_version = str(config.get("bank_version") or "")
+        self._quiet_floor = {}
+        """What each speaker's noise floor last measured, for :class:`Trim`."""
         self.streaming = ""
         self.callback_probe_ms = 0
         """How long the streaming probe below took, in milliseconds.
@@ -773,7 +775,7 @@ class Engines:
         # *edges* of a segment rather than inside it: the model's own padding,
         # and the click where one segment meets the next. In that order --
         # see :class:`Trim` and :class:`Seam`.
-        trim = Trim(rate or self.sample_rate)
+        trim = Trim(rate or self.sample_rate, floor=self._quiet_floor.get(speaker, 0))
         seam = Seam(rate or self.sample_rate)
 
         def emit(samples, sample_rate) -> bool:
@@ -791,6 +793,13 @@ class Engines:
                     continue
                 produced[0] += len(block) // 2
                 on_audio(block, sample_rate)
+            # What this segment measured its own noise floor to be, kept for the
+            # next segment in the same voice: a noise floor belongs to the voice
+            # rather than to the sentence, and the front of a segment has to be
+            # judged before that segment has measured anything.
+            if len(self._quiet_floor) > 16:
+                self._quiet_floor.clear()
+            self._quiet_floor[speaker] = trim.measured
 
         if self.streaming == "callback":
             def callback(samples, _progress):
@@ -812,7 +821,8 @@ class Engines:
                     emit(audio.samples, int(audio.sample_rate))
                 close(rate or self.sample_rate)
                 return {"samples": produced[0], "blocks": handed[0],
-                        "trimmed_ms": trim.dropped_ms}
+                        "trimmed_ms": trim.dropped_ms,
+                        "quiet_ms": trim.quiet_ms, "floor_db": trim.floor_db}
             except Exception as exc:  # noqa: BLE001 - see the two branches below
                 if produced[0]:
                     # Part of this segment has already been sent, so re-running
@@ -829,7 +839,8 @@ class Engines:
                 # are holding the last part of a segment that is about to be
                 # said again, and counting quiet nobody heard.
                 shaper = Shaper(found)
-                trim = Trim(rate or self.sample_rate)
+                trim = Trim(rate or self.sample_rate,
+                            floor=self._quiet_floor.get(speaker, 0))
                 seam = Seam(rate or self.sample_rate)
                 handed[0] = 0
 
@@ -837,7 +848,8 @@ class Engines:
         emit(audio.samples, int(audio.sample_rate))
         close(rate or self.sample_rate)
         return {"samples": produced[0], "blocks": handed[0],
-                "trimmed_ms": trim.dropped_ms}
+                "trimmed_ms": trim.dropped_ms,
+                "quiet_ms": trim.quiet_ms, "floor_db": trim.floor_db}
 
 
 _NUMPY = "unasked"
@@ -1059,32 +1071,46 @@ happened to generate.
 """
 
 QUIET_FLOOR = 130
-QUIET_CEILING = 650
-QUIET_SHARE = 0.02
-"""What counts as quiet once the unit has started, in PCM16 counts.
+QUIET_MULTIPLE = 3
+QUIET_SHARE = 8
+"""What counts as quiet, measured against the unit's own noise floor.
 
-Not a fixed number, because a cloned voice carries its reference recording's
-room tone, and a floor low enough for a studio recording finds no quiet at all
-in one made on a laptop. So the level moves with the unit: two per cent of the
-loudest sample so far -- about 34 dB down -- bounded below by 130 counts
-(roughly -48 dBFS, under any model's own noise floor) and above by 650 (roughly
--34 dBFS, still far under speech). Out of range in either direction the trim
-does less rather than more, which is the safe way for it to be wrong.
+The first version of this asked whether a window was below a *share of the
+loudest sample*, and on a real machine it trimmed exactly nothing: every unit
+came back ``trimmed_ms=0``. The reason is the voice. A cloned voice reproduces
+its reference recording's room tone, so what a listener hears as silence between
+two sentences is not silence at all -- it is that room tone, and a rule anchored
+to the peak puts the line far below it.
+
+So the line is anchored to the floor instead: three times the quietest ten
+milliseconds seen so far in this unit, which is where the room tone lives.
+Anchored at the bottom it follows a noisy clone up and a clean model down, and
+it never has to be guessed at.
+
+Two bounds keep it honest. It is never below :data:`QUIET_FLOOR` -- about -48
+dBFS, under any model's own noise -- because a unit of digital silence would
+otherwise put the line at zero. And it is never above an eighth of the loudest
+sample so far, which is the guard for a unit that contains no silence at all: if
+the quietest thing in it is a soft consonant, three times *that* would call a
+whole syllable quiet, and this is what stops it.
 """
 
 SPEECH_FLOOR = 1000
-"""What counts as the unit having started, in PCM16 counts. About -30 dBFS.
+OPEN_MULTIPLE = 4
+"""What counts as the unit having started. About -30 dBFS, or over the floor.
 
-A separate number from the one above, and absolute rather than relative,
-because the question at the *start* of a unit is different: a share of the
-loudest sample so far is meaningless when the loudest sample so far is the room
-tone. -30 dBFS is comfortably above any noise floor and well below speech, and
-being wrong about it costs nothing much either way -- too high and the lead is
-held a moment longer before it spills through untrimmed, too low and the trim
-keeps a little more quiet than it meant to.
+Two tests, and both have to pass. Absolute, because a unit has to start on
+something that is unmistakably not a noise floor. And relative, because on a
+noisy clone the room tone is *also* unmistakably above -30 dBFS -- that is
+exactly the case that made the first version trim nothing at the front.
+
+Being wrong here is bounded in both directions: too eager and the lead is kept
+rather than trimmed, too shy and the unit's audio waits :data:`MAX_LEAD_HOLD_MS`
+and then goes out untrimmed.
 """
 
 MAX_HOLD_MS = 600
+MAX_LEAD_HOLD_MS = 400
 SCAN_MS = 10
 """How much quiet may be held back, and how finely it is judged.
 
@@ -1093,13 +1119,11 @@ until the unit ends. Held audio is audio the listener does not have yet, so the
 hold is bounded: past 600 ms it spills through and only the last 600 ms is ever
 in hand.
 
-Holding *before* the first word is the same bound and is free in the case that
-matters: whatever is held there is padding, it is released the moment speech
-arrives, and the listener gets speech sooner than if it had never been held. It
-costs something in exactly one case -- a voice so quiet that no window ever
-reaches :data:`SPEECH_FLOOR`, where nothing is trimmed and the unit's audio
-simply arrives 600 ms later. That is a soft model with the volume turned well
-down, it is bounded, and it is smaller than the browser's own start buffer.
+Before the first word the bound is tighter, and it is a deadline rather than a
+spill. A unit whose opening cannot be told from its noise floor gives up waiting
+after 400 ms, sends what it has untrimmed, and carries on -- so the cost of not
+being able to tell is 400 ms once, at the front of that unit, rather than a
+trailing trim that never happens.
 
 Ten milliseconds is the window the level is judged over, because a single sample
 says nothing and a whole model chunk is eighty.
@@ -1121,16 +1145,38 @@ class Trim:
     Runs before :class:`Seam` rather than after it. The seam ramps a unit's
     first and last milliseconds to silence, and trimming after that would cut
     the ramp off and put back the click it exists to remove.
+
+    It reports what it saw as well as what it did -- :attr:`floor_db` and
+    :attr:`quiet_ms` alongside :attr:`dropped_ms` -- because the first version
+    of this class trimmed nothing on a real machine and the log could not say
+    why. A unit that reports a floor of -20 dBFS and half a second of quiet it
+    did not cut is a different problem from one that reports no quiet at all.
     """
 
     def __init__(self, rate: int, lead_ms: int = KEEP_LEAD_MS,
-                 tail_ms: int = KEEP_TAIL_MS):
+                 tail_ms: int = KEEP_TAIL_MS, floor: int = 0):
         self.rate = max(0, int(rate or 0))
         self.scan = max(1, int(self.rate * SCAN_MS / 1000))
         self.lead = int(self.rate * max(0, int(lead_ms)) / 1000)
         self.tail = int(self.rate * max(0, int(tail_ms)) / 1000)
         self.hold = max(self.tail, int(self.rate * MAX_HOLD_MS / 1000))
+        self.lead_hold = max(self.lead, int(self.rate * MAX_LEAD_HOLD_MS / 1000))
         self.dropped = 0
+        self.quiet_found = 0
+        self.hint = max(0, int(floor or 0))
+        """What the last unit in this voice measured its noise floor to be.
+
+        Seeded rather than discovered, and used for one thing only: deciding
+        that a unit has *started*. A noise floor is a property of the voice and
+        not of the sentence, and the front of a unit has to be judged before
+        that unit has had any chance to measure its own -- so the only number
+        available there is the one the last unit left behind. Zero when there is
+        no last unit, and then the question falls back to :data:`SPEECH_FLOOR`
+        alone.
+        """
+        self.measured = 32767
+        """The quietest ten milliseconds in this unit. What gets reported, and
+        what seeds the next one."""
         self._pending = _int16(b"")
         self._quiet = _int16(b"")
         self._opened = False
@@ -1140,6 +1186,20 @@ class Trim:
     def dropped_ms(self) -> int:
         """How much quiet this unit lost, in milliseconds. For the log."""
         return int(self.dropped * 1000 / (self.rate or 1))
+
+    @property
+    def quiet_ms(self) -> int:
+        """How much quiet this unit had at its two ends, cut or not."""
+        return int(self.quiet_found * 1000 / (self.rate or 1))
+
+    @property
+    def floor_db(self) -> int:
+        """This unit's own noise floor, in whole dBFS. Never below -96."""
+        import math
+
+        if self.measured <= 0:
+            return -96
+        return max(-96, int(round(20.0 * math.log10(self.measured / 32767.0))))
 
     def block(self, pcm: bytes) -> bytes:
         """Whatever of ``pcm`` is speech, or quiet that is being kept."""
@@ -1163,11 +1223,12 @@ class Trim:
             window = self._pending[:]
             del self._pending[:]
             self._judge(window, out)
+        self.quiet_found += len(self._quiet)
         if self._opened and len(self._quiet) > self.tail:
-            # Only when the unit opened. In a unit where no window ever reached
-            # the speech level, nothing has been shown to be padding, and
-            # cutting the end off it would be cutting off something quiet that
-            # might have been a word.
+            # Only when the unit opened. In a unit where nothing was ever told
+            # apart from its noise floor, nothing has been shown to be padding,
+            # and cutting the end off it would be cutting off something quiet
+            # that might have been a word.
             self.dropped += len(self._quiet) - self.tail
             del self._quiet[self.tail:]
         out.extend(self._quiet)
@@ -1179,30 +1240,12 @@ class Trim:
         peak = max(max(window), -min(window))
         if peak > self._peak:
             self._peak = peak
+        if peak < self.measured:
+            self.measured = peak
         if not self._opened:
-            # Before the first word, and "quiet" cannot be a share of a peak
-            # that has not happened yet: at this point the loudest thing seen
-            # may be the room tone itself. So the unit opens on an absolute
-            # level instead -- see :data:`SPEECH_FLOOR` -- and everything before
-            # that first word is padding, kept back to the lead.
-            self._quiet.extend(window)
-            if peak > SPEECH_FLOOR:
-                self._opened = True
-                if len(self._quiet) > self.lead + len(window):
-                    keep = self.lead + len(window)
-                    self.dropped += len(self._quiet) - keep
-                    del self._quiet[:len(self._quiet) - keep]
-                out.extend(self._quiet)
-                del self._quiet[:]
-            elif len(self._quiet) > self.hold:
-                # A unit with no clear speech in it at all. Nothing is trimmed
-                # and nothing is held indefinitely: it spills through, because a
-                # quiet unit is still a unit somebody is waiting to hear.
-                spill = len(self._quiet) - self.hold
-                out.extend(self._quiet[:spill])
-                del self._quiet[:spill]
+            self._before(window, peak, out)
             return
-        if peak > min(QUIET_CEILING, max(QUIET_FLOOR, int(self._peak * QUIET_SHARE))):
+        if peak > self._quiet_level():
             # Speech. Whatever quiet was being held is a gap *inside* the unit
             # and is passed on untouched -- only the two ends are this class's
             # business.
@@ -1215,6 +1258,51 @@ class Trim:
             spill = len(self._quiet) - self.hold
             out.extend(self._quiet[:spill])
             del self._quiet[:spill]
+
+    def _before(self, window, peak: int, out) -> None:
+        """A window from before the first word, and whether it is still one."""
+        self._quiet.extend(window)
+        if peak > SPEECH_FLOOR and (not self.hint or peak > self.hint * OPEN_MULTIPLE):
+            self._opened = True
+            keep = self.lead + len(window)
+            if len(self._quiet) > keep:
+                self.quiet_found += len(self._quiet) - len(window)
+                self.dropped += len(self._quiet) - keep
+                del self._quiet[:len(self._quiet) - keep]
+            out.extend(self._quiet)
+            del self._quiet[:]
+            return
+        if len(self._quiet) <= self.lead_hold:
+            return
+        if peak <= QUIET_FLOOR or (self.hint and peak <= self.hint * QUIET_MULTIPLE):
+            # Still plainly the model's own quiet, however long it goes on for.
+            # The oldest of it is dropped rather than held or sent: it is the
+            # far end of a lead nobody will hear, and holding it was only ever a
+            # way of finding out where the lead ended.
+            #
+            # "Plainly" is the whole of the condition. Either this is under any
+            # model's noise floor in absolute terms, or it is at the floor this
+            # voice measured last time. Anything else -- a unit whose every
+            # window is quiet, with no previous unit to compare it against -- is
+            # not dropped at all: it could as easily be somebody speaking softly
+            # with the volume turned down, and throwing that away would be
+            # throwing away a sentence.
+            self.quiet_found += len(self._quiet) - self.lead_hold
+            self.dropped += len(self._quiet) - self.lead_hold
+            del self._quiet[:len(self._quiet) - self.lead_hold]
+            return
+        # The deadline. This unit's opening cannot be told from its own noise,
+        # so it goes out as it is -- and it counts as opened, because the
+        # alternative is losing the trailing trim as well over a question that
+        # was only ever about the front.
+        self._opened = True
+        out.extend(self._quiet)
+        del self._quiet[:]
+
+    def _quiet_level(self) -> int:
+        """What counts as quiet once the unit has started."""
+        return max(QUIET_FLOOR, min(self.measured * QUIET_MULTIPLE,
+                                    self._peak // QUIET_SHARE))
 
 
 def _required(section: dict, key: str) -> str:
@@ -1562,6 +1650,8 @@ class Worker:
                            # factor for one unit rather than for a whole turn.
                            "samples": block["samples"],
                            "trimmed_ms": metrics["trimmed_ms"],
+                           "quiet_ms": metrics["quiet_ms"],
+                           "floor_db": metrics["floor_db"],
                            "sample_rate": int(engines.sample_rate or 0),
                            "streaming": engines.streaming})
         except Exception as exc:

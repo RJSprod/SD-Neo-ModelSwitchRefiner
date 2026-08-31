@@ -1061,17 +1061,41 @@ class TestTheQuietAModelPutsRoundAUnitIsCutBack:
     def test_the_level_follows_the_unit_rather_than_being_fixed(self):
         """A cloned voice carries its reference recording's room tone.
 
-        A fixed floor low enough for a studio recording finds no quiet at all in
-        a voice cloned from a laptop microphone, and the gap it was meant to
-        remove stays. The level is a share of the unit's own peak, so tone forty
-        decibels under the speech is still quiet.
+        This is the case that made the first version of this class trim exactly
+        nothing on a real machine: what a listener hears as silence between two
+        sentences is not silence, it is the reference recording's room tone, and
+        a level anchored to the loudest sample sits far below it. Anchored to
+        the quietest instead, it follows the voice.
         """
         room = 0.005
         assert room * 32767 > pocket_worker.QUIET_FLOOR, "the fixture is not a real test"
-        source = numpy.concatenate([quiet(0.5, room), tone(220.0, 1.0), quiet(0.4, room)])
+        source = numpy.concatenate([quiet(0.3, room), tone(220.0, 1.0), quiet(0.4, room)])
         trim = pocket_worker.Trim(RATE)
         through_trim(trim, source)
-        assert trim.dropped_ms == pytest.approx(900 - 60 - 120, abs=40)
+        assert trim.dropped_ms == pytest.approx(700 - 60 - 120, abs=40)
+        assert trim.floor_db == pytest.approx(-46, abs=2)
+
+    def test_a_lead_that_is_room_tone_needs_the_last_units_floor(self):
+        """What the seeded floor buys, and it is the front of the unit.
+
+        Room tone loud enough to pass for speech opens the unit on its first
+        window, and a unit that has already opened has no lead left to trim. The
+        floor the last unit in this voice measured is the only thing available
+        that early, and with it the bar for "this is the first word" moves above
+        the room tone.
+        """
+        room = 0.05
+        assert room * 32767 > pocket_worker.SPEECH_FLOOR, "the fixture is not a real test"
+        source = numpy.concatenate([quiet(0.3, room), tone(220.0, 1.0), quiet(0.4, room)])
+
+        cold = pocket_worker.Trim(RATE)
+        through_trim(cold, source)
+        assert cold.dropped_ms == pytest.approx(400 - 120, abs=40), (
+            "with no floor to go on, only the tail can be trimmed")
+
+        warm = pocket_worker.Trim(RATE, floor=cold.measured)
+        through_trim(warm, source)
+        assert warm.dropped_ms == pytest.approx(700 - 60 - 120, abs=40)
 
     def test_a_unit_that_never_reaches_the_speech_level_still_arrives_whole(self):
         """A soft model with the volume well down, and the one case the hold costs
@@ -1155,6 +1179,73 @@ class TestTheTrimAndTheSeamComposeInThatOrder:
         found = engine.stream("Hello.", "v", pocket_worker.NEUTRAL,
                               lambda _b: None, lambda: True)
         assert found["trimmed_ms"] == pytest.approx(350 - 60 - 120, abs=30)
+        assert found["quiet_ms"] == pytest.approx(350, abs=30)
+
+
+class TestASecondUnitKnowsWhatTheVoiceSoundsLikeWhenItIsQuiet:
+    """The reported failure, and the reason a floor is carried between units.
+
+    On a real machine every unit came back ``trimmed_ms=0``. The voice was a
+    clone, so what sounded like silence between the sentences was the reference
+    recording's room tone -- loud enough to be taken for the start of the unit,
+    which leaves a unit with no lead left to trim.
+
+    A noise floor belongs to the voice rather than to the sentence, so the
+    engine keeps what each unit measured and hands it to the next one. The first
+    unit of a voice can still only trim its tail; every unit after it can trim
+    both ends.
+    """
+
+    class Roomy:
+        """A model whose padding is room tone rather than silence."""
+
+        def __init__(self, room=0.05):
+            self.room = float(room)
+            self.exhausted = False
+            self.sample_rate = RATE
+            self.device = "cpu"
+            self.temp = 0.3
+            self.sampler_decode_steps = 1
+            self.has_voice_cloning = True
+
+        def generate_audio_stream(self, model_state, text_to_generate, max_tokens=1000,
+                                  frames_after_eos=None, copy_state=True):
+            source = numpy.concatenate([quiet(0.25, self.room), tone(220.0, 1.0),
+                                        quiet(0.35, self.room)])
+
+            def produce():
+                for start in range(0, len(source), 1920):
+                    yield source[start:start + 1920]
+                self.exhausted = True
+
+            return produce()
+
+    def speak(self, engine):
+        return engine.stream("Hello.", "v", pocket_worker.NEUTRAL,
+                             lambda _b: None, lambda: True)
+
+    def test_the_first_unit_trims_its_tail_and_the_second_trims_both_ends(self):
+        model = self.Roomy()
+        assert model.room * 32767 > pocket_worker.SPEECH_FLOOR, (
+            "the fixture's room tone is not loud enough to be the reported case")
+        engine = pocket_engine(model)
+
+        first = self.speak(engine)
+        assert first["trimmed_ms"] == pytest.approx(350 - 120, abs=40)
+        # Only the tail is even *counted* as quiet on this unit: the lead was
+        # taken for the start of the unit and went out as speech. What says so
+        # in a log is the floor, which is 20 dB above a clean model's.
+        assert first["quiet_ms"] == pytest.approx(350, abs=40)
+        assert first["floor_db"] == pytest.approx(-26, abs=2)
+
+        second = self.speak(engine)
+        assert second["trimmed_ms"] == pytest.approx(600 - 60 - 120, abs=40)
+
+    def test_the_floor_is_remembered_per_voice(self):
+        engine = pocket_engine(self.Roomy())
+        self.speak(engine)
+        assert engine._quiet_floor["v"] > 0
+        assert set(engine._quiet_floor) == {"v"}
 
 
 class TestTheVoiceStateCacheIsBounded:
