@@ -824,3 +824,23 @@ class TestTheLaneNeverBlocksOnADeadPipe:
         worker.send({"op": "tts_audio", "turn": "T"}, b"\x00\x00", audio=True)
         assert time.monotonic() - began < 2.0, "the lane blocked on a dead writer"
         assert worker._stopping is True
+
+
+class TestTheGeneratorIsDrainedEvenWhenTheConsumerFails:
+    def test_an_exception_in_on_audio_does_not_abandon_the_model(self):
+        """I-PKT-12, on the path nobody plans for.
+
+        Abandoning the generator is the one thing that must not happen: upstream
+        keeps a generation thread running until it is emptied, so a consumer
+        that raised halfway would leave one running against an unbounded queue
+        with nothing to drain it.
+        """
+        model = FakeModel(chunks=6)
+        engine = pocket_engine(model)
+
+        def explode(_block):
+            raise RuntimeError("the pipe went away")
+
+        with pytest.raises(RuntimeError):
+            engine.stream("Hello.", "v", pocket_worker.NEUTRAL, explode, lambda: True)
+        assert model.exhausted, "the generator was abandoned when the consumer failed"

@@ -1137,14 +1137,23 @@ class Engine:
         shaper = Shaper(delivery, self._numpy)
         stream = self.model.generate_audio_stream(
             state, str(text or ""), copy_state=True, **self.generation(delivery))
-        for chunk in stream:
-            if first == 0.0:
-                first = time.monotonic()
-            blocks += 1
-            block = self._as_pcm(chunk, shaper)
-            samples += len(block) // 2
-            if block and listening():
-                on_audio(block)
+        try:
+            for chunk in stream:
+                if first == 0.0:
+                    first = time.monotonic()
+                blocks += 1
+                block = self._as_pcm(chunk, shaper)
+                samples += len(block) // 2
+                if block and listening():
+                    on_audio(block)
+        finally:
+            # Whatever ended that loop -- normal exhaustion, or something in the
+            # consumer raising -- the generator is drained before this returns.
+            # Abandoning it is the one thing that must not happen: upstream's
+            # generation thread runs until it is emptied, and leaving it running
+            # against an unbounded internal queue is I-PKT-12's failure exactly.
+            for _leftover in stream:
+                blocks += 1
         tail = shaper.flush() if shaper.active else b""
         if tail:
             samples += len(tail) // 2
