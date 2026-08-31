@@ -229,9 +229,19 @@ def public_status() -> dict:
     except Exception:
         logger.debug("Model Chain: could not read whether the Kokoro worker is resident",
                      exc_info=True)
+    import mc_voice_models as models
+
+    whole = models.status()
     return {
         "installed": found.ready,
-        "ready": found.ready,
+        # Two readinesses, because Kokoro's engine block has always carried
+        # two and they are not the same question. ``ready`` is whether Voice
+        # Chat as a whole is set up -- runtime, speech-to-text and
+        # text-to-speech -- which is what the browser draws its "not set up"
+        # state from; ``tts_ready`` is this engine's own half. Collapsing them
+        # made a machine with no Whisper report itself ready.
+        "ready": whole.ready,
+        "tts_ready": found.ready,
         "message": found.message,
         "worker_resident": resident,
         "engine_busy": False,

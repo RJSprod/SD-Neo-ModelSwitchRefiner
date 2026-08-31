@@ -677,7 +677,7 @@ def _engine_block(active: str) -> dict:
     found = adapter.public_status()
     return {
         "ready": found["ready"],
-        "tts_ready": found["ready"],
+        "tts_ready": found["tts_ready"],
         "tts_message": found["message"],
         # ``engine_state``, not ``engine``. ``engine`` is the selected engine's
         # *id* in every payload this feature sends, and it used to be this

@@ -2036,7 +2036,14 @@ def public_status() -> dict:
     mode = str(live.get("interrupt_mode") or capabilities()["interrupt_mode"])
     return {
         "installed": found.ready,
-        "ready": bool(found.ready and not live.get("busy")),
+        # Whether this engine *can* speak, and not whether it happens to be
+        # speaking. The two were folded together here and the status payload
+        # publishes this value as ``ready`` and ``tts_ready`` -- so for the
+        # whole of every reply the browser was being told Voice Chat was not
+        # set up. ``engine_busy`` is the field for "the lane is occupied", and
+        # it is reported separately two lines down.
+        "ready": found.ready,
+        "tts_ready": found.ready,
         "message": found.message,
         "worker_resident": bool(engine_state.get("loaded")),
         "engine_busy": bool(live.get("busy")),

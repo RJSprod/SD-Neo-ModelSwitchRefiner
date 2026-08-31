@@ -725,3 +725,67 @@ class TestTheWireVocabularyIsStable:
         assert found["precision"] == "int8"
         with pytest.raises(sopro.SoproError):
             sopro.apply_engine_settings({"model_id": "something"})
+
+
+class TestReadyMeansReadinessRatherThanIdleness:
+    """Two questions that were folded into one key.
+
+    ``ready`` is whether this engine can speak; ``engine_busy`` is whether it
+    happens to be speaking. The status payload publishes the first as ``ready``
+    *and* ``tts_ready``, so folding the second into it told the browser Voice
+    Chat was not set up for the whole of every reply.
+    """
+
+    def test_a_busy_engine_is_still_a_ready_one(self, host, installed, worker,
+                                                monkeypatch):
+        monkeypatch.setattr(worker, "status",
+                            lambda: {"busy": True, "draining": False,
+                                     "interrupt_mode": "drain_unit"})
+        found = pocket.public_status()
+        assert found["ready"] is True
+        assert found["tts_ready"] is True
+        assert found["engine_busy"] is True
+
+    def test_a_draining_engine_is_still_a_ready_one(self, host, installed, worker,
+                                                    monkeypatch):
+        monkeypatch.setattr(worker, "status",
+                            lambda: {"busy": True, "draining": True,
+                                     "interrupt_mode": "drain_unit"})
+        found = pocket.public_status()
+        assert found["ready"] is True
+        assert found["draining"] is True
+
+    def test_an_engine_that_is_not_installed_is_not_ready(self, host, voice_root):
+        found = pocket.public_status()
+        assert found["ready"] is False
+        assert found["tts_ready"] is False
+
+
+class TestEveryEngineAnswersBothReadinesses:
+    """The payload carries ``ready`` and ``tts_ready``, and a caller must not
+    have to know which engines distinguish them."""
+
+    def test_kokoro_keeps_the_whole_installations_readiness_in_ready(self, host,
+                                                                     voice_root,
+                                                                     monkeypatch):
+        """Kokoro owns the speech-to-text half, so its two answers differ -- and
+        the browser drives its "not set up" state off the first of them."""
+        import mc_voice_kokoro as kokoro
+        import mc_voice_models as models
+
+        half = models.Status(runtime_ready=True, stt_ready=False, tts_ready=True,
+                             runtime_message="i", stt_message="not installed",
+                             tts_message="i", platform_supported=True)
+        monkeypatch.setattr(models, "status", lambda: half)
+        found = kokoro.public_status()
+        assert found["ready"] is False, "a machine with no Whisper reported itself ready"
+        assert found["tts_ready"] is True
+
+    def test_every_adapter_answers_the_same_key_set(self, host, voice_root):
+        import mc_voice_kokoro as kokoro
+        import mc_voice_sopro as sopro
+
+        wanted = {"installed", "ready", "tts_ready", "message", "worker_resident",
+                  "engine_busy", "draining", "interrupt_mode", "block"}
+        for adapter in (kokoro, sopro, pocket):
+            assert set(adapter.public_status()) == wanted, adapter.ENGINE

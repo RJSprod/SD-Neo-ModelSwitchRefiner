@@ -1389,6 +1389,12 @@ def public_status() -> dict:
     return {
         "installed": found.ready,
         "ready": found.ready,
+        # The same answer twice, deliberately. Sopro owns no speech-to-text, so
+        # "is Voice Chat set up" and "is this engine installed" are one question
+        # here -- which is exactly why the key has to be *present*: the payload
+        # carries both and a caller must not have to know which engines
+        # distinguish them.
+        "tts_ready": found.ready,
         "message": found.message,
         "worker_resident": bool(live.get("loaded")),
         "engine_busy": live.get("state") in ("speaking", "preparing"),
