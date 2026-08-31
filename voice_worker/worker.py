@@ -738,12 +738,21 @@ class Engines:
             return audio.samples, rate
         return Shaper(found).levelled(audio.samples), rate
 
-    def stream(self, text: str, sid: int, delivery, on_audio) -> int:
+    def stream(self, text: str, sid: int, delivery, on_audio) -> dict:
         """Synthesize ``text``, handing PCM16 to ``on_audio`` as it appears.
 
         ``on_audio(pcm, rate)`` returns True to continue and False to stop, and
         stopping is how cancellation actually happens -- see the module
-        docstring. Returns the number of samples produced.
+        docstring.
+
+        Returns ``{"samples", "blocks"}``: how much audio this segment produced
+        and how many times sherpa handed some back. The second number is
+        counted here rather than by the caller because since :class:`Seam` it is
+        no longer the same as the number of times ``on_audio`` was called -- the
+        seam withholds a segment's last few milliseconds and releases them at
+        the end, so it adds an emission of its own. What the metric is *for* is
+        whether callback mode delivered anything early, and that question is
+        about sherpa's hand-backs.
 
         The bytes handed over are built here, inside the call, from the array
         sherpa gave the callback. That array is the parent binding's own copy
@@ -755,17 +764,30 @@ class Engines:
         found = delivery or NEUTRAL
         rate = int(self.sample_rate or 0)
         produced = [0]
+        handed = [0]
         # One per segment, because the pitch shift carries a fractional read
         # position between blocks and starting a new one mid-sentence would put
         # a click at the boundary.
         shaper = Shaper(found)
+        # And one per segment for the other click -- the one at the *edges* of
+        # the segment rather than inside it. See :class:`Seam`.
+        seam = Seam(rate or self.sample_rate)
 
         def emit(samples, sample_rate) -> bool:
-            block = shaper.block(samples)
+            handed[0] += 1
+            block = seam.block(shaper.block(samples))
             if not block:
                 return True
             produced[0] += len(block) // 2
             return bool(on_audio(block, sample_rate))
+
+        def close(sample_rate) -> None:
+            """The milliseconds the seam withheld, ramped down. Ends the segment."""
+            block = seam.flush()
+            if not block:
+                return
+            produced[0] += len(block) // 2
+            on_audio(block, sample_rate)
 
         if self.streaming == "callback":
             def callback(samples, _progress):
@@ -775,11 +797,18 @@ class Engines:
                 audio = self.tts.generate(text, sid=speaker,
                                           speed=found.generation_speed,
                                           callback=callback)
-                if not produced[0] and getattr(audio, "samples", None) is not None:
+                if not handed[0] and getattr(audio, "samples", None) is not None:
                     # A build that accepts the argument and never calls it. One
                     # honest fallback rather than silence.
+                    #
+                    # The test is whether sherpa called back, not whether any
+                    # bytes reached the parent: the seam withholds a segment's
+                    # last few milliseconds, so a very short segment can have
+                    # been synthesised in full with nothing sent yet, and
+                    # generating it again there would say it twice.
                     emit(audio.samples, int(audio.sample_rate))
-                return produced[0]
+                close(rate or self.sample_rate)
+                return {"samples": produced[0], "blocks": handed[0]}
             except Exception as exc:  # noqa: BLE001 - see the two branches below
                 if produced[0]:
                     # Part of this segment has already been sent, so re-running
@@ -791,12 +820,17 @@ class Engines:
                       f"speech will arrive one segment at a time from now on")
                 # The half-used shaper goes with the attempt that failed. It
                 # carries a read position into audio nobody heard, and reusing
-                # it would start the retry a fraction of a sample out.
+                # it would start the retry a fraction of a sample out. The seam
+                # goes with it for the same reason: it is holding the last few
+                # milliseconds of a segment that is about to be said again.
                 shaper = Shaper(found)
+                seam = Seam(rate or self.sample_rate)
+                handed[0] = 0
 
         audio = self.tts.generate(text, sid=speaker, speed=found.generation_speed)
         emit(audio.samples, int(audio.sample_rate))
-        return produced[0]
+        close(rate or self.sample_rate)
+        return {"samples": produced[0], "blocks": handed[0]}
 
 
 _NUMPY = "unasked"
@@ -872,6 +906,131 @@ def silence(rate: int, milliseconds: int) -> bytes:
     """
     frames = int(max(int(rate or 0), 0) * max(int(milliseconds or 0), 0) / 1000.0)
     return b"\x00\x00" * frames if frames > 0 else b""
+
+
+DECLICK_MS = 8
+"""How long a committed unit takes to reach full level, and to leave it again.
+
+A unit does not end the way a recording ends. Kokoro is handed one sentence
+and produces the waveform for it; where that waveform happens to be when the
+sentence runs out is where the samples stop, and the next sentence is a fresh
+forward pass that starts wherever *it* starts. Played back the way this feature
+plays speech -- sample-exact, one unit after another, no gap -- the join between
+the two is a step, and a step in a waveform is a click. It is small, it lands
+at the end of a sentence, and on a long reply it happens once per sentence.
+
+Eight milliseconds is chosen to be longer than the step and shorter than a
+phoneme. A ramp that long puts the click's energy below about sixty hertz,
+where it stops being a tick, and what it takes the edge off is a unit's first
+and last eight milliseconds -- which is the quiet either side of a sentence
+rather than the sentence. Materially shorter stops removing the click;
+materially longer starts eating the consonant.
+"""
+
+
+def _int16(pcm: bytes):
+    """PCM16 bytes as a mutable array of samples, in this machine's order."""
+    import array
+
+    numbers = array.array("h")
+    numbers.frombytes(pcm)
+    if sys.byteorder == "big":
+        numbers.byteswap()
+    return numbers
+
+
+def _wire(numbers) -> bytes:
+    """Samples back as little-endian PCM16. Mutates ``numbers`` on a big-endian host."""
+    if sys.byteorder == "big":
+        numbers.byteswap()
+    return numbers.tobytes()
+
+
+def _ramp(count: int):
+    """A raised cosine from silence to unity, ``count`` samples long.
+
+    Raised rather than linear because a linear ramp has a corner at each end,
+    and a corner is a discontinuity in the first derivative -- quieter than a
+    step, and still audible on a quiet tail.
+    """
+    import math
+
+    if count <= 0:
+        return []
+    return [0.5 - 0.5 * math.cos(math.pi * (index + 0.5) / count)
+            for index in range(count)]
+
+
+class Seam:
+    """One committed unit's two edges, ramped so that its joins are not clicks.
+
+    A unit is one sentence's forward pass. Its last sample is wherever the
+    waveform was when the sentence ran out and its first is wherever the next
+    pass begins, and this feature plays units back with no gap between them --
+    so the join is a step, and a step is a click. See :data:`DECLICK_MS`.
+
+    Streaming makes this less trivial than a fade. The *end* of the unit has to
+    be ramped down, and nothing knows which block is the last one until the
+    synthesis is over -- so a unit's final :data:`DECLICK_MS` are withheld here
+    and released by :meth:`flush` when the unit ends. Eight milliseconds of
+    added latency once per sentence is not something anybody can hear. A click
+    is.
+
+    It works on PCM16 bytes rather than on float samples because every path
+    into it has already become bytes by the time it arrives, and a ramp is
+    exact either way.
+
+    One per unit, and the *unit* is the right scope: a pause may follow it, a
+    cancellation may throw it away, and the next one is synthesised with no
+    memory of this one. Ramping per block instead would fade several times a
+    second in the middle of a word.
+    """
+
+    def __init__(self, rate: int, milliseconds: int = DECLICK_MS):
+        self.span = max(0, int(int(rate or 0) * max(0, int(milliseconds)) / 1000))
+        self._window = _ramp(self.span)
+        self._held = bytearray()
+        self._risen = 0
+
+    def block(self, pcm: bytes) -> bytes:
+        """Whatever of ``pcm`` is certainly not this unit's final milliseconds."""
+        if not self.span:
+            return pcm or b""
+        if pcm:
+            self._held.extend(pcm)
+        keep = self.span * 2
+        if len(self._held) <= keep:
+            return b""
+        ready = bytes(self._held[:len(self._held) - keep])
+        del self._held[:len(ready)]
+        return self._rise(ready)
+
+    def flush(self) -> bytes:
+        """The unit's final milliseconds, ramped down into the silence after it."""
+        if not self.span:
+            return b""
+        held, self._held = bytes(self._held), bytearray()
+        tail = self._rise(held)
+        if not tail:
+            return b""
+        numbers = _int16(tail)
+        count = len(numbers)
+        window = self._window if count >= self.span else _ramp(count)
+        last = count - 1
+        for index in range(count):
+            numbers[last - index] = int(numbers[last - index] * window[index])
+        return _wire(numbers)
+
+    def _rise(self, pcm: bytes) -> bytes:
+        """``pcm`` with whatever of the opening ramp has not been spent yet."""
+        if not pcm or self._risen >= self.span:
+            return pcm
+        numbers = _int16(pcm)
+        count = min(len(numbers), self.span - self._risen)
+        for index in range(count):
+            numbers[index] = int(numbers[index] * self._window[self._risen + index])
+        self._risen += count
+        return _wire(numbers)
 
 
 def _required(section: dict, key: str) -> str:
@@ -1164,12 +1323,16 @@ class Worker:
         started = time.monotonic()
         spoken = 0
         gap = silence(int(engines.sample_rate or 0), turn.delivery.pause_ms)
-        # One segment's shape, in numbers only: how many times sherpa handed
-        # audio back and how long the first of them took. With
-        # ``max_num_sentences=1`` the block count *is* the sentence count, which
+        # One segment's shape, in numbers only: how long the first block took to
+        # reach the parent and how much speech the segment came to. How many
+        # times sherpa handed audio back is counted where it happens, inside
+        # ``Engines.stream``: with :class:`Seam` in the path the number of
+        # blocks that leave here is no longer the number that arrived, and it is
+        # sherpa's hand-backs that the callback-granularity metric is about.
+        # With ``max_num_sentences=1`` that count *is* the sentence count, which
         # is why the parent can report callback granularity without this file
         # ever counting anything about the text.
-        block = {"count": 0, "first": 0.0, "at": 0.0, "samples": 0}
+        block = {"first": 0.0, "at": 0.0, "samples": 0}
         try:
             while True:
                 text = turn.next_segment()
@@ -1182,7 +1345,6 @@ class Worker:
                         return False
                     sequence += 1
                     if block["at"]:
-                        block["count"] += 1
                         block["samples"] += len(chunk) // 2
                         if not block["first"]:
                             block["first"] = time.monotonic() - block["at"]
@@ -1199,16 +1361,16 @@ class Worker:
                 # Armed after the pause and not before it: a configured pause is
                 # deliberate prosody, and counting it as this segment's first
                 # audio would make an intentional gap look like a slow synthesis.
-                block.update({"count": 0, "first": 0.0, "samples": 0,
+                block.update({"first": 0.0, "samples": 0,
                               "at": time.monotonic()})
-                engines.stream(text, sid, turn.delivery, on_audio)
+                metrics = engines.stream(text, sid, turn.delivery, on_audio)
                 elapsed_segment = time.monotonic() - block["at"]
                 block["at"] = 0.0
                 spoken += 1
                 if turn.cancelled.is_set():
                     break
                 self.send({"op": "tts_segment_done", "turn": turn.id, "seq": sequence,
-                           "blocks": block["count"],
+                           "blocks": metrics["blocks"],
                            "first_block_ms": int(block["first"] * 1000),
                            "segment_ms": int(elapsed_segment * 1000),
                            # How much speech this unit actually produced, which
