@@ -1732,3 +1732,81 @@ class TestTheAccessTokenRoute:
         found = client.post(api.CREDENTIAL_ROUTE, json={"action": "state"})
         assert found.status_code in (401, 403)
 
+
+class TestAnAuditionIsTheDeliveryYouSet:
+    """The reported bug: change Volume to +12 dB, press Test, hear nothing new.
+
+    ``test_voice`` passed a missing profile straight through as ``None``, and
+    every engine reads a ``None`` profile as *neutral* rather than as "the
+    stored one" — so the Settings list's Test auditioned at speed 1.0 and 0 dB
+    whatever the delivery controls above it said. The controls saved correctly;
+    the audition threw the saved values away.
+    """
+
+    def spoken(self, monkeypatch):
+        """What reached the runtime, so the assertion is about the delivery
+        rather than about the sound."""
+        import mc_voice_engines as engines
+
+        seen = {}
+
+        class Runtime:
+            @staticmethod
+            def synthesize(text, handle=None, profile=None):
+                seen["profile"] = profile
+                return b"RIFFfake"
+
+        monkeypatch.setattr(engines, "runtime", lambda engine="": Runtime)
+        return seen
+
+    def test_a_bare_test_speaks_the_stored_delivery(self, host, voice_root, monkeypatch):
+        import mc_voice_engines as engines
+
+        engines.select("pocket")
+        profiles = engines.profiles("pocket")
+        profiles.remember({"gain": 12.0})
+        seen = self.spoken(monkeypatch)
+
+        api.test_voice("", text="Hello.")
+        assert seen["profile"]["gain"] == 12.0, \
+            "the Test auditioned neutral, not what Settings says"
+
+    def test_a_character_profile_still_layers_on_top_of_it(self, host, voice_root,
+                                                           monkeypatch):
+        """A character that sets only one field keeps the default's others —
+        that is the inheritance the whole model rests on."""
+        import mc_voice_engines as engines
+
+        engines.select("pocket")
+        profiles = engines.profiles("pocket")
+        profiles.remember({"gain": 12.0, "speed": 1.2})
+        seen = self.spoken(monkeypatch)
+
+        api.test_voice("", text="Hello.", profile={"speed": 0.8})
+        assert seen["profile"]["speed"] == 0.8, "the character's own field was ignored"
+        assert seen["profile"]["gain"] == 12.0, "it stopped following Settings"
+
+    def test_every_engine_answers_the_same_way(self, host, voice_root, monkeypatch):
+        """One rule, not one per engine: a bare Test is the stored delivery on
+        whichever engine is selected."""
+        import mc_voice_engines as engines
+
+        # Whether a voice happens to be installed is a different question, and
+        # an engine with none would refuse before the delivery mattered.
+        monkeypatch.setattr(engines, "resolve",
+                            lambda voice_id="", engine="": ("x", {"_handle": 0}))
+        for engine in engines.ENGINES:
+            engines.select(engine)
+            profiles = engines.profiles(engine)
+            profiles.remember({"speed": 1.3})
+            seen = self.spoken(monkeypatch)
+            api.test_voice("", text="Hello.")
+            assert seen["profile"]["speed"] == 1.3, engine
+
+    def test_something_that_is_not_a_profile_is_still_refused(self, host, voice_root):
+        import mc_voice_engines as engines
+
+        engines.select("pocket")
+        with pytest.raises(api.Refused):
+            api.test_voice("", text="Hello.", profile="+12 dB")
+

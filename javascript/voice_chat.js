@@ -65,6 +65,7 @@
         characterVoice: "mc-llm-chat-character-voice",
         characterVoiceList: "mc-llm-chat-character-voice-list",
         characterVoiceCustom: "mc-llm-chat-character-voice-custom",
+        characterVoiceDelivery: "mc-llm-chat-character-voice-delivery",
     };
 
     const ROUTES = {
@@ -4078,13 +4079,24 @@
         const custom = byId(IDS.characterVoiceCustom);
         const box = custom ? custom.querySelector('input[type="checkbox"]') : null;
         if (!box || !box.checked) return null;
+        // Read off the panel rather than from a list written here. The names
+        // used to be the four Kokoro has, which meant a PocketTTS character's
+        // Variation -- its fifth -- was saved, was used when the character
+        // actually spoke, and was silently dropped from its own Test button.
+        // The server renders one slider per field of the *active* engine into
+        // this group, so the group is the list.
+        const panel = byId(IDS.characterVoiceDelivery);
+        if (!panel) return null;
+        const prefix = IDS.characterVoice + "-";
         const found = {};
-        ["speed", "pitch", "gain", "pause"].forEach(function (name) {
-            const holder = byId(IDS.characterVoice + "-" + name);
-            if (!holder) return;
-            const input = holder.querySelector('input[type="number"], input[type="range"]');
-            if (input && input.value !== "") found[name] = Number(input.value);
-        });
+        Array.prototype.forEach.call(
+            panel.querySelectorAll('[id^="' + prefix + '"]'), function (holder) {
+                const name = (holder.id || "").slice(prefix.length);
+                if (!name) return;
+                const input = holder.querySelector(
+                    'input[type="number"], input[type="range"]');
+                if (input && input.value !== "") found[name] = Number(input.value);
+            });
         return Object.keys(found).length ? found : null;
     }
 
