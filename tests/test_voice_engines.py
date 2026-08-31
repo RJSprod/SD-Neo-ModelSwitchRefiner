@@ -55,20 +55,23 @@ class TestTheSelector:
         with pytest.raises(engines.EngineError):
             engines.select("festival")
 
-    def test_t_eng_3_switching_stops_every_tts_worker(self, host, monkeypatch):
-        """Section 19: exactly one TTS runtime is active, and the way that is
-        guaranteed is that *both* are stopped before the new id is persisted.
-        Both rather than "the one that was running", because asking which one it
-        was is one more thing that can be wrong."""
-        import mc_voice_runtime
-        import mc_voice_sopro_runtime
+    @pytest.mark.parametrize("wanted", ("sopro", "pocket"))
+    def test_t_eng_3_switching_stops_every_tts_worker(self, host, monkeypatch, wanted):
+        """T-ENG-P4. Exactly one TTS runtime is active, and the way that is
+        guaranteed is that *every* one is stopped before the new id is
+        persisted -- rather than "the one that was running", because asking
+        which one it was is one more thing that can be wrong.
 
+        Driven off the registry rather than a written-down list, so a fourth
+        engine is stopped by having been registered (I-PKT-30).
+        """
         stopped = []
-        monkeypatch.setattr(mc_voice_runtime, "stop", lambda reason="": stopped.append("kokoro"))
-        monkeypatch.setattr(mc_voice_sopro_runtime, "stop",
-                            lambda reason="": stopped.append("sopro"))
-        engines.select("sopro")
-        assert sorted(stopped) == ["kokoro", "sopro"]
+        for spec in engines.SPECS:
+            module = engines._module(spec.runtime)
+            monkeypatch.setattr(module, "stop",
+                                lambda reason="", name=spec.id: stopped.append(name))
+        engines.select(wanted)
+        assert sorted(stopped) == sorted(engines.ENGINES)
 
     def test_switching_cancels_the_speaking_turn(self, host, monkeypatch):
         """A reply half spoken in Kokoro must not finish in Sopro."""
@@ -243,8 +246,11 @@ class TestNoCrossEngineFallback:
 
 
 class TestTheFacade:
-    def test_each_engine_gets_its_own_modules(self, host):
+    def test_t_pkt_eng_10_each_engine_gets_its_own_modules(self, host):
         import mc_voice_kokoro
+        import mc_voice_pocket
+        import mc_voice_pocket_profile
+        import mc_voice_pocket_runtime
         import mc_voice_profile
         import mc_voice_runtime
         import mc_voice_sopro
@@ -253,20 +259,67 @@ class TestTheFacade:
 
         assert engines.adapter("kokoro") is mc_voice_kokoro
         assert engines.adapter("sopro") is mc_voice_sopro
+        assert engines.adapter("pocket") is mc_voice_pocket
         assert engines.runtime("kokoro") is mc_voice_runtime
         assert engines.runtime("sopro") is mc_voice_sopro_runtime
+        assert engines.runtime("pocket") is mc_voice_pocket_runtime
         assert engines.profiles("kokoro") is mc_voice_profile
         assert engines.profiles("sopro") is mc_voice_sopro_profile
+        assert engines.profiles("pocket") is mc_voice_pocket_profile
 
-    def test_the_two_profile_modules_do_not_share_a_single_option(self):
-        """Section 35: common labels, separate storage. Speed means a Kokoro
-        generate argument on one side and a time-scale on the other, and one
-        option holding both would be a setting that changed when it was edited
-        somewhere else."""
-        import mc_voice_profile as kokoro
-        import mc_voice_sopro_profile as sopro
+    def test_every_engine_is_a_row_rather_than_a_branch(self):
+        """I-PKT-30. A fourth engine registers a spec and an adapter; it does
+        not require finding every shared fallthrough first."""
+        assert engines.ENGINES == tuple(spec.id for spec in engines.SPECS)
+        assert set(engines.LABELS) == set(engines.ENGINES)
+        assert set(engines.BLURBS) == set(engines.ENGINES)
+        for spec in engines.SPECS:
+            assert spec.adapter and spec.runtime and spec.profiles
 
-        assert not (set(kokoro.OPTIONS.values()) & set(sopro.OPTIONS.values()))
+    def test_no_two_profile_modules_share_a_single_option(self):
+        """Section 35, I-PKT-3: common labels, separate storage. Speed means a
+        Kokoro generate argument on one side and a time-scale on the other two,
+        and one option holding two of them would be a setting that changed when
+        it was edited somewhere else."""
+        seen = {}
+        for engine in engines.ENGINES:
+            for name in engines.profiles(engine).OPTIONS.values():
+                assert name not in seen, f"{name} is shared by {seen.get(name)} and {engine}"
+                seen[name] = engine
+
+    def test_t_pkt_eng_11_every_engine_declares_what_stop_means(self, host):
+        """The one capability shared code reads before it promises anything."""
+        found = {engine: engines.interrupt_mode(engine) for engine in engines.ENGINES}
+        assert found == {"kokoro": "cancel", "sopro": "cancel", "pocket": "drain_unit"}
+        for engine in engines.ENGINES:
+            assert set(engines.capabilities(engine)) == {
+                "clone_preview", "rebuild", "engine_settings", "starter_voices",
+                "voice_lab", "interrupt_mode"}
+
+    def test_an_engine_that_will_not_import_answers_conservatively(self, host,
+                                                                   monkeypatch):
+        """An uninstalled engine is the ordinary case, and a caller that
+        believed it drains would draw a waiting state nothing ever clears."""
+
+        def missing(name):
+            raise ImportError(name)
+
+        monkeypatch.setattr(engines, "_module", missing)
+        assert engines.installed("pocket") is False
+        assert engines.capabilities("pocket")["interrupt_mode"] == "cancel"
+        assert engines.refusals("pocket") == (engines.EngineError,)
+
+    def test_a_refusal_type_comes_from_the_engine_rather_than_a_fallthrough(self, host):
+        """"Not Sopro means the Kokoro registry" was true while there were two
+        engines and became wrong the moment there were three."""
+        import mc_voice_pocket as pocket
+        import mc_voice_registry as registry
+        import mc_voice_sopro as sopro
+
+        assert registry.RegistryError in engines.refusals("kokoro")
+        assert sopro.SoproError in engines.refusals("sopro")
+        assert pocket.PocketError in engines.refusals("pocket")
+        assert sopro.SoproError not in engines.refusals("pocket")
 
 
 class TestTheKokoroAdapter:

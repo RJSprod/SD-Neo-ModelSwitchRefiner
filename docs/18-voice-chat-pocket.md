@@ -352,16 +352,30 @@ voice.
 
 ## What is provisional, and says so
 
-The manifest ships **unpinned**. `voice/managed-pocket-models.json` carries the
-runtime closure written down as `[package, version, kind]` triples and every
-artifact list empty, with `"pinned": false`. That is a state rather than an
-oversight: an artifact this repository makes no claim about is an artifact it
-will not download, and the managed install therefore refuses with a sentence
-naming `tools/pin_pocket_models.py`, which a maintainer runs on a machine that
-can reach the publishers.
+The manifest ships **half resolved**, and says so in its own `notes`.
 
-Install-from-a-folder still works in the meantime, and what is supplied has its
-digests recorded and becomes the constant the next install is checked against.
+The **runtime closure is pinned**: fifty-two wheels across four Python minors,
+each named, sized and hashed from pypi.org — PocketTTS 3.0.2, PyTorch 2.6.0 CPU,
+NumPy, safetensors, SentencePiece and the small pure-Python closure Torch itself
+declares on Windows, about 228 MB per platform. So the managed runtime install
+fetches exactly what this repository claims and refuses anything else.
+
+Torch is pinned at 2.6.0 rather than at the 3.0.2 metadata's `>=2.5.0` floor,
+and the reason is the kind of thing a pinning tool exists to catch: 2.5.x has no
+`cp313` Windows wheel, and this manifest advertises Python 3.13. A floor is not a
+runtime identity, and a platform advertised without a wheel to satisfy it is a
+platform that fails at install time instead of at review time.
+
+The **model, official voice and cloning artifacts are not recorded yet**,
+because the machine that pinned the closure could not reach huggingface.co. That
+is a state rather than an oversight: an artifact this repository makes no claim
+about is an artifact it will not download, so the model half of the install
+refuses with a sentence naming `tools/pin_pocket_models.py --model`, which a
+maintainer runs with `HF_TOKEN` set and the Kyutai conditions accepted. A closed
+gate there leaves the public half resolved and written.
+
+Install-from-a-folder works either way, and what is supplied has its digests
+recorded and becomes the constant the next install is checked against.
 
 Everything about the *shape* of the closure follows the Sopro precedent: exact
 wheels, unpacked into an isolated interpreter without pip, self-tested before
