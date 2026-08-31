@@ -442,7 +442,7 @@ class VoiceTurn:
 
     def note_segment(self, blocks: int = 0, first_block_ms: int = 0, streaming: str = "",
                      synth_ms: int = 0, audio_ms: int = 0, trimmed_ms: int = 0,
-                     quiet_ms: int = 0, floor_db: int = 0) -> None:
+                     quiet_ms: int = 0, floor_db: int = 0, gap_ms: int = 0) -> None:
         """What one segment cost the worker, in counts and milliseconds.
 
         The distinction section 4 asks to be preserved. A handshake that says
@@ -455,8 +455,10 @@ class VoiceTurn:
         exactly nothing, and it should read that way in a log rather than as a
         win.
 
-        ``quiet_ms``, ``trimmed_ms`` and ``floor_db`` are the gap between two
-        sentences, measured. How much quiet the engine put at this unit's two
+        ``quiet_ms``, ``trimmed_ms``, ``gap_ms`` and ``floor_db`` are the gap
+        between two sentences, measured -- and ``gap_ms`` is the one that says
+        whether the gap is even at a join: it is the longest pause *inside* the
+        unit, which is the model's prosody and is never trimmed. How much quiet the engine put at this unit's two
         ends, how much of it the worker cut back, and how loud this voice's own
         noise floor turned out to be. They belong beside ``audio_ms`` rather
         than in a note of their own, because together they are the whole of "why
@@ -489,6 +491,7 @@ class VoiceTurn:
                     "audio_ms": max(0, int(audio_ms or 0)),
                     "trimmed_ms": max(0, int(trimmed_ms or 0)),
                     "quiet_ms": max(0, int(quiet_ms or 0)),
+                    "gap_ms": max(0, int(gap_ms or 0)),
                     "floor_db": min(0, int(floor_db or 0)),
                     "streaming": self.streaming,
                 })
@@ -872,13 +875,13 @@ def _log_unit(turn_id: str, row: dict) -> None:
         index = int(row.get("index") or 0)
         line = ("Model Chain: Voice TTS segment — turn %s, n=%d, chars=%s, "
                 "ready_wait_ms=%s, synth_ms=%s, first_block_ms=%s, callback_blocks=%s, "
-                "audio_ms=%s, quiet_ms=%s, trimmed_ms=%s, floor_db=%s, "
+                "audio_ms=%s, quiet_ms=%s, trimmed_ms=%s, gap_ms=%s, floor_db=%s, "
                 "streaming=%s")
         values = (str(turn_id or "")[:8], index, row.get("chars"), row.get("ready_wait_ms"),
                   row.get("synth_ms"), row.get("first_block_ms"),
                   row.get("callback_blocks"), row.get("audio_ms"),
-                  row.get("quiet_ms"), row.get("trimmed_ms"), row.get("floor_db"),
-                  row.get("streaming") or "unknown")
+                  row.get("quiet_ms"), row.get("trimmed_ms"), row.get("gap_ms"),
+                  row.get("floor_db"), row.get("streaming") or "unknown")
         if index <= 2 or int(row.get("synth_ms") or 0) >= SLOW_SEGMENT_MS:
             logger.info(line, *values)
         else:

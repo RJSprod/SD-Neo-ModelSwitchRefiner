@@ -379,22 +379,29 @@ the trim buys is that the gap becomes a fixed, small, *chosen* one — and
 delivery, on top of a baseline that no longer varies with what the model
 happened to generate.
 
-**What counts as quiet is anchored to the floor, not to the peak.** The first
-version of this anchored it to the peak — two per cent of the loudest sample,
-bounded above by about -34 dBFS — and on a real machine it trimmed *exactly
-nothing*: every unit came back `trimmed_ms=0`. The reason is the voice. A cloned
-voice reproduces its reference recording's room tone, so what a listener hears
-as silence between two sentences is not silence at all; it is that room tone,
-sitting well above a line drawn from the peak.
+**What counts as quiet took three attempts, and both misses are the same
+mistake from opposite ends.** The first drew the line at two per cent of the
+loudest sample, capped at about -34 dBFS. The second, on the theory that a
+cloned voice's room tone sits above any such line, anchored it to the *floor*
+instead — three times the quietest ten milliseconds in the unit. Both came back
+`trimmed_ms=0` on a real machine, on units carrying about seven hundred
+milliseconds of audio that no amount of text accounts for.
 
-So the line is drawn from the bottom instead: three times the quietest ten
-milliseconds seen so far in the unit, which is where the room tone lives. It
-follows a noisy clone up and a clean model down and never has to be guessed at.
-Two bounds keep it honest — never below `QUIET_FLOOR` (about -48 dBFS, so a unit
-of digital silence does not put the line at zero), and never above an eighth of
-the loudest sample so far, which is the guard for a unit containing no silence
-at all: if the quietest thing in it is a soft consonant, three times *that*
-would call a whole syllable quiet.
+The second miss is the instructive one. The machine reported `floor_db=-68`:
+this voice's quietest moment is exceptionally *clean*, so three times it is 39
+counts — under the absolute minimum — and anchoring to the floor made the line
+**stricter** rather than looser. The room-tone theory was wrong for this voice,
+and the fix built on it could not have worked.
+
+What is actually wanted is not "at the noise floor" but "after the last thing
+worth hearing", and that is a share of the peak: a sixteenth, about 24 dB down.
+Nothing intelligible sits under it for long, everything the model adds after the
+end-of-speech token does, and it engages whatever the voice's noise floor turns
+out to be — because every unit has a loudest sample. `QUIET_FLOOR` remains only
+as an absolute minimum, so a unit that never gets loud cannot draw the line
+under its own speech. What protects a quiet ending is not the level but the
+keep: only the run *after* the last loud window is trimmed, and `KEEP_TAIL_MS`
+of it stays.
 
 **The front of a unit needs the previous unit.** Deciding a unit has *started*
 cannot use the same rule, because at that point the loudest thing seen may be
@@ -407,11 +414,15 @@ only trim its tail, and every unit after it trims both ends. The engine keeps
 one measured floor per voice for exactly this, because a noise floor is a
 property of the voice rather than of the sentence.
 
-**It reports what it saw, not only what it did.** `quiet_ms` and `floor_db` sit
-beside `trimmed_ms` on the unit's log row, because the first version of this
-trimmed nothing and the log could not say why. A unit reporting a floor of -26
-dBFS and half a second of quiet it did not cut is a different problem from one
-reporting no quiet at all.
+**It reports what it saw, not only what it did.** `quiet_ms`, `gap_ms` and
+`floor_db` sit beside `trimmed_ms` on the unit's log row, because the first two
+versions trimmed nothing and the log could not say why. The four together
+separate the cases that sound identical to a listener: quiet at the ends that
+was cut, quiet at the ends that was not recognised (which `floor_db` explains),
+and a pause *inside* the unit, which is the model's own prosody and is measured
+but never trimmed. A reply whose sentences are half a second apart is a
+different problem depending on which of those it is, and only `gap_ms` can say
+that the gap is not at a join at all.
 
 **Order matters, and it is tested.** The trim runs *before* `Seam`. The seam
 ends a unit with a few milliseconds of ramp down to silence; trimming after it
