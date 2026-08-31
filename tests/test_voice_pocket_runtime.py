@@ -55,6 +55,7 @@ class Turn:
         self.error = ""
         self.draining = False
         self.ready_at = 0.0
+        self.unit = {"chars": None, "audio_ms": None}
 
     def offer_audio(self, pcm, rate=0):
         if self.cancelled.is_set():
@@ -82,6 +83,10 @@ class Turn:
 
     def interrupting(self, chars=None, audio_ms=None):
         self.draining = True
+        if chars is not None:
+            self.unit["chars"] = int(chars)
+        if audio_ms is not None:
+            self.unit["audio_ms"] = int(audio_ms)
 
     def interrupted(self):
         self.draining = False
@@ -334,6 +339,71 @@ class TestInterruptionIsADrainWithABoundedWait:
         runtime.interrupt_turn(turn)
         runtime.interrupt_turn(turn)
         wait_until(lambda: runtime.status()["draining"] is False, what="the drain")
+
+
+class TestTheWaitingStateIsAlwaysTakenBackDown:
+    """The two halves of "Voice finishing..." that a frame-level test misses.
+
+    Both are about ordering rather than about frames, and both are invisible
+    until something waits on the state: an indicator that never clears looks
+    exactly like a drain that is still running, and a release envelope that was
+    never measured looks exactly like one that measured zero.
+    """
+
+    @pytest.mark.pocket(drain_seconds=0.2)
+    def test_a_report_that_arrives_before_the_write_returns_still_clears(
+            self, host, fake_pocket_worker, monkeypatch):
+        """The worker answers ``state="complete"`` synchronously when nothing
+        was inside the model -- a Stop between units, or on a turn the lane had
+        not picked up. The reader thread can therefore reach
+        :func:`_finish_drain` before the line after ``_write`` runs, and
+        ``interrupted()`` returns early on a turn that is not yet marked
+        draining. Marking it *after* that would leave a "Voice finishing..."
+        with nothing left to take it down.
+
+        Driven synchronously rather than by racing the reader, because a race
+        left to the scheduler is a race that passes on the machine that runs it.
+        """
+        turn = Turn()
+        runtime.begin_turn(turn, "pocket:official:alba", None)
+        runtime.send_segment(turn, "Hello.")
+        wait_until(lambda: turn.audio, what="audio")
+
+        write = runtime._write
+
+        def early(header, payload=b""):
+            found = write(header, payload)
+            if str(header.get("op") or "") == "tts_interrupt":
+                runtime._finish_drain(header.get("turn"),
+                                      {"state": "complete", "chars": 0, "audio_ms": 0})
+            return found
+
+        monkeypatch.setattr(runtime, "_write", early)
+        turn.cancel("user")
+        runtime.interrupt_turn(turn)
+
+        assert turn.draining is False, "the turn was left finishing forever"
+        assert runtime.status()["draining"] is False
+        assert runtime.status()["busy"] is False
+        assert turn.ready_at > 0.0, "the stop-to-ready measurement was never taken"
+
+    @pytest.mark.pocket(drain_seconds=0.15)
+    def test_the_abandoned_unit_is_measured_rather_than_merely_reported(
+            self, host, fake_pocket_worker):
+        """GATE P-3 is a cost against a size: "a Stop took 4.2 seconds" is only
+        a finding if something also recorded that the unit was seventy-eight
+        characters. The completing frame carries both, and this is the one place
+        they are read off it."""
+        turn = Turn()
+        runtime.begin_turn(turn, "pocket:official:alba", None)
+        runtime.send_segment(turn, "A sentence being spoken.")
+        wait_until(lambda: turn.audio, what="audio")
+        turn.cancel("user")
+        runtime.interrupt_turn(turn)
+        wait_until(lambda: turn.draining is False, what="the drain to complete")
+
+        assert turn.unit["chars"] == 42, "the abandoned unit's size was dropped"
+        assert turn.unit["audio_ms"] == 300, "the discarded audio was not measured"
 
 
 class TestLifecycleIsNotStop:

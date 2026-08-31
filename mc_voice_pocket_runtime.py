@@ -657,22 +657,37 @@ def interrupt_turn(turn) -> None:
     if known is not None:
         _busier(-1)
     try:
+        # Before the write, and that ordering is the whole of it. The worker
+        # answers ``state="complete"`` synchronously when nothing was inside
+        # the model -- a Stop between units, or on a turn the lane had not
+        # picked up yet -- so the reader thread can run :func:`_finish_drain`
+        # before this line would otherwise have been reached. ``interrupted()``
+        # returns early on a turn that was never marked draining, and this call
+        # would then set it draining *after* the report that clears it, leaving
+        # a "Voice finishing..." nothing would ever take down.
+        turn.interrupting()
+    except Exception:
+        logger.debug("Model Chain: could not mark a PocketTTS turn as draining",
+                     exc_info=True)
+    try:
         _write({"op": "tts_interrupt", "turn": identifier}, b"")
     except _WorkerGone:
         # The worker is gone, so its lane is not occupied by anything.
         _finish_drain(identifier)
         return
-    try:
-        turn.interrupting()
-    except Exception:
-        logger.debug("Model Chain: could not mark a PocketTTS turn as draining",
-                     exc_info=True)
     logger.info("Model Chain: PocketTTS was interrupted — playback is silent and the unit "
                 "already inside the model is being drained")
 
 
-def _finish_drain(identifier: str) -> None:
-    """The worker says its lane is free. The only place that clears the wait."""
+def _finish_drain(identifier: str, header: dict = None) -> None:
+    """The worker says its lane is free. The only place that clears the wait.
+
+    ``header`` is the frame that said so, and it carries how big the abandoned
+    unit was. Read here rather than dropped, because the release envelope is
+    measured in exactly those two numbers (section 43): "a Stop cost 4.2
+    seconds" is only a finding if something also recorded that the unit was
+    seventy-eight characters.
+    """
     with _state_lock:
         record = _draining.pop(str(identifier or ""), None)
         free = not _draining
@@ -681,8 +696,11 @@ def _finish_drain(identifier: str) -> None:
     if record is None:
         return
     turn = record.get("turn")
+    found = dict(header or {})
     try:
         if turn is not None:
+            if found.get("chars") is not None or found.get("audio_ms") is not None:
+                turn.interrupting(chars=found.get("chars"), audio_ms=found.get("audio_ms"))
             turn.interrupted()
     except Exception:
         logger.debug("Model Chain: could not clear a PocketTTS drain state", exc_info=True)
@@ -1095,7 +1113,7 @@ def _dispatch_turn(operation: str, header: dict, payload: bytes) -> None:
                 # is saying so, which is what keeps a bounded wait honest rather
                 # than a guess.
                 return
-            _finish_drain(identifier)
+            _finish_drain(identifier, header)
         # Everything else for a draining turn -- audio above all -- is consumed
         # and discarded. Read, and dropped: I-PKT-12 in one branch.
         return
@@ -1135,7 +1153,7 @@ def _dispatch_turn(operation: str, header: dict, payload: bytes) -> None:
             _lane_free.clear()
         _busier(-1)
         if str(header.get("state") or "") == "complete":
-            _finish_drain(identifier)
+            _finish_drain(identifier, header)
     elif operation == "tts_done":
         turn.audio_finished()
         _release_turn(turn)
