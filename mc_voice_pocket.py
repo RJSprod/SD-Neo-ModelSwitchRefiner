@@ -506,6 +506,20 @@ class Status:
                     and self.official_voices_ready)
 
     @property
+    def complete(self) -> bool:
+        """Whether there is nothing left for the Install button to fetch.
+
+        Different from :attr:`ready`, and the difference is a button that lied.
+        ``ready`` answers "can this engine speak", which is why cloning is not
+        in it -- an installation with official voices works. But the *button*
+        was labelled from ``ready``, so a machine whose gated half had been
+        refused read "Installed" with a Clone panel underneath it saying the
+        opposite, and the only way to get the missing piece was to press a
+        button that looked finished.
+        """
+        return bool(self.ready and self.cloning_ready)
+
+    @property
     def message(self) -> str:
         if self.ready:
             return "Installed." if self.cloning_ready else \

@@ -1293,7 +1293,7 @@ def pocket_html() -> str:
         f'{ui.escape(found.message)}</div>'
         f'<button type="button" class="mc-voice-install" data-mc-voice-pocket-install'
         f'{" disabled" if not found.platform_supported else ""}>'
-        f'{"Installed" if found.ready else "Install PocketTTS"}</button>'
+        f'{_pocket_button(found)}</button>'
         f'</div>'
         f'<p class="mc-voice-note">A streaming model that speaks with reviewed official '
         f'voices and can make a voice of its own from a short recording you take here. It '
@@ -1364,6 +1364,28 @@ def pocket_html() -> str:
           'account of any kind; only the voice-cloning weights are gated, and that gate is '
           'accepted upstream rather than here. After everything is installed it needs no '
           'Internet connection at all.</div>')
+
+
+def _pocket_button(found) -> str:
+    """What the Install button says, in the three states it can be in.
+
+    Three rather than two, because Pocket has a part that ``ready`` does not
+    cover: the gated cloning weights. Labelling the button from ``ready`` meant
+    an installation whose gated half had been refused said "Installed" while the
+    Clone panel below said it could not clone, and the remedy -- press Install
+    again once the access is sorted out -- looked like a thing that was already
+    done.
+
+    Pressing it fetches only what is missing. Every part of the transaction
+    checks whether it is already installed and says so rather than downloading
+    again, so "Install what is missing" is a description of what happens rather
+    than a promise this layer is making.
+    """
+    if found.complete:
+        return "Installed"
+    if found.ready:
+        return "Install what is missing"
+    return "Install PocketTTS"
 
 
 def _pocket_engine_settings(settings: dict, found) -> str:

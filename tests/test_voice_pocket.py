@@ -1063,6 +1063,66 @@ class TestAnInstallRefusalIsReadInPublic:
             "the log lost the path as well"
 
 
+class TestTheInstallButtonSaysWhatIsLeftToDo:
+    """The gated half is outside ``ready`` on purpose, and the button was not.
+
+    An installation whose cloning weights had been refused read "Installed"
+    with a Clone panel underneath it saying it could not clone, and the remedy
+    — press Install again once the access is sorted out — looked like a thing
+    that was already done.
+    """
+
+    def test_speech_is_ready_before_everything_is_installed(self, host, installed,
+                                                            worker):
+        found = pocket.status()
+        assert found.ready is True, "official voices are enough to speak"
+        assert found.cloning_ready is False
+        assert found.complete is False, "there is still something to fetch"
+
+    def test_complete_is_true_only_with_the_gated_half(self, host, cloning, worker):
+        found = pocket.status()
+        assert found.ready is True
+        assert found.cloning_ready is True
+        assert found.complete is True
+
+    def test_the_button_offers_the_missing_piece_rather_than_reading_installed(
+            self, host, installed, worker):
+        import mc_voice_ui as voice_ui
+
+        assert voice_ui._pocket_button(pocket.status()) == "Install what is missing"
+
+    def test_the_button_reads_installed_only_when_nothing_is_left(self, host, cloning,
+                                                                  worker):
+        import mc_voice_ui as voice_ui
+
+        assert voice_ui._pocket_button(pocket.status()) == "Installed"
+
+    def test_with_nothing_installed_it_offers_the_whole_thing(self, host, voice_root):
+        import mc_voice_ui as voice_ui
+
+        found = pocket.status()
+        assert found.ready is False
+        assert voice_ui._pocket_button(found) == "Install PocketTTS"
+
+    def test_pressing_it_again_fetches_only_what_is_missing(self, host, installed,
+                                                            worker, monkeypatch):
+        """"Install what is missing" is a description of what happens rather than
+        a promise this layer makes: every part checks whether it is already
+        there and says so instead of downloading again."""
+        said = []
+        for name in ("install_runtime", "install_model", "install_voices"):
+            monkeypatch.setattr(pocket, name,
+                                lambda on_status=None, on_progress=None, folder=None,
+                                _name=name: (on_status or (lambda _t: None))(
+                                    f"{_name} already installed"))
+        tried = []
+        monkeypatch.setattr(pocket, "install_cloning",
+                            lambda on_status=None, on_progress=None, folder=None:
+                            tried.append("cloning"))
+        pocket.install(on_status=said.append)
+        assert tried == ["cloning"], "the gated half was not attempted"
+
+
 class TestTheWorkerEnvironmentSaysWhatItMeans:
     def test_no_credential_and_no_location_can_reach_it(self, host, monkeypatch):
         """I-PKT-21. A token is the installer's and the parent process's, and

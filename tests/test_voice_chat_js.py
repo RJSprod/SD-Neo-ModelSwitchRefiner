@@ -275,6 +275,24 @@ settingsParts.cleanupRow.querySelector = function (selector) {
     return null;
 };
 
+// The PocketTTS row. Modelled because the button on it told a lie: it was
+// labelled from `installed`, which excludes the gated cloning half, so an
+// installation whose gated download had been refused read "Installed" with a
+// Clone panel underneath saying it could not clone.
+settingsParts.pocketRow = element("pocket-row");
+settingsParts.pocketRow["data-mc-voice-kind"] = "pocket";
+settingsParts.pocketInstall = element("pocket-install", "BUTTON");
+settingsParts.pocketStatus = element("pocket-status");
+settingsParts.pocketCloning = element("pocket-cloning");
+settingsParts.pocketRow.querySelector = function (selector) {
+    if (selector.indexOf("pocket-install") !== -1) return settingsParts.pocketInstall;
+    if (selector.indexOf('mc-voice-status="pocket"') !== -1) {
+        return settingsParts.pocketStatus;
+    }
+    if (selector.indexOf("pocket-cloning") !== -1) return settingsParts.pocketCloning;
+    return null;
+};
+
 // The Sopro validation row. One button, a status line and a table -- and it is
 // the one control in that panel that must change nothing at all, so what is
 // modelled here is the polling and the painting rather than any effect.
@@ -331,6 +349,7 @@ settingsRow.querySelector = function (selector) {
     if (selector.indexOf('kind="cleanup"') !== -1) return settingsParts.cleanupRow;
     if (selector.indexOf("sopro-validate-row") !== -1) return settingsParts.validateRow;
     if (selector === '[data-mc-voice-kind="sopro"]') return null;
+    if (selector === '[data-mc-voice-kind="pocket"]') return settingsParts.pocketRow;
     if (selector === '[data-mc-voice-tiers="stt"]') return settingsParts.tierList;
     if (selector === '[data-mc-voice-chosen="stt"]') return settingsParts.chosenLabel;
     if (selector.indexOf("data-mc-voice-tier=") !== -1) {
@@ -1112,6 +1131,10 @@ function report(extra) {
             sttLocalLabel: settingsParts.sttLocal.textContent,
             ttsLocalDisabled: settingsParts.ttsLocal.disabled,
             ttsLocalLabel: settingsParts.ttsLocal.textContent,
+            pocketButton: settingsParts.pocketInstall.textContent,
+            pocketDisabled: settingsParts.pocketInstall.disabled,
+            pocketLine: settingsParts.pocketStatus.textContent,
+            pocketCloning: settingsParts.pocketCloning.textContent,
             runtimeLine: settingsParts.runtimeLine.textContent,
             runtimeButton: settingsParts.runtimeButton.textContent,
             runtimeDisabled: settingsParts.runtimeButton.disabled,
@@ -1205,6 +1228,18 @@ DEFAULTS = {
                                    "engine_label": "Sopro V2",
                                    "settings": "<div class='mc-voice-settings'></div>",
                                    "voices": "<div class='mc-voice-voices'></div>"}},
+        # PocketTTS's status. `installed` is "can it speak" and `complete` is
+        # "is there anything left to fetch" -- the gated cloning half sits
+        # between them, and the button is labelled from the second.
+        "voice/pocket": {"json": {"ok": True, "installed": True, "complete": False,
+                                  "platform_supported": True, "runtime_ready": True,
+                                  "speech_model_ready": True,
+                                  "official_voices_ready": True, "cloning_ready": False,
+                                  "runtime_message": "Installed",
+                                  "model_message": "Installed",
+                                  "cloning_message": "Not installed. Gated.",
+                                  "message": "Installed.", "progress": {"pocket": {}}}},
+        "voice/pocket/install": {"json": {"ok": True}},
         "voice/runtime": {"json": {"ok": True, "engine": {"loaded": True, "state": "idle"}}},
         "voice/voices": {"json": {"ok": True, "voices": [], "default": "official:af_heart",
                                   "test_text": "This is a test of voice cloning.",
@@ -5268,3 +5303,85 @@ def draining_answers(mode: str = "drain_unit", draining: bool = True, **changes)
 def elementless(found: dict) -> bool:
     """Whether the composer has no usable control at all. Never true."""
     return bool(found["sendHidden"] and found["stopHidden"])
+
+
+class TestThePocketInstallButtonSaysWhatIsLeftToDo:
+    """The reported bug, as a test.
+
+    The row said "Installed" and the Clone panel below it said the engine could
+    not clone. Both were reading the same install, and only one of them was
+    counting the gated half.
+    """
+
+    def pocket(self, **changes):
+        answers = json.loads(DEFAULTS["ANSWERS"])
+        answers["voice/pocket"]["json"].update(changes)
+        return json.dumps(answers)
+
+    def test_speech_installed_but_cloning_missing_offers_the_missing_piece(self):
+        found = run("""
+            await tick();
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", ANSWERS=self.pocket(installed=True, complete=False))
+        assert found["settings"]["pocketButton"] == "Install what is missing"
+        assert found["settings"]["pocketDisabled"] is False, \
+            "the one control that fetches the missing piece must be pressable"
+
+    def test_everything_installed_reads_installed(self):
+        found = run("""
+            await tick();
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true",
+             ANSWERS=self.pocket(installed=True, complete=True, cloning_ready=True))
+        assert found["settings"]["pocketButton"] == "Installed"
+
+    def test_nothing_installed_offers_the_whole_thing(self):
+        found = run("""
+            await tick();
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true",
+             ANSWERS=self.pocket(installed=False, complete=False,
+                                 speech_model_ready=False))
+        assert found["settings"]["pocketButton"] == "Install PocketTTS"
+
+    def test_a_part_that_arrives_redraws_the_panel_rather_than_a_sentence(self):
+        """The other half of the reported bug. The Clone panel's whole body is
+        chosen server-side by the same readiness, so a part that has just
+        arrived has to redraw the surface — repainting the status line leaves
+        two paragraphs underneath it still explaining what is missing."""
+        answers = json.loads(DEFAULTS["ANSWERS"])
+        answers["voice/pocket"]["json"].update(installed=True, complete=False,
+                                               cloning_ready=False)
+        found = run("""
+            await tick();
+            await tick();
+            // The gated half arrives.
+            replies["voice/pocket"].json.complete = true;
+            replies["voice/pocket"].json.cloning_ready = true;
+            settingsParts.pocketInstall.fire("click");
+            await tick();
+            NOW += 5000;
+            await tick();
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", ANSWERS=json.dumps(answers))
+        assert [one for one in urls(found) if "voice/surface" in one], \
+            "the panel was never redrawn, so it still says gated"
+
+    def test_a_poll_with_no_news_does_not_redraw(self):
+        """A redraw on every poll would throw away a folder box somebody was
+        typing into."""
+        found = run("""
+            await tick();
+            await tick();
+            NOW += 5000;
+            await tick();
+            await tick();
+            console.log(JSON.stringify(report()));
+        """, SETTINGS_PRESENT="true", ANSWERS=self.pocket(installed=True, complete=True,
+                                                          cloning_ready=True))
+        assert [one for one in urls(found) if "voice/surface" in one] == []
+

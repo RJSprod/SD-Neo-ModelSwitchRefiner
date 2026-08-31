@@ -436,6 +436,7 @@
         window.clearTimeout(paintTimer);
         window.clearTimeout(voicesTimer);
         window.clearTimeout(soproTimer);
+        window.clearTimeout(pocketTimer);
         return post(ROUTES.surface, {}).then(function (payload) {
             if (!payload || !payload.ok || !payload.settings) return false;
             [[".mc-voice-settings", payload.settings],
@@ -3721,6 +3722,10 @@
         }, Math.max(0, delay || 0));
     }
 
+    // What the last settled poll said Pocket had installed, so a part that has
+    // just arrived can be told apart from one that was already there.
+    let pocketReadiness = null;
+
     function paintPocket(row, payload) {
         if (!row || !payload || !payload.ok) return;
         const progress = (payload.progress && payload.progress.pocket) || {};
@@ -3743,8 +3748,28 @@
         const install = row.querySelector("[data-mc-voice-pocket-install]");
         if (install) {
             install.disabled = !!progress.running || !payload.platform_supported;
-            install.textContent = payload.installed ? "Installed" : "Install PocketTTS";
+            // Three states, matching the server's. "Installed" from `installed`
+            // alone meant a machine whose gated half had been refused read
+            // finished, with the Clone panel below it saying the opposite.
+            install.textContent = payload.complete
+                ? "Installed"
+                : (payload.installed ? "Install what is missing" : "Install PocketTTS");
         }
+        // The rest of this surface is server-rendered from the same readiness --
+        // the Clone panel's whole body is chosen by it, not just its status line
+        // -- so a part that has just arrived has to redraw the panel rather than
+        // repaint a sentence inside a paragraph that still says it is missing.
+        // Only on an actual change, and `swapSurface` has its own cooldown, so a
+        // poll that sees no news costs nothing.
+        const settled = !progress.running;
+        const now = [payload.installed, payload.complete, payload.cloning_ready,
+                     payload.official_voices_ready].join("/");
+        if (settled && pocketReadiness !== null && pocketReadiness !== now) {
+            pocketReadiness = now;
+            attempt("redraw the Voice Chat settings", swapSurface);
+            return;
+        }
+        if (settled) pocketReadiness = now;
     }
 
     // The poll used to be a fixed 1.5 seconds, forever, whatever happened. On a

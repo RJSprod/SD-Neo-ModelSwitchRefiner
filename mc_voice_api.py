@@ -1897,6 +1897,10 @@ def pocket_payload() -> dict:
         "ok": True,
         "engine": engines.POCKET,
         "installed": found.ready,
+        # Whether anything is left to fetch, which is not the same question as
+        # whether it can speak: the gated cloning half is outside ``ready`` on
+        # purpose, and the Install button is labelled from this one.
+        "complete": found.complete,
         "platform_supported": found.platform_supported,
         "runtime_ready": found.runtime_ready,
         "speech_model_ready": found.speech_model_ready,
