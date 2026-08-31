@@ -234,3 +234,146 @@ class TestTheLogSaysWhyItIsQuiet:
         assert {frame[-2] for frame in frames} == {""}, (
             "a turn that could not be created must leave the field empty so the "
             "completed-reply fallback is still allowed to fire")
+
+
+# --------------------------------------------------------------------------- #
+# The same reply, on the engine whose Stop is not a cancellation
+# --------------------------------------------------------------------------- #
+
+
+class DrainingSpeaker:
+    """A worker whose Stop leaves it computing, like PocketTTS 3.0.2's.
+
+    ``interrupt_turn`` rather than ``cancel_turn``, and it does what the real
+    Pocket runtime does: it returns at once, marks the turn draining, and only
+    releases it when a *later* call says the lane is free. Which is the whole
+    point -- a double that freed the lane inside ``interrupt_turn`` would be a
+    double that could not fail the test.
+    """
+
+    def __init__(self):
+        self.segments = []
+        self.interrupted = []
+        self.cancelled = []
+        self.turn = None
+
+    def begin_turn(self, turn, handle=None, profile=None):
+        self.turn = turn
+        turn.sample_rate = 24000
+        return 24000
+
+    def send_segment(self, turn, text):
+        self.segments.append(text)
+        turn.offer_audio(b"\x01\x00" * 1200, 24000)
+
+    def finish_turn(self, turn):
+        turn.audio_finished()
+
+    def cancel_turn(self, turn):
+        self.cancelled.append(turn.id)
+
+    def interrupt_turn(self, turn):
+        self.interrupted.append(turn.id)
+        turn.interrupting(chars=42, audio_ms=300)
+
+    def release(self, turn):
+        """What ``tts_interrupted state=complete`` does on the real runtime."""
+        turn.interrupted()
+
+
+class TestStopIsEngineSpecificAllTheWayThrough:
+    """I-PKT-10 and section 49.2, at the layer both engines share."""
+
+    def test_a_cancelling_engine_is_asked_to_cancel(self, host):
+        speaker = Speaker()
+        asked = []
+        speaker.cancel_turn = lambda turn: asked.append(turn.id)
+        turn = turns.create(voice_id="kokoro:official:af_heart", sid=3, speaker=speaker,
+                            engine="kokoro", interrupt_mode="cancel")
+        turn.attached.set()
+        turn.start()
+        turn.add_text("Hello there, this is a whole sentence. ")
+        turn.complete()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not turn.finished.is_set():
+            time.sleep(0.01)
+        assert turn.interrupt_mode == "cancel"
+        assert turn.draining is False
+
+    def test_a_draining_engine_is_asked_to_interrupt_and_says_it_is_finishing(self, host):
+        """The turn is silent at once and *busy* afterwards, which are two
+        different facts and are reported as two."""
+        speaker = DrainingSpeaker()
+        turn = turns.create(voice_id="pocket:official:alba", speaker=speaker,
+                            engine="pocket", handle="pocket:official:alba",
+                            interrupt_mode="drain_unit")
+        turn.attached.set()
+        turn.start()
+        turn.add_text("Hello there, this is a whole sentence. ")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not speaker.segments:
+            time.sleep(0.01)
+        assert speaker.segments
+
+        turn.cancel("user")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not speaker.interrupted:
+            time.sleep(0.01)
+        assert speaker.interrupted == [turn.id]
+        assert speaker.cancelled == [], "a draining engine was asked to cancel"
+        assert turn.draining is True
+        assert turn.finishing is True
+        assert turns.finishing() is True
+        # Silent already: the browser stops hearing this before any of the above.
+        assert turn.cancelled.is_set()
+
+        speaker.release(turn)
+        assert turn.draining is False
+        assert turns.finishing() is False
+
+    def test_pcm_offered_during_a_drain_is_discarded_and_counted(self, host):
+        """I-PKT-12. A muted turn that stopped *reading* would make the drain
+        take longer rather than shorter, so the count is how a log can tell the
+        two apart afterwards."""
+        speaker = DrainingSpeaker()
+        turn = turns.create(voice_id="pocket:official:alba", speaker=speaker,
+                            engine="pocket", interrupt_mode="drain_unit")
+        turn.cancel("user")
+        for _block in range(4):
+            assert turn.offer_audio(b"\x01\x00" * 1200, 24000) is False
+        assert turn.metrics()["discarded_chunks"] == 4
+
+    def test_the_metrics_say_what_the_stop_cost(self, host):
+        """Section 36's allowed list, and section 43's tables. Numbers only, and
+        absent rather than zero where nothing was measured."""
+        speaker = DrainingSpeaker()
+        turn = turns.create(voice_id="pocket:official:alba", speaker=speaker,
+                            engine="pocket", interrupt_mode="drain_unit")
+        turn.attached.set()
+        turn.start()
+        turn.add_text("Hello there, this is a whole sentence. ")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not speaker.segments:
+            time.sleep(0.01)
+        turn.cancel("user")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not speaker.interrupted:
+            time.sleep(0.01)
+        speaker.release(turn)
+        found = turn.metrics()
+        assert found["interrupt_mode"] == "drain_unit"
+        assert found["interrupted"] is True
+        assert found["interrupted_unit_chars"] == 42
+        assert found["interrupted_unit_audio_ms"] == 300
+        assert isinstance(found["stop_to_ready_ms"], int)
+        assert "the launch code" not in repr(found)
+
+    def test_a_turn_on_a_cancelling_engine_never_reports_a_drain(self, host):
+        """Kokoro and Sopro show no waiting state, and the metrics say so too."""
+        turn = turns.create(voice_id="kokoro:official:af_heart", sid=3,
+                            speaker=Speaker(), engine="kokoro", interrupt_mode="cancel")
+        turn.cancel("user")
+        found = turn.metrics()
+        assert found["interrupt_mode"] == "cancel"
+        assert found["stop_to_ready_ms"] is None
+        assert turn.finishing is False
