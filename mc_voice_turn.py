@@ -126,7 +126,7 @@ class VoiceTurn:
 
     def __init__(self, voice_id: str = "", sid: int = 0, labels=(), page: str = "",
                  speaker=None, max_source_chars: int = MAX_SOURCE_CHARS, profile=None,
-                 engine: str = "", handle=None):
+                 engine: str = "", handle=None, interrupt_mode: str = ""):
         self.id = secrets.token_urlsafe(18)
         self.page = str(page or "")
         self.voice_id = str(voice_id or "")
@@ -147,6 +147,31 @@ class VoiceTurn:
         inside it, which is what makes "no shared caller depends on a Kokoro
         SID" a property of the code rather than a rule somebody follows
         (I-10, section 18).
+        """
+        self.interrupt_mode = str(interrupt_mode or "cancel")
+        """What Stop means on the engine this turn was frozen onto.
+
+        ``cancel`` on Kokoro and Sopro: synthesis is abandoned and the lane is
+        free at once. ``drain_unit`` on released PocketTTS 3.0.2: playback is
+        silent immediately, no further text is accepted for this turn, and the
+        one native call already in flight is allowed to finish while its output
+        is thrown away -- because upstream 3.0.2 exposes no safe cooperative
+        cancellation and its model is documented as not thread-safe, so starting
+        the next generation while the old one is alive would be incorrect
+        (I-PKT-10, I-PKT-11, section 21).
+
+        Frozen with the engine, the voice and the profile, for the same reason
+        they are: a turn started under one engine must not be interrupted under
+        another engine's rules halfway through.
+        """
+        self.draining = False
+        """Whether the engine is still finishing an abandoned unit for this turn.
+
+        Only ever true for an engine whose ``interrupt_mode`` is not ``cancel``.
+        Set from the runtime when the interrupt is acknowledged and cleared only
+        when the *worker* says its lane is free -- never on a timer, because a
+        waiting state that clears itself is a waiting state that lies
+        (I-PKT-13, section 21.4).
         """
         self.profile = dict(profile) if profile else None
         """The delivery this reply is spoken with, resolved when the turn was
@@ -201,6 +226,18 @@ class VoiceTurn:
         self.synthesis_done = False
 
         self._queued_samples = 0
+        self._discarded_chunks = 0
+        """How many PCM blocks were thrown away rather than played.
+
+        Counted because "the drain kept consuming" is the property I-PKT-12
+        asks for and a number is the only way to see it after the fact: a muted
+        turn whose discard count stayed at zero while the engine reported a
+        long drain is a muted turn that stopped reading, which is the failure
+        mode the invariant exists to prevent.
+        """
+        self._stopped_at = 0.0
+        self._ready_at = 0.0
+        self._interrupted_unit = {"chars": None, "audio_ms": None}
         self._first_text = 0.0
         self._first_segment = 0.0
         self._first_audio = 0.0
@@ -340,6 +377,12 @@ class VoiceTurn:
         Returns False when the turn was cancelled and the block was discarded.
         """
         if self.cancelled.is_set():
+            # The whole of the parent's half of I-PKT-12. A cancelled turn
+            # accepts nothing and *blocks* nothing: the reader thread that
+            # offered this block goes straight back to reading, so an engine
+            # that is still draining an abandoned unit can reach the end of it
+            # instead of stalling behind a queue nobody is emptying.
+            self._discarded_chunks += 1
             return False
         if not pcm:
             return True
@@ -471,9 +514,57 @@ class VoiceTurn:
         first = not self.cancelled.is_set()
         if first:
             self.reason = self.reason or str(reason or "user")
+            # When the browser went quiet, which is the number the drain
+            # measurement is taken against. Recorded here rather than in the
+            # runtime because silence is this object's event on every engine:
+            # what differs between engines is only how long the *engine* takes
+            # to release its lane afterwards.
+            self._stopped_at = time.monotonic()
         self.cancelled.set()
         self._wake()
         return first
+
+    def interrupting(self, chars=None, audio_ms=None) -> None:
+        """The engine acknowledged the interrupt and is still finishing a unit.
+
+        Called by a runtime whose ``interrupt_mode`` is not ``cancel``. It does
+        not change what the listener hears -- playback is already silent, and
+        :meth:`cancel` made it so before this was ever reached. What it changes
+        is what the surface may truthfully say: the engine is busy, a new turn
+        may not start yet, and the reason is a unit that was already inside the
+        model when Stop was pressed.
+
+        ``chars`` and ``audio_ms`` describe that abandoned unit, and they are
+        recorded because the release envelope is measured in them (section 43):
+        how big the unit was is the thing that decides how long a Stop costs.
+        """
+        with self._lock:
+            self.draining = True
+            if chars is not None:
+                self._interrupted_unit["chars"] = int(chars)
+            if audio_ms is not None:
+                self._interrupted_unit["audio_ms"] = int(audio_ms)
+
+    def interrupted(self) -> None:
+        """The engine says its lane is free. The waiting state ends here.
+
+        From the worker's own report and from nothing else -- not a timeout, not
+        an optimistic guess after the last frame, not a fixed grace period. A
+        "Voice finishing..." indicator that cleared on a timer would be an
+        indicator that let a second inference start while the first was still
+        alive, which is the one thing a non-thread-safe model must never be
+        asked to do (I-PKT-13).
+        """
+        with self._lock:
+            if not self.draining:
+                return
+            self.draining = False
+            self._ready_at = time.monotonic()
+
+    @property
+    def finishing(self) -> bool:
+        """Playback has stopped but the engine has not released its lane yet."""
+        return bool(self.draining)
 
     def _wake(self) -> None:
         """Unblock everything waiting on this turn, in both directions."""
@@ -580,7 +671,15 @@ class VoiceTurn:
                 self._compute = time.monotonic() - self._compute_started
             if began and self.cancelled.is_set() and not self.synthesis_done:
                 try:
-                    speaker.cancel_turn(self)
+                    # Ask the runtime to *interrupt* the turn, and let the
+                    # runtime decide what its engine can promise by that. Kokoro
+                    # and Sopro cancel, as they always have; Pocket 3.0.2 drains
+                    # the one unit already inside the model. The fallback to
+                    # ``cancel_turn`` is for a speaker double this suite installs
+                    # and for any runtime written before the capability existed
+                    # (I-PKT-10, section 21).
+                    stop = getattr(speaker, "interrupt_turn", None)
+                    (stop or speaker.cancel_turn)(self)
                 except Exception:
                     logger.debug("Model Chain: could not tell the worker to stop speaking",
                                  exc_info=True)
@@ -681,6 +780,18 @@ class VoiceTurn:
             "max_segment_index": self._max_unit["index"] or None,
             "cancelled": self.reason,
             "backend": self.engine,
+            # What Stop cost, on an engine where Stop is not free. Numbers only,
+            # and absent rather than zero where they were never measured, so a
+            # log comparing two engines cannot read a missing measurement as a
+            # fast one (section 36's allowed metrics).
+            "interrupt_mode": self.interrupt_mode,
+            "interrupted": bool(self.cancelled.is_set() and self.synthesis_started),
+            "stop_to_silence_ms": _since(started, self._stopped_at),
+            "stop_to_ready_ms": (int((self._ready_at - self._stopped_at) * 1000)
+                                 if self._ready_at and self._stopped_at else None),
+            "interrupted_unit_chars": self._interrupted_unit["chars"],
+            "interrupted_unit_audio_ms": self._interrupted_unit["audio_ms"],
+            "discarded_chunks": self._discarded_chunks or None,
             "voice_type": "clone" if ":clone:" in self.voice_id
                           or self.voice_id.startswith("clone:") else "official",
             # Kokoro's own address, reported because a shared log comparing two
@@ -793,7 +904,8 @@ accumulate one dictionary entry per reply.
 
 
 def create(voice_id: str = "", sid: int = 0, labels=(), page: str = "",
-           speaker=None, profile=None, engine: str = "", handle=None) -> VoiceTurn:
+           speaker=None, profile=None, engine: str = "", handle=None,
+           interrupt_mode: str = "") -> VoiceTurn:
     """Make a turn the active one, cancelling whatever was active before.
 
     Cancelling the previous turn here rather than leaving it is section 24's
@@ -804,7 +916,8 @@ def create(voice_id: str = "", sid: int = 0, labels=(), page: str = "",
     global _active_id
 
     turn = VoiceTurn(voice_id=voice_id, sid=sid, labels=labels, page=page, speaker=speaker,
-                     profile=profile, engine=engine, handle=handle)
+                     profile=profile, engine=engine, handle=handle,
+                     interrupt_mode=interrupt_mode)
     previous = None
     with _lock:
         _expire()
@@ -853,6 +966,20 @@ def busy() -> bool:
     """Whether any turn is still producing or waiting to produce speech."""
     with _lock:
         return any(turn.busy for turn in _turns.values())
+
+
+def finishing() -> bool:
+    """Whether any turn is silent but still holding an engine's inference lane.
+
+    Distinct from :func:`busy`, which asks whether anything is still *being
+    spoken*. A drained Pocket turn is not busy -- nobody is hearing it and
+    nothing more will be -- and it is still the reason a new turn may not start
+    yet. One function each, because a surface that conflated them would either
+    say "speaking" while the browser was silent or offer a Play button the
+    engine cannot honour (section 21.4).
+    """
+    with _lock:
+        return any(turn.finishing for turn in _turns.values())
 
 
 def forget_all(reason: str = "shutdown") -> None:

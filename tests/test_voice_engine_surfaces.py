@@ -126,13 +126,20 @@ def test_a_refusal_that_is_not_a_mismatch_is_not_flagged(host, voice_root, kokor
     assert raised.value.mismatch is False
 
 
-def test_the_engines_payload_is_the_one_place_both_names_appear(host, voice_root):
+def test_the_engines_payload_is_the_one_place_every_name_appears(host, voice_root):
+    """T-ENG-P8. The selector is the one neutral surface allowed to name them all.
+
+    Derived from the registry rather than written out here, so that a fourth
+    engine is a row in ``mc_voice_engines.SPECS`` and not a test to remember to
+    update -- which is the whole of I-PKT-30 as a test can state it.
+    """
     import mc_voice_api as api
 
     found = api.engines_payload()
     names = {entry["id"] for entry in found["engines"]}
-    assert names == {"kokoro", "sopro"}
-    # And it carries nothing operational about either: an id, a label, a
+    assert names == set(engines.ENGINES)
+    assert "pocket" in names
+    # And it carries nothing operational about any of them: an id, a label, a
     # sentence, and whether it is installed.
     for entry in found["engines"]:
         assert set(entry) == {"id", "label", "blurb", "active", "installed"}

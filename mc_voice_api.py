@@ -615,53 +615,46 @@ def status_payload() -> dict:
 def _engine_block(active: str) -> dict:
     """The active TTS engine's operational state, and only that engine's.
 
-    Both branches answer the same four questions -- is it installed, what does
-    it say about that, is a worker resident, and which voice speaks next -- so
-    every surface that draws them is engine-neutral above this line and engine-
-    specific below it.
+    Every engine answers the same six questions -- is it installed, what does it
+    say about that, is a worker resident, is its lane occupied, is it draining an
+    abandoned unit, and what does Stop mean on it -- and answers them through
+    :func:`public_status`, which is the engine's own function. This used to be a
+    branch that meant "Sopro, or else Kokoro"; a third engine is where an
+    ``else`` like that stops being a shortcut and starts reporting one engine's
+    readiness under another engine's name (I-PKT-30, section 31).
+
+    What is built here rather than asked for is the part that is not the
+    engine's to answer: which voice speaks next and what has been changed about
+    its delivery are questions about the *selected* engine's registry and
+    profile, and both already resolve through the facade.
     """
     import mc_voice_engines as engines
 
-    if active == engines.SOPRO:
-        import mc_voice_sopro as sopro
-        import mc_voice_sopro_runtime as sopro_runtime
-
-        found = sopro.status()
-        return {
-            "ready": found.ready,
-            "tts_ready": found.ready,
-            "tts_message": found.message,
-            # ``engine_state``, not ``engine``. ``engine`` is the selected
-            # engine's *id* in every payload this feature sends, and it used to
-            # be this residency object in the status payload alone -- so the
-            # scoping filter, which sets ``engine`` to the id, silently replaced
-            # the Voice flyout's Loaded/Unloaded line with the string "sopro".
-            # One key, one meaning.
-            "engine_state": sopro_runtime.engine(),
-            "voice": _default_voice(),
-            "delivery": _delivery_summary(),
-            "sopro": {
-                "installed": found.ready,
-                "runtime_ready": found.runtime_ready,
-                "model_ready": found.model_ready,
-                "runtime_message": found.runtime_message,
-                "model_message": found.model_message,
-                "platform_supported": found.platform_supported,
-                "fingerprint": found.fingerprint,
-                "settings": sopro.engine_settings(),
-                "defaults": sopro_runtime.defaults(),
-                "warnings": sopro.warnings(),
-            },
-        }
-    found = models.status()
+    adapter = engines.adapter(active)
+    found = adapter.public_status()
     return {
-        "ready": found.ready,
-        "tts_ready": found.tts_ready,
-        "tts_message": found.tts_message,
-        "engine_state": runtime.engine(),
+        "ready": found["ready"],
+        "tts_ready": found["ready"],
+        "tts_message": found["message"],
+        # ``engine_state``, not ``engine``. ``engine`` is the selected engine's
+        # *id* in every payload this feature sends, and it used to be this
+        # residency object in the status payload alone -- so the scoping filter,
+        # which sets ``engine`` to the id, silently replaced the Voice flyout's
+        # Loaded/Unloaded line with the string "sopro". One key, one meaning.
+        "engine_state": engines.runtime(active).engine(),
         "voice": _default_voice(),
         "delivery": _delivery_summary(),
-        "kokoro": {"installed": found.tts_ready, "message": found.tts_message},
+        # Neutral, and present on every engine rather than only on the one that
+        # needs them. The browser draws its playback state from these three and
+        # never from a version string or an engine id (I-PKT-28, section 31):
+        # ``interrupt_mode`` says what Stop promises, ``draining`` says whether
+        # an abandoned unit is still being consumed, and ``engine_busy`` says
+        # whether the inference lane is free to start something new.
+        "interrupt_mode": found["interrupt_mode"],
+        "draining": bool(found["draining"]),
+        "engine_busy": bool(found["engine_busy"]),
+        "worker_resident": bool(found["worker_resident"]),
+        active: found["block"],
     }
 
 
@@ -931,13 +924,12 @@ def speak(token: str) -> bytes:
                            f"read aloud.")
     voice_id, entry = _resolve_target(found, wanted)
     try:
-        if wanted == engines.SOPRO:
-            import mc_voice_sopro_runtime as sopro_runtime
-
-            audio = sopro_runtime.synthesize(text, voice_id, profile=found.get("profile"))
-        else:
-            audio = runtime.synthesize(text, sid=int(entry.get("_sid") or 0),
-                                       profile=found.get("profile"))
+        # One call, through the facade, with the engine's own opaque handle.
+        # There used to be a branch here that meant "Sopro, or else Kokoro",
+        # and a third engine is exactly where an ``else`` like that starts
+        # speaking the wrong voice (I-PKT-30, section 8).
+        audio = engines.runtime(wanted).synthesize(text, entry.get("_handle"),
+                                                   profile=found.get("profile"))
     except Exception as exc:
         if isinstance(exc, Refused):
             raise
@@ -1188,22 +1180,23 @@ def voices_payload(test_text=None, engine: str = "") -> dict:
 def _clone_hints(active: str) -> dict:
     """What the clone form should suggest, from the engine rather than a guess.
 
-    Empty for an engine that has nothing to say, which is the ordinary case:
-    Kokoro's cloning path has its own window and does not go through here.
+    Asked of the adapter, which is optional about answering: an engine with
+    nothing to say does not define ``clone_hints`` and gets an empty mapping,
+    which is the ordinary case for Kokoro -- its cloning path has a window of
+    its own and does not go through here.
+
+    Read every time rather than cached, and never hardcoded in the page,
+    because the ideal reference length is a release measurement (GATE
+    P-CLONE-1) and a number baked into JavaScript is a number that goes stale
+    the first time somebody measures it.
     """
     import mc_voice_engines as engines
 
-    if active != engines.SOPRO:
-        return {}
     try:
-        import mc_voice_sopro as sopro
-        import mc_voice_sopro_runtime as sopro_runtime
-
-        return {"min_seconds": sopro.MIN_REFERENCE_SECONDS,
-                "max_seconds": sopro.MAX_REFERENCE_SECONDS,
-                "ideal_seconds": sopro_runtime.defaults().get("ref_seconds") or 0}
+        hints = getattr(engines.adapter(active), "clone_hints", None)
+        return dict(hints() or {}) if callable(hints) else {}
     except Exception:
-        logger.debug("Model Chain: could not read the Sopro clone hints", exc_info=True)
+        logger.debug("Model Chain: could not read %s's clone hints", active, exc_info=True)
         return {}
 
 
@@ -1307,13 +1300,11 @@ def test_voice(voice_id: str, text: str = "", profile=None, engine: str = "") ->
             raise Refused(400, "That is not a delivery profile.")
         delivery = profiles.resolve(profile)
     try:
-        if active == engines.SOPRO:
-            import mc_voice_sopro_runtime as sopro_runtime
-
-            audio = sopro_runtime.synthesize(wanted, resolved, profile=delivery)
-        else:
-            audio = runtime.synthesize(wanted, sid=int(entry.get("_sid") or 0),
-                                       profile=delivery)
+        # The active engine's runtime, and the entry's own opaque handle. An
+        # audition that went through a branch naming one engine would be an
+        # audition a third engine could never reach (section 32).
+        audio = engines.runtime(active).synthesize(wanted, entry.get("_handle"),
+                                                   profile=delivery)
     except Exception as exc:
         raise Refused(503, str(exc) or "That voice could not be auditioned.") from None
     logger.info("Model Chain: a voice was auditioned on %s — %d characters, %d bytes of "

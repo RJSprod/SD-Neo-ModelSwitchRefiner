@@ -227,6 +227,7 @@ def begin_speech(character=None, persona=None, opening: str = ""):
         delivery = profiles.resolve(profile_of(character, active))
         found = turns.create(voice_id=voice_id, sid=int(entry.get("_sid") or 0),
                              handle=_handle(active, entry), engine=active,
+                             interrupt_mode=engines.interrupt_mode(active),
                              labels=_labels(character, persona), profile=delivery)
         found.base_chars = len(str(opening or ""))
         found.start()
@@ -248,16 +249,18 @@ def begin_speech(character=None, persona=None, opening: str = ""):
 def _handle(engine: str, entry) -> object:
     """What the engine's adapter needs to speak this voice, and nothing more.
 
-    A sherpa speaker number for Kokoro, the qualified stable id for Sopro. It
-    is built here, at the one place that has just resolved the voice, and the
-    turn carries it without ever looking inside -- which is what keeps a numeric
-    SID out of the shared turn contract (I-10).
-    """
-    import mc_voice_engines as engines
+    A sherpa speaker number for Kokoro, the qualified stable id for Sopro and
+    for Pocket. Read off the entry rather than reconstructed here, because the
+    adapter that resolved the voice is the one that knows what its own address
+    looks like -- and a function here that reconstructed it would be a function
+    with one branch per engine, which is the shape a third engine exists to
+    disprove (I-10, section 8).
 
-    if str(engine) == engines.SOPRO:
-        return str((entry or {}).get("id") or "")
-    return int((entry or {}).get("_sid") or 0)
+    The turn carries the result without ever looking inside it. That is what
+    keeps a numeric SID out of the shared turn contract rather than making it a
+    rule somebody has to follow.
+    """
+    return (entry or {}).get("_handle")
 
 
 def voice_of(character, engine: str = "") -> str:

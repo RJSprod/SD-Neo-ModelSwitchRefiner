@@ -1301,7 +1301,93 @@ def resolve(voice_id: str = "") -> tuple:
         entry = default_entry()
     if entry is None:
         raise SoproError("No Sopro voice has been created yet.")
+    # Sopro's address for a voice *is* its stable id, so ``_handle`` looks
+    # redundant here and is not: it is the name every engine's entry answers to,
+    # so that the shared turn can carry one opaque thing rather than knowing
+    # that Kokoro's is a number and Sopro's is a string (section 8). Stripped
+    # before any payload -- see :func:`mc_voice_api._public`.
+    entry["_handle"] = entry["id"]
     return entry["id"], entry
+
+
+def capabilities() -> dict:
+    """What Sopro can do, as behaviour rather than decoration. Section 8.
+
+    All of it. Sopro is the engine the preview transaction, the retained
+    reference, the rebuild and the Lab were written for, and it cancels
+    properly -- ``stream()`` is a generator the worker stops pulling from, so a
+    Stop is a Stop and nothing waits for a unit to finish.
+    """
+    return {"clone_preview": True, "rebuild": True, "engine_settings": True,
+            "starter_voices": True, "voice_lab": True, "interrupt_mode": "cancel"}
+
+
+def refusals() -> tuple:
+    """The exception type this adapter raises to *refuse* rather than fail.
+
+    One class, because every ordinary Sopro refusal -- no voice created yet, a
+    voice deleted out from under a character, a reference too short -- is a
+    :class:`SoproError`, and a fault is something else entirely.
+    """
+    return (SoproError,)
+
+
+def clone_hints() -> dict:
+    """What the clone form should suggest, from the engine rather than a guess.
+
+    Optional on an adapter, and present here because Sopro has an answer. The
+    ideal comes from the model's own configuration through the handshake rather
+    than from a number typed into the page, so a model revision that wants
+    longer references changes the form by being installed.
+    """
+    import mc_voice_sopro_runtime as sopro_runtime
+
+    return {"min_seconds": MIN_REFERENCE_SECONDS,
+            "max_seconds": MAX_REFERENCE_SECONDS,
+            "ideal_seconds": sopro_runtime.defaults().get("ref_seconds") or 0}
+
+
+def public_status() -> dict:
+    """Sopro's operational state, in the shape every engine answers with.
+
+    The common subset section 31 asks for, plus ``block`` -- the engine-owned
+    part the status payload publishes under this engine's own id, and the only
+    part a page scoped to another engine never sees.
+
+    ``draining`` is always False here. Sopro cancels; it never holds a lane
+    after a Stop, and reporting the field rather than omitting it is what lets
+    one piece of browser code draw the waiting state for the engine that does
+    without asking which engine it is (I-PKT-10).
+    """
+    import mc_voice_sopro_runtime as sopro_runtime
+
+    found = status()
+    live = {}
+    try:
+        live = sopro_runtime.engine() or {}
+    except Exception:
+        logger.debug("Model Chain: could not read the Sopro engine state", exc_info=True)
+    return {
+        "installed": found.ready,
+        "ready": found.ready,
+        "message": found.message,
+        "worker_resident": bool(live.get("loaded")),
+        "engine_busy": live.get("state") in ("speaking", "preparing"),
+        "draining": False,
+        "interrupt_mode": "cancel",
+        "block": {
+            "installed": found.ready,
+            "runtime_ready": found.runtime_ready,
+            "model_ready": found.model_ready,
+            "runtime_message": found.runtime_message,
+            "model_message": found.model_message,
+            "platform_supported": found.platform_supported,
+            "fingerprint": found.fingerprint,
+            "settings": engine_settings(),
+            "defaults": sopro_runtime.defaults(),
+            "warnings": warnings(),
+        },
+    }
 
 
 def rename(voice_id: str, display_name: str) -> dict:
