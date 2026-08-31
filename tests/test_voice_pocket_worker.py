@@ -800,3 +800,27 @@ class TestTheLocalConfigMayNotNameANetworkLocation:
         with pytest.raises(ValueError) as raised:
             engine._read_config()
         assert "Reinstall" in str(raised.value)
+
+
+class TestTheLaneNeverBlocksOnADeadPipe:
+    def test_audio_stops_being_queued_once_the_writer_has_gone(self):
+        """I-PKT-12, at the one place the lane could wedge.
+
+        The lane is the thread that has to reach the end of an abandoned unit.
+        If the pipe breaks and nothing is emptying the outbox, a lane spinning
+        on ``put`` is a unit that never finishes and a worker that never becomes
+        ready again.
+        """
+        worker = pocket_worker.Worker(io.BytesIO())
+        worker._outbox = pocket_worker.queue.Queue(maxsize=1)
+        worker._outbox.put(("filler", b""))
+
+        class Dead:
+            def is_alive(self):
+                return False
+
+        worker._writer = Dead()
+        began = time.monotonic()
+        worker.send({"op": "tts_audio", "turn": "T"}, b"\x00\x00", audio=True)
+        assert time.monotonic() - began < 2.0, "the lane blocked on a dead writer"
+        assert worker._stopping is True

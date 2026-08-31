@@ -1328,6 +1328,14 @@ class Worker:
             except queue.Full:
                 if self._stopping:
                     return
+                writer = self._writer
+                if writer is not None and not writer.is_alive():
+                    # The pipe has gone and nothing is emptying this queue. The
+                    # lane must not spin here: it is the thread that has to
+                    # reach the end of an abandoned unit, and a lane blocked on
+                    # a dead writer is a unit that never finishes (I-PKT-12).
+                    self._stopping = True
+                    return
 
     def _write_loop(self) -> None:
         while True:
