@@ -1514,10 +1514,16 @@ def _smoke_test(staging: Path) -> dict:
         raise PocketError("The staged PocketTTS runtime did not report what it is. Nothing "
                           "was installed.") from None
     if not report.get("ok"):
+        # Logged whole and shown short. The full text is what a maintainer
+        # diagnoses from and it is already in ``model_chain.log``; the panel gets
+        # the sentence without the path, because a refusal is read on screen,
+        # photographed, and pasted into a bug report.
+        logger.warning("Model Chain: the staged PocketTTS runtime could not load — %s",
+                       report.get("error") or "no reason reported")
         raise PocketError(
             f"The staged PocketTTS runtime could not load ("
-            f"{report.get('error') or 'no reason reported'}). Nothing was installed and "
-            f"Voice Chat is unchanged.")
+            f"{_without_paths(report.get('error')) or 'no reason reported'}). Nothing was "
+            f"installed and Voice Chat is unchanged.")
     if str(report.get("device") or "") != "cpu":
         raise PocketError(
             f"The staged PocketTTS runtime reported the device {report.get('device')!r} "
@@ -1528,6 +1534,37 @@ def _smoke_test(staging: Path) -> dict:
                 report.get("pocket_version"), report.get("torch_version"),
                 report.get("numpy_version"), report.get("thread_policy"))
     return report
+
+
+_PATHLIKE = re.compile(
+    r"(?:(?<![A-Za-z])[A-Za-z]:[\\/]|(?<![:\w\\/])[\\/])"
+    r"[^\s'\"()<>]*[\\/]([^\s'\"()<>\\/]+)")
+"""An absolute filesystem path, Windows or POSIX, with its last component captured.
+
+The two lookbehinds are what keep it to *filesystem* paths. Without the first,
+the ``s:`` in ``https://`` is a drive letter; without the second, the ``//``
+after it is a root. A URL and an ``hf://`` location are left whole, which is
+right for a different reason as well: where one of those appears in a refusal it
+is the thing the refusal is about.
+"""
+
+
+def _without_paths(text) -> str:
+    """One staged-runtime message with its filesystem paths cut down to filenames.
+
+    A refusal from inside the isolated runtime is a library's own sentence, and
+    a library is entitled to put the file it was reading into it -- which is how
+    ``cannot import name 'Sentinel' from 'typing_extensions'`` arrives carrying
+    the whole of somebody's install directory. The sentence is the useful half:
+    it is what a user acts on and what a maintainer diagnoses from. Where their
+    WebUI lives adds nothing to either, and unlike a log line, a panel is read
+    on screen, photographed and pasted into a bug report (section 36).
+
+    The filename is kept rather than the path removed entirely, because
+    "typing_extensions" is the part of ``…site-packages/typing_extensions.py``
+    that says which package is wrong.
+    """
+    return _PATHLIKE.sub(lambda found: found.group(1), str(text or "")).strip()
 
 
 def _run_staged(interpreter: Path, arguments: list, what: str, timeout: float = 300):
@@ -1574,9 +1611,11 @@ def _read_recipe(entry: Bundle) -> dict:
         raise PocketError("The PocketTTS runtime did not report its model configuration. "
                           "Nothing was installed.") from None
     if not report.get("ok") or not isinstance(report.get("recipe"), dict):
-        raise PocketError(f"The PocketTTS runtime could not describe its model "
-                          f"({report.get('error') or 'no reason reported'}). Nothing was "
-                          f"installed.")
+        logger.warning("Model Chain: the PocketTTS runtime could not describe its model "
+                       "— %s", report.get("error") or "no reason reported")
+        why = _without_paths(report.get("error")) or "no reason reported"
+        raise PocketError(f"The PocketTTS runtime could not describe its model ({why}). "
+                          f"Nothing was installed.")
     return report["recipe"]
 
 

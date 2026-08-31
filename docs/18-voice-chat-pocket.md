@@ -354,18 +354,19 @@ voice.
 
 The manifest ships **half resolved**, and says so in its own `notes`.
 
-The **runtime closure is pinned**: 112 wheels — twenty-eight packages across
-four Python minors — each named, sized and hashed from pypi.org, about 274 MB
-per platform. So the managed runtime install fetches exactly what this
-repository claims and refuses anything else.
+The **runtime closure is pinned**: 120 wheels — thirty packages across four
+Python minors — each named, sized and hashed from pypi.org, about 275 MB per
+platform. So the managed runtime install fetches exactly what this repository
+claims and refuses anything else.
 
-Twenty-eight rather than the thirteen it began as, and the difference was
+Thirty rather than the thirteen it began as, and the difference was
 **measured rather than reasoned about**. A real `pocket-tts 3.0.2` wheel — the
 one whose SHA-256 this manifest pins — was installed and every candidate package
 was blocked at the import hook in turn to see which ones make `import pocket_tts`
 raise. The original list was written by reading upstream's imports, and it was
-fifteen wheels short: five that `pocket_tts` imports at module level, one that no
-environment variable can turn off, and nine those bring with them.
+seventeen wheels short: five that `pocket_tts` imports at module level, one that
+no environment variable can turn off, nine those bring with them, and two that
+only a reading of the *declarations* finds — see below.
 
 - `pydantic` — `pocket_tts.utils.config` builds its config model with it;
 - `PyYAML` — the same module parses the config with it;
@@ -380,6 +381,50 @@ environment variable can turn off, and nine those bring with them.
 Those six bring nine of their own: `pydantic-core`, `annotated-types` and
 `typing-inspection` with pydantic; `urllib3`, `certifi`, `idna` and
 `charset-normalizer` with requests; `tqdm` and `packaging` with huggingface-hub.
+And `colorama` and `setuptools` complete it, for the reason the next section
+gives.
+
+### A closure where every pin is real and the set does not install
+
+The first version of that list shipped, and it did not work. Every wheel
+downloaded, every SHA-256 matched, all thirty megabytes unpacked into the
+isolated interpreter, and the self-test — which runs before anything is
+promoted — refused it:
+
+```
+ImportError: cannot import name 'Sentinel' from 'typing_extensions'
+```
+
+`typing-extensions` was still pinned at 4.12.2, chosen when this closure was
+thirteen packages and Torch was the only thing asking for it. `pydantic` and
+`typing-inspection` had since arrived needing 4.14.1 and 4.15.0. Every
+individual pin was a real, verified wheel; the *set* was not installable, and
+nothing in the pipeline was looking at the set.
+
+That is now `tools/pin_pocket_models.py`'s job. It reads what every publisher
+declares about every other package in the closure, evaluates the markers once
+per advertised Python minor, and refuses to write a manifest whose pins
+contradict one another. It still resolves nothing — that property is the whole
+point of this design — it checks a written-down list against what the
+publishers say, which is a different thing from asking an installer to choose.
+
+Run against the closure as it shipped, it names all five problems at once:
+
+```
+pydantic 2.13.5 needs typing-extensions>=4.14.1 on Python 3.10, and the closure pins typing-extensions 4.12.2.
+pydantic-core 2.46.5 needs typing-extensions>=4.14.1 …
+typing-inspection 0.4.4 needs typing-extensions>=4.15.0 …
+torch 2.6.0 needs setuptools; python_version >= "3.12" on Python 3.12, and the closure does not ship it.
+tqdm 4.70.0 needs colorama; platform_system == "Windows" on Python 3.10, and the closure does not ship it.
+```
+
+The last two are the interesting ones. Reading the *import path* finds neither:
+tqdm imports colorama inside a `try`, and nothing on the inference path touches
+`setuptools`. Reading the *declarations* finds both — and this closure is
+Windows-only and advertises 3.12 and 3.13, so both markers are live on exactly
+the platforms it ships to. They are in the closure now, and the omissions that
+remain are a table in the tool with a reason beside each name rather than an
+absence nobody wrote down.
 
 `huggingface-hub` is pinned in the **0.x** line on purpose: 1.x replaced
 `requests` with `httpx` and would add `httpx`, `httpcore`, `anyio`, `h11` and

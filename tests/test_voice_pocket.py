@@ -985,6 +985,68 @@ class TestTheWorkerIsPointedAtLocalFilesAndNothingElse:
         assert "no configuration" in str(raised.value)
 
 
+class TestAnInstallRefusalIsReadInPublic:
+    """Section 36. A panel is read on screen, photographed and pasted into a bug
+    report; a log is read by whoever is diagnosing. They want different things,
+    and until now they got the same string.
+    """
+
+    REPORTED = ("ImportError: cannot import name 'Sentinel' from 'typing_extensions' "
+                "(C:\\Roots\\Neo3\\model_chain_voice\\pocket\\.downloads\\"
+                "runtime-d027f381\\env\\Lib\\site-packages\\typing_extensions.py)")
+    """Verbatim from a real failed install, which is why it is the test case."""
+
+    def test_the_sentence_survives_and_the_install_directory_does_not(self):
+        found = pocket._without_paths(self.REPORTED)
+        assert "cannot import name 'Sentinel' from 'typing_extensions'" in found
+        assert "typing_extensions.py" in found, "the filename says which package is wrong"
+        assert "Roots" not in found and "Neo3" not in found
+        assert "C:" not in found
+
+    def test_a_posix_path_goes_the_same_way(self):
+        found = pocket._without_paths(
+            "FileNotFoundError: /home/someone/voice/pocket/models/english/model.safetensors")
+        assert found == "FileNotFoundError: model.safetensors"
+
+    def test_a_message_with_no_path_in_it_is_left_alone(self):
+        for one in ("ModuleNotFoundError: No module named 'scipy'",
+                    "licence CC-BY-4.0 and/or similar",
+                    "RuntimeError: no reason reported"):
+            assert pocket._without_paths(one) == one
+
+    def test_a_location_is_not_a_path_and_stays_whole(self):
+        """Where one of these appears in a refusal it is the thing the refusal is
+        about -- and the ``s:`` in ``https://`` is not a drive letter."""
+        for one in ("see https://example.com/a/b for more",
+                    "hf://kyutai/pocket-tts/languages/english/model.safetensors"):
+            assert pocket._without_paths(one) == one
+
+    def test_the_whole_message_still_reaches_the_log(self, host, voice_root, monkeypatch,
+                                                     caplog, tmp_path):
+        """The full path is what a maintainer diagnoses from. It is not being
+        thrown away -- it is being kept out of the browser."""
+        import logging
+
+        class Result:
+            # The interpreter starts (the first staged run only reads this) and
+            # the self-test then reports what actually went wrong.
+            returncode = 0
+            stdout = json.dumps({"ok": False,
+                                 "error": TestAnInstallRefusalIsReadInPublic.REPORTED})
+            stderr = ""
+
+        monkeypatch.setattr(pocket, "_run_staged",
+                            lambda *arguments, **values: Result())
+        caplog.set_level(logging.DEBUG, logger="model_chain")
+        with pytest.raises(pocket.PocketError) as raised:
+            pocket._smoke_test(tmp_path)
+
+        assert "Roots" not in str(raised.value)
+        assert "Sentinel" in str(raised.value), "the panel lost the reason too"
+        assert any("Roots" in record.getMessage() for record in caplog.records), \
+            "the log lost the path as well"
+
+
 class TestTheWorkerEnvironmentSaysWhatItMeans:
     def test_no_credential_and_no_location_can_reach_it(self, host, monkeypatch):
         """I-PKT-21. A token is the installer's and the parent process's, and
@@ -1190,6 +1252,38 @@ class TestTheShippedManifestIsCompleteEnoughToImport:
                    for name, _version, _kind in shipped["runtime"]["closure"]}
         present = [name for name in ABSENT if name.casefold() in closure]
         assert present == [], present
+
+    def test_the_versions_are_compatible_with_each_other(self, shipped):
+        """The failure this is a sentinel for actually shipped.
+
+        Every wheel downloaded, every hash matched, every file unpacked, and
+        ``import pocket_tts`` then died on ``cannot import name 'Sentinel' from
+        'typing_extensions'``: typing-extensions was pinned at 4.12.2 from when
+        this closure was thirteen packages, and pydantic and typing-inspection
+        had since arrived needing 4.14.1 and 4.15.0. Every pin was real and the
+        set was not installable.
+
+        The authoritative check is ``tools/pin_pocket_models.py``, which reads
+        what every publisher declares about every other package here and refuses
+        a closure whose pins contradict one another -- it needs the network, so
+        it runs at pin time rather than here. This is the offline sentinel for
+        the one skew that got out, and it cannot rot: the floor only rises if
+        somebody bumps pydantic, and the tool catches that.
+        """
+        found = {str(name).casefold(): version
+                 for name, version, _kind in shipped["runtime"]["closure"]}
+        major, minor = (int(part) for part in found["typing-extensions"].split(".")[:2])
+        assert (major, minor) >= (4, 15), found["typing-extensions"]
+
+    def test_a_dependency_declared_only_on_this_closures_platform_is_shipped(self, shipped):
+        """Two that a reading of the import path misses and a reading of the
+        *declarations* does not. tqdm asks for colorama on Windows, which is the
+        only platform this closure has; torch asks for setuptools on Python 3.12
+        and later, which is half the minors it advertises. Both were found by
+        the tool's check rather than by anybody noticing."""
+        found = {str(name).casefold() for name, _v, _k in shipped["runtime"]["closure"]}
+        assert "colorama" in found
+        assert "setuptools" in found
 
     def test_huggingface_hub_stays_in_the_zero_line(self, shipped):
         """1.x replaced requests with httpx and would add five more wheels to an

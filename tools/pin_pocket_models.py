@@ -735,6 +735,7 @@ def platforms(entries: tuple, declared: list, state: State, committed: dict, say
     for name, version, _kind in entries:
         say(f"  reading {name} {version} from PyPI")
         releases[(name, version)] = _release(name, version)
+    _requirements_met(entries, releases, minors, say)
 
     found = []
     for item in declared:
@@ -751,6 +752,95 @@ def platforms(entries: tuple, declared: list, state: State, committed: dict, say
         rebuilt["artifacts"] = artifacts
         found.append(rebuilt)
     return found
+
+
+OMITTED = {
+    "einops": "vendored maths helpers pocket_tts imports nowhere on the inference path",
+    "fastapi": "upstream's HTTP server, which this repository does not run",
+    "uvicorn": "the server that serves that server",
+    "typer": "upstream's command-line interface",
+    "python-multipart": "form parsing for the server",
+}
+"""Declared dependencies this closure deliberately does not ship, and why.
+
+Every one of them is reachable only from ``pocket_tts/main.py``, which is
+upstream's CLI and server; section 23.1 says the closure is the smallest tested
+*inference-complete* one, and none of these is on the import path Voice Chat
+uses. Written down as a table rather than left as an absence, so that a
+dependency which quietly stopped being optional shows up as a name that is not
+in here instead of as a silent omission.
+"""
+
+
+def _requirements_met(entries: tuple, releases: dict, minors: tuple, say) -> None:
+    """Does every pinned version satisfy every other pinned package's requirement?
+
+    The check this tool was missing, and the failure it exists for is a real
+    one: pinning ``pydantic`` beside a ``typing-extensions`` that predated it
+    produced a closure where every wheel downloaded, every hash matched, every
+    file unpacked, and ``import pocket_tts`` then died on ``cannot import name
+    'Sentinel' from 'typing_extensions'``. Nothing before this point could have
+    caught it, because every individual pin was real.
+
+    It resolves nothing -- that is still the property this whole design
+    protects. It reads what each publisher *declares* about the others and
+    checks the written-down list against it, which is a different thing from
+    asking an installer to choose. A version that fails here is a version a
+    person has to change in the manifest, and the message says which one and
+    what it has to satisfy.
+
+    Markers are evaluated once per advertised Python, because a dependency can
+    be conditional on the minor -- Torch asks for ``setuptools`` on 3.12 and
+    later and not before -- and a closure that satisfies three of four minors is
+    a closure that fails on somebody's machine and nobody else's.
+    """
+    try:
+        from packaging.requirements import Requirement
+        from packaging.utils import canonicalize_name
+        from packaging.version import Version
+    except ImportError:
+        raise PinError(
+            "this check needs the 'packaging' library to read what each publisher "
+            "declares about the others (pip install packaging). It is not optional: "
+            "without it this tool can pin a closure whose wheels all verify and which "
+            "cannot import.") from None
+
+    pinned = {canonicalize_name(name): (name, version) for name, version, _kind in entries}
+    trouble = []
+    for name, version, _kind in entries:
+        declared = (releases[(name, version)]["info"].get("requires_dist") or [])
+        for raw in declared:
+            try:
+                need = Requirement(raw)
+            except Exception:
+                say(f"  ! {name} {version} declares {raw!r}, which this tool cannot read")
+                continue
+            wanted = canonicalize_name(need.name)
+            for python in minors:
+                if need.marker is not None and not need.marker.evaluate({
+                        "extra": "", "os_name": "nt", "sys_platform": "win32",
+                        "platform_system": "Windows", "platform_machine": "AMD64",
+                        "implementation_name": "cpython", "python_version": python,
+                        "python_full_version": f"{python}.0"}):
+                    continue
+                if wanted not in pinned:
+                    if wanted in OMITTED:
+                        continue
+                    trouble.append(f"{name} {version} needs {need} on Python {python}, "
+                                   f"and the closure does not ship it. Add it, or add it "
+                                   f"to OMITTED with the reason it is not needed.")
+                    break
+                have = Version(pinned[wanted][1])
+                if not need.specifier.contains(have, prereleases=True):
+                    trouble.append(f"{name} {version} needs {need} on Python {python}, "
+                                   f"and the closure pins {pinned[wanted][0]} "
+                                   f"{pinned[wanted][1]}.")
+                    break
+    if trouble:
+        raise PinError("this closure cannot install as written:\n    "
+                       + "\n    ".join(sorted(set(trouble))))
+    say(f"  every pin satisfies every other pin's declared requirement on Python "
+        f"{', '.join(minors)}")
 
 
 def _complete(declared: list) -> bool:
