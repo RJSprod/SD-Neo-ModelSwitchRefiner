@@ -21,3 +21,9 @@ model_chain_voice/
 # reason the Kokoro ones are untracked: they are a property of a machine that
 # could reach the publishers.
 voice/managed-sopro-models.local.json
+
+# PocketTTS artifact pins recorded by mc_voice_models at install time, for the
+# same reason the Kokoro and Sopro ones are untracked: a digest nobody committed
+# is a property of the machine that fetched it, and recording it in the tracked
+# manifest would turn every later pull into a merge conflict full of hashes.
+voice/managed-pocket-models.local.json

@@ -2977,18 +2977,20 @@ is anything you or the model said.
 bundle ships, chosen in Settings and auditioned there. On Linux, an optional
 offline cloning tool can add your own.
 
-**And there is a second engine, if you want one.** Sopro V2 Turbo is an
-optional text-to-speech engine that makes a voice from five to twenty seconds of
-you talking — no training job, no separate cloning tool, and about a minute on a
-Windows CPU from pressing record to hearing yourself read a reply. It installs
-itself, runs in a PyTorch runtime of its own that never touches Kokoro's or
-Forge's, and is CPU-only like everything else here.
+**And there are two more engines, if you want one.** Sopro V2 Turbo makes a
+voice from five to twenty seconds of you talking — no training job, no separate
+cloning tool, and about a minute on a Windows CPU from pressing record to
+hearing yourself read a reply. **PocketTTS** is the third: a streaming CPU model
+that ships with reviewed official voices and clones from a shorter recording,
+with the cloning half behind an upstream access gate you accept yourself. Both
+install themselves, run in PyTorch runtimes of their own that never touch
+Kokoro's, each other's or Forge's, and are CPU-only like everything else here.
 
 One engine speaks at a time. Choosing one changes which voice settings appear
-everywhere — this page, the Voice menu, every character — and the other engine's
-controls are *gone from the page* rather than hidden on it. Its voices, default
-and per-character settings are kept exactly as they were and come back when you
-choose it again. Dictation is not part of the choice: Whisper has its own model
+everywhere — this page, the Voice menu, every character — and the other engines'
+controls are *gone from the page* rather than hidden on it. Their voices,
+defaults and per-character settings are kept exactly as they were and come back
+when you choose one again. Dictation is not part of the choice: Whisper has its own model
 and its own process, and switching engines does not reload it or touch your
 microphone settings.
 
@@ -3126,10 +3128,10 @@ applies to the next one rather than switching voices mid-sentence.
 
 ### Sopro V2: making a voice from a recording
 
-**Settings → Voice Chat → Text-to-speech engine** has two cards. Choosing
-**Sopro V2** replaces every Kokoro control on the page with Sopro's, cancels any
-speech, and unloads whichever engine was resident — so the one you are not using
-costs nothing but disk.
+**Settings → Voice Chat → Text-to-speech engine** has three cards. Choosing
+**Sopro V2** replaces every other engine's control on the page with Sopro's,
+cancels any speech, and unloads whichever engine was resident — so the ones you
+are not using cost nothing but disk.
 
 You can choose it before installing it. That is the state in which its own page
 explains itself and offers **Install Sopro**: about 141 MB of pinned wheels
@@ -3190,6 +3192,66 @@ character and no voice file. The sliders are numbered rather than named, and
 they stay numbered until repeatable listening tests across several voices
 justify names — naming them now would be inventing a product claim about eight
 numbers nobody has characterised.
+
+### PocketTTS, and the one thing its Stop cannot promise
+
+**PocketTTS** is the third card in *Settings → Voice Chat → Text-to-speech
+engine*. Choosing it replaces every other engine's control on the page with
+Pocket's, cancels any speech, and unloads whichever engine was resident.
+
+It arrives with voices, which Sopro does not: the public model repository ships
+precomputed official voice states, installed locally and never fetched again, so
+a fresh installation can speak the moment it finishes downloading. **Clone
+voice** is separate, because Pocket's cloning-capable weights are a *different*
+upstream repository behind an access gate — you accept its conditions on the
+publisher's page with your own account and start the WebUI with `HF_TOKEN` in
+its environment, and then it is one Install button like everything else. Without
+that, official voices still work and the clone panel tells you what is missing
+rather than offering a button that cannot work. Your token is read from the
+environment, sent only to the publisher, removed before the signed download
+redirect, and never written anywhere.
+
+**Speed, Pitch, Volume and Pause are Voice Chat's**, exactly as they are on
+Sopro, because the reviewed Pocket API has no speaking-rate input either.
+*Variation* is Pocket's own sampling temperature: higher values vary one take
+more, lower values are more repeatable, and it is **not** an emotion, warmth or
+energy control — the model has no such input. Left alone it follows the model's
+own recommendation.
+
+**Precision and Generation quality are engine-wide**, not per character. They
+change how the runtime executes, so changing one stops the worker and the next
+reply starts it again. Neither precision claims to be the faster one until it
+has been measured on real hardware; the turn summary in `model_chain.log`
+reports the real-time factor either way. There is no thread control, and the
+panel says why: PocketTTS sets its own CPU thread policy internally, and a
+slider that set `OMP_NUM_THREADS` and called it a Pocket thread count would be
+telling you something untrue.
+
+**And then there is Stop.** On Kokoro and on Sopro, Stop cancels: playback stops
+and the synthesis is abandoned. Released PocketTTS cannot do that safely — its
+generation runs on threads of its own, abandoning it leaves them running, and
+its model is documented as not thread-safe, so beginning the next sentence while
+the last one is still alive would be wrong. Upstream is working on it and has
+not merged it, and this extension does not ship a private copy of somebody
+else's unfinished patch.
+
+So on PocketTTS, Stop means **stop what I am hearing now**. The browser goes
+silent immediately, exactly as on the other two. What is different is that the
+one sentence already inside the model finishes on its own, silently, with
+everything it produces thrown away — and while that lasts the Play control says
+*Voice finishing…* and will not start anything new. It clears when the engine
+actually reports it is free, never on a timer. Everything the reply had not
+started yet is dropped, so what you wait for is one sentence rather than the
+rest of the answer.
+
+Kokoro and Sopro never show that state. When Pocket gains cooperative
+cancellation upstream and this extension adopts a reviewed release, the wait
+simply gets much shorter and nothing else about it changes.
+
+Custom Pocket voices keep the recording they were made from, and their prepared
+data is stored per model — so changing the model or the precision does not
+destroy the version that worked, and **Rebuild** makes a new one from the
+recording you already gave it.
 
 ### From an Android phone
 
@@ -3600,9 +3662,17 @@ mc_voice_sopro.py     Sopro: install, status, voice library, clone transaction
 mc_voice_sopro_runtime.py  the Sopro worker process, and the same five exits again
 mc_voice_sopro_profile.py  Sopro's delivery, and which half of it is Sopro's own
 mc_voice_lab.py       the experimental Lab, and why it cannot become a setting
-sopro_worker/worker.py     the Sopro sidecar: the only file that imports Torch
+sopro_worker/worker.py     the Sopro sidecar, and one of two that import Torch
 voice/managed-sopro-models.json  the pinned Sopro closure (data only)
 tools/pin_sopro_models.py  resolves that closure from PyPI (maintainers only)
+
+mc_voice_pocket.py    PocketTTS: install, five readiness states, clone transaction
+mc_voice_pocket_runtime.py  the Pocket worker process, and the drain that is its Stop
+mc_voice_pocket_profile.py  Pocket's delivery, and the one control that is Pocket's
+pocket_worker/worker.py    the Pocket sidecar, in a Torch that is not Sopro's
+mc_voice_reference.py the shared reference decoder, so two engines cannot drift
+voice/managed-pocket-models.json  the Pocket closure and its voices (data only)
+tools/pin_pocket_models.py  resolves that closure from PyPI (maintainers only)
 mc_creative_krea.py   Creative Mode: settings, roll history, one roll
 mc_creative_panel.py  the Creative control surface, built once for both surfaces
 mc_creative_profiles.py    named Creative configurations and the chosen default

@@ -1013,10 +1013,15 @@ class TestTheEngineRoute:
         monkeypatch.setattr(runtime, "load", lambda: loaded.append("load") or {"loaded": True})
         monkeypatch.setattr(runtime, "unload",
                             lambda reason="": loaded.append("unload") or {"loaded": False})
+        # ``engine_state``, not ``engine``. ``engine`` has been the selected
+        # engine's *id* in every payload since the scoping filter was written;
+        # this assertion was left behind by that change and had been red ever
+        # since, invisibly, because it only runs where FastAPI is installed.
         assert client.post(api.RUNTIME_ROUTE, headers=key,
-                           json={"action": "load"}).json()["engine"]["loaded"] is True
+                           json={"action": "load"}).json()["engine_state"]["loaded"] is True
         assert client.post(api.RUNTIME_ROUTE, headers=key,
-                           json={"action": "unload"}).json()["engine"]["loaded"] is False
+                           json={"action": "unload"}).json()["engine_state"]["loaded"] \
+            is False
         assert loaded == ["load", "unload"]
 
     def test_an_unknown_action_is_refused(self, client, key):
@@ -1034,8 +1039,12 @@ class TestTheEngineRoute:
 
     def test_the_status_route_carries_live_engine_state(self, client, key, installed):
         found = client.post(api.STATUS_ROUTE, headers=key).json()
-        assert set(found["engine"]) >= {"loaded", "state", "provider"}
-        assert found["engine"]["loaded"] is False
+        # ``engine`` is the id; ``engine_state`` is the residency object the
+        # Voice flyout draws. One key, one meaning -- and this assertion still
+        # named the old one.
+        assert found["engine"] == "kokoro"
+        assert set(found["engine_state"]) >= {"loaded", "state", "provider"}
+        assert found["engine_state"]["loaded"] is False
         assert "pid" not in json.dumps(found["engine"])
 
 
@@ -1054,13 +1063,15 @@ class TestVoiceManagement:
         found = client.post(api.VOICES_ROUTE, headers=key, json={}).json()
         accents = {entry["accent"] for entry in found["voices"]}
         assert accents == {"American English", "British English"}
-        assert found["default"] == "official:af_heart"
+        # Backend-qualified, as every id in a payload has been since there was
+        # more than one engine to own one.
+        assert found["default"] == "kokoro:official:af_heart"
 
     def test_setting_a_default_takes_and_is_reported_back(self, client, key,
                                                           voice_registry, kokoro_bundle):
         found = client.post(api.VOICE_DEFAULT_ROUTE, headers=key,
                             json={"voice": "official:bf_emma"}).json()
-        assert found["default"] == "official:bf_emma"
+        assert found["default"] == "kokoro:official:bf_emma"
 
     def test_renaming_or_deleting_an_official_voice_is_refused(self, client, key,
                                                                voice_registry,
@@ -1449,3 +1460,228 @@ class TestTheCompletedReplyPathSpeaksAsTheRightVoice:
         client.post(api.TTS_ROUTE, headers=key, json={"token": token})
         assert seen["profile"]["speed"] == 1.4
         assert seen["profile"]["pitch"] == -2.0
+
+
+# --------------------------------------------------------------------------- #
+# The active-engine routes
+# --------------------------------------------------------------------------- #
+
+
+class TestTheGenericCloneAndSettingsRoutes:
+    """Section 30. One set of routes for every engine that has a clone
+    transaction, rather than a second parallel forest per engine."""
+
+    def test_they_are_registered(self, app):
+        paths = {route.path for route in app.routes}
+        for route in api.POCKET_ROUTES:
+            assert route in paths, route
+
+    def test_sopros_own_routes_are_still_registered(self, app):
+        """A transition nobody can take incrementally is not a transition. The
+        browser calls these today and an external caller may still call them."""
+        paths = {route.path for route in app.routes}
+        for route in api.SOPRO_ROUTES:
+            assert route in paths, route
+
+    def test_a_request_naming_an_engine_that_is_not_selected_is_a_mismatch(
+            self, client, key, host):
+        """The one refusal a page reacts to structurally rather than by showing
+        a message: its whole document belongs to an engine that is no longer
+        selected (section 5)."""
+        import mc_voice_engines as engines
+
+        engines.select("kokoro")
+        found = client.post(api.ENGINE_SETTINGS_ROUTE,
+                            json={"engine": "pocket", "values": {"steps": 3}},
+                            headers=key)
+        assert found.status_code == 409
+        assert found.json()["engine_mismatch"] is True
+
+    def test_an_engine_without_the_capability_is_refused_rather_than_failing(
+            self, client, key, host):
+        """Kokoro has no engine settings and its cloning has a window of its
+        own. Asking anyway gets a sentence and a 409, not a 500."""
+        import mc_voice_engines as engines
+
+        engines.select("kokoro")
+        found = client.post(api.ENGINE_SETTINGS_ROUTE, json={"values": {"steps": 3}},
+                            headers=key)
+        assert found.status_code == 409
+        assert "Kokoro" in found.json()["error"]
+        found = client.post(api.CLONE_SAVE_ROUTE, json={"token": "x"}, headers=key)
+        assert found.status_code == 409
+
+    def test_a_setting_this_engine_does_not_have_is_refused(self, client, key, host,
+                                                            voice_root):
+        import mc_voice_engines as engines
+
+        engines.select("pocket")
+        found = client.post(api.ENGINE_SETTINGS_ROUTE,
+                            json={"values": {"threads": 8}}, headers=key)
+        assert found.status_code == 400
+        assert "threads" in found.json()["error"]
+
+    def test_a_pocket_setting_reaches_pockets_own_file(self, client, key, host,
+                                                       voice_root, monkeypatch):
+        import mc_voice_engines as engines
+        import mc_voice_pocket as pocket
+
+        engines.select("pocket")
+        monkeypatch.setattr(pocket, "_retire", lambda reason: None)
+        found = client.post(api.ENGINE_SETTINGS_ROUTE,
+                            json={"values": {"steps": 3, "precision": "int8"}},
+                            headers=key)
+        assert found.status_code == 200
+        assert found.json()["settings"]["steps"] == 3
+        assert pocket.steps() == 3
+        assert pocket.precision() == "int8"
+
+
+class TestOneAdapterSignatureIsReadRatherThanGuessedAt:
+    """Section 30's shim, and the one way it could go wrong.
+
+    Sopro's ``prepare_preview`` takes a language hint and Pocket's does not,
+    because Pocket's model *is* the language. Which of the two an adapter has is
+    read off its signature -- not found out by calling it and catching
+    ``TypeError``, because a ``TypeError`` raised inside a preparation is
+    indistinguishable from one raised by the call.
+    """
+
+    def test_the_fuller_call_is_made_when_the_adapter_takes_it(self):
+        seen = []
+
+        class Adapter:
+            def prepare_preview(self, name, wav, language=""):
+                seen.append((name, wav, language))
+                return {"token": "t"}
+
+        api._prepare_preview(Adapter(), "A Voice", b"RIFF", "en")
+        assert seen == [("A Voice", b"RIFF", "en")]
+
+    def test_the_shorter_call_is_made_when_it_does_not(self):
+        seen = []
+
+        class Adapter:
+            def prepare_preview(self, name, wav):
+                seen.append((name, wav))
+                return {"token": "t"}
+
+        api._prepare_preview(Adapter(), "A Voice", b"RIFF", "en")
+        assert seen == [("A Voice", b"RIFF")]
+
+    def test_a_type_error_from_inside_does_not_run_the_preparation_twice(self):
+        """The bug this replaced. Sopro's third parameter is defaulted, so the
+        fuller call always binds and the fallback could only ever be reached by
+        a ``TypeError`` thrown from *inside* -- a decoder handed a shape it
+        could not take. Retrying on that is a second worker round trip, a second
+        staging directory, and a refusal from the retry rather than from the
+        thing that actually went wrong."""
+        calls = []
+
+        class Adapter:
+            def prepare_preview(self, name, wav, language=""):
+                calls.append(language)
+                raise TypeError("cannot multiply a bytes-like by a float")
+
+        with pytest.raises(TypeError):
+            api._prepare_preview(Adapter(), "A Voice", b"RIFF", "en")
+        assert calls == ["en"], calls
+
+    def test_an_adapter_with_no_readable_signature_gets_the_fuller_call(self):
+        """A C builtin or something exotic is taken at its word rather than
+        refused: the shim's job is to pick a call, not to vet a callable."""
+        seen = []
+
+        class Adapter:
+            prepare_preview = staticmethod(
+                lambda *arguments: seen.append(arguments) or {"token": "t"})
+
+        api._prepare_preview(Adapter(), "A Voice", b"RIFF", "en")
+        assert seen == [("A Voice", b"RIFF", "en")]
+
+
+class TestThePocketRoutes:
+    def test_the_status_route_is_refused_while_another_engine_is_selected(
+            self, client, key, host):
+        import mc_voice_engines as engines
+
+        engines.select("sopro")
+        found = client.post(api.POCKET_ROUTE, json={}, headers=key)
+        assert found.status_code == 409
+        assert found.json()["engine_mismatch"] is True
+
+    def test_the_status_route_reports_the_five_states_and_what_stop_means(
+            self, client, key, host, voice_root):
+        import mc_voice_engines as engines
+
+        engines.select("pocket")
+        found = client.post(api.POCKET_ROUTE, json={}, headers=key)
+        assert found.status_code == 200
+        payload = found.json()
+        for name in ("platform_supported", "runtime_ready", "speech_model_ready",
+                     "official_voices_ready", "cloning_ready", "interrupt_mode",
+                     "draining", "engine_busy", "pinned"):
+            assert name in payload, name
+        assert payload["interrupt_mode"] == "drain_unit"
+        assert payload["draining"] is False
+
+    def test_the_status_route_carries_no_path(self, client, key, host, voice_root):
+        import mc_voice_engines as engines
+        import mc_voice_paths as paths
+
+        engines.select("pocket")
+        found = client.post(api.POCKET_ROUTE, json={}, headers=key)
+        assert str(paths.data_root()) not in found.text
+
+    def test_an_install_that_this_build_will_not_start_is_refused_with_its_reason(
+            self, client, key, host, voice_root, monkeypatch):
+        """A managed install this build cannot vouch for is refused before a
+        thread starts, so the sentence reaches the browser waiting for it."""
+        import mc_voice_engines as engines
+        import mc_voice_pocket as pocket
+
+        engines.select("pocket")
+        monkeypatch.setattr(pocket, "refusal",
+                            lambda manual=False: "PocketTTS says no, for a reason.")
+        found = client.post(api.POCKET_INSTALL_ROUTE, json={}, headers=key)
+        assert found.status_code == 409
+        assert found.json()["error"] == "PocketTTS says no, for a reason."
+
+    def test_no_status_route_starts_an_install_or_a_worker(self, client, key, host,
+                                                           voice_root, monkeypatch):
+        """Section 17, at the route a browser polls."""
+        import mc_voice_engines as engines
+        import mc_voice_pocket_runtime as pocket_runtime
+
+        engines.select("pocket")
+        monkeypatch.setattr(pocket_runtime, "ensure_started",
+                            lambda: pytest.fail("a status read started a worker"))
+        assert client.post(api.POCKET_ROUTE, json={}, headers=key).status_code == 200
+        assert client.post(api.STATUS_ROUTE, json={}, headers=key).status_code == 200
+
+
+class TestTheStatusPayloadTellsTheBrowserWhatStopMeans:
+    """I-PKT-28. The browser draws its playback state from what the engine
+    declares, never from a version string it recognised."""
+
+    def test_every_engine_reports_an_interrupt_mode_and_a_drain_flag(self, client, key,
+                                                                     host, voice_root):
+        import mc_voice_engines as engines
+
+        for engine, mode in (("kokoro", "cancel"), ("sopro", "cancel"),
+                             ("pocket", "drain_unit")):
+            engines.select(engine)
+            found = client.post(api.STATUS_ROUTE, json={}, headers=key).json()
+            assert found["interrupt_mode"] == mode, engine
+            assert found["draining"] is False, engine
+            assert "engine_busy" in found, engine
+
+    def test_the_inactive_engines_block_is_still_absent(self, client, key, host,
+                                                        voice_root):
+        import mc_voice_engines as engines
+
+        engines.select("pocket")
+        found = client.post(api.STATUS_ROUTE, json={}, headers=key).json()
+        assert "pocket" in found
+        assert "sopro" not in found
+        assert "kokoro" not in found

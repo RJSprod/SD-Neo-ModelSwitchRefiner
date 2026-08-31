@@ -109,6 +109,13 @@ def resolve(voice_id: str = "") -> tuple:
     # round trip, and stripped by :mod:`mc_voice_api` before anything is sent
     # to a browser -- see :func:`mc_voice_api._public`.
     found["_sid"] = int(sid)
+    # And under the name every engine's entry answers to. ``_handle`` is what
+    # the shared turn carries and what the runtime is handed, and it is opaque
+    # above this line on purpose: Kokoro's is an integer speaker in a block of
+    # floats, Sopro's and Pocket's are their own stable ids, and no shared
+    # caller may branch on which (I-10, section 8). ``_sid`` stays beside it
+    # because Kokoro's own tests and telemetry name the number.
+    found["_handle"] = int(sid)
     return found["id"], found
 
 
@@ -172,6 +179,76 @@ class _Status:
         self.ready = bool(ready)
         self.message = str(message or "")
         self.label = str(label or LABEL)
+
+
+def capabilities() -> dict:
+    """What Kokoro can do, as behaviour rather than decoration. Section 8.
+
+    Almost nothing, and that is the honest answer: Kokoro's cloning is a
+    separate offline tool with a window of its own rather than a preview
+    transaction on this page, it has no engine-global compute settings a user
+    may change, and it has no Lab. What it does have is real cancellation, which
+    is the one capability the shared Stop path reads.
+    """
+    return {"clone_preview": False, "rebuild": False, "engine_settings": False,
+            "starter_voices": False, "voice_lab": False, "interrupt_mode": "cancel"}
+
+
+def refusals() -> tuple:
+    """The exception types this adapter raises to *refuse* rather than fail.
+
+    Both of them, because a Kokoro voice operation can be refused from either
+    side of the boundary: this module refuses an id that is not Kokoro's, and
+    the registry underneath refuses a voice that does not exist or a bank that
+    has never been built. Declared here so that the facade asks the engine
+    rather than deciding that "not Sopro" means the Kokoro registry -- which was
+    true while there were two engines and is not a rule that survives a third.
+    """
+    return (KokoroError, registry.RegistryError)
+
+
+def public_status() -> dict:
+    """Kokoro's operational state, in the shape every engine answers with.
+
+    The common subset section 31 asks for -- installed, ready, message, whether
+    a worker is resident, whether the lane is occupied, whether it is draining,
+    and what Stop means -- plus ``block``, which is the engine-owned part the
+    status payload publishes under this engine's own id.
+
+    ``draining`` is always False here and is present rather than absent on
+    purpose: a browser reads one field to decide whether to draw a waiting
+    state, and a key that exists on one engine and not another is a key every
+    caller has to guess about.
+    """
+    found = status()
+    resident = False
+    try:
+        import mc_voice_runtime as runtime
+
+        resident = bool((runtime.engine() or {}).get("loaded"))
+    except Exception:
+        logger.debug("Model Chain: could not read whether the Kokoro worker is resident",
+                     exc_info=True)
+    import mc_voice_models as models
+
+    whole = models.status()
+    return {
+        "installed": found.ready,
+        # Two readinesses, because Kokoro's engine block has always carried
+        # two and they are not the same question. ``ready`` is whether Voice
+        # Chat as a whole is set up -- runtime, speech-to-text and
+        # text-to-speech -- which is what the browser draws its "not set up"
+        # state from; ``tts_ready`` is this engine's own half. Collapsing them
+        # made a machine with no Whisper report itself ready.
+        "ready": whole.ready,
+        "tts_ready": found.ready,
+        "message": found.message,
+        "worker_resident": resident,
+        "engine_busy": False,
+        "draining": False,
+        "interrupt_mode": "cancel",
+        "block": {"installed": found.ready, "message": found.message},
+    }
 
 
 def _mine(voice_id: str) -> None:

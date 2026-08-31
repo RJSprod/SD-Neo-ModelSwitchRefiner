@@ -308,7 +308,15 @@ class TestMetrics:
                               "ready_wait_1_ms",
                               "segment_2_chars", "segment_2_ms", "segment_2_first_block_ms",
                               "segment_2_callback_blocks", "segment_2_audio_ms",
-                              "ready_wait_2_ms"}
+                              "ready_wait_2_ms",
+                              # What Stop cost, on an engine where Stop is not
+                              # free. Numbers only, and here for the same reason
+                              # every other field is: named deliberately, so a
+                              # drain measurement cannot arrive in a log by
+                              # accident (I-PKT-11, section 36).
+                              "interrupt_mode", "interrupted", "stop_to_silence_ms",
+                              "stop_to_ready_ms", "interrupted_unit_chars",
+                              "interrupted_unit_audio_ms", "discarded_chunks"}
 
     def test_a_clone_is_categorised_without_naming_itself(self):
         turn = turns.create(voice_id="clone:1234", sid=53, speaker=Speaker())

@@ -124,6 +124,40 @@ SOPRO_REFERENCE_FILENAME = "reference.wav"
 SOPRO_PRODUCTION_FILENAME = "production.safetensors"
 SOPRO_PRODUCTION_META = "production.json"
 SOPRO_LAB_FILENAME = "lab-conditioning.safetensors"
+
+POCKET_DIRNAME = "pocket"
+POCKET_WORKER_DIRNAME = "pocket_worker"
+POCKET_MANIFEST_FILENAME = "managed-pocket-models.json"
+POCKET_REGISTRY_FILENAME = "registry.json"
+POCKET_SETTINGS_FILENAME = "settings.json"
+POCKET_OFFICIAL_DIRNAME = "official"
+POCKET_CLONES_DIRNAME = "clones"
+POCKET_PREVIEW_DIRNAME = "preview"
+POCKET_STATES_DIRNAME = "states"
+POCKET_REFERENCE_FILENAME = "reference.wav"
+POCKET_METADATA_FILENAME = "metadata.json"
+POCKET_PREVIEW_STATE_FILENAME = "state.safetensors"
+POCKET_STATE_SUFFIX = ".safetensors"
+POCKET_CONFIG_FILENAME = "model.local.yaml"
+"""The generated local Pocket config, written by the installer and read by the
+worker. Its whole reason for existing is that upstream's own config accepts
+``hf://`` and ``https://`` locations and this one does not: every path in it
+points at a file the parent already verified (I-PKT-20, section 25).
+
+Upstream's own schema, because upstream is what opens it: ``TTSModel.load_model``
+takes a path to a YAML document and refuses a suffix that is not ``.yaml`` or
+``.yml``. It is written as JSON, which is a subset of YAML and which this
+repository has a writer for."""
+
+POCKET_UPSTREAM_CONFIG_FILENAME = "model.upstream.json"
+"""PocketTTS's own shipped configuration for this model, exactly as it ships it.
+
+Copied out of the installed wheel at install time -- it describes the model's
+architecture, and a transcription of it into this repository's manifest would be
+a transcription that has to be updated whenever a model revision changes a layer
+count, and that nothing would notice going stale. Kept beside the generated
+config so that installing the gated half later can rewrite one location without
+starting a runtime to read the other twenty again."""
 """Sopro's whole subtree, under one directory of its own.
 
 A sibling of ``runtime/`` and ``models/`` rather than a set of files mixed into
@@ -362,6 +396,166 @@ def sopro_voices_root() -> Path:
 
 def sopro_registry_path() -> Path:
     return sopro_voices_root() / SOPRO_REGISTRY_FILENAME
+
+
+# --------------------------------------------------------------------------- #
+# Pocket
+# --------------------------------------------------------------------------- #
+#
+# A root of its own beside Sopro's rather than a subdirectory of it, and no
+# helper below reaches into another engine's tree. That is I-PKT-3 as a
+# filesystem fact: deleting a Pocket voice cannot touch a Sopro file, because
+# there is no expression here that names one.
+
+
+def pocket_root() -> Path:
+    """Everything Pocket owns, under one directory. Nothing else writes here."""
+    return data_root() / POCKET_DIRNAME
+
+
+def pocket_runtime_root() -> Path:
+    """The isolated Torch/Pocket closure.
+
+    A third interpreter, and deliberately not Sopro's. Both are PyTorch and that
+    is the argument *against* sharing rather than for it: two engines pinned to
+    one Torch build would make either engine's upgrade the other engine's
+    regression, and the worker isolation this feature promises is a closure
+    boundary rather than a directory naming convention (I-PKT-6, section 46).
+    """
+    return pocket_root() / RUNTIME_DIRNAME
+
+
+def pocket_runtime_manifest() -> Path:
+    return pocket_runtime_root() / INSTALLED_FILENAME
+
+
+def pocket_models_root() -> Path:
+    return pocket_root() / MODELS_DIRNAME
+
+
+def pocket_model_root(identifier: str) -> Path:
+    """One installed Pocket model bundle. ``identifier`` is checked, not trusted."""
+    return _contained(pocket_models_root(), identifier)
+
+
+def pocket_model_config(identifier: str) -> Path:
+    """The local-only config the worker loads for one model. Section 25."""
+    return pocket_model_root(identifier) / POCKET_CONFIG_FILENAME
+
+
+def pocket_upstream_config(identifier: str) -> Path:
+    """PocketTTS's own configuration for one model, as the wheel shipped it."""
+    return pocket_model_root(identifier) / POCKET_UPSTREAM_CONFIG_FILENAME
+
+
+def pocket_official_root(model_id: str = "") -> Path:
+    """The precomputed official voice states, per model.
+
+    Per model because an official voice state is model-specific data (section
+    39): the same voice prepared for two model revisions is two artifacts, and a
+    layout that had one file per voice would either overwrite the state that
+    worked or load one into a model it does not fit.
+    """
+    root = pocket_root() / POCKET_OFFICIAL_DIRNAME
+    return _contained(root, model_id) if model_id else root
+
+
+def pocket_official_file(model_id: str, voice: str) -> Path:
+    return _contained(pocket_official_root(model_id), f"{_uuid(voice)}{POCKET_STATE_SUFFIX}")
+
+
+def pocket_staging_root() -> Path:
+    return pocket_root() / STAGING_DIRNAME
+
+
+def pocket_staging_for(identifier: str, nonce: str) -> Path:
+    return _contained(pocket_staging_root(), f"{identifier}-{nonce}")
+
+
+def pocket_worker_script() -> Path:
+    """The Pocket sidecar entry point, inside the extension rather than the data root.
+
+    Its own file rather than a mode of the Sopro worker, for the reason Sopro's
+    is not a mode of Kokoro's: the two are launched by different interpreters
+    out of different closures, and a single script would be one file that has to
+    be importable under both -- one import away from a Pocket runtime reaching
+    for Sopro's Torch or the reverse.
+    """
+    return extension_root() / POCKET_WORKER_DIRNAME / "worker.py"
+
+
+def pocket_manifest_path() -> Path:
+    """The checked-in trust root for every Pocket artifact this build may fetch."""
+    return extension_root() / MANIFEST_DIRNAME / POCKET_MANIFEST_FILENAME
+
+
+def pocket_registry_path() -> Path:
+    """Which Pocket voices exist and which is the default."""
+    return pocket_root() / POCKET_REGISTRY_FILENAME
+
+
+def pocket_settings_path() -> Path:
+    """How the Pocket engine runs. A different file from the registry on purpose.
+
+    "Which voice" and "how the engine executes" have different invalidation
+    behaviour -- changing precision invalidates warmed state and may invalidate
+    a derived voice state, while renaming a voice invalidates nothing -- and one
+    file holding both would be one file rewritten for either (section 11).
+    """
+    return pocket_root() / POCKET_SETTINGS_FILENAME
+
+
+def pocket_clones_root() -> Path:
+    return pocket_root() / POCKET_CLONES_DIRNAME
+
+
+def pocket_clone_root(identifier: str) -> Path:
+    """One saved custom voice's directory, named by its server-minted UUID."""
+    return _contained(pocket_clones_root(), _uuid(identifier))
+
+
+def pocket_clone_file(identifier: str, name: str) -> Path:
+    return _contained(pocket_clone_root(identifier), name)
+
+
+def pocket_clone_states_root(identifier: str) -> Path:
+    """Where one clone's derived states live, one per model fingerprint.
+
+    ``states/<fingerprint>.safetensors`` rather than ``voice.safetensors`` at the
+    clone root, and section 39 gives the whole reason: a model switch must not
+    overwrite the only state that worked with the old model, and must not load a
+    state into an incompatible model because the filename happened to exist.
+    """
+    return pocket_clone_root(identifier) / POCKET_STATES_DIRNAME
+
+
+def pocket_clone_state(identifier: str, fingerprint: str) -> Path:
+    return _contained(pocket_clone_states_root(identifier),
+                      f"{_uuid(fingerprint)}{POCKET_STATE_SUFFIX}")
+
+
+def pocket_preview_root() -> Path:
+    """Unsaved clone previews. Temporary product state, never a voice."""
+    return pocket_root() / POCKET_PREVIEW_DIRNAME
+
+
+def pocket_preview_dir(token: str) -> Path:
+    return _contained(pocket_preview_root(), _uuid(token))
+
+
+def pocket_inside(candidate) -> bool:
+    """Whether ``candidate`` is under the Pocket subtree.
+
+    Read before every delete, for the reason :func:`sopro_inside` is: a voice
+    deletion has to prove every path it is about to remove resolves under *this*
+    engine's root, and I-PKT-3 makes that a cross-engine promise as well as a
+    containment one -- deleting a Pocket voice may not reach a Sopro file.
+    """
+    try:
+        Path(candidate).resolve().relative_to(pocket_root())
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------- #

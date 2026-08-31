@@ -99,6 +99,16 @@
         soproRebuild: "model-chain/voice/sopro/rebuild",
         soproStarter: "model-chain/voice/sopro/starter",
         soproValidate: "model-chain/voice/sopro/validate",
+        // The engine-neutral half. Every one of these carries the engine id the
+        // surface was drawn for, so a page built before somebody switched is
+        // refused with a 409 it reloads on rather than applied to whichever
+        // engine is selected now (section 30, section 31).
+        engineSettings: "model-chain/voice/engine/settings",
+        clonePreview: "model-chain/voice/clone/preview",
+        cloneSave: "model-chain/voice/clone/save",
+        cloneDiscard: "model-chain/voice/clone/discard",
+        pocket: "model-chain/voice/pocket",
+        pocketInstall: "model-chain/voice/pocket/install",
         cleanup: "model-chain/voice/cleanup",
         cleanupInstall: "model-chain/voice/cleanup/install",
         cleanupRun: "model-chain/voice/cleanup/run",
@@ -142,6 +152,13 @@
     const STREAM_SILENCE_MS = 30000;
 
     const MESSAGES = {
+        // The one sentence an engine whose Stop is not a cancellation needs.
+        // It says what actually happened -- playback has stopped -- before it
+        // says what is still going on, because "finishing" on its own reads as
+        // "still talking" to somebody who has just pressed Stop and heard
+        // silence (section 21.4).
+        finishing: "Playback has stopped. The voice engine is finishing the current "
+                   + "speech unit before it can speak again.",
         notReady: "Voice Chat is not set up. Install both models in Settings → Voice Chat.",
         denied: "Microphone access was not allowed by the browser or device.",
         notFound: "No microphone is available.",
@@ -741,6 +758,11 @@
             started: false,
             underruns: 0,
             ended: false,
+            // What Stop means on this turn's engine, read off the stream
+            // header. "cancel" until the header says otherwise, so a build or a
+            // proxy that drops it behaves exactly as every engine did before
+            // this existed.
+            interrupt: "cancel",
             pending: [],
             pendingSeconds: 0,
             draining: false,
@@ -837,10 +859,15 @@
     // those paths deliberately fire together.
     function stopSpeaking(alsoTellServer, reason) {
         const turnId = speech ? speech.id : "";
+        const mode = speech ? speech.interrupt : "";
         stopPlayback();
         speech = null;
         setVoiceBusy(false);
         if (alsoTellServer !== false) tellServerToStop(turnId, reason);
+        // Silence first, always, on every engine. Only then ask whether this
+        // one has anything left to finish -- because the answer must never be
+        // able to delay the thing the user actually pressed the button for.
+        if (turnId) noticeTheEngineMayStillBeFinishing(mode);
     }
 
     function play(buffer) {
@@ -1027,6 +1054,11 @@
                                       || "24000", 10) || 24000;
                 const stamped = response.headers.get("X-Model-Chain-Voice-Turn");
                 if (stamped && stamped !== turnId) throw new Error("turn");
+                // What Stop will mean on *this* reply, from the engine it was
+                // frozen onto rather than from whichever is selected by the
+                // time somebody presses the button.
+                state.interrupt = response.headers.get("X-Model-Chain-Voice-Interrupt")
+                    || "cancel";
                 return pump(state, response.body.getReader(), rate);
             });
         }).catch(function (error) {
@@ -1750,6 +1782,85 @@
 
     function busy() {
         return llmBusy() || voiceBusy;
+    }
+
+    // -- the engine that cannot cancel ---------------------------------------- //
+
+    // Some text-to-speech engines abandon their synthesis when Stop is pressed
+    // and some cannot. Released PocketTTS is the second kind: its generation
+    // runs on threads of its own and its model is not thread-safe, so the unit
+    // already inside it finishes silently before anything else may start.
+    //
+    // The browser is told which by the *status payload* -- `interrupt_mode`,
+    // `draining` and `engine_busy` -- and never by recognising an engine id or
+    // a version string (I-PKT-28). That matters beyond tidiness: the day a
+    // build ships with cooperative cancellation is the day a hard-coded rule
+    // here becomes a waiting state nobody can clear.
+    let finishing = false;
+    let finishingTimer = 0;
+
+    function setFinishing(value) {
+        const wanted = !!value;
+        if (finishing === wanted) return;
+        finishing = wanted;
+        const chip = byId(IDS.chip);
+        if (chip) {
+            if (wanted) chip.classList.add("mc-voice-finishing");
+            else chip.classList.remove("mc-voice-finishing");
+            if (wanted) {
+                // `aria-busy` for the machine and `title` for the pointer. The
+                // sentence itself goes to the status line, which is already a
+                // live region -- so a screen reader hears it announced rather
+                // than having to go looking for it. The chip's own label is
+                // left alone: replacing it would trade a permanent name for a
+                // temporary state.
+                chip.setAttribute("aria-busy", "true");
+                chip.setAttribute("title", MESSAGES.finishing);
+            } else {
+                chip.removeAttribute("aria-busy");
+                chip.removeAttribute("title");
+            }
+        }
+        if (wanted) say(MESSAGES.finishing, "info");
+    }
+
+    // Polled rather than assumed, and cleared only by the server saying the
+    // engine's lane is free -- never by a timer. A waiting state that cleared
+    // itself would be a waiting state that let a second generation start inside
+    // a process where the first was still running (I-PKT-13).
+    function watchForTheEngineToFinish(attempt) {
+        window.clearTimeout(finishingTimer);
+        if (attempt > 240) {
+            // Twenty minutes of asking. Something is wrong that polling will
+            // not fix, and the server has its own failsafe for it; leaving the
+            // indicator on forever would be this page lying about a state it
+            // stopped being able to observe.
+            setFinishing(false);
+            return;
+        }
+        finishingTimer = window.setTimeout(function () {
+            refreshStatus(true).then(function (payload) {
+                if (!payload || !payload.ok) {
+                    setFinishing(false);
+                    return null;
+                }
+                if (!payload.draining) {
+                    setFinishing(false);
+                    return null;
+                }
+                setFinishing(true);
+                watchForTheEngineToFinish(attempt + 1);
+                return null;
+            }).catch(function () { setFinishing(false); });
+        }, attempt === 0 ? 120 : 500);
+    }
+
+    // Called from every stop path. An engine that cancels answers `cancel` and
+    // nothing below happens at all, which is why Kokoro and Sopro never show
+    // this and never poll for it.
+    function noticeTheEngineMayStillBeFinishing(mode) {
+        if (!mode || mode === "cancel") return;
+        watchForTheEngineToFinish(0);
     }
 
     function setVoiceBusy(value) {
@@ -2691,12 +2802,19 @@
         const turnId = fieldValue(IDS.turn);
         if (turnId && turnId !== lastTurn) {
             lastTurn = turnId;
+            // A *new* turn means the server let one start, which means the lane
+            // was free. Cleared here rather than on every pass of this
+            // function: this runs on the poll, and clearing unconditionally
+            // would take the indicator down again a few hundred milliseconds
+            // after every Stop that put it up.
+            setFinishing(false);
             speakTurn(turnId);
             return;
         }
         const token = fieldValue(IDS.token);
         if (!token || token === lastToken) return;
         lastToken = token;
+        setFinishing(false);
         speakCompleted(token);
     }
 
@@ -3051,8 +3169,8 @@
         // once to a route that would refuse it.
         Array.prototype.forEach.call(
             holder.querySelectorAll("[data-mc-voice-local]"), function (button) {
-                if ((button.getAttribute("data-mc-voice-local") || "")
-                        .indexOf("sopro-") === 0) {
+                const own = button.getAttribute("data-mc-voice-local") || "";
+                if (own.indexOf("sopro-") === 0 || own.indexOf("pocket-") === 0) {
                     return;
                 }
                 button.addEventListener("click", function (event) {
@@ -3077,6 +3195,7 @@
         wireTiers(holder);
         wireEngineSelector(holder);
         wireSopro(holder);
+        wirePocket(holder);
         wireCleanup(holder);
         wireValidate(holder);
         schedulePaint(holder, 0);
@@ -3426,6 +3545,137 @@
         if (!payload.platform_supported) return payload.runtime_message || "";
         if (payload.installed) return "Installed.";
         return payload.runtime_message || payload.model_message || "";
+    }
+
+    // -- PocketTTS ------------------------------------------------------------- //
+    //
+    // Its own wiring rather than a third branch inside Sopro's, and its own
+    // route: the generic `[data-mc-voice-install]` handler posts a *kind* to
+    // Kokoro's install route, and this engine installs four separate parts
+    // through a route of its own. That is exactly how the cleanup row and the
+    // engine selector each came to be drawn, styled, routed and completely
+    // unwired -- everything present, and pressing the button doing nothing at
+    // all, with no request and no log line to diagnose.
+
+    let pocketTimer = 0;
+
+    function wirePocket(holder) {
+        const row = holder.querySelector('[data-mc-voice-kind="pocket"]');
+        if (!row || row.dataset.mcVoiceWired === "1") return;
+        row.dataset.mcVoiceWired = "1";
+
+        const install = row.querySelector("[data-mc-voice-pocket-install]");
+        if (install) {
+            install.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                install.disabled = true;
+                post(ROUTES.pocketInstall, {}, holder).then(function (payload) {
+                    if (payload && payload.error) {
+                        install.disabled = false;
+                        setText(row, '[data-mc-voice-status="pocket"]', payload.error);
+                        return;
+                    }
+                    pollPocket(holder, row, 1200);
+                });
+            });
+        }
+
+        // The manual half, four parts of it. `startInstall` speaks Kokoro's
+        // install route and this one takes a part name, so these buttons are
+        // handled here and skipped by the generic handler above -- attaching
+        // both would post every folder twice, once to a route that would
+        // refuse it.
+        Array.prototype.forEach.call(
+            holder.querySelectorAll('[data-mc-voice-local^="pocket-"]'), function (button) {
+                button.addEventListener("click", function (event) {
+                    if (event.preventDefault) event.preventDefault();
+                    const kind = button.getAttribute("data-mc-voice-local") || "";
+                    const scope = button.getAttribute("data-mc-voice-scope") || kind;
+                    const box = holder.querySelector(
+                        '[data-mc-voice-folder="' + cssEscape(scope) + '"]');
+                    const folder = box ? (box.value || "").trim() : "";
+                    if (!folder) {
+                        setText(row, '[data-mc-voice-status="pocket"]',
+                                "Type the folder the downloaded files are in, then press "
+                                + "this again.");
+                        return;
+                    }
+                    button.disabled = true;
+                    post(ROUTES.pocketInstall,
+                         {part: kind.slice("pocket-".length), folder: folder},
+                         holder).then(function (payload) {
+                        button.disabled = false;
+                        if (payload && payload.error) {
+                            setText(row, '[data-mc-voice-status="pocket"]', payload.error);
+                            return;
+                        }
+                        pollPocket(holder, row, 1200);
+                    });
+                });
+            });
+
+        // Precision, generation quality and the model, through the neutral
+        // engine-settings route. The select's own attribute is the *wire* name
+        // for that setting -- a stable vocabulary the server translates into
+        // whatever its adapter calls the thing -- so this layer carries a value
+        // across without knowing what any of them mean.
+        const settings = row.querySelector("[data-mc-voice-pocket-settings]");
+        if (settings) {
+            settings.addEventListener("change", function (event) {
+                const select = event.target.closest("[data-mc-voice-pocket-setting]");
+                if (!select) return;
+                const values = {};
+                values[select.getAttribute("data-mc-voice-pocket-setting")] = select.value;
+                post(ROUTES.engineSettings,
+                     {engine: engineOf(holder), values: values}, holder)
+                    .then(function (payload) { paintPocket(row, payload); });
+            });
+        }
+        whenOnScreen(row, function () { pollPocket(holder, row, 0); });
+    }
+
+    function engineOf(holder) {
+        return (holder && holder.getAttribute("data-mc-voice-engine-id")) || "";
+    }
+
+    function pollPocket(holder, row, delay) {
+        window.clearTimeout(pocketTimer);
+        pocketTimer = window.setTimeout(function () {
+            post(ROUTES.pocket, {}, holder).then(function (payload) {
+                paintPocket(row, payload);
+                const progress = payload && payload.progress && payload.progress.pocket;
+                // Only while something is running, for the reason the Sopro row
+                // gives: a permanent poll on a settings page is a request a
+                // second for as long as the tab stays open.
+                if (progress && progress.running) pollPocket(holder, row, 1200);
+            }).catch(function () { /* the next paint tries again */ });
+        }, Math.max(0, delay || 0));
+    }
+
+    function paintPocket(row, payload) {
+        if (!row || !payload || !payload.ok) return;
+        const progress = (payload.progress && payload.progress.pocket) || {};
+        setText(row, '[data-mc-voice-status="pocket"]',
+                progress.running ? progress.text
+                    : (progress.failed && progress.text) || payload.message || "");
+        // Four lines rather than one, because Pocket has five readinesses and
+        // "Installed" is not a useful answer to somebody whose speech works and
+        // whose Clone button does not (section 24).
+        setText(row, "[data-mc-voice-pocket-runtime]", payload.runtime_message);
+        setText(row, "[data-mc-voice-pocket-model]", payload.model_message);
+        setText(row, "[data-mc-voice-pocket-cloning]", payload.cloning_message);
+        setText(row, "[data-mc-voice-pocket-voices]",
+                payload.platform_supported
+                    ? (payload.official_voices_ready
+                        ? "Installed — PocketTTS's reviewed official voices."
+                        : "Not installed — until they are, PocketTTS can only speak "
+                          + "with voices you cloned yourself.")
+                    : payload.model_message);
+        const install = row.querySelector("[data-mc-voice-pocket-install]");
+        if (install) {
+            install.disabled = !!progress.running || !payload.platform_supported;
+            install.textContent = payload.installed ? "Installed" : "Install PocketTTS";
+        }
     }
 
     // The poll used to be a fixed 1.5 seconds, forever, whatever happened. On a
@@ -4118,6 +4368,7 @@
             // Kokoro page rather than branches on the engine -- absence is the
             // scoping (section 5).
             wireSoproClone(holder);
+            wirePocketClone(holder);
             wireLab(holder);
         });
     }
@@ -5235,8 +5486,16 @@
 
     const SOPRO_MAX_SECONDS = 20;
 
+    // Whichever engine's clone form this is. The capture itself is neither
+    // engine's -- one microphone, one recorder, one WAV -- so the only thing
+    // that differs is where the caption goes.
+    function recordingNote(form) {
+        return form ? form.querySelector("[data-mc-voice-sopro-recording],"
+                                         + "[data-mc-voice-pocket-recording]") : null;
+    }
+
     function startSoproRecording(form, button) {
-        const note = form.querySelector("[data-mc-voice-sopro-recording]");
+        const note = recordingNote(form);
         if (capture) {
             if (note) note.textContent = "The microphone is already in use for dictation.";
             return;
@@ -5262,7 +5521,7 @@
     }
 
     function stopSoproRecording(form, button) {
-        const note = form.querySelector("[data-mc-voice-sopro-recording]");
+        const note = recordingNote(form);
         const state = soproRecorder;
         soproRecorder = null;
         button.textContent = "Record here";
@@ -5476,6 +5735,194 @@
 
     function labPanel(holder) {
         return holder ? holder.querySelector("[data-mc-voice-lab]") : null;
+    }
+
+    // -- PocketTTS: making a voice from a recording ---------------------------- //
+    //
+    // The same workspace as Sopro's and deliberately not a copy of its wiring:
+    // the trimmer, the recorder and the WAV encoder are engine-neutral and are
+    // reused as they are, and what is Pocket's here is the three requests --
+    // preview, save, discard -- which go to the engine-neutral `/clone/*`
+    // routes carrying the engine id this document was drawn for.
+    //
+    // Nothing is registered by a preview. Create builds the voice, reads a line
+    // back and stops; Save is what writes it and Discard is what removes it,
+    // recording and all. Create that had already written the registry entry
+    // would make listening a receipt rather than a decision (section 26.2).
+
+    let pocketPreview = null;
+
+    function pocketForm(holder) {
+        return holder ? holder.querySelector("[data-mc-voice-pocket-form]") : null;
+    }
+
+    function wirePocketClone(holder) {
+        const form = pocketForm(holder);
+        if (!form || form.dataset.mcVoiceWired === "1") return;
+        form.dataset.mcVoiceWired = "1";
+
+        const say = function (text) {
+            const status = holder.querySelector("[data-mc-voice-pocket-clone-status]");
+            if (status) status.textContent = text || "";
+        };
+
+        const record = form.querySelector("[data-mc-voice-pocket-record]");
+        if (record) {
+            record.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                if (soproRecorder) {
+                    stopSoproRecording(form, record);
+                    return;
+                }
+                startSoproRecording(form, record);
+            });
+        }
+        const file = form.querySelector("[data-mc-voice-pocket-file]");
+        if (file) {
+            file.addEventListener("change", function () {
+                const chosen = file.files && file.files[0];
+                if (!chosen) return;
+                loadSoproClip(form, chosen, chosen.name || "that file");
+            });
+        }
+        const create = form.querySelector("[data-mc-voice-pocket-create]");
+        if (create) {
+            create.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                createPocketVoice(holder, form, create, say);
+            });
+        }
+
+        const preview = holder.querySelector("[data-mc-voice-pocket-preview]");
+        if (preview) {
+            const play = preview.querySelector("[data-mc-voice-pocket-preview-play]");
+            if (play) {
+                play.addEventListener("click", function (event) {
+                    if (event.preventDefault) event.preventDefault();
+                    playPocketPreview();
+                });
+            }
+            const save = preview.querySelector("[data-mc-voice-pocket-preview-save]");
+            if (save) {
+                save.addEventListener("click", function (event) {
+                    if (event.preventDefault) event.preventDefault();
+                    if (!pocketPreview) return;
+                    save.disabled = true;
+                    post(ROUTES.cloneSave,
+                         {token: pocketPreview.token, engine: engineOf(holder)}, holder)
+                        .then(function (payload) {
+                            save.disabled = false;
+                            if (!payload || !payload.ok) {
+                                // Left exactly where it is. A save the server
+                                // refused has not thrown the preview away, and
+                                // clearing the row would lose a voice that is
+                                // still on disk waiting to be kept.
+                                say((payload && payload.error)
+                                    || "That voice could not be saved.");
+                                return;
+                            }
+                            pocketPreview = null;
+                            showPocketPreview(holder, form);
+                            say("Saved.");
+                            applyVoices(holder, payload);
+                        }).catch(function () {
+                            save.disabled = false;
+                            say("That voice could not be saved.");
+                        });
+                });
+            }
+            const discard = preview.querySelector("[data-mc-voice-pocket-preview-discard]");
+            if (discard) {
+                discard.addEventListener("click", function (event) {
+                    if (event.preventDefault) event.preventDefault();
+                    const token = pocketPreview ? pocketPreview.token : "";
+                    // Cleared here whatever the server says. Discard is the
+                    // user's decision and a directory this page cannot see is
+                    // not a reason to leave a preview on screen.
+                    pocketPreview = null;
+                    showPocketPreview(holder, form);
+                    say("Discarded.");
+                    post(ROUTES.cloneDiscard, {token: token, engine: engineOf(holder)},
+                         holder).catch(function () { /* nothing was registered */ });
+                });
+            }
+        }
+        wireTrim(form, holder);
+    }
+
+    function showPocketPreview(holder, form) {
+        const row = holder.querySelector("[data-mc-voice-pocket-preview]");
+        if (!row) return;
+        row.hidden = !pocketPreview;
+        const note = row.querySelector("[data-mc-voice-pocket-preview-note]");
+        if (note) {
+            note.textContent = pocketPreview
+                ? ("“" + pocketPreview.name + "” is ready to listen to. "
+                   + "It is not saved yet.")
+                : "";
+        }
+        if (!pocketPreview && form) {
+            const trim = form.querySelector("[data-mc-voice-trim]");
+            if (trim) trim.hidden = true;
+        }
+    }
+
+    function playPocketPreview() {
+        if (!pocketPreview || !pocketPreview.audio) return;
+        unlock();
+        play(base64ToBuffer(pocketPreview.audio)).catch(function () { /* silent */ });
+    }
+
+    function createPocketVoice(holder, form, button, say) {
+        const name = form.querySelector("[data-mc-voice-pocket-name]");
+        if (!name || !(name.value || "").trim()) {
+            say("Give the voice a name.");
+            return;
+        }
+        if (clipDuration() <= 0) {
+            say("Choose an audio file or record something first.");
+            return;
+        }
+        const wav = clipToWav();
+        if (!wav) {
+            say("That selection is empty.");
+            return;
+        }
+        button.disabled = true;
+        say("Preparing the voice…");
+        const body = new FormData();
+        body.append("name", name.value);
+        // No language field. The PocketTTS model is the language and it is
+        // engine-global, so there is nothing per voice to send.
+        body.append("engine", engineOf(holder));
+        body.append("reference", new Blob([wav], {type: "audio/wav"}), "reference.wav");
+        fetch(url(ROUTES.clonePreview), {
+            method: "POST",
+            credentials: "same-origin",
+            headers: headers({}, holder),
+            body: body,
+        }).then(refused).then(function (response) {
+            return response.json();
+        }).then(function (payload) {
+            button.disabled = false;
+            if (!payload || !payload.ok) {
+                say((payload && payload.error) || "That voice could not be created.");
+                return;
+            }
+            // The name, the file and the selection all stay where they are: the
+            // next thing that happens may well be "no, try a different ten
+            // seconds", and a form that emptied itself would make trying again
+            // mean starting again.
+            pocketPreview = {token: payload.token || "",
+                             name: payload.name || name.value,
+                             audio: payload.audio || ""};
+            say("Ready. Listen, then Save voice or Discard.");
+            showPocketPreview(holder, form);
+            playPocketPreview();
+        }).catch(function () {
+            button.disabled = false;
+            say("That voice could not be created.");
+        });
     }
 
     function wireLab(holder) {

@@ -152,6 +152,38 @@ SOPRO_STARTER_ROUTE = f"{PREFIX}/sopro/starter"
 SOPRO_VALIDATE_ROUTE = f"{PREFIX}/sopro/validate"
 SOPRO_SAVE_ROUTE = f"{PREFIX}/sopro/save"
 SOPRO_DISCARD_ROUTE = f"{PREFIX}/sopro/discard"
+ENGINE_SETTINGS_ROUTE = f"{PREFIX}/engine/settings"
+CLONE_PREVIEW_ROUTE = f"{PREFIX}/clone/preview"
+CLONE_SAVE_ROUTE = f"{PREFIX}/clone/save"
+CLONE_DISCARD_ROUTE = f"{PREFIX}/clone/discard"
+CLONE_REBUILD_ROUTE = f"{PREFIX}/clone/rebuild"
+"""The active-engine clone transaction, in one set of routes for every engine
+that has one.
+
+The repository already had generic voice routes and a Sopro-shaped parallel
+forest beside them, and a third engine is where a second forest becomes a
+third. Each request names the engine the surface was rendered for, the server
+checks it against the selected one before mutating anything, and the work goes
+to that engine's adapter (section 30).
+
+Sopro's own routes stay registered and unchanged. They are what the browser
+called until this existed and what an external caller may still call, and a
+transition that broke them to prove a point would be a transition nobody could
+take incrementally.
+"""
+
+POCKET_ROUTE = f"{PREFIX}/pocket"
+POCKET_INSTALL_ROUTE = f"{PREFIX}/pocket/install"
+"""Pocket's install and status, which are its own rather than generic.
+
+Installation is not a capability every engine shares in a common shape: Kokoro
+ships with the WebUI's own model bundle, Sopro installs a runtime and a model,
+and Pocket installs a runtime, a model, a set of official voice states and --
+if an upstream access gate allows it -- a set of cloning weights. Section 30 is
+explicit that operations with no meaning on another engine are not generalised
+for symmetry.
+"""
+
 CLEANUP_ROUTE = f"{PREFIX}/cleanup"
 CLEANUP_INSTALL_ROUTE = f"{PREFIX}/cleanup/install"
 CLEANUP_RUN_ROUTE = f"{PREFIX}/cleanup/run"
@@ -180,11 +212,22 @@ SOPRO_ROUTES = (ENGINES_ROUTE, ENGINE_SELECT_ROUTE, SURFACE_ROUTE,
                 CLEANUP_ROUTE, CLEANUP_INSTALL_ROUTE, CLEANUP_RUN_ROUTE,
                 LAB_ROUTE, LAB_UPDATE_ROUTE, LAB_RESET_ROUTE, LAB_PLAY_ROUTE)
 
+POCKET_ROUTES = (ENGINE_SETTINGS_ROUTE, CLONE_PREVIEW_ROUTE, CLONE_SAVE_ROUTE,
+                 CLONE_DISCARD_ROUTE, CLONE_REBUILD_ROUTE, POCKET_ROUTE,
+                 POCKET_INSTALL_ROUTE)
+"""What the third engine added, named so the idempotency check below sees them.
+
+``install`` refuses to register anything when every path in :data:`ROUTES` is
+already present, so a route that is not in that tuple is a route a UI reload
+never gains.
+"""
+
 ROUTES = (STATUS_ROUTE, STT_ROUTE, TTS_ROUTE, INSTALL_ROUTE, MODELS_ROUTE, PROFILE_ROUTE,
           STREAM_ROUTE, CANCEL_ROUTE, TELEMETRY_ROUTE,
           RUNTIME_ROUTE, VOICES_ROUTE, VOICE_DEFAULT_ROUTE, VOICE_TEST_ROUTE,
           VOICE_RENAME_ROUTE, VOICE_DELETE_ROUTE, CLONING_INSTALL_ROUTE,
-          CLONING_STATUS_ROUTE, CLONING_START_ROUTE, CLONING_ABORT_ROUTE) + SOPRO_ROUTES
+          CLONING_STATUS_ROUTE, CLONING_START_ROUTE,
+          CLONING_ABORT_ROUTE) + SOPRO_ROUTES + POCKET_ROUTES
 
 TOKEN_HEADER = "x-model-chain-voice"
 
@@ -615,53 +658,46 @@ def status_payload() -> dict:
 def _engine_block(active: str) -> dict:
     """The active TTS engine's operational state, and only that engine's.
 
-    Both branches answer the same four questions -- is it installed, what does
-    it say about that, is a worker resident, and which voice speaks next -- so
-    every surface that draws them is engine-neutral above this line and engine-
-    specific below it.
+    Every engine answers the same six questions -- is it installed, what does it
+    say about that, is a worker resident, is its lane occupied, is it draining an
+    abandoned unit, and what does Stop mean on it -- and answers them through
+    :func:`public_status`, which is the engine's own function. This used to be a
+    branch that meant "Sopro, or else Kokoro"; a third engine is where an
+    ``else`` like that stops being a shortcut and starts reporting one engine's
+    readiness under another engine's name (I-PKT-30, section 31).
+
+    What is built here rather than asked for is the part that is not the
+    engine's to answer: which voice speaks next and what has been changed about
+    its delivery are questions about the *selected* engine's registry and
+    profile, and both already resolve through the facade.
     """
     import mc_voice_engines as engines
 
-    if active == engines.SOPRO:
-        import mc_voice_sopro as sopro
-        import mc_voice_sopro_runtime as sopro_runtime
-
-        found = sopro.status()
-        return {
-            "ready": found.ready,
-            "tts_ready": found.ready,
-            "tts_message": found.message,
-            # ``engine_state``, not ``engine``. ``engine`` is the selected
-            # engine's *id* in every payload this feature sends, and it used to
-            # be this residency object in the status payload alone -- so the
-            # scoping filter, which sets ``engine`` to the id, silently replaced
-            # the Voice flyout's Loaded/Unloaded line with the string "sopro".
-            # One key, one meaning.
-            "engine_state": sopro_runtime.engine(),
-            "voice": _default_voice(),
-            "delivery": _delivery_summary(),
-            "sopro": {
-                "installed": found.ready,
-                "runtime_ready": found.runtime_ready,
-                "model_ready": found.model_ready,
-                "runtime_message": found.runtime_message,
-                "model_message": found.model_message,
-                "platform_supported": found.platform_supported,
-                "fingerprint": found.fingerprint,
-                "settings": sopro.engine_settings(),
-                "defaults": sopro_runtime.defaults(),
-                "warnings": sopro.warnings(),
-            },
-        }
-    found = models.status()
+    adapter = engines.adapter(active)
+    found = adapter.public_status()
     return {
-        "ready": found.ready,
-        "tts_ready": found.tts_ready,
-        "tts_message": found.tts_message,
-        "engine_state": runtime.engine(),
+        "ready": found["ready"],
+        "tts_ready": found["tts_ready"],
+        "tts_message": found["message"],
+        # ``engine_state``, not ``engine``. ``engine`` is the selected engine's
+        # *id* in every payload this feature sends, and it used to be this
+        # residency object in the status payload alone -- so the scoping filter,
+        # which sets ``engine`` to the id, silently replaced the Voice flyout's
+        # Loaded/Unloaded line with the string "sopro". One key, one meaning.
+        "engine_state": engines.runtime(active).engine(),
         "voice": _default_voice(),
         "delivery": _delivery_summary(),
-        "kokoro": {"installed": found.tts_ready, "message": found.tts_message},
+        # Neutral, and present on every engine rather than only on the one that
+        # needs them. The browser draws its playback state from these three and
+        # never from a version string or an engine id (I-PKT-28, section 31):
+        # ``interrupt_mode`` says what Stop promises, ``draining`` says whether
+        # an abandoned unit is still being consumed, and ``engine_busy`` says
+        # whether the inference lane is free to start something new.
+        "interrupt_mode": found["interrupt_mode"],
+        "draining": bool(found["draining"]),
+        "engine_busy": bool(found["engine_busy"]),
+        "worker_resident": bool(found["worker_resident"]),
+        active: found["block"],
     }
 
 
@@ -931,13 +967,12 @@ def speak(token: str) -> bytes:
                            f"read aloud.")
     voice_id, entry = _resolve_target(found, wanted)
     try:
-        if wanted == engines.SOPRO:
-            import mc_voice_sopro_runtime as sopro_runtime
-
-            audio = sopro_runtime.synthesize(text, voice_id, profile=found.get("profile"))
-        else:
-            audio = runtime.synthesize(text, sid=int(entry.get("_sid") or 0),
-                                       profile=found.get("profile"))
+        # One call, through the facade, with the engine's own opaque handle.
+        # There used to be a branch here that meant "Sopro, or else Kokoro",
+        # and a third engine is exactly where an ``else`` like that starts
+        # speaking the wrong voice (I-PKT-30, section 8).
+        audio = engines.runtime(wanted).synthesize(text, entry.get("_handle"),
+                                                   profile=found.get("profile"))
     except Exception as exc:
         if isinstance(exc, Refused):
             raise
@@ -1005,6 +1040,13 @@ def stream_headers(turn) -> dict:
         "Pragma": "no-cache",
         "X-Model-Chain-Voice-Rate": str(int(turn.sample_rate or 24000)),
         "X-Model-Chain-Voice-Turn": str(turn.id),
+        # What Stop means on the engine *this turn* was frozen onto, which is
+        # the only place the browser can learn it without a round trip and the
+        # only place it is guaranteed to still be true: the mode is frozen with
+        # the engine, the voice and the profile, so a switch mid-reply cannot
+        # change what stopping this reply costs (I-PKT-10, I-PKT-28).
+        "X-Model-Chain-Voice-Interrupt": str(getattr(turn, "interrupt_mode", "")
+                                             or "cancel"),
         # nginx and several reverse proxies buffer a response whole unless told
         # not to, which would deliver every sample at once at the end -- the
         # exact failure section 40 says must not be silently called streaming.
@@ -1188,22 +1230,23 @@ def voices_payload(test_text=None, engine: str = "") -> dict:
 def _clone_hints(active: str) -> dict:
     """What the clone form should suggest, from the engine rather than a guess.
 
-    Empty for an engine that has nothing to say, which is the ordinary case:
-    Kokoro's cloning path has its own window and does not go through here.
+    Asked of the adapter, which is optional about answering: an engine with
+    nothing to say does not define ``clone_hints`` and gets an empty mapping,
+    which is the ordinary case for Kokoro -- its cloning path has a window of
+    its own and does not go through here.
+
+    Read every time rather than cached, and never hardcoded in the page,
+    because the ideal reference length is a release measurement (GATE
+    P-CLONE-1) and a number baked into JavaScript is a number that goes stale
+    the first time somebody measures it.
     """
     import mc_voice_engines as engines
 
-    if active != engines.SOPRO:
-        return {}
     try:
-        import mc_voice_sopro as sopro
-        import mc_voice_sopro_runtime as sopro_runtime
-
-        return {"min_seconds": sopro.MIN_REFERENCE_SECONDS,
-                "max_seconds": sopro.MAX_REFERENCE_SECONDS,
-                "ideal_seconds": sopro_runtime.defaults().get("ref_seconds") or 0}
+        hints = getattr(engines.adapter(active), "clone_hints", None)
+        return dict(hints() or {}) if callable(hints) else {}
     except Exception:
-        logger.debug("Model Chain: could not read the Sopro clone hints", exc_info=True)
+        logger.debug("Model Chain: could not read %s's clone hints", active, exc_info=True)
         return {}
 
 
@@ -1307,13 +1350,11 @@ def test_voice(voice_id: str, text: str = "", profile=None, engine: str = "") ->
             raise Refused(400, "That is not a delivery profile.")
         delivery = profiles.resolve(profile)
     try:
-        if active == engines.SOPRO:
-            import mc_voice_sopro_runtime as sopro_runtime
-
-            audio = sopro_runtime.synthesize(wanted, resolved, profile=delivery)
-        else:
-            audio = runtime.synthesize(wanted, sid=int(entry.get("_sid") or 0),
-                                       profile=delivery)
+        # The active engine's runtime, and the entry's own opaque handle. An
+        # audition that went through a branch naming one engine would be an
+        # audition a third engine could never reach (section 32).
+        audio = engines.runtime(active).synthesize(wanted, entry.get("_handle"),
+                                                   profile=delivery)
     except Exception as exc:
         raise Refused(503, str(exc) or "That voice could not be auditioned.") from None
     logger.info("Model Chain: a voice was auditioned on %s — %d characters, %d bytes of "
@@ -1621,6 +1662,286 @@ def sopro_validate(start: bool = False) -> dict:
     return {"ok": True, "already": False, "running": True, "done": False,
             "step": 0, "total": 0, "rows": [], "error": "",
             "message": "Starting…", "best": None}
+
+
+# --------------------------------------------------------------------------- #
+# The active engine's own settings and clone transaction
+# --------------------------------------------------------------------------- #
+
+
+def _capable(active: str, capability: str, what: str):
+    """The active engine's adapter, or an ordinary refusal naming what it lacks.
+
+    A capability an engine does not have is a *state* rather than a fault
+    (section 30): Kokoro has no engine settings and its cloning is a separate
+    window, and a browser that asked anyway gets a sentence and a 409 rather
+    than a traceback and a 500.
+    """
+    import mc_voice_engines as engines
+
+    if not engines.capabilities(active).get(capability):
+        raise Refused(409, f"{engines.label(active)} does not {what}.")
+    return engines.adapter(active)
+
+
+def engine_settings(values: dict = None, engine: str = "") -> dict:
+    """Change the active engine's global runtime settings, whatever they are.
+
+    One route for every engine that has any, because "which settings" is the
+    engine's question and "may this page still change them" is this layer's.
+    The values are passed through as keyword arguments the adapter validates
+    against its own explicit choices -- a number a browser invented never
+    becomes a generation policy (section 33).
+
+    A change that needs a model reload stops that engine's worker. That is a
+    lifecycle restart rather than a Stop, so it does not wait for Pocket's drain
+    (section 21.6), and it starts nothing: the next speech, test or preview
+    does.
+    """
+    import mc_voice_engines as engines
+
+    active = _active(engine)
+    adapter = _capable(active, "engine_settings", "have engine settings")
+    apply = getattr(adapter, "apply_engine_settings", None)
+    if apply is None:
+        raise Refused(409, f"{engines.label(active)} does not have engine settings.")
+    try:
+        found = apply(dict(values or {}))
+    except engines.refusals(active) as exc:
+        # A control this engine does not have, or a value it will not believe.
+        # Both are stale surfaces rather than faults: the page was drawn for a
+        # build whose panel is not this one's.
+        raise Refused(400, str(exc) or "That setting could not be changed.") from None
+    logger.info("Model Chain: a %s engine setting was changed", engines.label(active))
+    return {"ok": True, "engine": active, "settings": found,
+            **_engine_payload(active)}
+
+
+def clone_preview(name: str, wav: bytes, engine: str = "", language: str = "") -> dict:
+    """Build a voice on the active engine and audition it, without saving it.
+
+    The transaction section 26 describes, routed rather than reimplemented: the
+    adapter validates the name and the recording, mints its own directory,
+    prepares, exports, reads back and auditions -- and registers nothing. What
+    comes back is a token and the audition that exact preparation produced.
+
+    ``language`` is carried because Sopro takes one and is ignored by an engine
+    that does not. Generalising the *route* is not the same as pretending every
+    engine has the same parameters (section 30).
+    """
+    import mc_voice_engines as engines
+
+    active = _active(engine)
+    adapter = _capable(active, "clone_preview", "make a voice from a recording here")
+    if len(wav or b"") > MAX_REFERENCE_BYTES:
+        raise Refused(413, "That recording is too large.")
+    try:
+        made = _prepare_preview(adapter, name, wav, language)
+    except engines.refusals(active) as exc:
+        logger.warning("Model Chain: a %s voice preview was refused — %s",
+                       engines.label(active), exc)
+        raise Refused(400, str(exc)) from None
+    return {"ok": True, "engine": active, "token": made.get("token") or "",
+            "name": made.get("name") or "", "seconds": made.get("seconds") or 0,
+            "audio": base64.b64encode(made.get("audio") or b"").decode("ascii"),
+            "clone": _clone_hints(active)}
+
+
+def _accepts(call, *arguments) -> bool:
+    """Whether this callable can be called with exactly these arguments.
+
+    Asked of the signature rather than found out by calling: a ``TypeError``
+    raised *inside* a function is indistinguishable from one raised by calling
+    it with the wrong number of arguments, and the two want opposite handling.
+    A callable whose signature cannot be read at all -- a C builtin, something
+    exotic -- is taken at its word rather than refused.
+    """
+    import inspect
+
+    try:
+        inspect.signature(call).bind(*arguments)
+    except TypeError:
+        return False
+    except Exception:
+        logger.debug("Model Chain: could not read a voice adapter's signature",
+                     exc_info=True)
+    return True
+
+
+def _prepare_preview(adapter, name: str, wav: bytes, language: str):
+    """``prepare_preview`` on whichever signature this adapter has.
+
+    Sopro's takes a language hint and Pocket's does not, because Pocket's model
+    *is* the language and it is engine-global. Asked of the signature rather
+    than branched on by engine id, so a fourth engine with a third signature is
+    a third answer here and not a fourth branch (section 30).
+
+    Not a call wrapped in ``except TypeError``, which is what this was. Sopro's
+    third parameter is defaulted, so the fuller call always binds and the
+    fallback could only ever be reached by a ``TypeError`` thrown from *inside*
+    a preparation -- a decoder handed a shape it could not take. Retrying on
+    that would run the whole preparation a second time: a second worker round
+    trip, a second staging directory, and a refusal message from the retry
+    rather than from the thing that actually went wrong.
+    """
+    name, wav, language = str(name or ""), bytes(wav or b""), str(language or "")
+    if _accepts(adapter.prepare_preview, name, wav, language):
+        return adapter.prepare_preview(name, wav, language)
+    return adapter.prepare_preview(name, wav)
+
+
+def clone_save(token: str, engine: str = "") -> dict:
+    """Keep the previewed voice. The only step that writes anything visible."""
+    import mc_voice_engines as engines
+
+    active = _active(engine)
+    adapter = _capable(active, "clone_preview", "make a voice from a recording here")
+    try:
+        kept = adapter.save_preview(str(token or ""))
+    except engines.refusals(active) as exc:
+        logger.warning("Model Chain: a previewed %s voice was not saved — %s",
+                       engines.label(active), exc)
+        raise Refused(400, str(exc)) from None
+    return {"ok": True, "engine": active, "voice": _public(kept["voice"]),
+            **voices_payload(engine=active)}
+
+
+def clone_discard(token: str = "", engine: str = "") -> dict:
+    """Throw the previewed voice away, directory and all."""
+    import mc_voice_engines as engines
+
+    active = _active(engine)
+    adapter = _capable(active, "clone_preview", "make a voice from a recording here")
+    found = {"ok": True, "engine": active,
+             "discarded": bool(adapter.discard_preview(str(token or "")))}
+    state = getattr(adapter, "preview_state", None)
+    return {**found, **(state() if callable(state) else {})}
+
+
+def clone_rebuild(voice_id: str, engine: str = "") -> dict:
+    """Prepare a stale voice again from its retained recording.
+
+    Never automatic and never reached from a status poll: a background poll that
+    rebuilt a voice would be a poll that started a model and spent a minute of
+    somebody's CPU on a decision they did not make (I-PKT-26).
+    """
+    import mc_voice_engines as engines
+
+    active = _active(engine)
+    adapter = _capable(active, "rebuild", "rebuild a voice")
+    try:
+        made = adapter.rebuild(str(voice_id or ""))
+    except engines.refusals(active) as exc:
+        raise Refused(400, str(exc)) from None
+    return {"ok": True, "engine": active, "voice": _public(made["voice"]),
+            "audio": base64.b64encode(made.get("audio") or b"").decode("ascii"),
+            **voices_payload(engine=active)}
+
+
+def _engine_payload(active: str) -> dict:
+    """That engine's own status payload, for the panel to redraw from.
+
+    Routed rather than branched: whichever engine is selected, its own status
+    function answers, and an engine with none answers with the neutral block
+    every engine has.
+    """
+    import mc_voice_engines as engines
+
+    if active == engines.SOPRO:
+        return {"sopro": sopro_payload()}
+    if active == engines.POCKET:
+        return {"pocket": pocket_payload()}
+    return {}
+
+
+# --------------------------------------------------------------------------- #
+# PocketTTS
+# --------------------------------------------------------------------------- #
+
+
+def pocket_payload() -> dict:
+    """Everything the PocketTTS settings surface draws. Refused when it is not active.
+
+    Refused rather than returned empty, because the two are different bugs and
+    only one of them is this route's: an empty payload reads as "Pocket has
+    nothing", and a mismatch reads as "your page is out of date", which is what
+    it is.
+
+    Five readiness fields rather than one, because Pocket has five states
+    (section 24). A machine whose speech works and whose Clone button does not
+    is not "half installed"; it is a machine that has not accepted an upstream
+    licence, and the panel has to be able to say so.
+    """
+    import mc_voice_engines as engines
+    import mc_voice_pocket as pocket
+    import mc_voice_pocket_runtime as pocket_runtime
+
+    _active(engines.POCKET)
+    found = pocket.status()
+    live = pocket_runtime.status()
+    return {
+        "ok": True,
+        "engine": engines.POCKET,
+        "installed": found.ready,
+        "platform_supported": found.platform_supported,
+        "runtime_ready": found.runtime_ready,
+        "speech_model_ready": found.speech_model_ready,
+        "official_voices_ready": found.official_voices_ready,
+        "cloning_ready": found.cloning_ready,
+        "runtime_message": found.runtime_message,
+        "model_message": found.model_message,
+        "cloning_message": found.cloning_message,
+        "message": found.message,
+        "label": found.label,
+        "pinned": pocket.pinned(),
+        "model_id": found.model_id,
+        "fingerprint": found.fingerprint,
+        "download_bytes": found.download_bytes,
+        "ram_bytes": found.ram_bytes,
+        "settings": pocket.engine_settings(),
+        "defaults": pocket_runtime.defaults(),
+        "state": pocket_runtime.engine(),
+        # The three the playback control reads. Neutral names, because the
+        # browser draws a waiting state from what the engine declares rather
+        # than from a version string it recognised (I-PKT-28).
+        "interrupt_mode": live.get("interrupt_mode") or "",
+        "draining": bool(live.get("draining")),
+        "engine_busy": bool(live.get("busy")),
+        "clone": _clone_hints(engines.POCKET),
+        "sources": {"runtime": pocket.sources("runtime"),
+                    "model": pocket.sources("model"),
+                    "voices": pocket.sources("voices"),
+                    "cloning": pocket.sources("cloning")},
+        "warnings": pocket.warnings(),
+        "progress": models.progress(),
+    }
+
+
+def pocket_install(part: str = "", folder: str = "") -> dict:
+    """Install PocketTTS. One button for all of it, or one part from a folder.
+
+    Offloaded by the route in front, because this downloads a PyTorch closure
+    and builds an isolated interpreter, and neither is something to do on an
+    event loop.
+    """
+    import mc_voice_pocket as pocket
+
+    refused = pocket.refusal(manual=bool(folder))
+    if refused:
+        raise Refused(409, refused)
+    try:
+        if folder:
+            pocket.install_from(str(part or "runtime"), str(folder))
+        else:
+            pocket.install()
+    except models.Gated as exc:
+        # An access state rather than a failure. The public half may well have
+        # installed; what is missing is an acceptance somebody has to make
+        # upstream (T-INSTALL-P4).
+        raise Refused(409, str(exc)) from None
+    except pocket.PocketError as exc:
+        raise Refused(409, str(exc)) from None
+    return pocket_payload()
 
 
 def cleanup_payload() -> dict:
@@ -2342,6 +2663,23 @@ def install(_demo=None, app=None) -> bool:
             raise Refused(400, "That request did not carry a recording.") from None
         return (str(payload.get("name") or ""), str(payload.get("language") or ""), wav)
 
+    async def _form_engine(request) -> str:
+        """The engine id the surface that sent this was rendered for.
+
+        Read separately from :func:`_reference` because the two parse the same
+        body in two shapes and a function that returned four things would be a
+        function every caller unpacked wrongly once. Absent means "whatever is
+        active", which is what an in-sync page sends.
+        """
+        kind = str((getattr(request, "headers", {}) or {}).get("content-type") or "")
+        if "multipart/form-data" in kind:
+            try:
+                form = await request.form()
+            except Exception:
+                return ""
+            return str(form.get("engine") or "")
+        return ""
+
     def _json_route(route: str, call, failure: str):
         """One POST that reads a JSON body, runs off the loop, and answers JSON.
 
@@ -2398,6 +2736,93 @@ def install(_demo=None, app=None) -> bool:
         SOPRO_VALIDATE_ROUTE,
         lambda payload: sopro_validate(bool(payload.get("start"))),
         "The Sopro validation could not be run.")
+    # The active-engine routes. Each carries ``engine`` so a page drawn before
+    # somebody switched is refused with a 409 the browser reacts to by
+    # redrawing, rather than applied to whichever engine is selected now
+    # (section 30, section 31).
+    engine_settings_route = _json_route(
+        ENGINE_SETTINGS_ROUTE,
+        lambda payload: engine_settings(payload.get("values") or {},
+                                        str(payload.get("engine") or "")),
+        "That engine setting could not be changed.")
+    clone_save_route = _json_route(
+        CLONE_SAVE_ROUTE,
+        lambda payload: clone_save(str(payload.get("token") or ""),
+                                   str(payload.get("engine") or "")),
+        "That voice could not be saved.")
+    clone_discard_route = _json_route(
+        CLONE_DISCARD_ROUTE,
+        lambda payload: clone_discard(str(payload.get("token") or ""),
+                                      str(payload.get("engine") or "")),
+        "That preview could not be discarded.")
+    clone_rebuild_route = _json_route(
+        CLONE_REBUILD_ROUTE,
+        lambda payload: clone_rebuild(str(payload.get("voice") or ""),
+                                      str(payload.get("engine") or "")),
+        "That voice could not be rebuilt.")
+    pocket_status_route = _json_route(
+        POCKET_ROUTE, lambda _payload: pocket_payload(),
+        "PocketTTS's status could not be read.")
+
+    async def clone_preview_route(request: Request):
+        """The active engine's clone route. Multipart, because it carries a recording.
+
+        The same shape as Sopro's and Kokoro's, and for the same reasons: the
+        name and the engine ride beside the file so a clone is one atomic thing
+        to accept or refuse, and a reference recording is never written for a
+        job whose name was going to be rejected anyway.
+        """
+        try:
+            _checked(request, CLONE_PREVIEW_ROUTE)
+            name, language, wav = await _reference(request)
+            engine = await _form_engine(request)
+            return JSONResponse(await _offload(clone_preview, name, wav, engine, language))
+        except Refused as exc:
+            return _refusal(exc)
+        except Exception:
+            return _failed("a voice could not be created", "That voice could not be created.")
+
+    async def pocket_install_route(request: Request):
+        """Start installing PocketTTS in the background, and say so immediately.
+
+        In the background because this is a PyTorch closure plus a model plus a
+        set of voice states plus a self-test, and an HTTP request that takes
+        minutes is a request a phone's browser will give up on. Everything that
+        can be decided *before* the thread starts is decided here, so a refusal
+        the caller is waiting for reaches that caller instead of a log.
+        """
+        try:
+            _checked(request, POCKET_INSTALL_ROUTE)
+            payload = await _json(request)
+            import mc_voice_pocket as pocket
+
+            folder = str(payload.get("folder") or "").strip()
+            part = str(payload.get("part") or "").strip() or "runtime"
+            already = models.progress().get(pocket.KIND) or {}
+            if already.get("running"):
+                return JSONResponse({"ok": True, "already": True})
+            refused = pocket.refusal(manual=bool(folder))
+            if refused:
+                logger.warning("Model Chain: PocketTTS refused to install — %s", refused)
+                raise Refused(409, refused)
+        except Refused as exc:
+            return _refusal(exc)
+        except Exception:
+            return _failed("a PocketTTS install could not be started",
+                           "PocketTTS could not be installed.")
+
+        def run():
+            try:
+                pocket_install(part, folder)
+            except Exception:
+                # Already logged with its reason and already recorded where the
+                # Settings row will draw it -- see mc_voice_models._claim.
+                logger.debug("Model Chain: the PocketTTS install thread ended on an error",
+                             exc_info=True)
+
+        threading.Thread(target=run, name="mc-pocket-install", daemon=True).start()
+        return JSONResponse({"ok": True, "already": False})
+
     cleanup_status_route = _json_route(
         CLEANUP_ROUTE, lambda _payload: cleanup_payload(),
         "The recording cleanup status could not be read.")
@@ -2567,7 +2992,14 @@ def install(_demo=None, app=None) -> bool:
                               (LAB_ROUTE, lab_route),
                               (LAB_UPDATE_ROUTE, lab_update_route),
                               (LAB_RESET_ROUTE, lab_reset_route),
-                              (LAB_PLAY_ROUTE, lab_play_route)):
+                              (LAB_PLAY_ROUTE, lab_play_route),
+                              (ENGINE_SETTINGS_ROUTE, engine_settings_route),
+                              (CLONE_PREVIEW_ROUTE, clone_preview_route),
+                              (CLONE_SAVE_ROUTE, clone_save_route),
+                              (CLONE_DISCARD_ROUTE, clone_discard_route),
+                              (CLONE_REBUILD_ROUTE, clone_rebuild_route),
+                              (POCKET_ROUTE, pocket_status_route),
+                              (POCKET_INSTALL_ROUTE, pocket_install_route)):
             if path not in existing:
                 app.add_api_route(path, handler, methods=["POST"])
     except Exception:

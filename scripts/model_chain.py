@@ -52,6 +52,9 @@ import mc_voice_sopro
 import mc_voice_sopro_profile
 import mc_voice_cleanup_runtime
 import mc_voice_sopro_runtime
+import mc_voice_pocket
+import mc_voice_pocket_profile
+import mc_voice_pocket_runtime
 import mc_voice_state
 import mc_voice_ui
 from modules import errors, images, processing, scripts, shared
@@ -3655,23 +3658,37 @@ def _on_script_unloaded():
     # import graph: a speech worker that survived because releasing an image
     # model raised would be exactly the coupling this feature was designed
     # without.
-    try:
-        mc_voice_runtime.shutdown()
-        # Both, unconditionally, whichever engine was selected. "No engine
-        # outlives the WebUI" is the requirement, and asking which one was
-        # running is one more thing that can be wrong at the exact moment
-        # nothing may be.
-        mc_voice_sopro_runtime.shutdown()
-        # And the cleanup engine, which has an idle timer of its own and must
-        # not be trusted to have fired. A timer is a courtesy; this is the
-        # requirement.
-        mc_voice_cleanup_runtime.shutdown()
-        # Separately owned, and stopped separately (section 82). A clone is a
-        # long CPU job that has nothing to do with speech residency, and its
-        # process tree must not outlive this one either -- release blocker nine.
-        mc_voice_clone.shutdown()
-    except Exception:
-        errors.report("Model Chain: failed to stop the voice runtime", exc_info=True)
+    #
+    # Every one of them, unconditionally, whichever engine was selected. "No
+    # engine outlives the WebUI" is the requirement, and asking which one was
+    # running is one more thing that can be wrong at the exact moment nothing
+    # may be.
+    #
+    # One try *each*, and that is a correction rather than a style. All five
+    # used to share a block, so a failure in the first left the other four
+    # unstopped -- which is precisely the failure mode this door exists to
+    # prevent, and section 34 says so in as many words: a failure in one must
+    # not stop the cleanup of the others.
+    for name, stop in (
+            ("Kokoro", mc_voice_runtime.shutdown),
+            ("Sopro", mc_voice_sopro_runtime.shutdown),
+            # PocketTTS's ordinary Stop drains an abandoned unit; this is not
+            # that. A lifecycle boundary ends the process rather than waiting
+            # for quiescence, or a WebUI would refuse to close because a speech
+            # engine was finishing a sentence nobody is listening to.
+            ("PocketTTS", mc_voice_pocket_runtime.shutdown),
+            # The cleanup engine, which has an idle timer of its own and must
+            # not be trusted to have fired. A timer is a courtesy; this is the
+            # requirement.
+            ("the recording cleanup engine", mc_voice_cleanup_runtime.shutdown),
+            # Separately owned, and stopped separately (section 82). A clone is
+            # a long CPU job that has nothing to do with speech residency, and
+            # its process tree must not outlive this one either.
+            ("the Kokoro cloning tool", mc_voice_clone.shutdown)):
+        try:
+            stop()
+        except Exception:
+            errors.report(f"Model Chain: failed to stop {name}", exc_info=True)
     mc_memory.release_all()
     # The LLM lives in another process, so releasing our own references would
     # leave it running and holding VRAM after the extension has gone. It is

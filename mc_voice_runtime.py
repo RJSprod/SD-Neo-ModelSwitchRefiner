@@ -513,6 +513,30 @@ def cancel_turn(turn) -> None:
         _release_turn(turn)
 
 
+INTERRUPT_MODE = "cancel"
+"""What Stop means on this engine, as the capability the shared turn reads.
+
+``cancel`` and not a hedge: the sherpa callback is a generator this side stops pulling from,
+so abandoning it abandons the work rather than deferring it, and the lane is
+free as soon as the call returns. The constant is here rather than inferred
+because a third engine now exists whose answer is different, and shared code
+that guessed would be shared code that either promised too much or drew a
+waiting state nothing would ever clear (I-PKT-10, section 21).
+"""
+
+
+def interrupt_turn(turn) -> None:
+    """Interrupt ``turn``. On this engine that is exactly a cancellation.
+
+    Three lines and a name, and both are the point. The shared turn asks every
+    runtime the same question -- stop speaking this -- and each runtime answers
+    with what its engine can actually promise. Routing Kokoro through Pocket's
+    mute-and-drain policy to make the shared code look uniform would be trading
+    a correct cancellation for a workaround it does not need (section 49.2).
+    """
+    cancel_turn(turn)
+
+
 def _release_turn(turn) -> None:
     with _state_lock:
         _turns.pop(getattr(turn, "id", ""), None)

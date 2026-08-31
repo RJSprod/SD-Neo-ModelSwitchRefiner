@@ -160,10 +160,26 @@ class TestItStopsWhenItIsNotBeingUsed:
 
     def test_the_idle_timer_is_a_courtesy_and_not_the_guarantee(self):
         """``scripts/model_chain.py`` calls ``shutdown`` unconditionally on
-        unload, whatever the timer did or did not do."""
+        unload, whatever the timer did or did not do.
+
+        Read out of the unload coordinator rather than out of the whole file,
+        and by *name* rather than by call syntax: the five shutdowns are a
+        table now, each in a try of its own, so a grep for
+        ``mc_voice_cleanup_runtime.shutdown()`` would be checking the shape of
+        the code rather than the guarantee. What has to be true is that this
+        engine is in that table with the other four.
+        """
         source = (paths.extension_root() / "scripts" / "model_chain.py").read_text(
             encoding="utf-8")
-        assert "mc_voice_cleanup_runtime.shutdown()" in source
+        body = source.split("def _on_script_unloaded()")[1].split("\ntry:")[0]
+        for name in ("mc_voice_runtime.shutdown", "mc_voice_sopro_runtime.shutdown",
+                     "mc_voice_pocket_runtime.shutdown",
+                     "mc_voice_cleanup_runtime.shutdown", "mc_voice_clone.shutdown"):
+            assert name in body, name
+        # And unconditionally: nothing in that table is reached through an
+        # ``if``, so no engine's shutdown can be skipped because another's
+        # failed.
+        assert "if " not in body.split("for name, stop in (")[1].split("errors.report")[0]
 
 
 class TestTheCpuOnlyRule:

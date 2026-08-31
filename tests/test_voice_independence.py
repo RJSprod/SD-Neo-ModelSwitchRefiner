@@ -19,6 +19,7 @@ interpreter to read a struct format, and the day that starts requiring
 from __future__ import annotations
 
 import ast
+import os
 import sys
 import types
 from pathlib import Path
@@ -35,11 +36,17 @@ model runtime. Voice may not import any of them at any depth."""
 
 WORKER = ROOT / "voice_worker" / "worker.py"
 SOPRO_WORKER = ROOT / "sopro_worker" / "worker.py"
+POCKET_WORKER = ROOT / "pocket_worker" / "worker.py"
 
-WORKERS = (WORKER, SOPRO_WORKER)
-"""Both sidecars. Each is run by path under a *different* interpreter out of a
-*different* dependency closure, and neither may import the other's engine, the
-other's file, or anything from this extension."""
+WORKERS = (WORKER, SOPRO_WORKER, POCKET_WORKER)
+"""All three sidecars. Each is run by path under a *different* interpreter out
+of a *different* dependency closure, and none may import another's engine,
+another's file, or anything from this extension.
+
+Sopro's PyTorch and Pocket's are two closures rather than one, which looks like
+waste and is not: two engines pinned to a single Torch build would make either
+engine's upgrade the other engine's regression, and neither closure would ever
+be independently verifiable again."""
 
 
 def imported_names(path: Path) -> set[str]:
@@ -127,9 +134,19 @@ class TestTheImportGraph:
         """
         kokoro = imported_names(WORKER)
         sopro = imported_names(SOPRO_WORKER)
+        pocket = imported_names(POCKET_WORKER)
         assert "sopro_worker" not in kokoro and "sopro" not in kokoro
+        assert "pocket_worker" not in kokoro and "pocket_tts" not in kokoro
         assert "voice_worker" not in sopro and "sherpa_onnx" not in sopro
+        assert "pocket_worker" not in sopro and "pocket_tts" not in sopro
+        assert "voice_worker" not in pocket and "sherpa_onnx" not in pocket
+        assert "sopro_worker" not in pocket and "sopro" not in pocket
         assert "torch" not in kokoro and "torchaudio" not in kokoro
+        # The two PyTorch workers do import Torch -- inside a function, which is
+        # what ``test_a_worker_imports_only_the_standard_library_at_module_level``
+        # above holds them to. What matters here is that each imports its *own*
+        # engine and nothing of anybody else's.
+        assert "pocket_tts" not in sopro and "sopro" not in pocket
 
     def test_only_the_model_manager_reaches_the_network(self):
         """One door out, and it is the one with the hashes behind it.
@@ -209,6 +226,78 @@ class TestTheWorkerAsksForTheCpu:
         assert environ["CUDA_VISIBLE_DEVICES"] == ""
         assert environ["HIP_VISIBLE_DEVICES"] == ""
         assert environ["ROCR_VISIBLE_DEVICES"] == ""
+
+    def test_pockets_environment_hides_every_gpu_too(self):
+        """I-PKT-7. A Model Chain V1 support decision rather than a claim that
+        upstream Pocket can never execute elsewhere -- but for this release the
+        handshake has to be able to say ``provider=cpu`` and mean it."""
+        import mc_voice_pocket
+
+        environ = mc_voice_pocket.worker_environment()
+        assert environ["CUDA_VISIBLE_DEVICES"] == ""
+        assert environ["HIP_VISIBLE_DEVICES"] == ""
+        assert environ["ROCR_VISIBLE_DEVICES"] == ""
+
+    def test_pockets_environment_carries_no_credential_and_no_thread_count(self):
+        """I-PKT-21 and section 16.4, in the one mapping that could carry either.
+
+        A credential belongs to the installer in the parent; the worker's job is
+        inference from verified local files and it has no business holding a
+        token for a host it will never contact. And PocketTTS sets its own
+        thread policy, so a count here would be a count that means nothing.
+        """
+        import mc_voice_pocket
+
+        environ = mc_voice_pocket.worker_environment()
+        for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN",
+                     "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+            assert name not in environ, name
+
+    @pytest.mark.pocket(handshake={"device": "cuda", "provider": "cuda"})
+    def test_a_pocket_worker_reporting_a_gpu_is_refused(self, host, fake_pocket_worker):
+        """Fail closed, the same way the other two do."""
+        import mc_voice_pocket_runtime
+
+        with pytest.raises(mc_voice_pocket_runtime.PocketRuntimeError):
+            mc_voice_pocket_runtime.ensure_started()
+
+    @pytest.mark.pocket(containment="pipe")
+    def test_a_pocket_worker_without_containment_is_refused(self, host,
+                                                            fake_pocket_worker):
+        """A speech process that could outlive the WebUI is worse than no
+        speech -- and this engine spends real time computing after a Stop, so
+        the window in which that could happen is wider than the other two's."""
+        import mc_voice_pocket_runtime
+
+        if os.name == "nt":
+            pytest.skip("on Windows the parent proves containment with real handles")
+        with pytest.raises(mc_voice_pocket_runtime.PocketRuntimeError):
+            mc_voice_pocket_runtime.ensure_started()
+
+    def test_no_credential_reaches_the_pocket_worker_even_when_one_is_set(
+            self, host, fake_pocket_worker, monkeypatch):
+        """I-PKT-21, at the one place it could leak by inheritance.
+
+        The parent's own environment may legitimately hold a token -- the
+        installer reads it from there. The child's must not, and it is removed
+        rather than merely not added, because the child inherits.
+        """
+        import mc_voice_pocket_runtime
+
+        monkeypatch.setenv("HF_TOKEN", "hf_a_real_looking_secret")
+        captured = {}
+        import subprocess
+
+        real = subprocess.Popen
+
+        def watched(command, **values):
+            captured.update(values.get("env") or {})
+            return real(command, **values)
+
+        monkeypatch.setattr(subprocess, "Popen", watched)
+        mc_voice_pocket_runtime.ensure_started()
+        for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"):
+            assert name not in captured, name
 
     @pytest.mark.sopro(handshake={"device": "cuda"})
     def test_a_sopro_worker_reporting_a_gpu_is_refused(self, fake_sopro_worker):

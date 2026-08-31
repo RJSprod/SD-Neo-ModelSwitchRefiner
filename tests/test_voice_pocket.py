@@ -1,0 +1,1230 @@
+"""PocketTTS's product side: what is installed, which voices exist, and the
+transaction that turns a recording into one.
+
+Five readiness states rather than one boolean, because Pocket genuinely has
+five and each has a different remedy. A machine whose speech works and whose
+Clone button does not is not "half installed"; it is a machine that has not
+accepted an upstream licence, and everything here exists so the panel can say
+which of the five it is looking at (section 24).
+
+The other thing asserted here is that a preview is not a save. Everything up to
+the registry write leaves nothing anybody can see, so a preview that failed
+halfway costs one directory to undo -- and the audition somebody hears is the
+one their recording actually produced rather than a re-synthesis from a voice
+that has already been written down (I-PKT-17, section 26).
+
+Nothing here imports Torch or PocketTTS. The worker is a double, because the
+questions are about registries, transactions, containment and refusals rather
+than about tensors.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+from pathlib import Path
+
+import pytest
+
+import mc_voice_engines as engines
+import mc_voice_models as models
+import mc_voice_paths as paths
+import mc_voice_pocket as pocket
+
+
+def _here() -> dict:
+    """One platform entry describing the machine this suite is running on.
+
+    Without it every status test would land in "no tested runtime for this
+    platform" and prove nothing about the five states underneath -- the shipped
+    manifest advertises Windows, which is the release target rather than the
+    machine a test runs on.
+    """
+    import mc_voice_models as models
+
+    system, machine, python_version = models.current_platform()
+    return {"id": "test-runner", "system": system, "machines": [machine],
+            "python": python_version, "artifacts": []}
+
+
+@pytest.fixture
+def unpinned(voice_root, monkeypatch):
+    """This platform is supported and this build has not pinned its closure.
+
+    The honest state of a fresh checkout, and the one the refusal has to name a
+    tool for rather than saying "PocketTTS cannot be installed here".
+    """
+    manifest = {
+        "schema": 1, "version": 1, "pinned": False,
+        "runtime": {"import_name": "pocket_tts", "license": "Apache-2.0",
+                    "platforms": [_here()]},
+        "defaults": {"model": "english", "voice": "alba"},
+        "models": {"english": {"label": "PocketTTS English", "language": "en",
+                               "files": [], "required_paths": [], "voices": []}},
+    }
+    monkeypatch.setattr(pocket, "manifest", lambda refresh=False: manifest)
+    return manifest
+
+
+@pytest.fixture
+def installed(voice_root, monkeypatch):
+    """PocketTTS reported as fully installed, on disk, with two official voices.
+
+    Built rather than mocked wholesale: the registry, the official state files
+    and the model marker are real files under a throwaway root, so the tests
+    below exercise the same reads production does.
+    """
+    entry_root = paths.pocket_model_root("english")
+    entry_root.mkdir(parents=True, exist_ok=True)
+    (entry_root / "model.safetensors").write_bytes(
+        b"\x08\x00\x00\x00\x00\x00\x00\x00{}")
+    (entry_root / paths.INSTALLED_FILENAME).write_text(
+        json.dumps({"schema": 1, "id": "english",
+                    "digests": {"model.safetensors": "a" * 64}}), encoding="utf-8")
+    official = paths.pocket_official_root("english")
+    official.mkdir(parents=True, exist_ok=True)
+    for name in ("alba", "anna"):
+        (official / f"{name}.safetensors").write_bytes(b"\x08\x00\x00\x00\x00\x00\x00\x00{}")
+
+    manifest = {
+        "schema": 1, "version": 1, "pinned": True,
+        "runtime": {"import_name": "pocket_tts", "license": "Apache-2.0",
+                    "platforms": [_here()]},
+        "defaults": {"model": "english", "voice": "alba"},
+        "models": {"english": {
+            "label": "PocketTTS English", "language": "en",
+            "public_repo": "kyutai/pocket-tts-without-voice-cloning",
+            "cloning_repo": "kyutai/pocket-tts", "revision": "main",
+            "sample_rate": 24000, "recommended_temperature": 0.3,
+            "files": [{"filename": "model.safetensors", "local_name": "model.safetensors",
+                       "url": "https://example.invalid/model.safetensors"}],
+            "required_paths": ["model.safetensors"],
+            "cloning_files": [{"filename": "cloning.safetensors",
+                               "local_name": "cloning.safetensors",
+                               "url": "https://example.invalid/cloning.safetensors"}],
+            "cloning_required_paths": ["cloning.safetensors"],
+            "config": {"weights_path": "cloning.safetensors",
+                       "weights_path_without_voice_cloning": "model.safetensors",
+                       "tokenizer_path": "tokenizer.model"},
+            "voices": [
+                {"id": "alba", "display_name": "Alba", "language": "en",
+                 "accent": "Scottish", "license": "CC-BY-4.0",
+                 "attribution": "Kyutai", "source": "kyutai/pocket-tts",
+                 "artifact": {"filename": "alba.safetensors",
+                              "local_name": "alba.safetensors",
+                              "url": "https://example.invalid/alba.safetensors"}},
+                {"id": "anna", "display_name": "Anna", "language": "en",
+                 "accent": "", "license": "CC-BY-4.0", "attribution": "Kyutai",
+                 "source": "kyutai/pocket-tts",
+                 "artifact": {"filename": "anna.safetensors",
+                              "local_name": "anna.safetensors",
+                              "url": "https://example.invalid/anna.safetensors"}}],
+        }},
+    }
+    # A runtime marker rather than a patched status object, so ``_status``
+    # computes the five readiness fields the way production does -- including
+    # ``cloning_ready``, which is derived from two of the others and would have
+    # been silently wrong under a wrapper that set them afterwards.
+    runtime = paths.pocket_runtime_manifest()
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text(json.dumps({"schema": 1, "closure": "", "platform": "test-runner",
+                                   "pocket_version": "3.0.2", "torch_version": "2.5.0"}),
+                       encoding="utf-8")
+    monkeypatch.setattr(pocket, "_manifest_cache", manifest)
+    monkeypatch.setattr(pocket, "manifest", lambda refresh=False: manifest)
+    monkeypatch.setattr(pocket, "pinned", lambda: True)
+    return manifest
+
+
+@pytest.fixture
+def cloning(installed, voice_root, monkeypatch):
+    """The gated half installed too, so the clone transaction can run."""
+    root = paths.pocket_model_root("english")
+    (root / "cloning.safetensors").write_bytes(b"\x08\x00\x00\x00\x00\x00\x00\x00{}")
+    (root / pocket.CLONING_MARKER).write_text(json.dumps({"schema": 1}), encoding="utf-8")
+    return installed
+
+
+class FakeRuntime:
+    """The two calls the adapter makes into the worker, and nothing else."""
+
+    def __init__(self):
+        self.prepared = []
+        self.refreshed = []
+        self.forgotten = []
+
+    def prepare_voice(self, root, voice_id, wav_bytes, seconds=0.0, audition=""):
+        self.prepared.append({"root": root, "voice_id": voice_id, "seconds": seconds})
+        Path(root).mkdir(parents=True, exist_ok=True)
+        (Path(root) / paths.POCKET_PREVIEW_STATE_FILENAME).write_bytes(
+            b"\x08\x00\x00\x00\x00\x00\x00\x00{}")
+        return {"sample_rate": 24000, "audition_ms": 40, "state_bytes": 24,
+                "audio": b"RIFFfake"}
+
+    def refresh_catalog(self, voices, forget=()):
+        self.refreshed.append(dict(voices))
+        self.forgotten.extend(list(forget))
+        return len(voices)
+
+    def stop(self, reason=""):
+        pass
+
+    def status(self):
+        return {"busy": False, "draining": False, "interrupt_mode": "drain_unit"}
+
+    def engine(self):
+        return {"loaded": False, "defaults": {}}
+
+    def declared_interrupt_mode(self):
+        return "drain_unit"
+
+
+@pytest.fixture
+def worker(monkeypatch):
+    import sys
+
+    found = FakeRuntime()
+    monkeypatch.setitem(sys.modules, "mc_voice_pocket_runtime", found)
+    return found
+
+
+# --------------------------------------------------------------------------- #
+# What the facade asks
+# --------------------------------------------------------------------------- #
+
+
+class TestTheAdapterContract:
+    """Section 8. The facade asks; it no longer infers."""
+
+    def test_it_declares_what_it_can_do(self, host, voice_root):
+        found = pocket.capabilities()
+        assert set(found) == {"clone_preview", "rebuild", "engine_settings",
+                              "starter_voices", "voice_lab", "interrupt_mode"}
+        assert found["clone_preview"] is True
+        assert found["rebuild"] is True
+        assert found["engine_settings"] is True
+        # Neither of these, and neither is an oversight: Pocket starts with
+        # official voices so the wall starter voices were built for is not
+        # there, and its noise clamp and EOS threshold are not style axes
+        # (section 29.5).
+        assert found["starter_voices"] is False
+        assert found["voice_lab"] is False
+
+    def test_t_pkt_eng_11_it_declares_drain_unit_and_the_others_declare_cancel(
+            self, host, voice_root):
+        """The one capability that changes what Stop is allowed to promise."""
+        import mc_voice_kokoro as kokoro
+        import mc_voice_sopro as sopro
+
+        assert pocket.capabilities()["interrupt_mode"] == "drain_unit"
+        assert kokoro.capabilities()["interrupt_mode"] == "cancel"
+        assert sopro.capabilities()["interrupt_mode"] == "cancel"
+
+    def test_its_refusals_are_declared_rather_than_guessed(self, host, voice_root):
+        assert pocket.refusals() == (pocket.PocketError,)
+        assert engines.EngineError in engines.refusals("pocket")
+        assert pocket.PocketError in engines.refusals("pocket")
+
+    def test_the_public_status_has_the_common_subset_every_engine_answers_with(
+            self, host, voice_root):
+        found = pocket.public_status()
+        for name in ("installed", "ready", "message", "worker_resident", "engine_busy",
+                     "draining", "interrupt_mode", "block"):
+            assert name in found, name
+
+    def test_the_clone_hints_come_from_the_engine_rather_than_the_page(self, host,
+                                                                       voice_root):
+        """GATE P-CLONE-1. A number baked into JavaScript is a number that goes
+        stale the first time somebody measures it."""
+        found = pocket.clone_hints()
+        assert found["min_seconds"] == pocket.MIN_REFERENCE_SECONDS
+        assert found["ideal_seconds"] == pocket.IDEAL_REFERENCE_SECONDS
+        assert found["max_seconds"] == pocket.MAX_REFERENCE_SECONDS
+        # Below upstream's own thirty-second truncation ceiling, on purpose.
+        assert found["max_seconds"] < 30
+
+
+# --------------------------------------------------------------------------- #
+# Status
+# --------------------------------------------------------------------------- #
+
+
+class TestFiveStatesRatherThanOneBoolean:
+    def test_a_fresh_machine_is_not_ready_and_says_why(self, host, voice_root):
+        found = pocket.status()
+        assert found.ready is False
+        assert found.runtime_message
+        assert found.message
+
+    def test_an_unpinned_build_says_so_and_names_the_tool(self, host, unpinned):
+        """Section 23.1. An artifact this repository makes no claim about is an
+        artifact it will not download, and the honest answer says which tool
+        produces the claim."""
+        found = pocket.status()
+        assert "pin_pocket_models.py" in found.runtime_message
+        assert "pin_pocket_models.py" in pocket.refusal()
+        # And the folder path is still open.
+        assert pocket.refusal(manual=True) == ""
+
+    def test_speech_is_ready_without_cloning_access(self, host, installed, worker):
+        """Section 23.3. "Pocket speaks" and "Pocket clones" are two states, and
+        gating speech on an upstream licence nobody accepted would refuse the
+        feature over the half of it that is optional."""
+        found = pocket.status()
+        assert found.speech_model_ready is True
+        assert found.official_voices_ready is True
+        assert found.ready is True
+        assert found.cloning_ready is False
+        assert "gated repository" in found.cloning_message
+        assert "Official PocketTTS voices work without this" in found.cloning_message
+
+    def test_with_the_gated_half_installed_cloning_is_ready(self, host, cloning, worker):
+        found = pocket.status()
+        assert found.ready is True
+        assert found.cloning_ready is True
+
+    def test_reading_status_starts_nothing(self, host, voice_root):
+        """Section 17, and the reason ``installed`` can be read on a poll."""
+        assert engines.installed("pocket") is False
+        assert pocket.status().ready is False
+
+    def test_the_fingerprint_changes_with_precision(self, host, installed, worker):
+        """Section 12. Conservative, with GATE P-VOICE-1 against it: nobody has
+        established that Pocket's INT8 leaves the tensors a voice state is made
+        of untouched, so a precision change marks a cached state as needing a
+        rebuild rather than loading one that may not mean the same thing."""
+        before = pocket.status().fingerprint
+        pocket.set_engine_settings(precision_id="int8")
+        assert pocket.status().fingerprint != before
+
+    def test_the_fingerprint_changes_with_the_model(self, host, installed, worker,
+                                                    monkeypatch):
+        before = pocket.status().fingerprint
+        monkeypatch.setattr(pocket, "model_id", lambda: "other")
+        installed["models"]["other"] = dict(installed["models"]["english"])
+        assert pocket.status().fingerprint != before
+
+
+# --------------------------------------------------------------------------- #
+# Engine settings
+# --------------------------------------------------------------------------- #
+
+
+class TestEngineSettingsAreGlobalAndLiveInPocketsOwnFile:
+    def test_the_defaults_are_the_unquantised_ones(self, host, voice_root):
+        found = pocket.engine_settings()
+        assert found["precision"] == "full"
+        assert found["steps"] == 1
+
+    def test_neither_precision_claims_a_speed(self, host, voice_root):
+        """GATE P-5, I-PKT-26. Upstream reports faster x86 inference for INT8
+        and that may well hold, but Sopro's identical-looking setting measured
+        40% the other way on the first machine anybody tried."""
+        for entry in pocket.engine_settings()["precisions"]:
+            assert "faster" not in entry["label"].casefold()
+
+    def test_the_step_choices_are_tested_values_with_the_number_visible(self, host,
+                                                                        voice_root):
+        found = pocket.engine_settings()
+        assert [entry["id"] for entry in found["step_choices"]] == list(pocket.STEP_CHOICES)
+        assert found["step_choices"][0]["label"] == "Fast (default)"
+
+    def test_there_is_no_thread_control_and_a_sentence_where_one_would_be(self, host,
+                                                                          voice_root):
+        """Section 16.4. Setting OMP_NUM_THREADS=8 and calling it eight Pocket
+        threads would be reporting something untrue."""
+        found = pocket.engine_settings()
+        assert "threads" not in found
+        assert "thread_choices" not in found
+        assert "no supported thread-count control" in found["thread_policy"]
+
+    def test_a_setting_is_persisted_in_pockets_own_file(self, host, voice_root, worker):
+        """I-PKT-19. An option is a component on the settings page as well as a
+        stored value, and Apply Settings writes the page's build-time copy back
+        over whatever the panel just set."""
+        pocket.set_engine_settings(sampler_steps=3)
+        assert pocket.steps() == 3
+        stored = json.loads(paths.pocket_settings_path().read_text(encoding="utf-8"))
+        assert stored[pocket.SETTING_STEPS] == 3
+
+    def test_a_value_the_browser_invented_is_not_believed(self, host, voice_root, worker):
+        """Section 33. A number a browser sent never becomes a generation policy.
+
+        Refused rather than dropped. Both leave the setting alone, but only one
+        of them says so: a panel answered with the unchanged settings and no
+        error redraws the old value with nothing to explain why the click did
+        nothing.
+        """
+        with pytest.raises(pocket.PocketError):
+            pocket.set_engine_settings(sampler_steps=97)
+        with pytest.raises(pocket.PocketError):
+            pocket.set_engine_settings(precision_id="float3")
+        with pytest.raises(pocket.PocketError):
+            pocket.set_engine_settings(wanted_model="something-that-is-not-a-model")
+        assert pocket.steps() == pocket.STEP_DEFAULT
+        assert pocket.precision() == pocket.PRECISION_DEFAULT
+
+    def test_an_effective_change_stops_the_worker(self, host, voice_root, monkeypatch):
+        """I-PKT-24. A turn must never change precision in its middle, so the
+        setting is written and the *next* request starts a worker with it."""
+        stopped = []
+        monkeypatch.setattr(pocket, "_retire", lambda reason: stopped.append(reason))
+        pocket.set_engine_settings(precision_id="int8")
+        assert stopped and "precision" in stopped[0]
+
+    def test_setting_a_value_it_already_has_stops_nothing(self, host, voice_root,
+                                                          monkeypatch):
+        stopped = []
+        monkeypatch.setattr(pocket, "_retire", lambda reason: stopped.append(reason))
+        pocket.set_engine_settings(precision_id="full", sampler_steps=1)
+        assert stopped == []
+
+    def test_the_model_id_is_reserved_from_day_one(self, host, installed, worker):
+        """Section 16.3. V1 may expose only English; the architecture must not
+        encode "Pocket means English" in stable storage."""
+        assert pocket.model_id() == "english"
+        assert "model_id" in pocket.engine_settings()
+
+
+# --------------------------------------------------------------------------- #
+# Voices
+# --------------------------------------------------------------------------- #
+
+
+class TestTheVoiceLibrary:
+    def test_official_voices_come_from_the_manifest(self, host, installed, worker):
+        """Section 10. A manifest read rather than a network discovery event."""
+        found = pocket.official()
+        assert [entry["display_name"] for entry in found] == ["Alba", "Anna"]
+        assert all(entry["official"] for entry in found)
+
+    def test_an_official_voice_cannot_be_renamed_or_deleted(self, host, installed,
+                                                            worker):
+        assert all(not entry["editable"] for entry in pocket.official())
+        assert all(not entry["deletable"] for entry in pocket.official())
+        with pytest.raises(pocket.PocketError):
+            pocket.rename("pocket:official:alba", "Something Else")
+        with pytest.raises(pocket.PocketError):
+            pocket.delete("pocket:official:alba")
+
+    def test_the_default_is_the_reviewed_official_voice(self, host, installed, worker):
+        assert pocket.default_id() == "pocket:official:alba"
+        assert pocket.default_entry()["display_name"] == "Alba"
+
+    def test_setting_a_default_writes_pockets_registry_and_nothing_else(self, host,
+                                                                        installed,
+                                                                        worker):
+        """Section 28. Changed immediately, and with no second copy on a Forge
+        settings page that Apply could put back."""
+        pocket.set_default("pocket:official:anna")
+        assert pocket.default_id() == "pocket:official:anna"
+        stored = json.loads(paths.pocket_registry_path().read_text(encoding="utf-8"))
+        assert stored["default"] == "pocket:official:anna"
+
+    def test_resolve_carries_the_handle_privately(self, host, installed, worker):
+        """Section 8. The name every engine's entry answers to, so the shared
+        turn carries one opaque thing."""
+        found, entry = pocket.resolve("pocket:official:alba")
+        assert found == "pocket:official:alba"
+        assert entry["_handle"] == "pocket:official:alba"
+
+    def test_t_pkt_id_2_pocket_never_resolves_another_engines_voice(self, host,
+                                                                    installed, worker):
+        """I-PKT-2. A Sopro id is treated as absent, so the caller falls back to
+        *this* engine's default rather than crossing to another bank."""
+        found, _entry = pocket.resolve("sopro:clone:abcdef")
+        assert found == "pocket:official:alba"
+        assert pocket.lookup("sopro:clone:abcdef") is None
+        assert pocket.lookup("kokoro:official:af_heart") is None
+
+    def test_with_no_voices_at_all_it_refuses_rather_than_crossing_engines(self, host,
+                                                                           voice_root):
+        with pytest.raises(pocket.PocketError) as raised:
+            pocket.resolve("")
+        assert "no voice to speak with" in str(raised.value)
+
+    def test_a_name_that_could_be_a_path_is_refused(self, host, installed, worker):
+        """Section 45. A display name is metadata and never a filename."""
+        for name in ("../escape", "a/b", "", "x" * 200):
+            with pytest.raises(pocket.PocketError):
+                pocket.check_name(name)
+
+    def test_a_duplicate_name_is_refused(self, host, installed, worker):
+        with pytest.raises(pocket.PocketError):
+            pocket.check_name("Alba")
+
+
+class TestTheCatalogueTheWorkerIsGiven:
+    def test_it_maps_stable_ids_to_verified_local_paths(self, host, installed, worker):
+        """I-PKT-20. The worker is handed local paths and never a repository id,
+        a URL, or anything a browser supplied."""
+        found = pocket.catalog()
+        assert set(found) == {"pocket:official:alba", "pocket:official:anna"}
+        for entry in found.values():
+            assert entry["state"].endswith(".safetensors")
+            assert "://" not in entry["state"]
+
+    def test_a_voice_whose_state_is_missing_is_absent_rather_than_broken(self, host,
+                                                                        installed,
+                                                                        worker):
+        (paths.pocket_official_root("english") / "anna.safetensors").unlink()
+        assert "pocket:official:anna" not in pocket.catalog()
+
+
+# --------------------------------------------------------------------------- #
+# The clone transaction
+# --------------------------------------------------------------------------- #
+
+
+class TestAPreviewIsNotASave:
+    """I-PKT-17 and section 26."""
+
+    def test_t_pkt_clone_2_a_preview_registers_nothing(self, host, cloning, worker,
+                                                       spoken_wav):
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        assert made["token"]
+        assert pocket.custom() == []
+        assert pocket.default_id() == "pocket:official:alba"
+        assert pocket.preview_state()["pending"] is True
+
+    def test_t_pkt_clone_3_the_state_exists_only_in_the_preview_area(self, host,
+                                                                     cloning, worker,
+                                                                     spoken_wav):
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        root = paths.pocket_preview_dir(made["token"])
+        assert (root / paths.POCKET_REFERENCE_FILENAME).is_file()
+        assert (root / paths.POCKET_PREVIEW_STATE_FILENAME).is_file()
+        assert not paths.pocket_clones_root().exists()
+
+    def test_t_pkt_clone_5_save_is_the_registry_commit(self, host, cloning, worker,
+                                                       spoken_wav):
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        kept = pocket.save_preview(made["token"])
+        assert kept["voice"]["display_name"] == "Test Voice"
+        assert len(pocket.custom()) == 1
+        # And the state landed under its fingerprint rather than at the root.
+        identifier = pocket._uuid_of(kept["voice"]["id"])
+        states = list(paths.pocket_clone_states_root(identifier).glob("*.safetensors"))
+        assert len(states) == 1
+        assert states[0].stem == pocket.status().fingerprint
+
+    def test_saving_does_not_change_the_default(self, host, cloning, worker, spoken_wav):
+        """Section 26.3. Saving a voice is not the same decision as speaking
+        with it, and a Save that silently changed what every character sounds
+        like would be a Save nobody could undo."""
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        pocket.save_preview(made["token"])
+        assert pocket.default_id() == "pocket:official:alba"
+
+    def test_t_pkt_clone_8_a_wrong_token_is_refused(self, host, cloning, worker,
+                                                    spoken_wav):
+        pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        with pytest.raises(pocket.PocketError):
+            pocket.save_preview("not-the-token")
+
+    def test_t_pkt_clone_7_a_second_preview_discards_the_first(self, host, cloning,
+                                                               worker, spoken_wav):
+        first = pocket.prepare_preview("First", spoken_wav(8.0, 24000))
+        pocket.prepare_preview("Second", spoken_wav(8.0, 24000))
+        assert not paths.pocket_preview_dir(first["token"]).exists()
+        with pytest.raises(pocket.PocketError):
+            pocket.save_preview(first["token"])
+
+    def test_t_pkt_clone_6_discard_deletes_the_reference_and_the_state(self, host,
+                                                                       cloning, worker,
+                                                                       spoken_wav):
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        root = paths.pocket_preview_dir(made["token"])
+        assert pocket.discard_preview(made["token"]) is True
+        assert not root.exists()
+        assert pocket.preview_state()["pending"] is False
+
+    def test_a_discard_with_a_stale_token_leaves_the_current_preview_alone(self, host,
+                                                                           cloning,
+                                                                           worker,
+                                                                           spoken_wav):
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        assert pocket.discard_preview("somebody-elses-token") is False
+        assert pocket.preview_state()["pending"] is True
+        assert paths.pocket_preview_dir(made["token"]).exists()
+
+    def test_t_pkt_clone_1_an_invalid_reference_is_refused_before_anything_is_written(
+            self, host, cloning, worker, silent_wav, spoken_wav):
+        for bad, why in ((b"", "No recording"),
+                         (b"not a wav at all", "not a WAV"),
+                         (spoken_wav(2.0, 24000), "seconds long"),
+                         (spoken_wav(40.0, 24000), "shorter"),
+                         (silent_wav(8.0, 24000), "silent")):
+            with pytest.raises(pocket.PocketError) as raised:
+                pocket.prepare_preview("Test Voice", bad)
+            assert why in str(raised.value)
+        assert not paths.pocket_preview_root().exists() or \
+            not list(paths.pocket_preview_root().iterdir())
+
+    def test_cloning_is_refused_with_a_reason_when_the_gate_is_closed(self, host,
+                                                                      installed, worker,
+                                                                      spoken_wav):
+        with pytest.raises(pocket.PocketError) as raised:
+            pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        assert "gated repository" in str(raised.value)
+
+    def test_a_failed_preparation_leaves_no_recording_behind(self, host, cloning,
+                                                             worker, spoken_wav,
+                                                             monkeypatch):
+        """A directory with a WAV in it and no registry entry is a recording of
+        somebody that nothing will ever delete."""
+
+        def explode(**values):
+            raise RuntimeError("the model fell over")
+
+        monkeypatch.setattr(worker, "prepare_voice", explode)
+        with pytest.raises(RuntimeError):
+            pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        assert not paths.pocket_preview_root().exists() or \
+            not list(paths.pocket_preview_root().iterdir())
+
+
+class TestDeletingAndRebuilding:
+    def test_t_pkt_clone_9_deleting_removes_the_recording_and_every_state(self, host,
+                                                                          cloning,
+                                                                          worker,
+                                                                          spoken_wav):
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        kept = pocket.save_preview(made["token"])
+        identifier = pocket._uuid_of(kept["voice"]["id"])
+        root = paths.pocket_clone_root(identifier)
+        assert root.exists()
+        pocket.delete(kept["voice"]["id"])
+        assert not root.exists()
+        assert pocket.custom() == []
+
+    def test_deleting_a_pocket_voice_cannot_reach_another_engines_files(self, host,
+                                                                        cloning,
+                                                                        worker,
+                                                                        spoken_wav):
+        """I-PKT-3, as a filesystem fact rather than a rule."""
+        sopro_root = paths.sopro_root()
+        sopro_root.mkdir(parents=True, exist_ok=True)
+        (sopro_root / "keepme.txt").write_text("still here", encoding="utf-8")
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        kept = pocket.save_preview(made["token"])
+        pocket.delete(kept["voice"]["id"])
+        assert (sopro_root / "keepme.txt").read_text(encoding="utf-8") == "still here"
+
+    def test_a_stale_state_says_rebuild_rather_than_hiding_the_voice(self, host,
+                                                                     cloning, worker,
+                                                                     spoken_wav):
+        """Section 27. A voice whose state was prepared for another model is not
+        a broken voice; it is one with a remedy."""
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        kept = pocket.save_preview(made["token"])
+        identifier = pocket._uuid_of(kept["voice"]["id"])
+        for state in paths.pocket_clone_states_root(identifier).glob("*.safetensors"):
+            state.unlink()
+        entry = pocket.lookup(kept["voice"]["id"])
+        assert entry["compatible"] is False
+        assert entry["has_source"] is True
+        assert any("Rebuild it" in line for line in pocket.warnings())
+
+    def test_t_pkt_clone_10_rebuild_writes_the_current_fingerprints_state(self, host,
+                                                                          cloning,
+                                                                          worker,
+                                                                          spoken_wav):
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        kept = pocket.save_preview(made["token"])
+        identifier = pocket._uuid_of(kept["voice"]["id"])
+        for state in paths.pocket_clone_states_root(identifier).glob("*.safetensors"):
+            state.unlink()
+        pocket.rebuild(kept["voice"]["id"])
+        states = list(paths.pocket_clone_states_root(identifier).glob("*.safetensors"))
+        assert [path.stem for path in states] == [pocket.status().fingerprint]
+        assert pocket.lookup(kept["voice"]["id"])["compatible"] is True
+
+    def test_an_old_states_file_is_kept_when_a_new_one_is_built(self, host, cloning,
+                                                                worker, spoken_wav):
+        """Section 39. Switching the model back makes the old state usable again
+        without another rebuild."""
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        kept = pocket.save_preview(made["token"])
+        identifier = pocket._uuid_of(kept["voice"]["id"])
+        first = pocket.status().fingerprint
+        pocket.set_engine_settings(precision_id="int8")
+        pocket.rebuild(kept["voice"]["id"])
+        found = {path.stem for path in
+                 paths.pocket_clone_states_root(identifier).glob("*.safetensors")}
+        assert first in found
+        assert pocket.status().fingerprint in found
+
+    def test_a_voice_with_no_retained_recording_cannot_be_rebuilt_and_says_why(
+            self, host, cloning, worker, spoken_wav):
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        kept = pocket.save_preview(made["token"])
+        identifier = pocket._uuid_of(kept["voice"]["id"])
+        (paths.pocket_clone_root(identifier) / paths.POCKET_REFERENCE_FILENAME).unlink()
+        with pytest.raises(pocket.PocketError) as raised:
+            pocket.rebuild(kept["voice"]["id"])
+        assert "no retained recording" in str(raised.value)
+        # And once its state is stale as well, the warning says the harder
+        # thing: a derived state with no source is not a voice with a remedy.
+        for state in paths.pocket_clone_states_root(identifier).glob("*.safetensors"):
+            state.unlink()
+        assert any("has to be created again" in line for line in pocket.warnings())
+
+    def test_t_pkt_clone_11_nothing_rebuilds_from_a_status_read(self, host, cloning,
+                                                                worker, spoken_wav):
+        """I-PKT-26. A poll that rebuilt a voice would be a poll that started a
+        model and spent a minute of somebody's CPU on a decision they did not
+        make."""
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        kept = pocket.save_preview(made["token"])
+        identifier = pocket._uuid_of(kept["voice"]["id"])
+        for state in paths.pocket_clone_states_root(identifier).glob("*.safetensors"):
+            state.unlink()
+        before = list(worker.prepared)
+        for _poll in range(3):
+            pocket.status()
+            pocket.entries()
+            pocket.warnings()
+            pocket.public_status()
+        assert worker.prepared == before
+
+
+class TestTheTransactionsFailurePathsLeaveNothingOrphaned:
+    """The half of each transaction that only runs when something goes wrong.
+
+    Each of these is a state nothing else can clean up: a recording somebody
+    made sitting in a directory no record names, a live catalogue entry pointing
+    at a directory that has been deleted, or an installation reported as failed
+    when three quarters of it is promoted and working.
+    """
+
+    def test_a_save_that_refuses_leaves_the_preview_where_discard_can_find_it(
+            self, host, cloning, worker, spoken_wav, monkeypatch, tmp_path):
+        """The containment check and the move can both still refuse. Clearing
+        the record before them would leave the user's reference recording in a
+        directory nothing knows the name of: Discard would say there is nothing
+        pending, and the one ``rmtree`` this module relies on would have nothing
+        to remove."""
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        root = paths.pocket_preview_dir(made["token"])
+        assert (root / paths.POCKET_REFERENCE_FILENAME).is_file()
+
+        elsewhere = tmp_path / "not-pockets-tree"
+        real = paths.pocket_clone_root
+        monkeypatch.setattr(paths, "pocket_clone_root",
+                            lambda identifier="": elsewhere / str(identifier))
+        with pytest.raises(pocket.PocketError) as raised:
+            pocket.save_preview(made["token"])
+        assert "not where Voice Chat keeps them" in str(raised.value)
+
+        # Only this one put back: ``monkeypatch.undo()`` would also unwind the
+        # throwaway voice root the fixtures set up, and the containment check the
+        # discard makes would then be answering about the real one.
+        monkeypatch.setattr(paths, "pocket_clone_root", real)
+        assert pocket.preview_state()["pending"] is True, "the preview was forgotten"
+        assert (root / paths.POCKET_REFERENCE_FILENAME).is_file()
+        assert pocket.discard_preview(made["token"]) is True
+        assert not root.exists(), "the recording was orphaned"
+
+    def test_a_rebuild_never_repoints_the_voice_it_is_rebuilding(self, host, cloning,
+                                                                 worker, spoken_wav):
+        """The worker names a preparation in its live catalogue so the audition
+        can come from the file it just wrote. Naming it with the real voice id
+        would repoint that voice at the staging directory the parent deletes a
+        moment later, and a reply spoken in that voice in the window between
+        would fail on a path that is gone -- for a voice that was fine."""
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        kept = pocket.save_preview(made["token"])
+        identifier = pocket._uuid_of(kept["voice"]["id"])
+        for state in paths.pocket_clone_states_root(identifier).glob("*.safetensors"):
+            state.unlink()
+
+        pocket.rebuild(kept["voice"]["id"])
+        asked = worker.prepared[-1]
+        assert asked["voice_id"] != kept["voice"]["id"], \
+            "the rebuild repointed the live catalogue entry at its staging directory"
+        assert identifier in asked["voice_id"], "the temporary id is not traceable"
+        assert not Path(asked["root"]).exists(), "the staging directory outlived the rebuild"
+
+    def test_a_gated_half_that_fails_does_not_undo_the_three_parts_that_worked(
+            self, host, installed, worker, monkeypatch):
+        """One click means one action *after* the upstream access precondition
+        is satisfied. The three parts before the gated one have already been
+        promoted and work, so a link that dropped while fetching the cloning
+        weights must not report a failed installation for speech that speaks.
+        """
+        done = []
+        for name in ("install_runtime", "install_model", "install_voices"):
+            monkeypatch.setattr(pocket, name,
+                                lambda on_status=None, on_progress=None, folder=None,
+                                _name=name: done.append(_name))
+
+        said = []
+        for failure in (models.VoiceError("the connection was reset"),
+                        OSError("no space left on device"),
+                        pocket.PocketError("the digest did not match")):
+            done.clear()
+            said.clear()
+
+            def drops(on_status=None, on_progress=None, folder=None, _exc=failure):
+                raise _exc
+
+            monkeypatch.setattr(pocket, "install_cloning", drops)
+            found = pocket.install(on_status=said.append)
+            assert done == ["install_runtime", "install_model", "install_voices"], failure
+            assert found.speech_model_ready is True, failure
+            assert any(str(failure) in line for line in said), \
+                f"nothing said why cloning was skipped for {failure!r}"
+
+    def test_a_half_finished_cloning_copy_undoes_what_it_added(
+            self, host, installed, worker, monkeypatch, tmp_path):
+        """The one step in this transaction that is not a rename, and so the one
+        that can stop half way: the gated weights are moved into the installed
+        model directory file by file rather than promoted over it, because a
+        directory rename would take the working official half away for the
+        length of the move."""
+        entry = installed["models"]["english"]
+        entry["cloning_files"] = [
+            {"filename": "a.safetensors", "local_name": "cloning-a.safetensors",
+             "url": "https://example.invalid/a"},
+            {"filename": "b.safetensors", "local_name": "cloning-b.safetensors",
+             "url": "https://example.invalid/b"},
+        ]
+        entry["cloning_required_paths"] = ["cloning-a.safetensors", "cloning-b.safetensors"]
+
+        def adopted(artifacts, folder, destination, say, what):
+            destination.mkdir(parents=True, exist_ok=True)
+            for item in artifacts:
+                (destination / item.local_name).write_bytes(
+                    b"\x08\x00\x00\x00\x00\x00\x00\x00{}      ")
+            return {item.local_name: "a" * 64 for item in artifacts}
+
+        monkeypatch.setattr(pocket, "_adopt", adopted)
+
+        moved = []
+        real = pocket.os.replace
+
+        def flaky(source, destination):
+            moved.append(str(destination))
+            if len(moved) == 2:
+                raise OSError("the disk filled up")
+            return real(source, destination)
+
+        monkeypatch.setattr(pocket.os, "replace", flaky)
+        target = paths.pocket_model_root("english")
+        before = sorted(one.name for one in target.iterdir())
+
+        with pytest.raises(OSError):
+            pocket.install_cloning(folder=str(tmp_path))
+
+        monkeypatch.setattr(pocket.os, "replace", real)
+        assert sorted(one.name for one in target.iterdir()) == before, \
+            "a half-finished cloning install left a file behind"
+        assert not (target / pocket.CLONING_MARKER).exists()
+        assert pocket.status().cloning_ready is False
+
+    def test_a_gate_the_user_has_not_accepted_is_a_state_and_not_a_failure(
+            self, host, installed, worker, monkeypatch):
+        for name in ("install_runtime", "install_model", "install_voices"):
+            monkeypatch.setattr(pocket, name,
+                                lambda on_status=None, on_progress=None, folder=None: None)
+
+        def gated(on_status=None, on_progress=None, folder=None):
+            raise models.Gated("cloning.safetensors", 403)
+
+        monkeypatch.setattr(pocket, "install_cloning", gated)
+        said = []
+        found = pocket.install(on_status=said.append)
+        assert found.speech_model_ready is True
+        assert any("access gate" in line for line in said)
+
+
+RECIPE = {
+    "weights_path": "hf://kyutai/pocket-tts/languages/english/model.safetensors@39592ff2",
+    "weights_path_without_voice_cloning":
+        "hf://kyutai/pocket-tts-without-voice-cloning/languages/english/"
+        "model.safetensors@d29db797",
+    "default_temperature": 0.3,
+    "flow_lm": {
+        "dtype": "float32",
+        "insert_bos_before_voice": True,
+        "flow": {"depth": 6, "dim": 512},
+        "transformer": {"d_model": 1024, "hidden_scale": 4, "max_period": 10000,
+                        "num_heads": 16, "num_layers": 6},
+        "lookup_table": {
+            "dim": 1024, "n_bins": 4000, "tokenizer": "sentencepiece",
+            "tokenizer_path": "hf://kyutai/pocket-tts-without-voice-cloning/languages/"
+                              "english/tokenizer.model@d29db797"},
+    },
+    "mimi": {"dtype": "float32", "sample_rate": 24000, "channels": 1, "frame_rate": 12.5},
+}
+"""PocketTTS 3.0.2's own ``english.yaml``, shortened but not altered where it matters.
+
+The three locations are upstream's real ones, verbatim from the wheel, because
+this is a test about replacing exactly those three and leaving the other twenty
+keys alone.
+"""
+
+
+class TestTheWorkerIsPointedAtLocalFilesAndNothingElse:
+    """Section 25 and I-PKT-20, as the file upstream itself opens.
+
+    ``TTSModel.load_model`` takes a path to a YAML document in its own schema,
+    validates it with a model that forbids unknown keys, and resolves every
+    location in it with hub utilities it imports at module level. So the config
+    the worker is handed is upstream's own document with three paths replaced --
+    not a document of this repository's design, and not a document with an
+    ``hf://`` left anywhere in it.
+    """
+
+    def _localise(self, entry_root):
+        paths.pocket_upstream_config("english").parent.mkdir(parents=True, exist_ok=True)
+        paths.pocket_upstream_config("english").write_text(json.dumps(RECIPE),
+                                                           encoding="utf-8")
+        pocket._write_local_config(pocket.bundle())
+        return json.loads(paths.pocket_model_config("english").read_text(encoding="utf-8"))
+
+    def test_every_location_is_replaced_by_a_verified_local_file(self, host, cloning):
+        root = paths.pocket_model_root("english")
+        (root / "tokenizer.model").write_bytes(b"x")
+        found = self._localise(root)
+
+        assert found["weights_path"] == str(root / "cloning.safetensors")
+        assert found["weights_path_without_voice_cloning"] == str(root / "model.safetensors")
+        assert found["flow_lm"]["lookup_table"]["tokenizer_path"] == \
+            str(root / "tokenizer.model")
+
+    def test_nothing_upstream_describes_about_the_model_is_touched(self, host, cloning):
+        """The architecture is upstream's statement about its own model. A copy
+        of it in this repository would be a copy somebody has to update whenever
+        a revision changes a layer count, and that nothing notices going stale."""
+        root = paths.pocket_model_root("english")
+        (root / "tokenizer.model").write_bytes(b"x")
+        found = self._localise(root)
+
+        assert found["mimi"] == RECIPE["mimi"]
+        assert found["default_temperature"] == 0.3
+        assert found["flow_lm"]["transformer"] == RECIPE["flow_lm"]["transformer"]
+        assert found["flow_lm"]["lookup_table"]["n_bins"] == 4000
+
+    def test_no_network_location_survives_anywhere_in_it(self, host, cloning):
+        """Including three levels down. The weights are at the top and the
+        tokenizer is inside ``flow_lm.lookup_table``, and a check that only
+        looked at the top level would leave the one location the worker could
+        actually resolve."""
+        root = paths.pocket_model_root("english")
+        (root / "tokenizer.model").write_bytes(b"x")
+        text = json.dumps(self._localise(root))
+        assert "hf://" not in text
+        assert "https://" not in text
+
+    def test_without_the_gated_half_the_weights_are_the_public_ones(self, host, installed):
+        """Upstream falls back from ``weights_path`` to the public weights only
+        when the *download* fails, and a local path that is not there does not
+        fail there -- it fails later, fatally, on a model that would otherwise
+        have spoken perfectly well with official voices (section 23.3)."""
+        root = paths.pocket_model_root("english")
+        (root / "tokenizer.model").write_bytes(b"x")
+        found = self._localise(root)
+
+        assert found["weights_path"] == str(root / "model.safetensors")
+        assert found["weights_path_without_voice_cloning"] == str(root / "model.safetensors")
+
+    def test_a_missing_file_is_a_sentence_rather_than_a_hole_in_the_config(
+            self, host, cloning):
+        """Upstream's schema makes the tokenizer's location required and reads a
+        null ``weights_path`` as "load nothing", so writing the gap would be a
+        pydantic traceback or a silently uninitialised model -- neither of which
+        says which file is missing."""
+        with pytest.raises(pocket.PocketError) as raised:
+            self._localise(paths.pocket_model_root("english"))
+        assert "tokenizer.model" in str(raised.value)
+        assert not paths.pocket_model_config("english").exists()
+
+    def test_it_is_written_where_upstream_will_agree_to_open_it(self, host, cloning):
+        """``load_model`` refuses a config whose suffix is not ``.yaml`` or
+        ``.yml``. JSON is a subset of YAML, so the content is JSON and the name
+        is not."""
+        root = paths.pocket_model_root("english")
+        (root / "tokenizer.model").write_bytes(b"x")
+        self._localise(root)
+        assert paths.pocket_model_config("english").suffix in (".yaml", ".yml")
+
+    def test_the_recipe_comes_from_the_runtime_rather_than_from_this_repository(
+            self, host, installed, monkeypatch, tmp_path):
+        """It ships inside the wheel, so the only place it can be read is inside
+        the isolated runtime."""
+        class Result:
+            returncode = 0
+            stdout = json.dumps({"ok": True, "recipe": RECIPE})
+            stderr = ""
+
+        asked = []
+
+        def staged(interpreter, arguments, what, timeout=300):
+            asked.append([str(one) for one in arguments])
+            return Result()
+
+        monkeypatch.setattr(pocket, "runtime_python", lambda: tmp_path / "python")
+        monkeypatch.setattr(pocket, "_run_staged", staged)
+        assert pocket._read_recipe(pocket.bundle()) == RECIPE
+        assert asked and asked[0][-2:] == ["--recipe", "english"]
+
+    def test_a_runtime_that_cannot_describe_its_model_stops_the_install(
+            self, host, installed, monkeypatch, tmp_path):
+        class Result:
+            returncode = 1
+            stdout = json.dumps({"ok": False, "error": "no configuration for 'english'"})
+            stderr = ""
+
+        monkeypatch.setattr(pocket, "runtime_python", lambda: tmp_path / "python")
+        monkeypatch.setattr(pocket, "_run_staged",
+                            lambda *arguments, **values: Result())
+        with pytest.raises(pocket.PocketError) as raised:
+            pocket._read_recipe(pocket.bundle())
+        assert "no configuration" in str(raised.value)
+
+
+class TestTheWorkerEnvironmentSaysWhatItMeans:
+    def test_no_credential_and_no_location_can_reach_it(self, host, monkeypatch):
+        """I-PKT-21. A token is the installer's and the parent process's, and
+        there is no branch that could put one here."""
+        for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACEHUB_API_TOKEN"):
+            monkeypatch.setenv(name, "hf_secret")
+        found = pocket.worker_environment()
+        assert "hf_secret" not in json.dumps(found)
+        assert found["HF_HUB_OFFLINE"] == "1"
+
+    def test_no_graphics_device_is_visible(self, host):
+        found = pocket.worker_environment()
+        assert found["CUDA_VISIBLE_DEVICES"] == ""
+        assert found["HIP_VISIBLE_DEVICES"] == ""
+
+    def test_upstreams_type_checking_claw_is_off(self, host):
+        """``pocket_tts`` wraps every function in its package unless this is set,
+        which upstream's own comment says costs per call. It is not a way to drop
+        the dependency: ``pocket_tts/data/audio.py`` imports ``beartype.typing``
+        unconditionally, so the closure ships beartype either way -- see
+        :class:`TestTheShippedManifestIsCompleteEnoughToImport`."""
+        assert pocket.worker_environment()["POCKET_TTS_NO_BEARTYPE"] == "1"
+
+    def test_there_is_no_thread_count(self, host):
+        """Section 16.4. PocketTTS sets its own, so a number here would be a
+        number reported as a Pocket thread count that is not one."""
+        found = pocket.worker_environment()
+        assert not [name for name in found if "THREAD" in name.upper()]
+
+
+class TestNoPayloadCarriesAPath:
+    def test_t_pkt_id_4_no_public_entry_names_a_file_or_a_handle(self, host, cloning,
+                                                                 worker, spoken_wav):
+        import mc_voice_api as api
+
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        pocket.save_preview(made["token"])
+        for entry in pocket.entries():
+            found = api._public(entry)
+            text = json.dumps(found)
+            assert "_handle" not in found
+            assert str(paths.data_root()) not in text
+            assert ".safetensors" not in text
+
+    def test_the_public_status_block_carries_no_path(self, host, cloning, worker):
+        text = json.dumps(pocket.public_status())
+        assert str(paths.data_root()) not in text
+        assert ".safetensors" not in text
+
+
+class TestTheWireVocabularyIsStable:
+    """Section 30. One route serves every engine that has settings, so what it
+    forwards has to be a vocabulary rather than whichever Python parameter
+    names a module happens to use."""
+
+    def test_the_wire_names_reach_the_right_settings(self, host, installed, worker):
+        found = pocket.apply_engine_settings({"precision": "int8", "steps": 3})
+        assert found["precision"] == "int8"
+        assert found["steps"] == 3
+
+    def test_a_control_this_engine_does_not_have_is_refused(self, host, installed,
+                                                            worker):
+        """A page drawn for a build whose panel had a control this one does not
+        is a stale surface, and answering it with silence would be answering it
+        with "applied"."""
+        with pytest.raises(pocket.PocketError) as raised:
+            pocket.apply_engine_settings({"threads": 8})
+        assert "threads" in str(raised.value)
+
+    def test_sopro_answers_the_same_vocabulary_where_it_shares_one(self, host,
+                                                                   voice_root,
+                                                                   monkeypatch):
+        import mc_voice_sopro as sopro
+        import mc_voice_sopro_runtime as sopro_runtime
+
+        monkeypatch.setattr(sopro_runtime, "stop", lambda reason="": None)
+        found = sopro.apply_engine_settings({"precision": "int8"})
+        assert found["precision"] == "int8"
+        with pytest.raises(sopro.SoproError):
+            sopro.apply_engine_settings({"model_id": "something"})
+
+
+class TestReadyMeansReadinessRatherThanIdleness:
+    """Two questions that were folded into one key.
+
+    ``ready`` is whether this engine can speak; ``engine_busy`` is whether it
+    happens to be speaking. The status payload publishes the first as ``ready``
+    *and* ``tts_ready``, so folding the second into it told the browser Voice
+    Chat was not set up for the whole of every reply.
+    """
+
+    def test_a_busy_engine_is_still_a_ready_one(self, host, installed, worker,
+                                                monkeypatch):
+        monkeypatch.setattr(worker, "status",
+                            lambda: {"busy": True, "draining": False,
+                                     "interrupt_mode": "drain_unit"})
+        found = pocket.public_status()
+        assert found["ready"] is True
+        assert found["tts_ready"] is True
+        assert found["engine_busy"] is True
+
+    def test_a_draining_engine_is_still_a_ready_one(self, host, installed, worker,
+                                                    monkeypatch):
+        monkeypatch.setattr(worker, "status",
+                            lambda: {"busy": True, "draining": True,
+                                     "interrupt_mode": "drain_unit"})
+        found = pocket.public_status()
+        assert found["ready"] is True
+        assert found["draining"] is True
+
+    def test_an_engine_that_is_not_installed_is_not_ready(self, host, voice_root):
+        found = pocket.public_status()
+        assert found["ready"] is False
+        assert found["tts_ready"] is False
+
+
+class TestEveryEngineAnswersBothReadinesses:
+    """The payload carries ``ready`` and ``tts_ready``, and a caller must not
+    have to know which engines distinguish them."""
+
+    def test_kokoro_keeps_the_whole_installations_readiness_in_ready(self, host,
+                                                                     voice_root,
+                                                                     monkeypatch):
+        """Kokoro owns the speech-to-text half, so its two answers differ -- and
+        the browser drives its "not set up" state off the first of them."""
+        import mc_voice_kokoro as kokoro
+        import mc_voice_models as models
+
+        half = models.Status(runtime_ready=True, stt_ready=False, tts_ready=True,
+                             runtime_message="i", stt_message="not installed",
+                             tts_message="i", platform_supported=True)
+        monkeypatch.setattr(models, "status", lambda: half)
+        found = kokoro.public_status()
+        assert found["ready"] is False, "a machine with no Whisper reported itself ready"
+        assert found["tts_ready"] is True
+
+    def test_every_adapter_answers_the_same_key_set(self, host, voice_root):
+        import mc_voice_kokoro as kokoro
+        import mc_voice_sopro as sopro
+
+        wanted = {"installed", "ready", "tts_ready", "message", "worker_resident",
+                  "engine_busy", "draining", "interrupt_mode", "block"}
+        for adapter in (kokoro, sopro, pocket):
+            assert set(adapter.public_status()) == wanted, adapter.ENGINE
+
+
+
+# --------------------------------------------------------------------------- #
+# The manifest this repository actually ships
+# --------------------------------------------------------------------------- #
+
+
+NEEDED = (
+    "pocket-tts", "torch", "numpy", "safetensors", "sentencepiece", "scipy", "PyYAML",
+    "beartype", "pydantic", "pydantic-core", "annotated-types", "typing-inspection",
+    "typing-extensions", "huggingface-hub", "requests", "urllib3", "certifi", "idna",
+    "tqdm", "filelock", "sympy", "mpmath", "networkx",
+)
+"""Every distribution ``import pocket_tts`` fails without, measured not reasoned.
+
+Taken by blocking each candidate at the import hook against a real ``pocket-tts
+3.0.2`` install and seeing which ones make the import raise. It is written down
+here so that the measurement survives: a closure that quietly lost one of these
+would install, pass every test that does not start a runtime, and then fail on
+the first reply somebody wanted spoken.
+"""
+
+ABSENT = ("fastapi", "uvicorn", "typer", "python-multipart", "einops", "torchao",
+          "hf-xet", "httpx", "httpcore")
+"""What must *not* be in it, and each for its own reason.
+
+The first five are upstream's server and CLI and are not on the import path
+Voice Chat uses; section 23.1 says the closure is the smallest tested
+inference-complete one. ``torchao`` is an optional accelerator for a
+quantization GATE P-5 has not measured yet. ``hf-xet`` accelerates downloads this
+worker never performs. ``httpx`` and ``httpcore`` arrive only with
+huggingface-hub 1.x, which replaced requests with an HTTP client an offline
+worker must never use -- which is why the pin stays in the 0.x line.
+"""
+
+
+class TestTheShippedManifestIsCompleteEnoughToImport:
+    """The closure is data, so this is the only place it can be checked.
+
+    Everything else in this file runs against a fixture manifest, which is right
+    -- those tests are about behaviour. This one is about the file the extension
+    ships, because that file is now what decides whether ``import pocket_tts``
+    succeeds on somebody's machine.
+    """
+
+    @pytest.fixture
+    def shipped(self):
+        return json.loads(paths.pocket_manifest_path().read_text(encoding="utf-8"))
+
+    def test_every_package_the_import_path_needs_is_in_the_closure(self, shipped):
+        closure = {str(name).casefold()
+                   for name, _version, _kind in shipped["runtime"]["closure"]}
+        missing = [name for name in NEEDED if name.casefold() not in closure]
+        assert missing == [], missing
+
+    def test_the_server_and_the_cli_are_not(self, shipped):
+        closure = {str(name).casefold()
+                   for name, _version, _kind in shipped["runtime"]["closure"]}
+        present = [name for name in ABSENT if name.casefold() in closure]
+        assert present == [], present
+
+    def test_huggingface_hub_stays_in_the_zero_line(self, shipped):
+        """1.x replaced requests with httpx and would add five more wheels to an
+        offline worker for an HTTP client it must never use."""
+        found = {str(name).casefold(): version
+                 for name, version, _kind in shipped["runtime"]["closure"]}
+        assert found["huggingface-hub"].startswith("0."), found["huggingface-hub"]
+
+    def test_every_platform_is_pinned_byte_for_byte(self, shipped):
+        """A hash and a byte count, or nothing doing. There is no "download it
+        and trust it" mode and there is no flag to add one."""
+        platforms = shipped["runtime"]["platforms"]
+        assert platforms, "the manifest advertises no platform at all"
+        for item in platforms:
+            artifacts = item.get("artifacts") or ()
+            assert len(artifacts) == len(shipped["runtime"]["closure"]), item["id"]
+            for one in artifacts:
+                assert len(str(one.get("sha256") or "")) == 64, (item["id"], one)
+                assert int(one.get("bytes") or 0) > 0, (item["id"], one)
+                assert str(one["url"]).startswith("https://"), one
+
+    def test_the_config_block_names_the_three_locations_upstream_has(self, shipped):
+        """The manifest's ``config`` keys and :data:`mc_voice_pocket.LOCATIONS`
+        are two halves of one agreement: the first says which local file plays
+        each part, the second says where in upstream's document it goes."""
+        for entry in shipped["models"].values():
+            assert set(entry["config"]) == set(pocket.LOCATIONS), entry["config"]
+
+    def test_each_repository_is_pinned_at_a_commit_rather_than_a_branch(self, shipped):
+        """Upstream's shipped configuration names one commit for the public
+        weights and another for the cloning weights. Following ``main`` instead
+        would install bytes that configuration was not written for."""
+        for entry in shipped["models"].values():
+            for key in ("revision", "cloning_revision"):
+                found = str(entry.get(key) or "")
+                assert len(found) == 40 and found.strip("0123456789abcdef") == "", \
+                    (key, found)
+            assert entry["revision"] != entry["cloning_revision"]

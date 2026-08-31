@@ -5122,10 +5122,30 @@
     margin: 0.4em 0;
 }
 
-.mc-voice-sopro-recording {
+/* The "Recorded 12.4 s" note beside Record here. One rule for both cloning
+   engines: the class is per engine because the markup is, and the appearance of
+   a caption is not something either engine has an opinion about. */
+.mc-voice-sopro-recording,
+.mc-voice-pocket-recording {
     font-size: 0.85em;
     margin-left: 0.6em;
     opacity: 0.8;
+}
+
+/* The chip, while an engine that cannot cancel finishes the unit it was already
+   inside. Not an error colour and not a spinner: playback has already stopped,
+   which is what the user asked for, and the only thing left to say is that the
+   engine is not ready to start another one yet. Dimmed and not-allowed rather
+   than hidden, because a control that vanished would read as a feature that
+   broke. Applied only when the browser has been told this engine drains — see
+   `setFinishing` in javascript/voice_chat.js. */
+.mc-voice-finishing {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.mc-voice-finishing::after {
+    content: " ⏳";
 }
 
 /* The Voice Lab. A closed `<details>` by default and marked experimental at the

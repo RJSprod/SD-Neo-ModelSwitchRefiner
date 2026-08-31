@@ -123,6 +123,22 @@ class Character:
     sopro_top_p: float | None = None
     sopro_top_k: float | None = None
     sopro_language: str = ""
+    # Pocket's, on exactly the same rule and for exactly the same reason. Flat
+    # scalars because that is what :mod:`yamlish` can round-trip, and absence
+    # rather than a written default because a character with nothing here
+    # follows PocketTTS's current defaults (I-PKT-4).
+    #
+    # What is deliberately *not* here is the compute half. Precision, sampler
+    # steps and the model choice are engine-global (I-PKT-23): a character that
+    # carried them would be a character whose turn to speak silently restarted
+    # the Pocket worker, which is a setting pretending to be a personality
+    # trait (section 13, section 49.11).
+    pocket_voice: str = ""
+    pocket_speed: float | None = None
+    pocket_pitch: float | None = None
+    pocket_gain: float | None = None
+    pocket_pause: float | None = None
+    pocket_temperature: float | None = None
 
     @property
     def voice_profile(self) -> dict[str, object]:
@@ -153,6 +169,8 @@ class Character:
             found["kokoro"] = self.voice
         if self.sopro_voice:
             found["sopro"] = self.sopro_voice
+        if self.pocket_voice:
+            found["pocket"] = self.pocket_voice
         return found
 
     @property
@@ -175,6 +193,11 @@ class Character:
                  "language": self.sopro_language or None}
         if any(value is not None for value in sopro.values()):
             found["sopro"] = sopro
+        pocket = {"speed": self.pocket_speed, "pitch": self.pocket_pitch,
+                  "gain": self.pocket_gain, "pause": self.pocket_pause,
+                  "temperature": self.pocket_temperature}
+        if any(value is not None for value in pocket.values()):
+            found["pocket"] = pocket
         return found
 
     @staticmethod
@@ -188,16 +211,33 @@ class Character:
         caller.
         """
         offered = dict(profile or {})
-        if str(engine) == "sopro":
+        wanted = str(engine or "kokoro")
+        if wanted == "kokoro":
+            return {"voice": str(voice_id or "").strip(),
+                    "voice_speed": offered.get("speed"),
+                    "voice_pitch": offered.get("pitch"),
+                    "voice_gain": offered.get("gain"),
+                    "voice_pause": offered.get("pause")}
+        if wanted == "sopro":
             found = {"sopro_voice": str(voice_id or "").strip(),
                      "sopro_language": str(offered.get("language") or "")}
             for name in ("speed", "pitch", "gain", "pause", "temperature", "top_p",
                          "top_k"):
                 found[f"sopro_{name}"] = offered.get(name)
             return found
-        return {"voice": str(voice_id or "").strip(),
-                "voice_speed": offered.get("speed"), "voice_pitch": offered.get("pitch"),
-                "voice_gain": offered.get("gain"), "voice_pause": offered.get("pause")}
+        if wanted == "pocket":
+            found = {"pocket_voice": str(voice_id or "").strip()}
+            for name in ("speed", "pitch", "gain", "pause", "temperature"):
+                found[f"pocket_{name}"] = offered.get(name)
+            return found
+        # Named rather than defaulted. This used to end in a Kokoro ``return``
+        # that any unrecognised engine fell into, which was harmless while
+        # "not Sopro" could only mean Kokoro and became a silent data loss the
+        # moment a third engine existed: a Pocket save landing in the Kokoro
+        # branch would write a Pocket voice id into ``voice`` and quietly
+        # replace the character's Kokoro voice (section 13).
+        raise ValueError(f"{engine!r} is not a text-to-speech engine this build stores "
+                         f"character voice fields for.")
 
     def to_mapping(self) -> dict[str, object]:
         """The file, in the order it is written.
@@ -235,6 +275,18 @@ class Character:
                            ("sopro_temperature", self.sopro_temperature),
                            ("sopro_top_p", self.sopro_top_p),
                            ("sopro_top_k", self.sopro_top_k)):
+            if value is not None:
+                found[key] = value
+        # Pocket's, on the same rule again. A character edited on Kokoro keeps
+        # its Pocket keys because they are written from this object's own
+        # fields, and this object was loaded with them (I-PKT-3, section 44).
+        if self.pocket_voice:
+            found["pocket_voice"] = self.pocket_voice
+        for key, value in (("pocket_speed", self.pocket_speed),
+                           ("pocket_pitch", self.pocket_pitch),
+                           ("pocket_gain", self.pocket_gain),
+                           ("pocket_pause", self.pocket_pause),
+                           ("pocket_temperature", self.pocket_temperature)):
             if value is not None:
                 found[key] = value
         return found
@@ -275,6 +327,12 @@ class Character:
             sopro_top_p=_optional_number(values.get("sopro_top_p")),
             sopro_top_k=_optional_number(values.get("sopro_top_k")),
             sopro_language=_first(values, ("sopro_language",)),
+            pocket_voice=_first(values, ("pocket_voice",)),
+            pocket_speed=_optional_number(values.get("pocket_speed")),
+            pocket_pitch=_optional_number(values.get("pocket_pitch")),
+            pocket_gain=_optional_number(values.get("pocket_gain")),
+            pocket_pause=_optional_number(values.get("pocket_pause")),
+            pocket_temperature=_optional_number(values.get("pocket_temperature")),
         )
 
 

@@ -845,6 +845,16 @@ globalThis.MutationObserver = function (fn) {
 };
 const observers = [];
 
+// The answers table, as something a scenario can change. The placeholder above
+// is substituted as an object *literal*, so indexing it inside a scenario
+// assigns into a fresh object and quietly asserts nothing -- which is the worst
+// shape a test helper can have. One binding, read by `fetch`, and a scenario
+// that needs the server's answer to change part-way through mutates this
+// instead. Its name deliberately contains no placeholder token: substitution is
+// a plain string replace over this whole file, so an identifier that contained
+// one would be rewritten into the value.
+const replies = ANSWERS;
+
 globalThis.fetch = function (url, options) {
     requests.push({url, options: options || {},
                    body: options && options.body,
@@ -853,9 +863,9 @@ globalThis.fetch = function (url, options) {
     // them are substrings of each other -- "voice/sopro" is a prefix of
     // "voice/sopro/clone" -- so first-match made the answer depend on the order
     // keys happened to be inserted in, which a test helper adding one changes.
-    const matches = Object.keys(ANSWERS).filter((k) => url.indexOf(k) !== -1);
+    const matches = Object.keys(replies).filter((k) => url.indexOf(k) !== -1);
     matches.sort((a, b) => b.length - a.length);
-    const answer = ANSWERS[matches[0]];
+    const answer = replies[matches[0]];
     if (!answer) return Promise.reject(new Error("no route " + url));
     if (answer.reject) return Promise.reject(new Error("network"));
     const headerBag = answer.headers || {};
@@ -1067,6 +1077,13 @@ function report(extra) {
         }),
         aborts: aborts.length,
         readerCancelled: readers.map((r) => r.cancelled),
+        // The Pocket-only waiting state: playback has already stopped and the
+        // engine has not released its lane. Read off the chip rather than off a
+        // flag inside the module, because what a user meets is the chip.
+        finishing: elements["mc-llm-chat-to-voice"].classList
+            .contains("mc-voice-finishing"),
+        finishingTitle: elements["mc-llm-chat-to-voice"].getAttribute("title") || "",
+        finishingBusy: elements["mc-llm-chat-to-voice"].getAttribute("aria-busy") || "",
         sendHidden: (elements["mc-llm-chat-send"].classList
                      .contains("mc-llm-voice-hidden")),
         stopHidden: (elements["mc-llm-chat-stop"].classList
@@ -1166,7 +1183,8 @@ DEFAULTS = {
     "ANSWERS": json.dumps({
         "voice/tts-stream": {
             "headers": {"X-Model-Chain-Voice-Rate": "24000",
-                        "X-Model-Chain-Voice-Turn": "T1"},
+                        "X-Model-Chain-Voice-Turn": "T1",
+                        "X-Model-Chain-Voice-Interrupt": "cancel"},
             # Three network reads whose boundaries fall wherever they like --
             # including one that ends on the first byte of a sample.
             "chunks": [[1, 0, 2, 0, 3], [0, 4, 0], [5, 0, 6, 0]],
@@ -5105,3 +5123,148 @@ class TestTheEnginePanel:
             console.log(JSON.stringify(report()));
         """, ANSWERS=stream_answers(seconds=1.0, count=6, stall=True))
         assert found["aborts"] >= 1
+
+
+# --------------------------------------------------------------------------- #
+# The engine whose Stop is not a cancellation
+# --------------------------------------------------------------------------- #
+
+
+class TestVoiceFinishing:
+    """Section 21.4 and I-PKT-28.
+
+    Some text-to-speech engines abandon their synthesis when Stop is pressed and
+    some cannot. Released PocketTTS is the second kind, and everything below is
+    about the browser knowing that from the *payload* rather than from
+    recognising an engine id or a version string -- because the day a build
+    ships with cooperative cancellation is the day a hard-coded rule here
+    becomes a waiting state nobody can clear.
+    """
+
+    def test_an_engine_that_cancels_shows_nothing_and_asks_nothing(self):
+        """Kokoro and Sopro. The absence is the assertion: no indicator, and no
+        extra status request after the Stop."""
+        found = run("""
+            runState.value = "llm";
+            await speak('T1', 4);
+            const before = requests.filter((r) => r.url
+                && r.url.indexOf("voice/status") >= 0).length;
+            elements["mc-llm-chat-stop"].fire("click", {});
+            NOW += 2000;
+            await pump(6);
+            const after = requests.filter((r) => r.url
+                && r.url.indexOf("voice/status") >= 0).length;
+            console.log(JSON.stringify(Object.assign(report(), {polled: after - before})));
+        """, ANSWERS=draining_answers(mode="cancel", draining=False))
+        assert found["finishing"] is False
+        assert found["polled"] == 0, "a cancelling engine was polled for a drain"
+
+    def test_a_draining_engine_says_it_is_finishing_after_a_stop(self):
+        found = run("""
+            runState.value = "llm";
+            await speak('T1', 4);
+            elements["mc-llm-chat-stop"].fire("click", {});
+            // The indicator is armed on a timer, so the fake clock has to reach
+            // it. Everything about it is deliberately not immediate: a Stop
+            // that painted a waiting state before the engine had a chance to
+            // report itself free would flicker on every reply.
+            NOW += 2000;
+            await pump(8);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=draining_answers())
+        assert found["finishing"] is True
+        assert found["finishingBusy"] == "true"
+        assert "Playback has stopped" in found["finishingTitle"]
+        assert "Playback has stopped" in found["status"]
+
+    def test_the_indicator_clears_when_the_server_says_the_lane_is_free(self):
+        """From the server's answer and never from a timer: an indicator that
+        cleared itself would be an indicator that let a second generation start
+        inside a process where the first was still running."""
+        found = run("""
+            runState.value = "llm";
+            await speak('T1', 4);
+            elements["mc-llm-chat-stop"].fire("click", {});
+            NOW += 2000;
+            await pump(8);
+            const during = elements["mc-llm-chat-to-voice"].classList
+                .contains("mc-voice-finishing");
+            replies["voice/status"].json.draining = false;
+            NOW += 4000;
+            await pump(10);
+            console.log(JSON.stringify(Object.assign(report(), {during: during})));
+        """, ANSWERS=draining_answers())
+        assert found["during"] is True
+        assert found["finishing"] is False
+        assert found["finishingBusy"] == ""
+
+    def test_it_does_not_decide_from_an_engine_name(self):
+        """The payload says ``cancel`` while naming PocketTTS. The browser must
+        believe the capability, not the label."""
+        found = run("""
+            runState.value = "llm";
+            await speak('T1', 4);
+            elements["mc-llm-chat-stop"].fire("click", {});
+            // The indicator is armed on a timer, so the fake clock has to reach
+            // it. Everything about it is deliberately not immediate: a Stop
+            // that painted a waiting state before the engine had a chance to
+            // report itself free would flicker on every reply.
+            NOW += 2000;
+            await pump(8);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=draining_answers(mode="cancel", draining=False,
+                                       engine="pocket", engine_label="PocketTTS"))
+        assert found["finishing"] is False
+
+    def test_written_conversation_is_untouched_while_it_finishes(self):
+        """Section 21.4. Playback is silent and the engine is busy; the composer
+        is neither."""
+        found = run("""
+            runState.value = "llm";
+            await speak('T1', 4);
+            elements["mc-llm-chat-stop"].fire("click", {});
+            // The indicator is armed on a timer, so the fake clock has to reach
+            // it. Everything about it is deliberately not immediate: a Stop
+            // that painted a waiting state before the engine had a chance to
+            // report itself free would flicker on every reply.
+            NOW += 2000;
+            await pump(8);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=draining_answers())
+        assert found["finishing"] is True
+        assert elementless(found) is False
+
+    def test_the_source_never_names_an_engine_to_decide_this(self):
+        """I-PKT-28 as a property of the file. A string comparison against
+        ``"pocket"`` here would be the hard-coded rule the payload exists to
+        replace."""
+        source = SCRIPT.read_text(encoding="utf-8")
+        block = source.split("function setFinishing")[0].split(
+            "the engine that cannot cancel")[1]
+        assert '"pocket"' not in block
+        assert "3.0.2" not in block
+        assert "interrupt_mode" in block
+
+
+def draining_answers(mode: str = "drain_unit", draining: bool = True, **changes) -> str:
+    """Answers where the stream declares an interrupt mode and status a drain.
+
+    Both halves, because the browser learns the mode from the *stream* -- it is
+    frozen onto the turn, so a switch mid-reply cannot change what stopping that
+    reply costs -- and learns when the engine is free again from the status
+    poll.
+    """
+    answers = json.loads(DEFAULTS["ANSWERS"])
+    answers["voice/tts-stream"] = dict(
+        answers["voice/tts-stream"],
+        headers=dict(answers["voice/tts-stream"]["headers"],
+                     **{"X-Model-Chain-Voice-Interrupt": mode}),
+        chunks={"plan": {"bytes": 24000, "count": 6, "fill": 0}})
+    answers["voice/status"]["json"].update({"interrupt_mode": mode,
+                                            "draining": draining}, **changes)
+    return json.dumps(answers)
+
+
+def elementless(found: dict) -> bool:
+    """Whether the composer has no usable control at all. Never true."""
+    return bool(found["sendHidden"] and found["stopHidden"])

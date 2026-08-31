@@ -1541,3 +1541,72 @@ class TestTheSpeechToTextTiers:
         of them."""
         with models._claim("stt", None, "whisper-medium-int8"):
             assert models.progress()["stt"]["model"] == "whisper-medium-int8"
+
+
+# --------------------------------------------------------------------------- #
+# The one credential, and the hop it must not cross
+# --------------------------------------------------------------------------- #
+
+
+class Answer:
+    """The half of an ``http.client.HTTPResponse`` the redirect handler reads."""
+
+    def __init__(self):
+        import email.message
+
+        self.headers = email.message.Message()
+
+
+class TestACredentialNeverLeavesItsPublisher:
+    """I-PKT-21 and T-INSTALL-P5.
+
+    A gated artifact needs an ``Authorization`` header on exactly one request:
+    the one to the publisher that issued the gate. Everything after that is a
+    signed delivery URL, which is the point of the redirect -- and :mod:`urllib`
+    copies every header but two onto a redirected request, so the default
+    behaviour is to hand somebody's Hugging Face token to whichever host the 302
+    happens to name.
+    """
+
+    def _redirected(self, here: str, there: str):
+        import urllib.request
+
+        request = urllib.request.Request(here, headers={"Authorization": "Bearer hf_secret",
+                                                        "User-Agent": "test"})
+        made = models._DropCredentialOnHop().redirect_request(
+            request, Answer(), 302, "Found", Answer().headers, there)
+        assert made is not None
+        return {str(name).casefold(): value for name, value in made.headers.items()}
+
+    def test_the_token_follows_a_redirect_that_stays_where_it_was(self):
+        found = self._redirected("https://huggingface.co/a/resolve/main/w.safetensors",
+                                 "https://huggingface.co/a/resolve/main/w2.safetensors")
+        assert found.get("authorization") == "Bearer hf_secret"
+
+    def test_the_token_does_not_follow_a_redirect_to_another_host(self):
+        found = self._redirected("https://huggingface.co/a/resolve/main/w.safetensors",
+                                 "https://cdn-lfs.example.net/signed/abc?x=1")
+        assert "authorization" not in found
+
+    def test_the_token_does_not_follow_a_downgrade_to_the_clear(self):
+        """The same host, and still a hop it must not cross. A bearer token sent
+        over ``http:`` is a bearer token readable by everything on the path,
+        which is the failure the guard exists for arriving by a different door.
+        """
+        found = self._redirected("https://huggingface.co/a/resolve/main/w.safetensors",
+                                 "http://huggingface.co/a/resolve/main/w.safetensors")
+        assert "authorization" not in found
+
+    def test_a_token_is_attached_only_to_its_own_publisher(self, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "hf_secret")
+        assert models._credential("https://huggingface.co/a/resolve/main/w") == "hf_secret"
+        assert models._credential("https://example.net/a/resolve/main/w") == ""
+
+    def test_a_token_is_never_attached_over_an_unencrypted_transport(self, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "hf_secret")
+        assert models._credential("http://huggingface.co/a/resolve/main/w") == ""
+
+    def test_no_credential_variable_set_means_no_header(self, monkeypatch):
+        for name in models.CREDENTIAL_VARIABLES:
+            monkeypatch.delenv(name, raising=False)
+        assert models._credential("https://huggingface.co/a/resolve/main/w") == ""
