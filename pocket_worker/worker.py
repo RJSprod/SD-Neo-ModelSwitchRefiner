@@ -1032,27 +1032,32 @@ happened to generate.
 
 QUIET_FLOOR = 130
 QUIET_MULTIPLE = 3
-QUIET_SHARE = 8
-"""What counts as quiet, measured against the unit's own noise floor.
+QUIET_SHARE = 16
+"""What counts as quiet: a share of this unit's own loudest sample.
 
-The first version of this asked whether a window was below a *share of the
-loudest sample*, and on a real machine it trimmed exactly nothing: every unit
-came back ``trimmed_ms=0``. The reason is the voice. A cloned voice reproduces
-its reference recording's room tone, so what a listener hears as silence between
-two sentences is not silence at all -- it is that room tone, and a rule anchored
-to the peak puts the line far below it.
+Two earlier rules missed it, and both misses are worth keeping written down
+because they were the same mistake from opposite ends.
 
-So the line is anchored to the floor instead: three times the quietest ten
-milliseconds seen so far in this unit, which is where the room tone lives.
-Anchored at the bottom it follows a noisy clone up and a clean model down, and
-it never has to be guessed at.
+The first drew the line at two per cent of the peak but capped it at about -34
+dBFS. The second, on the theory that a cloned voice's room tone sits above any
+such line, anchored it to the *floor* instead -- three times the quietest ten
+milliseconds in the unit. Then the machine reported ``floor_db=-68``: this
+voice's quietest moment is exceptionally clean, so three times it is 39 counts,
+under the absolute minimum, and the anchor made the line *stricter* rather than
+looser. Both rules came back ``quiet_ms=0`` on units carrying about seven
+hundred milliseconds of audio that no amount of text accounts for.
 
-Two bounds keep it honest. It is never below :data:`QUIET_FLOOR` -- about -48
-dBFS, under any model's own noise -- because a unit of digital silence would
-otherwise put the line at zero. And it is never above an eighth of the loudest
-sample so far, which is the guard for a unit that contains no silence at all: if
-the quietest thing in it is a soft consonant, three times *that* would call a
-whole syllable quiet, and this is what stops it.
+What is actually wanted is not "at the noise floor" but "after the last thing
+worth hearing", and that is a share of the peak: a sixteenth, about 24 dB down.
+Nothing intelligible sits under it for long, everything the model adds after the
+end-of-speech token does, and it engages whatever the voice's noise floor turns
+out to be -- because every unit has a loudest sample, and the quiet is defined
+against that rather than against a level somebody guessed.
+
+:data:`QUIET_FLOOR` remains as an absolute minimum, about -48 dBFS, so that a
+unit which never gets loud cannot draw the line under its own speech. What
+protects a genuinely quiet ending is not the level but the keep: only the run
+*after* the last loud window is trimmed, and :data:`KEEP_TAIL_MS` of it stays.
 """
 
 SPEECH_FLOOR = 1000
@@ -1123,6 +1128,17 @@ class Trim:
         self.lead_hold = max(self.lead, int(self.rate * MAX_LEAD_HOLD_MS / 1000))
         self.dropped = 0
         self.quiet_found = 0
+        self.longest = 0
+        """The longest run of quiet *inside* this unit, in samples.
+
+        Measured and never trimmed. A pause the model put between two clauses is
+        prosody and belongs to the delivery, so this class does not touch it --
+        but a reply whose sentences are separated by half a second of nothing
+        has to be able to say whether that half second is at the joins between
+        units, where this class can do something about it, or inside them, where
+        it cannot. Those are different problems and the log could not previously
+        tell them apart.
+        """
         self.hint = max(0, int(floor or 0))
         """What the last unit in this voice measured its noise floor to be.
 
@@ -1141,6 +1157,7 @@ class Trim:
         self._quiet = _int16(b"")
         self._opened = False
         self._peak = 0
+        self._run = 0
 
     @property
     def dropped_ms(self) -> int:
@@ -1151,6 +1168,11 @@ class Trim:
     def quiet_ms(self) -> int:
         """How much quiet this unit had at its two ends, cut or not."""
         return int(self.quiet_found * 1000 / (self.rate or 1))
+
+    @property
+    def gap_ms(self) -> int:
+        """The longest pause inside this unit. Measured, never trimmed."""
+        return int(self.longest * 1000 / (self.rate or 1))
 
     @property
     def floor_db(self) -> int:
@@ -1208,11 +1230,16 @@ class Trim:
         if peak > self._quiet_level():
             # Speech. Whatever quiet was being held is a gap *inside* the unit
             # and is passed on untouched -- only the two ends are this class's
-            # business.
+            # business. Its length is kept, because it is the one number that
+            # says whether a gap somebody can hear is this class's to fix.
+            if self._run > self.longest:
+                self.longest = self._run
+            self._run = 0
             out.extend(self._quiet)
             del self._quiet[:]
             out.extend(window)
             return
+        self._run += len(window)
         self._quiet.extend(window)
         if len(self._quiet) > self.hold:
             spill = len(self._quiet) - self.hold
@@ -1261,8 +1288,7 @@ class Trim:
 
     def _quiet_level(self) -> int:
         """What counts as quiet once the unit has started."""
-        return max(QUIET_FLOOR, min(self.measured * QUIET_MULTIPLE,
-                                    self._peak // QUIET_SHARE))
+        return max(QUIET_FLOOR, self._peak // QUIET_SHARE)
 
 
 # --------------------------------------------------------------------------- #
@@ -1864,6 +1890,7 @@ class Engine:
             "audio_ms": int(samples * 1000 / (self.sample_rate or 1)),
             "trimmed_ms": trim.dropped_ms,
             "quiet_ms": trim.quiet_ms,
+            "gap_ms": trim.gap_ms,
             "floor_db": trim.floor_db,
             "streaming": "chunk" if blocks > 1 else "unit",
         }

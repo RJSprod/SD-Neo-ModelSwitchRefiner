@@ -438,15 +438,23 @@ class TestTheQuietAModelPutsRoundASegmentIsCutBack:
         num_speakers = 53
         sample_rate = 24000
 
-        def __init__(self, lead=0.5, tail=0.4, level=0.0):
+        def __init__(self, lead=0.5, tail=0.4, level=0.0, dead=None):
             self.lead = lead
             self.tail = tail
             self.level = level
+            self.dead = dead
 
         def samples(self):
             rate = self.sample_rate
+            middle = [0.5] * rate
+            if self.dead is not None:
+                # One exceptionally quiet moment in the middle of the words, so
+                # that the segment's floor is far below its own padding.
+                half = rate // 2
+                middle = ([0.5] * half + [self.dead] * (rate // 50)
+                          + [0.5] * (rate - half))
             return ([self.level] * int(self.lead * rate)
-                    + [0.5] * rate
+                    + middle
                     + [self.level] * int(self.tail * rate))
 
         def generate(self, text, sid=0, speed=1.0, callback=None):
@@ -493,6 +501,24 @@ class TestTheQuietAModelPutsRoundASegmentIsCutBack:
         found, metrics = self.spoken(tts)
         assert metrics["trimmed_ms"] == 0
         assert abs(len(found) - tts.sample_rate) < tts.sample_rate * 0.02
+
+    def test_a_clean_floor_does_not_make_the_line_strict(self):
+        """Reported from a machine: ``floor_db=-68`` and ``quiet_ms=0``.
+
+        A voice whose quietest moment is exceptionally clean had the line drawn
+        under its own padding, so nothing was recognised and nothing was cut.
+        The line comes from the speech instead -- a sixteenth of the loudest
+        sample -- so one dead moment in the middle cannot make the padding
+        around it invisible.
+        """
+        plain = self.Padded(lead=0.3, level=0.01)
+        deep = self.Padded(lead=0.3, level=0.01, dead=0.0004)
+        _blocks, one = self.spoken(plain)
+        _blocks, two = self.spoken(deep)
+        assert one["floor_db"] > two["floor_db"] + 20, "the fixtures are not different"
+        assert one["trimmed_ms"] == pytest.approx(
+            700 - worker.KEEP_LEAD_MS - worker.KEEP_TAIL_MS, abs=40)
+        assert abs(one["trimmed_ms"] - two["trimmed_ms"]) < 40
 
     def test_the_level_follows_the_segment_rather_than_being_fixed(self):
         """A voice recorded with room tone still has its padding recognised."""

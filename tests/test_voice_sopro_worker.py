@@ -464,6 +464,38 @@ class TestTheQuietAModelPutsRoundAUnitIsCutBack:
         assert trim.dropped_ms == pytest.approx(700 - sopro_worker.KEEP_LEAD_MS
                                                 - sopro_worker.KEEP_TAIL_MS, abs=40)
 
+    def test_a_clean_floor_does_not_make_the_line_strict(self):
+        """Reported from a machine: ``floor_db=-68`` and ``quiet_ms=0``.
+
+        A voice whose quietest moment is exceptionally clean had the line drawn
+        under its own padding, so nothing was recognised and nothing was cut.
+        The line comes from the speech instead -- a sixteenth of the loudest
+        sample -- so one dead moment in the middle of a unit cannot make the
+        unit's padding invisible.
+        """
+        pad, dead = 0.01, 0.0004
+        noisy = numpy.concatenate([self.quiet(0.3, pad), tone(220.0, 1.0) * 1.8,
+                                   self.quiet(0.4, pad)])
+        clean = numpy.concatenate([self.quiet(0.3, pad), tone(220.0, 0.5) * 1.8,
+                                   self.quiet(0.02, dead), tone(220.0, 0.5) * 1.8,
+                                   self.quiet(0.4, pad)])
+        one, two = sopro_worker.Trim(self.RATE), sopro_worker.Trim(self.RATE)
+        self.through(one, noisy)
+        self.through(two, clean)
+        assert one.floor_db > two.floor_db + 20, "the fixtures are not different"
+        assert one.dropped_ms == pytest.approx(700 - sopro_worker.KEEP_LEAD_MS
+                                               - sopro_worker.KEEP_TAIL_MS, abs=40)
+        assert abs(one.dropped_ms - two.dropped_ms) < 40
+
+    def test_a_pause_inside_a_unit_is_measured_and_left_alone(self):
+        source = numpy.concatenate([tone(220.0, 0.2) * 1.8, self.quiet(0.5, 0.01),
+                                    tone(220.0, 0.2) * 1.8])
+        trim = sopro_worker.Trim(self.RATE)
+        found = self.through(trim, source)
+        assert trim.gap_ms == pytest.approx(500, abs=30)
+        assert trim.dropped == 0
+        assert abs(found.size - source.size) < self.RATE * 0.02
+
     def test_a_rate_of_nothing_is_a_pass_through_rather_than_a_crash(self):
         source = numpy.concatenate([self.quiet(0.1), tone(220.0, 0.1)])
         assert self.through(sopro_worker.Trim(0), source).size == source.size

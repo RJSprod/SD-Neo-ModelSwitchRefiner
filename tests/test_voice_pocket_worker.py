@@ -1084,9 +1084,14 @@ class TestTheQuietAModelPutsRoundAUnitIsCutBack:
         that early, and with it the bar for "this is the first word" moves above
         the room tone.
         """
+        # Loud enough to be taken for the start of a unit, quiet enough to be
+        # recognised as quiet once the unit's own peak is known. A real clone's
+        # room tone is far below both; this one sits between them on purpose,
+        # because that is the only place where the seeded floor is what decides.
         room = 0.05
+        speech = tone(220.0, 1.0) * 1.8
         assert room * 32767 > pocket_worker.SPEECH_FLOOR, "the fixture is not a real test"
-        source = numpy.concatenate([quiet(0.3, room), tone(220.0, 1.0), quiet(0.4, room)])
+        source = numpy.concatenate([quiet(0.3, room), speech, quiet(0.4, room)])
 
         cold = pocket_worker.Trim(RATE)
         through_trim(cold, source)
@@ -1124,6 +1129,83 @@ class TestTheQuietAModelPutsRoundAUnitIsCutBack:
         source = numpy.concatenate([quiet(0.1), tone(220.0, 0.1)])
         found = through_trim(pocket_worker.Trim(0), source)
         assert found.size == source.size
+
+
+class TestQuietIsMeasuredAgainstTheSpeechAndNotAgainstTheFloor:
+    """The second miss, written down as a fixture.
+
+    A real machine reported ``floor_db=-68``: a voice whose quietest moment is
+    exceptionally clean. Anchoring the line to that floor put it at 39 counts,
+    under the absolute minimum -- so the padding either side of the unit, which
+    sits perfectly audibly above it, was not quiet by any rule this class had,
+    and ``quiet_ms`` came back zero on units carrying about seven hundred
+    milliseconds of audio no amount of text accounts for.
+
+    The signal below is that unit: padding at about -40 dBFS, speech far above
+    it, and one exceptionally dead moment in the middle to set the floor low.
+    """
+
+    PAD = 0.01
+    DEAD = 0.0004
+
+    def unit(self):
+        return numpy.concatenate([
+            quiet(0.3, self.PAD),
+            tone(220.0, 0.5) * 1.8,
+            quiet(0.02, self.DEAD),
+            tone(220.0, 0.5) * 1.8,
+            quiet(0.4, self.PAD),
+        ])
+
+    def test_the_padding_is_recognised_and_the_floor_is_still_reported(self):
+        trim = pocket_worker.Trim(RATE)
+        found = through_trim(trim, self.unit())
+        assert trim.floor_db < -60, "the fixture no longer has a clean floor"
+        assert trim.dropped_ms == pytest.approx(700 - 60 - 120, abs=40)
+        assert found.size == pytest.approx(
+            self.unit().size - trim.dropped, abs=RATE * 0.02)
+
+    def test_the_floor_being_low_does_not_make_the_line_strict(self):
+        """The whole of the second miss: a cleaner unit must not be trimmed less.
+
+        The same unit without its one dead moment has a floor thirty decibels
+        higher, and has to come out the same length -- because the line is drawn
+        from the speech, which did not move.
+        """
+        noisy = numpy.concatenate([quiet(0.3, self.PAD), tone(220.0, 1.0) * 1.8,
+                                   quiet(0.4, self.PAD)])
+        clean = numpy.concatenate([quiet(0.3, self.PAD), tone(220.0, 0.5) * 1.8,
+                                   quiet(0.02, self.DEAD), tone(220.0, 0.5) * 1.8,
+                                   quiet(0.4, self.PAD)])
+        one, two = pocket_worker.Trim(RATE), pocket_worker.Trim(RATE)
+        through_trim(one, noisy)
+        through_trim(two, clean)
+        assert one.floor_db > two.floor_db + 20, "the fixtures are not different"
+        assert abs(one.dropped_ms - two.dropped_ms) < 40
+
+    def test_a_pause_inside_the_unit_is_measured_and_left_alone(self):
+        """The number that says whether a gap is even this class's to fix.
+
+        A pause the model put between two clauses is prosody. It is reported so
+        that a reply whose sentences are half a second apart can say whether
+        that half second is at the joins, where something can be done about it,
+        or inside a unit, where the answer is a different one.
+        """
+        source = numpy.concatenate([tone(220.0, 0.2) * 1.8, quiet(0.5, self.PAD),
+                                    tone(220.0, 0.2) * 1.8])
+        trim = pocket_worker.Trim(RATE)
+        found = through_trim(trim, source)
+        assert trim.gap_ms == pytest.approx(500, abs=30)
+        assert trim.dropped == 0
+        assert abs(found.size - source.size) < RATE * 0.02
+
+    def test_the_trailing_run_is_not_counted_as_a_pause_inside(self):
+        """A tail is a tail. Only a run that speech comes back after is a gap."""
+        source = numpy.concatenate([tone(220.0, 0.5) * 1.8, quiet(0.4, self.PAD)])
+        trim = pocket_worker.Trim(RATE)
+        through_trim(trim, source)
+        assert trim.gap_ms == 0
+        assert trim.dropped_ms == pytest.approx(400 - 120, abs=40)
 
 
 class TestTheTrimAndTheSeamComposeInThatOrder:
@@ -1210,7 +1292,7 @@ class TestASecondUnitKnowsWhatTheVoiceSoundsLikeWhenItIsQuiet:
 
         def generate_audio_stream(self, model_state, text_to_generate, max_tokens=1000,
                                   frames_after_eos=None, copy_state=True):
-            source = numpy.concatenate([quiet(0.25, self.room), tone(220.0, 1.0),
+            source = numpy.concatenate([quiet(0.25, self.room), tone(220.0, 1.0) * 1.8,
                                         quiet(0.35, self.room)])
 
             def produce():

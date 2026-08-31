@@ -391,11 +391,12 @@ class Sink:
         return True
 
     def note_segment(self, blocks=0, first_block_ms=0, streaming="", synth_ms=0,
-                     audio_ms=0, trimmed_ms=0, quiet_ms=0, floor_db=0):
+                     audio_ms=0, trimmed_ms=0, quiet_ms=0, floor_db=0, gap_ms=0):
         self.segments.append({"blocks": blocks, "first_block_ms": first_block_ms,
                               "streaming": streaming, "synth_ms": synth_ms,
                               "audio_ms": audio_ms, "trimmed_ms": trimmed_ms,
-                              "quiet_ms": quiet_ms, "floor_db": floor_db})
+                              "quiet_ms": quiet_ms, "floor_db": floor_db,
+                              "gap_ms": gap_ms})
 
     def audio_finished(self):
         self.done = True
