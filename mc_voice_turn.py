@@ -441,7 +441,7 @@ class VoiceTurn:
                          exc_info=True)
 
     def note_segment(self, blocks: int = 0, first_block_ms: int = 0, streaming: str = "",
-                     synth_ms: int = 0, audio_ms: int = 0) -> None:
+                     synth_ms: int = 0, audio_ms: int = 0, trimmed_ms: int = 0) -> None:
         """What one segment cost the worker, in counts and milliseconds.
 
         The distinction section 4 asks to be preserved. A handshake that says
@@ -453,6 +453,12 @@ class VoiceTurn:
         that arrives at the end of the synthesis is callback mode delivering
         exactly nothing, and it should read that way in a log rather than as a
         win.
+
+        ``trimmed_ms`` is how much quiet the worker cut off this unit's two
+        ends. It belongs beside ``audio_ms`` rather than in a note of its own,
+        because the two together are the whole of "why is there a gap here":
+        audio that is not speech is a gap the listener hears, and this is how
+        much of it the engine produced and did not get to keep.
 
         ``synth_ms`` is the rest of the answer and the reason this row exists at
         all. Four numbers on one line -- how long the text took to arrive, how
@@ -477,6 +483,7 @@ class VoiceTurn:
                     "first_block_ms": max(0, int(first_block_ms or 0)),
                     "synth_ms": max(0, int(synth_ms or 0)),
                     "audio_ms": max(0, int(audio_ms or 0)),
+                    "trimmed_ms": max(0, int(trimmed_ms or 0)),
                     "streaming": self.streaming,
                 })
                 if row["synth_ms"] > self._max_unit["ms"]:
@@ -859,11 +866,11 @@ def _log_unit(turn_id: str, row: dict) -> None:
         index = int(row.get("index") or 0)
         line = ("Model Chain: Voice TTS segment — turn %s, n=%d, chars=%s, "
                 "ready_wait_ms=%s, synth_ms=%s, first_block_ms=%s, callback_blocks=%s, "
-                "audio_ms=%s, streaming=%s")
+                "audio_ms=%s, trimmed_ms=%s, streaming=%s")
         values = (str(turn_id or "")[:8], index, row.get("chars"), row.get("ready_wait_ms"),
                   row.get("synth_ms"), row.get("first_block_ms"),
                   row.get("callback_blocks"), row.get("audio_ms"),
-                  row.get("streaming") or "unknown")
+                  row.get("trimmed_ms"), row.get("streaming") or "unknown")
         if index <= 2 or int(row.get("synth_ms") or 0) >= SLOW_SEGMENT_MS:
             logger.info(line, *values)
         else:

@@ -337,6 +337,66 @@ change, not a DSP one.
 
 ---
 
+## The gap between sentences, and what most of it was
+
+Reported from the same machine, after the click was gone: about half a second
+of silence between sentences in a long reply. The log ruled out the obvious
+answer first — `underrun_count=0`, `rebuffer_count=0`, `max_underrun_gap_ms=0`
+on a turn that ran at RTF 0.367 — so the browser never ran dry and the producer
+was never behind. The silence was not a gap in the stream. It was *in* the
+audio.
+
+Two things put it there, and one of them is deliberate upstream:
+
+* **After the last phoneme.** `_autoregressive_generation` does not stop at the
+  end-of-speech token. It keeps going for `frames_after_eos` more frames —
+  upstream's own guess is 1 for a sentence and 3 for a phrase, plus 2 — at
+  `mimi.frame_rate` 12.5, which is 80 ms a frame. So every unit ends with about
+  a quarter of a second of generated audio that is not speech.
+* **Before the first one.** A fresh Mimi decoder settles in at the start of
+  every generation, and the model's own leading quiet is whatever it is.
+
+Voice Chat plays units back with nothing between them, so those two land
+end-to-end and become the gap a listener hears between one sentence and the
+next.
+
+`Trim` cuts each unit's leading quiet back to `KEEP_LEAD_MS` and its trailing
+quiet back to `KEEP_TAIL_MS` — 60 and 120 milliseconds — and reports how much it
+removed as `trimmed_ms` on the unit's log row, beside `audio_ms`. Quiet *inside*
+a unit is not touched: a pause the model put between two clauses is prosody, and
+only the two ends are padding. Trailing quiet cannot be known to be trailing
+until the unit ends, so it is held here and released by `flush()`, bounded by
+`MAX_HOLD_MS` because held audio is audio the listener does not have yet.
+
+Three details are worth writing down.
+
+**Cut back, not cut out.** Sentences in speech are separated by a pause, and
+butting one against the next reads as hurried rather than as continuous. What
+the trim buys is that the gap becomes a fixed, small, *chosen* one — and
+"Pause between sentences" adds to it for anybody who wants a more measured
+delivery, on top of a baseline that no longer varies with what the model
+happened to generate.
+
+**What counts as quiet is not a fixed number.** A cloned voice carries its
+reference recording's room tone, so a floor low enough for a studio recording
+finds no quiet at all in a voice cloned from a laptop microphone — and the gap
+stays exactly where the trim was supposed to remove it. Once a unit has started,
+quiet is two per cent of the loudest sample so far (about 34 dB down), bounded
+into [`QUIET_FLOOR`, `QUIET_CEILING`]. At the *start* of a unit that rule is
+meaningless — the loudest sample so far may be the room tone itself — so the
+unit opens on an absolute `SPEECH_FLOOR` of about -30 dBFS instead, and
+everything before that first word is padding.
+
+**Order matters, and it is tested.** The trim runs *before* `Seam`. The seam
+ends a unit with a few milliseconds of ramp down to silence; trimming after it
+would see that ramp as trailing quiet, cut it off, and put back the click the
+ramp exists to remove.
+
+Kokoro and Sopro pad their units too, so each worker carries its own copy, held
+to its own tests — the same duplication rule as the speed and pitch DSP.
+
+---
+
 ## There is no thread control, and a sentence where one would be
 
 PocketTTS 3.0.2 calls `torch.set_num_threads(1)` itself and takes its

@@ -393,6 +393,82 @@ class TestWhatNeverLeavesThisProcess:
         assert found == "that recording contains no audio"
 
 
+class TestTheQuietAModelPutsRoundAUnitIsCutBack:
+    """The gap between sentences, and what most of it actually was.
+
+    A reply is a run of units played back with nothing between them, so the
+    silence a listener hears between two sentences is the silence *inside* the
+    two units: whatever the decoder produced before the first phoneme and
+    whatever it produced after the last one. None of it was asked for.
+
+    Cut back rather than cut out: sentences are separated by a pause in speech,
+    and the delivery's own "Pause between sentences" adds to what is left.
+    """
+
+    RATE = 24000
+
+    def quiet(self, seconds: float, level: float = 0.0):
+        return numpy.full(int(seconds * self.RATE), level, dtype=numpy.float32)
+
+    def through(self, trim, source, chunk: int = 431):
+        out = bytearray()
+        for start in range(0, len(source), chunk):
+            out += trim.block(sopro_worker.pcm16(source[start:start + chunk]))
+        out += trim.flush()
+        return numpy.frombuffer(bytes(out), dtype="<i2").astype(numpy.float32) / 32767.0
+
+    def test_the_lead_is_cut_to_the_kept_amount(self):
+        source = numpy.concatenate([self.quiet(0.5), tone(220.0, 1.0)])
+        found = self.through(sopro_worker.Trim(self.RATE), source)
+        expected = int(self.RATE * sopro_worker.KEEP_LEAD_MS / 1000) + self.RATE
+        assert abs(found.size - expected) < self.RATE * 0.02
+
+    def test_the_tail_is_cut_to_the_kept_amount(self):
+        source = numpy.concatenate([tone(220.0, 1.0), self.quiet(0.4)])
+        found = self.through(sopro_worker.Trim(self.RATE), source)
+        expected = self.RATE + int(self.RATE * sopro_worker.KEEP_TAIL_MS / 1000)
+        assert abs(found.size - expected) < self.RATE * 0.02
+
+    def test_quiet_inside_a_unit_is_prosody_and_is_left_alone(self):
+        source = numpy.concatenate([tone(220.0, 0.2), self.quiet(0.3), tone(220.0, 0.2)])
+        trim = sopro_worker.Trim(self.RATE)
+        found = self.through(trim, source)
+        assert trim.dropped == 0
+        assert abs(found.size - source.size) < self.RATE * 0.02
+
+    def test_a_long_pause_inside_a_unit_is_still_left_alone(self):
+        """Longer than the hold, so it cannot all be waited out. It still
+        arrives, because held audio spills through rather than accumulating."""
+        source = numpy.concatenate([tone(220.0, 0.1), self.quiet(1.5), tone(220.0, 0.1)])
+        trim = sopro_worker.Trim(self.RATE)
+        found = self.through(trim, source)
+        assert trim.dropped == 0
+        assert abs(found.size - source.size) < self.RATE * 0.02
+
+    def test_speech_is_never_cut(self):
+        trim = sopro_worker.Trim(self.RATE)
+        found = self.through(trim, tone(220.0, 1.0))
+        assert trim.dropped == 0
+        assert abs(found.size - self.RATE) < self.RATE * 0.02
+
+    def test_the_level_follows_the_unit_rather_than_being_fixed(self):
+        """A cloned voice carries its reference recording's room tone, and a
+        fixed floor low enough for a studio recording would find no quiet in
+        it at all."""
+        room = 0.005
+        assert room * 32767 > sopro_worker.QUIET_FLOOR, "the fixture is not a real test"
+        source = numpy.concatenate([self.quiet(0.5, room), tone(220.0, 1.0),
+                                    self.quiet(0.4, room)])
+        trim = sopro_worker.Trim(self.RATE)
+        self.through(trim, source)
+        assert trim.dropped_ms == pytest.approx(900 - sopro_worker.KEEP_LEAD_MS
+                                                - sopro_worker.KEEP_TAIL_MS, abs=40)
+
+    def test_a_rate_of_nothing_is_a_pass_through_rather_than_a_crash(self):
+        source = numpy.concatenate([self.quiet(0.1), tone(220.0, 0.1)])
+        assert self.through(sopro_worker.Trim(0), source).size == source.size
+
+
 class TestAUnitEndsAtSilenceRatherThanWhereverItWas:
     """The pop between sentences, and the thing that removes it.
 

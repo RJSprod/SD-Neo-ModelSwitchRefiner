@@ -420,6 +420,89 @@ class TestPcm16:
         assert worker.pcm16(None) == b""
 
 
+class TestTheQuietAModelPutsRoundASegmentIsCutBack:
+    """The gap between sentences, and what most of it actually was.
+
+    A reply is a run of segments played back with nothing between them, so the
+    silence a listener hears between two sentences is the silence *inside* the
+    two segments: the model's own quiet before the first word and after the
+    last. None of it was asked for.
+
+    Cut back rather than cut out: sentences are separated by a pause in speech,
+    and the delivery's own "Pause between sentences" adds to what is left.
+    """
+
+    class Padded:
+        """A synthesiser whose one batch is quiet, speech, and quiet."""
+
+        num_speakers = 53
+        sample_rate = 24000
+
+        def __init__(self, lead=0.5, tail=0.4, level=0.0):
+            self.lead = lead
+            self.tail = tail
+            self.level = level
+
+        def samples(self):
+            rate = self.sample_rate
+            return ([self.level] * int(self.lead * rate)
+                    + [0.5] * rate
+                    + [self.level] * int(self.tail * rate))
+
+        def generate(self, text, sid=0, speed=1.0, callback=None):
+            if callback is not None:
+                callback(self.samples(), 0.5)
+                return Audio([])
+            return Audio(self.samples())
+
+    def spoken(self, tts, delivery=None):
+        import array
+        import sys
+
+        found = engines(tts)
+        found.streaming = "callback"
+        blocks = []
+        metrics = found.stream("Hello there.", 3, delivery or worker.NEUTRAL,
+                               lambda block, rate: blocks.append(block) or True)
+        numbers = array.array("h")
+        numbers.frombytes(b"".join(blocks))
+        if sys.byteorder == "big":
+            numbers.byteswap()
+        return numbers, metrics
+
+    def kept(self, tts):
+        rate = tts.sample_rate
+        return rate + int(rate * (worker.KEEP_LEAD_MS + worker.KEEP_TAIL_MS) / 1000)
+
+    def test_the_padding_either_side_is_cut_back(self):
+        tts = self.Padded()
+        found, metrics = self.spoken(tts)
+        assert abs(len(found) - self.kept(tts)) < tts.sample_rate * 0.03
+        assert metrics["trimmed_ms"] == pytest.approx(
+            900 - worker.KEEP_LEAD_MS - worker.KEEP_TAIL_MS, abs=40)
+
+    def test_the_edges_are_still_ramped_to_silence(self):
+        """Trim first, ramp second. The other way round cuts the ramp off and
+        puts back the click it exists to remove."""
+        found, _metrics = self.spoken(self.Padded())
+        assert abs(found[0]) < 300
+        assert abs(found[-1]) < 300
+
+    def test_a_segment_with_no_padding_loses_nothing(self):
+        tts = self.Padded(lead=0.0, tail=0.0)
+        found, metrics = self.spoken(tts)
+        assert metrics["trimmed_ms"] == 0
+        assert abs(len(found) - tts.sample_rate) < tts.sample_rate * 0.02
+
+    def test_the_level_follows_the_segment_rather_than_being_fixed(self):
+        """A voice recorded with room tone still has its padding recognised."""
+        tts = self.Padded(level=0.005)
+        assert 0.005 * 32767 > worker.QUIET_FLOOR, "the fixture is not a real test"
+        _found, metrics = self.spoken(tts)
+        assert metrics["trimmed_ms"] == pytest.approx(
+            900 - worker.KEEP_LEAD_MS - worker.KEEP_TAIL_MS, abs=40)
+
+
 class TestASegmentEndsAtSilenceRatherThanWhereverItWas:
     """The pop between sentences, and the thing that removes it.
 

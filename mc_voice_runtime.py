@@ -1020,6 +1020,7 @@ def _dispatch_turn(operation: str, header: dict, payload: bytes) -> None:
                      # and the parent was throwing away.
                      synth_ms=int(header.get("segment_ms") or 0),
                      audio_ms=int(samples * 1000 / rate) if rate else 0,
+                     trimmed_ms=int(header.get("trimmed_ms") or 0),
                      streaming=str(header.get("streaming") or ""))
             except Exception:
                 logger.debug("Model Chain: a Voice segment's timing could not be recorded",
