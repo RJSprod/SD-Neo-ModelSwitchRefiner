@@ -152,6 +152,13 @@
     const STREAM_SILENCE_MS = 30000;
 
     const MESSAGES = {
+        // The one sentence an engine whose Stop is not a cancellation needs.
+        // It says what actually happened -- playback has stopped -- before it
+        // says what is still going on, because "finishing" on its own reads as
+        // "still talking" to somebody who has just pressed Stop and heard
+        // silence (section 21.4).
+        finishing: "Playback has stopped. The voice engine is finishing the current "
+                   + "speech unit before it can speak again.",
         notReady: "Voice Chat is not set up. Install both models in Settings → Voice Chat.",
         denied: "Microphone access was not allowed by the browser or device.",
         notFound: "No microphone is available.",
@@ -751,6 +758,11 @@
             started: false,
             underruns: 0,
             ended: false,
+            // What Stop means on this turn's engine, read off the stream
+            // header. "cancel" until the header says otherwise, so a build or a
+            // proxy that drops it behaves exactly as every engine did before
+            // this existed.
+            interrupt: "cancel",
             pending: [],
             pendingSeconds: 0,
             draining: false,
@@ -847,10 +859,15 @@
     // those paths deliberately fire together.
     function stopSpeaking(alsoTellServer, reason) {
         const turnId = speech ? speech.id : "";
+        const mode = speech ? speech.interrupt : "";
         stopPlayback();
         speech = null;
         setVoiceBusy(false);
         if (alsoTellServer !== false) tellServerToStop(turnId, reason);
+        // Silence first, always, on every engine. Only then ask whether this
+        // one has anything left to finish -- because the answer must never be
+        // able to delay the thing the user actually pressed the button for.
+        if (turnId) noticeTheEngineMayStillBeFinishing(mode);
     }
 
     function play(buffer) {
@@ -1037,6 +1054,11 @@
                                       || "24000", 10) || 24000;
                 const stamped = response.headers.get("X-Model-Chain-Voice-Turn");
                 if (stamped && stamped !== turnId) throw new Error("turn");
+                // What Stop will mean on *this* reply, from the engine it was
+                // frozen onto rather than from whichever is selected by the
+                // time somebody presses the button.
+                state.interrupt = response.headers.get("X-Model-Chain-Voice-Interrupt")
+                    || "cancel";
                 return pump(state, response.body.getReader(), rate);
             });
         }).catch(function (error) {
@@ -1760,6 +1782,85 @@
 
     function busy() {
         return llmBusy() || voiceBusy;
+    }
+
+    // -- the engine that cannot cancel ---------------------------------------- //
+
+    // Some text-to-speech engines abandon their synthesis when Stop is pressed
+    // and some cannot. Released PocketTTS is the second kind: its generation
+    // runs on threads of its own and its model is not thread-safe, so the unit
+    // already inside it finishes silently before anything else may start.
+    //
+    // The browser is told which by the *status payload* -- `interrupt_mode`,
+    // `draining` and `engine_busy` -- and never by recognising an engine id or
+    // a version string (I-PKT-28). That matters beyond tidiness: the day a
+    // build ships with cooperative cancellation is the day a hard-coded rule
+    // here becomes a waiting state nobody can clear.
+    let finishing = false;
+    let finishingTimer = 0;
+
+    function setFinishing(value) {
+        const wanted = !!value;
+        if (finishing === wanted) return;
+        finishing = wanted;
+        const chip = byId(IDS.chip);
+        if (chip) {
+            if (wanted) chip.classList.add("mc-voice-finishing");
+            else chip.classList.remove("mc-voice-finishing");
+            if (wanted) {
+                // `aria-busy` for the machine and `title` for the pointer. The
+                // sentence itself goes to the status line, which is already a
+                // live region -- so a screen reader hears it announced rather
+                // than having to go looking for it. The chip's own label is
+                // left alone: replacing it would trade a permanent name for a
+                // temporary state.
+                chip.setAttribute("aria-busy", "true");
+                chip.setAttribute("title", MESSAGES.finishing);
+            } else {
+                chip.removeAttribute("aria-busy");
+                chip.removeAttribute("title");
+            }
+        }
+        if (wanted) say(MESSAGES.finishing, "info");
+    }
+
+    // Polled rather than assumed, and cleared only by the server saying the
+    // engine's lane is free -- never by a timer. A waiting state that cleared
+    // itself would be a waiting state that let a second generation start inside
+    // a process where the first was still running (I-PKT-13).
+    function watchForTheEngineToFinish(attempt) {
+        window.clearTimeout(finishingTimer);
+        if (attempt > 240) {
+            // Twenty minutes of asking. Something is wrong that polling will
+            // not fix, and the server has its own failsafe for it; leaving the
+            // indicator on forever would be this page lying about a state it
+            // stopped being able to observe.
+            setFinishing(false);
+            return;
+        }
+        finishingTimer = window.setTimeout(function () {
+            refreshStatus(true).then(function (payload) {
+                if (!payload || !payload.ok) {
+                    setFinishing(false);
+                    return null;
+                }
+                if (!payload.draining) {
+                    setFinishing(false);
+                    return null;
+                }
+                setFinishing(true);
+                watchForTheEngineToFinish(attempt + 1);
+                return null;
+            }).catch(function () { setFinishing(false); });
+        }, attempt === 0 ? 120 : 500);
+    }
+
+    // Called from every stop path. An engine that cancels answers `cancel` and
+    // nothing below happens at all, which is why Kokoro and Sopro never show
+    // this and never poll for it.
+    function noticeTheEngineMayStillBeFinishing(mode) {
+        if (!mode || mode === "cancel") return;
+        watchForTheEngineToFinish(0);
     }
 
     function setVoiceBusy(value) {
@@ -2701,12 +2802,19 @@
         const turnId = fieldValue(IDS.turn);
         if (turnId && turnId !== lastTurn) {
             lastTurn = turnId;
+            // A *new* turn means the server let one start, which means the lane
+            // was free. Cleared here rather than on every pass of this
+            // function: this runs on the poll, and clearing unconditionally
+            // would take the indicator down again a few hundred milliseconds
+            // after every Stop that put it up.
+            setFinishing(false);
             speakTurn(turnId);
             return;
         }
         const token = fieldValue(IDS.token);
         if (!token || token === lastToken) return;
         lastToken = token;
+        setFinishing(false);
         speakCompleted(token);
     }
 

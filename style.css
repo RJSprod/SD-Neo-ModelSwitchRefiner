@@ -5132,6 +5132,22 @@
     opacity: 0.8;
 }
 
+/* The chip, while an engine that cannot cancel finishes the unit it was already
+   inside. Not an error colour and not a spinner: playback has already stopped,
+   which is what the user asked for, and the only thing left to say is that the
+   engine is not ready to start another one yet. Dimmed and not-allowed rather
+   than hidden, because a control that vanished would read as a feature that
+   broke. Applied only when the browser has been told this engine drains — see
+   `setFinishing` in javascript/voice_chat.js. */
+.mc-voice-finishing {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.mc-voice-finishing::after {
+    content: " ⏳";
+}
+
 /* The Voice Lab. A closed `<details>` by default and marked experimental at the
    top of it, because section 44 asks for it to be hard to mistake a Lab result
    for a character's saved voice. The notice is a block rather than a footnote

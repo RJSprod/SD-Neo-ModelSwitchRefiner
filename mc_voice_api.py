@@ -1040,6 +1040,13 @@ def stream_headers(turn) -> dict:
         "Pragma": "no-cache",
         "X-Model-Chain-Voice-Rate": str(int(turn.sample_rate or 24000)),
         "X-Model-Chain-Voice-Turn": str(turn.id),
+        # What Stop means on the engine *this turn* was frozen onto, which is
+        # the only place the browser can learn it without a round trip and the
+        # only place it is guaranteed to still be true: the mode is frozen with
+        # the engine, the voice and the profile, so a switch mid-reply cannot
+        # change what stopping this reply costs (I-PKT-10, I-PKT-28).
+        "X-Model-Chain-Voice-Interrupt": str(getattr(turn, "interrupt_mode", "")
+                                             or "cancel"),
         # nginx and several reverse proxies buffer a response whole unless told
         # not to, which would deliver every sample at once at the end -- the
         # exact failure section 40 says must not be silently called streaming.
