@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "version": 3,
+  "version": 4,
   "pinned": true,
-  "notes": "HALF RESOLVED. The runtime closure is pinned: every wheel is named, sized and hashed from pypi.org, so the managed install fetches exactly what this repository claims and refuses anything else. Its completeness was measured rather than reasoned about -- a real pocket-tts 3.0.2 install was probed by blocking each candidate at the import hook to see which ones make `import pocket_tts` raise -- and tests/test_voice_pocket.py keeps that measurement from rotting. The model, official voice and cloning artifacts are NOT recorded yet: the machine that pinned the closure could not reach huggingface.co, so the model half of the install refuses with a sentence naming tools/pin_pocket_models.py rather than fetching something nobody reviewed. Their locations and revisions ARE recorded, from upstream's own shipped configuration inside the wheel rather than from a model card. Run `python tools/pin_pocket_models.py --model` on a machine that can reach the hub, with HF_TOKEN set and the Kyutai conditions accepted, to fill in the sizes and digests; the cloning half is gated and a closed gate leaves the public half resolved. Installing from a folder you filled yourself works either way, and records the digests of what it was given.",
+  "notes": "The runtime closure below is resolved: every wheel is named, sized and hashed from pypi.org, so the managed install fetches exactly what this repository claims and refuses anything else. Model and voice artifacts carry the publisher's digest where the hub reports one and are attested over HTTPS at install time where it does not, and either way the digest of what actually arrived is recorded. Regenerate this file with tools/pin_pocket_models.py; it is the only thing that should write it. This is GATE P-1 satisfied: no unreviewed wheel is fetched dynamically.",
   "runtime": {
     "package": "pocket-tts",
     "import_name": "pocket_tts",
@@ -47,7 +47,7 @@
       ],
       [
         "typing-extensions",
-        "4.12.2",
+        "4.16.0",
         "pure"
       ],
       [
@@ -154,9 +154,19 @@
         "PyYAML",
         "6.0.3",
         "binary"
+      ],
+      [
+        "colorama",
+        "0.4.6",
+        "pure"
+      ],
+      [
+        "setuptools",
+        "80.9.0",
+        "pure"
       ]
     ],
-    "closure_notes": "The smallest inference-complete closure, measured rather than reasoned about: every package here is one `import pocket_tts` fails without, checked by blocking each candidate at the import hook against a real 3.0.2 install, plus the runtime dependencies those packages themselves declare. Upstream's project metadata also lists a server and a CLI -- fastapi, uvicorn, typer, python-multipart, einops -- and none of them is on the import path Voice Chat uses; section 23.1 says the closure is the smallest tested inference-complete one, so they are absent. huggingface-hub and requests are here because pocket_tts.utils.utils imports them at module level, not because anything resolves a location at run time: the worker is handed a config whose every path is local, HF_HUB_OFFLINE is set in its environment, and it refuses a config that names a network location at all (I-PKT-20). huggingface-hub is pinned in the 0.x line deliberately: 1.x replaces requests with httpx and would add httpx, httpcore, anyio, h11 and sniffio to an offline worker for an HTTP client it must never use. beartype cannot be dropped -- pocket_tts/data/audio.py imports beartype.typing unconditionally -- but POCKET_TTS_NO_BEARTYPE=1 in the worker's environment keeps its claw from wrapping every function in the package, which upstream's own comment says costs per call. hf-xet is absent for the same reason torchao is: an accelerator for downloads this worker never performs. torchao is deliberately absent: INT8 quantization is offered only once GATE P-5 has measured it on release hardware, and adding an optional accelerator before then would be pinning a dependency nothing has run. Torch is 2.6.0 rather than the 3.0.2 metadata's >=2.5.0 floor because 2.5.x has no cp313 Windows wheel and this manifest advertises Python 3.13; a floor is not a runtime identity, and a platform advertised without a wheel to satisfy it is a platform that fails at install time instead of at review time. scipy is pinned at 1.15.3 rather than a newer release because 1.16 dropped Python 3.10, which this manifest still advertises.",
+    "closure_notes": "The smallest inference-complete closure, measured rather than reasoned about: every package here is one `import pocket_tts` fails without, checked by blocking each candidate at the import hook against a real 3.0.2 install, plus the runtime dependencies those packages themselves declare. The versions are checked against each other as well as against the import: tools/pin_pocket_models.py reads what every publisher declares about every other package here and refuses a closure whose pins contradict one another. That check was added after a closure shipped in which every wheel downloaded, every hash matched, every file unpacked, and `import pocket_tts` then died on `cannot import name 'Sentinel' from 'typing_extensions'` -- typing-extensions was pinned at 4.12.2 from when this closure was thirteen packages, and pydantic and typing-inspection had arrived needing 4.14.1 and 4.15.0. Every pin was real; the set was not installable. colorama and setuptools are here for the same reason and were found by the same check: tqdm declares colorama on Windows, which is the only platform this closure has, and torch declares setuptools on Python 3.12 and later, which is half the minors it advertises. Upstream's project metadata also lists a server and a CLI -- fastapi, uvicorn, typer, python-multipart, einops -- and none of them is on the import path Voice Chat uses; section 23.1 says the closure is the smallest tested inference-complete one, so they are absent and the tool's OMITTED table records why. huggingface-hub and requests are here because pocket_tts.utils.utils imports them at module level, not because anything resolves a location at run time: the worker is handed a config whose every path is local, HF_HUB_OFFLINE is set in its environment, and it refuses a config that names a network location at all (I-PKT-20). huggingface-hub is pinned in the 0.x line deliberately: 1.x replaces requests with httpx and would add httpx, httpcore, anyio, h11 and sniffio to an offline worker for an HTTP client it must never use. beartype cannot be dropped -- pocket_tts/data/audio.py imports beartype.typing unconditionally -- but POCKET_TTS_NO_BEARTYPE=1 in the worker's environment keeps its claw from wrapping every function in the package, which upstream's own comment says costs per call. hf-xet is absent for the same reason torchao is: an accelerator for downloads this worker never performs. torchao is deliberately absent: INT8 quantization is offered only once GATE P-5 has measured it on release hardware, and adding an optional accelerator before then would be pinning a dependency nothing has run. Torch is 2.6.0 rather than the 3.0.2 metadata's >=2.5.0 floor because 2.5.x has no cp313 Windows wheel and this manifest advertises Python 3.13; a floor is not a runtime identity, and a platform advertised without a wheel to satisfy it is a platform that fails at install time instead of at review time. scipy is pinned at 1.15.3 rather than a newer release because 1.16 dropped Python 3.10, which this manifest still advertises.",
     "platforms": [
       {
         "id": "windows-x86_64-cp310",
@@ -210,11 +220,11 @@
             "sha256": "2082e5703d51fbf98ea75855d9d5527e33d8ff23099bec374a134febee6946b0"
           },
           {
-            "filename": "typing_extensions-4.12.2-py3-none-any.whl",
-            "local_name": "typing_extensions-4.12.2-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/26/9f/ad63fc0248c5379346306f8668cda6e2e2e9c95e01216d2b8ffd9ff037d0/typing_extensions-4.12.2-py3-none-any.whl",
-            "bytes": 37438,
-            "sha256": "04e5ca0351e0f3f85c6853954072df659d0d13fac324d0072316b67d7794700d"
+            "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+            "local_name": "typing_extensions-4.16.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+            "bytes": 45571,
+            "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
           },
           {
             "filename": "sympy-1.13.1-py3-none-any.whl",
@@ -362,6 +372,20 @@
             "url": "https://files.pythonhosted.org/packages/2a/fa/926c003379b19fca39dd4634818b00dec6c62d87faf628d1394e137354d4/pyyaml-6.0.3-cp310-cp310-win_amd64.whl",
             "bytes": 158561,
             "sha256": "bdb2c67c6c1390b63c6ff89f210c8fd09d9a1217a465701eac7316313c915e4c"
+          },
+          {
+            "filename": "colorama-0.4.6-py2.py3-none-any.whl",
+            "local_name": "colorama-0.4.6-py2.py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl",
+            "bytes": 25335,
+            "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"
+          },
+          {
+            "filename": "setuptools-80.9.0-py3-none-any.whl",
+            "local_name": "setuptools-80.9.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a3/dc/17031897dae0efacfea57dfd3a82fdd2a2aeb58e0ff71b77b87e44edc772/setuptools-80.9.0-py3-none-any.whl",
+            "bytes": 1201486,
+            "sha256": "062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922"
           }
         ]
       },
@@ -417,11 +441,11 @@
             "sha256": "2082e5703d51fbf98ea75855d9d5527e33d8ff23099bec374a134febee6946b0"
           },
           {
-            "filename": "typing_extensions-4.12.2-py3-none-any.whl",
-            "local_name": "typing_extensions-4.12.2-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/26/9f/ad63fc0248c5379346306f8668cda6e2e2e9c95e01216d2b8ffd9ff037d0/typing_extensions-4.12.2-py3-none-any.whl",
-            "bytes": 37438,
-            "sha256": "04e5ca0351e0f3f85c6853954072df659d0d13fac324d0072316b67d7794700d"
+            "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+            "local_name": "typing_extensions-4.16.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+            "bytes": 45571,
+            "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
           },
           {
             "filename": "sympy-1.13.1-py3-none-any.whl",
@@ -569,6 +593,20 @@
             "url": "https://files.pythonhosted.org/packages/da/e3/ea007450a105ae919a72393cb06f122f288ef60bba2dc64b26e2646fa315/pyyaml-6.0.3-cp311-cp311-win_amd64.whl",
             "bytes": 158763,
             "sha256": "9f3bfb4965eb874431221a3ff3fdcddc7e74e3b07799e0e84ca4a0f867d449bf"
+          },
+          {
+            "filename": "colorama-0.4.6-py2.py3-none-any.whl",
+            "local_name": "colorama-0.4.6-py2.py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl",
+            "bytes": 25335,
+            "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"
+          },
+          {
+            "filename": "setuptools-80.9.0-py3-none-any.whl",
+            "local_name": "setuptools-80.9.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a3/dc/17031897dae0efacfea57dfd3a82fdd2a2aeb58e0ff71b77b87e44edc772/setuptools-80.9.0-py3-none-any.whl",
+            "bytes": 1201486,
+            "sha256": "062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922"
           }
         ]
       },
@@ -624,11 +662,11 @@
             "sha256": "2082e5703d51fbf98ea75855d9d5527e33d8ff23099bec374a134febee6946b0"
           },
           {
-            "filename": "typing_extensions-4.12.2-py3-none-any.whl",
-            "local_name": "typing_extensions-4.12.2-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/26/9f/ad63fc0248c5379346306f8668cda6e2e2e9c95e01216d2b8ffd9ff037d0/typing_extensions-4.12.2-py3-none-any.whl",
-            "bytes": 37438,
-            "sha256": "04e5ca0351e0f3f85c6853954072df659d0d13fac324d0072316b67d7794700d"
+            "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+            "local_name": "typing_extensions-4.16.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+            "bytes": 45571,
+            "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
           },
           {
             "filename": "sympy-1.13.1-py3-none-any.whl",
@@ -776,6 +814,20 @@
             "url": "https://files.pythonhosted.org/packages/86/bf/899e81e4cce32febab4fb42bb97dcdf66bc135272882d1987881a4b519e9/pyyaml-6.0.3-cp312-cp312-win_amd64.whl",
             "bytes": 154003,
             "sha256": "5fcd34e47f6e0b794d17de1b4ff496c00986e1c83f7ab2fb8fcfe9616ff7477b"
+          },
+          {
+            "filename": "colorama-0.4.6-py2.py3-none-any.whl",
+            "local_name": "colorama-0.4.6-py2.py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl",
+            "bytes": 25335,
+            "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"
+          },
+          {
+            "filename": "setuptools-80.9.0-py3-none-any.whl",
+            "local_name": "setuptools-80.9.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a3/dc/17031897dae0efacfea57dfd3a82fdd2a2aeb58e0ff71b77b87e44edc772/setuptools-80.9.0-py3-none-any.whl",
+            "bytes": 1201486,
+            "sha256": "062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922"
           }
         ]
       },
@@ -831,11 +883,11 @@
             "sha256": "2082e5703d51fbf98ea75855d9d5527e33d8ff23099bec374a134febee6946b0"
           },
           {
-            "filename": "typing_extensions-4.12.2-py3-none-any.whl",
-            "local_name": "typing_extensions-4.12.2-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/26/9f/ad63fc0248c5379346306f8668cda6e2e2e9c95e01216d2b8ffd9ff037d0/typing_extensions-4.12.2-py3-none-any.whl",
-            "bytes": 37438,
-            "sha256": "04e5ca0351e0f3f85c6853954072df659d0d13fac324d0072316b67d7794700d"
+            "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+            "local_name": "typing_extensions-4.16.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+            "bytes": 45571,
+            "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
           },
           {
             "filename": "sympy-1.13.1-py3-none-any.whl",
@@ -983,6 +1035,20 @@
             "url": "https://files.pythonhosted.org/packages/97/c9/39d5b874e8b28845e4ec2202b5da735d0199dbe5b8fb85f91398814a9a46/pyyaml-6.0.3-cp313-cp313-win_amd64.whl",
             "bytes": 154090,
             "sha256": "79005a0d97d5ddabfeeea4cf676af11e647e41d81c9a7722a193022accdb6b7c"
+          },
+          {
+            "filename": "colorama-0.4.6-py2.py3-none-any.whl",
+            "local_name": "colorama-0.4.6-py2.py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl",
+            "bytes": 25335,
+            "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"
+          },
+          {
+            "filename": "setuptools-80.9.0-py3-none-any.whl",
+            "local_name": "setuptools-80.9.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a3/dc/17031897dae0efacfea57dfd3a82fdd2a2aeb58e0ff71b77b87e44edc772/setuptools-80.9.0-py3-none-any.whl",
+            "bytes": 1201486,
+            "sha256": "062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922"
           }
         ]
       }
