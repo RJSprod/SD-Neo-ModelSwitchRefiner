@@ -1685,3 +1685,50 @@ class TestTheStatusPayloadTellsTheBrowserWhatStopMeans:
         assert "pocket" in found
         assert "sopro" not in found
         assert "kokoro" not in found
+
+
+class TestTheAccessTokenRoute:
+    """One token for every engine's gated downloads, saved once."""
+
+    def test_it_is_registered(self, app):
+        assert api.CREDENTIAL_ROUTE in {route.path for route in app.routes}
+
+    def test_saving_then_reading_never_returns_the_token(self, client, key, host,
+                                                         voice_root):
+        found = client.post(api.CREDENTIAL_ROUTE,
+                            json={"action": "save", "token": "hf_a_real_looking_token"},
+                            headers=key)
+        assert found.status_code == 200, found.text
+        assert found.json()["stored"] is True
+        assert "hf_a_real_looking_token" not in found.text
+
+        again = client.post(api.CREDENTIAL_ROUTE, json={"action": "state"}, headers=key)
+        assert again.json()["stored"] is True
+        assert again.json()["ends"] == "oken"
+        assert "hf_a_real_looking_token" not in again.text
+
+    def test_forgetting_is_idempotent(self, client, key, host, voice_root):
+        for _twice in range(2):
+            found = client.post(api.CREDENTIAL_ROUTE, json={"action": "forget"},
+                                headers=key)
+            assert found.status_code == 200
+            assert found.json()["stored"] is False
+
+    def test_an_empty_token_is_refused_rather_than_stored(self, client, key, host,
+                                                          voice_root):
+        found = client.post(api.CREDENTIAL_ROUTE, json={"action": "save", "token": "  "},
+                            headers=key)
+        assert found.status_code == 400
+        assert "token" in found.json()["error"]
+
+    def test_an_action_this_route_does_not_do_is_refused(self, client, key, host,
+                                                         voice_root):
+        found = client.post(api.CREDENTIAL_ROUTE, json={"action": "read_it_back"},
+                            headers=key)
+        assert found.status_code == 400
+
+    def test_it_needs_the_page_token_like_every_other_route(self, client, host,
+                                                            voice_root):
+        found = client.post(api.CREDENTIAL_ROUTE, json={"action": "state"})
+        assert found.status_code in (401, 403)
+

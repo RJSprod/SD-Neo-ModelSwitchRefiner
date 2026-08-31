@@ -25,6 +25,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import socket
 import sys
 from pathlib import Path
@@ -560,3 +561,105 @@ class TestPocketSaysNothingItShouldNot:
         assert str(paths.data_root()) not in text
         assert "hf_" not in text
         assert ".safetensors" not in text
+
+
+# --------------------------------------------------------------------------- #
+# A stored access token
+# --------------------------------------------------------------------------- #
+
+TOKEN = "hf_VOICE_TOKEN_SENTINEL_9F3A"
+
+
+class TestAStoredTokenGoesToOnePlaceAndComesBackFromNone:
+    """I-PKT-21, with the token now allowed to live on disk.
+
+    Letting somebody save a token is a change to the trust model and not to
+    where it may go: one publisher, over HTTPS, from the parent process, on the
+    request that needs it. Everything below is a place it must not turn up, and
+    each is checked with a sentinel rather than by reading the code.
+    """
+
+    @pytest.fixture
+    def saved(self, voice_root, monkeypatch):
+        import mc_voice_models as models
+
+        for name in models.CREDENTIAL_VARIABLES:
+            monkeypatch.delenv(name, raising=False)
+        models.remember_credential(TOKEN)
+        return models
+
+    def test_it_is_used_for_its_own_publisher_and_nobody_else(self, saved):
+        assert saved._credential("https://huggingface.co/a/resolve/main/w") == TOKEN
+        assert saved._credential("https://example.invalid/a") == ""
+        assert saved._credential("http://huggingface.co/a") == ""
+
+    def test_nothing_that_can_be_read_back_contains_it(self, saved):
+        found = saved.credential_state()
+        assert TOKEN not in json.dumps(found)
+        assert found["stored"] is True
+        assert found["ends"] == TOKEN[-4:]
+
+    def test_saving_and_forgetting_are_not_logged_with_the_token(self, saved, captured):
+        saved.remember_credential(TOKEN)
+        saved.forget_credential()
+        for record in captured.records:
+            assert TOKEN not in record.getMessage()
+
+    def test_a_refusal_does_not_echo_what_was_refused(self, voice_root, monkeypatch):
+        import mc_voice_models as models
+
+        with pytest.raises(models.VoiceError) as raised:
+            models.remember_credential("hf_" + SPOKEN + " with a space")
+        assert SPOKEN not in str(raised.value)
+
+    def test_no_worker_environment_carries_it(self, saved, host):
+        """A worker is given verified local paths and has no host to
+        authenticate to, so there is no branch that could put one there."""
+        import mc_voice_pocket as pocket
+        import mc_voice_sopro as sopro
+
+        for environment in (pocket.worker_environment(), sopro.worker_environment()):
+            assert TOKEN not in json.dumps(environment)
+
+    def test_no_worker_config_carries_it(self, saved, host):
+        import mc_voice_pocket as pocket
+
+        assert TOKEN not in json.dumps(pocket.worker_config(), default=str)
+
+    def test_forgetting_stops_it_being_used_without_a_restart(self, saved):
+        assert saved._credential("https://huggingface.co/a") == TOKEN
+        saved.forget_credential()
+        assert saved._credential("https://huggingface.co/a") == ""
+        assert saved.credential_state()["stored"] is False
+
+    def test_it_is_written_where_only_this_account_can_read_it(self, saved):
+        import stat
+
+        path = paths_module().credential_path()
+        assert path.is_file()
+        if os.name != "nt":
+            mode = stat.S_IMODE(path.stat().st_mode)
+            assert mode == 0o600, oct(mode)
+
+    def test_the_stored_one_wins_over_a_stale_environment_variable(self, saved,
+                                                                   monkeypatch):
+        """A saved token that an old export silently overrode would be a Save
+        that appeared to do nothing."""
+        monkeypatch.setenv("HF_TOKEN", "hf_an_older_one")
+        assert saved._credential("https://huggingface.co/a") == TOKEN
+
+    def test_with_nothing_saved_the_environment_is_still_read(self, voice_root,
+                                                              monkeypatch):
+        import mc_voice_models as models
+
+        monkeypatch.setenv("HF_TOKEN", "hf_from_the_environment")
+        assert models._credential("https://huggingface.co/a") == "hf_from_the_environment"
+        assert models.credential_state()["stored"] is False
+        assert models.credential_state()["from_environment"] is True
+
+
+def paths_module():
+    import mc_voice_paths
+
+    return mc_voice_paths
+

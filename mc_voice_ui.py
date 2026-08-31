@@ -958,6 +958,7 @@ def settings_html() -> str:
     parts.append(f'<div class="mc-voice-runtime">{ui.escape(found.summary)}</div>')
 
     parts.append(_tier_row(found))
+    parts.append(credential_html())
     # Before the engine's own panel, because cleaning a recording is not
     # speaking and has no opinion about which engine does it. It was inside the
     # engine branch once, which meant the row -- and the only way to install it
@@ -979,6 +980,67 @@ def settings_html() -> str:
     parts.append(_panel(_ENGINE_PANELS, active, "settings surface"))
     parts.append("</div>")
     return "".join(parts)
+
+
+def credential_html() -> str:
+    """One access token for every Voice Chat download that needs one.
+
+    Shared rather than per engine, because there is one publisher and one token:
+    it is read on the way to a gated artifact whichever bundle asked for it, and
+    a control per engine would be three places to paste the same string and
+    three places to forget it.
+
+    Write-only in the direction that matters. The field posts and clears; the
+    status line says whether one is stored and the last four characters of it,
+    which is enough to recognise a key and useless to somebody reading the
+    screen over a shoulder. There is no request anywhere that returns it.
+
+    The trade is stated rather than implied. An environment variable dies with
+    the shell that set it; a stored token sits in a file until somebody presses
+    Forget, and anything running as that user can read it. That is a reasonable
+    thing to choose and an unreasonable thing to discover.
+    """
+    state = models.credential_state()
+    if state["stored"]:
+        line = (f'Saved — a token ending {ui.escape(state["ends"])} is used for gated '
+                f'downloads.')
+    elif state["from_environment"]:
+        line = (f'Not saved — {ui.escape(state["environment_variable"])} is set in this '
+                f"WebUI's environment and is used instead.")
+    else:
+        line = "Not saved — gated downloads will be refused with a sentence about access."
+    return (
+        f'<div class="mc-voice-row" data-mc-voice-kind="credential">'
+        f'<div class="mc-voice-head">'
+        f'<div class="mc-voice-heading">Access token</div>'
+        f'<div class="mc-voice-default">{ui.escape(state["host"])}, for gated files</div>'
+        f'<div class="mc-voice-status" data-mc-voice-status="credential">'
+        f'{line}</div>'
+        f'<button type="button" class="mc-voice-forget-token" '
+        f'data-mc-voice-forget-token>Forget it</button>'
+        f'</div>'
+        f'<details class="mc-voice-manual">'
+        f'<summary>Save an access token</summary>'
+        f'<p>Most of Voice Chat needs no account at all. One thing does: PocketTTS\u2019s '
+        f'voice-cloning weights are behind the publisher\u2019s access gate, which you '
+        f'accept on your own {ui.escape(state["host"])} account. Paste a token here and '
+        f'Voice Chat will use it for any gated download, for every engine.</p>'
+        f'<div class="mc-voice-folder-row">'
+        f'<input type="password" class="mc-voice-folder" data-mc-voice-token '
+        f'autocomplete="off" spellcheck="false" '
+        f'placeholder="hf_\u2026" />'
+        f'<button type="button" class="mc-voice-install-local" '
+        f'data-mc-voice-save-token>Save this token</button>'
+        f'</div>'
+        f'<p class="mc-voice-note">It is written to a file in the Voice Chat folder that '
+        f'only your account can read, and it is never sent to a speech process, written to '
+        f'the log, or shown again \u2014 this page can only tell you the last four '
+        f'characters. Anything running as you can read that file, which an environment '
+        f'variable set for one session cannot say; if you would rather not keep it on '
+        f'disk, set HF_TOKEN in the environment you start the WebUI from instead and leave '
+        f'this empty.</p>'
+        f'</details>'
+        f'</div>')
 
 
 def _kokoro_panel() -> str:

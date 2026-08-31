@@ -172,6 +172,20 @@ transition that broke them to prove a point would be a transition nobody could
 take incrementally.
 """
 
+CREDENTIAL_ROUTE = f"{PREFIX}/credential"
+"""Store, replace or forget the publisher access token, and say which is true.
+
+One route for every engine's downloads rather than one per engine, because
+there is one publisher and one token: it is read by
+:func:`mc_voice_models._credential` on the way to a gated artifact, whichever
+bundle asked for it.
+
+It is write-only in the direction that matters. A GET-shaped read reports
+whether a token is stored and the last four characters of it, and there is no
+call anywhere that returns the token itself -- not to this route, not to a
+status payload, not to a worker (I-PKT-21).
+"""
+
 POCKET_ROUTE = f"{PREFIX}/pocket"
 POCKET_INSTALL_ROUTE = f"{PREFIX}/pocket/install"
 """Pocket's install and status, which are its own rather than generic.
@@ -214,7 +228,7 @@ SOPRO_ROUTES = (ENGINES_ROUTE, ENGINE_SELECT_ROUTE, SURFACE_ROUTE,
 
 POCKET_ROUTES = (ENGINE_SETTINGS_ROUTE, CLONE_PREVIEW_ROUTE, CLONE_SAVE_ROUTE,
                  CLONE_DISCARD_ROUTE, CLONE_REBUILD_ROUTE, POCKET_ROUTE,
-                 POCKET_INSTALL_ROUTE)
+                 POCKET_INSTALL_ROUTE, CREDENTIAL_ROUTE)
 """What the third engine added, named so the idempotency check below sees them.
 
 ``install`` refuses to register anything when every path in :data:`ROUTES` is
@@ -1944,6 +1958,33 @@ def pocket_install(part: str = "", folder: str = "") -> dict:
     return pocket_payload()
 
 
+def credential(action: str = "", token: str = "") -> dict:
+    """Remember, replace or forget the publisher access token.
+
+    Three actions on one route because they are one decision with three
+    answers, and the read is the same shape as the writes so the panel has one
+    thing to draw.
+
+    The token arrives once, in a request body, and never leaves again. There is
+    no action here that returns it, ``credential_state`` cannot produce it, and
+    nothing else in Voice Chat reads the file: a worker is given verified local
+    paths and has no host to authenticate to (I-PKT-20, I-PKT-21).
+    """
+    wanted = str(action or "state").strip().lower()
+    if wanted in ("", "state", "read"):
+        return {"ok": True, **models.credential_state()}
+    try:
+        if wanted in ("save", "set", "remember"):
+            return {"ok": True, **models.remember_credential(str(token or ""))}
+        if wanted in ("forget", "clear", "delete"):
+            return {"ok": True, **models.forget_credential()}
+    except models.VoiceError as exc:
+        # Deliberately not logged with the body. A refusal about a token is one
+        # of the few places where the thing that failed validation is the secret.
+        raise Refused(400, str(exc)) from None
+    raise Refused(400, "That is not something this route does.")
+
+
 def cleanup_payload() -> dict:
     """What the recording-cleanup row draws, and what the clone form asks.
 
@@ -2763,6 +2804,11 @@ def install(_demo=None, app=None) -> bool:
     pocket_status_route = _json_route(
         POCKET_ROUTE, lambda _payload: pocket_payload(),
         "PocketTTS's status could not be read.")
+    credential_route = _json_route(
+        CREDENTIAL_ROUTE,
+        lambda payload: credential(str(payload.get("action") or ""),
+                                   str(payload.get("token") or "")),
+        "That access token could not be saved.")
 
     async def clone_preview_route(request: Request):
         """The active engine's clone route. Multipart, because it carries a recording.
@@ -2999,7 +3045,8 @@ def install(_demo=None, app=None) -> bool:
                               (CLONE_DISCARD_ROUTE, clone_discard_route),
                               (CLONE_REBUILD_ROUTE, clone_rebuild_route),
                               (POCKET_ROUTE, pocket_status_route),
-                              (POCKET_INSTALL_ROUTE, pocket_install_route)):
+                              (POCKET_INSTALL_ROUTE, pocket_install_route),
+                              (CREDENTIAL_ROUTE, credential_route)):
             if path not in existing:
                 app.add_api_route(path, handler, methods=["POST"])
     except Exception:

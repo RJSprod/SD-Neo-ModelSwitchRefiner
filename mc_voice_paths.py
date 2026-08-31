@@ -343,6 +343,21 @@ def reference_file(identifier: str) -> Path:
 # --------------------------------------------------------------------------- #
 
 
+CREDENTIAL_FILENAME = "publisher-credential.json"
+"""Where a publisher token is kept when somebody asks Voice Chat to remember it.
+
+Under the voice root and nowhere else. Not ``config.json``, which is Forge's
+shared settings file and ends up in screenshots, gists and bug reports; not the
+extension directory, which is a git checkout; and not a manifest, which is a
+reviewed document. One file, owned by this feature, that a user can delete.
+"""
+
+
+def credential_path() -> Path:
+    """The stored publisher credential. Read by the installer, by nothing else."""
+    return data_root() / CREDENTIAL_FILENAME
+
+
 def sopro_root() -> Path:
     """Everything Sopro owns, under one directory. Nothing else writes here."""
     return data_root() / SOPRO_DIRNAME
