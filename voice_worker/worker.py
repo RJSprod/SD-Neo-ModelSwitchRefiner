@@ -769,25 +769,28 @@ class Engines:
         # position between blocks and starting a new one mid-sentence would put
         # a click at the boundary.
         shaper = Shaper(found)
-        # And one per segment for the other click -- the one at the *edges* of
-        # the segment rather than inside it. See :class:`Seam`.
+        # And one per segment each for the other two things that happen at the
+        # *edges* of a segment rather than inside it: the model's own padding,
+        # and the click where one segment meets the next. In that order --
+        # see :class:`Trim` and :class:`Seam`.
+        trim = Trim(rate or self.sample_rate)
         seam = Seam(rate or self.sample_rate)
 
         def emit(samples, sample_rate) -> bool:
             handed[0] += 1
-            block = seam.block(shaper.block(samples))
+            block = seam.block(trim.block(shaper.block(samples)))
             if not block:
                 return True
             produced[0] += len(block) // 2
             return bool(on_audio(block, sample_rate))
 
         def close(sample_rate) -> None:
-            """The milliseconds the seam withheld, ramped down. Ends the segment."""
-            block = seam.flush()
-            if not block:
-                return
-            produced[0] += len(block) // 2
-            on_audio(block, sample_rate)
+            """The trim's kept tail and the seam's ramp. Ends the segment."""
+            for block in (seam.block(trim.flush()), seam.flush()):
+                if not block:
+                    continue
+                produced[0] += len(block) // 2
+                on_audio(block, sample_rate)
 
         if self.streaming == "callback":
             def callback(samples, _progress):
@@ -808,7 +811,8 @@ class Engines:
                     # generating it again there would say it twice.
                     emit(audio.samples, int(audio.sample_rate))
                 close(rate or self.sample_rate)
-                return {"samples": produced[0], "blocks": handed[0]}
+                return {"samples": produced[0], "blocks": handed[0],
+                        "trimmed_ms": trim.dropped_ms}
             except Exception as exc:  # noqa: BLE001 - see the two branches below
                 if produced[0]:
                     # Part of this segment has already been sent, so re-running
@@ -820,17 +824,20 @@ class Engines:
                       f"speech will arrive one segment at a time from now on")
                 # The half-used shaper goes with the attempt that failed. It
                 # carries a read position into audio nobody heard, and reusing
-                # it would start the retry a fraction of a sample out. The seam
-                # goes with it for the same reason: it is holding the last few
-                # milliseconds of a segment that is about to be said again.
+                # it would start the retry a fraction of a sample out. The trim
+                # and the seam go with it for the same reason: between them they
+                # are holding the last part of a segment that is about to be
+                # said again, and counting quiet nobody heard.
                 shaper = Shaper(found)
+                trim = Trim(rate or self.sample_rate)
                 seam = Seam(rate or self.sample_rate)
                 handed[0] = 0
 
         audio = self.tts.generate(text, sid=speaker, speed=found.generation_speed)
         emit(audio.samples, int(audio.sample_rate))
         close(rate or self.sample_rate)
-        return {"samples": produced[0], "blocks": handed[0]}
+        return {"samples": produced[0], "blocks": handed[0],
+                "trimmed_ms": trim.dropped_ms}
 
 
 _NUMPY = "unasked"
@@ -1031,6 +1038,183 @@ class Seam:
             numbers[index] = int(numbers[index] * self._window[self._risen + index])
         self._risen += count
         return _wire(numbers)
+
+KEEP_LEAD_MS = 60
+KEEP_TAIL_MS = 120
+"""How much of a unit's own quiet is kept at each end, in milliseconds.
+
+A segment is not the length of what it says. Kokoro is handed one sentence and
+returns a waveform with the model's own silence around the words at both ends.
+Voice Chat plays segments back with nothing between them, so those two add up
+into the gap between one sentence and the next: dead air nobody asked for, in
+the middle of a reply.
+
+What is *not* done is removing the gap altogether. Sentences in speech are
+separated by a pause, and butting one against the next reads as hurried rather
+than as continuous -- so the quiet is cut back to a fixed, small amount rather
+than cut out, and "Pause between sentences" adds to that for anybody who wants a
+more measured delivery. The point is that the gap becomes the one somebody
+chose, the same length every time, instead of whatever padding the model
+happened to generate.
+"""
+
+QUIET_FLOOR = 130
+QUIET_CEILING = 650
+QUIET_SHARE = 0.02
+"""What counts as quiet once the unit has started, in PCM16 counts.
+
+Not a fixed number, because a cloned voice carries its reference recording's
+room tone, and a floor low enough for a studio recording finds no quiet at all
+in one made on a laptop. So the level moves with the unit: two per cent of the
+loudest sample so far -- about 34 dB down -- bounded below by 130 counts
+(roughly -48 dBFS, under any model's own noise floor) and above by 650 (roughly
+-34 dBFS, still far under speech). Out of range in either direction the trim
+does less rather than more, which is the safe way for it to be wrong.
+"""
+
+SPEECH_FLOOR = 1000
+"""What counts as the unit having started, in PCM16 counts. About -30 dBFS.
+
+A separate number from the one above, and absolute rather than relative,
+because the question at the *start* of a unit is different: a share of the
+loudest sample so far is meaningless when the loudest sample so far is the room
+tone. -30 dBFS is comfortably above any noise floor and well below speech, and
+being wrong about it costs nothing much either way -- too high and the lead is
+held a moment longer before it spills through untrimmed, too low and the trim
+keeps a little more quiet than it meant to.
+"""
+
+MAX_HOLD_MS = 600
+SCAN_MS = 10
+"""How much quiet may be held back, and how finely it is judged.
+
+Trailing quiet has to be held to be trimmed -- nothing knows it is *trailing*
+until the unit ends. Held audio is audio the listener does not have yet, so the
+hold is bounded: past 600 ms it spills through and only the last 600 ms is ever
+in hand.
+
+Holding *before* the first word is the same bound and is free in the case that
+matters: whatever is held there is padding, it is released the moment speech
+arrives, and the listener gets speech sooner than if it had never been held. It
+costs something in exactly one case -- a voice so quiet that no window ever
+reaches :data:`SPEECH_FLOOR`, where nothing is trimmed and the unit's audio
+simply arrives 600 ms later. That is a soft model with the volume turned well
+down, it is bounded, and it is smaller than the browser's own start buffer.
+
+Ten milliseconds is the window the level is judged over, because a single sample
+says nothing and a whole model chunk is eighty.
+"""
+
+
+class Trim:
+    """The quiet a model puts either side of a unit, cut back to a set amount.
+
+    A segment's leading quiet is trimmed to :data:`KEEP_LEAD_MS` and its
+    trailing quiet to :data:`KEEP_TAIL_MS`. Quiet *inside* a segment is not
+    touched: a pause the model put between two clauses is prosody, and only the
+    two ends are padding.
+
+    Trailing quiet cannot be recognised as trailing until the segment ends, so
+    it is held here and released by :meth:`flush` -- bounded, because held audio
+    is audio the listener does not have yet.
+
+    Runs before :class:`Seam` rather than after it. The seam ramps a unit's
+    first and last milliseconds to silence, and trimming after that would cut
+    the ramp off and put back the click it exists to remove.
+    """
+
+    def __init__(self, rate: int, lead_ms: int = KEEP_LEAD_MS,
+                 tail_ms: int = KEEP_TAIL_MS):
+        self.rate = max(0, int(rate or 0))
+        self.scan = max(1, int(self.rate * SCAN_MS / 1000))
+        self.lead = int(self.rate * max(0, int(lead_ms)) / 1000)
+        self.tail = int(self.rate * max(0, int(tail_ms)) / 1000)
+        self.hold = max(self.tail, int(self.rate * MAX_HOLD_MS / 1000))
+        self.dropped = 0
+        self._pending = _int16(b"")
+        self._quiet = _int16(b"")
+        self._opened = False
+        self._peak = 0
+
+    @property
+    def dropped_ms(self) -> int:
+        """How much quiet this unit lost, in milliseconds. For the log."""
+        return int(self.dropped * 1000 / (self.rate or 1))
+
+    def block(self, pcm: bytes) -> bytes:
+        """Whatever of ``pcm`` is speech, or quiet that is being kept."""
+        if not self.rate:
+            return pcm or b""
+        if pcm:
+            self._pending.extend(_int16(pcm))
+        out = _int16(b"")
+        while len(self._pending) >= self.scan:
+            window = self._pending[:self.scan]
+            del self._pending[:self.scan]
+            self._judge(window, out)
+        return _wire(out) if len(out) else b""
+
+    def flush(self) -> bytes:
+        """The end of the unit: the kept tail, and nothing behind it."""
+        if not self.rate:
+            return b""
+        out = _int16(b"")
+        if len(self._pending):
+            window = self._pending[:]
+            del self._pending[:]
+            self._judge(window, out)
+        if self._opened and len(self._quiet) > self.tail:
+            # Only when the unit opened. In a unit where no window ever reached
+            # the speech level, nothing has been shown to be padding, and
+            # cutting the end off it would be cutting off something quiet that
+            # might have been a word.
+            self.dropped += len(self._quiet) - self.tail
+            del self._quiet[self.tail:]
+        out.extend(self._quiet)
+        del self._quiet[:]
+        return _wire(out) if len(out) else b""
+
+    def _judge(self, window, out) -> None:
+        """One window: speech, quiet before the speech, or quiet after it."""
+        peak = max(max(window), -min(window))
+        if peak > self._peak:
+            self._peak = peak
+        if not self._opened:
+            # Before the first word, and "quiet" cannot be a share of a peak
+            # that has not happened yet: at this point the loudest thing seen
+            # may be the room tone itself. So the unit opens on an absolute
+            # level instead -- see :data:`SPEECH_FLOOR` -- and everything before
+            # that first word is padding, kept back to the lead.
+            self._quiet.extend(window)
+            if peak > SPEECH_FLOOR:
+                self._opened = True
+                if len(self._quiet) > self.lead + len(window):
+                    keep = self.lead + len(window)
+                    self.dropped += len(self._quiet) - keep
+                    del self._quiet[:len(self._quiet) - keep]
+                out.extend(self._quiet)
+                del self._quiet[:]
+            elif len(self._quiet) > self.hold:
+                # A unit with no clear speech in it at all. Nothing is trimmed
+                # and nothing is held indefinitely: it spills through, because a
+                # quiet unit is still a unit somebody is waiting to hear.
+                spill = len(self._quiet) - self.hold
+                out.extend(self._quiet[:spill])
+                del self._quiet[:spill]
+            return
+        if peak > min(QUIET_CEILING, max(QUIET_FLOOR, int(self._peak * QUIET_SHARE))):
+            # Speech. Whatever quiet was being held is a gap *inside* the unit
+            # and is passed on untouched -- only the two ends are this class's
+            # business.
+            out.extend(self._quiet)
+            del self._quiet[:]
+            out.extend(window)
+            return
+        self._quiet.extend(window)
+        if len(self._quiet) > self.hold:
+            spill = len(self._quiet) - self.hold
+            out.extend(self._quiet[:spill])
+            del self._quiet[:spill]
 
 
 def _required(section: dict, key: str) -> str:
@@ -1377,6 +1561,7 @@ class Worker:
                            # is what turns a synthesis time into a real-time
                            # factor for one unit rather than for a whole turn.
                            "samples": block["samples"],
+                           "trimmed_ms": metrics["trimmed_ms"],
                            "sample_rate": int(engines.sample_rate or 0),
                            "streaming": engines.streaming})
         except Exception as exc:

@@ -987,6 +987,176 @@ class TestTwoUnitsInARowSoundLikeOneReply:
         assert self.speak(engine, listening=lambda: False).size == 0
 
 
+def quiet(seconds: float, level: float = 0.0, rate: int = RATE):
+    return numpy.full(int(seconds * rate), level, dtype=numpy.float32)
+
+
+def through_trim(trim, source, chunk: int = 431, module=None):
+    """Push a unit through a trim in awkward-sized chunks and collect the PCM."""
+    module = module or pocket_worker
+    out = bytearray()
+    for start in range(0, len(source), chunk):
+        out += trim.block(module.pcm16(source[start:start + chunk]))
+    out += trim.flush()
+    return numpy.frombuffer(bytes(out), dtype="<i2").astype(numpy.float32) / 32767.0
+
+
+class TestTheQuietAModelPutsRoundAUnitIsCutBack:
+    """The gap between sentences, and what most of it actually was.
+
+    A reply is a run of units played back with nothing between them, so the
+    silence a listener hears between two sentences is the silence *inside* the
+    two units: whatever the decoder produced before the first phoneme, and
+    whatever it produced after the last one. For PocketTTS the second of those
+    is generated on purpose -- upstream keeps going for a few frames after the
+    end-of-speech token, at 12.5 frames a second -- and none of it was asked
+    for.
+
+    Cut back rather than cut out: sentences are separated by a pause in speech,
+    and the delivery's own "Pause between sentences" adds to what is left.
+    """
+
+    def test_the_lead_is_cut_to_the_kept_amount(self):
+        source = numpy.concatenate([quiet(0.5), tone(220.0, 1.0)])
+        found = through_trim(pocket_worker.Trim(RATE), source)
+        expected = int(RATE * pocket_worker.KEEP_LEAD_MS / 1000) + RATE
+        assert abs(found.size - expected) < RATE * 0.02
+
+    def test_the_tail_is_cut_to_the_kept_amount(self):
+        source = numpy.concatenate([tone(220.0, 1.0), quiet(0.4)])
+        found = through_trim(pocket_worker.Trim(RATE), source)
+        expected = RATE + int(RATE * pocket_worker.KEEP_TAIL_MS / 1000)
+        assert abs(found.size - expected) < RATE * 0.02
+
+    def test_what_was_cut_is_reported(self):
+        trim = pocket_worker.Trim(RATE)
+        source = numpy.concatenate([quiet(0.5), tone(220.0, 1.0), quiet(0.4)])
+        found = through_trim(trim, source)
+        assert trim.dropped_ms == pytest.approx(900 - 60 - 120, abs=30)
+        assert found.size + trim.dropped * 1 == pytest.approx(source.size, abs=RATE * 0.02)
+
+    def test_quiet_inside_a_unit_is_prosody_and_is_left_alone(self):
+        """Only the two ends are padding. A pause between clauses is the model
+        saying something, and cutting it would be rewriting the delivery."""
+        source = numpy.concatenate([tone(220.0, 0.2), quiet(0.3), tone(220.0, 0.2)])
+        found = through_trim(pocket_worker.Trim(RATE), source)
+        assert abs(found.size - source.size) < RATE * 0.02
+
+    def test_a_long_pause_inside_a_unit_is_still_left_alone(self):
+        """Longer than the hold, so it cannot all be waited out. It still
+        arrives, because held audio spills through rather than accumulating."""
+        source = numpy.concatenate([tone(220.0, 0.1), quiet(1.5), tone(220.0, 0.1)])
+        trim = pocket_worker.Trim(RATE)
+        found = through_trim(trim, source)
+        assert abs(found.size - source.size) < RATE * 0.02
+        assert trim.dropped == 0
+
+    def test_speech_is_never_cut(self):
+        source = tone(220.0, 1.0)
+        trim = pocket_worker.Trim(RATE)
+        found = through_trim(trim, source)
+        assert trim.dropped == 0
+        assert abs(found.size - source.size) < RATE * 0.02
+
+    def test_the_level_follows_the_unit_rather_than_being_fixed(self):
+        """A cloned voice carries its reference recording's room tone.
+
+        A fixed floor low enough for a studio recording finds no quiet at all in
+        a voice cloned from a laptop microphone, and the gap it was meant to
+        remove stays. The level is a share of the unit's own peak, so tone forty
+        decibels under the speech is still quiet.
+        """
+        room = 0.005
+        assert room * 32767 > pocket_worker.QUIET_FLOOR, "the fixture is not a real test"
+        source = numpy.concatenate([quiet(0.5, room), tone(220.0, 1.0), quiet(0.4, room)])
+        trim = pocket_worker.Trim(RATE)
+        through_trim(trim, source)
+        assert trim.dropped_ms == pytest.approx(900 - 60 - 120, abs=40)
+
+    def test_a_unit_that_never_reaches_the_speech_level_still_arrives_whole(self):
+        """A soft model with the volume well down, and the one case the hold costs
+        something.
+
+        Nothing here is loud enough to open the unit, so nothing is trimmed --
+        which is right, because nothing here is known to be padding. What must
+        not happen is audio being held for the length of the unit and arriving
+        as one lump at the end of it: past the hold it spills through, so a
+        quiet unit is late by the hold and no later.
+        """
+        source = numpy.full(int(RATE * 2.0), 0.02, dtype=numpy.float32)
+        assert 0.02 * 32767 < pocket_worker.SPEECH_FLOOR, "the fixture is not a real test"
+        trim = pocket_worker.Trim(RATE)
+        held = []
+        for start in range(0, len(source), 431):
+            held.append(len(trim.block(pocket_worker.pcm16(source[start:start + 431]))) // 2)
+        held.append(len(trim.flush()) // 2)
+        assert trim.dropped == 0
+        assert sum(held) == source.size
+        # Spilling, rather than one lump at the end: most of it arrived while
+        # the unit was still being produced.
+        assert sum(held[:-1]) > source.size * 0.5
+
+    def test_a_rate_of_nothing_is_a_pass_through_rather_than_a_crash(self):
+        source = numpy.concatenate([quiet(0.1), tone(220.0, 0.1)])
+        found = through_trim(pocket_worker.Trim(0), source)
+        assert found.size == source.size
+
+
+class TestTheTrimAndTheSeamComposeInThatOrder:
+    """Trim first, ramp second. The other way round removes the ramp.
+
+    :class:`Seam` ends a unit with a few milliseconds of ramp down to silence.
+    Trimming after that would see the ramp as trailing quiet, cut it off, and
+    put back the click the ramp exists to remove -- so the order is not a
+    detail, and this is the test that says so.
+    """
+
+    def speak(self, model, **config):
+        engine = pocket_engine(model, **config)
+        offered = []
+        engine.stream("Hello.", "v", pocket_worker.NEUTRAL, offered.append, lambda: True)
+        return numpy.frombuffer(b"".join(offered), dtype="<i2").astype(numpy.float32) / 32767.0
+
+    class Padded:
+        """A model whose unit is padding, speech, and a quarter second of padding."""
+
+        def __init__(self):
+            self.exhausted = False
+            self.sample_rate = RATE
+            self.device = "cpu"
+            self.temp = 0.3
+            self.sampler_decode_steps = 1
+            self.has_voice_cloning = True
+            self.calls = []
+
+        def generate_audio_stream(self, model_state, text_to_generate, max_tokens=1000,
+                                  frames_after_eos=None, copy_state=True):
+            self.calls.append(text_to_generate)
+            source = numpy.concatenate([quiet(0.1), tone(220.0, 1.0), quiet(0.25)])
+
+            def produce():
+                for start in range(0, len(source), 1920):
+                    yield source[start:start + 1920]
+                self.exhausted = True
+
+            return produce()
+
+    def test_the_padding_goes_and_the_edges_are_still_silent(self):
+        found = self.speak(self.Padded())
+        kept = int(RATE * (pocket_worker.KEEP_LEAD_MS
+                           + pocket_worker.KEEP_TAIL_MS) / 1000) + RATE
+        assert abs(found.size - kept) < RATE * 0.03, "the padding was not cut back"
+        assert abs(float(found[0])) < 1e-3, "the unit no longer opens at silence"
+        assert abs(float(found[-1])) < 1e-3, "the seam's ramp was trimmed off"
+        assert float(numpy.abs(numpy.diff(numpy.concatenate([found, found]))).max()) < 0.05
+
+    def test_the_unit_reports_what_it_cut(self):
+        engine = pocket_engine(self.Padded())
+        found = engine.stream("Hello.", "v", pocket_worker.NEUTRAL,
+                              lambda _b: None, lambda: True)
+        assert found["trimmed_ms"] == pytest.approx(350 - 60 - 120, abs=30)
+
+
 class TestTheVoiceStateCacheIsBounded:
     def test_it_never_grows_past_its_capacity(self):
         """Section 22. An unbounded dictionary in a process that runs for a
