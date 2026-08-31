@@ -1046,3 +1046,57 @@ class TestTheCharacterEditorFollowsTheEngine:
         assert found["engine"] == "pocket"
         assert found["voice"] == ""
         assert len(found["values"]) == len(profile.FIELDS)
+
+
+class TestACharactersDeliveryControlsAreTheEnginesOwn:
+    """The contract ``javascript/voice_chat.js`` reads the field list through.
+
+    The script used to carry the list itself — the four Kokoro has — so a
+    PocketTTS character's fifth control, Variation, was saved, was used when
+    the character actually spoke, and was dropped from its own Test button. It
+    now reads every slider inside the delivery group and takes each field name
+    off the element id, which only works while these two agree.
+    """
+
+    def test_the_panel_holds_one_slider_per_field_of_the_active_engine(self, host):
+        import mc_llm_ui as llm_ui
+        import mc_voice_engines as engines
+        import mc_voice_ui as voice_ui
+
+        for engine in engines.ENGINES:
+            engines.select(engine)
+            fields = list(engines.profiles(engine).FIELDS)
+            assert voice_ui._field_names() == tuple(fields), engine
+            drawn = [control["name"] for control in voice_ui.delivery_controls()]
+            assert drawn == fields, engine
+            # And every one of them is reachable by the prefix the script slices
+            # the name back out of.
+            # Built the way the script builds it: the base id plus a dash.
+            # ``ident`` strips a trailing dash from its own parts, so asking it
+            # for the prefix directly gives a different string.
+            prefix = llm_ui.ident("chat", "character-voice") + "-"
+            for name in fields:
+                found = llm_ui.ident("chat", f"character-voice-{name}")
+                assert found.startswith(prefix), (engine, name)
+                assert found[len(prefix):] == name, (engine, name)
+
+    def test_the_group_the_script_queries_is_the_one_the_sliders_are_in(self):
+        """The script asks the group for its sliders, so the group's own id must
+        not be one of the answers — a field called "delivery" would be read as a
+        slider named after the group."""
+        import mc_llm_ui as llm_ui
+        import mc_voice_engines as engines
+
+        group = llm_ui.ident("chat", "character-voice-delivery")
+        for engine in engines.ENGINES:
+            assert "delivery" not in engines.profiles(engine).FIELDS, engine
+        assert group.endswith("-delivery")
+
+    def test_the_script_does_not_carry_its_own_copy_of_the_list(self):
+        """The regression itself: a list written here goes stale the moment an
+        engine has a field the author of the list did not have."""
+        from pathlib import Path
+
+        source = Path("javascript/voice_chat.js").read_text(encoding="utf-8")
+        assert '["speed", "pitch", "gain", "pause"].forEach' not in source
+

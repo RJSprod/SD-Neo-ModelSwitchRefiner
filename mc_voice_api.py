@@ -1356,13 +1356,19 @@ def test_voice(voice_id: str, text: str = "", profile=None, engine: str = "") ->
         raise Refused(404, str(exc) or "No voice is installed.") from None
     # An audition of a voice whose delivery is being edited has to *be* that
     # delivery, or the sliders are being adjusted against a sound they do not
-    # produce. A body with no profile in it means the default voice's own,
-    # which is what the Settings list has always auditioned.
-    delivery = None
-    if profile is not None:
-        if not isinstance(profile, dict):
-            raise Refused(400, "That is not a delivery profile.")
-        delivery = profiles.resolve(profile)
+    # produce. A body with no profile in it means the default voice's own.
+    #
+    # ``resolve`` either way, and ``None`` is the whole of the fix. It used to
+    # be passed through untouched, and every engine reads a ``None`` profile as
+    # *neutral* rather than as "the stored one" -- so the Settings list's Test
+    # button auditioned at speed 1.0 and 0 dB whatever the delivery controls
+    # above it had been set to, and somebody adjusting those controls was
+    # listening to a sound they did not describe. ``resolve(None)`` is the
+    # stored default; ``resolve(character)`` layers that character's overrides
+    # on top of it, which is what a spoken reply does.
+    if profile is not None and not isinstance(profile, dict):
+        raise Refused(400, "That is not a delivery profile.")
+    delivery = profiles.resolve(profile)
     try:
         # The active engine's runtime, and the entry's own opaque handle. An
         # audition that went through a branch naming one engine would be an
