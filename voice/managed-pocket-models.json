@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "version": 2,
+  "version": 3,
   "pinned": true,
-  "notes": "HALF RESOLVED. The runtime closure is pinned: every wheel is named, sized and hashed from pypi.org, so the managed install fetches exactly what this repository claims and refuses anything else. The model, official voice and cloning artifacts are NOT recorded yet -- the machine that pinned the closure could not reach huggingface.co -- so the model half of the install refuses with a sentence naming tools/pin_pocket_models.py rather than fetching something nobody reviewed. Run `python tools/pin_pocket_models.py --model` on a machine that can reach the hub, with HF_TOKEN set and the Kyutai conditions accepted, to fill in the rest; the cloning half is gated and a closed gate leaves the public half resolved. Installing from a folder you filled yourself works either way, and records the digests of what it was given.",
+  "notes": "HALF RESOLVED. The runtime closure is pinned: every wheel is named, sized and hashed from pypi.org, so the managed install fetches exactly what this repository claims and refuses anything else. Its completeness was measured rather than reasoned about -- a real pocket-tts 3.0.2 install was probed by blocking each candidate at the import hook to see which ones make `import pocket_tts` raise -- and tests/test_voice_pocket.py keeps that measurement from rotting. The model, official voice and cloning artifacts are NOT recorded yet: the machine that pinned the closure could not reach huggingface.co, so the model half of the install refuses with a sentence naming tools/pin_pocket_models.py rather than fetching something nobody reviewed. Their locations and revisions ARE recorded, from upstream's own shipped configuration inside the wheel rather than from a model card. Run `python tools/pin_pocket_models.py --model` on a machine that can reach the hub, with HF_TOKEN set and the Kyutai conditions accepted, to fill in the sizes and digests; the cloning half is gated and a closed gate leaves the public half resolved. Installing from a folder you filled yourself works either way, and records the digests of what it was given.",
   "runtime": {
     "package": "pocket-tts",
     "import_name": "pocket_tts",
@@ -79,9 +79,84 @@
         "fsspec",
         "2024.10.0",
         "pure"
+      ],
+      [
+        "beartype",
+        "0.22.9",
+        "pure"
+      ],
+      [
+        "pydantic",
+        "2.13.5",
+        "pure"
+      ],
+      [
+        "pydantic-core",
+        "2.46.5",
+        "binary"
+      ],
+      [
+        "annotated-types",
+        "0.8.0",
+        "pure"
+      ],
+      [
+        "typing-inspection",
+        "0.4.4",
+        "pure"
+      ],
+      [
+        "huggingface-hub",
+        "0.35.3",
+        "pure"
+      ],
+      [
+        "requests",
+        "2.34.2",
+        "pure"
+      ],
+      [
+        "urllib3",
+        "2.7.0",
+        "pure"
+      ],
+      [
+        "certifi",
+        "2026.7.22",
+        "pure"
+      ],
+      [
+        "idna",
+        "3.19",
+        "pure"
+      ],
+      [
+        "charset-normalizer",
+        "3.5.1",
+        "binary"
+      ],
+      [
+        "tqdm",
+        "4.70.0",
+        "pure"
+      ],
+      [
+        "packaging",
+        "26.3",
+        "pure"
+      ],
+      [
+        "scipy",
+        "1.15.3",
+        "binary"
+      ],
+      [
+        "PyYAML",
+        "6.0.3",
+        "binary"
       ]
     ],
-    "closure_notes": "The smallest tested inference-complete closure rather than everything pocket-tts declares. Upstream's project metadata also lists a server and a CLI; the import path Voice Chat uses needs neither, and section 23.1 says the closure is the smallest tested inference-complete one. torchao is deliberately absent: INT8 quantization is offered only once GATE P-5 has measured it on release hardware, and adding an optional accelerator before then would be pinning a dependency nothing has run. Torch is 2.6.0 rather than the 3.0.2 metadata's >=2.5.0 floor because 2.5.x has no cp313 Windows wheel and this manifest advertises Python 3.13; a floor is not a runtime identity, and a platform advertised without a wheel to satisfy it is a platform that fails at install time instead of at review time.",
+    "closure_notes": "The smallest inference-complete closure, measured rather than reasoned about: every package here is one `import pocket_tts` fails without, checked by blocking each candidate at the import hook against a real 3.0.2 install, plus the runtime dependencies those packages themselves declare. Upstream's project metadata also lists a server and a CLI -- fastapi, uvicorn, typer, python-multipart, einops -- and none of them is on the import path Voice Chat uses; section 23.1 says the closure is the smallest tested inference-complete one, so they are absent. huggingface-hub and requests are here because pocket_tts.utils.utils imports them at module level, not because anything resolves a location at run time: the worker is handed a config whose every path is local, HF_HUB_OFFLINE is set in its environment, and it refuses a config that names a network location at all (I-PKT-20). huggingface-hub is pinned in the 0.x line deliberately: 1.x replaces requests with httpx and would add httpx, httpcore, anyio, h11 and sniffio to an offline worker for an HTTP client it must never use. beartype cannot be dropped -- pocket_tts/data/audio.py imports beartype.typing unconditionally -- but POCKET_TTS_NO_BEARTYPE=1 in the worker's environment keeps its claw from wrapping every function in the package, which upstream's own comment says costs per call. hf-xet is absent for the same reason torchao is: an accelerator for downloads this worker never performs. torchao is deliberately absent: INT8 quantization is offered only once GATE P-5 has measured it on release hardware, and adding an optional accelerator before then would be pinning a dependency nothing has run. Torch is 2.6.0 rather than the 3.0.2 metadata's >=2.5.0 floor because 2.5.x has no cp313 Windows wheel and this manifest advertises Python 3.13; a floor is not a runtime identity, and a platform advertised without a wheel to satisfy it is a platform that fails at install time instead of at review time. scipy is pinned at 1.15.3 rather than a newer release because 1.16 dropped Python 3.10, which this manifest still advertises.",
     "platforms": [
       {
         "id": "windows-x86_64-cp310",
@@ -182,6 +257,111 @@
             "url": "https://files.pythonhosted.org/packages/c6/b2/454d6e7f0158951d8a78c2e1eb4f69ae81beb8dca5fee9809c6c99e9d0d0/fsspec-2024.10.0-py3-none-any.whl",
             "bytes": 179641,
             "sha256": "03b9a6785766a4de40368b88906366755e2819e758b83705c88cd7cb5fe81871"
+          },
+          {
+            "filename": "beartype-0.22.9-py3-none-any.whl",
+            "local_name": "beartype-0.22.9-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/71/cc/18245721fa7747065ab478316c7fea7c74777d07f37ae60db2e84f8172e8/beartype-0.22.9-py3-none-any.whl",
+            "bytes": 1333658,
+            "sha256": "d16c9bbc61ea14637596c5f6fbff2ee99cbe3573e46a716401734ef50c3060c2"
+          },
+          {
+            "filename": "pydantic-2.13.5-py3-none-any.whl",
+            "local_name": "pydantic-2.13.5-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/eb/47/c95ffc2009878c7aac0c5e08528022dcb885933252a88b5f170058014464/pydantic-2.13.5-py3-none-any.whl",
+            "bytes": 472589,
+            "sha256": "346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73"
+          },
+          {
+            "filename": "pydantic_core-2.46.5-cp310-cp310-win_amd64.whl",
+            "local_name": "pydantic_core-2.46.5-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/f2/94/205ed9d7ddaf44acd489889708ea124a3f41bdb42c141c8684d528ad0e7a/pydantic_core-2.46.5-cp310-cp310-win_amd64.whl",
+            "bytes": 2042551,
+            "sha256": "1e5aad1220a1192c42341c8fd4a8686657e73ab2a920c970bdc4de334fe3193d"
+          },
+          {
+            "filename": "annotated_types-0.8.0-py3-none-any.whl",
+            "local_name": "annotated_types-0.8.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/99/91/8acff4f5e50511b911bbccb72b8628a49c68ce14148cd9f6431094859a90/annotated_types-0.8.0-py3-none-any.whl",
+            "bytes": 13427,
+            "sha256": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0"
+          },
+          {
+            "filename": "typing_inspection-0.4.4-py3-none-any.whl",
+            "local_name": "typing_inspection-0.4.4-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/67/81/4add07e5172b7ac40d8ed5ff580409a7801a4fe26d529bdd915401dabfbe/typing_inspection-0.4.4-py3-none-any.whl",
+            "bytes": 14750,
+            "sha256": "65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147"
+          },
+          {
+            "filename": "huggingface_hub-0.35.3-py3-none-any.whl",
+            "local_name": "huggingface_hub-0.35.3-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/31/a0/651f93d154cb72323358bf2bbae3e642bdb5d2f1bfc874d096f7cb159fa0/huggingface_hub-0.35.3-py3-none-any.whl",
+            "bytes": 564262,
+            "sha256": "0e3a01829c19d86d03793e4577816fe3bdfc1602ac62c7fb220d593d351224ba"
+          },
+          {
+            "filename": "requests-2.34.2-py3-none-any.whl",
+            "local_name": "requests-2.34.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl",
+            "bytes": 73075,
+            "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0"
+          },
+          {
+            "filename": "urllib3-2.7.0-py3-none-any.whl",
+            "local_name": "urllib3-2.7.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl",
+            "bytes": 131087,
+            "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897"
+          },
+          {
+            "filename": "certifi-2026.7.22-py3-none-any.whl",
+            "local_name": "certifi-2026.7.22-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
+            "bytes": 136983,
+            "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
+          },
+          {
+            "filename": "idna-3.19-py3-none-any.whl",
+            "local_name": "idna-3.19-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/57/b0/0e52c878c53f245edd3a11020f20979b3f490f245af532c7cae3027754b5/idna-3.19-py3-none-any.whl",
+            "bytes": 68550,
+            "sha256": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4"
+          },
+          {
+            "filename": "charset_normalizer-3.5.1-cp310-cp310-win_amd64.whl",
+            "local_name": "charset_normalizer-3.5.1-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/d2/21/83fffb77864408b8bf0fe1ca603926401d6f8775a8e150b39aacc9958f8a/charset_normalizer-3.5.1-cp310-cp310-win_amd64.whl",
+            "bytes": 206030,
+            "sha256": "be47f99644b208bff7766314013f9acf57b056b04191d570d68ad14022cf5b1d"
+          },
+          {
+            "filename": "tqdm-4.70.0-py3-none-any.whl",
+            "local_name": "tqdm-4.70.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/f9/1c/01bfd571a64e7f270e6bab5e33777debe0edc56759233ce84f27dec92d14/tqdm-4.70.0-py3-none-any.whl",
+            "bytes": 80184,
+            "sha256": "7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953"
+          },
+          {
+            "filename": "packaging-26.3-py3-none-any.whl",
+            "local_name": "packaging-26.3-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl",
+            "bytes": 129956,
+            "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
+          },
+          {
+            "filename": "scipy-1.15.3-cp310-cp310-win_amd64.whl",
+            "local_name": "scipy-1.15.3-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/d1/84/55bc4881973d3f79b479a5a2e2df61c8c9a04fcb986a213ac9c02cfb659b/scipy-1.15.3-cp310-cp310-win_amd64.whl",
+            "bytes": 41259201,
+            "sha256": "9d61e97b186a57350f6d6fd72640f9e99d5a4a2b8fbf4b9ee9a841eab327dc13"
+          },
+          {
+            "filename": "pyyaml-6.0.3-cp310-cp310-win_amd64.whl",
+            "local_name": "pyyaml-6.0.3-cp310-cp310-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/2a/fa/926c003379b19fca39dd4634818b00dec6c62d87faf628d1394e137354d4/pyyaml-6.0.3-cp310-cp310-win_amd64.whl",
+            "bytes": 158561,
+            "sha256": "bdb2c67c6c1390b63c6ff89f210c8fd09d9a1217a465701eac7316313c915e4c"
           }
         ]
       },
@@ -284,6 +464,111 @@
             "url": "https://files.pythonhosted.org/packages/c6/b2/454d6e7f0158951d8a78c2e1eb4f69ae81beb8dca5fee9809c6c99e9d0d0/fsspec-2024.10.0-py3-none-any.whl",
             "bytes": 179641,
             "sha256": "03b9a6785766a4de40368b88906366755e2819e758b83705c88cd7cb5fe81871"
+          },
+          {
+            "filename": "beartype-0.22.9-py3-none-any.whl",
+            "local_name": "beartype-0.22.9-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/71/cc/18245721fa7747065ab478316c7fea7c74777d07f37ae60db2e84f8172e8/beartype-0.22.9-py3-none-any.whl",
+            "bytes": 1333658,
+            "sha256": "d16c9bbc61ea14637596c5f6fbff2ee99cbe3573e46a716401734ef50c3060c2"
+          },
+          {
+            "filename": "pydantic-2.13.5-py3-none-any.whl",
+            "local_name": "pydantic-2.13.5-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/eb/47/c95ffc2009878c7aac0c5e08528022dcb885933252a88b5f170058014464/pydantic-2.13.5-py3-none-any.whl",
+            "bytes": 472589,
+            "sha256": "346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73"
+          },
+          {
+            "filename": "pydantic_core-2.46.5-cp311-cp311-win_amd64.whl",
+            "local_name": "pydantic_core-2.46.5-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/9e/c2/718b9deb4b72453b5d8c7447a3b14cb77bef36917ef5f514e0948a4096a0/pydantic_core-2.46.5-cp311-cp311-win_amd64.whl",
+            "bytes": 2041030,
+            "sha256": "40375c2d05acec10323e45dfe2077ac44bc74659008614af5069034e2cfc781c"
+          },
+          {
+            "filename": "annotated_types-0.8.0-py3-none-any.whl",
+            "local_name": "annotated_types-0.8.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/99/91/8acff4f5e50511b911bbccb72b8628a49c68ce14148cd9f6431094859a90/annotated_types-0.8.0-py3-none-any.whl",
+            "bytes": 13427,
+            "sha256": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0"
+          },
+          {
+            "filename": "typing_inspection-0.4.4-py3-none-any.whl",
+            "local_name": "typing_inspection-0.4.4-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/67/81/4add07e5172b7ac40d8ed5ff580409a7801a4fe26d529bdd915401dabfbe/typing_inspection-0.4.4-py3-none-any.whl",
+            "bytes": 14750,
+            "sha256": "65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147"
+          },
+          {
+            "filename": "huggingface_hub-0.35.3-py3-none-any.whl",
+            "local_name": "huggingface_hub-0.35.3-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/31/a0/651f93d154cb72323358bf2bbae3e642bdb5d2f1bfc874d096f7cb159fa0/huggingface_hub-0.35.3-py3-none-any.whl",
+            "bytes": 564262,
+            "sha256": "0e3a01829c19d86d03793e4577816fe3bdfc1602ac62c7fb220d593d351224ba"
+          },
+          {
+            "filename": "requests-2.34.2-py3-none-any.whl",
+            "local_name": "requests-2.34.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl",
+            "bytes": 73075,
+            "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0"
+          },
+          {
+            "filename": "urllib3-2.7.0-py3-none-any.whl",
+            "local_name": "urllib3-2.7.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl",
+            "bytes": 131087,
+            "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897"
+          },
+          {
+            "filename": "certifi-2026.7.22-py3-none-any.whl",
+            "local_name": "certifi-2026.7.22-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
+            "bytes": 136983,
+            "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
+          },
+          {
+            "filename": "idna-3.19-py3-none-any.whl",
+            "local_name": "idna-3.19-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/57/b0/0e52c878c53f245edd3a11020f20979b3f490f245af532c7cae3027754b5/idna-3.19-py3-none-any.whl",
+            "bytes": 68550,
+            "sha256": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4"
+          },
+          {
+            "filename": "charset_normalizer-3.5.1-cp311-cp311-win_amd64.whl",
+            "local_name": "charset_normalizer-3.5.1-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/e3/57/32f0ccea59e8612057c61d6fd22ef2cb63cca93c9fe594094919696ac170/charset_normalizer-3.5.1-cp311-cp311-win_amd64.whl",
+            "bytes": 206653,
+            "sha256": "f9b1e28d0e8dbfa858abdba91d6b547beaf2df1a59bec6da6faae7b96a4991a9"
+          },
+          {
+            "filename": "tqdm-4.70.0-py3-none-any.whl",
+            "local_name": "tqdm-4.70.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/f9/1c/01bfd571a64e7f270e6bab5e33777debe0edc56759233ce84f27dec92d14/tqdm-4.70.0-py3-none-any.whl",
+            "bytes": 80184,
+            "sha256": "7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953"
+          },
+          {
+            "filename": "packaging-26.3-py3-none-any.whl",
+            "local_name": "packaging-26.3-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl",
+            "bytes": 129956,
+            "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
+          },
+          {
+            "filename": "scipy-1.15.3-cp311-cp311-win_amd64.whl",
+            "local_name": "scipy-1.15.3-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/ab/a7/0ddaf514ce8a8714f6ed243a2b391b41dbb65251affe21ee3077ec45ea9a/scipy-1.15.3-cp311-cp311-win_amd64.whl",
+            "bytes": 41246504,
+            "sha256": "ae48a786a28412d744c62fd7816a4118ef97e5be0bee968ce8f0a2fba7acf3bb"
+          },
+          {
+            "filename": "pyyaml-6.0.3-cp311-cp311-win_amd64.whl",
+            "local_name": "pyyaml-6.0.3-cp311-cp311-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/da/e3/ea007450a105ae919a72393cb06f122f288ef60bba2dc64b26e2646fa315/pyyaml-6.0.3-cp311-cp311-win_amd64.whl",
+            "bytes": 158763,
+            "sha256": "9f3bfb4965eb874431221a3ff3fdcddc7e74e3b07799e0e84ca4a0f867d449bf"
           }
         ]
       },
@@ -386,6 +671,111 @@
             "url": "https://files.pythonhosted.org/packages/c6/b2/454d6e7f0158951d8a78c2e1eb4f69ae81beb8dca5fee9809c6c99e9d0d0/fsspec-2024.10.0-py3-none-any.whl",
             "bytes": 179641,
             "sha256": "03b9a6785766a4de40368b88906366755e2819e758b83705c88cd7cb5fe81871"
+          },
+          {
+            "filename": "beartype-0.22.9-py3-none-any.whl",
+            "local_name": "beartype-0.22.9-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/71/cc/18245721fa7747065ab478316c7fea7c74777d07f37ae60db2e84f8172e8/beartype-0.22.9-py3-none-any.whl",
+            "bytes": 1333658,
+            "sha256": "d16c9bbc61ea14637596c5f6fbff2ee99cbe3573e46a716401734ef50c3060c2"
+          },
+          {
+            "filename": "pydantic-2.13.5-py3-none-any.whl",
+            "local_name": "pydantic-2.13.5-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/eb/47/c95ffc2009878c7aac0c5e08528022dcb885933252a88b5f170058014464/pydantic-2.13.5-py3-none-any.whl",
+            "bytes": 472589,
+            "sha256": "346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73"
+          },
+          {
+            "filename": "pydantic_core-2.46.5-cp312-cp312-win_amd64.whl",
+            "local_name": "pydantic_core-2.46.5-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/cf/c9/4c19f41b84cf6b622a72fbeed7665b25d47a187d68d47d0d430c07f23268/pydantic_core-2.46.5-cp312-cp312-win_amd64.whl",
+            "bytes": 2043140,
+            "sha256": "5e81740c09e310f5aa5cbd3e434a01c154d4bef93241c7877b39f211d2b78ba8"
+          },
+          {
+            "filename": "annotated_types-0.8.0-py3-none-any.whl",
+            "local_name": "annotated_types-0.8.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/99/91/8acff4f5e50511b911bbccb72b8628a49c68ce14148cd9f6431094859a90/annotated_types-0.8.0-py3-none-any.whl",
+            "bytes": 13427,
+            "sha256": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0"
+          },
+          {
+            "filename": "typing_inspection-0.4.4-py3-none-any.whl",
+            "local_name": "typing_inspection-0.4.4-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/67/81/4add07e5172b7ac40d8ed5ff580409a7801a4fe26d529bdd915401dabfbe/typing_inspection-0.4.4-py3-none-any.whl",
+            "bytes": 14750,
+            "sha256": "65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147"
+          },
+          {
+            "filename": "huggingface_hub-0.35.3-py3-none-any.whl",
+            "local_name": "huggingface_hub-0.35.3-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/31/a0/651f93d154cb72323358bf2bbae3e642bdb5d2f1bfc874d096f7cb159fa0/huggingface_hub-0.35.3-py3-none-any.whl",
+            "bytes": 564262,
+            "sha256": "0e3a01829c19d86d03793e4577816fe3bdfc1602ac62c7fb220d593d351224ba"
+          },
+          {
+            "filename": "requests-2.34.2-py3-none-any.whl",
+            "local_name": "requests-2.34.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl",
+            "bytes": 73075,
+            "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0"
+          },
+          {
+            "filename": "urllib3-2.7.0-py3-none-any.whl",
+            "local_name": "urllib3-2.7.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl",
+            "bytes": 131087,
+            "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897"
+          },
+          {
+            "filename": "certifi-2026.7.22-py3-none-any.whl",
+            "local_name": "certifi-2026.7.22-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
+            "bytes": 136983,
+            "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
+          },
+          {
+            "filename": "idna-3.19-py3-none-any.whl",
+            "local_name": "idna-3.19-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/57/b0/0e52c878c53f245edd3a11020f20979b3f490f245af532c7cae3027754b5/idna-3.19-py3-none-any.whl",
+            "bytes": 68550,
+            "sha256": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4"
+          },
+          {
+            "filename": "charset_normalizer-3.5.1-cp312-cp312-win_amd64.whl",
+            "local_name": "charset_normalizer-3.5.1-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/9d/7a/4c6c298171e6b3e745633180ff59350fc0ca0db1ffd28df1e369e0579f71/charset_normalizer-3.5.1-cp312-cp312-win_amd64.whl",
+            "bytes": 200551,
+            "sha256": "3617ac3cfd8b9888f145ad89dd6e692285834b0201c6074a5eeaad3fd4d668c2"
+          },
+          {
+            "filename": "tqdm-4.70.0-py3-none-any.whl",
+            "local_name": "tqdm-4.70.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/f9/1c/01bfd571a64e7f270e6bab5e33777debe0edc56759233ce84f27dec92d14/tqdm-4.70.0-py3-none-any.whl",
+            "bytes": 80184,
+            "sha256": "7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953"
+          },
+          {
+            "filename": "packaging-26.3-py3-none-any.whl",
+            "local_name": "packaging-26.3-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl",
+            "bytes": 129956,
+            "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
+          },
+          {
+            "filename": "scipy-1.15.3-cp312-cp312-win_amd64.whl",
+            "local_name": "scipy-1.15.3-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/e6/eb/3bf6ea8ab7f1503dca3a10df2e4b9c3f6b3316df07f6c0ded94b281c7101/scipy-1.15.3-cp312-cp312-win_amd64.whl",
+            "bytes": 40966184,
+            "sha256": "52092bc0472cfd17df49ff17e70624345efece4e1a12b23783a1ac59a1b728ed"
+          },
+          {
+            "filename": "pyyaml-6.0.3-cp312-cp312-win_amd64.whl",
+            "local_name": "pyyaml-6.0.3-cp312-cp312-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/86/bf/899e81e4cce32febab4fb42bb97dcdf66bc135272882d1987881a4b519e9/pyyaml-6.0.3-cp312-cp312-win_amd64.whl",
+            "bytes": 154003,
+            "sha256": "5fcd34e47f6e0b794d17de1b4ff496c00986e1c83f7ab2fb8fcfe9616ff7477b"
           }
         ]
       },
@@ -488,6 +878,111 @@
             "url": "https://files.pythonhosted.org/packages/c6/b2/454d6e7f0158951d8a78c2e1eb4f69ae81beb8dca5fee9809c6c99e9d0d0/fsspec-2024.10.0-py3-none-any.whl",
             "bytes": 179641,
             "sha256": "03b9a6785766a4de40368b88906366755e2819e758b83705c88cd7cb5fe81871"
+          },
+          {
+            "filename": "beartype-0.22.9-py3-none-any.whl",
+            "local_name": "beartype-0.22.9-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/71/cc/18245721fa7747065ab478316c7fea7c74777d07f37ae60db2e84f8172e8/beartype-0.22.9-py3-none-any.whl",
+            "bytes": 1333658,
+            "sha256": "d16c9bbc61ea14637596c5f6fbff2ee99cbe3573e46a716401734ef50c3060c2"
+          },
+          {
+            "filename": "pydantic-2.13.5-py3-none-any.whl",
+            "local_name": "pydantic-2.13.5-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/eb/47/c95ffc2009878c7aac0c5e08528022dcb885933252a88b5f170058014464/pydantic-2.13.5-py3-none-any.whl",
+            "bytes": 472589,
+            "sha256": "346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73"
+          },
+          {
+            "filename": "pydantic_core-2.46.5-cp313-cp313-win_amd64.whl",
+            "local_name": "pydantic_core-2.46.5-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/2c/1e/1d5371213f4cc9a7ed70c0bfcc7911de22311ee99a662a56077d7292d2ac/pydantic_core-2.46.5-cp313-cp313-win_amd64.whl",
+            "bytes": 2041980,
+            "sha256": "15f4a94963c95accac15b7b657bb177d3ad82bb90b0d0526d9a9b85079925db5"
+          },
+          {
+            "filename": "annotated_types-0.8.0-py3-none-any.whl",
+            "local_name": "annotated_types-0.8.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/99/91/8acff4f5e50511b911bbccb72b8628a49c68ce14148cd9f6431094859a90/annotated_types-0.8.0-py3-none-any.whl",
+            "bytes": 13427,
+            "sha256": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0"
+          },
+          {
+            "filename": "typing_inspection-0.4.4-py3-none-any.whl",
+            "local_name": "typing_inspection-0.4.4-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/67/81/4add07e5172b7ac40d8ed5ff580409a7801a4fe26d529bdd915401dabfbe/typing_inspection-0.4.4-py3-none-any.whl",
+            "bytes": 14750,
+            "sha256": "65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147"
+          },
+          {
+            "filename": "huggingface_hub-0.35.3-py3-none-any.whl",
+            "local_name": "huggingface_hub-0.35.3-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/31/a0/651f93d154cb72323358bf2bbae3e642bdb5d2f1bfc874d096f7cb159fa0/huggingface_hub-0.35.3-py3-none-any.whl",
+            "bytes": 564262,
+            "sha256": "0e3a01829c19d86d03793e4577816fe3bdfc1602ac62c7fb220d593d351224ba"
+          },
+          {
+            "filename": "requests-2.34.2-py3-none-any.whl",
+            "local_name": "requests-2.34.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl",
+            "bytes": 73075,
+            "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0"
+          },
+          {
+            "filename": "urllib3-2.7.0-py3-none-any.whl",
+            "local_name": "urllib3-2.7.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl",
+            "bytes": 131087,
+            "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897"
+          },
+          {
+            "filename": "certifi-2026.7.22-py3-none-any.whl",
+            "local_name": "certifi-2026.7.22-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
+            "bytes": 136983,
+            "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
+          },
+          {
+            "filename": "idna-3.19-py3-none-any.whl",
+            "local_name": "idna-3.19-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/57/b0/0e52c878c53f245edd3a11020f20979b3f490f245af532c7cae3027754b5/idna-3.19-py3-none-any.whl",
+            "bytes": 68550,
+            "sha256": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4"
+          },
+          {
+            "filename": "charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl",
+            "local_name": "charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/8a/33/56d97ade41c8db611e727168c52ae46c9224c362ec28d4b65d7e9869e8da/charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl",
+            "bytes": 199295,
+            "sha256": "aea996a6aba25260827c9ea511d1addfde2da9eb686ac961838509086188b7e6"
+          },
+          {
+            "filename": "tqdm-4.70.0-py3-none-any.whl",
+            "local_name": "tqdm-4.70.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/f9/1c/01bfd571a64e7f270e6bab5e33777debe0edc56759233ce84f27dec92d14/tqdm-4.70.0-py3-none-any.whl",
+            "bytes": 80184,
+            "sha256": "7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953"
+          },
+          {
+            "filename": "packaging-26.3-py3-none-any.whl",
+            "local_name": "packaging-26.3-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl",
+            "bytes": 129956,
+            "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
+          },
+          {
+            "filename": "scipy-1.15.3-cp313-cp313-win_amd64.whl",
+            "local_name": "scipy-1.15.3-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/87/2e/892ad2862ba54f084ffe8cc4a22667eaf9c2bcec6d2bff1d15713c6c0703/scipy-1.15.3-cp313-cp313-win_amd64.whl",
+            "bytes": 40988851,
+            "sha256": "b90ab29d0c37ec9bf55424c064312930ca5f4bde15ee8619ee44e69319aab163"
+          },
+          {
+            "filename": "pyyaml-6.0.3-cp313-cp313-win_amd64.whl",
+            "local_name": "pyyaml-6.0.3-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/97/c9/39d5b874e8b28845e4ec2202b5da735d0199dbe5b8fb85f91398814a9a46/pyyaml-6.0.3-cp313-cp313-win_amd64.whl",
+            "bytes": 154090,
+            "sha256": "79005a0d97d5ddabfeeea4cf676af11e647e41d81c9a7722a193022accdb6b7c"
           }
         ]
       }
@@ -505,13 +1000,13 @@
       "language": "en",
       "public_repo": "kyutai/pocket-tts-without-voice-cloning",
       "cloning_repo": "kyutai/pocket-tts",
-      "revision": "main",
+      "revision": "d29db7978e464fb90cb3359ee0c69a273b9142cc",
       "sample_rate": 24000,
       "recommended_temperature": 0.3,
       "license": "CC-BY-4.0 (PocketTTS model weights, Kyutai)",
       "attribution": "PocketTTS English by Kyutai. Public model assets from huggingface.co/kyutai/pocket-tts-without-voice-cloning; the voice-cloning weights are a separate gated repository whose conditions have to be accepted upstream.",
       "summary": "A streaming CPU model. Speaks with precomputed official voice states, and clones a voice from a short local recording once the gated weights are installed.",
-      "notes": "Downloaded once and then read from disk. Voice Chat writes a local config whose every path names a verified local file, so nothing here is resolved again after installation and no hf:// or https:// location ever reaches the worker.",
+      "notes": "Downloaded once and then read from disk. The two revisions are upstream's own, read out of pocket_tts/config/english.yaml inside the 3.0.2 wheel: the package pins the public weights and tokenizer at one commit and the cloning-capable weights at another, and following main instead would install bytes the shipped configuration was not written for. Voice Chat's installer copies that same configuration out of the runtime and rewrites its three locations to the local files it verified, so nothing is resolved again after installation and no hf:// or https:// location ever reaches the worker.",
       "about_bytes": 0,
       "ram_bytes": 2147483648,
       "files": [],
@@ -519,11 +1014,12 @@
       "cloning_files": [],
       "cloning_required_paths": [],
       "config": {
-        "weights_path_without_voice_cloning": "",
-        "weights_path": "",
-        "tokenizer_path": ""
+        "weights_path": "model-voice-cloning.safetensors",
+        "weights_path_without_voice_cloning": "model.safetensors",
+        "tokenizer_path": "tokenizer.model"
       },
-      "voices": []
+      "voices": [],
+      "cloning_revision": "39592ff23c9ef80098bb74895d104c26275fe2c9"
     }
   }
 }

@@ -103,7 +103,9 @@ def installed(voice_root, monkeypatch):
                                "local_name": "cloning.safetensors",
                                "url": "https://example.invalid/cloning.safetensors"}],
             "cloning_required_paths": ["cloning.safetensors"],
-            "config": {"weights_path": "model.safetensors"},
+            "config": {"weights_path": "cloning.safetensors",
+                       "weights_path_without_voice_cloning": "model.safetensors",
+                       "tokenizer_path": "tokenizer.model"},
             "voices": [
                 {"id": "alba", "display_name": "Alba", "language": "en",
                  "accent": "Scottish", "license": "CC-BY-4.0",
@@ -790,6 +792,171 @@ class TestTheTransactionsFailurePathsLeaveNothingOrphaned:
         assert any("access gate" in line for line in said)
 
 
+RECIPE = {
+    "weights_path": "hf://kyutai/pocket-tts/languages/english/model.safetensors@39592ff2",
+    "weights_path_without_voice_cloning":
+        "hf://kyutai/pocket-tts-without-voice-cloning/languages/english/"
+        "model.safetensors@d29db797",
+    "default_temperature": 0.3,
+    "flow_lm": {
+        "dtype": "float32",
+        "insert_bos_before_voice": True,
+        "flow": {"depth": 6, "dim": 512},
+        "transformer": {"d_model": 1024, "hidden_scale": 4, "max_period": 10000,
+                        "num_heads": 16, "num_layers": 6},
+        "lookup_table": {
+            "dim": 1024, "n_bins": 4000, "tokenizer": "sentencepiece",
+            "tokenizer_path": "hf://kyutai/pocket-tts-without-voice-cloning/languages/"
+                              "english/tokenizer.model@d29db797"},
+    },
+    "mimi": {"dtype": "float32", "sample_rate": 24000, "channels": 1, "frame_rate": 12.5},
+}
+"""PocketTTS 3.0.2's own ``english.yaml``, shortened but not altered where it matters.
+
+The three locations are upstream's real ones, verbatim from the wheel, because
+this is a test about replacing exactly those three and leaving the other twenty
+keys alone.
+"""
+
+
+class TestTheWorkerIsPointedAtLocalFilesAndNothingElse:
+    """Section 25 and I-PKT-20, as the file upstream itself opens.
+
+    ``TTSModel.load_model`` takes a path to a YAML document in its own schema,
+    validates it with a model that forbids unknown keys, and resolves every
+    location in it with hub utilities it imports at module level. So the config
+    the worker is handed is upstream's own document with three paths replaced --
+    not a document of this repository's design, and not a document with an
+    ``hf://`` left anywhere in it.
+    """
+
+    def _localise(self, entry_root):
+        paths.pocket_upstream_config("english").parent.mkdir(parents=True, exist_ok=True)
+        paths.pocket_upstream_config("english").write_text(json.dumps(RECIPE),
+                                                           encoding="utf-8")
+        pocket._write_local_config(pocket.bundle())
+        return json.loads(paths.pocket_model_config("english").read_text(encoding="utf-8"))
+
+    def test_every_location_is_replaced_by_a_verified_local_file(self, host, cloning):
+        root = paths.pocket_model_root("english")
+        (root / "tokenizer.model").write_bytes(b"x")
+        found = self._localise(root)
+
+        assert found["weights_path"] == str(root / "cloning.safetensors")
+        assert found["weights_path_without_voice_cloning"] == str(root / "model.safetensors")
+        assert found["flow_lm"]["lookup_table"]["tokenizer_path"] == \
+            str(root / "tokenizer.model")
+
+    def test_nothing_upstream_describes_about_the_model_is_touched(self, host, cloning):
+        """The architecture is upstream's statement about its own model. A copy
+        of it in this repository would be a copy somebody has to update whenever
+        a revision changes a layer count, and that nothing notices going stale."""
+        root = paths.pocket_model_root("english")
+        (root / "tokenizer.model").write_bytes(b"x")
+        found = self._localise(root)
+
+        assert found["mimi"] == RECIPE["mimi"]
+        assert found["default_temperature"] == 0.3
+        assert found["flow_lm"]["transformer"] == RECIPE["flow_lm"]["transformer"]
+        assert found["flow_lm"]["lookup_table"]["n_bins"] == 4000
+
+    def test_no_network_location_survives_anywhere_in_it(self, host, cloning):
+        """Including three levels down. The weights are at the top and the
+        tokenizer is inside ``flow_lm.lookup_table``, and a check that only
+        looked at the top level would leave the one location the worker could
+        actually resolve."""
+        root = paths.pocket_model_root("english")
+        (root / "tokenizer.model").write_bytes(b"x")
+        text = json.dumps(self._localise(root))
+        assert "hf://" not in text
+        assert "https://" not in text
+
+    def test_without_the_gated_half_the_weights_are_the_public_ones(self, host, installed):
+        """Upstream falls back from ``weights_path`` to the public weights only
+        when the *download* fails, and a local path that is not there does not
+        fail there -- it fails later, fatally, on a model that would otherwise
+        have spoken perfectly well with official voices (section 23.3)."""
+        root = paths.pocket_model_root("english")
+        (root / "tokenizer.model").write_bytes(b"x")
+        found = self._localise(root)
+
+        assert found["weights_path"] == str(root / "model.safetensors")
+        assert found["weights_path_without_voice_cloning"] == str(root / "model.safetensors")
+
+    def test_it_is_written_where_upstream_will_agree_to_open_it(self, host, cloning):
+        """``load_model`` refuses a config whose suffix is not ``.yaml`` or
+        ``.yml``. JSON is a subset of YAML, so the content is JSON and the name
+        is not."""
+        root = paths.pocket_model_root("english")
+        (root / "tokenizer.model").write_bytes(b"x")
+        self._localise(root)
+        assert paths.pocket_model_config("english").suffix in (".yaml", ".yml")
+
+    def test_the_recipe_comes_from_the_runtime_rather_than_from_this_repository(
+            self, host, installed, monkeypatch, tmp_path):
+        """It ships inside the wheel, so the only place it can be read is inside
+        the isolated runtime."""
+        class Result:
+            returncode = 0
+            stdout = json.dumps({"ok": True, "recipe": RECIPE})
+            stderr = ""
+
+        asked = []
+
+        def staged(interpreter, arguments, what, timeout=300):
+            asked.append([str(one) for one in arguments])
+            return Result()
+
+        monkeypatch.setattr(pocket, "runtime_python", lambda: tmp_path / "python")
+        monkeypatch.setattr(pocket, "_run_staged", staged)
+        assert pocket._read_recipe(pocket.bundle()) == RECIPE
+        assert asked and asked[0][-2:] == ["--recipe", "english"]
+
+    def test_a_runtime_that_cannot_describe_its_model_stops_the_install(
+            self, host, installed, monkeypatch, tmp_path):
+        class Result:
+            returncode = 1
+            stdout = json.dumps({"ok": False, "error": "no configuration for 'english'"})
+            stderr = ""
+
+        monkeypatch.setattr(pocket, "runtime_python", lambda: tmp_path / "python")
+        monkeypatch.setattr(pocket, "_run_staged",
+                            lambda *arguments, **values: Result())
+        with pytest.raises(pocket.PocketError) as raised:
+            pocket._read_recipe(pocket.bundle())
+        assert "no configuration" in str(raised.value)
+
+
+class TestTheWorkerEnvironmentSaysWhatItMeans:
+    def test_no_credential_and_no_location_can_reach_it(self, host, monkeypatch):
+        """I-PKT-21. A token is the installer's and the parent process's, and
+        there is no branch that could put one here."""
+        for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACEHUB_API_TOKEN"):
+            monkeypatch.setenv(name, "hf_secret")
+        found = pocket.worker_environment()
+        assert "hf_secret" not in json.dumps(found)
+        assert found["HF_HUB_OFFLINE"] == "1"
+
+    def test_no_graphics_device_is_visible(self, host):
+        found = pocket.worker_environment()
+        assert found["CUDA_VISIBLE_DEVICES"] == ""
+        assert found["HIP_VISIBLE_DEVICES"] == ""
+
+    def test_upstreams_type_checking_claw_is_off(self, host):
+        """``pocket_tts`` wraps every function in its package unless this is set,
+        which upstream's own comment says costs per call. It is not a way to drop
+        the dependency: ``pocket_tts/data/audio.py`` imports ``beartype.typing``
+        unconditionally, so the closure ships beartype either way -- see
+        :class:`TestTheShippedManifestIsCompleteEnoughToImport`."""
+        assert pocket.worker_environment()["POCKET_TTS_NO_BEARTYPE"] == "1"
+
+    def test_there_is_no_thread_count(self, host):
+        """Section 16.4. PocketTTS sets its own, so a number here would be a
+        number reported as a Pocket thread count that is not one."""
+        found = pocket.worker_environment()
+        assert not [name for name in found if "THREAD" in name.upper()]
+
+
 class TestNoPayloadCarriesAPath:
     def test_t_pkt_id_4_no_public_entry_names_a_file_or_a_handle(self, host, cloning,
                                                                  worker, spoken_wav):
@@ -904,3 +1071,102 @@ class TestEveryEngineAnswersBothReadinesses:
                   "engine_busy", "draining", "interrupt_mode", "block"}
         for adapter in (kokoro, sopro, pocket):
             assert set(adapter.public_status()) == wanted, adapter.ENGINE
+
+
+
+# --------------------------------------------------------------------------- #
+# The manifest this repository actually ships
+# --------------------------------------------------------------------------- #
+
+
+NEEDED = (
+    "pocket-tts", "torch", "numpy", "safetensors", "sentencepiece", "scipy", "PyYAML",
+    "beartype", "pydantic", "pydantic-core", "annotated-types", "typing-inspection",
+    "typing-extensions", "huggingface-hub", "requests", "urllib3", "certifi", "idna",
+    "tqdm", "filelock", "sympy", "mpmath", "networkx",
+)
+"""Every distribution ``import pocket_tts`` fails without, measured not reasoned.
+
+Taken by blocking each candidate at the import hook against a real ``pocket-tts
+3.0.2`` install and seeing which ones make the import raise. It is written down
+here so that the measurement survives: a closure that quietly lost one of these
+would install, pass every test that does not start a runtime, and then fail on
+the first reply somebody wanted spoken.
+"""
+
+ABSENT = ("fastapi", "uvicorn", "typer", "python-multipart", "einops", "torchao",
+          "hf-xet", "httpx", "httpcore")
+"""What must *not* be in it, and each for its own reason.
+
+The first five are upstream's server and CLI and are not on the import path
+Voice Chat uses; section 23.1 says the closure is the smallest tested
+inference-complete one. ``torchao`` is an optional accelerator for a
+quantization GATE P-5 has not measured yet. ``hf-xet`` accelerates downloads this
+worker never performs. ``httpx`` and ``httpcore`` arrive only with
+huggingface-hub 1.x, which replaced requests with an HTTP client an offline
+worker must never use -- which is why the pin stays in the 0.x line.
+"""
+
+
+class TestTheShippedManifestIsCompleteEnoughToImport:
+    """The closure is data, so this is the only place it can be checked.
+
+    Everything else in this file runs against a fixture manifest, which is right
+    -- those tests are about behaviour. This one is about the file the extension
+    ships, because that file is now what decides whether ``import pocket_tts``
+    succeeds on somebody's machine.
+    """
+
+    @pytest.fixture
+    def shipped(self):
+        return json.loads(paths.pocket_manifest_path().read_text(encoding="utf-8"))
+
+    def test_every_package_the_import_path_needs_is_in_the_closure(self, shipped):
+        closure = {str(name).casefold()
+                   for name, _version, _kind in shipped["runtime"]["closure"]}
+        missing = [name for name in NEEDED if name.casefold() not in closure]
+        assert missing == [], missing
+
+    def test_the_server_and_the_cli_are_not(self, shipped):
+        closure = {str(name).casefold()
+                   for name, _version, _kind in shipped["runtime"]["closure"]}
+        present = [name for name in ABSENT if name.casefold() in closure]
+        assert present == [], present
+
+    def test_huggingface_hub_stays_in_the_zero_line(self, shipped):
+        """1.x replaced requests with httpx and would add five more wheels to an
+        offline worker for an HTTP client it must never use."""
+        found = {str(name).casefold(): version
+                 for name, version, _kind in shipped["runtime"]["closure"]}
+        assert found["huggingface-hub"].startswith("0."), found["huggingface-hub"]
+
+    def test_every_platform_is_pinned_byte_for_byte(self, shipped):
+        """A hash and a byte count, or nothing doing. There is no "download it
+        and trust it" mode and there is no flag to add one."""
+        platforms = shipped["runtime"]["platforms"]
+        assert platforms, "the manifest advertises no platform at all"
+        for item in platforms:
+            artifacts = item.get("artifacts") or ()
+            assert len(artifacts) == len(shipped["runtime"]["closure"]), item["id"]
+            for one in artifacts:
+                assert len(str(one.get("sha256") or "")) == 64, (item["id"], one)
+                assert int(one.get("bytes") or 0) > 0, (item["id"], one)
+                assert str(one["url"]).startswith("https://"), one
+
+    def test_the_config_block_names_the_three_locations_upstream_has(self, shipped):
+        """The manifest's ``config`` keys and :data:`mc_voice_pocket.LOCATIONS`
+        are two halves of one agreement: the first says which local file plays
+        each part, the second says where in upstream's document it goes."""
+        for entry in shipped["models"].values():
+            assert set(entry["config"]) == set(pocket.LOCATIONS), entry["config"]
+
+    def test_each_repository_is_pinned_at_a_commit_rather_than_a_branch(self, shipped):
+        """Upstream's shipped configuration names one commit for the public
+        weights and another for the cloning weights. Following ``main`` instead
+        would install bytes that configuration was not written for."""
+        for entry in shipped["models"].values():
+            for key in ("revision", "cloning_revision"):
+                found = str(entry.get(key) or "")
+                assert len(found) == 40 and found.strip("0123456789abcdef") == "", \
+                    (key, found)
+            assert entry["revision"] != entry["cloning_revision"]

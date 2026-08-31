@@ -354,17 +354,49 @@ voice.
 
 The manifest ships **half resolved**, and says so in its own `notes`.
 
-The **runtime closure is pinned**: fifty-two wheels across four Python minors,
-each named, sized and hashed from pypi.org — PocketTTS 3.0.2, PyTorch 2.6.0 CPU,
-NumPy, safetensors, SentencePiece and the small pure-Python closure Torch itself
-declares on Windows, about 228 MB per platform. So the managed runtime install
-fetches exactly what this repository claims and refuses anything else.
+The **runtime closure is pinned**: 112 wheels — twenty-eight packages across
+four Python minors — each named, sized and hashed from pypi.org, about 274 MB
+per platform. So the managed runtime install fetches exactly what this
+repository claims and refuses anything else.
+
+Twenty-eight rather than the thirteen it began as, and the difference was
+**measured rather than reasoned about**. A real `pocket-tts 3.0.2` wheel — the
+one whose SHA-256 this manifest pins — was installed and every candidate package
+was blocked at the import hook in turn to see which ones make `import pocket_tts`
+raise. The original list was written by reading upstream's imports, and it was
+fifteen wheels short: five that `pocket_tts` imports at module level, one that no
+environment variable can turn off, and nine those bring with them.
+
+- `pydantic` — `pocket_tts.utils.config` builds its config model with it;
+- `PyYAML` — the same module parses the config with it;
+- `scipy` — `pocket_tts.data.audio_utils` imports it at module level;
+- `huggingface-hub` and `requests` — `pocket_tts.utils.utils` imports both at
+  module level, whether or not anything ever resolves a location;
+- `beartype` — `pocket_tts/data/audio.py` does `from beartype.typing import
+  Iterator` unconditionally. `POCKET_TTS_NO_BEARTYPE=1` in the worker's
+  environment keeps its claw from wrapping every function in the package, which
+  upstream's own comment says costs per call, but it does not remove the import.
+
+Those six bring nine of their own: `pydantic-core`, `annotated-types` and
+`typing-inspection` with pydantic; `urllib3`, `certifi`, `idna` and
+`charset-normalizer` with requests; `tqdm` and `packaging` with huggingface-hub.
+
+`huggingface-hub` is pinned in the **0.x** line on purpose: 1.x replaced
+`requests` with `httpx` and would add `httpx`, `httpcore`, `anyio`, `h11` and
+`sniffio` to an offline worker for an HTTP client it must never use. Having the
+hub library present at all is uncomfortable and the answer is not to pretend it
+is absent: `HF_HUB_OFFLINE` and `TRANSFORMERS_OFFLINE` are set in the worker's
+environment, the config it is handed names only local files, and it refuses one
+that names a network location anywhere in it — including three levels down,
+where the tokenizer's location lives.
 
 Torch is pinned at 2.6.0 rather than at the 3.0.2 metadata's `>=2.5.0` floor,
 and the reason is the kind of thing a pinning tool exists to catch: 2.5.x has no
 `cp313` Windows wheel, and this manifest advertises Python 3.13. A floor is not a
 runtime identity, and a platform advertised without a wheel to satisfy it is a
-platform that fails at install time instead of at review time.
+platform that fails at install time instead of at review time. `scipy` is pinned
+at 1.15.3 for the mirror image of the same reason: 1.16 dropped Python 3.10,
+which this manifest still advertises.
 
 The **model, official voice and cloning artifacts are not recorded yet**,
 because the machine that pinned the closure could not reach huggingface.co. That
@@ -373,6 +405,21 @@ about is an artifact it will not download, so the model half of the install
 refuses with a sentence naming `tools/pin_pocket_models.py --model`, which a
 maintainer runs with `HF_TOKEN` set and the Kyutai conditions accepted. A closed
 gate there leaves the public half resolved and written.
+
+Their **locations and revisions are** recorded, though, and from upstream's own
+statement rather than from a model card somebody read. The `english.yaml` that
+ships inside the 3.0.2 wheel names three files:
+
+```
+weights_path:                        hf://kyutai/pocket-tts/languages/english/model.safetensors@39592ff2…
+weights_path_without_voice_cloning:  hf://kyutai/pocket-tts-without-voice-cloning/languages/english/model.safetensors@d29db797…
+flow_lm.lookup_table.tokenizer_path: hf://kyutai/pocket-tts-without-voice-cloning/languages/english/tokenizer.model@d29db797…
+```
+
+Two repositories at **two different commits**, which is upstream's arrangement
+and not an oversight here — so the manifest carries a revision per repository
+and the pinner resolves each against its own. Following `main` would install
+bytes that shipped configuration was not written for.
 
 Install-from-a-folder works either way, and what is supplied has its digests
 recorded and becomes the constant the next install is checked against.
@@ -401,6 +448,42 @@ load; local reference conditioning; state export and reload; first PCM before a
 unit completes; drain-unit interruption reaching worker-ready with no overlap;
 repeated sequential turns on one model; clean exit while generation is active;
 and a cached base state still reusable across generations.
+
+*Partly run, and it changed the code.* The half of this gate that needs no model
+weights was executed against a real `pocket-tts 3.0.2` wheel — the one whose
+SHA-256 this manifest pins — and the API this worker had been written against
+was wrong in five places, each of which would have failed on the first reply
+somebody wanted spoken:
+
+| What the worker did | What released 3.0.2 has |
+| --- | --- |
+| `load_model(config=<dict>, device="cpu")` | no `device` parameter at all, and `config` must be a **path to a `.yaml` file** — a dict is refused with *"Config should be a path to a YAML file ending with .yaml"* |
+| `generate_audio_stream(state, text, sampler_decode_steps=…, temperature=…)` | `(model_state, text_to_generate, max_tokens, frames_after_eos, copy_state)`. Both numbers are **instance attributes** read inside the sampler |
+| `get_state_for_audio_prompt(<wav bytes>)` | `(audio_conditioning: Path \| str \| Tensor, truncate=False)` — bytes fall through every branch |
+| `model.export_voice(...)` / `model.save_state(...)` | `pocket_tts.export_model_state(state, dest)`, a **module-level function**. `export_voice` is the name of upstream's CLI command |
+| `get_state_for_audio_prompt(<str path>)` for a saved state | correct *shape*, wrong *type*: a `str` is handed to `download_if_necessary` first, which resolves `https://` and `hf://`. A `Path` goes straight to the file |
+
+That last one is the one worth dwelling on. It was not a crash — it was the
+single call in the worker that could have reached the network, in the engine
+whose whole design says nothing after installation does. Passing a `Path`
+closes it.
+
+Two consequences beyond the call sites. Upstream's `Config` model **forbids
+unknown keys**, so the local config can no longer be a document of this
+repository's own design with a `schema` and a `model_id` in it: it is upstream's
+own shipped `english.yaml` with three paths replaced, copied out of the wheel at
+install time by `worker.py --recipe`, and everything else Voice Chat wants to
+tell the worker goes over the wire in `worker_config()` instead. And because a
+local path that is missing does not fail where upstream's fallback catches it,
+`weights_path` on a machine without the gated half is pointed at the **public**
+weights rather than left naming a file that is not there — otherwise "installed
+without cloning" would be a model that refuses to load rather than one that
+speaks with official voices.
+
+What is still outstanding is everything that needs the weights: first PCM before
+a unit completes, RTF, drain timings, and a cached base state's reusability
+across generations. Those are measurements, and the tables below are still
+empty.
 
 **Gate P-1 — runtime closure.** The exact Windows/Python closure installing from
 empty staging without pip, and passing its self-test. No unreviewed wheel

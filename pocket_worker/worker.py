@@ -22,6 +22,34 @@ about *which* voice; this process owns inference and nothing else. It is handed
 paths it did not choose and a voice catalogue it did not build, and it validates
 both anyway, because it is the process that would crash.
 
+The upstream surface this file binds to
+---------------------------------------
+Four things, and they are written down here because they are the whole contract
+and because every one of them was wrong once:
+
+    ``TTSModel.load_model(config=<path to a .yaml>, sampler_decode_steps=,
+        quantize=)`` -- a *path*, not a document, and there is no ``device``
+        argument. The path is the local config the installer wrote;
+    ``model.get_state_for_audio_prompt(<pathlib.Path>, truncate=)`` -- one
+        function for both jobs, told apart by the suffix: a ``.safetensors``
+        path is loaded as an exported state and anything else is encoded as a
+        reference recording. A ``str`` is *not* the same thing as a ``Path``
+        here: upstream hands a string to its downloader first, which resolves
+        ``https://`` and ``hf://``, so a ``Path`` is what keeps this process
+        offline (I-PKT-20);
+    ``model.generate_audio_stream(state, text, copy_state=True)`` -- no
+        temperature and no step count among its arguments. Both live on the
+        model instance and are read inside the sampler, which is why
+        :meth:`Engine.speaking_at` exists and why it is safe only because there
+        is one lane;
+    ``pocket_tts.export_model_state(state, dest)`` -- a module-level function.
+        ``export_voice`` is the name of upstream's *CLI command* and is not on
+        the model at all.
+
+Everything is resolved by name and every argument is checked against the
+signature that will receive it, so a build whose API has moved is a sentence
+here rather than a ``TypeError`` inside somebody's first reply.
+
 One lane, and why it is not negotiable
 ---------------------------------------
 Upstream documents ``generate_audio_stream()`` as **not thread-safe** and it
@@ -101,9 +129,11 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
 import io
 import json
 import os
+import pathlib
 import queue
 import struct
 import sys
@@ -127,6 +157,17 @@ MARKER = "--model-chain-pocket-worker"
 """On the command line so this process is recognisable in a task manager and by
 the stray sweep. Never a voice name, never a path, never spoken text: a command
 line is world readable on most systems."""
+
+REFERENCE_FILENAME = "reference.wav"
+STATE_FILENAME = "state.safetensors"
+"""What a preparation writes into the directory the parent built for it.
+
+Two names shared with :mod:`mc_voice_paths` by agreement rather than by import,
+exactly as the framing is: this file must stay runnable under an interpreter
+that has PocketTTS and Torch and knows nothing about the extension. Named here
+so the agreement is visible in both files rather than being two string literals
+that happen to match.
+"""
 
 MAX_HEADER = 1 << 20
 MAX_PAYLOAD = 40 << 20
@@ -864,6 +905,105 @@ slow fuse. If a measurement ever justifies a different number it becomes a
 different constant, not a slider.
 """
 
+NO_BEARTYPE = "POCKET_TTS_NO_BEARTYPE"
+"""The environment variable that keeps a type-checking claw out of inference.
+
+``pocket_tts/__init__.py`` calls ``beartype_this_package()`` unless this is
+``"1"``, which wraps every function in the package. Upstream's own comment says
+it costs per call and blocks ``torch.compile``, and Voice Chat has no use for
+it: the boundary this process actually has to defend is the pipe, and that is
+checked here.
+
+Set by the parent when it builds this process's environment, and set again
+below immediately before the import -- braces and belt, because a closure that
+does not ship ``beartype`` would otherwise fail to import at all rather than
+run one function slower.
+"""
+
+
+def _upstream():
+    """PocketTTS's two public entry points, resolved once and by name.
+
+    ``TTSModel`` and the module-level ``export_model_state``. The second is not
+    a model method in released 3.0.2 and never was: exporting a voice state is a
+    function over the state dictionary, and looking for ``model.export_voice``
+    -- the name of upstream's *CLI command* -- finds nothing.
+    """
+    os.environ.setdefault(NO_BEARTYPE, "1")
+    import pocket_tts
+
+    model_class = getattr(pocket_tts, "TTSModel", None)
+    if model_class is None:
+        raise Refusal("This PocketTTS build has no TTSModel, so Voice Chat cannot load a "
+                      "model with it. Reinstall PocketTTS in Settings → Voice Chat.")
+    export_state = getattr(pocket_tts, "export_model_state", None)
+    if export_state is None:
+        raise Refusal("This PocketTTS build cannot export a voice state, so Voice Chat "
+                      "cannot make a voice from a recording with it.")
+    return model_class, export_state
+
+
+def _parameters(call):
+    """The parameter names this callable accepts, or ``None`` if it takes anything.
+
+    ``None`` for a signature that cannot be read and for one with ``**kwargs``,
+    because both mean "do not decide for it". Read rather than discovered by
+    calling and catching ``TypeError``: a ``TypeError`` raised inside a model
+    loader is indistinguishable from one raised by calling it wrongly, and the
+    second of those deserves a sentence naming the argument.
+    """
+    import inspect
+
+    try:
+        parameters = inspect.signature(call).parameters
+    except Exception:  # noqa: BLE001 - a builtin, something exotic; taken at its word
+        return None
+    if any(one.kind is inspect.Parameter.VAR_KEYWORD for one in parameters.values()):
+        return None
+    return set(parameters)
+
+
+def _read_document(path: str):
+    """One config document, whether it was written as YAML or as JSON.
+
+    The installer writes JSON into a ``.yaml`` file, because JSON is a subset of
+    YAML and this repository already has a JSON writer everywhere and a YAML
+    writer nowhere. Upstream reads it with ``yaml.safe_load`` either way. This
+    reads it the same way when PyYAML is present, and falls back to ``json`` so
+    that a unit test of the boundary does not need the closure.
+    """
+    with open(path, "r", encoding="utf-8") as handle:
+        text = handle.read()
+    try:
+        import yaml
+    except Exception:  # noqa: BLE001 - the closure has it; a bare test may not
+        return json.loads(text)
+    return yaml.safe_load(text)
+
+
+def _locations(found, seen=None) -> list:
+    """Every network location anywhere inside a parsed config. Depth-first.
+
+    Recursive because upstream's config is nested and the locations are at three
+    different depths: the weights at the top level, the tokenizer three levels
+    down. A check that only looked at the top level would pass a config whose
+    tokenizer was still an ``hf://`` path (I-PKT-20).
+    """
+    seen = [] if seen is None else seen
+    if isinstance(found, dict):
+        for key, value in found.items():
+            for one in _locations(value, []):
+                seen.append(f"{key}.{one}" if one else str(key))
+    elif isinstance(found, (list, tuple)):
+        for value in found:
+            _locations(value, seen)
+    else:
+        text = str(found or "")
+        if text.startswith(("hf://", "http://", "https://")):
+            seen.append("")
+    return seen
+
+
 MAX_STATE_BYTES = 96 * 1024 * 1024
 """A ceiling on what may be read back as a voice state.
 
@@ -905,10 +1045,12 @@ class Engine:
         self.state_schema = int(found.get("state_schema") or STATE_SCHEMA)
         self.sample_rate = int(found.get("sample_rate") or SAMPLE_RATE)
         self.cloning_ready = bool(found.get("cloning_ready"))
+        self.reference_seconds = float(found.get("reference_seconds") or 0.0)
         self.voices = dict(found.get("voices") or {})
         self.model = None
         self.defaults = {}
-        self.upstream_build_id = ""
+        self.upstream_build_id = str(found.get("upstream_build_id") or "")
+        self._export_state = None
         self._numpy = None
         self._states = collections.OrderedDict()
         self._lock = threading.Lock()
@@ -920,9 +1062,21 @@ class Engine:
 
         The only place in this process that imports either. Everything about it
         is arranged so that a failure is a sentence rather than a traceback: the
-        config is read here, the callables are resolved by name here, and the
-        device is asserted here rather than assumed from an environment
-        variable somebody could have unset.
+        recipe is read here, the callables are resolved by name here, every
+        argument is checked against the signature that will receive it, and the
+        device is asserted here rather than assumed from an environment variable
+        somebody could have unset.
+
+        What released 3.0.2 actually offers
+        -----------------------------------
+        ``TTSModel.load_model(language=None, config=None, temp=None,
+        sampler_decode_steps=1, ..., quantize=False)``. It takes a *path to a
+        YAML file* and refuses anything whose suffix is not ``.yaml`` or
+        ``.yml``; it has no ``device`` argument at all, and its temperature and
+        step count are stored on the instance and read at generation time. So
+        the model is pointed at the recipe the installer wrote (section 25) and
+        the two generation parameters are model attributes rather than
+        per-call arguments -- see :meth:`stream`.
         """
         import torch
 
@@ -932,32 +1086,55 @@ class Engine:
             numpy = None
         self._numpy = numpy
 
-        from pocket_tts import TTSModel  # noqa: F401 - resolved below by name
+        recipe = self._read_config()
+        model_class, export_state = _upstream()
+        self._export_state = export_state
 
-        config = self._read_config()
-        loader = getattr(TTSModel, "load_model", None)
+        loader = getattr(model_class, "load_model", None)
         if loader is None:
             raise Refusal("This PocketTTS build has no TTSModel.load_model, so Voice "
-                             "Chat cannot load a model with it.")
-        arguments = {"config": config, "device": "cpu"}
+                          "Chat cannot load a model with it.")
+        takes = _parameters(loader)
+        if takes is not None and "config" not in takes:
+            raise Refusal("This PocketTTS build's model loader does not take a config "
+                          "file, so Voice Chat cannot point it at the model it installed.")
+        arguments = {"config": self.config_path}
+        if self.sampler_steps and (takes is None or "sampler_decode_steps" in takes):
+            # The generation policy, set once at load. Upstream keeps it on the
+            # instance and reads it per generation; a turn that changed it in
+            # its middle would be a turn whose second half was a different model
+            # configuration from its first (I-PKT-24).
+            arguments["sampler_decode_steps"] = self.sampler_steps
         if self.precision == "int8":
-            # Upstream's dynamic INT8 at load time. Named ``quantize`` in 3.0.2;
-            # passed only when it was asked for, so a build that does not accept
-            # the argument still loads at full precision rather than refusing.
+            # Upstream's dynamic INT8 at load time, named ``quantize`` in 3.0.2.
+            # Refused rather than dropped on a build that does not offer it: a
+            # setting that silently did nothing would be a setting somebody
+            # measured and drew a conclusion from.
+            if takes is not None and "quantize" not in takes:
+                raise Refusal("This PocketTTS build cannot load a quantized model. Set "
+                              "the PocketTTS precision back to full in Settings → "
+                              "Voice Chat.")
             arguments["quantize"] = True
         self.model = loader(**arguments)
-        for name in ("generate_audio_stream",):
+        for name in ("generate_audio_stream", "get_state_for_audio_prompt"):
             if getattr(self.model, name, None) is None:
                 raise Refusal(f"This PocketTTS build has no {name}, so Voice Chat "
-                                 f"cannot speak with it.")
+                              f"cannot speak with it.")
         self.upstream_build_id = str(getattr(self.model, "build_id", "")
-                                     or config.get("upstream_build_id") or "")
-        self.defaults = self._read_defaults(config)
-        rate = int(getattr(self.model, "sample_rate", 0) or config.get("sample_rate") or 0)
+                                     or self.upstream_build_id or "")
+        self.defaults = self._read_defaults(recipe)
+        rate = int(getattr(self.model, "sample_rate", 0) or 0)
         if rate:
             if rate != self.sample_rate:
                 _note(f"model reports {rate} Hz; the parent expected {self.sample_rate}")
             self.sample_rate = rate
+        if getattr(self.model, "has_voice_cloning", True) is False:
+            # Upstream's own answer, and it beats the parent's file check. It
+            # sets this when the cloning-capable weights could not be read and it
+            # fell back to the ones without them, which is a state a directory
+            # listing cannot see.
+            self.cloning_ready = False
+            _note("this model was loaded without voice-cloning weights")
         # Asserted rather than assumed. The environment empties every GPU
         # variable before this process starts, and this is the check that the
         # emptying worked (I-PKT-7).
@@ -967,58 +1144,93 @@ class Engine:
               f"{self.sample_rate} Hz")
 
     def _read_config(self) -> dict:
-        """The local-only config the parent wrote. Never a URL, never a repo id.
+        """The local-only recipe the parent wrote. Never a URL, never a repo id.
 
-        Checked here as well as written there, because this is the process that
-        would go to the network if a location ever got into it -- and a worker
-        that refused one is a worker whose offline claim is enforced rather than
-        asserted (I-PKT-20).
+        This is the file upstream itself will open -- ``load_model(config=...)``
+        takes a path to a YAML document in its own schema and resolves every
+        ``weights_path`` in it, including ``hf://`` and ``https://`` ones, using
+        hub utilities it imports at module level. That behaviour belongs to an
+        installer. So the installer writes this file with every path pointing at
+        something it already downloaded, hashed and promoted, and this function
+        reads it back and refuses it if any location survived (I-PKT-20).
+
+        Read here as well as written there because this is the process that would
+        go to the network, and a check that only lives in the writer is a check
+        that is not enforced. It walks the whole document rather than its top
+        level: the weights are at the root and the tokenizer is three levels
+        down, and a top-level scan would pass a config whose tokenizer was still
+        a repository path.
         """
         if not self.config_path or not os.path.isfile(self.config_path):
             raise Refusal("PocketTTS has no local model configuration. Reinstall it in "
-                             "Settings → Voice Chat.")
-        with open(self.config_path, "r", encoding="utf-8") as handle:
-            found = json.load(handle)
+                          "Settings → Voice Chat.")
+        found = _read_document(self.config_path)
         if not isinstance(found, dict):
             raise Refusal("PocketTTS's local model configuration is not readable.")
-        for key, value in found.items():
-            text = str(value)
-            if text.startswith("hf://") or text.startswith("http://") \
-                    or text.startswith("https://"):
-                raise Refusal(f"PocketTTS's local configuration names a network location "
-                                 f"for {key}, which this worker will not resolve.")
+        located = _locations(found)
+        if located:
+            raise Refusal(f"PocketTTS's local configuration names a network location for "
+                          f"{located[0]}, which this worker will not resolve.")
         return found
 
-    def _read_defaults(self, config: dict) -> dict:
+    def _read_defaults(self, recipe: dict) -> dict:
         """The model's own generation defaults, for the panel to show as "model
-        default" rather than as a number this build invented (I-PKT-25)."""
+        default" rather than as a number this build invented (I-PKT-25).
+
+        From the loaded model first and the recipe second. Upstream reads
+        ``default_temperature`` out of the config when it is given no ``temp``
+        and keeps the result on the instance, so the instance is the one that
+        knows what this model is actually running at.
+        """
         found = {}
-        recommended = config.get("recommended_temperature")
-        if recommended is not None:
-            found["temperature"] = float(recommended)
-        for name in ("temperature",):
-            value = getattr(getattr(self.model, "config", None), name, None)
-            if value is not None:
-                found[name] = float(value)
-        found["sampler_steps"] = self.sampler_steps
-        found["ref_seconds"] = float(config.get("ideal_reference_seconds") or 0.0)
+        temperature = getattr(self.model, "temp", None)
+        if temperature is None:
+            temperature = recipe.get("default_temperature")
+        if temperature is not None:
+            try:
+                found["temperature"] = float(temperature)
+            except (TypeError, ValueError):
+                pass
+        found["sampler_steps"] = int(getattr(self.model, "sampler_decode_steps", 0)
+                                     or self.sampler_steps)
+        found["ref_seconds"] = float(self.reference_seconds or 0.0)
         return found
 
     def device(self) -> str:
         found = getattr(self.model, "device", None)
         return str(found) if found is not None else "cpu"
 
-    def generation(self, delivery: Delivery) -> dict:
-        """The arguments one generation is asked for.
+    @contextlib.contextmanager
+    def speaking_at(self, delivery: Delivery):
+        """This turn's Variation, for the length of one generation.
 
-        The sampler step count is the engine's, not the turn's: it is an engine
-        setting because it changes the generation policy, and a turn that
-        changed it in its middle would be a turn whose second half was a
-        different model configuration from its first (I-PKT-24).
+        A context manager and not an argument, because released 3.0.2 has no
+        temperature argument on ``generate_audio_stream``: ``temp`` is stored on
+        the model at load and read inside the sampler, so the only way to say
+        "this reply, warmer" is to set the attribute for the length of the call
+        and put it back.
+
+        Safe for exactly one reason and it is worth writing down: there is one
+        model and one inference lane in this process, and upstream documents the
+        model as not thread-safe, so nothing else can be generating while this is
+        held (I-PKT-8). The moment that stops being true this becomes wrong, and
+        the lane is what makes it right.
+
+        The sampler step count is not here. It is an engine setting rather than a
+        turn's, because it changes the generation policy, and a turn that changed
+        it in its middle would be a turn whose second half was a different model
+        configuration from its first (I-PKT-24). It is set once, at load.
         """
-        found = {"sampler_decode_steps": self.sampler_steps}
-        found.update((delivery or NEUTRAL).generation(self.defaults))
-        return found
+        wanted = (delivery or NEUTRAL).generation(self.defaults).get("temperature")
+        if wanted is None or self.model is None or not hasattr(self.model, "temp"):
+            yield
+            return
+        before = self.model.temp
+        self.model.temp = float(wanted)
+        try:
+            yield
+        finally:
+            self.model.temp = before
 
     # -- voice states ------------------------------------------------------ #
 
@@ -1099,46 +1311,87 @@ class Engine:
         if declared <= 0 or declared + 8 > size:
             raise Refusal("That voice's prepared data does not have a safetensors "
                              "header.")
-        loader = getattr(self.model, "load_state", None) or \
-            getattr(self.model, "get_state_for_audio_prompt", None)
+        loader = getattr(self.model, "get_state_for_audio_prompt", None)
         if loader is None:
             raise Refusal("This PocketTTS build cannot load an exported voice state.")
-        return loader(path)
+        # A ``pathlib.Path`` and never a ``str``. Upstream branches on the type:
+        # a string is handed to ``download_if_necessary`` first, which resolves
+        # ``https://`` and ``hf://`` and would make this the one call in the
+        # worker that could reach the network. A Path goes straight to the file
+        # (I-PKT-20). The same function loads an exported state and encodes a
+        # recording, and it tells them apart by the ``.safetensors`` suffix --
+        # which is why every state this build writes has one.
+        return loader(pathlib.Path(path))
 
-    def prepare(self, wav_bytes: bytes, seconds: float = 0.0) -> dict:
-        """A reference recording as an exported voice state, written and read back.
+    def prepare(self, wav_bytes: bytes, root: str, seconds: float = 0.0) -> dict:
+        """A reference recording as a voice state, from a file inside ``root``.
 
-        Written and read back, in that order, and the reading is not ceremony
-        (section 26.2). A preparation that returned without an exception says
-        nothing about whether the file it wrote can be loaded after a restart,
-        and the audition the user is about to hear is synthesised from what came
-        back off the disk rather than from what stayed in memory.
+        From a file, because that is what released 3.0.2 takes:
+        ``get_state_for_audio_prompt`` accepts a ``Path``, a ``str`` or a Torch
+        tensor and nothing else -- raw WAV bytes fall through every branch and
+        die on an attribute the model was never given. So the recording is
+        written into the directory the parent built for this preparation and the
+        path is passed. ``root`` is that directory and the only place this
+        process writes.
+
+        The name is the one the parent uses for the retained recording, which
+        makes this idempotent on the preview path -- the bytes are the ones
+        already there -- and gives a rebuild its source inside its own staging
+        directory, which the parent deletes either way.
+
+        ``truncate=True`` is upstream's own thirty-second ceiling. It is a belt
+        rather than the limit: the parent refuses anything outside this engine's
+        own window long before this is reached (section 26.1).
         """
         if not self.cloning_ready:
             raise Refusal("PocketTTS's voice-cloning weights are not installed, so it "
-                             "cannot make a voice from a recording.")
+                          "cannot make a voice from a recording.")
         samples, rate = decode_wav(wav_bytes)
         if rate != self.sample_rate:
             raise Refusal(f"That recording is {rate} Hz and PocketTTS wants "
-                             f"{self.sample_rate} Hz.")
+                          f"{self.sample_rate} Hz.")
         if not samples:
             raise Refusal("That recording is empty.")
         extract = getattr(self.model, "get_state_for_audio_prompt", None)
         if extract is None:
             raise Refusal("This PocketTTS build cannot make a voice from a recording.")
-        return {"state": extract(wav_bytes), "seconds": float(seconds or 0.0),
-                "sample_rate": rate}
+        if not root or not os.path.isdir(root):
+            raise Refusal("That preparation has nowhere to write.")
+        reference = os.path.join(root, REFERENCE_FILENAME)
+        with open(reference, "wb") as handle:
+            handle.write(wav_bytes)
+        takes = _parameters(extract)
+        arguments = {} if (takes is not None and "truncate" not in takes) \
+            else {"truncate": True}
+        return {"state": extract(pathlib.Path(reference), **arguments),
+                "seconds": float(seconds or 0.0), "sample_rate": rate}
 
     def export(self, state, path: str) -> int:
-        """Write one voice state to safetensors and return its size in bytes."""
-        save = getattr(self.model, "export_voice", None) or \
-            getattr(self.model, "save_state", None)
+        """Write one voice state to safetensors and return its size in bytes.
+
+        Through ``pocket_tts.export_model_state``, which is a module-level
+        function over the state dictionary rather than a model method -- the
+        symmetric partner of the ``.safetensors`` branch of
+        ``get_state_for_audio_prompt``, which is what reads it back.
+
+        Staged and renamed so a half-written state is never a state. The staging
+        file is removed on failure, because a ``.new`` left in a preview
+        directory is a file the promote would carry into somebody's voice.
+        """
+        save = self._export_state
         if save is None:
             raise Refusal("This PocketTTS build cannot export a voice state.")
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         staging = f"{path}.new"
-        save(state, staging)
-        os.replace(staging, path)
+        try:
+            save(state, staging)
+            os.replace(staging, path)
+        except BaseException:
+            try:
+                os.remove(staging)
+            except OSError:
+                pass
+            raise
         return int(os.path.getsize(path))
 
     # -- speaking ---------------------------------------------------------- #
@@ -1159,6 +1412,14 @@ class Engine:
         generation may leave the state it was handed carrying this sentence's
         continuation, and the next reply in that voice would start from the
         middle of the last one (I-PKT-16).
+
+        Everything else this generation is asked for is a model attribute rather
+        than an argument, because that is what released 3.0.2 offers -- see
+        :meth:`speaking_at`, and note that the scope has to cover the *whole*
+        loop below. ``generate_audio_stream`` is a generator function: nothing
+        runs until the first ``next``, and the sampler reads the temperature per
+        chunk, so a scope that closed after the call was made would have restored
+        the old value before a single block was produced.
         """
         state = self.state_for(voice_id)
         began = time.monotonic()
@@ -1166,25 +1427,27 @@ class Engine:
         blocks = 0
         samples = 0
         shaper = Shaper(delivery, self._numpy)
-        stream = self.model.generate_audio_stream(
-            state, str(text or ""), copy_state=True, **self.generation(delivery))
-        try:
-            for chunk in stream:
-                if first == 0.0:
-                    first = time.monotonic()
-                blocks += 1
-                block = self._as_pcm(chunk, shaper)
-                samples += len(block) // 2
-                if block and listening():
-                    on_audio(block)
-        finally:
-            # Whatever ended that loop -- normal exhaustion, or something in the
-            # consumer raising -- the generator is drained before this returns.
-            # Abandoning it is the one thing that must not happen: upstream's
-            # generation thread runs until it is emptied, and leaving it running
-            # against an unbounded internal queue is I-PKT-12's failure exactly.
-            for _leftover in stream:
-                blocks += 1
+        with self.speaking_at(delivery):
+            stream = self.model.generate_audio_stream(state, str(text or ""),
+                                                      copy_state=True)
+            try:
+                for chunk in stream:
+                    if first == 0.0:
+                        first = time.monotonic()
+                    blocks += 1
+                    block = self._as_pcm(chunk, shaper)
+                    samples += len(block) // 2
+                    if block and listening():
+                        on_audio(block)
+            finally:
+                # Whatever ended that loop -- normal exhaustion, or something in
+                # the consumer raising -- the generator is drained before this
+                # returns. Abandoning it is the one thing that must not happen:
+                # upstream's generation thread runs until it is emptied, and
+                # leaving it running against an unbounded internal queue is
+                # I-PKT-12's failure exactly.
+                for _leftover in stream:
+                    blocks += 1
         tail = shaper.flush() if shaper.active else b""
         if tail:
             samples += len(tail) // 2
@@ -1597,12 +1860,22 @@ class Worker:
 # --------------------------------------------------------------------------- #
 
 DRAIN_GRACE = 2.0
-"""How long an already-accepted request may take to answer after stdin closes.
+"""How long the *writer* may take to empty its outbox after stdin closes.
 
-A request this process took off the wire is one somebody is waiting for;
-dropping it because stdin happened to end first turns a clone into a timeout on
-the other side. Bounded, because the reason stdin ended may be that the parent
-died.
+The writer and not the lane, and the difference is the whole of it. A reply this
+process has already produced is one somebody is waiting for, and dropping it
+because stdin happened to end first turns a clone into a timeout on the other
+side -- so the outbox is given a bounded moment to reach the pipe.
+
+The lane is deliberately not joined. A lane inside a generation is exactly the
+thing this engine's whole design says must not be waited on: the parent's
+shutdown is a lifecycle operation rather than a Stop, it has already stopped
+listening, and a WebUI that will not close because a speech process is thinking
+is a worse bug than any this could be reporting (section 21.6). The lane thread
+is a daemon and goes with the process.
+
+Bounded even for the writer, because the reason stdin ended may be that the
+parent died.
 """
 
 
@@ -1808,8 +2081,8 @@ def _do_prepare(worker, reply, request_id, header: dict, payload: bytes) -> None
         reply(request_id, {"ok": False, "error": "that preparation has nowhere to write"})
         return
     began = time.monotonic()
-    made = worker.engine.prepare(payload, float(header.get("seconds") or 0.0))
-    path = os.path.join(root, "state.safetensors")
+    made = worker.engine.prepare(payload, root, float(header.get("seconds") or 0.0))
+    path = os.path.join(root, STATE_FILENAME)
     size = worker.engine.export(made["state"], path)
 
     # Read back, and used. The catalogue entry is temporary and is replaced by
@@ -1876,6 +2149,12 @@ def selftest() -> int:
         report["numpy_version"] = _package_version("numpy")
         import pocket_tts  # noqa: F401 - imported to prove the closure is complete
 
+        # Resolved, not just imported. ``import pocket_tts`` proves the closure
+        # is complete; this proves the two entry points Voice Chat speaks to are
+        # the ones this build has, which is the difference between refusing here
+        # -- before anything is promoted -- and refusing on the first reply
+        # somebody wanted spoken.
+        _upstream()
         report["pocket_version"] = _package_version("pocket_tts")
         report["upstream_build_id"] = str(getattr(pocket_tts, "__build__", "") or "")
         report["thread_policy"] = thread_policy()
@@ -1890,15 +2169,68 @@ def selftest() -> int:
     return 0 if report["ok"] else 1
 
 
+def recipe(name: str) -> int:
+    """Print PocketTTS's own config for one model, as JSON. One line out.
+
+    The installer runs this inside the staged runtime, because the config that
+    describes a model's architecture ships *inside the wheel* -- ``english.yaml``
+    and its siblings under ``pocket_tts/config`` -- and the parent process has no
+    PocketTTS to read it from.
+
+    Taken from upstream rather than transcribed into this repository's manifest,
+    and that is the whole reason this mode exists. The document is upstream's
+    description of its own model: layer counts, dtypes, frame rate, the
+    tokenizer's kind, the sample rate. A copy here would be a copy that has to be
+    updated whenever a model revision changes any of them, and nothing would
+    notice if it were not. What Voice Chat *does* own is the three locations in
+    it -- the weights, the cloning weights and the tokenizer -- and the installer
+    replaces those with the local files it verified before writing the result
+    (section 25, I-PKT-20).
+    """
+    report = {"ok": False, "error": ""}
+    try:
+        # Before the import, and that ordering is deliberate: a name is checked
+        # for being a name, not for being importable, and a refusal about the
+        # argument should not depend on the closure being installed. Nothing that
+        # arrives here becomes a path component -- the model id comes from a
+        # manifest this repository ships, which is exactly the kind of trust
+        # that stops being true one release later.
+        wanted = os.path.basename(str(name or ""))
+        if not wanted or wanted != str(name or ""):
+            raise Refusal("that is not a model name")
+        os.environ.setdefault(NO_BEARTYPE, "1")
+        import pocket_tts.utils.config as upstream
+        import yaml
+
+        source = upstream.CONFIGS_DIR / f"{wanted}.yaml"
+        if not source.is_file():
+            available = sorted(one.stem for one in upstream.CONFIGS_DIR.glob("*.yaml"))
+            raise Refusal(f"this PocketTTS build has no configuration for {wanted!r}; it "
+                          f"has {', '.join(available) or 'none'}")
+        with open(source, "r", encoding="utf-8") as handle:
+            found = yaml.safe_load(handle)
+        if not isinstance(found, dict):
+            raise Refusal(f"this PocketTTS build's {wanted} configuration is not readable")
+        report = {"ok": True, "error": "", "recipe": found}
+    except Exception as exc:  # noqa: BLE001 - the report is the answer
+        report["error"] = _safe(exc)
+    sys.stdout.write(json.dumps(report) + "\n")
+    sys.stdout.flush()
+    return 0 if report.get("ok") else 1
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(MARKER, action="store_true", dest="marker")
     parser.add_argument("--parent-pid", type=int, default=0)
     parser.add_argument("--session", default="")
     parser.add_argument("--selftest", action="store_true")
+    parser.add_argument("--recipe", default="")
     found, _rest = parser.parse_known_args(argv if argv is not None else sys.argv[1:])
     if found.selftest:
         return selftest()
+    if found.recipe:
+        return recipe(found.recipe)
     return serve(sys.stdin.buffer, sys.stdout.buffer)
 
 

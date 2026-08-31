@@ -262,6 +262,7 @@ class Bundle:
     public_repo: str
     cloning_repo: str
     revision: str
+    cloning_revision: str
     license: str
     attribution: str
     summary: str
@@ -380,6 +381,13 @@ def bundle(identifier: str = "") -> Bundle:
         public_repo=str(entry.get("public_repo") or ""),
         cloning_repo=str(entry.get("cloning_repo") or ""),
         revision=str(entry.get("revision") or "main"),
+        # Upstream pins its two repositories at different commits -- the public
+        # weights and the tokenizer at one, the cloning-capable weights at
+        # another -- so this is a field of its own rather than one revision
+        # standing in for both. It falls back to ``revision`` for a manifest
+        # written before the difference was noticed.
+        cloning_revision=str(entry.get("cloning_revision") or entry.get("revision")
+                             or "main"),
         license=str(entry.get("license") or ""),
         attribution=str(entry.get("attribution") or ""),
         summary=str(entry.get("summary") or ""),
@@ -693,11 +701,22 @@ def worker_environment() -> dict:
     of our choosing and reporting it as a Pocket thread count would be reporting
     something that is not true (section 16.4, section 35).
 
-    ``HF_HUB_OFFLINE`` and ``TRANSFORMERS_OFFLINE`` are belt rather than braces:
-    the closure has no ``huggingface_hub`` in it at all, so there is nothing to
-    turn off. They are set anyway so that a future closure which acquired one
-    fails rather than succeeds (I-PKT-20, section 25). No credential is here,
-    and there is no branch that could put one here.
+    ``HF_HUB_OFFLINE`` and ``TRANSFORMERS_OFFLINE`` are braces rather than belt.
+    ``pocket_tts.utils.utils`` imports ``huggingface_hub`` and ``requests`` at
+    module level, so the closure has both and turning them off is a real
+    instruction rather than a precaution: nothing in the worker resolves a
+    location -- the config it is handed names only local files and it refuses one
+    that does not -- and these say so to the libraries as well (I-PKT-20,
+    section 25). No credential is here, and there is no branch that could put one
+    here.
+
+    ``POCKET_TTS_NO_BEARTYPE`` keeps upstream's runtime type-checking claw from
+    wrapping every function in its package. Upstream's own comment says the
+    wrapper costs per call and blocks ``torch.compile``; the boundary this
+    process actually has to defend is its pipe, and that is checked in the worker
+    rather than by decorating a library. It does not remove the dependency --
+    ``pocket_tts/data/audio.py`` imports ``beartype.typing`` unconditionally, so
+    the closure ships it either way.
     """
     return {
         "CUDA_VISIBLE_DEVICES": "",
@@ -706,6 +725,7 @@ def worker_environment() -> dict:
         "PYTORCH_NO_CUDA_MEMORY_CACHING": "1",
         "PYTHONNOUSERSITE": "1",
         "PYTHONUNBUFFERED": "1",
+        "POCKET_TTS_NO_BEARTYPE": "1",
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
         "HF_HUB_DISABLE_TELEMETRY": "1",
@@ -735,6 +755,8 @@ def worker_config() -> dict:
         "state_schema": STATE_SCHEMA,
         "sample_rate": entry.sample_rate,
         "cloning_ready": found.cloning_ready,
+        "reference_seconds": IDEAL_REFERENCE_SECONDS,
+        "upstream_build_id": str(found.closure.get("upstream_build_id") or ""),
         "voices": catalog(),
     }
 
@@ -1168,6 +1190,11 @@ def install_model(on_status=None, on_progress=None, folder=None) -> None:
             "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         })
         models._promote(staging, target)
+        # After the promote, because the runtime is what reads it and the model
+        # root is where it lands. Before the local config, because the local
+        # config is this document with three paths replaced.
+        say("Reading PocketTTS's model configuration…")
+        _write_json(paths.pocket_upstream_config(entry.identifier), _read_recipe(entry))
         _write_local_config(entry)
         say(f"{entry.label} is installed.")
         tick(1.0)
@@ -1280,7 +1307,7 @@ def install_cloning(on_status=None, on_progress=None, folder=None) -> None:
         _write_json(target / CLONING_MARKER, {
             "schema": SCHEMA,
             "repo": entry.cloning_repo,
-            "revision": entry.revision,
+            "revision": entry.cloning_revision,
             "license": entry.license,
             "digests": {name: digest for name, digest in sorted(digests.items())},
             "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1499,6 +1526,68 @@ def _run_staged(interpreter: Path, arguments: list, what: str, timeout: float = 
                           f"({exc.__class__.__name__}). Nothing was installed.") from None
 
 
+def _read_recipe(entry: Bundle) -> dict:
+    """PocketTTS's own configuration for this model, out of the installed wheel.
+
+    Run inside the isolated runtime, because that is the only place the document
+    exists: upstream ships ``pocket_tts/config/<language>.yaml`` in its wheel and
+    the WebUI's own Python has no PocketTTS to read it from.
+
+    Taken from upstream rather than transcribed into this repository's manifest.
+    The document describes the *model*: layer counts, dtypes, the frame rate, the
+    tokenizer's kind, the sample rate. A copy here would be a copy somebody has
+    to update whenever a model revision changes any of them, and nothing would
+    notice if it went stale. What this repository owns is the three locations in
+    it, and :func:`_write_local_config` is where those are replaced.
+    """
+    interpreter = runtime_python()
+    if interpreter is None:
+        raise PocketError("The isolated PocketTTS runtime is not installed, so its model "
+                          "configuration could not be read. Install the runtime first.")
+    result = _run_staged(interpreter,
+                         [paths.pocket_worker_script(), "--recipe", entry.identifier],
+                         "read the PocketTTS model configuration", timeout=300)
+    try:
+        report = json.loads((result.stdout or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        logger.warning("Model Chain: the staged PocketTTS runtime said %s",
+                       models._quote(result.stdout))
+        raise PocketError("The PocketTTS runtime did not report its model configuration. "
+                          "Nothing was installed.") from None
+    if not report.get("ok") or not isinstance(report.get("recipe"), dict):
+        raise PocketError(f"The PocketTTS runtime could not describe its model "
+                          f"({report.get('error') or 'no reason reported'}). Nothing was "
+                          f"installed.")
+    return report["recipe"]
+
+
+LOCATIONS = {
+    "weights_path": ("weights_path",),
+    "weights_path_without_voice_cloning": ("weights_path_without_voice_cloning",),
+    "tokenizer_path": ("flow_lm", "lookup_table", "tokenizer_path"),
+}
+"""Where each artifact this repository installs belongs in upstream's config.
+
+Three, and the manifest's ``config`` block is keyed by the same three names. The
+tokenizer's is three levels down, which is why this is a table of paths rather
+than a dictionary update: a merge at the top level would leave upstream's
+``hf://`` tokenizer location in place, and the one call in the worker that could
+reach the network is the one that resolves it (I-PKT-20).
+"""
+
+
+def _place(found: dict, where: tuple, value) -> None:
+    """Set one nested key, building the dictionaries on the way down."""
+    node = found
+    for name in where[:-1]:
+        step = node.get(name)
+        if not isinstance(step, dict):
+            step = {}
+            node[name] = step
+        node = step
+    node[where[-1]] = value
+
+
 def _write_local_config(entry: Bundle) -> None:
     """The local-only model config the worker loads. Section 25, as a file.
 
@@ -1509,34 +1598,81 @@ def _write_local_config(entry: Bundle) -> None:
     location in it for anything to resolve and no network for it to resolve
     against (I-PKT-20).
 
-    Written as JSON rather than as the YAML upstream also accepts, because this
-    file is generated and read by two things in this repository and JSON needs no
-    parser the runtime closure does not already have.
+    It is upstream's own document with three paths replaced, and not a document
+    of this repository's own design, because upstream is what opens it:
+    ``TTSModel.load_model`` takes a path to a YAML file in its schema, validates
+    it with a model that forbids unknown keys, and reads the architecture out of
+    it. Anything this repository wants to tell the worker that is not part of
+    that schema goes over the wire in :func:`worker_config` instead.
+
+    Written as JSON rather than as YAML, because JSON is a subset of YAML,
+    ``yaml.safe_load`` reads it either way, and this repository has a JSON writer
+    everywhere and a YAML writer nowhere.
+
+    ``weights_path`` is the interesting one. Upstream loads the cloning-capable
+    weights from it and falls back to ``weights_path_without_voice_cloning`` when
+    it cannot -- but only when the *fetch* fails, and a local path that is not
+    there does not fail there, it fails later and fatally. So a machine without
+    the gated half gets a config whose ``weights_path`` is the public file: the
+    engine speaks, and cloning is refused with a sentence rather than the model
+    refusing to load at all (section 23.3).
     """
     root = paths.pocket_model_root(entry.identifier)
-    found = {
-        "schema": SCHEMA,
-        "model_id": entry.identifier,
-        "language": entry.language,
-        "sample_rate": entry.sample_rate,
-    }
-    if entry.recommended_temperature is not None:
-        found["recommended_temperature"] = entry.recommended_temperature
-    for key, name in (entry.config or {}).items():
-        if not name:
+    stored = _read_json(paths.pocket_upstream_config(entry.identifier))
+    if not stored:
+        # Written by :func:`install_model` from the runtime, so the only way to
+        # be here is a half-installed tree -- the gated weights adopted from a
+        # folder before the model itself, say. Not fatal: the worker refuses a
+        # config it cannot find with a sentence naming the remedy, and the next
+        # model install writes both files. Loud, because it is a state nothing
+        # else reports.
+        logger.warning("Model Chain: PocketTTS has no upstream model configuration to "
+                       "localise, so its local config was not written; install the "
+                       "PocketTTS model")
+        return
+    found = json.loads(json.dumps(stored))
+    names = dict(entry.config or {})
+    public = names.get("weights_path_without_voice_cloning") or ""
+    for key, where in LOCATIONS.items():
+        name = str(names.get(key) or "")
+        candidate = (root / name) if name else None
+        if candidate is None or not candidate.is_file():
+            if key == "weights_path" and public and (root / public).is_file():
+                # No gated half on this machine. Pointed at the public weights
+                # rather than left naming a file that is not there, because
+                # upstream only falls back when a *download* fails.
+                _place(found, where, str(root / public))
+                continue
+            _place(found, where, None)
             continue
-        candidate = root / str(name)
-        # Only paths that are actually there. A config naming a file the gated
-        # half would have brought is a config that makes the worker fail at load
-        # rather than run without cloning, which is the opposite of what the
-        # partial-install state is for.
-        if candidate.is_file():
-            found[str(key)] = str(candidate)
+        _place(found, where, str(candidate))
+    located = [key for key, where in LOCATIONS.items()
+               if str(_at(found, where) or "").startswith(("hf://", "http://", "https://"))]
+    if located:
+        # A location this build does not know how to replace, which means the
+        # manifest's ``config`` block and upstream's document have drifted apart.
+        # A broken extension rather than a broken installation, so the sentence
+        # says what is on disk rather than claiming a rollback that did not
+        # happen: the artifacts are promoted and only this file is missing.
+        raise PocketError(f"PocketTTS's local configuration still names a network location "
+                          f"for {located[0]}, so it was not written. The model files are "
+                          f"installed; PocketTTS will not start until this build is "
+                          f"corrected.")
     try:
         _write_json(paths.pocket_model_config(entry.identifier), found)
     except OSError:
         logger.debug("Model Chain: could not write the local PocketTTS config",
                      exc_info=True)
+
+
+def _at(found: dict, where: tuple):
+    """One nested value, or ``None`` for a path that is not there."""
+    node = found
+    for name in where:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(name)
+    return node
 
 
 def uninstall() -> Status:

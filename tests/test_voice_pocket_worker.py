@@ -30,7 +30,9 @@ tested on a machine where PocketTTS was never installed.
 
 from __future__ import annotations
 
+import importlib.util
 import io
+import json
 import math
 import struct
 import threading
@@ -129,6 +131,17 @@ class TestTheThreeWorkersAgreeOnTheWire:
         raw = pocket_worker._LENGTH.pack(pocket_worker.MAX_HEADER + 1)
         with pytest.raises(ValueError):
             pocket_worker.read_frame(io.BytesIO(raw))
+
+    def test_the_two_filenames_inside_a_preparation_are_the_same_agreement(self):
+        """The parent builds a directory and the worker writes two files into it.
+        Neither imports the other -- this file has to stay runnable under an
+        interpreter that has Torch and knows nothing about the extension -- so
+        the names are an agreement, and an agreement nothing checks is a rename
+        away from a preview whose reference the save cannot find."""
+        import mc_voice_paths as paths
+
+        assert pocket_worker.REFERENCE_FILENAME == paths.POCKET_REFERENCE_FILENAME
+        assert pocket_worker.STATE_FILENAME == paths.POCKET_PREVIEW_STATE_FILENAME
 
 
 # --------------------------------------------------------------------------- #
@@ -693,30 +706,48 @@ class FakeModel:
     pulling would leave it running against an unbounded internal queue with
     nobody emptying it. Nothing in the real ``Engine`` may return before this
     goes true.
+
+    The signatures below are released 3.0.2's, exactly, and that is the point of
+    the class rather than an incidental property of it. A fake whose
+    ``generate_audio_stream`` swallowed ``**arguments`` would accept a
+    temperature and a step count as keywords, which the real one does not take
+    at all -- and every test of the delivery path would then pass against a
+    parent that could only ever raise ``TypeError`` in production. What upstream
+    actually does is keep both on the instance and read them inside the sampler,
+    so this reads them per chunk and records what it saw.
     """
 
-    def __init__(self, chunks=5):
+    def __init__(self, chunks=5, temp=0.3, sampler_decode_steps=1):
         self.chunks = int(chunks)
         self.exhausted = False
         self.calls = []
+        self.seen = []
+        self.prepared = []
         self.state_copies = []
         self.sample_rate = RATE
         self.device = "cpu"
+        self.temp = temp
+        self.sampler_decode_steps = int(sampler_decode_steps)
+        self.has_voice_cloning = True
 
-    def generate_audio_stream(self, state, text, copy_state=True, **arguments):
-        self.calls.append({"text": text, "copy_state": copy_state, **arguments})
+    def generate_audio_stream(self, model_state, text_to_generate, max_tokens=1000,
+                              frames_after_eos=None, copy_state=True):
+        self.calls.append({"text": text_to_generate, "copy_state": copy_state})
         # What upstream's ``copy_state`` guarantees, made observable: the base
         # state handed in must not be the object that gets mutated.
-        self.state_copies.append(dict(state) if copy_state else state)
+        self.state_copies.append(dict(model_state) if copy_state else model_state)
 
         def produce():
             for _index in range(self.chunks):
+                self.seen.append({"temp": self.temp,
+                                  "sampler_decode_steps": self.sampler_decode_steps})
                 yield numpy.zeros(240, dtype=numpy.float32)
             self.exhausted = True
 
         return produce()
 
-    def get_state_for_audio_prompt(self, data):
+    def get_state_for_audio_prompt(self, audio_conditioning, truncate=False):
+        self.prepared.append((audio_conditioning, truncate))
         return {"prepared": True}
 
 
@@ -767,13 +798,47 @@ class TestTheEngineKeepsConsumingWhileMuted:
         assert engine._states["v"] == {"base": 1}
 
     def test_the_engine_step_count_rather_than_the_turns_reaches_the_model(self):
-        """I-PKT-24. The sampler policy is engine-global; a turn cannot change it."""
-        model = FakeModel(chunks=1)
+        """I-PKT-24. The sampler policy is engine-global; a turn cannot change it.
+
+        Both numbers are read where upstream reads them -- off the model, inside
+        the sampler -- because released 3.0.2's ``generate_audio_stream`` takes
+        neither as an argument.
+        """
+        model = FakeModel(chunks=2, sampler_decode_steps=3)
         engine = pocket_engine(model, sampler_steps=3)
         engine.stream("Anything.", "v", pocket_worker.Delivery(temperature=0.4),
                       lambda _b: None, lambda: True)
-        assert model.calls[0]["sampler_decode_steps"] == 3
-        assert model.calls[0]["temperature"] == 0.4
+        assert [one["sampler_decode_steps"] for one in model.seen] == [3, 3]
+        assert [one["temp"] for one in model.seen] == [0.4, 0.4]
+
+    def test_a_turns_variation_does_not_outlive_the_turn(self):
+        """The temperature is set on the model for the length of one generation
+        and put back, because that is the only place released 3.0.2 reads it. A
+        scope that leaked would make one warm reply warm every reply after it,
+        which is the shape of a bug nobody reports as a bug."""
+        model = FakeModel(chunks=1, temp=0.3)
+        engine = pocket_engine(model)
+        engine.stream("Warm.", "v", pocket_worker.Delivery(temperature=0.9),
+                      lambda _b: None, lambda: True)
+        assert model.seen[-1]["temp"] == 0.9
+        assert model.temp == 0.3, "the turn's Variation was left on the model"
+
+        engine.stream("Neutral.", "v", pocket_worker.NEUTRAL, lambda _b: None,
+                      lambda: True)
+        assert model.seen[-1]["temp"] == 0.3, "an untouched control changed the model"
+
+    def test_the_variation_is_restored_even_when_the_consumer_fails(self):
+        model = FakeModel(chunks=3, temp=0.3)
+        engine = pocket_engine(model)
+
+        def explode(_block):
+            raise RuntimeError("the pipe went away")
+
+        with pytest.raises(RuntimeError):
+            engine.stream("Warm.", "v", pocket_worker.Delivery(temperature=0.9),
+                          explode, lambda: True)
+        assert model.temp == 0.3
+        assert model.exhausted, "the generator was abandoned rather than drained"
 
 
 class TestTheVoiceStateCacheIsBounded:
@@ -827,6 +892,36 @@ class TestTheLocalConfigMayNotNameANetworkLocation:
         with pytest.raises(ValueError) as raised:
             engine._read_config()
         assert "Reinstall" in str(raised.value)
+
+    def test_a_location_three_levels_down_is_refused_too(self, tmp_path):
+        """Upstream's config is nested and the locations are at two depths: the
+        weights at the root and the tokenizer inside ``flow_lm.lookup_table``. A
+        top-level scan would pass the one this worker could actually resolve --
+        ``load_config`` hands every path to ``download_if_necessary``."""
+        path = tmp_path / "model.local.yaml"
+        path.write_text(pocket_worker.json.dumps({
+            "weights_path": str(tmp_path / "w.st"),
+            "flow_lm": {"lookup_table": {
+                "tokenizer_path": "hf://kyutai/pocket-tts/tokenizer.model"}},
+        }), encoding="utf-8")
+        engine = pocket_worker.Engine({"config_path": str(path)})
+        with pytest.raises(ValueError) as raised:
+            engine._read_config()
+        found = str(raised.value)
+        assert "network location" in found
+        assert "tokenizer_path" in found, found
+
+    def test_the_report_names_where_rather_than_what(self, tmp_path):
+        """A key path, never the location itself: a repository id is not private
+        but the habit of putting a config's *values* in a message is how a clone
+        path ends up in somebody's log (I-PKT-27)."""
+        path = tmp_path / "model.local.yaml"
+        path.write_text(pocket_worker.json.dumps(
+            {"weights_path": "hf://kyutai/pocket-tts/model.safetensors"}), encoding="utf-8")
+        engine = pocket_worker.Engine({"config_path": str(path)})
+        with pytest.raises(ValueError) as raised:
+            engine._read_config()
+        assert "kyutai" not in str(raised.value)
 
 
 class TestTheLaneNeverBlocksOnADeadPipe:
@@ -939,9 +1034,20 @@ class TestTheDrainReportsTheSizeOfWhatItThrewAway:
             assert started.wait(5.0), "the engine never entered a unit"
             stdin.feed({"op": "tts_text", "turn": "T1"}, b"And another one behind it.")
             stdin.feed({"op": "tts_interrupt", "turn": "T1"})
+            # Waited for rather than assumed. Feeding the pipe only queues bytes,
+            # so releasing the unit here would race the command loop -- and a
+            # Stop that landed *between* units is a different, equally correct
+            # answer with no unit to measure. The "draining" acknowledgement is
+            # the worker saying it read the interrupt while it was inside one.
+            draining = stdout.wait_for("tts_interrupted")
+            assert draining[0][0]["state"] == "draining", draining[0][0]
             release.set()
-            stdout.wait_for("tts_interrupted")
-            time.sleep(0.1)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if any(header.get("state") == "complete"
+                       for header, _payload in stdout.of("tts_interrupted")):
+                    break
+                time.sleep(0.01)
 
         found = run_worker(engine, feed)
         complete = [header for header, _payload in found.of("tts_interrupted")
@@ -950,4 +1056,147 @@ class TestTheDrainReportsTheSizeOfWhatItThrewAway:
         assert complete[0]["chars"] == len("A sentence of some length.")
         assert complete[0]["audio_ms"] > 0
         assert complete[0]["dropped_units"] == 1
+
+
+class TestTheUpstreamApiIsTheOneReleasedThreePointZeroPointTwoHas:
+    """GATE P-0, as the assertions the harness produced.
+
+    Every one of these was checked against a real ``pocket-tts 3.0.2`` wheel
+    whose SHA-256 is the one this repository's manifest pins, and every one of
+    them was previously wrong in a way no test could see: the model was loaded
+    with a ``device`` argument that does not exist, handed a config dictionary
+    where a path to a YAML file was required, asked to generate with a
+    temperature and a step count that are not parameters, asked to encode raw
+    WAV bytes it cannot take, and asked to export through a method that is a CLI
+    command rather than anything on the model.
+    """
+
+    def test_a_state_is_loaded_from_a_path_object_and_never_a_string(self, tmp_path):
+        """Upstream branches on the type. A ``str`` goes through
+        ``download_if_necessary``, which resolves ``https://`` and ``hf://`` --
+        making it the one call in this worker that could reach the network. A
+        ``Path`` goes straight to the file (I-PKT-20)."""
+        import pathlib
+
+        state = tmp_path / "state.safetensors"
+        state.write_bytes(b"\x08\x00\x00\x00\x00\x00\x00\x00{}      ")
+        model = FakeModel()
+        engine = pocket_engine(model)
+        engine.voices = {"v": {"kind": "clone", "state": str(state)}}
+        engine._states.clear()
+
+        assert engine.state_for("v") == {"prepared": True}
+        asked, _truncate = model.prepared[-1]
+        assert isinstance(asked, pathlib.Path), type(asked)
+
+    def test_a_recording_is_prepared_from_a_file_rather_than_from_bytes(self, tmp_path):
+        """``get_state_for_audio_prompt`` takes a ``Path``, a ``str`` or a Torch
+        tensor. Raw WAV bytes fall through every branch and die on an attribute
+        the model was never given."""
+        import pathlib
+
+        model = FakeModel()
+        engine = pocket_engine(model, cloning_ready=True)
+        root = tmp_path / "preview"
+        root.mkdir()
+        wav = pocket_worker.encode_wav(pocket_worker.pcm16([0.0] * 2400), RATE)
+
+        made = engine.prepare(wav, str(root), seconds=8.0)
+        assert made["state"] == {"prepared": True}
+        asked, truncate = model.prepared[-1]
+        assert isinstance(asked, pathlib.Path), type(asked)
+        assert asked.name == pocket_worker.REFERENCE_FILENAME
+        assert asked.read_bytes() == wav, "the reference the model read is not the one sent"
+        assert truncate is True
+
+    def test_a_preparation_with_nowhere_to_write_is_a_sentence(self, tmp_path):
+        engine = pocket_engine(FakeModel(), cloning_ready=True)
+        with pytest.raises(ValueError) as raised:
+            engine.prepare(pocket_worker.encode_wav(pocket_worker.pcm16([0.0] * 2400), RATE),
+                           str(tmp_path / "gone"), seconds=8.0)
+        assert "nowhere to write" in str(raised.value)
+
+    def test_a_state_is_exported_through_the_module_function(self, tmp_path):
+        """``export_model_state`` is a function over the state dictionary.
+        ``export_voice`` is the name of upstream's *CLI command* and is not on
+        the model at all, so looking for it there found nothing."""
+        written = []
+
+        def export_model_state(state, dest):
+            written.append((state, dest))
+            open(dest, "wb").write(b"x" * 40)
+
+        engine = pocket_engine(FakeModel())
+        engine._export_state = export_model_state
+        size = engine.export({"flow_lm": {}}, str(tmp_path / "out" / "state.safetensors"))
+        assert size == 40
+        assert written[0][1].endswith(".new"), "the write was not staged"
+        assert (tmp_path / "out" / "state.safetensors").is_file()
+        assert not (tmp_path / "out" / "state.safetensors.new").exists()
+
+    def test_a_failed_export_leaves_no_staging_file_behind(self, tmp_path):
+        """A ``.new`` left in a preview directory is a file the promote would
+        carry into somebody's saved voice."""
+        def explode(state, dest):
+            open(dest, "wb").write(b"half")
+            raise RuntimeError("out of memory")
+
+        engine = pocket_engine(FakeModel())
+        engine._export_state = explode
+        target = tmp_path / "state.safetensors"
+        with pytest.raises(RuntimeError):
+            engine.export({"flow_lm": {}}, str(target))
+        assert not target.exists()
+        assert not target.with_name(target.name + ".new").exists()
+
+    def test_a_build_with_no_exporter_refuses_rather_than_raising_an_attribute_error(self):
+        engine = pocket_engine(FakeModel())
+        engine._export_state = None
+        with pytest.raises(ValueError) as raised:
+            engine.export({"flow_lm": {}}, "/nowhere/state.safetensors")
+        assert "cannot export" in str(raised.value)
+
+    def test_only_arguments_the_loader_accepts_are_offered_to_it(self):
+        """Read off the signature rather than found out by calling: a
+        ``TypeError`` raised inside a model loader is indistinguishable from one
+        raised by calling it wrongly."""
+        def loader(config, temp=None, sampler_decode_steps=1, quantize=False):
+            return None
+
+        assert pocket_worker._parameters(loader) == {
+            "config", "temp", "sampler_decode_steps", "quantize"}
+
+        def narrow(config):
+            return None
+
+        assert pocket_worker._parameters(narrow) == {"config"}
+
+        def anything(**values):
+            return None
+
+        assert pocket_worker._parameters(anything) is None
+
+
+class TestTheRecipeModeReadsUpstreamsOwnConfiguration:
+    """``worker.py --recipe english``, which the installer runs in the staged
+    runtime because the document ships inside the wheel."""
+
+    def test_a_name_that_could_be_a_path_is_refused(self, capsys):
+        """Nothing a browser or a manifest sends becomes a path component. The
+        model id reaches this from a manifest this repository ships, which is
+        exactly the kind of trust that stops being true one release later."""
+        for bad in ("../../etc/passwd", "languages/english", "english/../.."):
+            assert pocket_worker.recipe(bad) == 1
+            found = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+            assert found["ok"] is False
+            assert "not a model name" in found["error"], found
+
+    def test_a_name_this_build_does_not_have_says_what_it_does_have(self, capsys):
+        """A refusal with the correction already on screen, rather than
+        "PocketTTS failed to start"."""
+        if importlib.util.find_spec("pocket_tts") is None:
+            pytest.skip("this machine has no PocketTTS closure")
+        assert pocket_worker.recipe("klingon") == 1
+        found = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert "has no configuration" in found["error"]
 

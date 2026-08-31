@@ -221,12 +221,10 @@ class Declared:
 
 
 MODEL_FILES = (
-    Declared("config.json", "config.json",
-             "the model configuration, read before any tensor is touched"),
-    Declared("model.safetensors", "model.safetensors",
+    Declared("languages/english/model.safetensors", "model.safetensors",
              "the transformer, the depth decoder and the acoustic decoder",
              "weights_path_without_voice_cloning"),
-    Declared("tokenizer.model", "tokenizer.model",
+    Declared("languages/english/tokenizer.model", "tokenizer.model",
              "the sentencepiece text tokenizer", "tokenizer_path"),
 )
 """What ``kyutai/pocket-tts-without-voice-cloning`` has to serve.
@@ -238,19 +236,32 @@ built from "everything in the repository" would install a model card and a
 sample WAV and call them required. The tool refuses if a name here is not served
 and prints what the repository actually holds, so a rename upstream is a loud
 failure with the correction already on screen.
+
+The paths and the revisions are upstream's own, read out of
+``pocket_tts/config/english.yaml`` inside the 3.0.2 wheel: that file is what the
+package resolves when nobody replaces its locations, so it is the statement of
+which bytes this model *is*. There is no ``config.json`` here because there is
+nothing for one to do -- the architecture is that same shipped YAML, and the
+installer copies it out of the runtime rather than fetching a second description
+of the model from the hub (see ``mc_voice_pocket._read_recipe``).
 """
 
 CLONING_FILES = (
-    Declared("model.safetensors", "model-voice-cloning.safetensors",
+    Declared("languages/english/model.safetensors", "model-voice-cloning.safetensors",
              "the cloning-capable weights, which carry the voice encoder the "
              "public model does not", "weights_path"),
 )
 """What the gated ``kyutai/pocket-tts`` adds, and deliberately only that.
 
-The gated repository serves its own copy of the tokenizer and the config as
-well. They are not listed: the public half already installed those files and
-verified them, and a second copy would be a second trust root for one artifact
-plus a second thing that can disagree with itself.
+The gated repository serves its own copy of the tokenizer as well. It is not
+listed: the public half already installed that file and verified it, and a
+second copy would be a second trust root for one artifact plus a second thing
+that can disagree with itself.
+
+Note that the two repositories are pinned at *different* revisions, which is
+upstream's own arrangement rather than an oversight here -- its config names one
+commit for the cloning weights and another for the public weights and the
+tokenizer -- so the manifest carries a revision per repository.
 """
 
 
@@ -911,7 +922,8 @@ def cloning(entry: dict, state: State, committed: dict, token: str, say) -> dict
     repo = str(entry.get("cloning_repo") or "")
     if not repo:
         raise PinError(f"{MODEL_ID} names no cloning_repo")
-    commit, served = repository(repo, str(entry.get("revision") or "main"), token, say)
+    commit, served = repository(repo, str(entry.get("cloning_revision")
+                                           or entry.get("revision") or "main"), token, say)
 
     files = []
     config = dict(found.get("config") or {})

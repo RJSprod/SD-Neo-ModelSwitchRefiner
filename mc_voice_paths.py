@@ -142,7 +142,22 @@ POCKET_CONFIG_FILENAME = "model.local.yaml"
 """The generated local Pocket config, written by the installer and read by the
 worker. Its whole reason for existing is that upstream's own config accepts
 ``hf://`` and ``https://`` locations and this one does not: every path in it
-points at a file the parent already verified (I-PKT-20, section 25)."""
+points at a file the parent already verified (I-PKT-20, section 25).
+
+Upstream's own schema, because upstream is what opens it: ``TTSModel.load_model``
+takes a path to a YAML document and refuses a suffix that is not ``.yaml`` or
+``.yml``. It is written as JSON, which is a subset of YAML and which this
+repository has a writer for."""
+
+POCKET_UPSTREAM_CONFIG_FILENAME = "model.upstream.json"
+"""PocketTTS's own shipped configuration for this model, exactly as it ships it.
+
+Copied out of the installed wheel at install time -- it describes the model's
+architecture, and a transcription of it into this repository's manifest would be
+a transcription that has to be updated whenever a model revision changes a layer
+count, and that nothing would notice going stale. Kept beside the generated
+config so that installing the gated half later can rewrite one location without
+starting a runtime to read the other twenty again."""
 """Sopro's whole subtree, under one directory of its own.
 
 A sibling of ``runtime/`` and ``models/`` rather than a set of files mixed into
@@ -426,6 +441,11 @@ def pocket_model_root(identifier: str) -> Path:
 def pocket_model_config(identifier: str) -> Path:
     """The local-only config the worker loads for one model. Section 25."""
     return pocket_model_root(identifier) / POCKET_CONFIG_FILENAME
+
+
+def pocket_upstream_config(identifier: str) -> Path:
+    """PocketTTS's own configuration for one model, as the wheel shipped it."""
+    return pocket_model_root(identifier) / POCKET_UPSTREAM_CONFIG_FILENAME
 
 
 def pocket_official_root(model_id: str = "") -> Path:
