@@ -1595,7 +1595,12 @@ def set_test_text(text: str) -> str:
 
 
 ENVELOPE = reference.Envelope(
-    engine=LABEL,
+    # "Sopro", and deliberately not ``LABEL``. The panel calls this engine
+    # Sopro V2 because the version is what distinguishes it from the model it
+    # replaced; a sentence refusing somebody's recording called it Sopro before
+    # this validation moved out of this module, and moving code is not a reason
+    # to change what a user reads.
+    engine="Sopro",
     minimum_seconds=MIN_REFERENCE_SECONDS,
     maximum_seconds=MAX_REFERENCE_SECONDS,
     maximum_bytes=MAX_REFERENCE_BYTES,

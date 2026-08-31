@@ -1537,6 +1537,69 @@ class TestTheGenericCloneAndSettingsRoutes:
         assert pocket.precision() == "int8"
 
 
+class TestOneAdapterSignatureIsReadRatherThanGuessedAt:
+    """Section 30's shim, and the one way it could go wrong.
+
+    Sopro's ``prepare_preview`` takes a language hint and Pocket's does not,
+    because Pocket's model *is* the language. Which of the two an adapter has is
+    read off its signature -- not found out by calling it and catching
+    ``TypeError``, because a ``TypeError`` raised inside a preparation is
+    indistinguishable from one raised by the call.
+    """
+
+    def test_the_fuller_call_is_made_when_the_adapter_takes_it(self):
+        seen = []
+
+        class Adapter:
+            def prepare_preview(self, name, wav, language=""):
+                seen.append((name, wav, language))
+                return {"token": "t"}
+
+        api._prepare_preview(Adapter(), "A Voice", b"RIFF", "en")
+        assert seen == [("A Voice", b"RIFF", "en")]
+
+    def test_the_shorter_call_is_made_when_it_does_not(self):
+        seen = []
+
+        class Adapter:
+            def prepare_preview(self, name, wav):
+                seen.append((name, wav))
+                return {"token": "t"}
+
+        api._prepare_preview(Adapter(), "A Voice", b"RIFF", "en")
+        assert seen == [("A Voice", b"RIFF")]
+
+    def test_a_type_error_from_inside_does_not_run_the_preparation_twice(self):
+        """The bug this replaced. Sopro's third parameter is defaulted, so the
+        fuller call always binds and the fallback could only ever be reached by
+        a ``TypeError`` thrown from *inside* -- a decoder handed a shape it
+        could not take. Retrying on that is a second worker round trip, a second
+        staging directory, and a refusal from the retry rather than from the
+        thing that actually went wrong."""
+        calls = []
+
+        class Adapter:
+            def prepare_preview(self, name, wav, language=""):
+                calls.append(language)
+                raise TypeError("cannot multiply a bytes-like by a float")
+
+        with pytest.raises(TypeError):
+            api._prepare_preview(Adapter(), "A Voice", b"RIFF", "en")
+        assert calls == ["en"], calls
+
+    def test_an_adapter_with_no_readable_signature_gets_the_fuller_call(self):
+        """A C builtin or something exotic is taken at its word rather than
+        refused: the shim's job is to pick a call, not to vet a callable."""
+        seen = []
+
+        class Adapter:
+            prepare_preview = staticmethod(
+                lambda *arguments: seen.append(arguments) or {"token": "t"})
+
+        api._prepare_preview(Adapter(), "A Voice", b"RIFF", "en")
+        assert seen == [("A Voice", b"RIFF", "en")]
+
+
 class TestThePocketRoutes:
     def test_the_status_route_is_refused_while_another_engine_is_selected(
             self, client, key, host):

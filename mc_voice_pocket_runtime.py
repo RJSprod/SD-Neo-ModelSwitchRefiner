@@ -351,6 +351,41 @@ def supported_platform() -> bool:
     return system in CONTAINMENT
 
 
+def _expected_containment() -> str:
+    """The parent-death mechanism this platform is supposed to use, or ``""``.
+
+    Empty for a platform with no tested mechanism, which makes every answer a
+    child could give the wrong one -- the right outcome, since Pocket refuses to
+    install there in the first place.
+    """
+    import mc_voice_models as models
+
+    try:
+        system, _machine, _python = models.current_platform()
+    except Exception:
+        logger.debug("Model Chain: could not identify this platform for PocketTTS",
+                     exc_info=True)
+        return ""
+    return CONTAINMENT.get(system, "")
+
+
+def _declared_sample_rate() -> int:
+    """What the installed Pocket bundle says its model produces, or ``0``.
+
+    Zero for a manifest that does not say, and a comparison against zero is not
+    made: a build that has not recorded a rate has nothing to check against, and
+    inventing one would be checking the worker against a guess.
+    """
+    try:
+        import mc_voice_pocket as pocket
+
+        return int(pocket.bundle().sample_rate or 0)
+    except Exception:
+        logger.debug("Model Chain: the PocketTTS bundle declares no sample rate",
+                     exc_info=True)
+        return 0
+
+
 def config_line() -> str:
     """One line naming how this worker is configured, for the turn summary.
 
@@ -950,7 +985,8 @@ def _handshake_with(state) -> Handshake:
             only (I-PKT-7) -- and a worker that found a GPU is a worker whose
             memory this WebUI's image generation was counting on;
         no containment evidence where the parent could not arrange it itself;
-        a sample rate outside what the browser's scheduler was built for;
+        a sample rate that is not the one the installed bundle declares, or is
+            outside what the browser's scheduler was built for;
         a model fingerprint that is not the one on disk, which means a saved
             voice state would be loaded into a model it was not prepared for
             (I-PKT-18);
@@ -996,15 +1032,32 @@ def _handshake_with(state) -> Handshake:
             f"The PocketTTS worker reported the device {found.device or found.provider!r} "
             f"rather than the CPU. This release supports PocketTTS on the CPU only, so it "
             f"was stopped.")
-    if os.name != "nt" and found.containment not in CONTAINMENT.values():
+    if os.name != "nt" and found.containment != _expected_containment():
         # On Windows the parent arranged the job object itself and verified it
         # with real handles, so the child's own answer is diagnostic. On every
         # other platform the mechanism has to run *inside* the child between
         # fork and the first request, and the child's confirmation is the only
         # evidence there is.
+        #
+        # Compared against *this* platform's mechanism and not against the set
+        # of all of them: a Linux child that answered "job" would have been
+        # accepted by a membership test, and "job" on Linux is not a mechanism
+        # that exists -- it is a child claiming a containment nothing arranged.
         raise PocketRuntimeError(
             "The PocketTTS worker could not confirm that it will be ended if this WebUI "
             "stops, so it was stopped now instead.")
+    declared = _declared_sample_rate()
+    if declared and found.sample_rate != declared:
+        # Against the rate the installed bundle declares, rather than against a
+        # range the browser could play. A model revision that changed its output
+        # rate is exactly the case this catches, and it is not audible as a
+        # failure -- it is audible as a voice pitched wrong, because every voice
+        # state and every delivery ratio downstream was computed for the
+        # declared rate (I-PKT-18).
+        raise PocketRuntimeError(
+            f"The PocketTTS worker reported a sample rate of {found.sample_rate} Hz and "
+            f"the installed model declares {declared} Hz, so it was stopped. Reinstall "
+            f"PocketTTS in Settings → Voice Chat.")
     if found.sample_rate <= 0 or found.sample_rate > 96000:
         raise PocketRuntimeError(
             f"The PocketTTS worker reported a sample rate of {found.sample_rate} Hz, which "
@@ -1240,11 +1293,21 @@ def stop(reason: str = "") -> None:
 
     Reachable while another thread is inside a native call, which is only true
     because nothing waiting holds ``_state_lock``.
+
+    Including this. ``_state_lock`` is re-entrant, so calling :func:`_discard`
+    from inside it would have kept it held across the whole bounded escalation
+    -- ask, close, wait, terminate, wait, kill -- which is several seconds on
+    the one engine where a worker asked to stop is *expected* not to answer
+    promptly. A status poll landing in that window would have blocked on it, so
+    an unload would have looked like a hang. The check is under the lock and the
+    teardown is outside it; two callers racing is harmless, because
+    :func:`_discard` takes the handle under the lock and the loser finds none.
     """
     with _state_lock:
-        if _process is None:
-            return
-        _discard(reason or "PocketTTS stopped")
+        running = _process is not None
+    if not running:
+        return
+    _discard(reason or "PocketTTS stopped")
 
 
 def shutdown() -> None:
@@ -1278,8 +1341,12 @@ def shutdown() -> None:
             pass
         with _state_lock:
             _closing = True
-            if _process is not None:
-                _discard("WebUI shutdown")
+            running = _process is not None
+        # Outside the lock, for the reason :func:`stop` sets out: the escalation
+        # is bounded but not instant, and holding the state lock across it makes
+        # every reader of that state wait for a process to die.
+        if running:
+            _discard("WebUI shutdown")
     except Exception:
         logger.debug("Model Chain: the PocketTTS shutdown hook failed", exc_info=True)
     finally:

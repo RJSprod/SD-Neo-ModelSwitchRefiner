@@ -980,7 +980,13 @@ def _credential(url: str) -> str:
     environment stops being used without a restart, and so that this module
     never holds one longer than the request that needs it.
     """
-    if _host(url) not in ("huggingface.co", "www.huggingface.co"):
+    parts = urllib.parse.urlsplit(str(url or ""))
+    if parts.scheme.casefold() != "https":
+        # A bearer token belongs on an encrypted transport and nowhere else.
+        # The manifests this reads are this repository's own, so this is not a
+        # case that arises -- which is exactly why it is cheap to refuse.
+        return ""
+    if parts.netloc.casefold() not in ("huggingface.co", "www.huggingface.co"):
         return ""
     for name in CREDENTIAL_VARIABLES:
         found = str(os.environ.get(name) or "").strip()
@@ -1005,7 +1011,7 @@ class _DropCredentialOnHop(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         made = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if made is None or _host(newurl) == _host(req.full_url):
+        if made is None or _origin(newurl) == _origin(req.full_url):
             return made
         for name in list(made.headers):
             if str(name).casefold() == "authorization":
@@ -1016,6 +1022,19 @@ class _DropCredentialOnHop(urllib.request.HTTPRedirectHandler):
 
 def _host(url: str) -> str:
     return urllib.parse.urlsplit(url).netloc.casefold()
+
+
+def _origin(url: str) -> str:
+    """Scheme and host together, which is what "the same place" means here.
+
+    The host alone is not enough. A 302 from ``https://host/a`` to
+    ``http://host/b`` stays on the host and is still a downgrade onto the
+    clear, so a credential that followed it would be a bearer token sent in
+    plaintext to anything on the path -- which is the failure the redirect
+    guard exists to prevent, arriving by a different door.
+    """
+    parts = urllib.parse.urlsplit(str(url or ""))
+    return f"{parts.scheme.casefold()}://{parts.netloc.casefold()}"
 
 
 def _header_map(answer) -> dict:
@@ -1065,7 +1084,7 @@ def _head(url: str, hops: int = 5, authorized: bool = False) -> tuple[int, dict]
         if not target:
             return status, found
         target = urllib.parse.urljoin(here, target)
-        if _host(target) != _host(here):
+        if _origin(target) != _origin(here):
             return 200, found
         here = target
     return status or 200, found

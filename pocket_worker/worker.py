@@ -152,6 +152,23 @@ cancellation is adopted, and the only other thing that changes then is what
 _LENGTH = struct.Struct(">I")
 
 
+class Refusal(ValueError):
+    """A sentence this file wrote, and the only kind of message that crosses back.
+
+    Every refusal raised in this process is one of these, and :func:`_safe`
+    forwards it verbatim because this file knows what is in it: no path, no
+    voice name, no spoken text.
+
+    A plain ``ValueError`` used to serve, and that was the bug. ``ValueError``
+    is the base of much of the numeric stack -- ``json`` raises
+    :class:`json.JSONDecodeError` for a malformed document, NumPy and Torch
+    raise it for a shape or a dtype -- so "it is a ``ValueError``, therefore
+    this file wrote it" was not true, and a library message naming a tensor
+    shape or a file could reach the parent's log through the one function whose
+    whole job is to stop that (I-PKT-27).
+    """
+
+
 # --------------------------------------------------------------------------- #
 # Framing -- byte-identical to the other two workers, by agreement not by import
 # --------------------------------------------------------------------------- #
@@ -169,20 +186,20 @@ def read_frame(stream) -> "tuple[dict, bytes] | None":
         return None
     (size,) = _LENGTH.unpack(header_length)
     if size > MAX_HEADER:
-        raise ValueError("header too large")
+        raise Refusal("header too large")
     raw = _read_exactly(stream, size)
     if raw is None:
         return None
     header = json.loads(raw.decode("utf-8"))
     if not isinstance(header, dict):
-        raise ValueError("header is not an object")
+        raise Refusal("header is not an object")
 
     payload_length = _read_exactly(stream, 4)
     if payload_length is None:
         return None
     (size,) = _LENGTH.unpack(payload_length)
     if size > MAX_PAYLOAD:
-        raise ValueError("payload too large")
+        raise Refusal("payload too large")
     payload = b"" if size == 0 else _read_exactly(stream, size)
     if payload is None:
         return None
@@ -233,11 +250,11 @@ def decode_wav(data: bytes) -> "tuple[list, int]":
         rate = handle.getframerate()
         frames = handle.getnframes()
         if channels != 1:
-            raise ValueError("audio is not mono")
+            raise Refusal("audio is not mono")
         if width != 2:
-            raise ValueError("audio is not 16-bit")
+            raise Refusal("audio is not 16-bit")
         if frames <= 0:
-            raise ValueError("audio is empty")
+            raise Refusal("audio is empty")
         raw = handle.readframes(frames)
 
     samples = array.array("h")
@@ -429,10 +446,13 @@ def _safe(exc: BaseException) -> str:
     the text that was being spoken, and a worker that forwarded one would put
     conversation content in the parent's log by accident (I-PKT-27).
 
-    A :class:`ValueError` is this file's own refusal -- already a sentence,
-    already free of anything private -- and is forwarded as written.
+    A :class:`Refusal` is this file's own -- already a sentence, already free of
+    anything private -- and is forwarded as written. Nothing else is, and that
+    is narrower than it looks: ``json``, NumPy and Torch all raise
+    :class:`ValueError` subclasses whose messages routinely name a path, a
+    dtype or a shape, so the test cannot be the base class.
     """
-    if isinstance(exc, ValueError):
+    if isinstance(exc, Refusal):
         return str(exc)
     return exc.__class__.__name__
 
@@ -917,7 +937,7 @@ class Engine:
         config = self._read_config()
         loader = getattr(TTSModel, "load_model", None)
         if loader is None:
-            raise ValueError("This PocketTTS build has no TTSModel.load_model, so Voice "
+            raise Refusal("This PocketTTS build has no TTSModel.load_model, so Voice "
                              "Chat cannot load a model with it.")
         arguments = {"config": config, "device": "cpu"}
         if self.precision == "int8":
@@ -928,7 +948,7 @@ class Engine:
         self.model = loader(**arguments)
         for name in ("generate_audio_stream",):
             if getattr(self.model, name, None) is None:
-                raise ValueError(f"This PocketTTS build has no {name}, so Voice Chat "
+                raise Refusal(f"This PocketTTS build has no {name}, so Voice Chat "
                                  f"cannot speak with it.")
         self.upstream_build_id = str(getattr(self.model, "build_id", "")
                                      or config.get("upstream_build_id") or "")
@@ -942,7 +962,7 @@ class Engine:
         # variable before this process starts, and this is the check that the
         # emptying worked (I-PKT-7).
         if str(self.device()) != "cpu":
-            raise ValueError(f"PocketTTS loaded on {self.device()} rather than the CPU.")
+            raise Refusal(f"PocketTTS loaded on {self.device()} rather than the CPU.")
         _note(f"loaded {self.model_id} at {self.precision}, {self.sampler_steps} step(s), "
               f"{self.sample_rate} Hz")
 
@@ -955,17 +975,17 @@ class Engine:
         asserted (I-PKT-20).
         """
         if not self.config_path or not os.path.isfile(self.config_path):
-            raise ValueError("PocketTTS has no local model configuration. Reinstall it in "
+            raise Refusal("PocketTTS has no local model configuration. Reinstall it in "
                              "Settings → Voice Chat.")
         with open(self.config_path, "r", encoding="utf-8") as handle:
             found = json.load(handle)
         if not isinstance(found, dict):
-            raise ValueError("PocketTTS's local model configuration is not readable.")
+            raise Refusal("PocketTTS's local model configuration is not readable.")
         for key, value in found.items():
             text = str(value)
             if text.startswith("hf://") or text.startswith("http://") \
                     or text.startswith("https://"):
-                raise ValueError(f"PocketTTS's local configuration names a network location "
+                raise Refusal(f"PocketTTS's local configuration names a network location "
                                  f"for {key}, which this worker will not resolve.")
         return found
 
@@ -1014,8 +1034,19 @@ class Engine:
             return len(self.voices)
 
     def forget(self, voice_id: str) -> None:
+        """Drop a temporary catalogue entry and whatever state it cached.
+
+        Both, and not just the state. A preparation names its work in the live
+        catalogue so the audition can be synthesised from the file that was just
+        written, and the parent deletes or moves that file the moment the reply
+        lands. An entry left behind would name a path that is not there any
+        more, so the next thing that asked for it would be told to rebuild a
+        voice that was fine.
+        """
+        wanted = str(voice_id or "")
         with self._lock:
-            self._states.pop(str(voice_id or ""), None)
+            self._states.pop(wanted, None)
+            self.voices.pop(wanted, None)
 
     def state_for(self, voice_id: str):
         """The model state for one voice, from the bounded cache or from disk.
@@ -1039,10 +1070,10 @@ class Engine:
                 return found
             entry = self.voices.get(wanted)
         if not isinstance(entry, dict):
-            raise ValueError("That voice is not one PocketTTS has been given.")
+            raise Refusal("That voice is not one PocketTTS has been given.")
         path = str(entry.get("state") or "")
         if not path or not os.path.isfile(path):
-            raise ValueError("That voice's prepared data is missing. Rebuild it in "
+            raise Refusal("That voice's prepared data is missing. Rebuild it in "
                              "Settings → Voice Chat.")
         state = self._load_state(path)
         with self._lock:
@@ -1061,17 +1092,17 @@ class Engine:
         """
         size = os.path.getsize(path)
         if size <= 8 or size > MAX_STATE_BYTES:
-            raise ValueError("That voice's prepared data is not a size PocketTTS can read.")
+            raise Refusal("That voice's prepared data is not a size PocketTTS can read.")
         with open(path, "rb") as handle:
             head = handle.read(8)
         (declared,) = struct.unpack("<Q", head)
         if declared <= 0 or declared + 8 > size:
-            raise ValueError("That voice's prepared data does not have a safetensors "
+            raise Refusal("That voice's prepared data does not have a safetensors "
                              "header.")
         loader = getattr(self.model, "load_state", None) or \
             getattr(self.model, "get_state_for_audio_prompt", None)
         if loader is None:
-            raise ValueError("This PocketTTS build cannot load an exported voice state.")
+            raise Refusal("This PocketTTS build cannot load an exported voice state.")
         return loader(path)
 
     def prepare(self, wav_bytes: bytes, seconds: float = 0.0) -> dict:
@@ -1084,17 +1115,17 @@ class Engine:
         back off the disk rather than from what stayed in memory.
         """
         if not self.cloning_ready:
-            raise ValueError("PocketTTS's voice-cloning weights are not installed, so it "
+            raise Refusal("PocketTTS's voice-cloning weights are not installed, so it "
                              "cannot make a voice from a recording.")
         samples, rate = decode_wav(wav_bytes)
         if rate != self.sample_rate:
-            raise ValueError(f"That recording is {rate} Hz and PocketTTS wants "
+            raise Refusal(f"That recording is {rate} Hz and PocketTTS wants "
                              f"{self.sample_rate} Hz.")
         if not samples:
-            raise ValueError("That recording is empty.")
+            raise Refusal("That recording is empty.")
         extract = getattr(self.model, "get_state_for_audio_prompt", None)
         if extract is None:
-            raise ValueError("This PocketTTS build cannot make a voice from a recording.")
+            raise Refusal("This PocketTTS build cannot make a voice from a recording.")
         return {"state": extract(wav_bytes), "seconds": float(seconds or 0.0),
                 "sample_rate": rate}
 
@@ -1103,7 +1134,7 @@ class Engine:
         save = getattr(self.model, "export_voice", None) or \
             getattr(self.model, "save_state", None)
         if save is None:
-            raise ValueError("This PocketTTS build cannot export a voice state.")
+            raise Refusal("This PocketTTS build cannot export a voice state.")
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         staging = f"{path}.new"
         save(state, staging)
@@ -1232,6 +1263,17 @@ class Turn:
         self.segments: "queue.Queue" = queue.Queue()
         self.done = False
         self.interrupted = False
+        self.gate = threading.Lock()
+        """Held for the two lines that decide whether a unit is inside the model.
+
+        ``speaking`` is set by the lane and read by the command loop, and the
+        window between :meth:`next_segment` returning text and the model being
+        entered is a window in which the honest answer changes. Without this,
+        a Stop landing in it is told the lane is free and the lane then starts
+        the unit anyway -- so the parent releases its drain, begins the next
+        reply, and two generations run at once in a model documented as not
+        thread-safe (I-PKT-13).
+        """
         self.speaking = False
         self.units = 0
         self.reported = False
@@ -1415,12 +1457,18 @@ class Worker:
                        "state": "complete", "interrupt_mode": INTERRUPT_MODE})
             return
         turn.stop()
-        if not turn.speaking:
+        with turn.gate:
+            # Read under the gate the lane sets it under, and ``stop()`` above
+            # it: whichever of the two threads arrives first, the other then
+            # sees a settled answer rather than a value that is about to change.
+            inside = turn.speaking
+            if not inside:
+                turn.reported = True
+        if not inside:
             # Nothing was inside the model, so there is nothing to drain. Said
             # immediately rather than after the lane notices, because a Play
             # control that waited for a drain that never happened would be a
             # control that stayed disabled for no reason.
-            turn.reported = True
             self.send({"op": "tts_interrupted", "turn": turn.id, "state": "complete",
                        "interrupt_mode": INTERRUPT_MODE})
             self.close_turn(turn.id)
@@ -1490,7 +1538,15 @@ class Worker:
             if text is None:
                 break
             turn.units += 1
-            turn.speaking = True
+            with turn.gate:
+                if turn.interrupted:
+                    # Stop landed while this unit was in the lane's hand and not
+                    # yet in the model. The command loop has already answered
+                    # "the lane is free", so starting it now would be a
+                    # generation the parent believes is not running.
+                    turn.dropped += 1
+                    break
+                turn.speaking = True
             heartbeat = [time.monotonic()]
 
             def listening(turn=turn, heartbeat=heartbeat):
@@ -1511,7 +1567,8 @@ class Worker:
                 found = self.engine.stream(text, turn.voice_id, turn.delivery, offer,
                                            listening)
             finally:
-                turn.speaking = False
+                with turn.gate:
+                    turn.speaking = False
             if turn.interrupted:
                 interrupted_chars = len(text)
                 interrupted_ms = int(found.get("audio_ms") or 0)

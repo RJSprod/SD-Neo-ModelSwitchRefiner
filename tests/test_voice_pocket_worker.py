@@ -254,8 +254,35 @@ class TestErrorsCarryNothingPrivate:
         assert pocket_worker._safe(exc) == "RuntimeError"
 
     def test_this_workers_own_refusals_are_sentences(self):
-        assert pocket_worker._safe(ValueError("That voice is not one PocketTTS has.")) \
+        assert pocket_worker._safe(
+            pocket_worker.Refusal("That voice is not one PocketTTS has.")) \
             == "That voice is not one PocketTTS has."
+
+    def test_a_library_value_error_is_not_mistaken_for_one_of_this_files(self):
+        """``ValueError`` is the base of much of the numeric stack, so it cannot
+        be the test for "this file wrote it". ``json`` raises a subclass of it
+        for a malformed document and names the document; NumPy and Torch raise
+        it for a shape and name the shape. Only :class:`Refusal` crosses whole.
+        """
+        import json
+
+        try:
+            json.loads("{" + '"reference": "/home/someone/clones/abc.wav"')
+        except ValueError as exc:
+            found = pocket_worker._safe(exc)
+        assert found == "JSONDecodeError", found
+
+        numeric = ValueError("could not broadcast input array from shape (2,) into (3,)")
+        assert pocket_worker._safe(numeric) == "ValueError"
+
+    def test_every_refusal_this_file_raises_is_one_of_its_own(self):
+        """Belt for the rule above: a new ``raise ValueError`` added here would
+        be a message forwarded as a class name and a refusal the user could not
+        act on, which is the quiet half of the same bug."""
+        import pathlib
+
+        source = pathlib.Path(pocket_worker.__file__).read_text(encoding="utf-8")
+        assert "raise ValueError(" not in source
 
 
 # --------------------------------------------------------------------------- #
@@ -844,3 +871,83 @@ class TestTheGeneratorIsDrainedEvenWhenTheConsumerFails:
         with pytest.raises(RuntimeError):
             engine.stream("Hello.", "v", pocket_worker.NEUTRAL, explode, lambda: True)
         assert model.exhausted, "the generator was abandoned when the consumer failed"
+
+
+class TestNothingStartsAfterTheLaneHasBeenReportedFree:
+    """The window between a unit leaving the queue and entering the model.
+
+    ``speaking`` is set by the lane and read by the command loop, and for a few
+    instructions the honest answer changes under the reader. A Stop landing
+    there used to be told "the lane is free" -- after which the lane started the
+    unit anyway, the parent released its drain and began the next reply, and two
+    generations ran at once in a model upstream documents as not thread-safe
+    (I-PKT-13).
+    """
+
+    def test_a_stop_between_units_is_not_followed_by_a_generation(self, monkeypatch):
+        pulled = threading.Event()
+        go = threading.Event()
+        real = pocket_worker.Turn.next_segment
+
+        def held(self):
+            found = real(self)
+            if found is not None:
+                # Between the queue and the model, held open so the command loop
+                # below lands exactly in the window rather than nearly in it.
+                pulled.set()
+                go.wait(5.0)
+            return found
+
+        monkeypatch.setattr(pocket_worker.Turn, "next_segment", held)
+        engine = FakeEngine(chunks=2)
+
+        def feed(stdin, stdout):
+            stdin.feed({"op": "tts_begin", "turn": "T1", "voice_id": "pocket:official:alba"})
+            stdin.feed({"op": "tts_text", "turn": "T1"}, b"Hello.")
+            stdin.feed({"op": "tts_end", "turn": "T1"})
+            assert pulled.wait(5.0), "the lane never took a unit off the queue"
+            stdin.feed({"op": "tts_interrupt", "turn": "T1"})
+            stdout.wait_for("tts_interrupted")
+            go.set()
+            time.sleep(0.2)
+
+        found = run_worker(engine, feed)
+        assert engine.started == [], \
+            "a unit was generated after the lane had been reported free"
+        reports = [header for header, _payload in found.of("tts_interrupted")]
+        assert [item.get("state") for item in reports] == ["complete"], reports
+
+
+class TestTheDrainReportsTheSizeOfWhatItThrewAway:
+    def test_the_completing_frame_carries_the_unit_and_the_units_dropped(self):
+        """GATE P-3 is a cost against a size. "A Stop took 4.2 seconds" is only
+        a finding if something also recorded that the unit was seventy-eight
+        characters and that two more were discarded behind it."""
+        started = threading.Event()
+        release = threading.Event()
+
+        def gate(index):
+            if index == 0:
+                started.set()
+                release.wait(5.0)
+
+        engine = FakeEngine(chunks=3, gate=gate)
+
+        def feed(stdin, stdout):
+            stdin.feed({"op": "tts_begin", "turn": "T1", "voice_id": "pocket:official:alba"})
+            stdin.feed({"op": "tts_text", "turn": "T1"}, b"A sentence of some length.")
+            assert started.wait(5.0), "the engine never entered a unit"
+            stdin.feed({"op": "tts_text", "turn": "T1"}, b"And another one behind it.")
+            stdin.feed({"op": "tts_interrupt", "turn": "T1"})
+            release.set()
+            stdout.wait_for("tts_interrupted")
+            time.sleep(0.1)
+
+        found = run_worker(engine, feed)
+        complete = [header for header, _payload in found.of("tts_interrupted")
+                    if header.get("state") == "complete"]
+        assert complete, [header for header, _ in found.of("tts_interrupted")]
+        assert complete[0]["chars"] == len("A sentence of some length.")
+        assert complete[0]["audio_ms"] > 0
+        assert complete[0]["dropped_units"] == 1
+

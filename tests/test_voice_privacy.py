@@ -474,8 +474,19 @@ class TestPocketSaysNothingItShouldNot:
     def test_the_workers_own_refusals_survive_because_they_are_already_safe(self):
         from pocket_worker import worker as pocket
 
-        assert pocket._safe(ValueError("That voice's prepared data is missing.")) == \
+        assert pocket._safe(
+            pocket.Refusal("That voice's prepared data is missing.")) == \
             "That voice's prepared data is missing."
+
+    def test_a_library_value_error_does_not_pass_for_one_of_the_workers(self):
+        """``ValueError`` is the base of much of the numeric stack, so it is not
+        evidence that this worker wrote the message. Torch and NumPy raise it
+        for a shape; ``json`` raises a subclass of it and names the document."""
+        from pocket_worker import worker as pocket
+
+        leaky = ValueError(f"could not parse /home/someone/clones/abc.wav: {SPOKEN}")
+        assert pocket._safe(leaky) == "ValueError"
+        assert SPOKEN not in pocket._safe(leaky)
 
     def test_the_runtime_turns_a_class_name_into_a_sentence_with_no_content(self):
         import mc_voice_pocket_runtime as pocket_runtime

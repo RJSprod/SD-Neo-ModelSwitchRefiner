@@ -530,6 +530,20 @@ class TestReferenceValidation:
             sopro.normalize_reference(spoken_wav(2.0, 24000))
         assert "5" in str(raised.value)
 
+    def test_the_refusals_still_call_this_engine_what_they_always_called_it(
+            self, voice_root, spoken_wav, silent_wav):
+        """The decoder moved into :mod:`mc_voice_reference` when a third engine
+        that clones from a recording arrived, and it takes the engine's name
+        from an envelope. Taking it from ``LABEL`` would have turned every one
+        of these sentences from "Sopro" into "Sopro V2" -- moving code is not a
+        reason to change what a user reads."""
+        for bad in (spoken_wav(2.0, 24000), spoken_wav(40.0, 24000),
+                    silent_wav(10.0, 24000), b"not a wav at all, not even close"):
+            with pytest.raises(sopro.SoproError) as raised:
+                sopro.normalize_reference(bad)
+            assert "Sopro V2" not in str(raised.value), str(raised.value)
+        assert sopro.ENVELOPE.engine == "Sopro"
+
     def test_a_recording_longer_than_the_window_is_refused(self, voice_root, spoken_wav):
         with pytest.raises(sopro.SoproError) as raised:
             sopro.normalize_reference(spoken_wav(40.0, 24000))

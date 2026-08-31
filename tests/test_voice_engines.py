@@ -152,6 +152,17 @@ class TestVoiceIdentity:
     def test_an_empty_id_stays_empty(self):
         assert engines.qualify("") == ""
 
+    def test_an_engine_name_on_its_own_is_not_a_voice(self):
+        """Reachable from a hand-edited option or a value an older build wrote.
+        It used to raise ``IndexError`` out of a settings read, which is a stack
+        trace where every caller here already treats "" as "nothing is chosen"
+        and falls back. "kokoro:" would be no better: an id that matches no
+        voice and looks like it should."""
+        for name in engines.ENGINES:
+            assert engines.qualify(name) == ""
+            assert engines.qualify(f"  {name.upper()}  ") == ""
+        assert engines.qualify("pocket:") == ""
+
 
 class TestCharacterState:
     def test_t_mig_1_a_legacy_character_is_a_kokoro_character(self):

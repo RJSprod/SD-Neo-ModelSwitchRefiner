@@ -849,26 +849,42 @@ def set_engine_settings(precision_id: str = "", sampler_steps=None,
 
     It never changes Kokoro or Sopro (I-PKT-3), which is enforced by the storage
     being Pocket's own file rather than by a check that could be forgotten.
+
+    A value that is not one of the offered ones is *refused* rather than
+    dropped. Both are safe -- neither writes the setting -- but only one of them
+    is honest: a panel that sent a precision this build does not have and was
+    answered with the unchanged settings and no error would show the old value
+    with no explanation of why its click did nothing.
     """
     changed = []
     offered = str(precision_id or "").strip().lower()
-    if offered and offered in PRECISIONS and offered != precision():
-        _remember(SETTING_PRECISION, offered)
-        changed.append("precision")
+    if offered:
+        if offered not in PRECISIONS:
+            raise PocketError(f"{offered!r} is not a precision PocketTTS offers.")
+        if offered != precision():
+            _remember(SETTING_PRECISION, offered)
+            changed.append("precision")
     if sampler_steps is not None:
         try:
             value = int(sampler_steps)
         except (TypeError, ValueError):
-            value = 0
+            value = None
         # Against the offered list rather than against a range, so a number a
         # browser invented cannot become a generation policy nobody has heard.
-        if value in STEP_CHOICES and value != steps():
+        if value not in STEP_CHOICES:
+            raise PocketError("That is not a PocketTTS generation quality this build "
+                              "offers.")
+        if value != steps():
             _remember(SETTING_STEPS, value)
             changed.append("generation quality")
     offered = str(wanted_model or "").strip()
-    if offered and offered in model_ids() and offered != model_id():
-        _remember(SETTING_MODEL, offered)
-        changed.append("model")
+    if offered:
+        if offered not in model_ids():
+            raise PocketError(f"{offered!r} is not a PocketTTS model this build has "
+                              f"recorded.")
+        if offered != model_id():
+            _remember(SETTING_MODEL, offered)
+            changed.append("model")
     if changed:
         _retire(f"the PocketTTS {' and '.join(changed)} changed")
         logger.info("Model Chain: PocketTTS %s changed", " and ".join(changed))
@@ -1018,10 +1034,16 @@ def install(on_status=None, on_progress=None, cloning: bool = True) -> Status:
                 say(str(exc))
                 logger.info("Model Chain: PocketTTS installed without voice cloning — %s",
                             exc)
-            except PocketError as exc:
-                say(str(exc))
+            except (PocketError, models.VoiceError, OSError) as exc:
+                # Everything the gated half can fail with, and not just this
+                # module's own refusals. The three parts before it have already
+                # been promoted and work; a link that dropped or a disk that
+                # filled while fetching the cloning weights would otherwise
+                # abort an installation that had already succeeded, and the
+                # panel would report a failure for speech that speaks.
+                say(str(exc) or "The PocketTTS voice-cloning weights were not installed.")
                 logger.warning("Model Chain: the PocketTTS cloning weights were not "
-                               "installed — %s", exc)
+                               "installed — %s: %s", exc.__class__.__name__, exc)
         tick(1.0)
         say("PocketTTS installed.")
         return status()
@@ -2264,16 +2286,24 @@ def save_preview(token: str) -> dict:
             raise PocketError("That preview is no longer the one waiting to be saved. "
                               "Create the voice again.")
         pending = dict(_preview)
+        identifier = uuid.uuid4().hex
+        source = Path(pending["directory"])
+        target = paths.pocket_clone_root(identifier)
+        if not (paths.pocket_inside(source) and paths.pocket_inside(target)):
+            raise PocketError("That preview is not where Voice Chat keeps them, so it was "
+                              "not saved.")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, target)
+        # Cleared here and not a line earlier. Everything above this can still
+        # refuse, and a record cleared before the refusal would leave the
+        # recording somebody actually made sitting in a directory nothing knows
+        # the name of any more: Discard would say there is nothing pending, and
+        # the one ``rmtree`` this module relies on would have nothing to remove.
+        # The claim is inside the lock for the same reason -- two Saves racing on
+        # one token must not both reach the move, because the loser's rename
+        # would fail on a directory the winner had already taken.
         _preview.clear()
 
-    identifier = uuid.uuid4().hex
-    source = Path(pending["directory"])
-    target = paths.pocket_clone_root(identifier)
-    if not (paths.pocket_inside(source) and paths.pocket_inside(target)):
-        raise PocketError("That preview is not where Voice Chat keeps them, so it was not "
-                          "saved.")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(source, target)
     # The state the worker exported is the preview's; it becomes this clone's
     # state for the fingerprint it was prepared under. One file per fingerprint
     # from the first save, so a later model change adds a state rather than
@@ -2359,8 +2389,14 @@ def rebuild(voice_id: str) -> dict:
     try:
         import mc_voice_pocket_runtime as runtime
 
+        # A namespace of its own, and never this voice's real id. The worker
+        # names the preparation in its live catalogue so it can audition from
+        # the file it just wrote, and the real id would therefore be repointed
+        # at ``staging`` -- a directory the ``finally`` below deletes. A reply
+        # spoken in this voice in that window would fail on a path that is gone,
+        # for a voice that was perfectly fine before the rebuild started.
         made = runtime.prepare_voice(
-            root=str(staging), voice_id=f"{ENGINE}:clone:{identifier}",
+            root=str(staging), voice_id=f"{ENGINE}:rebuild:{identifier}",
             wav_bytes=source.read_bytes(), audition=test_text())
         candidate = staging / paths.POCKET_PREVIEW_STATE_FILENAME
         if not candidate.is_file():

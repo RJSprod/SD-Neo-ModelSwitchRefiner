@@ -1747,19 +1747,47 @@ def clone_preview(name: str, wav: bytes, engine: str = "", language: str = "") -
             "clone": _clone_hints(active)}
 
 
+def _accepts(call, *arguments) -> bool:
+    """Whether this callable can be called with exactly these arguments.
+
+    Asked of the signature rather than found out by calling: a ``TypeError``
+    raised *inside* a function is indistinguishable from one raised by calling
+    it with the wrong number of arguments, and the two want opposite handling.
+    A callable whose signature cannot be read at all -- a C builtin, something
+    exotic -- is taken at its word rather than refused.
+    """
+    import inspect
+
+    try:
+        inspect.signature(call).bind(*arguments)
+    except TypeError:
+        return False
+    except Exception:
+        logger.debug("Model Chain: could not read a voice adapter's signature",
+                     exc_info=True)
+    return True
+
+
 def _prepare_preview(adapter, name: str, wav: bytes, language: str):
     """``prepare_preview`` on whichever signature this adapter has.
 
     Sopro's takes a language hint and Pocket's does not, because Pocket's model
-    *is* the language and it is engine-global. Asked for by name rather than
-    branched on by engine id, so a fourth engine with a third signature is a
-    third ``TypeError`` here and not a fourth branch (section 30).
+    *is* the language and it is engine-global. Asked of the signature rather
+    than branched on by engine id, so a fourth engine with a third signature is
+    a third answer here and not a fourth branch (section 30).
+
+    Not a call wrapped in ``except TypeError``, which is what this was. Sopro's
+    third parameter is defaulted, so the fuller call always binds and the
+    fallback could only ever be reached by a ``TypeError`` thrown from *inside*
+    a preparation -- a decoder handed a shape it could not take. Retrying on
+    that would run the whole preparation a second time: a second worker round
+    trip, a second staging directory, and a refusal message from the retry
+    rather than from the thing that actually went wrong.
     """
-    try:
-        return adapter.prepare_preview(str(name or ""), bytes(wav or b""),
-                                       str(language or ""))
-    except TypeError:
-        return adapter.prepare_preview(str(name or ""), bytes(wav or b""))
+    name, wav, language = str(name or ""), bytes(wav or b""), str(language or "")
+    if _accepts(adapter.prepare_preview, name, wav, language):
+        return adapter.prepare_preview(name, wav, language)
+    return adapter.prepare_preview(name, wav)
 
 
 def clone_save(token: str, engine: str = "") -> dict:

@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 import mc_voice_engines as engines
+import mc_voice_models as models
 import mc_voice_paths as paths
 import mc_voice_pocket as pocket
 
@@ -345,8 +346,19 @@ class TestEngineSettingsAreGlobalAndLiveInPocketsOwnFile:
         assert stored[pocket.SETTING_STEPS] == 3
 
     def test_a_value_the_browser_invented_is_not_believed(self, host, voice_root, worker):
-        """Section 33. A number a browser sent never becomes a generation policy."""
-        pocket.set_engine_settings(sampler_steps=97, precision_id="float3")
+        """Section 33. A number a browser sent never becomes a generation policy.
+
+        Refused rather than dropped. Both leave the setting alone, but only one
+        of them says so: a panel answered with the unchanged settings and no
+        error redraws the old value with nothing to explain why the click did
+        nothing.
+        """
+        with pytest.raises(pocket.PocketError):
+            pocket.set_engine_settings(sampler_steps=97)
+        with pytest.raises(pocket.PocketError):
+            pocket.set_engine_settings(precision_id="float3")
+        with pytest.raises(pocket.PocketError):
+            pocket.set_engine_settings(wanted_model="something-that-is-not-a-model")
         assert pocket.steps() == pocket.STEP_DEFAULT
         assert pocket.precision() == pocket.PRECISION_DEFAULT
 
@@ -673,6 +685,109 @@ class TestDeletingAndRebuilding:
             pocket.warnings()
             pocket.public_status()
         assert worker.prepared == before
+
+
+class TestTheTransactionsFailurePathsLeaveNothingOrphaned:
+    """The half of each transaction that only runs when something goes wrong.
+
+    Each of these is a state nothing else can clean up: a recording somebody
+    made sitting in a directory no record names, a live catalogue entry pointing
+    at a directory that has been deleted, or an installation reported as failed
+    when three quarters of it is promoted and working.
+    """
+
+    def test_a_save_that_refuses_leaves_the_preview_where_discard_can_find_it(
+            self, host, cloning, worker, spoken_wav, monkeypatch, tmp_path):
+        """The containment check and the move can both still refuse. Clearing
+        the record before them would leave the user's reference recording in a
+        directory nothing knows the name of: Discard would say there is nothing
+        pending, and the one ``rmtree`` this module relies on would have nothing
+        to remove."""
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        root = paths.pocket_preview_dir(made["token"])
+        assert (root / paths.POCKET_REFERENCE_FILENAME).is_file()
+
+        elsewhere = tmp_path / "not-pockets-tree"
+        real = paths.pocket_clone_root
+        monkeypatch.setattr(paths, "pocket_clone_root",
+                            lambda identifier="": elsewhere / str(identifier))
+        with pytest.raises(pocket.PocketError) as raised:
+            pocket.save_preview(made["token"])
+        assert "not where Voice Chat keeps them" in str(raised.value)
+
+        # Only this one put back: ``monkeypatch.undo()`` would also unwind the
+        # throwaway voice root the fixtures set up, and the containment check the
+        # discard makes would then be answering about the real one.
+        monkeypatch.setattr(paths, "pocket_clone_root", real)
+        assert pocket.preview_state()["pending"] is True, "the preview was forgotten"
+        assert (root / paths.POCKET_REFERENCE_FILENAME).is_file()
+        assert pocket.discard_preview(made["token"]) is True
+        assert not root.exists(), "the recording was orphaned"
+
+    def test_a_rebuild_never_repoints_the_voice_it_is_rebuilding(self, host, cloning,
+                                                                 worker, spoken_wav):
+        """The worker names a preparation in its live catalogue so the audition
+        can come from the file it just wrote. Naming it with the real voice id
+        would repoint that voice at the staging directory the parent deletes a
+        moment later, and a reply spoken in that voice in the window between
+        would fail on a path that is gone -- for a voice that was fine."""
+        made = pocket.prepare_preview("Test Voice", spoken_wav(8.0, 24000))
+        kept = pocket.save_preview(made["token"])
+        identifier = pocket._uuid_of(kept["voice"]["id"])
+        for state in paths.pocket_clone_states_root(identifier).glob("*.safetensors"):
+            state.unlink()
+
+        pocket.rebuild(kept["voice"]["id"])
+        asked = worker.prepared[-1]
+        assert asked["voice_id"] != kept["voice"]["id"], \
+            "the rebuild repointed the live catalogue entry at its staging directory"
+        assert identifier in asked["voice_id"], "the temporary id is not traceable"
+        assert not Path(asked["root"]).exists(), "the staging directory outlived the rebuild"
+
+    def test_a_gated_half_that_fails_does_not_undo_the_three_parts_that_worked(
+            self, host, installed, worker, monkeypatch):
+        """One click means one action *after* the upstream access precondition
+        is satisfied. The three parts before the gated one have already been
+        promoted and work, so a link that dropped while fetching the cloning
+        weights must not report a failed installation for speech that speaks.
+        """
+        done = []
+        for name in ("install_runtime", "install_model", "install_voices"):
+            monkeypatch.setattr(pocket, name,
+                                lambda on_status=None, on_progress=None, folder=None,
+                                _name=name: done.append(_name))
+
+        said = []
+        for failure in (models.VoiceError("the connection was reset"),
+                        OSError("no space left on device"),
+                        pocket.PocketError("the digest did not match")):
+            done.clear()
+            said.clear()
+
+            def drops(on_status=None, on_progress=None, folder=None, _exc=failure):
+                raise _exc
+
+            monkeypatch.setattr(pocket, "install_cloning", drops)
+            found = pocket.install(on_status=said.append)
+            assert done == ["install_runtime", "install_model", "install_voices"], failure
+            assert found.speech_model_ready is True, failure
+            assert any(str(failure) in line for line in said), \
+                f"nothing said why cloning was skipped for {failure!r}"
+
+    def test_a_gate_the_user_has_not_accepted_is_a_state_and_not_a_failure(
+            self, host, installed, worker, monkeypatch):
+        for name in ("install_runtime", "install_model", "install_voices"):
+            monkeypatch.setattr(pocket, name,
+                                lambda on_status=None, on_progress=None, folder=None: None)
+
+        def gated(on_status=None, on_progress=None, folder=None):
+            raise models.Gated("cloning.safetensors", 403)
+
+        monkeypatch.setattr(pocket, "install_cloning", gated)
+        said = []
+        found = pocket.install(on_status=said.append)
+        assert found.speech_model_ready is True
+        assert any("access gate" in line for line in said)
 
 
 class TestNoPayloadCarriesAPath:

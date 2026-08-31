@@ -166,6 +166,19 @@ class TestTheHandshakeRefusesWhatThisBuildCannotAccept:
             runtime.ensure_started()
         assert "sample rate" in str(raised.value)
 
+    @pytest.mark.pocket(sample_rate=22050)
+    def test_a_sample_rate_that_is_not_the_installed_models_is_refused(
+            self, host, fake_pocket_worker):
+        """22050 Hz is a rate the browser plays perfectly well, which is the
+        point: a model revision that changed its output rate is not audible as
+        a failure, it is audible as a voice pitched wrong, because every voice
+        state and every delivery ratio downstream was computed for the rate the
+        bundle declares (I-PKT-18)."""
+        with pytest.raises(runtime.PocketRuntimeError) as raised:
+            runtime.ensure_started()
+        found = str(raised.value)
+        assert "22050" in found and "24000" in found, found
+
     def test_it_refuses_to_start_when_pocket_is_not_the_selected_engine(
             self, host, fake_pocket_worker):
         """One active TTS worker at a time. A stale request from a page drawn
@@ -443,6 +456,44 @@ class TestLifecycleIsNotStop:
         assert runtime.engine()["loaded"] is True
         engines.select("kokoro")
         assert runtime.engine()["loaded"] is False
+
+
+class TestNothingWaitsBehindATeardown:
+    def test_stopping_does_not_hold_the_state_lock_across_the_escalation(
+            self, host, fake_pocket_worker, monkeypatch):
+        """The escalation is bounded -- ask, close, wait, terminate, wait, kill
+        -- but it is several seconds on the one engine where a worker asked to
+        stop is *expected* not to answer promptly. ``_state_lock`` is
+        re-entrant, so taking it around the check and then calling the teardown
+        inside it held it for all of that, and every reader of that state -- a
+        status poll above all -- blocked on a process dying. An unload then
+        looked like a hang.
+        """
+        import threading
+
+        runtime.ensure_started()
+        seen = []
+        waited = runtime._wait
+
+        def watched(process, timeout):
+            free = []
+
+            def probe():
+                got = runtime._state_lock.acquire(blocking=False)
+                free.append(got)
+                if got:
+                    runtime._state_lock.release()
+
+            thread = threading.Thread(target=probe)
+            thread.start()
+            thread.join(2.0)
+            seen.append(bool(free and free[0]))
+            return waited(process, timeout)
+
+        monkeypatch.setattr(runtime, "_wait", watched)
+        runtime.stop("test")
+        assert seen, "the teardown never reached the wait, so this proves nothing"
+        assert all(seen), "the state lock was held while a worker was being ended"
 
 
 class TestTheDrainFailsafeIsBoundedRatherThanForever:

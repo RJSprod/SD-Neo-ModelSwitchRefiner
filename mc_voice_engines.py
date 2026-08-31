@@ -530,9 +530,16 @@ def qualify(voice_id: str, engine: str = "") -> str:
     text = str(voice_id or "").strip()
     if not text:
         return ""
-    head = text.split(":", 1)[0].casefold()
+    head, _, rest = text.partition(":")
+    head = head.casefold()
     if head in ENGINES:
-        return f"{head}:{text.split(':', 1)[1]}"
+        # An engine name with nothing after it is not a voice, and there is no
+        # honest way to make one out of it: it can arrive from a hand-edited
+        # option or an older build's stored value, and every caller here already
+        # treats "" as "nothing is chosen" and falls back. Producing "kokoro:"
+        # instead would be producing an id that matches no voice and looks like
+        # it should.
+        return f"{head}:{rest}" if rest else ""
     return f"{str(engine or DEFAULT_ENGINE)}:{text}"
 
 
