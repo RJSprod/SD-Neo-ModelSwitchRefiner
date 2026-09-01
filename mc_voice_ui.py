@@ -1710,7 +1710,18 @@ def pipeline_stage_detail(stage_id: str) -> str:
     purpose = {"dpdfnet": "Speech cleanup \u2014 noise and synthesis artefacts.",
                "lavasr": "Speech bandwidth extension \u2014 48 kHz mono output."}
     revision = str(entry.get("revision") or "")
+    # Named on the panel rather than discovered by pressing the button. A stage
+    # runs inside the enhancement runtime and cannot be installed or proved
+    # without it, and a user looking at a stage that will not install is owed
+    # that fact where they are looking (A-44) rather than in a log file.
+    runtime_ready = found.runtime_ready
+    requires = ("Installed." if runtime_ready
+                else ("It will be installed first \u2014 about "
+                      f"{models._bytes_label(_runtime_bytes())} more."
+                      if _runtime_bytes() else "It will be installed first."))
     rows = [("Purpose", purpose.get(stage_id, spec.summary), ""),
+            ("Requires", "Voice Pipeline runtime"
+             + ("" if runtime_ready else " \u2014 not installed yet"), requires),
             ("Installation", _state_label(held.install_state if held else "not_installed"),
              held.message if held else ""),
             ("Runtime", _state_label("loaded" if stage_id in live["loaded_stages"]
@@ -1724,7 +1735,10 @@ def pipeline_stage_detail(stage_id: str) -> str:
               f"pinned release" if entry.get("provisional")
               else (f"revision {revision[:12]}" if revision else ""))),
             ("Download size", models._bytes_label(entry.get("about_bytes") or 0)
-             if entry.get("about_bytes") else "\u2014", ""),
+             if entry.get("about_bytes") else "the model, plus the runtime"
+             if not runtime_ready else "the model",
+             "The publisher reports the model's size when the download starts."
+             if not entry.get("about_bytes") else ""),
             ("Output", "48 kHz mono" if spec.output_rate_policy != "preserve"
              else "the rate it was given", ""),
             ("License", entry.get("license") or "\u2014", entry.get("attribution") or "")]
@@ -1768,7 +1782,8 @@ def _component_shell(title: str, blurb: str, rows, component: str,
             f'data-mc-voice-progress="pipeline" hidden>'
             f'<div class="mc-voice-progress-bar" '
             f'data-mc-voice-progress-bar="pipeline"></div></div>'
-            f'</div>')
+            f'</div>'
+            + _pipeline_status_line(component))
     return (f'<div class="mc-voice-detail">'
             f'<div class="mc-voice-heading">{ui.escape(title)}</div>'
             f'<p class="mc-voice-note">{ui.escape(blurb)}</p>'
@@ -1776,6 +1791,50 @@ def _component_shell(title: str, blurb: str, rows, component: str,
             f'{buttons}'
             + (f'<p class="mc-voice-note">{ui.escape(note)}</p>' if note else "")
             + '</div>')
+
+
+def _pipeline_status_line(component: str) -> str:
+    """Where an install says what it is doing, and what went wrong if it did.
+
+    This element is the answer to a defect worth naming, because the shape of it
+    recurs: the install route returns ``{"ok": true}`` the moment the thread
+    starts, every real failure lands in the progress map minutes later, and the
+    overview repainted two state chips and nothing else. So a refusal that the
+    server had written down in full -- and logged, with the host description
+    under it -- reached a user as a button that went back to how it was. "The
+    button went back to how it was" is not an answer to "what happened"
+    (:func:`mc_voice_models._claim`), and it is not an answer here either.
+
+    Rendered from the progress map rather than left for the browser to fill, so
+    that the panel is right the moment it is drawn: a detail surface opened
+    after a failed install shows the reason without waiting for a poll, and one
+    opened after a clean install shows nothing at all.
+    """
+    if not component:
+        return ""
+    import mc_voice_models as models
+    import mc_voice_pipeline as pipeline
+
+    try:
+        found = dict(models.progress().get(pipeline.KIND) or {})
+    except Exception:
+        logger.debug("Model Chain: could not read the Voice Pipeline install progress",
+                     exc_info=True)
+        return ""
+    # Scoped to the component this panel is about. One pipeline install runs at
+    # a time, so an unscoped line would print the runtime's failure on the
+    # stage's panel and read as though the stage were the thing that broke.
+    if str(found.get("model") or "") != component:
+        text, failed = "", False
+    else:
+        text = str(found.get("text") or "")
+        failed = bool(found.get("failed"))
+        if not found.get("running") and not failed and text == "Installed.":
+            text = ""
+    return (f'<p class="mc-voice-note mc-voice-component-status'
+            f'{" mc-voice-failed" if failed else ""}" '
+            f'data-mc-voice-component-status="{ui.escape(component)}"'
+            f'{"" if text else " hidden"}>{ui.escape(text)}</p>')
 
 
 def _sopro_engine_settings(settings: dict, found) -> str:
@@ -2739,6 +2798,25 @@ def _tts_status(engine: str):
     return read
 
 
+def _pipeline_installing(component: str) -> bool:
+    """Whether the install running right now is this component's.
+
+    Scoped by the identifier ``mc_voice_models._claim`` was given, so a stage
+    install that is building the runtime underneath it reports the *stage* as
+    installing -- which is what was asked for and what the panel is showing.
+    """
+    import mc_voice_models as models
+    import mc_voice_pipeline as pipeline
+
+    try:
+        found = models.progress().get(pipeline.KIND) or {}
+    except Exception:
+        logger.debug("Model Chain: could not read the Voice Pipeline install progress",
+                     exc_info=True)
+        return False
+    return bool(found.get("running")) and str(found.get("model") or "") == component
+
+
 def _pipeline_component_status(component: str):
     def read():
         import mc_voice_pipeline as pipeline
@@ -2751,12 +2829,21 @@ def _pipeline_component_status(component: str):
             logger.debug("Model Chain: could not describe the Voice Pipeline's %s",
                          component, exc_info=True)
             return {"install_state": "error", "runtime_state": "unavailable"}
+        # ``pipeline.status()`` is a pure filesystem read and cannot know that
+        # an install is in flight -- so this state existed in INSTALL_STATES,
+        # had a label waiting for it in the overview, and was never once
+        # produced. The browser's poller stops as soon as nothing is busy, so
+        # the effect was an overview that took one look at a multi-minute
+        # install, saw "Not installed", and stopped asking.
+        busy = _pipeline_installing(component)
         if component == "runtime":
-            return {"install_state": found.runtime_install_state,
+            return {"install_state": ("installing" if busy
+                                      else found.runtime_install_state),
                     "runtime_state": live["runtime_state"]}
         held = found.stage(component)
         return {
-            "install_state": held.install_state if held else "not_installed",
+            "install_state": ("installing" if busy
+                              else (held.install_state if held else "not_installed")),
             "runtime_state": ("loaded" if component in live["loaded_stages"]
                               else "unloaded"),
             "pipeline_enabled": bool(held and held.enabled),

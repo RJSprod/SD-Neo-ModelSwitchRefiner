@@ -194,6 +194,39 @@ To turn it into a real pin, from a machine that can reach the hub:
 python tools/pin_pipeline_models.py --stage dpdfnet --revision <sha>
 ```
 
+### Installing a stage installs the runtime under it
+
+A stage is not proved by downloading it. `_install_stage` ends by running a
+second of synthetic speech through the model *inside the staged interpreter*,
+which is the whole point of the transaction — a backend that reads 24 kHz as
+16 kHz loads perfectly and returns perfectly finite numbers, and the only thing
+wrong with it is the duration. With no runtime there is nothing to run that
+proof in.
+
+The first shipped version answered that by refusing:
+
+> The Voice Pipeline runtime is not installed yet, and a model that cannot be
+> run cannot be proved. Install the runtime first.
+
+Correct, and the wrong shape. It sent somebody who had pressed the only button
+their panel offered to go and find a different one — and it said so through
+`models._claim`, which writes the reason into the progress map and the log, both
+of which the components overview then declined to draw. What reached the user
+was a button that went back to how it was, twice.
+
+So `install()` installs the prerequisite instead of describing it. Both halves
+run inside one `_claim`, so it is still one transaction that either finishes or
+leaves the machine as it was, and `_span` scales each half into its own slice of
+the bar (`RUNTIME_SHARE`, 0.75) so the progress does not fill, reset and fill
+again. The platform gate still answers first: chaining is not a way around it,
+and on a machine with no pinned closure the refusal names the runtime, because
+there the stage is not what is missing.
+
+Two things carry the state to where it can be seen: the stage panel gains a
+**Requires** row naming the runtime and what installing it will cost, and
+`/components` now publishes the same `progress` block `/pipeline` already did so
+the overview can draw a failure rather than repaint two chips.
+
 ### Still outstanding for a release
 
 1. Sweep 250 / 500 / 750 / 1000 ms Lava analysis windows with 40–120 ms context
