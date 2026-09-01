@@ -2128,28 +2128,112 @@ def preload_enabled() -> bool:
     return _preload_disabled_reason is None
 
 
-def preload_async(width: int = 0, height: int = 0) -> bool:
-    """Start warming Stage 1's weights back into VRAM in the background.
+RESTORE = "restore"
+"""Swap a checkpoint this extension swapped out back in from the RAM cache."""
+
+RESIDENT = "resident"
+"""Move the loaded checkpoint's own weights the rest of the way onto the card."""
+
+FROM_DISK = "from disk"
+"""Have the host load the selected checkpoint, because nothing usable is loaded."""
+
+
+def _preload_task(allow_disk_load: bool = False) -> str | None:
+    """What warming Stage 1 would actually have to do, or None for nothing.
+
+    Three kinds of work, and telling them apart is the difference between a
+    warm-up that warms something and one that reports success having moved
+    nothing:
+
+    :data:`RESTORE`
+        A checkpoint this extension swapped out is waiting to come back. Until
+        this function existed it was the *only* reason a preload ever ran --
+        and a plan with no Stage 2 never swaps anything out, so on a
+        single-stage plan the preload had nothing to trigger it, ever. The
+        model then sat in system RAM between generations while the warm-up
+        reported, accurately and uselessly, that it had finished in 0.0s with
+        the image model cold.
+
+    :data:`RESIDENT`
+        The selected checkpoint *is* the loaded one and its weights are not all
+        on the card. This is the state a generation ends in: the host moves out
+        what it needs to and leaves the rest wherever it landed. Every
+        following generation then pays to move it back, and every LoRA is
+        applied against weights that have to be walked across the bus first --
+        which is why a slow LoRA and a cold model are one symptom, not two.
+
+    :data:`FROM_DISK`
+        Nothing usable is loaded at all, or the selection has moved somewhere
+        the cache cannot answer for. Only offered when the caller asks for it,
+        because reading a checkpoint off disk is the one job here that is
+        expensive whether or not anybody is waiting on it -- which makes it
+        right for an explicit warm-up and wrong for the background pass that
+        follows every generation.
+    """
+    if _pending_restore is not None:
+        return RESTORE
+
+    if not _is_real_model(model_data_sd_model()):
+        return FROM_DISK if allow_disk_load else None
+
+    try:
+        selection, loaded = _loading_parameters_key(), _loaded_model_key()
+    except Exception:
+        selection = loaded = ""
+    if selection and loaded and selection != loaded:
+        # The UI points at something else. Installing a cache entry from here
+        # is reinstate_pending()'s job and it has no pending restore to work
+        # from, so the host's own loader is the honest answer.
+        return FROM_DISK if allow_disk_load else None
+
+    resident, total = _loaded_residency()
+    if total <= 0:
+        # Residency cannot be measured. Moving weights on a guess is how a
+        # warm-up becomes the thing it was added to prevent.
+        return None
+    if resident >= total * READY_FRACTION:
+        return None  # already where the next generation needs it
+
+    return RESIDENT
+
+
+def preload_async(width: int = 0, height: int = 0, *, allow_disk_load: bool = False,
+                  force: bool = False) -> bool:
+    """Start warming Stage 1's weights into VRAM in the background.
 
     ``width``/``height`` size the VRAM budget, and are the *current*
     generation's Stage 1 size because the next one's is not knowable yet. That
     only affects how much room is freed, and ``before_process`` re-checks
     against the real size before Stage 1 runs.
 
+    ``allow_disk_load`` permits the expensive case -- see :func:`_preload_task`.
+    ``force`` runs even with the preload setting off, and is for :mod:`mc_arm`:
+    that setting is consent to a background thread after every generation,
+    which is not the same question as "load what this generation needs before
+    it starts", and a user who turned the warm-up on and got a language model
+    and no image model had answered the second question, not the first. The
+    circuit breaker still applies to both -- a machine where this does not work
+    is a machine where it does not work however it was asked for.
+
     Returns True if a preload was started.
     """
     global _preload_thread, _preload_result
 
-    if not preload_enabled():
+    if not preload_enabled() and not (force and _preload_disabled_reason is None):
         return False
-    if _pending_restore is None:
-        return False  # nothing was swapped out, so nothing to swap back
 
+    # Before the task is decided, not after: an in-flight preload is moving the
+    # very state that decision reads.
     join_preload()
+
+    task = _preload_task(allow_disk_load)
+    if task is None:
+        return False
+
     _preload_result = None
     _preload_thread = threading.Thread(
         target=_preload_worker,
-        args=(width, height),
+        args=(width, height, task),
         name="model-chain-preload",
         daemon=True,
     )
@@ -2191,7 +2275,11 @@ def join_preload(timeout: float | None = None) -> None:
 
 
 def consume_preload() -> bool:
-    """True once if a background preload already swapped Stage 1 back in.
+    """True once if a background preload already moved Stage 1's weights.
+
+    Swapped in from the cache, loaded from disk or topped up where they sat --
+    all three leave VRAM looking different from however the last generation
+    left it, and all three therefore have the same consequence here.
 
     Lets ``before_process`` tell "nothing to do" apart from "already done", so
     the VRAM budget still gets checked against this generation's real size.
@@ -2266,25 +2354,34 @@ def _host_torch_context():
         return contextlib.nullcontext()
 
 
-def _preload_worker(width: int, height: int) -> None:
+def _preload_worker(width: int, height: int, task: str = RESTORE) -> None:
     global _preload_reinstated, _preload_result, _preload_failures
 
     started = time.perf_counter()
     try:
         with _model_lock, _host_torch_context():
-            # reinstate_pending() re-reads the live selection, so a checkpoint
-            # changed in the UI since the generation ended is handled correctly
-            # here: either it is cached and gets swapped in, or this returns
-            # False and the next generation loads it from disk as usual.
-            if not reinstate_pending():
-                _preload_result = PreloadResult(
-                    "nothing", detail="Stage 1 was already the loaded model"
-                )
-                return
+            if task == RESTORE:
+                # reinstate_pending() re-reads the live selection, so a checkpoint
+                # changed in the UI since the generation ended is handled correctly
+                # here: either it is cached and gets swapped in, or this returns
+                # False and the next generation loads it from disk as usual.
+                if not reinstate_pending():
+                    _preload_result = PreloadResult(
+                        "nothing", detail="Stage 1 was already the loaded model"
+                    )
+                    return
+            elif task == FROM_DISK:
+                if not _load_selected_from_disk():
+                    _preload_result = PreloadResult(
+                        "nothing", detail="no checkpoint is selected to load"
+                    )
+                    return
 
-            # Set before anything can fail. It means "the swap happened", and
-            # after it has, the next generation must still budget VRAM for
-            # Stage 1 -- especially if the rest of this went wrong.
+            # Set before anything can fail. It means "weights moved since the
+            # last generation budgeted for them", which is true after all three
+            # tasks, and it is what tells the next generation to work its VRAM
+            # budget out again rather than inherit one -- especially if the rest
+            # of this went wrong.
             _preload_reinstated = True
 
             from modules import shared
@@ -2315,6 +2412,36 @@ def _preload_worker(width: int, height: int) -> None:
 
     _preload_failures = 0
     _log_preload_result(_preload_result)
+
+
+def _load_selected_from_disk() -> bool:
+    """Have the host load the selected checkpoint, the way a generation would.
+
+    ``forge_model_reload`` is the host's own loader, and the only thing that
+    knows which of its several load paths a given checkpoint and module set
+    needs. Nothing is reimplemented here and nothing is assembled here; what
+    this adds is the *timing*, which is the whole of the warm-up's value. The
+    same twenty seconds are spent either way -- the question this answers is
+    whether they are spent while somebody watches a progress bar sit still.
+
+    Returns False when there is nothing to load. An installation with no
+    checkpoint selected is a legitimate state, not a failure, and the warm-up
+    simply has no work in it.
+    """
+    from modules import sd_models, shared
+    from modules.sd_models import model_data
+
+    name = getattr(shared.opts, "sd_model_checkpoint", "")
+    if not name or checkpoint_info(name) is None:
+        return False
+
+    # A stale loading hash makes forge_model_reload() return early and hand
+    # back whatever is loaded -- which here is nothing. Clearing it first is
+    # the difference between a warm-up that loads the model and one that
+    # cheerfully reports having loaded a null.
+    ensure_model_loadable()
+    sd_models.forge_model_reload()
+    return _is_real_model(model_data.sd_model)
 
 
 def model_data_sd_model():
@@ -2378,9 +2505,11 @@ def _log_preload_result(result: PreloadResult | None) -> None:
 
     if result.state == "ready":
         logger.info(
-            "Model Chain: preloaded %s into VRAM in %.1fs (%.1f GB moved, %s) — "
-            "the next generation starts sampling immediately",
+            "Model Chain: %s is in VRAM — %.1f GB resident after %.1fs (%.1f GB moved, %s). "
+            "It stays there until something needs the room, so the next generation starts "
+            "sampling immediately and its LoRA is applied to weights already on the card",
             result.checkpoint,
+            result.resident_bytes / _GB,
             result.seconds,
             result.moved_bytes / _GB,
             result.detail,
@@ -2388,7 +2517,7 @@ def _log_preload_result(result: PreloadResult | None) -> None:
         return
 
     logger.info(
-        "Model Chain: preloaded %.1f GB of %.1f GB of %s in %.1fs — the next generation "
+        "Model Chain: warmed %.1f GB of %.1f GB of %s in %.1fs — the next generation "
         "will move the rest on demand",
         result.resident_bytes / _GB,
         result.model_bytes / _GB,
@@ -2933,6 +3062,29 @@ def _record_reserve_miss(stage: str, shortfall: int, llm_bytes: int,
         logger.debug("Model Chain: could not record the reserve miss", exc_info=True)
 
 
+def _warming_wanted() -> bool:
+    """Whether anything is going to start a preload, and so consume a capture.
+
+    Two settings can, and they ask different questions: the preload setting
+    permits a background thread after a generation, and the warm-up setting
+    asks for the pipeline to be loaded before somebody waits on it. Either one
+    produces a preload thread, so either one is a reason to hold on to what a
+    preload would warm.
+
+    Read through :mod:`mc_arm` rather than the option directly, because that
+    module owns the mapping from the stored label to a mode, and never at
+    import time, because this module is the one :mod:`mc_arm` reaches into.
+    """
+    if option(OPT_PRELOAD, PRELOAD_DEFAULT):
+        return True
+    try:
+        import mc_arm
+
+        return mc_arm.mode() != mc_arm.WARM_OFF
+    except Exception:
+        return False
+
+
 def capture_stage_2_components() -> int:
     """Remember Stage 2's patchers before the swap back to Stage 1 hides them.
 
@@ -2949,9 +3101,9 @@ def capture_stage_2_components() -> int:
     _stage_2_patchers = []
     if not option(OPT_WARM_STAGE_2, True):
         return 0
-    if not option(OPT_PRELOAD, PRELOAD_DEFAULT):
+    if not _warming_wanted():
         # Warming only ever happens on the preload's thread; see the note above
-        # warm_secondary. With the preload off there is no consumer.
+        # warm_secondary. With nothing that would start one there is no consumer.
         return 0
 
     try:
@@ -3129,7 +3281,7 @@ def _readiness_explanation(result: PreloadResult | None) -> str:
         return f" (the preload is off for this session: {retired})"
 
     if result is None:
-        return "" if option(OPT_PRELOAD, PRELOAD_DEFAULT) else " (preload off)"
+        return "" if _warming_wanted() else " (no warm-up is enabled)"
 
     if result.state == "failed":
         return f" (the preload failed: {result.detail})"

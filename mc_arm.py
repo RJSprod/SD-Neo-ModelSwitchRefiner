@@ -129,6 +129,22 @@ class Readiness:
         return f"{self.state} — " + "; ".join(
             f"{part.name.lower()} is {part.state}" for part in self.cold)
 
+    def explain(self) -> str:
+        """The same, plus why each cold part is cold.
+
+        For the line a warm-up *ends* on, which is the one somebody reads when
+        it did not work. "warm-up finished in 0.0s — cold — image model is
+        cold" is a true sentence that answers nothing, and the answer was
+        already measured a line earlier: every part carries the reason it is in
+        the state it is in.
+        """
+        if self.armed or not self.parts:
+            return self.describe()
+        return f"{self.state} — " + "; ".join(
+            f"{part.name.lower()} is {part.state}"
+            + (f" ({part.detail})" if part.detail else "")
+            for part in self.cold)
+
 
 def readiness() -> Readiness:
     """What is loaded right now. Starts nothing, moves nothing, never raises.
@@ -236,13 +252,24 @@ def arm(width: int = 0, height: int = 0, *, reason: str = "") -> Readiness:
             return before
         logger.info("Model Chain: warming up%s — %s",
                     f" for {reason}" if reason else "", before.describe())
-        _arm_llm()
+        # Image first. The order is not arbitrary and it is not free: a
+        # warm-up that starts llama-server, spends twenty seconds on it and
+        # then reports the image model cold has spent the user's whole wait on
+        # the half they were not waiting for. Generate is what somebody is
+        # sitting in front of.
+        #
+        # Nothing is lost on the language side by going second. Its VRAM
+        # allowance is the plan's remainder, and ``mc_plan.usable_vram_bytes``
+        # adds the image family's own residency back before dividing -- so
+        # llama-server is placed at exactly the same size whether the
+        # checkpoint has reached the card yet or not.
         _arm_image(width, height)
+        _arm_llm()
         after = readiness()
     finally:
         _arming.release()
     logger.info("Model Chain: warm-up finished in %.1fs — %s",
-                time.monotonic() - started, after.describe())
+                time.monotonic() - started, after.explain())
     return after
 
 
@@ -267,18 +294,42 @@ def _arm_llm() -> None:
 
 
 def _arm_image(width: int = 0, height: int = 0) -> None:
-    """Move Stage 1's weights back toward VRAM, and wait for them.
+    """Get Stage 1's weights into VRAM, and wait for them.
 
-    ``mc_memory`` owns every part of this. The preload is its own, the budget
-    is its own, and whether a preload is allowed at all is its own setting --
-    this only asks, and then waits, because an asynchronous warm-up is not a
-    warm-up as far as the generation behind it is concerned.
+    ``mc_memory`` owns every part of this: the load, the budget, the eviction
+    and the circuit breaker. This only asks, and then waits -- because an
+    asynchronous warm-up is not a warm-up as far as the generation behind it is
+    concerned.
+
+    Two things are asked for that the background pass after a generation does
+    not ask for, and both are the difference between this warming the image
+    model and this doing nothing at all:
+
+    ``allow_disk_load``
+        because "never a cold run" has to include the first run of a session,
+        which is the coldest one there is.
+
+    ``force``
+        because the preload setting is consent to a background thread after
+        every generation, and that is a different question from the one a user
+        answers by turning this on. Requiring both -- one of them off by
+        default and named after the other half of the extension -- is how a
+        warm-up came to spend twenty seconds on a language model and report the
+        image model cold. The circuit breaker is untouched: a machine where
+        this does not work is still a machine where it does not work.
     """
     try:
         import mc_memory
 
-        if mc_memory.preload_async(width, height):
+        if mc_memory.preload_async(width, height, allow_disk_load=True, force=True):
             mc_memory.join_preload()
+            return
+        # Nothing started. Either it was already warm -- in which case the line
+        # this warm-up ends with says so -- or it has been retired, which is
+        # worth saying out loud rather than leaving as an unexplained 0.0s.
+        retired = mc_memory.preload_disabled_reason()
+        if retired is not None:
+            logger.info("Model Chain: the image model was not warmed up — %s", retired)
     except Exception:
         logger.info("Model Chain: the image model could not be warmed up; the next "
                     "generation will load it", exc_info=True)

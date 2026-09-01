@@ -493,12 +493,14 @@ Under **Settings → Model Chain**:
   RAM) — the ceiling on RAM held by the residency cache. This is a ceiling, not
   a reservation: the live free-RAM check is the real guard. Raise it if the
   console reports a model being refused.
-- **Preload Stage 1 after Stage 2 finishes** (experimental, default **off**) —
-  see [Preloading Stage 1](#preloading-stage-1-experimental-off-by-default).
+- **Keep the image model in VRAM between generations** (experimental, default
+  **off**) — see
+  [Keeping the image model in VRAM](#keeping-the-image-model-in-vram-experimental-off-by-default).
 - **Keep Stage 1's text encoder and VAE in VRAM during Stage 2** (default on) —
   see [Pinning Stage 1's encoders](#pinning-stage-1s-encoders).
 - **Use leftover VRAM to keep Stage 2 warm between generations** (default on,
-  but only takes effect when the preload above is enabled) — see
+  but only takes effect when something will start a warm-up — either the
+  setting above or **Warm up before generating**) — see
   [Spending what is left](#spending-what-is-left).
 - **Minimum VRAM reserve (GB)** (default 0 = automatic) — a floor under the
   automatically sized reserve. Model Chain never warms anything into it, and
@@ -523,7 +525,7 @@ count. A batch of two, 20 steps then 8, went 100% → 33% → 66% → 100%. Time
 spent moving several gigabytes of weights between the stages counted for
 nothing at all.
 
-With this on, the job is modelled as timed phases — waiting on a preload,
+With this on, the job is modelled as timed phases — waiting on a warm-up,
 freeing VRAM, Stage 1 sampling, the checkpoint switch, Stage 2 sampling,
 finalising — and the bar reports **how much of the predicted wall time has
 passed**. It moves forwards only, at a roughly even rate through work of very
@@ -546,7 +548,8 @@ cost different amounts.
 
 The bar never shows 100% — the WebUI removes it when the job genuinely ends. And
 "the job" means your images are ready. If the optional
-[Stage 1 preload](#preloading-stage-1-experimental-off-by-default) is on it runs
+[image-model warm-up](#keeping-the-image-model-in-vram-experimental-off-by-default)
+is on it runs
 in the background *after* that, once the progress bar is already gone; the
 panel's residency line is where its state is reported.
 
@@ -987,41 +990,73 @@ Invalidation is always the conservative direction — the worst it can do is mak
 the host redo work it could have skipped. Nothing here ever writes a hash, only
 clears one.
 
-#### Preloading Stage 1 (experimental, off by default)
+#### Keeping the image model in VRAM (experimental, off by default)
 
-Restoring Stage 1 is two costs. The pointer swap out of the RAM cache is cheap;
-moving the weights back into VRAM is not, and it happens lazily the moment the
-sampler first asks for them. Left to the next Generate click, you wait through
-the whole move before a single step runs.
+Getting the image model onto the card is two costs. The pointer swap out of the
+RAM cache is cheap; moving the weights into VRAM is not, and it happens lazily
+the moment the sampler first asks for them. Left to the next Generate click, you
+wait through the whole move before a single step runs — and so does every LoRA,
+which is applied by walking the weights it patches and is therefore as slow as
+the bus when they are not on the card. **A slow LoRA and a cold model are one
+symptom, not two.**
 
-The preload starts as soon as Stage 2 finishes, on a background thread, so it
+The warm-up runs on a background thread as soon as a generation finishes, so it
 overlaps the time you spend looking at the images you just got. Running it
 inline would gain nothing — `postprocess` runs before the generation call
-returns, so an inline preload would just move the same wait to before the
+returns, so an inline warm-up would just move the same wait to before the
 gallery appears.
 
-**"Preloaded" means ready to sample, not "a thread ran".** The worker swaps
-Stage 1 back in, budgets VRAM for it, moves its weights through the host's own
+There are three shapes of work, and it picks whichever applies:
+
+| It finds | It does |
+| --- | --- |
+| a checkpoint Model Chain swapped out for Stage 2 | swaps it back in from the RAM cache, then moves its weights |
+| the selected checkpoint loaded but only partly on the card | moves the rest of its weights |
+| nothing usable loaded | asks the host's own loader for it — **only** when an explicit warm-up asked, never on the background pass, because reading a checkpoint off disk is expensive whether or not anybody is waiting |
+
+The second row is the ordinary case and it is the one a single-stage plan lives
+in. A plan with no Stage 2 never swaps anything out, so for a long time there
+was nothing to trigger a warm-up at all: the model sat in system RAM between
+generations, and the console said so twice per generation without either line
+being able to do anything about it.
+
+**"Warm" means ready to sample, not "a thread ran".** The worker gets Stage 1
+loaded, budgets VRAM for it, moves its weights through the host's own
 `load_models_gpu`, and then *measures* how much of the model the host reports
-resident. A preload that ran out of room reports partial rather than success,
+resident. A warm-up that ran out of room reports partial rather than success,
 and every generation opens with a line saying which it got:
 
 ```
 Model Chain: Stage 1 is warm — 12.4 GB already in VRAM (preloaded in 8.5s).
 Model Chain: Stage 1 is partially warm — 7.2 GB of 12.4 GB in VRAM, the rest
              moves on demand (preloaded in 5.1s).
-Model Chain: Stage 1 is cold — 12.4 GB still to move from system RAM (preload off).
+Model Chain: Stage 1 is cold — 12.4 GB still to move from system RAM
+             (no warm-up is enabled).
 ```
 
 That line is measured against the host's live view every time, not reported from
-what the preload believed it achieved.
+what the warm-up believed it achieved.
+
+##### Its relationship with "Warm up before generating"
+
+Two settings, two questions. This one permits a background thread **after** a
+generation. [**Warm up before generating**](#settings) asks for the pipeline to
+be loaded **before** somebody waits on it, and it does the image model first,
+because Generate is what you are sitting in front of. Turning that one on
+therefore turns this work on for the moments it names, whichever way this one is
+set — requiring both, with this one off by default and named after the other
+half of the extension, only produced warm-ups that spent twenty seconds starting
+llama-server and reported the image model cold.
+
+The circuit breaker below is not lifted by either: a machine where this does not
+work is a machine where it does not work however it was asked for.
 
 ##### What happens when it goes wrong
 
 Nothing downstream depends on it completing, and the failure behaviour is the
 part worth trusting:
 
-- **A Generate that arrives mid-preload waits, and the wait is never wasted.**
+- **A Generate that arrives mid-warm-up waits, and the wait is never wasted.**
   The next generation joins the thread before touching any model and then takes
   the same lock, so the worst case is exactly the wait you would have had anyway.
   A wait long enough to notice is logged, so a slow first click has a visible
@@ -1035,11 +1070,11 @@ part worth trusting:
 - **Nothing survives that might no longer be true.** A failure drops the pinned
   encoders and invalidates the prepared LoRA state rather than trusting either.
 - **Repeated failure retires the feature.** Two consecutive failures take the
-  preload out of service for the rest of the session, with a line in the console
+  warm-up out of service for the rest of the session, with a line in the console
   saying so. Enabling it can cost you a generation; it cannot cost you every
   generation. Toggling the setting off and on gives it another chance without a
   restart.
-- **A checkpoint change supersedes it.** The preload records what it warmed, and
+- **A checkpoint change supersedes it.** The warm-up records what it warmed, and
   a change of checkpoint, VAE, text encoder or storage dtype since then means the
   result is discarded and the current selection loads normally.
 
@@ -1062,7 +1097,7 @@ the host build, on other extensions wrapping the sampler, and especially on
 just move them.
 
 The asymmetry is what decides the default. Pinning and the VRAM sizing *remove*
-work; the preload only moves the same work earlier. A machine where it
+work; the warm-up only moves the same work earlier. A machine where it
 misbehaves loses far more than a machine where it is off gains, and the failure
 handling above changes what a bad outcome costs without changing how likely one
 is. Turn it on in **Settings → Model Chain** once you have confirmed it is safe
@@ -1086,10 +1121,10 @@ the expensive way.
 
 What has to be freed is the requirement **minus whatever the target already
 holds**, and the target is never itself offered up for eviction. Skipping that
-subtraction is self-defeating: after a preload the target is the largest
+subtraction is self-defeating: after a warm-up the target is the largest
 evictable thing on the card, so asking to free the whole requirement evicts
 exactly the weights the next pass is about to use, and the load happens twice.
-That was a real bug — the preload's 8.5s of work was being discarded and redone
+That was a real bug — the warm-up's 8.5s of work was being discarded and redone
 on every Generate click.
 
 #### The reserve
@@ -1154,17 +1189,20 @@ Model Chain: kept 2 of Stage 2's 3 components warm in VRAM (3.0 GB moved,
              1.4 GB free, 1.0 GB reserved) — a Stage 2 retry starts sooner
 ```
 
-**This runs on the preload's thread and nowhere else, so it needs the preload
-enabled.** That boundary was learned the hard way and is worth stating plainly.
+**This runs on the warm-up's thread and nowhere else, so it needs something
+that will start one** — either
+[keeping the image model in VRAM](#keeping-the-image-model-in-vram-experimental-off-by-default)
+or **Warm up before generating**. That boundary was learned the hard way and is
+worth stating plainly.
 Model Chain frees VRAM from anywhere — `free_memory` moves weights *out*, which
 is what the host does on every eviction anyway — but it fills VRAM from exactly
 one place. Loading weights *in* rewrites and re-patches them, and doing that
 from a script hook rather than from inside the sampler left the model in a state
 the very next sampling step rejected outright with `RuntimeError: Inference
-tensors do not track version counter`. The preload has a deliberate answer to
+tensors do not track version counter`. The warm-up has a deliberate answer to
 that, an opt-in switch and a circuit breaker; a hook on the generation thread
-has none of the three. With the preload off, nothing is captured and nothing is
-warmed.
+has none of the three. With no warm-up asked for at all, nothing is captured and
+nothing is warmed.
 
 Four rules keep the rest from becoming the problem it is trying to solve:
 
@@ -1180,8 +1218,8 @@ Four rules keep the rest from becoming the problem it is trying to solve:
   no keep-list, so the next pass that needs room takes their VRAM back through
   the ordinary eviction path without anything special happening.
 - **Nothing is held when nothing can use it.** The captured components are
-  references to real weights, so with the preload off they are not captured at
-  all rather than keeping gigabytes alive for a warm-up that will never run.
+  references to real weights, so with no warm-up asked for they are not captured
+  at all rather than keeping gigabytes alive for a warm-up that will never run.
 
 One limitation worth stating: whether keeping a given component warm is
 genuinely faster than releasing and reloading it is decided here by whether it
@@ -3905,7 +3943,7 @@ round-tripping, the residency cascade and RAM budget, per-checkpoint
 VAE/text-encoder selection and its cache keying, model-flag restoration across a
 warm swap, edit-mode scoping and polarity, preset round-tripping and recovery
 from a damaged store, encoder pinning and its fallbacks, the background Stage 1
-preload and its failure handling, prepared-LoRA-state reuse and every case that
+warm-up and its failure handling, prepared-LoRA-state reuse and every case that
 invalidates it, stage isolation of extra-network tags, the VRAM reserve and its
 four floors, speculative warming of Stage 2, interruption handling, Stage 2
 reference routing in all three modes with its ordering, capability and cleanup
@@ -4130,7 +4168,7 @@ tests/test_lora_state.py       reusing prepared state that is no longer valid
 tests/test_warming.py          warming into the reserve costs an OOM or, worse,
                                a silent spill to system RAM, so most of the file
                                is about warming *not* happening
-tests/test_residency_speed.py  a preload that fails must cost one generation
+tests/test_residency_speed.py  a warm-up that fails must cost one generation
                                rather than every one
 ```
 

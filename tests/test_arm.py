@@ -166,6 +166,26 @@ class TestReadingTheState:
         assert "language model" in said
         assert "image model" in said
 
+    def test_it_can_also_say_why(self, pipeline):
+        """"warm-up finished in 0.0s — image model is cold" answers nothing.
+
+        The reason was measured a line earlier; every part carries it.
+        """
+        said = mc_arm.readiness().explain()
+
+        assert "13.9 GB still to move from system RAM" in said
+
+    def test_an_armed_pipeline_has_nothing_to_explain(self, pipeline, monkeypatch):
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "stage_1_readiness",
+                            lambda: ("warm", "Stage 1 is warm."))
+        pipeline._running = (Server(),)
+
+        found = mc_arm.readiness()
+
+        assert found.explain() == found.describe()
+
 
 # --------------------------------------------------------------------------- #
 # Loading
@@ -176,7 +196,8 @@ class TestArming:
     def test_it_starts_the_language_model(self, pipeline, monkeypatch):
         import mc_memory
 
-        monkeypatch.setattr(mc_memory, "preload_async", lambda w=0, h=0: False)
+        monkeypatch.setattr(mc_memory, "preload_async",
+                            lambda w=0, h=0, **kwargs: False)
 
         mc_arm.arm(reason="a test")
 
@@ -188,7 +209,8 @@ class TestArming:
         import mc_memory
 
         joined: list = []
-        monkeypatch.setattr(mc_memory, "preload_async", lambda w=0, h=0: True)
+        monkeypatch.setattr(mc_memory, "preload_async",
+                            lambda w=0, h=0, **kwargs: True)
         monkeypatch.setattr(mc_memory, "join_preload",
                             lambda timeout=None: joined.append(True))
 
@@ -201,7 +223,8 @@ class TestArming:
         import mc_memory
 
         joined: list = []
-        monkeypatch.setattr(mc_memory, "preload_async", lambda w=0, h=0: False)
+        monkeypatch.setattr(mc_memory, "preload_async",
+                            lambda w=0, h=0, **kwargs: False)
         monkeypatch.setattr(mc_memory, "join_preload",
                             lambda timeout=None: joined.append(True))
 
@@ -216,7 +239,8 @@ class TestArming:
 
         monkeypatch.setattr(mc_memory, "stage_1_readiness",
                             lambda: ("warm", "Stage 1 is warm."))
-        monkeypatch.setattr(mc_memory, "preload_async", lambda w=0, h=0: False)
+        monkeypatch.setattr(mc_memory, "preload_async",
+                            lambda w=0, h=0, **kwargs: False)
         pipeline._running = (Server(),)
 
         mc_arm.arm(reason="a test")
@@ -229,7 +253,8 @@ class TestArming:
         that is what it did before this existed."""
         import mc_memory
 
-        monkeypatch.setattr(mc_memory, "preload_async", lambda w=0, h=0: False)
+        monkeypatch.setattr(mc_memory, "preload_async",
+                            lambda w=0, h=0, **kwargs: False)
 
         def explode(*args, **kwargs):
             raise RuntimeError("llama-server would not start")
@@ -244,7 +269,8 @@ class TestArming:
         """A startup warm-up and a Generate pressed two seconds later."""
         import mc_memory
 
-        monkeypatch.setattr(mc_memory, "preload_async", lambda w=0, h=0: False)
+        monkeypatch.setattr(mc_memory, "preload_async",
+                            lambda w=0, h=0, **kwargs: False)
         started = threading.Event()
         release = threading.Event()
 
@@ -264,6 +290,72 @@ class TestArming:
         first.join(timeout=5)
 
         assert pipeline.clients == 1
+
+
+class TestTheImageModelComesFirst:
+    """Generate is what somebody is sitting in front of.
+
+    From a user's log, a warm-up that ran llama-server first:
+
+        warming up for this generation — cold — image model is cold; language
+            model is cold
+        llama-server ready — all layers on the GPU, 8,192 token context
+        warm-up finished in 20.3s — cold — image model is cold
+
+    Twenty seconds of somebody's wait, spent entirely on the half they were not
+    waiting for, and the half they were still in system RAM at the end of it.
+
+    Nothing is lost on the language side by going second: its VRAM allowance is
+    the plan's remainder, and ``mc_plan.usable_vram_bytes`` adds the image
+    family's own residency back before dividing, so llama-server is placed at
+    the same size either way.
+    """
+
+    @pytest.fixture
+    def order(self, pipeline, monkeypatch):
+        import mc_memory
+
+        seen: list = []
+        monkeypatch.setattr(
+            mc_memory, "preload_async",
+            lambda w=0, h=0, **kwargs: seen.append(("image", kwargs)) or False)
+        monkeypatch.setattr(pipeline, "client",
+                            lambda *a, **k: seen.append(("llm", {})) or object())
+        return seen
+
+    def test_the_image_model_is_warmed_before_the_language_model(self, order):
+        mc_arm.arm(1024, 1024, reason="a test")
+
+        assert [step for step, _ in order] == ["image", "llm"]
+
+    def test_it_asks_for_the_load_the_background_pass_will_not_do(self, order):
+        """"Never a cold run" has to include the first run of a session."""
+        mc_arm.arm(1024, 1024, reason="a test")
+
+        _, kwargs = order[0]
+        assert kwargs["allow_disk_load"] is True
+
+    def test_it_does_not_need_the_preload_setting_turned_on_as_well(self, order):
+        """Turning the warm-up on is already an answer about warmth."""
+        mc_arm.arm(1024, 1024, reason="a test")
+
+        _, kwargs = order[0]
+        assert kwargs["force"] is True
+
+    def test_a_retired_preload_is_said_out_loud(self, pipeline, monkeypatch, caplog):
+        """Otherwise an image model that is never warmed is an unexplained 0.0s."""
+        import mc_memory
+
+        monkeypatch.setattr(mc_memory, "preload_async",
+                            lambda w=0, h=0, **kwargs: False)
+        monkeypatch.setattr(mc_memory, "preload_disabled_reason",
+                            lambda: "it failed 2 times in a row")
+
+        with caplog.at_level("INFO", logger="model_chain"):
+            mc_arm.arm(1024, 1024, reason="a test")
+
+        assert any("failed 2 times in a row" in record.getMessage()
+                   for record in caplog.records)
 
 
 class TestTheSetting:
