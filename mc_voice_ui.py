@@ -1847,6 +1847,63 @@ def _runtime_bytes(flavour: str = "onnx") -> int:
         return 0
 
 
+def _stage_manual_section(stage_id: str) -> str:
+    """The "download it yourself" half of a stage panel.
+
+    The same escape hatch the speech models have carried all along, offered for
+    a stage. For LavaSR it is not a fallback: its weights are on a host this
+    repository could not reach to pin, so this is the only way in, and a panel
+    that only showed a disabled Install button would be a panel that says no
+    without saying how.
+
+    The links are the load-bearing part. Naming the three files and letting
+    somebody click them is the difference between "this build cannot fetch it"
+    and a job somebody can actually finish.
+    """
+    import mc_voice_pipeline as pipeline
+
+    try:
+        entry = pipeline.manifest()["stages"][stage_id]
+    except Exception:
+        return ""
+    if not pipeline.stage_local_installable(stage_id):
+        return ""
+    sources = entry.get("sources") or []
+    if not sources:
+        return ""
+    label = entry.get("label") or stage_id
+    managed = pipeline.stage_installable(stage_id)
+    links = "".join(
+        f'<li><a href="{ui.escape(item["url"])}" target="_blank" rel="noreferrer">'
+        f'{ui.escape(item["filename"])}</a></li>' for item in sources)
+    blurb = (
+        f"Download these {len(sources)} files, keeping the folders they are in, then give "
+        f"Voice Chat the folder you put them in. Nothing needs renaming and no account or "
+        f"access token is needed."
+        if not managed else
+        f"The Install button above does all of this for you. This is here for a machine "
+        f"that cannot reach the publisher.")
+    return (
+        f'<details class="mc-voice-manual" open>'
+        f'<summary>Install {ui.escape(label)} from files you download yourself</summary>'
+        f'<p>{ui.escape(blurb)}</p>'
+        f'<ul class="mc-voice-links">{links}</ul>'
+        f'<div class="mc-voice-folder-row">'
+        f'<input type="text" class="mc-voice-folder" '
+        f'data-mc-voice-stage-folder="{ui.escape(stage_id)}" spellcheck="false" '
+        f'placeholder="C:\\Users\\you\\Downloads\\LavaSR" />'
+        f'<button type="button" class="mc-voice-install-local" '
+        f'data-mc-voice-stage-local="{ui.escape(stage_id)}">'
+        f'Install from this folder</button>'
+        f'</div>'
+        f'<p class="mc-voice-note">Nothing is installed on trust. Every file the model '
+        f'loads is checked for before anything is promoted, the model is run once on this '
+        f'machine to prove it works, and what arrived is hashed so later tampering is '
+        f'still visible \u2014 but this extension has never seen these files, so it makes '
+        f'no claim about the bytes themselves and says so where it reports the install.</p>'
+        f'</details>')
+
+
 def pipeline_stage_detail(stage_id: str) -> str:
     """One stage's panel: what it does, what is pinned, and how it is loaded.
 
@@ -1923,7 +1980,7 @@ def pipeline_stage_detail(stage_id: str) -> str:
         installable=pipeline.stage_installable(stage_id),
         installed=bool(held and held.install_state == "installed"),
         note=pipeline.stage_unavailable_reason(stage_id),
-        extra=_pipeline_device_row(stage_id))
+        extra=_pipeline_device_row(stage_id) + _stage_manual_section(stage_id))
 
 
 def _component_shell(title: str, blurb: str, rows, component: str,

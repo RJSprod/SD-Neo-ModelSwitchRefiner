@@ -3265,12 +3265,25 @@ def install(_demo=None, app=None) -> bool:
 
             payload = await _json(request)
             component = str(payload.get("component") or "")
+            folder = str(payload.get("folder") or "").strip()
             if component not in pipeline.COMPONENTS:
                 raise Refused(400, "That is not a Voice Pipeline component.")
             if component == "runtime":
+                if folder:
+                    raise Refused(400, "The Voice Pipeline runtime is built from wheels "
+                                       "this extension pins, not from a folder.")
                 if not pipeline.runtime_installable():
                     raise Refused(409, "This build has not pinned a Voice Pipeline runtime "
                                        "closure for this machine.")
+            elif folder:
+                # The folder path answers a different question from the managed
+                # one -- "can this be read from disk" rather than "can this be
+                # fetched" -- so a stage this build cannot download is still
+                # allowed here. That is the whole point of the escape hatch, and
+                # gating it on stage_installable() would close it exactly where
+                # it is needed.
+                if not pipeline.stage_local_installable(component):
+                    raise Refused(409, "That component cannot be installed from a folder.")
             elif not pipeline.stage_installable(component):
                 raise Refused(409, pipeline.stage_unavailable_reason(component)
                               or "That component cannot be installed by this build.")
@@ -3284,7 +3297,10 @@ def install(_demo=None, app=None) -> bool:
 
         def run():
             try:
-                pipeline.install(component)
+                if folder:
+                    pipeline.install_from(component, folder)
+                else:
+                    pipeline.install(component)
             except Exception:
                 # Swallowed here and reported through the progress map, which
                 # the row is already polling -- see mc_voice_models._claim.

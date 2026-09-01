@@ -339,7 +339,11 @@
    "attribution": "LavaSR by Yatharth Sharma.",
    "about_bytes": 0,
    "artifacts": [],
-   "required_paths": [],
+   "required_paths": [
+    "enhancer_v2/pytorch_model.bin",
+    "enhancer_v2/config.yaml",
+    "denoiser/denoiser.bin"
+   ],
    "contract": {
     "backend": "pytorch-vocos",
     "backend_input_rate": 16000,
@@ -350,9 +354,27 @@
     "notes": "MEASURED, from upstream's own source rather than its README, and this settles the question the whole design was gated on. LavaSR/model.py's enhance() resamples 16000 -> 48000 UNCONDITIONALLY, in both the denoise and the no-denoise branch: `torchaudio.functional.resample(wav, 16000, 48000)`. load_audio() will happily load a file at some other input_sr, but enhance() still interprets whatever it is given as 16 kHz -- so handing it Pocket's 24 kHz would stretch the reply by half and nothing would say so. The README's '8-48 kHz input' describes the project's ambition, not this code path. So the adapter's contract is: resample the real source rate to 16000 deterministically, run the model, take 48000 out. That is what mc_voice_pipeline_runtime hands the worker and what LavaStage implements; analysis_ms and context_ms still need the latency-quality sweep before a release."
    },
    "provisional": false,
-   "available": false,
-   "unavailable_reason": "Not installable yet \u2014 this build has no files pinned for it. The PyTorch runtime it needs is ready; LavaSR's own model and code are not declared here yet, so there is nothing for the installer to fetch.",
-   "maintainer_notes": "What is left, precisely. The torch runtime closure exists and is pinned (48 wheels, 264 MB, ONNX Runtime and PyTorch in one interpreter so the single contained worker still serves both stages), and a CUDA variant resolves torch and torchaudio from download.pytorch.org at install time. What is missing is LavaSR itself: its weights on huggingface.co, its source at commit 33ac040892519c1bb4aed7eb32e79af51cc29e2a, the vocos fork at 451e522f7a11c3652c9522f63ea6780736d93de0, and encodec 0.1.1 (sdist only, sha256 36dde98ccfe6c51a15576476cadfcb3b35a63507b8b8555abd69889a6fba6772). The alternative that needs none of the three is tools/export_lavasr_onnx.py, which exports LavaSR to ONNX on a machine that can reach the hub and proves the graph against PyTorch before writing it."
+   "available": true,
+   "unavailable_reason": "This build cannot fetch LavaSR for you \u2014 its files are on a host this repository could not reach to pin them. Download them yourself and point Voice Chat at the folder, using the links below.",
+   "maintainer_notes": "What is left, precisely. The torch runtime closure exists and is pinned (48 wheels, 264 MB, ONNX Runtime and PyTorch in one interpreter so the single contained worker still serves both stages), and a CUDA variant resolves torch and torchaudio from download.pytorch.org at install time. What is missing is LavaSR itself: its weights on huggingface.co, its source at commit 33ac040892519c1bb4aed7eb32e79af51cc29e2a, the vocos fork at 451e522f7a11c3652c9522f63ea6780736d93de0, and encodec 0.1.1 (sdist only, sha256 36dde98ccfe6c51a15576476cadfcb3b35a63507b8b8555abd69889a6fba6772). The alternative that needs none of the three is tools/export_lavasr_onnx.py, which exports LavaSR to ONNX on a machine that can reach the hub and proves the graph against PyTorch before writing it.",
+   "local_only": true,
+   "sources": [
+    {
+     "filename": "enhancer_v2/pytorch_model.bin",
+     "save_as": "enhancer_v2/pytorch_model.bin",
+     "url": "https://huggingface.co/YatharthS/LavaSR/resolve/main/enhancer_v2/pytorch_model.bin"
+    },
+    {
+     "filename": "enhancer_v2/config.yaml",
+     "save_as": "enhancer_v2/config.yaml",
+     "url": "https://huggingface.co/YatharthS/LavaSR/resolve/main/enhancer_v2/config.yaml"
+    },
+    {
+     "filename": "denoiser/denoiser.bin",
+     "save_as": "denoiser/denoiser.bin",
+     "url": "https://huggingface.co/YatharthS/LavaSR/resolve/main/denoiser/denoiser.bin"
+    }
+   ]
   }
  ],
  "runtimes": {
