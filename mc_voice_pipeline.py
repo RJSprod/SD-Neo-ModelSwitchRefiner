@@ -1615,7 +1615,7 @@ def install(component: str, on_status=None, on_progress=None) -> "Status":
     with models._claim(KIND, say, wanted):
         if wanted == "runtime":
             _install_runtime(say, tick)
-        elif runtime_python() is None:
+        elif runtime_python(stage_flavour(wanted)) is None:
             # The runtime is not a second thing to install, it is the thing this
             # stage is proved inside: ``_install_stage`` ends by running the
             # model through a second of speech in the staged interpreter, and
@@ -1630,17 +1630,18 @@ def install(component: str, on_status=None, on_progress=None) -> "Status":
             # that either finishes or leaves the machine as it was, and the two
             # progress spans below are what stops the bar from reaching the end
             # twice.
+            flavour = stage_flavour(wanted)
             if not supported_platform():
                 raise PipelineError(
                     "This build has no pinned Voice Pipeline runtime for this operating "
                     "system and Python version, and the enhancement stages cannot run "
                     "without one.")
-            if not runtime_installable():
+            if not runtime_installable(flavour):
                 raise PipelineError(
                     "This build has not pinned a Voice Pipeline runtime closure for this "
                     "machine, and the enhancement stages cannot run without one.")
             say("The Voice Pipeline runtime has to be installed first \u2014 doing that now\u2026")
-            _install_runtime(say, _span(tick, 0.0, RUNTIME_SHARE))
+            _install_runtime(say, _span(tick, 0.0, RUNTIME_SHARE), flavour)
             _install_stage(wanted, say, _span(tick, RUNTIME_SHARE, 1.0))
         else:
             _install_stage(wanted, say, tick)
@@ -1677,8 +1678,8 @@ def _span(tick, low: float, high: float):
     return scaled
 
 
-def _platform_entry(flavour: str = "onnx") -> dict:
-    entry = _platform_entry_or_none(manifest(), flavour)
+def _platform_entry(flavour: str = "onnx", accelerator: str = "cpu") -> dict:
+    entry = _platform_entry_or_none(manifest(), flavour, accelerator)
     if entry is None:
         raise PipelineError(
             "This build has no pinned Voice Pipeline runtime for this operating system and "
@@ -1772,22 +1773,27 @@ def _artifacts(entries) -> list:
             for item in entries]
 
 
-def _install_runtime(say, tick) -> None:
+def _install_runtime(say, tick, flavour: str = "onnx",
+                     accelerator: str = "cpu") -> None:
     import mc_voice_models as models
 
-    entry = _platform_entry()
-    staging = paths.pipeline_staging_for("runtime", uuid.uuid4().hex[:8])
+    entry = _platform_entry(flavour, accelerator)
+    staging = paths.pipeline_staging_for(f"runtime-{flavour}-{accelerator}",
+                                         uuid.uuid4().hex[:8])
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True, exist_ok=True)
     try:
         say("Checking what the publishers say these files are…")
-        artifacts = _artifacts(entry["artifacts"])
+        # Any wheel this build could not pin gets its URL and digest from the
+        # publisher's index first. Most closures have none of these and this is
+        # a no-op; the CUDA one is the exception it exists for.
+        artifacts = _artifacts(_resolve_artifacts(entry, say))
         expectations = models._expectations(artifacts, say)
         models._make_room(artifacts, staging, expectations)
         digests = models._fetch_all(artifacts, staging, say, tick, 0.7, expectations)
 
         say("Building the isolated enhancement runtime…")
-        found = manifest()["runtime"]
+        found = runtime_entry(manifest(), flavour)
         chosen = models.RuntimePlatform(
             identifier=str(entry.get("id") or ""),
             system=str(entry.get("system") or "").casefold(),
@@ -1813,7 +1819,10 @@ def _install_runtime(say, tick) -> None:
                     "the Voice Pipeline runtime")
         models._write_json(staging / paths.INSTALLED_FILENAME, {
             "schema": SCHEMA,
-            "closure": runtime_closure_id(),
+            "closure": runtime_closure_id(flavour, accelerator),
+            "flavour": flavour,
+            "accelerator": accelerator,
+            "pinned": runtime_pinned(flavour, accelerator),
             "platform": chosen.identifier,
             "python": chosen.python,
             "provider": found["provider"],
@@ -1821,13 +1830,16 @@ def _install_runtime(say, tick) -> None:
             "license": found["license"],
             "artifacts": {name: digest for name, digest in digests.items()},
         })
-        models._promote(staging, paths.pipeline_runtime_root())
+        models._promote(staging, paths.pipeline_runtime_root(flavour))
         tick(1.0)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     say("The Voice Pipeline runtime is installed.")
-    logger.info("Model Chain: the Voice Pipeline runtime is installed — closure %s",
-                runtime_closure_id())
+    logger.info("Model Chain: the Voice Pipeline %s runtime is installed on %s — "
+                "closure %s%s", flavour, accelerator,
+                runtime_closure_id(flavour, accelerator),
+                "" if runtime_pinned(flavour, accelerator)
+                else " (wheels resolved from the publisher's index, not pinned here)")
 
 
 def _run_staged(interpreter: Path, arguments: list, what: str, timeout: float = 300):
@@ -2003,11 +2015,24 @@ def install_from(stage_id: str, folder, on_status=None, on_progress=None) -> Non
     say = models._narrator(KIND, on_status)
     tick = models._ticker(KIND, on_progress)
 
+    flavour = stage_flavour(stage_id)
     with models._claim(KIND, say, stage_id):
-        if runtime_python(stage_flavour(stage_id)) is None:
-            raise PipelineError(
-                "The Voice Pipeline runtime is not installed yet, and a model that cannot "
-                "be run cannot be proved. Install the runtime first.")
+        if runtime_python(flavour) is None:
+            # Installed rather than described, for the reason install() gives at
+            # length: telling somebody who pressed the only button on their
+            # panel to go and press a different one is not an answer, and here
+            # it was not even true. Nothing on the settings page installs the
+            # PyTorch closure -- the Runtime row builds the ONNX one -- so this
+            # refusal named a button that does not exist and left the folder
+            # path unreachable for the one stage that has no other way in.
+            if not runtime_installable(flavour):
+                raise PipelineError(
+                    "This build has no Voice Pipeline runtime for this machine, and a "
+                    "model that cannot be run cannot be proved.")
+            say("The Voice Pipeline runtime has to be installed first \u2014 doing that "
+                "now\u2026")
+            _install_runtime(say, _span(tick, 0.0, RUNTIME_SHARE), flavour)
+            tick = _span(tick, RUNTIME_SHARE, 1.0)
         logger.info("Model Chain: the Voice Pipeline is installing %s from %s",
                     stage_id, source)
         say(f"Reading {source}…")
