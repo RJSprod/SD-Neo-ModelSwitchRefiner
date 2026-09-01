@@ -1483,9 +1483,11 @@ class TestAStageInstallsTheRuntimeItNeeds:
         monkeypatch.setattr(models, "current_platform",
                             lambda: ("windows", "amd64", "3.13"))
         monkeypatch.setattr(pipeline, "runtime_python",
-                            lambda: ("python" if runtime_present else None))
-        monkeypatch.setattr(pipeline, "_install_runtime",
-                            lambda say, tick: (done.append("runtime"), tick(1.0)))
+                            lambda flavour="onnx": ("python" if runtime_present else None))
+        monkeypatch.setattr(
+            pipeline, "_install_runtime",
+            lambda say, tick, flavour="onnx", accelerator="cpu": (
+                done.append(f"runtime:{flavour}"), tick(1.0)))
         monkeypatch.setattr(pipeline, "_install_stage",
                             lambda which, say, tick: (done.append(which), tick(1.0)))
         monkeypatch.setattr(pipeline, "status", lambda: "status")
@@ -1494,7 +1496,7 @@ class TestAStageInstallsTheRuntimeItNeeds:
     def test_installing_a_stage_installs_the_runtime_first(self, monkeypatch):
         done, said, bar = self._stub(monkeypatch, runtime_present=False)
         pipeline.install("dpdfnet", on_status=said.append, on_progress=bar.append)
-        assert done == ["runtime", "dpdfnet"], (
+        assert done == ["runtime:onnx", "dpdfnet"], (
             "a stage install must build the runtime it is proved inside before "
             "trying to prove anything in it")
         assert any("runtime" in text and "first" in text for text in said), said
@@ -3151,12 +3153,81 @@ class TestInstallingAStageFromAFolderYouFilled:
         with pytest.raises(pipeline.PipelineError, match="Give the folder"):
             pipeline.install_from("lavasr", "   ")
 
-    def test_a_stage_with_no_runtime_is_refused_before_anything_is_copied(
+    def test_a_missing_runtime_is_installed_rather_than_described(
             self, tmp_path, monkeypatch):
+        """The dead end this class was shipped into, and the fix for it.
+
+        LavaSR needs the PyTorch closure. Nothing on the settings page installs
+        that -- the Runtime row builds the ONNX one -- so refusing with "install
+        the runtime first" named a button that does not exist and left the only
+        way into this stage permanently shut. The prerequisite is built here for
+        the same reason install() builds it: nobody wants a stage without the
+        runtime under it.
+        """
+        import mc_voice_models as models
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("windows", "amd64", "3.13"))
+        built = []
+        monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": None)
+        monkeypatch.setattr(
+            pipeline, "_install_runtime",
+            lambda say, tick, flavour="onnx", accelerator="cpu": (
+                built.append(flavour), tick(1.0)))
+        monkeypatch.setattr(pipeline, "_self_test", lambda stage_id, staging: {})
+        folder = self._folder(tmp_path / "src", {
+            "enhancer_v2/pytorch_model.bin": b"x" * 32,
+            "enhancer_v2/config.yaml": b"sample_rate: 24000\n",
+            "denoiser/denoiser.bin": b"y" * 32})
+        pipeline.install_from("lavasr", folder)
+        assert built == ["torch"], "LavaSR is proved inside the PyTorch closure"
+        assert paths.pipeline_stage_manifest("lavasr").exists()
+
+    def test_a_build_with_no_closure_at_all_still_says_so(self, tmp_path, monkeypatch):
+        """Installing the prerequisite is only possible where one is pinned."""
+        import mc_voice_models as models
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("linux", "x86_64", "3.11"))
         monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": None)
         folder = self._folder(tmp_path / "src", {
             "enhancer_v2/pytorch_model.bin": b"x" * 32,
             "enhancer_v2/config.yaml": b"sample_rate: 24000\n",
             "denoiser/denoiser.bin": b"y" * 32})
-        with pytest.raises(pipeline.PipelineError, match="runtime is not installed"):
+        with pytest.raises(pipeline.PipelineError, match="no Voice Pipeline runtime"):
             pipeline.install_from("lavasr", folder)
+
+
+class TestTheResolverIsActuallyReached:
+    """A guard on a defect I shipped: correct code nothing ever called.
+
+    The CUDA wheel resolver was written, tested in isolation and committed --
+    and never wired into the installer, so the closure it exists to build could
+    not have been built. Unit tests on the resolver all passed. The thing they
+    could not see was that no caller existed.
+    """
+
+    def test_the_runtime_installer_resolves_before_it_fetches(self, monkeypatch,
+                                                              voice_root):
+        import mc_voice_models as models
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("windows", "amd64", "3.13"))
+        seen = []
+
+        def watch(entry, say):
+            seen.append(entry.get("id"))
+            raise pipeline.PipelineError("stop here, the resolve is what was under test")
+
+        monkeypatch.setattr(pipeline, "_resolve_artifacts", watch)
+        with pytest.raises(pipeline.PipelineError, match="stop here"):
+            pipeline._install_runtime(lambda *a, **k: None, lambda *a, **k: None,
+                                      "torch", "cuda")
+        assert seen == ["windows-x86_64-cp313-cu128"], (
+            "the installer must hand the CUDA platform entry to the resolver")
+
+    def test_a_closure_with_nothing_to_resolve_passes_through_unchanged(self):
+        """Most closures are fully pinned; resolving must be a no-op for them."""
+        entry = pipeline._platform_entry_or_none(pipeline.manifest(), "onnx", "cpu")
+        if entry is None:
+            pytest.skip("no ONNX closure for this platform")
+        rows = pipeline._resolve_artifacts(entry, lambda *a, **k: None)
+        assert rows == entry["artifacts"]
+        assert all(not item["resolve"] for item in rows)
