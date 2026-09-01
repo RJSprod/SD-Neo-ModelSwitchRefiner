@@ -3714,6 +3714,45 @@
                     }).catch(function () { button.disabled = false; });
                 });
             });
+        // Installing a stage from a folder somebody filled themselves. Sits
+        // beside the managed button rather than replacing it: for DPDFNet the
+        // download works and this is the escape hatch, and for LavaSR the
+        // download is not offered at all and this is the only way in.
+        host.querySelectorAll("[data-mc-voice-stage-local]").forEach(
+            function (button) {
+                button.addEventListener("click", function (event) {
+                    if (event.preventDefault) event.preventDefault();
+                    if (button.disabled) return;
+                    const stage = button.getAttribute("data-mc-voice-stage-local");
+                    const box = host.querySelector(
+                        '[data-mc-voice-stage-folder="' + stage + '"]');
+                    const folder = box ? String(box.value || "").trim() : "";
+                    if (!folder) {
+                        // Said here rather than sent and refused. The server
+                        // would answer the same thing, and a round trip to be
+                        // told to fill in the empty box is a worse answer.
+                        showComponentStatus(
+                            row, stage, "Give the folder the downloaded files are in.");
+                        if (box && box.focus) box.focus();
+                        return;
+                    }
+                    button.disabled = true;
+                    post(ROUTES.pipelineInstall, {component: stage, folder: folder},
+                         holder).then(function (payload) {
+                        button.disabled = false;
+                        if (!payload || !payload.ok) {
+                            showComponentStatus(
+                                row, stage, (payload && payload.error)
+                                    || "That folder could not be installed from.");
+                            return;
+                        }
+                        pollComponents(holder, row, 800);
+                        const pipelineRow = holder.querySelector(
+                            '[data-mc-voice-kind="pipeline"]');
+                        if (pipelineRow) pollPipeline(holder, pipelineRow, 800);
+                    }).catch(function () { button.disabled = false; });
+                });
+            });
         // Where an enhancement stage runs. The one other interactive thing in a
         // detail surface, and it is here rather than in `wirePipeline` for a
         // plain reason: this markup is fetched from `/component` and injected

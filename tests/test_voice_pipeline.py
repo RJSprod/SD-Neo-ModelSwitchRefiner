@@ -1222,15 +1222,61 @@ class TestTheManifestIsATrustRoot:
         hundred words of engineering notes that told a user staring at a
         disabled button everything except what to do.
         """
-        assert pipeline.stage_installable("lavasr") is False
+        assert pipeline.stage_installable("lavasr") is False, "this build cannot fetch it"
         reason = pipeline.stage_unavailable_reason("lavasr")
+        if "operating system" in reason:
+            # This machine has no pinned closure at all, which is a truthful
+            # earlier answer and not the one under test.
+            pytest.skip("no runtime closure for this platform")
         assert "LavaSR" in reason
-        assert "not declared" in reason or "no files pinned" in reason
+        assert "folder" in reason, "a refusal that does not say how is half an answer"
         assert len(reason) <= 320, (
             f"the panel reason is {len(reason)} characters; it is read by somebody "
             f"looking at a disabled button, not by somebody reading a commit log")
         with pytest.raises(pipeline.PipelineError, match="LavaSR"):
             pipeline.install("lavasr")
+
+    def test_lavasr_can_still_be_installed_from_a_folder(self):
+        """Cannot fetch is not cannot install.
+
+        Its weights are on a host this repository could not reach to pin, so
+        the managed download is not offered -- but the files themselves are
+        public and a person can fetch them in a browser. The panel names them
+        and takes a folder, which is the difference between a build that says
+        no and a build that says no and how.
+        """
+        import mc_voice_models as models
+        assert pipeline.stage_available("lavasr") is True
+        entry = pipeline.manifest()["stages"]["lavasr"]
+        assert entry["required_paths"] == ["enhancer_v2/pytorch_model.bin",
+                                           "enhancer_v2/config.yaml",
+                                           "denoiser/denoiser.bin"]
+        assert len(entry["sources"]) == len(entry["required_paths"])
+        for item in entry["sources"]:
+            assert item["url"].startswith("https://huggingface.co/YatharthS/LavaSR/")
+
+    def test_the_folder_path_still_needs_a_runtime_to_prove_the_model_in(self, monkeypatch):
+        """Installable from a folder is not installable into nothing.
+
+        The files can be read from disk on any machine; running the model to
+        prove it works needs the closure, and a build with no closure for this
+        platform cannot offer the folder path either.
+        """
+        import mc_voice_models as models
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("windows", "amd64", "3.13"))
+        assert pipeline.stage_local_installable("lavasr") is True
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("linux", "x86_64", "3.11"))
+        assert pipeline.stage_local_installable("lavasr") is False
+
+    def test_a_required_path_that_would_escape_its_folder_is_refused(self):
+        """These are nested now, so they are joined to a directory we chose."""
+        for bad in ("../escape.bin", "/etc/passwd", "a/../../b.bin", "C:/x.bin", ""):
+            with pytest.raises(pipeline.PipelineError):
+                pipeline._read_required_path("lavasr", bad)
+        assert pipeline._read_required_path(
+            "lavasr", "enhancer_v2\\config.yaml") == "enhancer_v2/config.yaml"
 
     def test_the_measured_lava_rate_is_recorded_where_the_adapter_reads_it(self):
         """The Phase-0 blocker, answered from upstream's source.
@@ -2586,9 +2632,16 @@ class TestThePlacementControlSaysWhatItCanAndCannotDo:
             types.SimpleNamespace(physical_index=0, uuid="GPU-aaaa", memory_total_mb=24576,
                                   name="NVIDIA GeForce RTX 3090")])
 
-        assert pipeline.stage_available("lavasr") is False, "so this proves nothing"
+        # LavaSR is shipped now -- it installs from a folder -- so it is no
+        # longer the example of an unshipped stage. The property still matters,
+        # so it is proved against a stage the build says it does not have.
+        monkeypatch.setattr(pipeline, "stage_available",
+                            lambda stage_id: stage_id != "lavasr")
         assert ui_module._pipeline_device_row("lavasr") == ""
         assert ui_module._pipeline_device_row("dpdfnet") != ""
+        monkeypatch.undo()
+        assert ui_module._pipeline_device_row("lavasr") != "", (
+            "a stage that can be installed is a stage that can be placed")
 
     def test_availability_and_installability_are_different_questions(self):
         """A stage not installable *here* is still a stage this build has.
@@ -2948,3 +3001,162 @@ class TestChoosingACardChoosesADifferentClosure:
         monkeypatch.setattr(pipeline, "_manifest_cache", None)
         with pytest.raises(pipeline.PipelineError, match="does not know how to build for"):
             pipeline._read_manifest(found)
+
+
+class TestInstallingAStageFromAFolderYouFilled:
+    """The escape hatch, for a stage. For LavaSR it is the only way in.
+
+    Its weights sit on a host this repository could not reach to pin, so no
+    digest for them was ever committed and the managed download is not offered.
+    The files are public though, so a person can fetch them in a browser -- and
+    a build that only showed a disabled button would be refusing work it is
+    perfectly able to do.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated(self, voice_root):
+        """Every case here writes a real installation, so each needs its own tree.
+
+        Without this the first successful install leaves a stage record behind
+        and the next case's "nothing was installed" assertion passes or fails on
+        the previous test's leftovers rather than on its own behaviour.
+        """
+        return voice_root
+
+    @staticmethod
+    def _folder(tmp_path, layout):
+        for name, blob in layout.items():
+            target = tmp_path / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(blob)
+        return tmp_path
+
+    def test_a_missing_file_names_it_and_installs_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        folder = self._folder(tmp_path / "src", {
+            "enhancer_v2/pytorch_model.bin": b"x" * 32,
+            "enhancer_v2/config.yaml": b"sample_rate: 24000\n"})
+        with pytest.raises(pipeline.PipelineError, match="denoiser/denoiser.bin"):
+            pipeline.install_from("lavasr", folder)
+        assert not paths.pipeline_stage_manifest("lavasr").exists()
+
+    def test_an_empty_file_is_refused_rather_than_copied(self, tmp_path, monkeypatch):
+        """A browser that failed halfway leaves a zero-byte file, not no file."""
+        monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        folder = self._folder(tmp_path / "src", {
+            "enhancer_v2/pytorch_model.bin": b"x" * 32,
+            "enhancer_v2/config.yaml": b"sample_rate: 24000\n",
+            "denoiser/denoiser.bin": b""})
+        with pytest.raises(pipeline.PipelineError, match="empty"):
+            pipeline.install_from("lavasr", folder)
+
+    def test_files_dropped_loose_are_accepted_as_well_as_nested(self, tmp_path,
+                                                                monkeypatch):
+        """Clicking three links gives three loose files, not a tree.
+
+        Accepting only the nested spelling would refuse the more likely of the
+        two layouts, which is the one somebody gets by doing exactly what the
+        panel's links invite them to do.
+        """
+        monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        monkeypatch.setattr(pipeline, "_self_test", lambda stage_id, staging: {})
+        folder = self._folder(tmp_path / "loose", {
+            "pytorch_model.bin": b"w" * 64,
+            "config.yaml": b"sample_rate: 24000\n",
+            "denoiser.bin": b"d" * 64})
+        pipeline.install_from("lavasr", folder)
+        root = paths.pipeline_stage_root("lavasr")
+        # Stored under the names the model's own loader indexes into, whichever
+        # way they arrived -- the loader is what has to find them, not the user.
+        assert (root / "enhancer_v2" / "pytorch_model.bin").exists()
+        assert (root / "enhancer_v2" / "config.yaml").exists()
+        assert (root / "denoiser" / "denoiser.bin").exists()
+
+    def test_the_record_says_local_rather_than_claiming_a_verification(self, tmp_path,
+                                                                      monkeypatch):
+        """This repository has never seen these bytes and must not imply it has."""
+        monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        monkeypatch.setattr(pipeline, "_self_test", lambda stage_id, staging: {})
+        folder = self._folder(tmp_path / "src", {
+            "enhancer_v2/pytorch_model.bin": b"x" * 32,
+            "enhancer_v2/config.yaml": b"sample_rate: 24000\n",
+            "denoiser/denoiser.bin": b"y" * 32})
+        pipeline.install_from("lavasr", folder)
+        record = json.loads(
+            paths.pipeline_stage_manifest("lavasr").read_text(encoding="utf-8"))
+        assert record["source"] == "local"
+        assert record["revision"] == "", "no revision was verified, so none is claimed"
+        assert record["provisional"] is True
+        # Hashed anyway: the bytes were never vouched for, but later tampering
+        # is still detectable, which is a different and achievable claim.
+        assert len(record["artifacts"]) == 3
+        assert all(len(digest) == 64 for digest in record["artifacts"].values())
+
+    def test_a_folder_that_fails_the_self_test_leaves_the_old_install_alone(
+            self, tmp_path, monkeypatch):
+        """Staged, proved, promoted -- in that order, so a bad folder is inert."""
+        monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        monkeypatch.setattr(pipeline, "_self_test", lambda stage_id, staging: {})
+        good = self._folder(tmp_path / "good", {
+            "enhancer_v2/pytorch_model.bin": b"x" * 32,
+            "enhancer_v2/config.yaml": b"sample_rate: 24000\n",
+            "denoiser/denoiser.bin": b"y" * 32})
+        pipeline.install_from("lavasr", good)
+        before = paths.pipeline_stage_manifest("lavasr").read_text(encoding="utf-8")
+
+        def explode(stage_id, staging):
+            raise pipeline.PipelineError("it does not run here")
+
+        monkeypatch.setattr(pipeline, "_self_test", explode)
+        bad = self._folder(tmp_path / "bad", {
+            "enhancer_v2/pytorch_model.bin": b"z" * 32,
+            "enhancer_v2/config.yaml": b"sample_rate: 48000\n",
+            "denoiser/denoiser.bin": b"z" * 32})
+        with pytest.raises(pipeline.PipelineError, match="does not run here"):
+            pipeline.install_from("lavasr", bad)
+        assert paths.pipeline_stage_manifest("lavasr").read_text(encoding="utf-8") == before
+
+    def test_pointing_at_a_file_takes_its_folder(self, tmp_path, monkeypatch):
+        """What people paste is a file path. Refusing it is unkind, not safe.
+
+        Its *own* folder, note, not the root of a tree it happens to sit in.
+        Pasting a nested file gives that file's directory, which will then be
+        missing the rest -- and the error names what it looked for, which is
+        more use than silently climbing until something matches.
+        """
+        monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        monkeypatch.setattr(pipeline, "_self_test", lambda stage_id, staging: {})
+        folder = self._folder(tmp_path / "loose", {
+            "pytorch_model.bin": b"x" * 32,
+            "config.yaml": b"sample_rate: 24000\n",
+            "denoiser.bin": b"y" * 32})
+        pipeline.install_from("lavasr", folder / "config.yaml")
+        assert paths.pipeline_stage_manifest("lavasr").exists()
+
+    def test_a_nested_paste_says_where_it_looked(self, tmp_path, monkeypatch):
+        """The consequence of the rule above, made explicit rather than found."""
+        monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        folder = self._folder(tmp_path / "src", {
+            "enhancer_v2/pytorch_model.bin": b"x" * 32,
+            "enhancer_v2/config.yaml": b"sample_rate: 24000\n",
+            "denoiser/denoiser.bin": b"y" * 32})
+        with pytest.raises(pipeline.PipelineError) as caught:
+            pipeline.install_from("lavasr", folder / "enhancer_v2" / "config.yaml")
+        assert "Looked for" in str(caught.value)
+
+    def test_nothing_at_that_path_says_so_plainly(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": tmp_path)
+        with pytest.raises(pipeline.PipelineError, match="There is nothing at"):
+            pipeline.install_from("lavasr", tmp_path / "nope")
+        with pytest.raises(pipeline.PipelineError, match="Give the folder"):
+            pipeline.install_from("lavasr", "   ")
+
+    def test_a_stage_with_no_runtime_is_refused_before_anything_is_copied(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "runtime_python", lambda flavour="onnx": None)
+        folder = self._folder(tmp_path / "src", {
+            "enhancer_v2/pytorch_model.bin": b"x" * 32,
+            "enhancer_v2/config.yaml": b"sample_rate: 24000\n",
+            "denoiser/denoiser.bin": b"y" * 32})
+        with pytest.raises(pipeline.PipelineError, match="runtime is not installed"):
+            pipeline.install_from("lavasr", folder)

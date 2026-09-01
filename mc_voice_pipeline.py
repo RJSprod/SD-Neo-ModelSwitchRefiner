@@ -753,6 +753,27 @@ def _read_artifact(owner: str, item) -> dict:
     }
 
 
+def _read_required_path(stage_id: str, name) -> str:
+    """One path the model's loader needs, checked before it becomes a filesystem op.
+
+    These may be nested now -- LavaSR indexes into ``enhancer_v2/config.yaml``,
+    so flattening them would break the very loader they describe -- and a nested
+    name is joined to a directory this module chose. Anything that could leave
+    that directory is a manifest bug with a filesystem consequence, refused here
+    rather than at the write, exactly as an artifact's local name is.
+    """
+    text = str(name or "").replace("\\", "/").strip()
+    if not text:
+        raise PipelineError(f"The Voice Pipeline manifest gives {stage_id!r} a required "
+                            f"path with no name.")
+    parts = [part for part in text.split("/") if part]
+    if (text.startswith("/") or ".." in parts or not parts
+            or any(part == "." for part in parts) or ":" in text):
+        raise PipelineError(f"The Voice Pipeline manifest gives {stage_id!r} a required "
+                            f"path ({text!r}) that would not stay in its own folder.")
+    return "/".join(parts)
+
+
 def _read_stage(spec: StageSpec, entry: dict) -> dict:
     """One stage entry, validated against the shape the worker will be handed."""
     artifacts = entry.get("artifacts")
@@ -810,9 +831,28 @@ def _read_stage(spec: StageSpec, entry: dict) -> dict:
         "attribution": str(entry.get("attribution") or ""),
         "about_bytes": int(entry.get("about_bytes") or 0),
         "artifacts": read,
-        "required_paths": [str(name) for name in (entry.get("required_paths") or ())],
+        "required_paths": [_read_required_path(spec.id, name)
+                           for name in (entry.get("required_paths") or ())],
+        # Where a person can get these files themselves. Read through the same
+        # HTTPS check the fetchable artifacts go through, because these become
+        # links in a settings panel and a link is a thing somebody clicks.
+        "sources": [_read_source(spec.id, item) for item in (entry.get("sources") or ())],
         "contract": dict(contract),
     }
+
+
+def _read_source(stage_id: str, item) -> dict:
+    """One "download it yourself" link, validated."""
+    if not isinstance(item, dict):
+        raise PipelineError(f"The Voice Pipeline manifest gives {stage_id!r} a source that "
+                            f"is not an object.")
+    url = str(item.get("url") or "")
+    if not url.startswith("https://"):
+        raise PipelineError(f"The Voice Pipeline manifest gives {stage_id!r} a source that "
+                            f"is not HTTPS.")
+    filename = str(item.get("filename") or "")
+    return {"filename": filename, "url": url,
+            "save_as": str(item.get("save_as") or filename)}
 
 
 def _immutable(revision: str) -> bool:
@@ -1196,9 +1236,12 @@ def _record(path: Path) -> dict:
     return found if isinstance(found, dict) else {}
 
 
-def runtime_python() -> "Path | None":
-    """The installed enhancement interpreter, or ``None``."""
-    root = paths.pipeline_runtime_root() / "env"
+def runtime_python(flavour: str = "onnx") -> "Path | None":
+    """The installed enhancement interpreter for one closure, or ``None``."""
+    try:
+        root = paths.pipeline_runtime_root(flavour) / "env"
+    except ValueError:
+        return None
     candidates = (root / "Scripts" / "python.exe", root / "bin" / "python3",
                   root / "bin" / "python")
     for candidate in candidates:
@@ -1886,6 +1929,158 @@ def _install_stage(stage_id: str, say, tick) -> None:
     say(f"{entry['label']} is installed.")
     logger.info("Model Chain: %s is installed — revision %s", entry["label"],
                 entry["revision"][:12])
+
+
+def stage_local_installable(stage_id: str) -> bool:
+    """Whether a stage can be installed from files somebody downloaded themselves.
+
+    A different question from :func:`stage_installable`, which asks whether this
+    build can *fetch* it. A stage this repository could not pin -- no digests,
+    no immutable revision, a publisher this machine could not reach -- can still
+    be installed from a folder, because the folder is the source of truth and
+    nothing has to be guessed about a remote layout to read it.
+
+    What it needs is only the list of files the model's own loader indexes into,
+    which is read out of upstream's source rather than out of a repository
+    listing. That is why LavaSR can take this path while its managed download
+    still cannot be offered.
+    """
+    try:
+        found = manifest()
+    except PipelineError:
+        return False
+    entry = found["stages"].get(str(stage_id or ""))
+    if entry is None or not entry["required_paths"]:
+        return False
+    return runtime_installable(stage_flavour(stage_id))
+
+
+def install_from(stage_id: str, folder, on_status=None, on_progress=None) -> None:
+    """Install one stage from files already on this machine.
+
+    The escape hatch the speech models have had all along
+    (:func:`mc_voice_models.install_from`), for the pipeline's stages. It earns
+    its place here for the same reasons and one more: LavaSR's weights are on a
+    host this repository's manifests could not reach to pin, so for that stage
+    this is not the fallback path -- it is the only one.
+
+    The claim it makes is the weaker one, honestly. There is no committed digest
+    to check these files against, because this repository has never seen them.
+    So the checks are the ones that can be made truthfully: every file the
+    model's own loader needs is present, none is empty, and the model actually
+    loads and produces audio of the right length on this machine before anything
+    is promoted. A digest is computed and recorded at install time, so later
+    tampering is still detectable even though the original bytes were never
+    vouched for, and the record says ``local`` so no surface claims a
+    verification that did not happen.
+
+    The transaction is the managed path's: staged, proved, promoted with a
+    rename. A folder that turns out to hold the wrong thing does not disturb a
+    stage that was already working.
+    """
+    import mc_voice_models as models
+
+    spec = stage(stage_id)
+    if spec is None:
+        raise PipelineError(f"{stage_id!r} is not a Voice Pipeline stage.")
+    entry = manifest()["stages"][stage_id]
+    if not entry["required_paths"]:
+        raise PipelineError(
+            f"This build does not know which files {entry['label']} needs, so it cannot "
+            f"check a folder for them. Nothing was installed.")
+
+    source = Path(str(folder or "").strip().strip('"')).expanduser()
+    if not str(folder or "").strip():
+        raise PipelineError("Give the folder the downloaded files are in.")
+    if not source.exists():
+        raise PipelineError(f"There is nothing at {source}.")
+    if source.is_file():
+        # A folder is asked for and a file inside one is what people paste.
+        source = source.parent
+    if not source.is_dir():
+        raise PipelineError(f"{source} is not a folder.")
+
+    say = models._narrator(KIND, on_status)
+    tick = models._ticker(KIND, on_progress)
+
+    with models._claim(KIND, say, stage_id):
+        if runtime_python(stage_flavour(stage_id)) is None:
+            raise PipelineError(
+                "The Voice Pipeline runtime is not installed yet, and a model that cannot "
+                "be run cannot be proved. Install the runtime first.")
+        logger.info("Model Chain: the Voice Pipeline is installing %s from %s",
+                    stage_id, source)
+        say(f"Reading {source}…")
+        staging = paths.pipeline_staging_for(stage_id, uuid.uuid4().hex[:8])
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
+        try:
+            digests = _copy_supplied(entry, source, staging, say, tick)
+            say(f"Checking that {entry['label']} runs on this machine…")
+            _self_test(stage_id, staging)
+            tick(0.95)
+            models._write_json(staging / paths.INSTALLED_FILENAME, {
+                "schema": SCHEMA,
+                "closure": stage_closure_id(stage_id),
+                "id": stage_id,
+                "source": "local",
+                "repo": entry["repo"],
+                "revision": "",
+                "model_id": entry["model_id"],
+                "license": entry["license"],
+                "attribution": entry["attribution"],
+                "contract": entry["contract"],
+                "provisional": True,
+                "model_file": entry["required_paths"][0],
+                "artifacts": dict(digests),
+            })
+            models._promote(staging, paths.pipeline_stage_root(stage_id))
+            tick(1.0)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+    say(f"{entry['label']} is installed from your own files.")
+    logger.info("Model Chain: %s is installed from files supplied at %s",
+                entry["label"], source)
+
+
+def _copy_supplied(entry: dict, source: Path, staging: Path, say, tick) -> dict:
+    """Find every file the loader needs under ``source`` and stage a copy.
+
+    Two layouts are accepted for each wanted path, and only two. The path as the
+    model's loader spells it -- ``enhancer_v2/config.yaml`` -- and the bare
+    filename sitting loose in the folder. The first is what a hub snapshot or a
+    directory download gives; the second is what somebody clicking individual
+    file links ends up with, and refusing that would be refusing the more
+    likely of the two.
+
+    Nothing is searched for recursively. A wanted name found three directories
+    down is as likely to be a different file with the same name as the right
+    one, and guessing there would undo the point of naming the paths at all.
+    """
+    import mc_voice_models as models
+
+    digests = {}
+    wanted = list(entry["required_paths"])
+    for index, name in enumerate(wanted):
+        candidates = [source / name]
+        bare = name.rsplit("/", 1)[-1]
+        if bare != name:
+            candidates.append(source / bare)
+        found = next((item for item in candidates if item.is_file()), None)
+        if found is None:
+            spelled = " or ".join(str(item) for item in candidates)
+            raise PipelineError(
+                f"{entry['label']} needs {name}, which is not in that folder. Looked for "
+                f"{spelled}. Nothing was installed.")
+        if found.stat().st_size <= 0:
+            raise PipelineError(f"{found} is empty. Nothing was installed.")
+        target = staging / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        say(f"Copying {bare}…")
+        shutil.copyfile(found, target)
+        digests[name] = models._digest(target)
+        tick(0.1 + 0.6 * (index + 1) / max(1, len(wanted)))
+    return digests
 
 
 def _self_test(stage_id: str, staging: Path) -> dict:
