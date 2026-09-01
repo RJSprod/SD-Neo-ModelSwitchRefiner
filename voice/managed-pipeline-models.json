@@ -1,356 +1,717 @@
 {
-  "schema": 1,
-  "version": 2,
-  "pinned": false,
-  "notes": "PARTIALLY PINNED. The runtime closure is pinned byte for byte: every wheel below is named, sized and hashed from pypi.org, resolved for windows-x86_64-cp313 -- the platform this was first tested on. The DPDFNet model is DECLARED BUT NOT HASHED: the machine that wrote this manifest could not reach huggingface.co, so the model's size and digest are recorded at install time from what the publisher actually serves, and its revision is the publisher's branch rather than an immutable commit. That is a weaker claim than the closure's and the difference is worth stating: an artifact with a digest here is checked against a number this repository committed to, and one without is checked against the digest its publisher reports at install time. Both refuse a file that arrives wrong; only the first refuses a publisher who changed their mind. A stage in that state carries \"provisional\": true, the settings row says so in words, and `python tools/pin_pipeline_models.py --stage dpdfnet --revision <sha>` on a machine that can reach the hub turns the first claim into the second. LavaSR is not installable in this build at all -- see its own entry.",
-  "runtime": {
+ "schema": 1,
+ "version": 2,
+ "pinned": false,
+ "notes": "PARTIALLY PINNED. The runtime closure is pinned byte for byte: every wheel below is named, sized and hashed from pypi.org, resolved for windows-x86_64-cp313 -- the platform this was first tested on. The DPDFNet model is DECLARED BUT NOT HASHED: the machine that wrote this manifest could not reach huggingface.co, so the model's size and digest are recorded at install time from what the publisher actually serves, and its revision is the publisher's branch rather than an immutable commit. That is a weaker claim than the closure's and the difference is worth stating: an artifact with a digest here is checked against a number this repository committed to, and one without is checked against the digest its publisher reports at install time. Both refuse a file that arrives wrong; only the first refuses a publisher who changed their mind. A stage in that state carries \"provisional\": true, the settings row says so in words, and `python tools/pin_pipeline_models.py --stage dpdfnet --revision <sha>` on a machine that can reach the hub turns the first claim into the second. LavaSR is not installable in this build at all -- see its own entry.",
+ "runtime": {
+  "python": "3.13",
+  "provider": "cpu+directml",
+  "build": 3,
+  "import_name": "onnxruntime",
+  "license": "MIT (ONNX Runtime, including its DirectML execution provider); BSD-3-Clause (NumPy, SciPy, scikit-learn, joblib, sympy, mpmath); ISC (librosa); BSD-2-Clause (numba, llvmlite); Apache-2.0 (DPDFNet); MIT (soxr, soundfile, tqdm, filelock)",
+  "attribution": "Resolved from PyPI for CPython 3.13 on Windows x86-64 with pip's own resolver, then hashed and checked against the digests pypi.org publishes for each file. The three wheels the DirectML build brought in over the CPU one -- onnxruntime-directml itself, sympy and mpmath -- were resolved from the same publisher metadata and hashed the same way; the other thirty-one are unchanged from that pip resolution.",
+  "closure_notes": "The enhancement runtime is deliberately NOT PocketTTS's interpreter (section 14.6). Lifecycle coupling does not imply dependency coupling: Pocket's closure stays reproducible, the pipeline can later serve Kokoro and Sopro, and a pipeline update cannot mutate the environment a working voice depends on. The closure below is the ONNX path -- Path A of section 10.4 -- which is the one to validate first because it shares a runtime with DPDFNet and gives explicit thread control. If Phase 0 rejects it, section 14.5 says to use the official PyTorch/Vocos LavaSR in this same isolated runtime with a project-owned rate adapter, which is a different closure and a different 'build' number here, not a different design. The ONNX Runtime wheel is the DirectML build rather than the plain CPU one, and that is a deliberate choice of ONE closure over two. The DirectML wheel carries the CPU execution provider as well as the DirectML one, so the placement setting picks a provider inside an installed runtime instead of picking between two installed runtimes -- no second interpreter, no second download, and a machine with no usable graphics card still runs every stage exactly as it did. The cost is honest and small: the DirectML build's newest release is 1.24.4 where the CPU-only build is at 1.29.0, and it declares sympy, which the CPU build no longer does. DirectML rather than CUDA because one wheel and no CUDA toolkit covers every Direct3D 12 card, where the CUDA build would need a toolkit matched per card generation -- the same wheel serves a 30-series and a 50-series card, which the CUDA builds do not.",
+  "wanted": [
+   [
+    "dpdfnet",
+    "0.6.0",
+    "upstream's own ONNX inference package and its StreamEnhancer"
+   ],
+   [
+    "onnxruntime-directml",
+    "1.24.4",
+    "the inference session. This build carries the CPU execution provider and the DirectML one in a single wheel, so one closure serves a stage running on the processor and the same stage running on a graphics card"
+   ],
+   [
+    "librosa",
+    "1.0.0",
+    "dpdfnet imports it for resampling; it brings numba and scipy with it"
+   ],
+   [
+    "sympy",
+    "1.14.0",
+    "onnxruntime-directml declares it; it brings mpmath with it"
+   ]
+  ],
+  "platforms": [
+   {
+    "id": "windows-x86_64-cp313",
+    "system": "windows",
+    "machines": [
+     "amd64",
+     "x86_64"
+    ],
     "python": "3.13",
-    "provider": "cpu+directml",
-    "build": 3,
-    "import_name": "onnxruntime",
-    "license": "MIT (ONNX Runtime, including its DirectML execution provider); BSD-3-Clause (NumPy, SciPy, scikit-learn, joblib, sympy, mpmath); ISC (librosa); BSD-2-Clause (numba, llvmlite); Apache-2.0 (DPDFNet); MIT (soxr, soundfile, tqdm, filelock)",
-    "attribution": "Resolved from PyPI for CPython 3.13 on Windows x86-64 with pip's own resolver, then hashed and checked against the digests pypi.org publishes for each file. The three wheels the DirectML build brought in over the CPU one -- onnxruntime-directml itself, sympy and mpmath -- were resolved from the same publisher metadata and hashed the same way; the other thirty-one are unchanged from that pip resolution.",
-    "closure_notes": "The enhancement runtime is deliberately NOT PocketTTS's interpreter (section 14.6). Lifecycle coupling does not imply dependency coupling: Pocket's closure stays reproducible, the pipeline can later serve Kokoro and Sopro, and a pipeline update cannot mutate the environment a working voice depends on. The closure below is the ONNX path -- Path A of section 10.4 -- which is the one to validate first because it shares a runtime with DPDFNet and gives explicit thread control. If Phase 0 rejects it, section 14.5 says to use the official PyTorch/Vocos LavaSR in this same isolated runtime with a project-owned rate adapter, which is a different closure and a different 'build' number here, not a different design. The ONNX Runtime wheel is the DirectML build rather than the plain CPU one, and that is a deliberate choice of ONE closure over two. The DirectML wheel carries the CPU execution provider as well as the DirectML one, so the placement setting picks a provider inside an installed runtime instead of picking between two installed runtimes -- no second interpreter, no second download, and a machine with no usable graphics card still runs every stage exactly as it did. The cost is honest and small: the DirectML build's newest release is 1.24.4 where the CPU-only build is at 1.29.0, and it declares sympy, which the CPU build no longer does. DirectML rather than CUDA because one wheel and no CUDA toolkit covers every Direct3D 12 card, where the CUDA build would need a toolkit matched per card generation -- the same wheel serves a 30-series and a 50-series card, which the CUDA builds do not.",
-    "wanted": [
-      [
-        "dpdfnet",
-        "0.6.0",
-        "upstream's own ONNX inference package and its StreamEnhancer"
-      ],
-      [
-        "onnxruntime-directml",
-        "1.24.4",
-        "the inference session. This build carries the CPU execution provider and the DirectML one in a single wheel, so one closure serves a stage running on the processor and the same stage running on a graphics card"
-      ],
-      [
-        "librosa",
-        "1.0.0",
-        "dpdfnet imports it for resampling; it brings numba and scipy with it"
-      ],
-      [
-        "sympy",
-        "1.14.0",
-        "onnxruntime-directml declares it; it brings mpmath with it"
-      ]
-    ],
-    "platforms": [
-      {
-        "id": "windows-x86_64-cp313",
-        "system": "windows",
-        "machines": [
-          "amd64",
-          "x86_64"
-        ],
-        "python": "3.13",
-        "artifacts": [
-          {
-            "filename": "certifi-2026.7.22-py3-none-any.whl",
-            "local_name": "certifi-2026.7.22-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
-            "bytes": 136983,
-            "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
-          },
-          {
-            "filename": "cffi-2.1.1-cp313-cp313-win_amd64.whl",
-            "local_name": "cffi-2.1.1-cp313-cp313-win_amd64.whl",
-            "url": "https://files.pythonhosted.org/packages/60/a6/8b149b2c3f2e11aaa1618ef64500b45f50f22c57a977a4dff1aff1f91042/cffi-2.1.1-cp313-cp313-win_amd64.whl",
-            "bytes": 185688,
-            "sha256": "1aa5645c30469b09530c4ebca77ebf8f17618293c58f8549cb1a543a50236e7d"
-          },
-          {
-            "filename": "charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl",
-            "local_name": "charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl",
-            "url": "https://files.pythonhosted.org/packages/8a/33/56d97ade41c8db611e727168c52ae46c9224c362ec28d4b65d7e9869e8da/charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl",
-            "bytes": 199295,
-            "sha256": "aea996a6aba25260827c9ea511d1addfde2da9eb686ac961838509086188b7e6"
-          },
-          {
-            "filename": "cloudpickle-3.1.2-py3-none-any.whl",
-            "local_name": "cloudpickle-3.1.2-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/88/39/799be3f2f0f38cc727ee3b4f1445fe6d5e4133064ec2e4115069418a5bb6/cloudpickle-3.1.2-py3-none-any.whl",
-            "bytes": 22228,
-            "sha256": "9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a"
-          },
-          {
-            "filename": "decorator-5.3.1-py3-none-any.whl",
-            "local_name": "decorator-5.3.1-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/05/7f/798705f5296a58ca505d600456748d1be48078eac8a7050d8a98bc9edb89/decorator-5.3.1-py3-none-any.whl",
-            "bytes": 10365,
-            "sha256": "f47fe6fdbd2edd623ecfe36875d37aba411624e2670dd395dddae1358689bb3c"
-          },
-          {
-            "filename": "dpdfnet-0.6.0-py3-none-any.whl",
-            "local_name": "dpdfnet-0.6.0-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/f3/57/3eb73faf0aefde25701f5e01315e77bbcbaf4e165651dba3efb936e11c55/dpdfnet-0.6.0-py3-none-any.whl",
-            "bytes": 25898,
-            "sha256": "457b10879808d7b259312f2128a26b5defb16aa3095536b4af0d55a263e3fd06"
-          },
-          {
-            "filename": "filelock-3.32.5-py3-none-any.whl",
-            "local_name": "filelock-3.32.5-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/36/d2/b70a31e13d04456d28493f31d2aa087e99eeb2767ef0293b2625727ccb8c/filelock-3.32.5-py3-none-any.whl",
-            "bytes": 100003,
-            "sha256": "142cd9fa77a872c5e78c62329a0d15278fadc686eb89e760017968961a4fd6b2"
-          },
-          {
-            "filename": "flatbuffers-25.12.19-py2.py3-none-any.whl",
-            "local_name": "flatbuffers-25.12.19-py2.py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/e8/2d/d2a548598be01649e2d46231d151a6c56d10b964d94043a335ae56ea2d92/flatbuffers-25.12.19-py2.py3-none-any.whl",
-            "bytes": 26661,
-            "sha256": "7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4"
-          },
-          {
-            "filename": "idna-3.19-py3-none-any.whl",
-            "local_name": "idna-3.19-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/57/b0/0e52c878c53f245edd3a11020f20979b3f490f245af532c7cae3027754b5/idna-3.19-py3-none-any.whl",
-            "bytes": 68550,
-            "sha256": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4"
-          },
-          {
-            "filename": "joblib-1.6.0-py3-none-any.whl",
-            "local_name": "joblib-1.6.0-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/18/53/84099323c2ec4be98d935f63c033ac4151ee83836ca1050ede3b3aadf155/joblib-1.6.0-py3-none-any.whl",
-            "bytes": 306115,
-            "sha256": "3dbbf9f6e4b592a2357b854608e980fe6390d131d7a82f011a377ef2ebef7aba"
-          },
-          {
-            "filename": "lazy_loader-0.5-py3-none-any.whl",
-            "local_name": "lazy_loader-0.5-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/8a/a1/8d812e53a5da1687abb10445275d41a8b13adb781bbf7196ddbcf8d88505/lazy_loader-0.5-py3-none-any.whl",
-            "bytes": 8044,
-            "sha256": "ab0ea149e9c554d4ffeeb21105ac60bed7f3b4fd69b1d2360a4add51b170b005"
-          },
-          {
-            "filename": "librosa-1.0.0-py3-none-any.whl",
-            "local_name": "librosa-1.0.0-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/96/14/0b2e4cc8017796dc8f69de740708601832c1e8d5377166eedb4db0a92264/librosa-1.0.0-py3-none-any.whl",
-            "bytes": 294628,
-            "sha256": "5910a6c0e1b2e494b92758c1615a7acbd0515a2315e138927ba2982f2af88857"
-          },
-          {
-            "filename": "llvmlite-0.49.0-cp313-cp313-win_amd64.whl",
-            "local_name": "llvmlite-0.49.0-cp313-cp313-win_amd64.whl",
-            "url": "https://files.pythonhosted.org/packages/96/7f/9f5afcf6476b228d6b170408f377a0c4f91477fc1fc91f8141088b45bf46/llvmlite-0.49.0-cp313-cp313-win_amd64.whl",
-            "bytes": 41865544,
-            "sha256": "a1b414dc6b164738ec39dd8987cea73829057b7dd92fc6d91b52838385fc1dd2"
-          },
-          {
-            "filename": "mpmath-1.4.1-py3-none-any.whl",
-            "local_name": "mpmath-1.4.1-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/13/f2/abeec3db71d221ccd3cd89d206be1fabf5a3ee7178862f5fba23a59607e0/mpmath-1.4.1-py3-none-any.whl",
-            "bytes": 567787,
-            "sha256": "dc4f0ea2304480d4a9a48a94c1020571558ade522b44a6912efac63a586e140f"
-          },
-          {
-            "filename": "msgpack-1.2.2-cp313-cp313-win_amd64.whl",
-            "local_name": "msgpack-1.2.2-cp313-cp313-win_amd64.whl",
-            "url": "https://files.pythonhosted.org/packages/3c/f8/593f5caf0dacab41cde1564c5f0419e61af55ec9628006205e8fd5eb5e03/msgpack-1.2.2-cp313-cp313-win_amd64.whl",
-            "bytes": 72203,
-            "sha256": "b07c03f0da7e5279170df7745ddc732d526c8a198208936ec1a95c11ed2b2d5f"
-          },
-          {
-            "filename": "narwhals-2.25.0-py3-none-any.whl",
-            "local_name": "narwhals-2.25.0-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/eb/dc/55481808fd70ef1567cf13540ffd4702af3f74b112e35427564b03f79c2d/narwhals-2.25.0-py3-none-any.whl",
-            "bytes": 467373,
-            "sha256": "1f0f403e8c7e4463cde9bfe78b12fdd809e3ae3dda6d9b2f802934fb9c7a6a8f"
-          },
-          {
-            "filename": "numba-0.67.0-cp313-cp313-win_amd64.whl",
-            "local_name": "numba-0.67.0-cp313-cp313-win_amd64.whl",
-            "url": "https://files.pythonhosted.org/packages/0f/80/d48f0ba7442516ceb5a1585f0c81d3aa531bc96bfcabcd9f8f925768c426/numba-0.67.0-cp313-cp313-win_amd64.whl",
-            "bytes": 2815504,
-            "sha256": "b68ad5125fe245339cc8dcc036081fc1ea482c5063387b9612a76ccd83dc91cd"
-          },
-          {
-            "filename": "numpy-2.5.2-cp313-cp313-win_amd64.whl",
-            "local_name": "numpy-2.5.2-cp313-cp313-win_amd64.whl",
-            "url": "https://files.pythonhosted.org/packages/15/20/f3489f86d81ea460b2bcdceaed094142ca6579f6be0ec527b781d39afe68/numpy-2.5.2-cp313-cp313-win_amd64.whl",
-            "bytes": 12460532,
-            "sha256": "85aaccb24182c25df891ad0ec333585967e115269d5f1b17f2c9ae005bc96657"
-          },
-          {
-            "filename": "onnxruntime_directml-1.24.4-cp313-cp313-win_amd64.whl",
-            "local_name": "onnxruntime_directml-1.24.4-cp313-cp313-win_amd64.whl",
-            "url": "https://files.pythonhosted.org/packages/60/53/2bd2696fac19cf8ca55496a0bcfe431f3aff9579eabbb0e231dc238acf6f/onnxruntime_directml-1.24.4-cp313-cp313-win_amd64.whl",
-            "bytes": 25112253,
-            "sha256": "2f1031cb2281e5b27cca9efe0b9399317c7286e4d226f7a79d4ab79bbd94d19e"
-          },
-          {
-            "filename": "packaging-26.3-py3-none-any.whl",
-            "local_name": "packaging-26.3-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl",
-            "bytes": 129956,
-            "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
-          },
-          {
-            "filename": "platformdirs-4.11.5-py3-none-any.whl",
-            "local_name": "platformdirs-4.11.5-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/c7/12/6f3fcd5067a9cbf4f8664b32957973498da8b083455203c8d9cab83a725c/platformdirs-4.11.5-py3-none-any.whl",
-            "bytes": 23900,
-            "sha256": "89f8d42695853b89c7170bd49bc3dc593f98a71e695ede88e06a3b247bc4563b"
-          },
-          {
-            "filename": "pooch-1.9.0-py3-none-any.whl",
-            "local_name": "pooch-1.9.0-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/2a/2d/d4bf65e47cea8ff2c794a600c4fd1273a7902f268757c531e0ee9f18aa58/pooch-1.9.0-py3-none-any.whl",
-            "bytes": 67175,
-            "sha256": "f265597baa9f760d25ceb29d0beb8186c243d6607b0f60b83ecf14078dbc703b"
-          },
-          {
-            "filename": "protobuf-7.36.1-cp310-abi3-win_amd64.whl",
-            "local_name": "protobuf-7.36.1-cp310-abi3-win_amd64.whl",
-            "url": "https://files.pythonhosted.org/packages/db/37/155788a0d8daded960375af604202805308169f9b859419ea0aa370946e2/protobuf-7.36.1-cp310-abi3-win_amd64.whl",
-            "bytes": 456518,
-            "sha256": "51139351435d9b43d88a55eaa49fb6f737fbb478fb0cbf2cf694d1a04a9d3363"
-          },
-          {
-            "filename": "pycparser-3.0-py3-none-any.whl",
-            "local_name": "pycparser-3.0-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl",
-            "bytes": 48172,
-            "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"
-          },
-          {
-            "filename": "requests-2.34.2-py3-none-any.whl",
-            "local_name": "requests-2.34.2-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl",
-            "bytes": 73075,
-            "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0"
-          },
-          {
-            "filename": "scikit_learn-1.9.0-cp313-cp313-win_amd64.whl",
-            "local_name": "scikit_learn-1.9.0-cp313-cp313-win_amd64.whl",
-            "url": "https://files.pythonhosted.org/packages/20/3f/7917ca72464038f6240ec70c29f94862d08a34a74291ae4d4ec5eb8186a0/scikit_learn-1.9.0-cp313-cp313-win_amd64.whl",
-            "bytes": 8184330,
-            "sha256": "5808d98f15c6bf6d9d96d2348c1997392a5888ce7097e664105f930c4bca1277"
-          },
-          {
-            "filename": "scipy-1.18.1-cp313-cp313-win_amd64.whl",
-            "local_name": "scipy-1.18.1-cp313-cp313-win_amd64.whl",
-            "url": "https://files.pythonhosted.org/packages/93/0e/e0348fbc0dbab65c114cf78957e7dfeb49f8e8b556b4d930cc12ff195e18/scipy-1.18.1-cp313-cp313-win_amd64.whl",
-            "bytes": 36622841,
-            "sha256": "559ed65f60c1af5a03f3912605a1b5114f522c7c32fb23c3376ae8f03219fe28"
-          },
-          {
-            "filename": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
-            "local_name": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
-            "url": "https://files.pythonhosted.org/packages/ed/97/b39c18ac1df45e755ca22b8b00e872929da5d107998a207a5e4ac831bfda/soundfile-0.14.0-py2.py3-none-win_amd64.whl",
-            "bytes": 1021480,
-            "sha256": "299491d3499460fb1b74bb4bd78b57ffc2d243a5fafa7b6ec1b264875c78453e"
-          },
-          {
-            "filename": "soxr-1.1.0-cp312-abi3-win_amd64.whl",
-            "local_name": "soxr-1.1.0-cp312-abi3-win_amd64.whl",
-            "url": "https://files.pythonhosted.org/packages/b0/4d/621e4150e4815246ad552d215a8a294a90143fedd19ee442cf82d3b3abc8/soxr-1.1.0-cp312-abi3-win_amd64.whl",
-            "bytes": 174357,
-            "sha256": "6ae2a174bffea94e8ead857dad85999d3f49f091774dbad5b046c0417d7092f4"
-          },
-          {
-            "filename": "sympy-1.14.0-py3-none-any.whl",
-            "local_name": "sympy-1.14.0-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
-            "bytes": 6299353,
-            "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5"
-          },
-          {
-            "filename": "threadpoolctl-3.6.0-py3-none-any.whl",
-            "local_name": "threadpoolctl-3.6.0-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/32/d5/f9a850d79b0851d1d4ef6456097579a9005b31fea68726a4ae5f2d82ddd9/threadpoolctl-3.6.0-py3-none-any.whl",
-            "bytes": 18638,
-            "sha256": "43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb"
-          },
-          {
-            "filename": "tqdm-4.70.0-py3-none-any.whl",
-            "local_name": "tqdm-4.70.0-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/f9/1c/01bfd571a64e7f270e6bab5e33777debe0edc56759233ce84f27dec92d14/tqdm-4.70.0-py3-none-any.whl",
-            "bytes": 80184,
-            "sha256": "7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953"
-          },
-          {
-            "filename": "typing_extensions-4.16.0-py3-none-any.whl",
-            "local_name": "typing_extensions-4.16.0-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
-            "bytes": 45571,
-            "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
-          },
-          {
-            "filename": "urllib3-2.7.0-py3-none-any.whl",
-            "local_name": "urllib3-2.7.0-py3-none-any.whl",
-            "url": "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl",
-            "bytes": 131087,
-            "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897"
-          }
-        ]
-      }
-    ],
-    "about_bytes": 138100000
-  },
-  "stages": [
+    "artifacts": [
+     {
+      "filename": "certifi-2026.7.22-py3-none-any.whl",
+      "local_name": "certifi-2026.7.22-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
+      "bytes": 136983,
+      "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
+     },
+     {
+      "filename": "cffi-2.1.1-cp313-cp313-win_amd64.whl",
+      "local_name": "cffi-2.1.1-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/60/a6/8b149b2c3f2e11aaa1618ef64500b45f50f22c57a977a4dff1aff1f91042/cffi-2.1.1-cp313-cp313-win_amd64.whl",
+      "bytes": 185688,
+      "sha256": "1aa5645c30469b09530c4ebca77ebf8f17618293c58f8549cb1a543a50236e7d"
+     },
+     {
+      "filename": "charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl",
+      "local_name": "charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/8a/33/56d97ade41c8db611e727168c52ae46c9224c362ec28d4b65d7e9869e8da/charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl",
+      "bytes": 199295,
+      "sha256": "aea996a6aba25260827c9ea511d1addfde2da9eb686ac961838509086188b7e6"
+     },
+     {
+      "filename": "cloudpickle-3.1.2-py3-none-any.whl",
+      "local_name": "cloudpickle-3.1.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/88/39/799be3f2f0f38cc727ee3b4f1445fe6d5e4133064ec2e4115069418a5bb6/cloudpickle-3.1.2-py3-none-any.whl",
+      "bytes": 22228,
+      "sha256": "9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a"
+     },
+     {
+      "filename": "decorator-5.3.1-py3-none-any.whl",
+      "local_name": "decorator-5.3.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/05/7f/798705f5296a58ca505d600456748d1be48078eac8a7050d8a98bc9edb89/decorator-5.3.1-py3-none-any.whl",
+      "bytes": 10365,
+      "sha256": "f47fe6fdbd2edd623ecfe36875d37aba411624e2670dd395dddae1358689bb3c"
+     },
+     {
+      "filename": "dpdfnet-0.6.0-py3-none-any.whl",
+      "local_name": "dpdfnet-0.6.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/f3/57/3eb73faf0aefde25701f5e01315e77bbcbaf4e165651dba3efb936e11c55/dpdfnet-0.6.0-py3-none-any.whl",
+      "bytes": 25898,
+      "sha256": "457b10879808d7b259312f2128a26b5defb16aa3095536b4af0d55a263e3fd06"
+     },
+     {
+      "filename": "filelock-3.32.5-py3-none-any.whl",
+      "local_name": "filelock-3.32.5-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/36/d2/b70a31e13d04456d28493f31d2aa087e99eeb2767ef0293b2625727ccb8c/filelock-3.32.5-py3-none-any.whl",
+      "bytes": 100003,
+      "sha256": "142cd9fa77a872c5e78c62329a0d15278fadc686eb89e760017968961a4fd6b2"
+     },
+     {
+      "filename": "flatbuffers-25.12.19-py2.py3-none-any.whl",
+      "local_name": "flatbuffers-25.12.19-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/e8/2d/d2a548598be01649e2d46231d151a6c56d10b964d94043a335ae56ea2d92/flatbuffers-25.12.19-py2.py3-none-any.whl",
+      "bytes": 26661,
+      "sha256": "7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4"
+     },
+     {
+      "filename": "idna-3.19-py3-none-any.whl",
+      "local_name": "idna-3.19-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/57/b0/0e52c878c53f245edd3a11020f20979b3f490f245af532c7cae3027754b5/idna-3.19-py3-none-any.whl",
+      "bytes": 68550,
+      "sha256": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4"
+     },
+     {
+      "filename": "joblib-1.6.0-py3-none-any.whl",
+      "local_name": "joblib-1.6.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/18/53/84099323c2ec4be98d935f63c033ac4151ee83836ca1050ede3b3aadf155/joblib-1.6.0-py3-none-any.whl",
+      "bytes": 306115,
+      "sha256": "3dbbf9f6e4b592a2357b854608e980fe6390d131d7a82f011a377ef2ebef7aba"
+     },
+     {
+      "filename": "lazy_loader-0.5-py3-none-any.whl",
+      "local_name": "lazy_loader-0.5-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/8a/a1/8d812e53a5da1687abb10445275d41a8b13adb781bbf7196ddbcf8d88505/lazy_loader-0.5-py3-none-any.whl",
+      "bytes": 8044,
+      "sha256": "ab0ea149e9c554d4ffeeb21105ac60bed7f3b4fd69b1d2360a4add51b170b005"
+     },
+     {
+      "filename": "librosa-1.0.0-py3-none-any.whl",
+      "local_name": "librosa-1.0.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/96/14/0b2e4cc8017796dc8f69de740708601832c1e8d5377166eedb4db0a92264/librosa-1.0.0-py3-none-any.whl",
+      "bytes": 294628,
+      "sha256": "5910a6c0e1b2e494b92758c1615a7acbd0515a2315e138927ba2982f2af88857"
+     },
+     {
+      "filename": "llvmlite-0.49.0-cp313-cp313-win_amd64.whl",
+      "local_name": "llvmlite-0.49.0-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/96/7f/9f5afcf6476b228d6b170408f377a0c4f91477fc1fc91f8141088b45bf46/llvmlite-0.49.0-cp313-cp313-win_amd64.whl",
+      "bytes": 41865544,
+      "sha256": "a1b414dc6b164738ec39dd8987cea73829057b7dd92fc6d91b52838385fc1dd2"
+     },
+     {
+      "filename": "mpmath-1.4.1-py3-none-any.whl",
+      "local_name": "mpmath-1.4.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/13/f2/abeec3db71d221ccd3cd89d206be1fabf5a3ee7178862f5fba23a59607e0/mpmath-1.4.1-py3-none-any.whl",
+      "bytes": 567787,
+      "sha256": "dc4f0ea2304480d4a9a48a94c1020571558ade522b44a6912efac63a586e140f"
+     },
+     {
+      "filename": "msgpack-1.2.2-cp313-cp313-win_amd64.whl",
+      "local_name": "msgpack-1.2.2-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/3c/f8/593f5caf0dacab41cde1564c5f0419e61af55ec9628006205e8fd5eb5e03/msgpack-1.2.2-cp313-cp313-win_amd64.whl",
+      "bytes": 72203,
+      "sha256": "b07c03f0da7e5279170df7745ddc732d526c8a198208936ec1a95c11ed2b2d5f"
+     },
+     {
+      "filename": "narwhals-2.25.0-py3-none-any.whl",
+      "local_name": "narwhals-2.25.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/eb/dc/55481808fd70ef1567cf13540ffd4702af3f74b112e35427564b03f79c2d/narwhals-2.25.0-py3-none-any.whl",
+      "bytes": 467373,
+      "sha256": "1f0f403e8c7e4463cde9bfe78b12fdd809e3ae3dda6d9b2f802934fb9c7a6a8f"
+     },
+     {
+      "filename": "numba-0.67.0-cp313-cp313-win_amd64.whl",
+      "local_name": "numba-0.67.0-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/0f/80/d48f0ba7442516ceb5a1585f0c81d3aa531bc96bfcabcd9f8f925768c426/numba-0.67.0-cp313-cp313-win_amd64.whl",
+      "bytes": 2815504,
+      "sha256": "b68ad5125fe245339cc8dcc036081fc1ea482c5063387b9612a76ccd83dc91cd"
+     },
+     {
+      "filename": "numpy-2.5.2-cp313-cp313-win_amd64.whl",
+      "local_name": "numpy-2.5.2-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/15/20/f3489f86d81ea460b2bcdceaed094142ca6579f6be0ec527b781d39afe68/numpy-2.5.2-cp313-cp313-win_amd64.whl",
+      "bytes": 12460532,
+      "sha256": "85aaccb24182c25df891ad0ec333585967e115269d5f1b17f2c9ae005bc96657"
+     },
+     {
+      "filename": "onnxruntime_directml-1.24.4-cp313-cp313-win_amd64.whl",
+      "local_name": "onnxruntime_directml-1.24.4-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/60/53/2bd2696fac19cf8ca55496a0bcfe431f3aff9579eabbb0e231dc238acf6f/onnxruntime_directml-1.24.4-cp313-cp313-win_amd64.whl",
+      "bytes": 25112253,
+      "sha256": "2f1031cb2281e5b27cca9efe0b9399317c7286e4d226f7a79d4ab79bbd94d19e"
+     },
+     {
+      "filename": "packaging-26.3-py3-none-any.whl",
+      "local_name": "packaging-26.3-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl",
+      "bytes": 129956,
+      "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
+     },
+     {
+      "filename": "platformdirs-4.11.5-py3-none-any.whl",
+      "local_name": "platformdirs-4.11.5-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/c7/12/6f3fcd5067a9cbf4f8664b32957973498da8b083455203c8d9cab83a725c/platformdirs-4.11.5-py3-none-any.whl",
+      "bytes": 23900,
+      "sha256": "89f8d42695853b89c7170bd49bc3dc593f98a71e695ede88e06a3b247bc4563b"
+     },
+     {
+      "filename": "pooch-1.9.0-py3-none-any.whl",
+      "local_name": "pooch-1.9.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/2a/2d/d4bf65e47cea8ff2c794a600c4fd1273a7902f268757c531e0ee9f18aa58/pooch-1.9.0-py3-none-any.whl",
+      "bytes": 67175,
+      "sha256": "f265597baa9f760d25ceb29d0beb8186c243d6607b0f60b83ecf14078dbc703b"
+     },
+     {
+      "filename": "protobuf-7.36.1-cp310-abi3-win_amd64.whl",
+      "local_name": "protobuf-7.36.1-cp310-abi3-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/db/37/155788a0d8daded960375af604202805308169f9b859419ea0aa370946e2/protobuf-7.36.1-cp310-abi3-win_amd64.whl",
+      "bytes": 456518,
+      "sha256": "51139351435d9b43d88a55eaa49fb6f737fbb478fb0cbf2cf694d1a04a9d3363"
+     },
+     {
+      "filename": "pycparser-3.0-py3-none-any.whl",
+      "local_name": "pycparser-3.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl",
+      "bytes": 48172,
+      "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"
+     },
+     {
+      "filename": "requests-2.34.2-py3-none-any.whl",
+      "local_name": "requests-2.34.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl",
+      "bytes": 73075,
+      "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0"
+     },
+     {
+      "filename": "scikit_learn-1.9.0-cp313-cp313-win_amd64.whl",
+      "local_name": "scikit_learn-1.9.0-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/20/3f/7917ca72464038f6240ec70c29f94862d08a34a74291ae4d4ec5eb8186a0/scikit_learn-1.9.0-cp313-cp313-win_amd64.whl",
+      "bytes": 8184330,
+      "sha256": "5808d98f15c6bf6d9d96d2348c1997392a5888ce7097e664105f930c4bca1277"
+     },
+     {
+      "filename": "scipy-1.18.1-cp313-cp313-win_amd64.whl",
+      "local_name": "scipy-1.18.1-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/93/0e/e0348fbc0dbab65c114cf78957e7dfeb49f8e8b556b4d930cc12ff195e18/scipy-1.18.1-cp313-cp313-win_amd64.whl",
+      "bytes": 36622841,
+      "sha256": "559ed65f60c1af5a03f3912605a1b5114f522c7c32fb23c3376ae8f03219fe28"
+     },
+     {
+      "filename": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+      "local_name": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/ed/97/b39c18ac1df45e755ca22b8b00e872929da5d107998a207a5e4ac831bfda/soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+      "bytes": 1021480,
+      "sha256": "299491d3499460fb1b74bb4bd78b57ffc2d243a5fafa7b6ec1b264875c78453e"
+     },
+     {
+      "filename": "soxr-1.1.0-cp312-abi3-win_amd64.whl",
+      "local_name": "soxr-1.1.0-cp312-abi3-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/b0/4d/621e4150e4815246ad552d215a8a294a90143fedd19ee442cf82d3b3abc8/soxr-1.1.0-cp312-abi3-win_amd64.whl",
+      "bytes": 174357,
+      "sha256": "6ae2a174bffea94e8ead857dad85999d3f49f091774dbad5b046c0417d7092f4"
+     },
+     {
+      "filename": "sympy-1.14.0-py3-none-any.whl",
+      "local_name": "sympy-1.14.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
+      "bytes": 6299353,
+      "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5"
+     },
+     {
+      "filename": "threadpoolctl-3.6.0-py3-none-any.whl",
+      "local_name": "threadpoolctl-3.6.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/32/d5/f9a850d79b0851d1d4ef6456097579a9005b31fea68726a4ae5f2d82ddd9/threadpoolctl-3.6.0-py3-none-any.whl",
+      "bytes": 18638,
+      "sha256": "43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb"
+     },
+     {
+      "filename": "tqdm-4.70.0-py3-none-any.whl",
+      "local_name": "tqdm-4.70.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/f9/1c/01bfd571a64e7f270e6bab5e33777debe0edc56759233ce84f27dec92d14/tqdm-4.70.0-py3-none-any.whl",
+      "bytes": 80184,
+      "sha256": "7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953"
+     },
+     {
+      "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+      "local_name": "typing_extensions-4.16.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+      "bytes": 45571,
+      "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
+     },
+     {
+      "filename": "urllib3-2.7.0-py3-none-any.whl",
+      "local_name": "urllib3-2.7.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl",
+      "bytes": 131087,
+      "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897"
+     }
+    ]
+   }
+  ],
+  "about_bytes": 138100000
+ },
+ "stages": [
+  {
+   "id": "dpdfnet",
+   "label": "DPDFNet",
+   "order": 100,
+   "role": "denoise",
+   "output_rate_policy": "preserve",
+   "summary": "Cleans noise and synthesis artifacts out of generated speech, at whatever rate it is given.",
+   "license": "Apache-2.0",
+   "upstream": "https://github.com/ceva-ip/DPDFNet",
+   "repo": "Ceva-IP/DPDFNet",
+   "revision": "main",
+   "model_id": "dpdfnet8_48khz_hr",
+   "attribution": "DPDFNet by Ceva. Model dpdfnet8_48khz_hr from the publisher's own repository.",
+   "about_bytes": 0,
+   "artifacts": [
     {
-      "id": "dpdfnet",
-      "label": "DPDFNet",
-      "order": 100,
-      "role": "denoise",
-      "output_rate_policy": "preserve",
-      "summary": "Cleans noise and synthesis artifacts out of generated speech, at whatever rate it is given.",
-      "license": "Apache-2.0",
-      "upstream": "https://github.com/ceva-ip/DPDFNet",
-      "repo": "Ceva-IP/DPDFNet",
-      "revision": "main",
-      "model_id": "dpdfnet8_48khz_hr",
-      "attribution": "DPDFNet by Ceva. Model dpdfnet8_48khz_hr from the publisher's own repository.",
-      "about_bytes": 0,
-      "artifacts": [
-        {
-          "filename": "dpdfnet8_48khz_hr.onnx",
-          "local_name": "dpdfnet8_48khz_hr.onnx",
-          "url": "https://huggingface.co/Ceva-IP/DPDFNet/resolve/main/onnx/dpdfnet8_48khz_hr.onnx",
-          "bytes": 0,
-          "sha256": ""
-        }
-      ],
-      "required_paths": [
-        "dpdfnet8_48khz_hr.onnx"
-      ],
-      "contract": {
-        "package": "dpdfnet",
-        "model_id": "dpdfnet8_48khz_hr",
-        "model_sample_rate": 48000,
-        "accepts_any_input_rate": true,
-        "output_rate": null,
-        "notes": "Measured from upstream 0.6.0's own source rather than from its README. StreamEnhancer.process(chunk, sample_rate=N) resamples N to the model's native rate internally and returns output back at N, so the stage is handed Pocket's real 24000 Hz and gives back 24000 Hz -- output_rate is null because this stage's output rate is its caller's, and the 48 kHz in the model name is the network's own working rate. The streaming path is a causal STFT that upstream documents as deliberately NOT bit-identical to its offline enhance(); that is the correct path for real time and is the one this feature uses. onnx_path is passed explicitly so resolve_model() never reaches the network (I-VP-22)."
-      },
-      "provisional": true
-    },
-    {
-      "id": "lavasr",
-      "label": "LavaSR",
-      "order": 200,
-      "role": "bandwidth_extension",
-      "output_rate_policy": "48000",
-      "summary": "Restores speech bandwidth and delivers 48 kHz.",
-      "license": "Apache-2.0",
-      "upstream": "https://github.com/ysharma3501/LavaSR",
-      "repo": "YatharthS/LavaSR",
-      "revision": "",
-      "model_id": "lavasr-v2",
-      "attribution": "LavaSR by Yatharth Sharma.",
-      "about_bytes": 0,
-      "artifacts": [],
-      "required_paths": [],
-      "contract": {
-        "backend": "pytorch-vocos",
-        "backend_input_rate": 16000,
-        "output_rate": 48000,
-        "analysis_ms": null,
-        "context_ms": null,
-        "denoise": false,
-        "notes": "MEASURED, from upstream's own source rather than its README, and this settles the question the whole design was gated on. LavaSR/model.py's enhance() resamples 16000 -> 48000 UNCONDITIONALLY, in both the denoise and the no-denoise branch: `torchaudio.functional.resample(wav, 16000, 48000)`. load_audio() will happily load a file at some other input_sr, but enhance() still interprets whatever it is given as 16 kHz -- so handing it Pocket's 24 kHz would stretch the reply by half and nothing would say so. The README's '8-48 kHz input' describes the project's ambition, not this code path. So the adapter's contract is: resample the real source rate to 16000 deterministically, run the model, take 48000 out. That is what mc_voice_pipeline_runtime hands the worker and what LavaStage implements; analysis_ms and context_ms still need the latency-quality sweep before a release."
-      },
-      "provisional": false,
-      "available": false,
-      "unavailable_reason": "Not in this build. LavaSR publishes no wheel, and its dependencies include Torch, torchaudio and a vocos fork pinned to a git branch rather than a release -- none of which can be pinned into this repository's closure the way every other artifact here is. Its rate contract IS now measured (see contract.notes) and the pipeline's LavaSR adapter is written and tested against stand-in backends; what is missing is a dependency closure a release could stand behind."
+     "filename": "dpdfnet8_48khz_hr.onnx",
+     "local_name": "dpdfnet8_48khz_hr.onnx",
+     "url": "https://huggingface.co/Ceva-IP/DPDFNet/resolve/main/onnx/dpdfnet8_48khz_hr.onnx",
+     "bytes": 0,
+     "sha256": ""
     }
-  ]
+   ],
+   "required_paths": [
+    "dpdfnet8_48khz_hr.onnx"
+   ],
+   "contract": {
+    "package": "dpdfnet",
+    "model_id": "dpdfnet8_48khz_hr",
+    "model_sample_rate": 48000,
+    "accepts_any_input_rate": true,
+    "output_rate": null,
+    "notes": "Measured from upstream 0.6.0's own source rather than from its README. StreamEnhancer.process(chunk, sample_rate=N) resamples N to the model's native rate internally and returns output back at N, so the stage is handed Pocket's real 24000 Hz and gives back 24000 Hz -- output_rate is null because this stage's output rate is its caller's, and the 48 kHz in the model name is the network's own working rate. The streaming path is a causal STFT that upstream documents as deliberately NOT bit-identical to its offline enhance(); that is the correct path for real time and is the one this feature uses. onnx_path is passed explicitly so resolve_model() never reaches the network (I-VP-22)."
+   },
+   "provisional": true
+  },
+  {
+   "id": "lavasr",
+   "label": "LavaSR",
+   "order": 200,
+   "role": "bandwidth_extension",
+   "output_rate_policy": "48000",
+   "summary": "Restores speech bandwidth and delivers 48 kHz.",
+   "license": "Apache-2.0",
+   "upstream": "https://github.com/ysharma3501/LavaSR",
+   "repo": "YatharthS/LavaSR",
+   "revision": "",
+   "model_id": "lavasr-v2",
+   "attribution": "LavaSR by Yatharth Sharma.",
+   "about_bytes": 0,
+   "artifacts": [],
+   "required_paths": [],
+   "contract": {
+    "backend": "pytorch-vocos",
+    "backend_input_rate": 16000,
+    "output_rate": 48000,
+    "analysis_ms": null,
+    "context_ms": null,
+    "denoise": false,
+    "notes": "MEASURED, from upstream's own source rather than its README, and this settles the question the whole design was gated on. LavaSR/model.py's enhance() resamples 16000 -> 48000 UNCONDITIONALLY, in both the denoise and the no-denoise branch: `torchaudio.functional.resample(wav, 16000, 48000)`. load_audio() will happily load a file at some other input_sr, but enhance() still interprets whatever it is given as 16 kHz -- so handing it Pocket's 24 kHz would stretch the reply by half and nothing would say so. The README's '8-48 kHz input' describes the project's ambition, not this code path. So the adapter's contract is: resample the real source rate to 16000 deterministically, run the model, take 48000 out. That is what mc_voice_pipeline_runtime hands the worker and what LavaStage implements; analysis_ms and context_ms still need the latency-quality sweep before a release."
+   },
+   "provisional": false,
+   "available": false,
+   "unavailable_reason": "Not in this build yet, and what is left is now specific. The PyTorch runtime closure LavaSR needs EXISTS and is pinned -- 48 wheels, 264 MB, ONNX Runtime and PyTorch in one interpreter so it still runs in the single contained worker. Three things are not pinned. LavaSR itself publishes no wheel, so it has to be fetched from GitHub at commit 33ac040892519c1bb4aed7eb32e79af51cc29e2a; its vocos dependency is a fork pinned to a branch, resolved here to commit 451e522f7a11c3652c9522f63ea6780736d93de0, which differs from the vocos 0.1.0 on PyPI by seventeen lines in three files; and vocos imports encodec 0.1.1 unconditionally, which publishes an sdist and no wheel. None of the three could be hashed by the machine that wrote this manifest, which cannot reach codeload.github.com. The better path is not to need any of them: `python tools/export_lavasr_onnx.py --out <dir>` exports LavaSR to ONNX on a machine that can reach huggingface.co, proves the graph against PyTorch sample for sample, and produces an artifact the light 138 MB closure already runs -- beside DPDFNet, in the same worker, with the same placement control. That tool refuses to write an unproved export, and the refusal is the point: the inverse STFT in the monkey-patched vocos head is where an exporter is most likely to produce audio that still sounds like speech and is the wrong length."
+  }
+ ],
+ "runtimes": {
+  "torch": {
+   "python": "3.13",
+   "provider": "cpu+directml+torch",
+   "build": 1,
+   "import_name": "torch",
+   "license": "BSD-3-Clause (PyTorch, NumPy, SciPy, scikit-learn, joblib, sympy, mpmath, torchaudio, networkx); MIT (ONNX Runtime including its DirectML execution provider, einops, soxr, soundfile, tqdm, filelock, PyYAML); ISC (librosa); BSD-2-Clause (numba, llvmlite); Apache-2.0 (huggingface_hub, LavaSR)",
+   "attribution": "Resolved from PyPI for CPython 3.13 on Windows x86-64 and hashed against the digests pypi.org publishes for each file. pip's own resolver could not be used for this closure the way it was for the ONNX one: --platform steers wheel-tag selection but does not set the marker environment, so a Linux machine resolving torch for Windows tries to satisfy the nvidia-* pins that torch gates behind platform_system == \"Linux\" and fails outright. The dependency graph was walked against PyPI's own metadata with a Windows/cp313 marker environment instead, which is the same information pip would have used had it been able to.",
+   "closure_notes": "THE PYTORCH FLAVOUR, AND IT CARRIES ONNX RUNTIME TOO -- deliberately, because that is what keeps this to ONE PROCESS. LavaSR upstream is a PyTorch model and DPDFNet is an ONNX one; running them in two runtimes would mean two workers, two job objects and two ways to leak a process that outlives the voice it belongs to. Carrying both wheel sets in one interpreter costs 126 MB over the ONNX closure and buys back every containment guarantee unchanged -- the same start and stop path, the same Windows job object, the same pdeathsig, the same coupling to PocketTTS's residency. A stage's backend chooses which interpreter the single contained worker runs, never how many workers there are.\n\nCPU ONLY, AND THAT IS NOT A DESIGN CHOICE. torch on PyPI for Windows is the CPU build; every CUDA dependency in its metadata is gated behind platform_system == \"Linux\", and the Windows CUDA wheels live on download.pytorch.org, which the machine that wrote this manifest could not reach. A CUDA closure is a second platform entry here, resolved and hashed the same way, from a machine that can reach that host. Until then a card cannot be offered for the torch backend, and the settings row says so rather than showing a control that would do nothing.",
+   "about_bytes": 263730707,
+   "platforms": [
+    {
+     "id": "windows-x86_64-cp313",
+     "system": "windows",
+     "machines": [
+      "amd64",
+      "x86_64"
+     ],
+     "python": "3.13",
+     "artifacts": [
+      {
+       "filename": "anyio-4.14.2-py3-none-any.whl",
+       "local_name": "anyio-4.14.2-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/da/35/f2287558c17e29fafc8ef3daf819bb9834061cfa43bff8014f7df7f63bdc/anyio-4.14.2-py3-none-any.whl",
+       "bytes": 125813,
+       "sha256": "9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494"
+      },
+      {
+       "filename": "certifi-2026.7.22-py3-none-any.whl",
+       "local_name": "certifi-2026.7.22-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
+       "bytes": 136983,
+       "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
+      },
+      {
+       "filename": "cffi-2.1.1-cp313-cp313-win_amd64.whl",
+       "local_name": "cffi-2.1.1-cp313-cp313-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/60/a6/8b149b2c3f2e11aaa1618ef64500b45f50f22c57a977a4dff1aff1f91042/cffi-2.1.1-cp313-cp313-win_amd64.whl",
+       "bytes": 185688,
+       "sha256": "1aa5645c30469b09530c4ebca77ebf8f17618293c58f8549cb1a543a50236e7d"
+      },
+      {
+       "filename": "charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl",
+       "local_name": "charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/8a/33/56d97ade41c8db611e727168c52ae46c9224c362ec28d4b65d7e9869e8da/charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl",
+       "bytes": 199295,
+       "sha256": "aea996a6aba25260827c9ea511d1addfde2da9eb686ac961838509086188b7e6"
+      },
+      {
+       "filename": "click-8.5.0-py3-none-any.whl",
+       "local_name": "click-8.5.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl",
+       "bytes": 125251,
+       "sha256": "255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360"
+      },
+      {
+       "filename": "cloudpickle-3.1.2-py3-none-any.whl",
+       "local_name": "cloudpickle-3.1.2-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/88/39/799be3f2f0f38cc727ee3b4f1445fe6d5e4133064ec2e4115069418a5bb6/cloudpickle-3.1.2-py3-none-any.whl",
+       "bytes": 22228,
+       "sha256": "9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a"
+      },
+      {
+       "filename": "colorama-0.4.6-py2.py3-none-any.whl",
+       "local_name": "colorama-0.4.6-py2.py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl",
+       "bytes": 25335,
+       "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"
+      },
+      {
+       "filename": "decorator-5.3.1-py3-none-any.whl",
+       "local_name": "decorator-5.3.1-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/05/7f/798705f5296a58ca505d600456748d1be48078eac8a7050d8a98bc9edb89/decorator-5.3.1-py3-none-any.whl",
+       "bytes": 10365,
+       "sha256": "f47fe6fdbd2edd623ecfe36875d37aba411624e2670dd395dddae1358689bb3c"
+      },
+      {
+       "filename": "einops-0.8.2-py3-none-any.whl",
+       "local_name": "einops-0.8.2-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/2a/09/f8d8f8f31e4483c10a906437b4ce31bdf3d6d417b73fe33f1a8b59e34228/einops-0.8.2-py3-none-any.whl",
+       "bytes": 65638,
+       "sha256": "54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193"
+      },
+      {
+       "filename": "filelock-3.32.5-py3-none-any.whl",
+       "local_name": "filelock-3.32.5-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/36/d2/b70a31e13d04456d28493f31d2aa087e99eeb2767ef0293b2625727ccb8c/filelock-3.32.5-py3-none-any.whl",
+       "bytes": 100003,
+       "sha256": "142cd9fa77a872c5e78c62329a0d15278fadc686eb89e760017968961a4fd6b2"
+      },
+      {
+       "filename": "flatbuffers-25.12.19-py2.py3-none-any.whl",
+       "local_name": "flatbuffers-25.12.19-py2.py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/e8/2d/d2a548598be01649e2d46231d151a6c56d10b964d94043a335ae56ea2d92/flatbuffers-25.12.19-py2.py3-none-any.whl",
+       "bytes": 26661,
+       "sha256": "7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4"
+      },
+      {
+       "filename": "fsspec-2026.7.0-py3-none-any.whl",
+       "local_name": "fsspec-2026.7.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/fd/3c/6a2bf344106328fd04963664a60b9bb6496fc25df8e962fcdc1367285fb9/fsspec-2026.7.0-py3-none-any.whl",
+       "bytes": 206583,
+       "sha256": "b57ddbafedfaef7018c1ecab32aa200a9d7ca26b77965f64e48b70061249d279"
+      },
+      {
+       "filename": "h11-0.16.0-py3-none-any.whl",
+       "local_name": "h11-0.16.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl",
+       "bytes": 37515,
+       "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86"
+      },
+      {
+       "filename": "httpcore-1.0.9-py3-none-any.whl",
+       "local_name": "httpcore-1.0.9-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/7e/f5/f66802a942d491edb555dd61e3a9961140fd64c90bce1eafd741609d334d/httpcore-1.0.9-py3-none-any.whl",
+       "bytes": 78784,
+       "sha256": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55"
+      },
+      {
+       "filename": "httpx-0.28.1-py3-none-any.whl",
+       "local_name": "httpx-0.28.1-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl",
+       "bytes": 73517,
+       "sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad"
+      },
+      {
+       "filename": "huggingface_hub-1.29.0-py3-none-any.whl",
+       "local_name": "huggingface_hub-1.29.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/4e/a5/47c2ea9b228ccbcba8467e9a64823146e8ebbad29855e591d8f5eedcc9c7/huggingface_hub-1.29.0-py3-none-any.whl",
+       "bytes": 795768,
+       "sha256": "b00f7782afc14db4bc6572763810a635bdfbab8623d957bfb553bd18e03852cd"
+      },
+      {
+       "filename": "idna-3.19-py3-none-any.whl",
+       "local_name": "idna-3.19-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/57/b0/0e52c878c53f245edd3a11020f20979b3f490f245af532c7cae3027754b5/idna-3.19-py3-none-any.whl",
+       "bytes": 68550,
+       "sha256": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4"
+      },
+      {
+       "filename": "jinja2-3.1.6-py3-none-any.whl",
+       "local_name": "jinja2-3.1.6-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl",
+       "bytes": 134899,
+       "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"
+      },
+      {
+       "filename": "joblib-1.6.0-py3-none-any.whl",
+       "local_name": "joblib-1.6.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/18/53/84099323c2ec4be98d935f63c033ac4151ee83836ca1050ede3b3aadf155/joblib-1.6.0-py3-none-any.whl",
+       "bytes": 306115,
+       "sha256": "3dbbf9f6e4b592a2357b854608e980fe6390d131d7a82f011a377ef2ebef7aba"
+      },
+      {
+       "filename": "lazy_loader-0.5-py3-none-any.whl",
+       "local_name": "lazy_loader-0.5-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/8a/a1/8d812e53a5da1687abb10445275d41a8b13adb781bbf7196ddbcf8d88505/lazy_loader-0.5-py3-none-any.whl",
+       "bytes": 8044,
+       "sha256": "ab0ea149e9c554d4ffeeb21105ac60bed7f3b4fd69b1d2360a4add51b170b005"
+      },
+      {
+       "filename": "librosa-1.0.0-py3-none-any.whl",
+       "local_name": "librosa-1.0.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/96/14/0b2e4cc8017796dc8f69de740708601832c1e8d5377166eedb4db0a92264/librosa-1.0.0-py3-none-any.whl",
+       "bytes": 294628,
+       "sha256": "5910a6c0e1b2e494b92758c1615a7acbd0515a2315e138927ba2982f2af88857"
+      },
+      {
+       "filename": "llvmlite-0.49.0-cp313-cp313-win_amd64.whl",
+       "local_name": "llvmlite-0.49.0-cp313-cp313-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/96/7f/9f5afcf6476b228d6b170408f377a0c4f91477fc1fc91f8141088b45bf46/llvmlite-0.49.0-cp313-cp313-win_amd64.whl",
+       "bytes": 41865544,
+       "sha256": "a1b414dc6b164738ec39dd8987cea73829057b7dd92fc6d91b52838385fc1dd2"
+      },
+      {
+       "filename": "markupsafe-3.0.3-cp313-cp313-win_amd64.whl",
+       "local_name": "markupsafe-3.0.3-cp313-cp313-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/05/73/c4abe620b841b6b791f2edc248f556900667a5a1cf023a6646967ae98335/markupsafe-3.0.3-cp313-cp313-win_amd64.whl",
+       "bytes": 15113,
+       "sha256": "9a1abfdc021a164803f4d485104931fb8f8c1efd55bc6b748d2f5774e78b62c5"
+      },
+      {
+       "filename": "mpmath-1.3.0-py3-none-any.whl",
+       "local_name": "mpmath-1.3.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl",
+       "bytes": 536198,
+       "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c"
+      },
+      {
+       "filename": "msgpack-1.2.2-cp313-cp313-win_amd64.whl",
+       "local_name": "msgpack-1.2.2-cp313-cp313-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/3c/f8/593f5caf0dacab41cde1564c5f0419e61af55ec9628006205e8fd5eb5e03/msgpack-1.2.2-cp313-cp313-win_amd64.whl",
+       "bytes": 72203,
+       "sha256": "b07c03f0da7e5279170df7745ddc732d526c8a198208936ec1a95c11ed2b2d5f"
+      },
+      {
+       "filename": "narwhals-2.25.0-py3-none-any.whl",
+       "local_name": "narwhals-2.25.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/eb/dc/55481808fd70ef1567cf13540ffd4702af3f74b112e35427564b03f79c2d/narwhals-2.25.0-py3-none-any.whl",
+       "bytes": 467373,
+       "sha256": "1f0f403e8c7e4463cde9bfe78b12fdd809e3ae3dda6d9b2f802934fb9c7a6a8f"
+      },
+      {
+       "filename": "networkx-3.6.1-py3-none-any.whl",
+       "local_name": "networkx-3.6.1-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/9e/c9/b2622292ea83fbb4ec318f5b9ab867d0a28ab43c5717bb85b0a5f6b3b0a4/networkx-3.6.1-py3-none-any.whl",
+       "bytes": 2068504,
+       "sha256": "d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762"
+      },
+      {
+       "filename": "numba-0.67.0-cp313-cp313-win_amd64.whl",
+       "local_name": "numba-0.67.0-cp313-cp313-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/0f/80/d48f0ba7442516ceb5a1585f0c81d3aa531bc96bfcabcd9f8f925768c426/numba-0.67.0-cp313-cp313-win_amd64.whl",
+       "bytes": 2815504,
+       "sha256": "b68ad5125fe245339cc8dcc036081fc1ea482c5063387b9612a76ccd83dc91cd"
+      },
+      {
+       "filename": "numpy-2.5.2-cp313-cp313-win_amd64.whl",
+       "local_name": "numpy-2.5.2-cp313-cp313-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/15/20/f3489f86d81ea460b2bcdceaed094142ca6579f6be0ec527b781d39afe68/numpy-2.5.2-cp313-cp313-win_amd64.whl",
+       "bytes": 12460532,
+       "sha256": "85aaccb24182c25df891ad0ec333585967e115269d5f1b17f2c9ae005bc96657"
+      },
+      {
+       "filename": "onnxruntime_directml-1.24.4-cp313-cp313-win_amd64.whl",
+       "local_name": "onnxruntime_directml-1.24.4-cp313-cp313-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/60/53/2bd2696fac19cf8ca55496a0bcfe431f3aff9579eabbb0e231dc238acf6f/onnxruntime_directml-1.24.4-cp313-cp313-win_amd64.whl",
+       "bytes": 25112253,
+       "sha256": "2f1031cb2281e5b27cca9efe0b9399317c7286e4d226f7a79d4ab79bbd94d19e"
+      },
+      {
+       "filename": "packaging-26.3-py3-none-any.whl",
+       "local_name": "packaging-26.3-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl",
+       "bytes": 129956,
+       "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
+      },
+      {
+       "filename": "platformdirs-4.11.7-py3-none-any.whl",
+       "local_name": "platformdirs-4.11.7-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/27/6e/80993e10a0482f630cef528635789233224f36b1ffd11592aa15d13ff9ce/platformdirs-4.11.7-py3-none-any.whl",
+       "bytes": 23938,
+       "sha256": "8a02cb259042c79d1cd0450facc2fe6dc9d303ae7901afbe33bf8ea0b188cef6"
+      },
+      {
+       "filename": "pooch-1.9.0-py3-none-any.whl",
+       "local_name": "pooch-1.9.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/2a/2d/d4bf65e47cea8ff2c794a600c4fd1273a7902f268757c531e0ee9f18aa58/pooch-1.9.0-py3-none-any.whl",
+       "bytes": 67175,
+       "sha256": "f265597baa9f760d25ceb29d0beb8186c243d6607b0f60b83ecf14078dbc703b"
+      },
+      {
+       "filename": "protobuf-7.36.1-py3-none-any.whl",
+       "local_name": "protobuf-7.36.1-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/39/ca/c47f91d3cab175b01fd8c4f0d80fdf8613be876cc616e66ad281a59c5ddf/protobuf-7.36.1-py3-none-any.whl",
+       "bytes": 179813,
+       "sha256": "7d951e46b3f963d6c264c367c437921de9d5aedd9c3f9612b9077736b4e3ad5c"
+      },
+      {
+       "filename": "pycparser-3.0-py3-none-any.whl",
+       "local_name": "pycparser-3.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl",
+       "bytes": 48172,
+       "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"
+      },
+      {
+       "filename": "pyyaml-6.0.3-cp313-cp313-win_amd64.whl",
+       "local_name": "pyyaml-6.0.3-cp313-cp313-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/97/c9/39d5b874e8b28845e4ec2202b5da735d0199dbe5b8fb85f91398814a9a46/pyyaml-6.0.3-cp313-cp313-win_amd64.whl",
+       "bytes": 154090,
+       "sha256": "79005a0d97d5ddabfeeea4cf676af11e647e41d81c9a7722a193022accdb6b7c"
+      },
+      {
+       "filename": "requests-2.34.2-py3-none-any.whl",
+       "local_name": "requests-2.34.2-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl",
+       "bytes": 73075,
+       "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0"
+      },
+      {
+       "filename": "scikit_learn-1.9.0-cp313-cp313-win_amd64.whl",
+       "local_name": "scikit_learn-1.9.0-cp313-cp313-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/20/3f/7917ca72464038f6240ec70c29f94862d08a34a74291ae4d4ec5eb8186a0/scikit_learn-1.9.0-cp313-cp313-win_amd64.whl",
+       "bytes": 8184330,
+       "sha256": "5808d98f15c6bf6d9d96d2348c1997392a5888ce7097e664105f930c4bca1277"
+      },
+      {
+       "filename": "scipy-1.18.1-cp313-cp313-win_amd64.whl",
+       "local_name": "scipy-1.18.1-cp313-cp313-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/93/0e/e0348fbc0dbab65c114cf78957e7dfeb49f8e8b556b4d930cc12ff195e18/scipy-1.18.1-cp313-cp313-win_amd64.whl",
+       "bytes": 36622841,
+       "sha256": "559ed65f60c1af5a03f3912605a1b5114f522c7c32fb23c3376ae8f03219fe28"
+      },
+      {
+       "filename": "setuptools-84.0.0-py3-none-any.whl",
+       "local_name": "setuptools-84.0.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl",
+       "bytes": 818216,
+       "sha256": "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"
+      },
+      {
+       "filename": "soundfile-0.14.0-py2.py3-none-any.whl",
+       "local_name": "soundfile-0.14.0-py2.py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/b1/d1/5e338af9ca6ed0786cd5bb03f6d60de1c325728c1189014f3b59aae7403c/soundfile-0.14.0-py2.py3-none-any.whl",
+       "bytes": 26799,
+       "sha256": "8ba81ae3a89fd5ab3bef8a8eb481fbbe794e806309675a89b4df48b8d31908a8"
+      },
+      {
+       "filename": "sympy-1.14.0-py3-none-any.whl",
+       "local_name": "sympy-1.14.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
+       "bytes": 6299353,
+       "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5"
+      },
+      {
+       "filename": "threadpoolctl-3.6.0-py3-none-any.whl",
+       "local_name": "threadpoolctl-3.6.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/32/d5/f9a850d79b0851d1d4ef6456097579a9005b31fea68726a4ae5f2d82ddd9/threadpoolctl-3.6.0-py3-none-any.whl",
+       "bytes": 18638,
+       "sha256": "43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb"
+      },
+      {
+       "filename": "torch-2.13.0-cp313-cp313-win_amd64.whl",
+       "local_name": "torch-2.13.0-cp313-cp313-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/91/3d/e7adcc6aaf36961cd18f56cf8ad0f3058c3a5c84ccf391762176c94581b8/torch-2.13.0-cp313-cp313-win_amd64.whl",
+       "bytes": 122057920,
+       "sha256": "49b58f1e2c52440abb6f17c28f0335fe6c6d01ad1a7f55b0183b81e4b34d64e6"
+      },
+      {
+       "filename": "torchaudio-2.11.0-cp313-cp313-win_amd64.whl",
+       "local_name": "torchaudio-2.11.0-cp313-cp313-win_amd64.whl",
+       "url": "https://files.pythonhosted.org/packages/e2/8b/2bbb3dca6ff28cba0de250874d5ef4fc2822c47a934b59b3974cff3219ef/torchaudio-2.11.0-cp313-cp313-win_amd64.whl",
+       "bytes": 328662,
+       "sha256": "986f4df5ed17b003dc52489468601720090e65f964f8bebccf90eb45bba75744"
+      },
+      {
+       "filename": "tqdm-4.70.0-py3-none-any.whl",
+       "local_name": "tqdm-4.70.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/f9/1c/01bfd571a64e7f270e6bab5e33777debe0edc56759233ce84f27dec92d14/tqdm-4.70.0-py3-none-any.whl",
+       "bytes": 80184,
+       "sha256": "7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953"
+      },
+      {
+       "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+       "local_name": "typing_extensions-4.16.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+       "bytes": 45571,
+       "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
+      },
+      {
+       "filename": "urllib3-2.7.0-py3-none-any.whl",
+       "local_name": "urllib3-2.7.0-py3-none-any.whl",
+       "url": "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl",
+       "bytes": 131087,
+       "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897"
+      }
+     ]
+    }
+   ]
+  }
+ }
 }

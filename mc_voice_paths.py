@@ -129,6 +129,23 @@ PIPELINE_DIRNAME = "pipeline"
 PIPELINE_WORKER_DIRNAME = "pipeline_worker"
 PIPELINE_MANIFEST_FILENAME = "managed-pipeline-models.json"
 PIPELINE_MODELS_DIRNAME = "models"
+
+PIPELINE_RUNTIME_FLAVOURS = {"onnx": RUNTIME_DIRNAME, "torch": "runtime-torch"}
+"""The closures the Voice Pipeline can install, and the directory each lives in.
+
+Two closures rather than one because LavaSR upstream is a PyTorch model and
+DPDFNet is an ONNX one, and a single closure carrying both would make everybody
+who only wants the cleanup stage download PyTorch to get it.
+
+They are separate *directories* and emphatically not separate *processes*. The
+torch closure carries ONNX Runtime as well, so whichever flavour is installed,
+one worker serves every enabled stage -- one job object, one pdeathsig, one
+lifetime tied to PocketTTS. A backend choice picks which interpreter that single
+contained worker runs; it never adds a second thing to contain.
+
+``onnx`` keeps the plain ``runtime`` directory it has always had, so a runtime
+installed before this existed is still found where it was left.
+"""
 """The Voice Pipeline's own subtree, beside the three engines rather than
 inside PocketTTS's.
 
@@ -699,13 +716,26 @@ def pipeline_root() -> Path:
     return data_root() / PIPELINE_DIRNAME
 
 
-def pipeline_runtime_root() -> Path:
-    """The isolated interpreter and the enhancement closure unpacked beside it."""
-    return pipeline_root() / RUNTIME_DIRNAME
+def pipeline_runtime_flavour(flavour: str) -> str:
+    """The one place a flavour name is checked before it becomes a directory.
+
+    A name that is not one of the two is a programming error rather than a user
+    one, and it is refused here rather than quietly resolving to a sibling of
+    the pipeline root. Everything below takes the checked name.
+    """
+    name = str(flavour or "onnx")
+    if name not in PIPELINE_RUNTIME_FLAVOURS:
+        raise ValueError(f"{name!r} is not a Voice Pipeline runtime flavour")
+    return name
 
 
-def pipeline_runtime_manifest() -> Path:
-    return pipeline_runtime_root() / INSTALLED_FILENAME
+def pipeline_runtime_root(flavour: str = "onnx") -> Path:
+    """The isolated interpreter and one enhancement closure unpacked beside it."""
+    return pipeline_root() / PIPELINE_RUNTIME_FLAVOURS[pipeline_runtime_flavour(flavour)]
+
+
+def pipeline_runtime_manifest(flavour: str = "onnx") -> Path:
+    return pipeline_runtime_root(flavour) / INSTALLED_FILENAME
 
 
 def pipeline_models_root() -> Path:

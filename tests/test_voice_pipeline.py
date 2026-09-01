@@ -2568,6 +2568,32 @@ class TestThePlacementControlSaysWhatItCanAndCannotDo:
         assert "does not do is push anything out" in drawn
         assert "spoken unenhanced" in drawn
 
+    def test_a_stage_this_build_does_not_ship_is_offered_no_device(self, monkeypatch):
+        """LavaSR, today. Its Install button is disabled because the build has
+        no dependency closure for it, and a dropdown asking where to run it
+        would be offering to place something that cannot exist here -- the same
+        control-that-lies problem as a disabled select, in a different costume.
+        """
+        import mc_voice_ui as ui_module
+
+        self._machine(monkeypatch, [
+            types.SimpleNamespace(physical_index=0, uuid="GPU-aaaa", memory_total_mb=24576,
+                                  name="NVIDIA GeForce RTX 3090")])
+
+        assert pipeline.stage_available("lavasr") is False, "so this proves nothing"
+        assert ui_module._pipeline_device_row("lavasr") == ""
+        assert ui_module._pipeline_device_row("dpdfnet") != ""
+
+    def test_availability_and_installability_are_different_questions(self):
+        """A stage not installable *here* is still a stage this build has.
+
+        Collapsing the two would take the device control off DPDFNet on any
+        machine with no pinned runtime, which is a stage whose settings still
+        mean something.
+        """
+        assert pipeline.stage_available("dpdfnet") is True
+        assert pipeline.stage_available("nosuch") is False
+
     @pytest.mark.parametrize("component", ["tts-pocket", "tts-sopro", "tts-kokoro",
                                            "recording-cleanup"])
     def test_an_engine_that_cannot_move_gets_a_sentence_and_no_control(self, component):
@@ -2662,3 +2688,174 @@ class TestTheEnhancementThreadBudgetIsATurnableDial:
                 opts=types.SimpleNamespace(data={pipeline.OPT_THREADS: held})))
             monkeypatch.setitem(sys.modules, "modules", fake)
             assert pipeline.threads() == expected, held
+
+
+class TestTheBuildCarriesTwoRuntimeClosures:
+    """One closure for ONNX, one that adds PyTorch, and never two processes.
+
+    LavaSR upstream is a PyTorch model and DPDFNet is an ONNX one. The
+    interesting property is not that a second closure exists -- it is that
+    adding it did not add a second thing to contain.
+    """
+
+    @staticmethod
+    def _windows(monkeypatch):
+        import mc_voice_models as models
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("windows", "amd64", "3.13"))
+
+    def test_both_closures_are_pinned_byte_for_byte(self, monkeypatch):
+        """No provisional path for a wheel, on either flavour.
+
+        A wheel's contents get executed. The stages may arrive against a digest
+        their publisher reports at install time; a runtime may not.
+        """
+        self._windows(monkeypatch)
+        found = pipeline.manifest()
+        for flavour in pipeline.RUNTIME_FLAVOURS:
+            entry = pipeline.runtime_entry(found, flavour)
+            artifacts = entry["platforms"][0]["artifacts"]
+            assert artifacts, flavour
+            for item in artifacts:
+                assert item["sha256"], f"{flavour}: {item['local_name']} is unhashed"
+                assert item["bytes"] > 0, f"{flavour}: {item['local_name']} is unsized"
+            assert pipeline.runtime_installable(flavour) is True, flavour
+
+    def test_the_torch_closure_carries_onnx_runtime_too(self, monkeypatch):
+        """The whole reason there is still only one worker process.
+
+        If the torch flavour shipped without ONNX Runtime, an installation with
+        both stages enabled would need a second interpreter to run DPDFNet --
+        and a second interpreter is a second job object, a second pdeathsig, and
+        a second way to leave something running after the voice it belongs to
+        has gone. Carrying both wheel sets costs 126 MB and removes that whole
+        category of bug, so this is a property worth a test rather than a
+        comment.
+        """
+        self._windows(monkeypatch)
+        found = pipeline.manifest()
+        names = [item["local_name"].split("-")[0].casefold().replace("_", "-")
+                 for item in pipeline.runtime_entry(found, "torch")["platforms"][0]["artifacts"]]
+        assert "onnxruntime-directml" in names
+        assert "torch" in names
+
+    def test_each_flavour_installs_into_its_own_directory(self):
+        onnx = paths.pipeline_runtime_root("onnx")
+        torch = paths.pipeline_runtime_root("torch")
+        assert onnx != torch
+        assert onnx.name == "runtime", "an already-installed runtime must stay found"
+        assert paths.pipeline_inside(torch), "the second closure is still the pipeline's"
+
+    def test_a_flavour_this_build_does_not_have_is_refused_not_guessed(self):
+        with pytest.raises(ValueError):
+            paths.pipeline_runtime_root("cuda")
+        assert pipeline.runtime_closure_id("cuda") == ""
+
+    def test_the_two_closures_have_different_identities(self, monkeypatch):
+        self._windows(monkeypatch)
+        assert (pipeline.runtime_closure_id("onnx")
+                != pipeline.runtime_closure_id("torch"))
+
+    def test_adding_a_flavour_did_not_make_installed_runtimes_stale(self, monkeypatch):
+        """A regression guard on a mistake I made and caught.
+
+        The fingerprint first led with the flavour name for every closure, which
+        changed the onnx id and would have told every existing installation to
+        re-download 138 MB to gain a flavour its owner may never enable. The
+        literal below is the id this build produced before the torch closure
+        existed; it is pinned here so that a future edit to the fingerprint has
+        to be a deliberate one.
+        """
+        self._windows(monkeypatch)
+        assert pipeline.runtime_closure_id("onnx") == "684ddbdb0fc928f4"
+
+    def test_an_unknown_closure_in_the_manifest_is_a_broken_build(self, monkeypatch):
+        """Refused before a download starts, like an unknown provider is."""
+        found = json.loads(paths.pipeline_manifest_path().read_text(encoding="utf-8"))
+        found["runtimes"]["cuda"] = dict(found["runtimes"]["torch"])
+        monkeypatch.setattr(pipeline, "_manifest_cache", None)
+        with pytest.raises(pipeline.PipelineError, match="does not know how to install"):
+            pipeline._read_manifest(found)
+
+
+class TestTheExportToolRefusesAnExportThatDoesNotMatch:
+    """The verdict logic of tools/export_lavasr_onnx.py, exercised without torch.
+
+    The whole value of that tool is a refusal: it exists so an ONNX LavaSR is
+    only offered once it has been proved against the PyTorch model it came
+    from. That decision is a pure function of two arrays, and it should not be
+    the one part that is only ever exercised by a maintainer on a machine with
+    a 122 MB wheel and a Hugging Face token.
+    """
+
+    @staticmethod
+    def _tool():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "export_lavasr_onnx",
+            paths.extension_root() / "tools" / "export_lavasr_onnx.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_a_length_mismatch_is_refused_at_any_tolerance(self):
+        """The failure that matters most, and the one no tolerance may forgive.
+
+        Audio of the wrong length still sounds like speech. A graph that
+        resamples to the wrong rate, or pads, produces exactly this and nothing
+        about it is audible as an error -- it is audible as a slow talker.
+        """
+        tool = self._tool()
+        verdict = tool.compare([0.0] * 48000, [0.0] * 32000, tolerance=1e9)
+        assert verdict["ok"] is False
+        assert verdict["reason"] == "length"
+        assert "48000" in verdict["detail"] and "32000" in verdict["detail"]
+
+    def test_a_close_enough_export_passes_and_says_how_close(self):
+        tool = self._tool()
+        ref = [0.1, -0.2, 0.3, -0.4]
+        got = [0.1001, -0.2001, 0.3001, -0.4001]
+        verdict = tool.compare(ref, got, tolerance=1e-3)
+        assert verdict["ok"] is True
+        assert verdict["worst"] < 1e-3
+        assert verdict["samples"] == 4
+
+    def test_a_drift_past_the_tolerance_is_refused_and_located(self):
+        tool = self._tool()
+        ref = [0.0] * 10
+        got = [0.0] * 9 + [0.5]
+        verdict = tool.compare(ref, got, tolerance=1e-3)
+        assert verdict["ok"] is False
+        assert verdict["reason"] == "value"
+        assert "sample 9" in verdict["detail"]
+
+    def test_nan_is_refused_rather_than_compared(self):
+        """An exporter that drops a guard produces NaN, not a large number."""
+        tool = self._tool()
+        verdict = tool.compare([0.0, 0.0], [0.0, float("nan")], tolerance=1e9)
+        assert verdict["ok"] is False
+        assert verdict["reason"] == "not-finite"
+
+    def test_an_empty_reference_proves_nothing_and_is_refused(self):
+        tool = self._tool()
+        verdict = tool.compare([], [], tolerance=1e-3)
+        assert verdict["ok"] is False
+        assert verdict["reason"] == "empty"
+
+    def test_the_determinism_check_is_an_exact_comparison(self):
+        """Run twice, same bytes -- a zero tolerance, deliberately."""
+        tool = self._tool()
+        assert tool.compare([0.1, 0.2], [0.1, 0.2], 0.0)["ok"] is True
+        assert tool.compare([0.1, 0.2], [0.1, 0.2000001], 0.0)["ok"] is False
+
+    def test_the_proof_lengths_include_one_that_does_not_divide_evenly(self):
+        """A padding bug only shows at a length that is not whole windows."""
+        tool = self._tool()
+        assert any(n % 16000 for n in tool.PROOF_LENGTHS)
+        assert min(tool.PROOF_LENGTHS) < 16000, "one shorter than a second"
+
+    def test_the_tool_says_what_is_missing_rather_than_traceback(self):
+        """Run where upstream is absent, which is every machine in CI."""
+        tool = self._tool()
+        with pytest.raises(tool.ExportError, match="not importable here"):
+            tool.load_upstream("cpu")
