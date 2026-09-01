@@ -1304,23 +1304,105 @@ class _DpdfBackend:
 
 
 class _LavaBackend:
-    """LavaSR's ONNX session, driven one analysis window at a time."""
+    """LavaSR upstream, driven one analysis window at a time.
+
+    PyTorch rather than ONNX, which is the correction to a real failure: this
+    class used to open the stage's model file with ONNX Runtime, and LavaSR's
+    weights are a PyTorch checkpoint, so a perfectly good installation died on
+    ``InvalidProtobuf`` at the self-test. The name of the file was never the
+    problem -- the runtime it was handed to was.
+
+    The window scheme, the rates and the crossfade all belong to
+    :class:`LavaStage` above. What lives here is only "one tensor in, one tensor
+    out", so that a future ONNX export of the same model can replace this class
+    without the stage noticing.
+    """
 
     def __init__(self, root, config: dict, numpy_module):
-        from pathlib import Path
-
         self._np = numpy_module
-        wanted = str(config.get("model_file") or "model.onnx")
-        provider, adapter = _wanted_provider(config)
-        self._session = _Session(Path(root) / wanted, config.get("intraop", 2),
-                                 config.get("interop", 1), provider, adapter)
-        self.providers = self._session.providers
+        self._device = _torch_device(config)
+        try:
+            import torch
+            from LavaSR.enhancer.linkwitz_merge import FastLRMerge
+            from LavaSR.model import LavaEnhance2
+        except ImportError as exc:
+            raise Refusal(f"the enhancement runtime has no PyTorch LavaSR in it ({exc})")
+
+        self._torch = torch
+        # A real directory, so upstream's snapshot_download() branch is never
+        # taken: I-VP-21 says this process gets verified local paths and no
+        # network, at load time as much as at inference time.
+        self._model = LavaEnhance2(model_path=str(root), device=self._device)
+
+        # The refiner upstream builds in load_audio(), which is the entry point
+        # this adapter does not use. Its constructor default is a 4 kHz cutoff,
+        # and load_audio() overrides it to half the input rate -- 8 kHz for the
+        # 16 kHz LavaSR actually reads. Leaving the default would blend the
+        # original and the upsampled bands an octave too low and throw away real
+        # content between 4 and 8 kHz. Read out of upstream's own usage rather
+        # than out of its constructor signature.
+        # The same key the stage is built from, so the refiner's cutoff and the
+        # rate the audio actually arrives at cannot drift apart. Refused rather
+        # than defaulted: a cutoff guessed from a missing measurement is exactly
+        # the kind of silent wrongness this stage is careful about elsewhere.
+        backend_rate = int(config.get("backend_input_rate") or 0)
+        if backend_rate <= 0:
+            raise Refusal("LavaSR was given no measured input rate to work at")
+        self._model.bwe_model.lr_refiner = FastLRMerge(
+            device=self._device, cutoff=backend_rate // 2, transition_bins=1024)
+        self.providers = (self._device,)
 
     def reset(self, rate: int) -> None:
         return None
 
     def enhance(self, samples, rate: int):
-        raise Refusal("LavaSR is not installable in this build")
+        """One analysis window in at ``rate``, 48 kHz out.
+
+        ``rate`` is the backend rate the stage resampled to and is not passed
+        on: upstream's enhance() has 16000 written into it, which is the whole
+        reason the stage measures a backend rate and converts before calling.
+        """
+        torch = self._torch
+        block = self._np.asarray(samples, dtype=self._np.float32).reshape(1, -1)
+        if not block.size:
+            return []
+        with torch.no_grad():
+            wav = torch.from_numpy(block).to(self._device)
+            heard = self._model.enhance(wav, enhance=True, denoise=True, batch=False)
+            return heard.detach().to("cpu").float().reshape(-1).numpy().tolist()
+
+
+def _torch_device(config: dict) -> str:
+    """Where a PyTorch stage runs, as a device string torch understands.
+
+    The same placement the ONNX stages take as an execution provider, said in
+    the other library's vocabulary. ``adapter`` is the card the user picked on
+    the panel; on the CUDA closure that is a CUDA ordinal, and the parent is
+    what decides which physical card that is -- this end does not re-guess it.
+
+    A card that was asked for and is not there is refused rather than quietly
+    swapped for the processor, for the reason the ONNX path gives: running
+    somewhere else while reporting success is how a placement setting becomes
+    one nobody can trust.
+    """
+    provider = str(config.get("provider") or PROVIDER_CPU)
+    if provider == PROVIDER_CPU:
+        return "cpu"
+    try:
+        import torch
+    except ImportError as exc:
+        raise Refusal(f"the enhancement runtime has no PyTorch in it ({exc})")
+    try:
+        adapter = max(0, int(config.get("adapter", 0)))
+    except (TypeError, ValueError):
+        adapter = 0
+    if not torch.cuda.is_available():
+        raise Refusal("this stage was placed on a graphics card and the enhancement "
+                      "runtime has no CUDA build of PyTorch in it")
+    if adapter >= torch.cuda.device_count():
+        raise Refusal(f"this stage was placed on graphics card {adapter} and PyTorch "
+                      f"can see {torch.cuda.device_count()}")
+    return f"cuda:{adapter}"
 
 
 # --------------------------------------------------------------------------- #

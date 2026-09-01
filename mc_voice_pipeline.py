@@ -713,6 +713,10 @@ def _read_artifact(owner: str, item) -> dict:
     if digest and (len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)):
         raise PipelineError(f"The Voice Pipeline manifest's {owner} names a hash that is "
                             f"not a SHA-256.")
+    source_package = str(item.get("source_package") or "")
+    if source_package and ("/" in source_package or source_package in (".", "..")):
+        raise PipelineError(f"The Voice Pipeline manifest's {owner} names a source package "
+                            f"({source_package!r}) that is not a plain directory name.")
     resolve = item.get("resolve")
     if resolve is not None:
         # An artifact resolved from a publisher's index at install time. Only
@@ -745,6 +749,7 @@ def _read_artifact(owner: str, item) -> dict:
         "bytes": int(item.get("bytes") or 0),
         "sha256": digest,
         "resolve": resolve,
+        "source_package": source_package,
         # Whether this artifact is behind the publisher's access gate, and
         # therefore whether the shared credential may be offered for it. A fact
         # this repository commits to in a manifest, never one a response teaches
@@ -880,12 +885,21 @@ def runtime_installable(flavour: str = "onnx", accelerator: str = "cpu") -> bool
     entry = _platform_entry_or_none(found, flavour, accelerator)
     if entry is None or not entry["artifacts"]:
         return False
-    # A resolved artifact has no digest here by definition -- it gets one from
-    # the publisher's index at install time, and the download is checked against
-    # that. It is still installable; what it is not is *pinned*, which is a
-    # different question that :func:`runtime_pinned` answers separately so that
-    # a surface can say which of the two it is looking at.
-    return all(item["resolve"] or (item["sha256"] and item["bytes"] > 0)
+    # Three shapes count as installable, and only the first is *pinned*.
+    #
+    #   a digest and a size committed here -- checked against a number this
+    #       repository reviewed;
+    #   a resolve -- the URL and the digest both come from the publisher's
+    #       index at install time;
+    #   a source package with a URL -- an immutable commit or an sdist whose
+    #       digest the publisher serves, recorded at install.
+    #
+    # The last two are weaker claims, which is why :func:`runtime_pinned` is a
+    # separate question rather than a synonym: a surface has to be able to say
+    # which of the three it is looking at instead of implying the strongest.
+    return all(item["resolve"]
+               or (item["sha256"] and item["bytes"] > 0)
+               or (item["source_package"] and item["url"])
                for item in entry["artifacts"])
 
 
@@ -1769,6 +1783,7 @@ def _artifacts(entries) -> list:
     return [models.Artifact(filename=item["filename"], local_name=item["local_name"],
                             url=item["url"], size=item["bytes"] or None,
                             sha256=item["sha256"] or None,
+                            source_package=str(item.get("source_package") or ""),
                             authorized=bool(item.get("authorized")))
             for item in entries]
 

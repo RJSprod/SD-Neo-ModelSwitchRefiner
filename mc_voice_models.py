@@ -133,6 +133,14 @@ class Artifact:
     sha256: str | None
     archive: str = ""
     strip_root: str = ""
+    source_package: str = ""
+    """The importable directory to lift out of a source archive, if this is one.
+
+    Empty for every wheel, which is nearly everything. Set only for the three
+    pure-Python packages LavaSR needs that publish no wheel at all, where
+    "installing" means putting one named directory on the path rather than
+    unpacking a distribution -- see :func:`unpack_source_archive`.
+    """
     authorized: bool = False
     """Whether this artifact sits behind a publisher's access gate.
 
@@ -2104,6 +2112,75 @@ that is only ever launched by path will use.
 """
 
 
+def unpack_source_archive(archive: Path, package: str, destination: Path) -> list[str]:
+    """Install one pure-Python package by lifting its directory out of a tarball.
+
+    For the three packages LavaSR needs that publish no wheel: LavaSR itself,
+    the vocos fork it pins to a git branch, and encodec, which vocos imports
+    unconditionally and which ships an sdist only. All three are pure Python, so
+    "installing" them is putting their package directory on the path -- there is
+    no build step to run and therefore no setup.py executed here.
+
+    Only the named package directory is taken. A GitHub tarball is a repository,
+    not a distribution: it carries tests, training scripts, and in encodec's case
+    four megabytes of sample audio, none of which belongs in a speech runtime.
+    Naming the directory rather than unpacking the archive is also what keeps
+    this honest about *what* was installed -- one importable name, chosen here,
+    rather than whatever the archive happened to contain.
+
+    Every member is checked before it is written. A tar entry may name any path
+    it likes, including one that climbs out of the destination, and a symlink
+    entry may point anywhere at all; both are refused rather than sanitised.
+    """
+    wanted = str(package or "").strip("/")
+    if not wanted or "/" in wanted or wanted in (".", ".."):
+        raise VoiceError(f"{package!r} is not a package name that can be unpacked.")
+    destination.mkdir(parents=True, exist_ok=True)
+    root = (destination / wanted).resolve()
+    added: list[str] = []
+    try:
+        with tarfile.open(archive, "r:*") as bundle:
+            for member in bundle.getmembers():
+                parts = [p for p in member.name.split("/") if p and p != "."]
+                # <archive-root>/<…>/<package>/<path…> -- the package directory
+                # can sit at any depth, because a GitHub tarball wraps the
+                # repository in a commit-named folder and an sdist in a
+                # version-named one.
+                if wanted not in parts:
+                    continue
+                relative = "/".join(parts[parts.index(wanted):])
+                if member.issym() or member.islnk():
+                    # Nothing in these three packages is a link, and a link is
+                    # the one member that can point outside the tree after the
+                    # path check has already passed.
+                    raise VoiceError(f"{archive.name} contains a link ({member.name}), "
+                                     f"which is not unpacked. Nothing was installed.")
+                if not (member.isfile() or member.isdir()):
+                    continue
+                target = (destination / relative).resolve()
+                if target != root and root not in target.parents:
+                    raise VoiceError(f"{archive.name} names a path ({member.name}) that "
+                                     f"would not stay in its own folder. Nothing was "
+                                     f"installed.")
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                handle = bundle.extractfile(member)
+                if handle is None:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with handle, open(target, "wb") as out:
+                    shutil.copyfileobj(handle, out)
+                added.append(relative)
+    except tarfile.TarError as exc:
+        raise VoiceError(f"{archive.name} could not be read ({exc.__class__.__name__}). "
+                         f"Nothing was installed.") from None
+    if not added:
+        raise VoiceError(f"{archive.name} does not contain a {wanted!r} package. Nothing "
+                         f"was installed.")
+    return added
+
+
 def _unpack_wheel(wheel: Path, destination: Path) -> list[str]:
     """Install one wheel by unpacking it. Returns the top-level names it added.
 
@@ -2202,6 +2279,13 @@ def _build_environment(staging: Path, wheels: Path, chosen: RuntimePlatform,
         if not wheel.is_file():
             raise VoiceError(f"{item.filename} is missing from the staged download. Nothing "
                              f"was installed.")
+        package = getattr(item, "source_package", "")
+        if package:
+            added = unpack_source_archive(wheel, package, target)
+            logger.info("Model Chain: Voice Chat unpacked the %s package out of %s into "
+                        "the isolated runtime (%s files)", package, item.filename,
+                        len(added))
+            continue
         added = _unpack_wheel(wheel, target)
         logger.info("Model Chain: Voice Chat unpacked %s into the isolated runtime (%s)",
                     item.filename, ", ".join(added[:6]) or "nothing")

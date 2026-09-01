@@ -199,3 +199,98 @@ class TestTheNewestVersionIsChosenDeliberately:
                  link("torch-2.9.1-cp313-cp313-win_amd64.whl", DIGEST)),
             BASE, "torch", "2.9.1", WINDOWS)
         assert found["filename"].startswith("torch-2.9.1")
+
+
+class TestLiftingAPackageOutOfASourceArchive:
+    """Three of LavaSR's dependencies publish source and no wheel.
+
+    This writes files onto disk from an archive fetched over the network, so
+    what it refuses matters as much as what it extracts. A tar member may name
+    any path it likes, including one that climbs out of the destination.
+    """
+
+    @staticmethod
+    def _archive(tmp_path, entries, name="pkg.tar.gz"):
+        import io, tarfile
+        path = tmp_path / name
+        with tarfile.open(path, "w:gz") as bundle:
+            for member, blob in entries.items():
+                info = tarfile.TarInfo(member)
+                info.size = len(blob)
+                bundle.addfile(info, io.BytesIO(blob))
+        return path
+
+    def test_only_the_named_package_directory_is_taken(self, tmp_path):
+        """A GitHub tarball is a repository, not a distribution.
+
+        encodec's sdist carries four megabytes of sample audio next to its
+        package; a LavaSR checkout carries a README and a pyproject. None of
+        that belongs in a speech runtime.
+        """
+        import mc_voice_models as models
+        archive = self._archive(tmp_path, {
+            "LavaSR-33ac0408/README.md": b"# LavaSR\n",
+            "LavaSR-33ac0408/pyproject.toml": b"[project]\n",
+            "LavaSR-33ac0408/test_48k.wav": b"R" * 4096,
+            "LavaSR-33ac0408/LavaSR/__init__.py": b"",
+            "LavaSR-33ac0408/LavaSR/model.py": b"class LavaEnhance2:\n    pass\n",
+            "LavaSR-33ac0408/LavaSR/enhancer/enhancer.py": b"# bwe\n"})
+        added = models.unpack_source_archive(archive, "LavaSR", tmp_path / "site")
+        assert (tmp_path / "site" / "LavaSR" / "model.py").exists()
+        assert (tmp_path / "site" / "LavaSR" / "enhancer" / "enhancer.py").exists()
+        assert not (tmp_path / "site" / "README.md").exists()
+        assert not (tmp_path / "site" / "test_48k.wav").exists()
+        assert all(name.startswith("LavaSR/") for name in added)
+
+    def test_a_member_that_climbs_out_of_the_destination_is_refused(self, tmp_path):
+        import mc_voice_models as models
+        archive = self._archive(tmp_path, {
+            "pkg-1.0/vocos/__init__.py": b"",
+            "pkg-1.0/vocos/../../../escape.py": b"import os\n"})
+        with pytest.raises(models.VoiceError, match="would not stay in its own folder"):
+            models.unpack_source_archive(archive, "vocos", tmp_path / "site")
+
+    def test_a_symlink_member_is_refused_rather_than_followed(self, tmp_path):
+        """The one member that can still point outside after the path check."""
+        import io, tarfile
+        import mc_voice_models as models
+        path = tmp_path / "link.tar.gz"
+        with tarfile.open(path, "w:gz") as bundle:
+            good = tarfile.TarInfo("pkg-1.0/vocos/__init__.py")
+            good.size = 0
+            bundle.addfile(good, io.BytesIO(b""))
+            link = tarfile.TarInfo("pkg-1.0/vocos/secrets.py")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "/etc/passwd"
+            bundle.addfile(link)
+        with pytest.raises(models.VoiceError, match="contains a link"):
+            models.unpack_source_archive(path, "vocos", tmp_path / "site")
+
+    def test_an_archive_without_the_package_says_so(self, tmp_path):
+        import mc_voice_models as models
+        archive = self._archive(tmp_path, {"other-1.0/other/__init__.py": b""})
+        with pytest.raises(models.VoiceError, match="does not contain a 'vocos' package"):
+            models.unpack_source_archive(archive, "vocos", tmp_path / "site")
+
+    def test_a_package_name_that_is_a_path_is_refused(self, tmp_path):
+        import mc_voice_models as models
+        archive = self._archive(tmp_path, {"pkg-1.0/vocos/__init__.py": b""})
+        for bad in ("../vocos", "a/b", "", ".."):
+            with pytest.raises(models.VoiceError):
+                models.unpack_source_archive(archive, bad, tmp_path / "site")
+
+    def test_a_corrupt_archive_names_itself_rather_than_tracebacking(self, tmp_path):
+        import mc_voice_models as models
+        path = tmp_path / "broken.tar.gz"
+        path.write_bytes(b"this is not a tarball")
+        with pytest.raises(models.VoiceError, match="could not be read"):
+            models.unpack_source_archive(path, "vocos", tmp_path / "site")
+
+    def test_a_package_nested_deeper_is_still_found(self, tmp_path):
+        """An sdist wraps in a version folder, a checkout in a commit folder."""
+        import mc_voice_models as models
+        archive = self._archive(tmp_path, {
+            "encodec-0.1.1/src/encodec/__init__.py": b"",
+            "encodec-0.1.1/src/encodec/model.py": b"class EncodecModel:\n    pass\n"})
+        models.unpack_source_archive(archive, "encodec", tmp_path / "site")
+        assert (tmp_path / "site" / "encodec" / "model.py").exists()

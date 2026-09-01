@@ -2765,11 +2765,14 @@ class TestTheBuildCarriesTwoRuntimeClosures:
         monkeypatch.setattr(models, "current_platform",
                             lambda: ("windows", "amd64", "3.13"))
 
-    def test_both_closures_are_pinned_byte_for_byte(self, monkeypatch):
-        """No provisional path for a wheel, on either flavour.
+    def test_every_wheel_is_pinned_byte_for_byte(self, monkeypatch):
+        """No provisional path for a *wheel*, on either flavour.
 
-        A wheel's contents get executed. The stages may arrive against a digest
-        their publisher reports at install time; a runtime may not.
+        A wheel's contents get executed, so it is checked against a digest this
+        repository reviewed. Three things in the torch closure are not wheels --
+        LavaSR, the vocos fork and encodec publish source only -- and they are
+        named exceptions rather than a relaxed rule: the assertion below lists
+        them, so a fourth cannot be added without editing this test.
         """
         self._windows(monkeypatch)
         found = pipeline.manifest()
@@ -2778,9 +2781,38 @@ class TestTheBuildCarriesTwoRuntimeClosures:
             artifacts = entry["platforms"][0]["artifacts"]
             assert artifacts, flavour
             for item in artifacts:
+                if item["source_package"] or item["resolve"]:
+                    continue
                 assert item["sha256"], f"{flavour}: {item['local_name']} is unhashed"
                 assert item["bytes"] > 0, f"{flavour}: {item['local_name']} is unsized"
             assert pipeline.runtime_installable(flavour) is True, flavour
+
+    def test_the_source_packages_are_exactly_the_three_with_no_wheel(self, monkeypatch):
+        self._windows(monkeypatch)
+        found = pipeline.manifest()
+        assert not [item for item in
+                    pipeline.runtime_entry(found, "onnx")["platforms"][0]["artifacts"]
+                    if item["source_package"]], "the ONNX closure is wheels only"
+        for entry in pipeline.runtime_entry(found, "torch")["platforms"]:
+            packages = sorted(item["source_package"] for item in entry["artifacts"]
+                              if item["source_package"])
+            assert packages == ["LavaSR", "encodec", "vocos"], entry["id"]
+
+    def test_encodec_is_pinned_even_though_it_ships_no_wheel(self, monkeypatch):
+        """An sdist on PyPI can still be hashed here. Only the two GitHub
+        tarballs cannot, because that host is unreachable from the machine that
+        writes this manifest -- not because they are source."""
+        self._windows(monkeypatch)
+        rows = {item["source_package"]: item for item in
+                pipeline.runtime_entry(pipeline.manifest(), "torch")["platforms"][0]
+                ["artifacts"] if item["source_package"]}
+        assert rows["encodec"]["sha256"], "encodec is on PyPI and is pinned"
+        assert rows["encodec"]["bytes"] > 0
+        for name in ("LavaSR", "vocos"):
+            assert rows[name]["url"].startswith("https://codeload.github.com/")
+            # An immutable commit, so the archive cannot change under the pin
+            # even though the digest is the publisher's rather than ours.
+            assert len(rows[name]["url"].rsplit("/", 1)[-1]) == 40
 
     def test_the_torch_closure_carries_onnx_runtime_too(self, monkeypatch):
         """The whole reason there is still only one worker process.
@@ -2967,7 +2999,7 @@ class TestChoosingACardChoosesADifferentClosure:
         self._windows(monkeypatch)
         assert pipeline.runtime_installable("torch", "cuda") is True
         assert pipeline.runtime_pinned("torch", "cuda") is False
-        assert pipeline.runtime_pinned("torch", "cpu") is True, "the CPU one is pinned"
+        assert pipeline.runtime_pinned("onnx", "cpu") is True, "the ONNX one is pinned"
 
     def test_only_the_two_wheels_that_cannot_be_pinned_are_resolved(self, monkeypatch):
         """Everything else in the CUDA closure still comes hashed from PyPI.
@@ -2980,7 +3012,10 @@ class TestChoosingACardChoosesADifferentClosure:
         entry = pipeline._platform_entry_or_none(pipeline.manifest(), "torch", "cuda")
         resolved = [item for item in entry["artifacts"] if item["resolve"]]
         assert sorted(item["local_name"] for item in resolved) == ["torch", "torchaudio"]
-        assert len(entry["artifacts"]) - len(resolved) == 46
+        # Everything else is a wheel this repository hashed, or one of the three
+        # named source packages. Nothing is loose.
+        rest = [item for item in entry["artifacts"] if not item["resolve"]]
+        assert all(item["sha256"] or item["source_package"] for item in rest)
 
     def test_a_manifest_that_both_pins_and_resolves_a_wheel_is_refused(self):
         """One or the other. A pin overwritten by a publisher is not a pin."""
