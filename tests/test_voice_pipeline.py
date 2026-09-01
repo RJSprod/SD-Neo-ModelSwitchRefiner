@@ -1213,16 +1213,22 @@ class TestTheManifestIsATrustRoot:
         assert "operating system" in pipeline.stage_unavailable_reason("dpdfnet")
 
     def test_lavasr_is_not_installable_and_says_why(self):
-        """Not "coming soon". A sentence naming what is actually missing.
+        """Not "coming soon", and not an essay either.
 
-        Its rate contract *is* measured now -- upstream's own enhance() resamples
-        16000 to 48000 unconditionally, which is the number the adapter needed.
-        What is missing is a dependency closure: no wheel, Torch, and a vocos
-        fork pinned to a git branch rather than a release.
+        What is missing changed once the PyTorch closure was pinned: the
+        runtime is no longer the gap, LavaSR's own files are. The reason has to
+        track that. It also has to stay a *sentence* -- this string is rendered
+        on a settings panel, and an earlier version of it grew into three
+        hundred words of engineering notes that told a user staring at a
+        disabled button everything except what to do.
         """
         assert pipeline.stage_installable("lavasr") is False
         reason = pipeline.stage_unavailable_reason("lavasr")
-        assert "LavaSR" in reason and "wheel" in reason
+        assert "LavaSR" in reason
+        assert "not declared" in reason or "no files pinned" in reason
+        assert len(reason) <= 320, (
+            f"the panel reason is {len(reason)} characters; it is read by somebody "
+            f"looking at a disabled button, not by somebody reading a commit log")
         with pytest.raises(pipeline.PipelineError, match="LavaSR"):
             pipeline.install("lavasr")
 

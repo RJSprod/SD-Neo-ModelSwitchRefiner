@@ -1837,11 +1837,12 @@ def pipeline_runtime_detail() -> str:
         installed=found.runtime_ready)
 
 
-def _runtime_bytes() -> int:
+def _runtime_bytes(flavour: str = "onnx") -> int:
     import mc_voice_pipeline as pipeline
 
     try:
-        return int(pipeline.manifest()["runtime"].get("about_bytes") or 0)
+        return int(pipeline.runtime_entry(pipeline.manifest(), flavour)
+                   .get("about_bytes") or 0)
     except Exception:
         return 0
 
@@ -1875,13 +1876,21 @@ def pipeline_stage_detail(stage_id: str) -> str:
     # runs inside the enhancement runtime and cannot be installed or proved
     # without it, and a user looking at a stage that will not install is owed
     # that fact where they are looking (A-44) rather than in a log file.
-    runtime_ready = found.runtime_ready
+    # Which closure this stage runs in, rather than "the runtime" as though
+    # there were one. LavaSR needs the PyTorch one; quoting it the ONNX one's
+    # size told the user they were 132 MB from a stage that actually needs 264
+    # and a different interpreter.
+    flavour = pipeline.stage_flavour(stage_id)
+    runtime_ready = found.runtime_ready and flavour == "onnx"
+    size = _runtime_bytes(flavour)
+    runtime_label = ("Voice Pipeline runtime" if flavour == "onnx"
+                     else "Voice Pipeline runtime, PyTorch build")
     requires = ("Installed." if runtime_ready
-                else ("It will be installed first \u2014 about "
-                      f"{models._bytes_label(_runtime_bytes())} more."
-                      if _runtime_bytes() else "It will be installed first."))
+                else (f"It will be installed first \u2014 about "
+                      f"{models._bytes_label(size)} more."
+                      if size else "It will be installed first."))
     rows = [("Purpose", purpose.get(stage_id, spec.summary), ""),
-            ("Requires", "Voice Pipeline runtime"
+            ("Requires", runtime_label
              + ("" if runtime_ready else " \u2014 not installed yet"), requires),
             ("Installation", _state_label(held.install_state if held else "not_installed"),
              held.message if held else ""),
