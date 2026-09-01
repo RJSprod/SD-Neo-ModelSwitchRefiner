@@ -91,6 +91,11 @@
         engines: "model-chain/voice/engines",
         engineSelect: "model-chain/voice/engine/select",
         surface: "model-chain/voice/surface",
+        pipeline: "model-chain/voice/pipeline",
+        pipelineSettings: "model-chain/voice/pipeline/settings",
+        pipelineInstall: "model-chain/voice/pipeline/install",
+        components: "model-chain/voice/components",
+        component: "model-chain/voice/component",
         sopro: "model-chain/voice/sopro",
         soproInstall: "model-chain/voice/sopro/install",
         soproSettings: "model-chain/voice/sopro/settings",
@@ -438,6 +443,10 @@
         window.clearTimeout(voicesTimer);
         window.clearTimeout(soproTimer);
         window.clearTimeout(pocketTimer);
+        // Both new rows are inside the surface being replaced, so both of their
+        // timers paint nodes that are about to be thrown away.
+        window.clearTimeout(pipelineTimer);
+        window.clearTimeout(componentsTimer);
         return post(ROUTES.surface, {}).then(function (payload) {
             if (!payload || !payload.ok || !payload.settings) return false;
             [[".mc-voice-settings", payload.settings],
@@ -3203,6 +3212,8 @@
         wireSopro(holder);
         wirePocket(holder);
         wireCleanup(holder);
+        wirePipeline(holder);
+        wireComponents(holder);
         wireCredential(holder);
         wireValidate(holder);
         schedulePaint(holder, 0);
@@ -3507,6 +3518,250 @@
             install.disabled = running || payload.installed || !payload.platform_supported;
             install.textContent = payload.installed ? "Installed" : "Install cleanup";
         }
+    }
+
+    // -- the Voice Pipeline ---------------------------------------------------- //
+    //
+    // Three switches and one sentence. The switches post *together*, through one
+    // route, because the server reads all three at the top of every turn and a
+    // browser that sent them separately could be interrupted between two of them
+    // and leave a configuration nobody chose.
+    //
+    // There is nothing here that reorders anything. The stage rows are numbered
+    // by the server and carry no drag handle, no move buttons and no order to
+    // send: the chain's order is structural and is not configuration.
+
+    let pipelineTimer = 0;
+
+    function wirePipeline(holder) {
+        const row = holder.querySelector('[data-mc-voice-kind="pipeline"]');
+        if (!row || row.dataset.mcVoiceWired === "1") return;
+        row.dataset.mcVoiceWired = "1";
+
+        const master = row.querySelector("[data-mc-voice-pipeline-master]");
+        const stages = Array.prototype.slice.call(
+            row.querySelectorAll("[data-mc-voice-pipeline-toggle]"));
+
+        function send() {
+            const body = {stages: {}};
+            if (master) body.enabled = !!master.checked;
+            stages.forEach(function (box) {
+                body.stages[box.getAttribute("data-mc-voice-pipeline-toggle")] =
+                    !!box.checked;
+            });
+            post(ROUTES.pipelineSettings, body, holder).then(function (payload) {
+                // Repainted from what the server says it stored rather than from
+                // what the checkbox looks like, so a host that refused the write
+                // shows the setting that is actually in force.
+                paintPipeline(row, payload);
+            }).catch(function () {
+                setText(row, "[data-mc-voice-status]",
+                        "That switch could not be changed.");
+            });
+        }
+
+        if (master) master.addEventListener("change", send);
+        stages.forEach(function (box) { box.addEventListener("change", send); });
+        whenOnScreen(row, function () { pollPipeline(holder, row, 0); });
+    }
+
+    function pollPipeline(holder, row, delay) {
+        window.clearTimeout(pipelineTimer);
+        pipelineTimer = window.setTimeout(function () {
+            post(ROUTES.pipeline, {}, holder).then(function (payload) {
+                paintPipeline(row, payload);
+                const progress = payload && payload.progress && payload.progress.pipeline;
+                if (progress && progress.running) pollPipeline(holder, row, 1200);
+            }).catch(function () { /* the next paint tries again */ });
+        }, Math.max(0, delay || 0));
+    }
+
+    function paintPipeline(row, payload) {
+        if (!row || !payload || !payload.ok) return;
+        const progress = (payload.progress && payload.progress.pipeline) || {};
+        const running = !!progress.running;
+        setText(row, "[data-mc-voice-status]",
+                running ? (progress.text || "Installing…")
+                        : ((payload.runtime && payload.runtime.message) || ""));
+        // The path line, from the server's own snapshot rather than assembled
+        // here from the checkboxes: a stage somebody ticked but never installed
+        // must not appear in a line that claims what ran.
+        setText(row, "[data-mc-voice-pipeline-path]",
+                payload.reason || payload.path || "");
+        const master = row.querySelector("[data-mc-voice-pipeline-master]");
+        if (master) {
+            master.checked = !!payload.master_enabled;
+            master.disabled = !payload.supported_for_engine;
+        }
+        (payload.stages || []).forEach(function (stage) {
+            const box = row.querySelector(
+                '[data-mc-voice-pipeline-toggle="' + stage.id + '"]');
+            if (box) box.checked = !!stage.enabled;
+            const note = row.querySelector(
+                '[data-mc-voice-pipeline-state="' + stage.id + '"]');
+            if (note) {
+                note.textContent = stage.install_state === "installed"
+                    ? (stage.runtime_state === "loaded" ? "Loaded" : "")
+                    : stage.message;
+            }
+        });
+    }
+
+    // -- the component overview and its one detail host ------------------------ //
+    //
+    // Several compact rows visible at once, and exactly one full detail surface
+    // mounted under them. Clicking a row *replaces* the host's contents with
+    // server-rendered markup for that component; it never appends a second
+    // panel and never leaves the previous component's controls in the document.
+    //
+    // Which component was last open is remembered in localStorage. It is a
+    // browser preference about a page, not a generation setting, so it belongs
+    // there rather than in the settings a backup would restore.
+
+    let componentsTimer = 0;
+    let componentsBusy = false;
+    let componentOpen = "";
+    const COMPONENT_KEY = "mcVoiceComponent";
+
+    function wireComponents(holder) {
+        const row = holder.querySelector('[data-mc-voice-kind="components"]');
+        if (!row || row.dataset.mcVoiceWired === "1") return;
+        row.dataset.mcVoiceWired = "1";
+
+        const host = row.querySelector("[data-mc-voice-component-detail]");
+        const buttons = Array.prototype.slice.call(
+            row.querySelectorAll("[data-mc-voice-component]"));
+
+        buttons.forEach(function (button) {
+            button.addEventListener("click", function (event) {
+                if (event.preventDefault) event.preventDefault();
+                showComponent(holder, row, host,
+                              button.getAttribute("data-mc-voice-component"));
+            });
+        });
+
+        whenOnScreen(row, function () {
+            let wanted = "";
+            try { wanted = window.localStorage.getItem(COMPONENT_KEY) || ""; }
+            catch (error) { wanted = ""; }
+            // A remembered component this build no longer has selects nothing
+            // rather than an error: the list is what changed, not the choice.
+            if (wanted && !row.querySelector(
+                    '[data-mc-voice-component="' + wanted + '"]')) wanted = "";
+            if (wanted) showComponent(holder, row, host, wanted);
+            pollComponents(holder, row, 0);
+        });
+    }
+
+    function showComponent(holder, row, host, identifier) {
+        if (!host || !identifier) return;
+        row.querySelectorAll("[data-mc-voice-component]").forEach(function (button) {
+            button.classList.toggle(
+                "mc-voice-component-open",
+                button.getAttribute("data-mc-voice-component") === identifier);
+        });
+        componentOpen = identifier;
+        try { window.localStorage.setItem(COMPONENT_KEY, identifier); }
+        catch (error) { /* a browser that will not store it still works */ }
+        post(ROUTES.component, {id: identifier}, holder).then(function (payload) {
+            if (!payload || !payload.ok || typeof payload.html !== "string") return;
+            // innerHTML on the one host, so the component that was there is gone
+            // rather than hidden. Nothing else on the page owns this element.
+            host.innerHTML = payload.html;
+            wireComponentDetail(holder, row, host);
+        }).catch(function () { /* the row stays as it was */ });
+    }
+
+    function wireComponentDetail(holder, row, host) {
+        host.querySelectorAll("[data-mc-voice-pipeline-install]").forEach(
+            function (button) {
+                button.addEventListener("click", function (event) {
+                    if (event.preventDefault) event.preventDefault();
+                    if (button.disabled) return;
+                    button.disabled = true;
+                    post(ROUTES.pipelineInstall,
+                         {component: button.getAttribute(
+                             "data-mc-voice-pipeline-install")},
+                         holder).then(function (payload) {
+                        if (!payload || !payload.ok) {
+                            button.disabled = false;
+                            return;
+                        }
+                        pollComponents(holder, row, 800);
+                        const pipelineRow = holder.querySelector(
+                            '[data-mc-voice-kind="pipeline"]');
+                        if (pipelineRow) pollPipeline(holder, pipelineRow, 800);
+                    }).catch(function () { button.disabled = false; });
+                });
+            });
+        // Nothing else in a detail surface is interactive, and that is a
+        // decision rather than an omission. A detail panel that re-rendered an
+        // engine's own installer would put a second copy of markup the settings
+        // row already carries into the same holder, and every
+        // `holder.querySelector('[data-mc-voice-kind="…"]')` above would then
+        // have two candidates and be handed the wrong one. So engine and
+        // cleanup details are state, and the section that owns their controls
+        // keeps them.
+    }
+
+    function pollComponents(holder, row, delay) {
+        window.clearTimeout(componentsTimer);
+        componentsTimer = window.setTimeout(function () {
+            post(ROUTES.components, {}, holder).then(function (payload) {
+                paintComponents(row, payload);
+                const busy = busyComponents(payload);
+                // The detail panel is server-rendered once, when it was opened,
+                // so an install that finished under it would leave a stale
+                // "Install" button on a component that now says Installed in
+                // the row above it. Redrawn on the edge rather than on every
+                // poll: the rows are cheap and the panel is not.
+                if (componentsBusy && !busy && componentOpen) {
+                    const host = row.querySelector("[data-mc-voice-component-detail]");
+                    showComponent(holder, row, host, componentOpen);
+                }
+                componentsBusy = busy;
+                if (busy) pollComponents(holder, row, 1200);
+            }).catch(function () { /* the next paint tries again */ });
+        }, Math.max(0, delay || 0));
+    }
+
+    function busyComponents(payload) {
+        // Only while something is actually moving. An idle overview asks for
+        // nothing, which is the same rule every other row in this file follows.
+        const rows = (payload && payload.components) || [];
+        return rows.some(function (item) {
+            return item.install_state === "installing"
+                || item.runtime_state === "loading"
+                || item.runtime_state === "stopping";
+        });
+    }
+
+    const COMPONENT_STATE_WORDS = {
+        not_installed: "Not installed", installing: "Installing…",
+        installed: "Installed", stale: "Needs updating", corrupt: "Damaged",
+        error: "Error", unavailable: "—", unloaded: "Unloaded", loading: "Loading…",
+        loaded: "Loaded", busy: "Busy", stopping: "Stopping…",
+    };
+
+    function paintComponents(row, payload) {
+        if (!row || !payload || !payload.ok) return;
+        (payload.components || []).forEach(function (item) {
+            const button = row.querySelector(
+                '[data-mc-voice-component="' + item.id + '"]');
+            if (!button) return;
+            const install = button.querySelector("[data-mc-voice-install-state]");
+            const runtime = button.querySelector("[data-mc-voice-runtime-state]");
+            // Two chips, always, never one word doing both jobs: "Installed" is
+            // a fact about disk and "Loaded" is a fact about memory right now.
+            if (install) {
+                install.textContent =
+                    COMPONENT_STATE_WORDS[item.install_state] || item.install_state;
+            }
+            if (runtime) {
+                runtime.textContent =
+                    COMPONENT_STATE_WORDS[item.runtime_state] || item.runtime_state;
+            }
+        });
     }
 
     function wireSopro(holder) {

@@ -198,6 +198,35 @@ explicit that operations with no meaning on another engine are not generalised
 for symmetry.
 """
 
+PIPELINE_ROUTE = f"{PREFIX}/pipeline"
+PIPELINE_SETTINGS_ROUTE = f"{PREFIX}/pipeline/settings"
+PIPELINE_INSTALL_ROUTE = f"{PREFIX}/pipeline/install"
+"""The Voice Pipeline's status, its three switches and its installs.
+
+Engine-neutral on purpose. The pipeline polishes whatever finalised PCM it is
+given and has no opinion about which engine produced it, so these routes carry
+no engine id and are not refused for a stale one -- which is the ``refuse_mismatch("")``
+path, meaning "whatever is active". Execution is gated to PocketTTS today
+(:data:`mc_voice_pipeline.SUPPORTED_ENGINES`) and that is a property of the
+plumbing rather than of the request.
+
+One settings route for all three switches rather than one per switch, because a
+browser that posted them separately could be interrupted between two of them and
+leave a configuration nobody chose (section 18.3).
+"""
+
+COMPONENTS_ROUTE = f"{PREFIX}/components"
+COMPONENT_ROUTE = f"{PREFIX}/component"
+"""The settings overview and the one detail surface under it.
+
+``components`` answers the compact rows -- what is installed, what is loaded,
+what is enabled -- and nothing else; ``component`` answers the full markup for
+exactly one of them, which the browser puts in one host. That split is the whole
+of the QOL redesign: the overview is cheap enough to poll and the detail is the
+only thing mounted, so an inactive engine's controls are absent from the page
+rather than hidden in it (section 5.4).
+"""
+
 CLEANUP_ROUTE = f"{PREFIX}/cleanup"
 CLEANUP_INSTALL_ROUTE = f"{PREFIX}/cleanup/install"
 CLEANUP_RUN_ROUTE = f"{PREFIX}/cleanup/run"
@@ -2000,6 +2029,173 @@ def credential(action: str = "", token: str = "") -> dict:
     raise Refused(400, "That is not something this route does.")
 
 
+def pipeline_payload() -> dict:
+    """What the Voice Pipeline row draws. Numbers, enums and sentences only.
+
+    Never the token, never a filesystem path, never a worker's environment --
+    the same bar every status in this feature clears (I-VP-26, section 5.7).
+    """
+    import mc_voice_pipeline as pipeline
+    import mc_voice_pipeline_runtime as runtime
+
+    found = pipeline.status()
+    live = runtime.status()
+    # The snapshot is built for the engine that is actually selected, so the
+    # path preview and the label under it describe the same thing. Asking it
+    # about PocketTTS while the row says "Kokoro" would draw a chain that would
+    # not run.
+    active = _active_engine()
+    snapshot = pipeline.snapshot(_source_rate(), active, found)
+    return {
+        "ok": True,
+        "supported_for_engine": active in pipeline.SUPPORTED_ENGINES,
+        "master_enabled": found.master_enabled,
+        "state": pipeline.pipeline_state(found),
+        "desired_stages": list(pipeline.desired_stages()),
+        "active_stages": list(snapshot.stage_ids),
+        "path": snapshot.describe(_source_label()),
+        "reason": snapshot.reason,
+        "input_rate": snapshot.input_rate,
+        "output_rate": snapshot.output_rate,
+        "pinned": found.pinned,
+        "download_bytes": found.download_bytes,
+        "runtime": {
+            "install_state": found.runtime_install_state,
+            "runtime_state": live["runtime_state"],
+            "message": found.runtime_message,
+            "closure_id": found.runtime_closure_id,
+            "loaded_stages": live["loaded_stages"],
+        },
+        "stages": [
+            {
+                "id": held.id,
+                "label": held.label,
+                "order": held.order,
+                "summary": pipeline.stage(held.id).summary if pipeline.stage(held.id)
+                           else "",
+                "install_state": held.install_state,
+                "runtime_state": ("loaded" if held.id in live["loaded_stages"]
+                                  else "unloaded"),
+                "message": held.message,
+                "enabled": held.enabled,
+                "revision": held.revision[:12],
+                "license": held.license,
+                "about_bytes": held.about_bytes,
+            }
+            for held in found.stages
+        ],
+        "progress": {pipeline.KIND: models.progress().get(pipeline.KIND) or {}},
+    }
+
+
+def _active_engine() -> str:
+    import mc_voice_engines as engines
+
+    try:
+        return str(engines.active() or "")
+    except Exception:
+        return ""
+
+
+def _source_label() -> str:
+    return {"pocket": "PocketTTS", "kokoro": "Kokoro",
+            "sopro": "Sopro V2"}.get(_active_engine(), "Speech")
+
+
+def _source_rate() -> int:
+    """The rate the selected engine speaks at, for the path preview only.
+
+    A preview number rather than a contract: what a turn actually runs at is
+    frozen by :func:`mc_voice_pipeline.snapshot` against the rate the worker
+    reported for that turn (I-VP-06). Answering 0 here would make the preview
+    say "0 kHz", so an engine that cannot be asked answers with nothing and the
+    preview simply omits the rate.
+    """
+    try:
+        import mc_voice_pocket_runtime as pocket
+
+        # What the worker said when it started, if one is running, and what the
+        # installed bundle declares otherwise. Both are the same number on a
+        # healthy installation; asking the running worker first is what makes
+        # the preview honest on one where they have come apart.
+        return int((pocket.engine().get("sample_rate") or 0)
+                   or pocket._declared_sample_rate() or 0)
+    except Exception:
+        return 0
+
+
+def pipeline_settings(enabled, stages) -> dict:
+    """The three switches, written together, validated to booleans and known ids.
+
+    No order field is accepted and there is nothing to accept one into: the
+    chain's order is structural and lives in :data:`mc_voice_pipeline.STAGES`
+    (I-VP-01, section 18.3). A request naming a stage this build does not have
+    is refused rather than ignored, because silently accepting it would report
+    success for a setting that was never stored.
+    """
+    import mc_voice_pipeline as pipeline
+
+    wanted = {}
+    for name, value in dict(stages or {}).items():
+        if pipeline.stage(str(name)) is None:
+            raise Refused(400, f"There is no Voice Pipeline stage called {name!r}.")
+        if value is not None and not isinstance(value, bool):
+            raise Refused(400, "A Voice Pipeline switch is on or off.")
+        wanted[str(name)] = value
+    if enabled is not None and not isinstance(enabled, bool):
+        raise Refused(400, "A Voice Pipeline switch is on or off.")
+    pipeline.remember(enabled, wanted)
+    found = pipeline_payload()
+    import mc_voice_turn as turns
+
+    # Said rather than implied. A turn in flight is frozen onto the snapshot it
+    # started with, so somebody who changes a switch mid-reply has changed the
+    # next one, and a surface that did not say so would be a surface that looked
+    # broken for the length of a sentence (I-VP-06, section 12.5).
+    found["applied"] = "pending_next_turn" if turns.busy() else "now"
+    return found
+
+
+def pipeline_install(component: str) -> dict:
+    """Install the pipeline runtime or one stage. Offloaded and threaded by the route."""
+    import mc_voice_pipeline as pipeline
+
+    try:
+        pipeline.install(str(component or ""))
+    except pipeline.PipelineError as exc:
+        raise Refused(409, str(exc)) from None
+    return pipeline_payload()
+
+
+def components_payload() -> dict:
+    """The compact overview's rows, as data the browser repaints from.
+
+    Only non-secret UI facts (section 5.7): an id, a category, a label, an
+    install state and a runtime state. Never a token, never a filesystem path,
+    never a worker's environment or command line.
+    """
+    import mc_voice_ui as voice_ui
+
+    return {"ok": True, "components": voice_ui.component_rows(),
+            "categories": [{"id": key, "label": label}
+                           for key, label in voice_ui.CATEGORIES]}
+
+
+def component_payload(identifier: str) -> dict:
+    """One component's full detail surface, as markup for one host.
+
+    Server-rendered and swapped into a single element, built on the surface
+    replacement the settings page already uses rather than a second refresh
+    system of its own (section 5.8). Requested by id, and an id this build does
+    not have is refused rather than answered with somebody else's panel.
+    """
+    import mc_voice_ui as voice_ui
+
+    if voice_ui.component(identifier) is None:
+        raise Refused(404, "There is no Voice Chat component by that name.")
+    return {"ok": True, "id": identifier, "html": voice_ui.component_html(identifier)}
+
+
 def cleanup_payload() -> dict:
     """What the recording-cleanup row draws, and what the clone form asks.
 
@@ -2887,6 +3083,20 @@ def install(_demo=None, app=None) -> bool:
     cleanup_status_route = _json_route(
         CLEANUP_ROUTE, lambda _payload: cleanup_payload(),
         "The recording cleanup status could not be read.")
+    pipeline_status_route = _json_route(
+        PIPELINE_ROUTE, lambda _payload: pipeline_payload(),
+        "The Voice Pipeline's status could not be read.")
+    pipeline_settings_route = _json_route(
+        PIPELINE_SETTINGS_ROUTE,
+        lambda payload: pipeline_settings(payload.get("enabled"),
+                                          payload.get("stages") or {}),
+        "That Voice Pipeline switch could not be changed.")
+    components_route = _json_route(
+        COMPONENTS_ROUTE, lambda _payload: components_payload(),
+        "The Voice Chat components could not be listed.")
+    component_route = _json_route(
+        COMPONENT_ROUTE, lambda payload: component_payload(str(payload.get("id") or "")),
+        "That component's settings could not be drawn.")
     lab_route = _json_route(
         LAB_ROUTE, lambda payload: lab_payload(str(payload.get("token") or ""),
                                                str(payload.get("voice") or "")),
@@ -2902,6 +3112,44 @@ def install(_demo=None, app=None) -> bool:
         LAB_PLAY_ROUTE, lambda payload: lab_audition(str(payload.get("token") or ""),
                                                      str(payload.get("side") or "b")),
         "That Voice Lab audition could not be played.")
+
+    async def pipeline_install_route(request: Request):
+        """Start installing one Voice Pipeline component, and say so immediately.
+
+        In the background for the reason the cleanup engine's is: this is a
+        runtime, two models and a self-test that plays a second of audio through
+        each of them, and an HTTP request that takes minutes is one a browser
+        gives up on.
+        """
+        try:
+            _checked(request, PIPELINE_INSTALL_ROUTE)
+            import mc_voice_pipeline as pipeline
+
+            payload = await _json(request)
+            component = str(payload.get("component") or "")
+            if component not in pipeline.COMPONENTS:
+                raise Refused(400, "That is not a Voice Pipeline component.")
+            if not pipeline.pinned():
+                raise Refused(409, pipeline.unpinned_reason())
+            if (models.progress().get(pipeline.KIND) or {}).get("running"):
+                return JSONResponse({"ok": True, "already": True})
+        except Refused as exc:
+            return _refusal(exc)
+        except Exception:
+            return _failed("a Voice Pipeline install could not be started",
+                           "The Voice Pipeline could not be installed.")
+
+        def run():
+            try:
+                pipeline.install(component)
+            except Exception:
+                # Swallowed here and reported through the progress map, which
+                # the row is already polling -- see mc_voice_models._claim.
+                logger.debug("Model Chain: the Voice Pipeline install thread ended on an "
+                             "error", exc_info=True)
+
+        threading.Thread(target=run, name="mc-pipeline-install", daemon=True).start()
+        return JSONResponse({"ok": True, "already": False})
 
     async def cleanup_install_route(request: Request):
         """Start installing the cleanup engine, and say so immediately.
@@ -3047,6 +3295,11 @@ def install(_demo=None, app=None) -> bool:
                               (SOPRO_VALIDATE_ROUTE, sopro_validate_route),
                               (SOPRO_SAVE_ROUTE, sopro_save_route),
                               (SOPRO_DISCARD_ROUTE, sopro_discard_route),
+                              (PIPELINE_ROUTE, pipeline_status_route),
+                              (PIPELINE_SETTINGS_ROUTE, pipeline_settings_route),
+                              (PIPELINE_INSTALL_ROUTE, pipeline_install_route),
+                              (COMPONENTS_ROUTE, components_route),
+                              (COMPONENT_ROUTE, component_route),
                               (CLEANUP_ROUTE, cleanup_status_route),
                               (CLEANUP_INSTALL_ROUTE, cleanup_install_route),
                               (CLEANUP_RUN_ROUTE, cleanup_run_route),

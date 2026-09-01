@@ -1,0 +1,1446 @@
+"""The Voice Pipeline: what it is, what is installed, and what a turn froze onto.
+
+Optional, off until somebody turns it on, and made of exactly two stages in one
+fixed order:
+
+    1  DPDFNet   cleans noise and synthesis artifacts out of generated speech
+    2  LavaSR    restores speech bandwidth and delivers 48 kHz
+
+It is not a text-to-speech engine and it is not in the engine selector. It takes
+the PCM a speech engine has already finished with and gives back better PCM at a
+declared rate, which is why it lives beside :mod:`mc_voice_cleanup` in shape and
+nowhere near :mod:`mc_voice_engines` in kind.
+
+Where the pipeline begins
+-------------------------
+Not at the model. The Voice Pipeline's input is the PCM the source worker would
+otherwise have handed straight to :meth:`mc_voice_turn.VoiceTurn.offer_audio` --
+which is to say *after* the delivery shaper, after the trim and the internal-gap
+policy, after the 8 ms unit seam and after the intentional pauses (I-VP-04).
+
+That boundary is the single most load-bearing decision in this feature and it is
+a decision the repository has already paid for. PRs #148 through #153 moved the
+quiet-normalisation, gap-shortening and de-click policy into the source workers
+on the strength of measurements from real machines, and every one of those
+operations deliberately changes duration. A pipeline inserted before them would
+enhance audio the source intends to discard, disagree with the source's own
+clock, and end up with two competing seam systems. So the enhancement layer owns
+what it creates at or after its own boundary -- recurrent state, analysis
+windows, overlap, and the sample ledger -- and owns nothing before it.
+
+The corollary is stated here because it is the thing somebody will be tempted to
+"fix": if the source trimmed 300 ms of dead air, that 300 ms is not in the
+pipeline's input and is never restored (I-VP-08). Preserving duration means
+preserving the finalised clock this feature was handed, not the model's
+hypothetical pre-trim one.
+
+Three switches and no fourth
+----------------------------
+The order is structural, not a preference. There are no drag handles, no
+move-up buttons, and no persisted order key -- ``dpdfnet`` is 100 and ``lavasr``
+is 200 because cleaning a signal before asking a bandwidth-extension model to
+reconstruct its missing top is the way round that does not ask the second model
+to invent detail out of the first model's hiss (I-VP-01, section 2.5).
+
+What the user gets is master on/off and one switch per stage, and every
+combination of those runs: neither, either alone, or both (I-VP-02). A stage
+that is off is a bypass, not a no-op wrapper, and master off is the current
+delivery path with no pipeline object in it at all (I-VP-03).
+
+Why this build cannot install anything yet
+------------------------------------------
+:func:`pinned` answers False and :func:`install` refuses, because
+``voice/managed-pipeline-models.json`` carries no revisions, no digests and --
+the one that matters -- no measured LavaSR rate contract. Upstream's README
+advertises 8-48 kHz input; the reviewed upstream inference path resamples 16 kHz
+to 48 kHz internally. Those are different claims, and shipping an installer
+built on the friendlier one means shipping speech played at two-thirds speed to
+somebody who trusted it. Section 23 calls Phase 0 blocking; this module is what
+makes "blocking" a refusal rather than a note in a document.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import shutil
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+
+import mc_voice_paths as paths
+
+logger = logging.getLogger("model_chain")
+"""Handler is attached once, in mc_memory."""
+
+FEATURE = "voice_pipeline"
+LABEL = "Voice Pipeline"
+
+KIND = "pipeline"
+"""The key this feature's install progress is filed under.
+
+Beside ``runtime``, ``stt``, ``tts``, ``sopro`` and ``cleanup`` in the one
+progress map, so the settings row draws it with the same code and two installs
+cannot run at once under the same name.
+"""
+
+SCHEMA = 1
+
+INTRAOP_THREADS = 2
+INTEROP_THREADS = 1
+"""The enhancement runtime's CPU budget, and it is smaller than everybody
+else's on purpose.
+
+Sopro, Kokoro and the cleanup engine each get four intra-op threads because each
+of them is the only thing running when it runs. This one runs *beside* a
+PocketTTS generation, on the same cores, for the whole length of a reply
+(section 11.9). Four here would be four more threads contending with the model
+whose output this is supposed to be improving, and an enhancement stage that
+makes the speech it is enhancing arrive late has not improved anything.
+
+Two rather than one because the measured target is a sustained real-time factor
+comfortably under 1.0 with headroom (section 11.7), and one thread has none.
+This is a starting budget to benchmark against, which is what section 9.8 asks
+for, not a number anybody has proved.
+"""
+
+
+class PipelineError(RuntimeError):
+    """A Voice Pipeline operation that could not be completed. Never fatal.
+
+    Never fatal is the whole contract. Every path that raises this has a caller
+    that turns it into a sentence and a reply that is still spoken -- with the
+    pipeline off for that turn if it had not started, and cancelled cleanly if
+    it had (section 15). Speech that is not enhanced is a disappointment;
+    speech that does not happen because an optional polish failed is a bug.
+    """
+
+
+# --------------------------------------------------------------------------- #
+# The stage registry
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class StageSpec:
+    """One enhancement stage, and everything the pipeline decides from it.
+
+    ``order`` is the fixed semantic position and it is not a default anybody may
+    override. It exists as a number rather than as tuple position so that
+    :func:`snapshot` can sort by it and a reader can see that sorting by
+    *anything the user typed* was never possible: there is no order in the
+    persisted settings to sort by (I-VP-01, section 18.1).
+
+    ``output_rate_policy`` is how this stage answers "what rate comes out of
+    you". ``"preserve"`` means the caller's rate, unchanged; a numeric string
+    means that rate, whatever went in. It is a policy rather than a number
+    because DPDFNet's answer genuinely depends on its caller and LavaSR's
+    genuinely does not.
+    """
+
+    id: str
+    order: int
+    role: str
+    label: str
+    summary: str
+    option: str
+    output_rate_policy: str
+
+    def rate_after(self, rate: int) -> int:
+        """The sample rate downstream of this stage, given ``rate`` into it."""
+        if self.output_rate_policy == "preserve":
+            return int(rate)
+        return int(self.output_rate_policy)
+
+
+OPT_ENABLED = "model_chain_voice_pipeline"
+OPT_DPDFNET = "model_chain_voice_pipeline_dpdfnet"
+OPT_LAVASR = "model_chain_voice_pipeline_lavasr"
+
+STAGES = (
+    StageSpec(
+        id="dpdfnet",
+        order=100,
+        role="denoise",
+        label="DPDFNet",
+        summary="Clean noise and synthesis artifacts",
+        option=OPT_DPDFNET,
+        output_rate_policy="preserve",
+    ),
+    StageSpec(
+        id="lavasr",
+        order=200,
+        role="bandwidth_extension",
+        label="LavaSR",
+        summary="Restore speech bandwidth to 48 kHz",
+        option=OPT_LAVASR,
+        output_rate_policy="48000",
+    ),
+)
+"""The whole pipeline, in the only order it runs in.
+
+A tuple rather than a list, and read-only everywhere: this is the structure the
+feature promises, and a registry somebody can append to at runtime is a registry
+that eventually gets appended to from a request body.
+"""
+
+STAGE_IDS = tuple(spec.id for spec in STAGES)
+
+SUPPORTED_ENGINES = ("pocket",)
+"""Which speech engines hand their finalised PCM to the pipeline today.
+
+One, deliberately (I-VP-29, section 7). The pipeline's own contract is generic
+-- PCM, a real rate, a channel count and a snapshot -- and nothing in the worker
+knows what a Pocket unit is. What is Pocket-only is the *plumbing*: the handoff
+lives in :mod:`mc_voice_pocket_runtime` because that is where the finalised PCM
+of that engine exists, and Kokoro's and Sopro's own boundaries are theirs to
+declare when somebody attaches them (section 7 of the phase plan). A tuple
+rather than a bare string because the second entry is a plumbing change, not a
+design one.
+"""
+
+
+def stage(stage_id: str) -> "StageSpec | None":
+    """One stage by id, or ``None`` for a name this build does not have."""
+    wanted = str(stage_id or "")
+    for spec in STAGES:
+        if spec.id == wanted:
+            return spec
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# The switches
+# --------------------------------------------------------------------------- #
+
+
+def enabled() -> bool:
+    """Whether the master switch is on. Default off, on any doubt at all.
+
+    The same shape as :func:`mc_voice_state.auto_speak` and for the same reason:
+    a host that will not answer, an option nobody registered and a value that is
+    not a boolean all mean "the user has not asked for this", and the answer to
+    that is the existing playback path.
+    """
+    return _flag(OPT_ENABLED)
+
+
+def stage_enabled(stage_id: str) -> bool:
+    """Whether one stage's switch is on, ignoring the master and installation.
+
+    Intent only. What actually runs is decided once per turn by
+    :func:`snapshot`, which also has to know whether the master is on and
+    whether the stage is installed -- three questions that are deliberately not
+    collapsed into one, because "off" and "not installed" are different
+    sentences to put in front of somebody (section 4.2).
+    """
+    spec = stage(stage_id)
+    if spec is None:
+        return False
+    return _flag(spec.option, default=True)
+
+
+def desired_stages() -> tuple:
+    """The stage ids the user has asked for, in pipeline order.
+
+    Ignores installation and ignores the master switch. This is what the UI
+    draws ticks against and what :func:`snapshot` starts from.
+    """
+    return tuple(spec.id for spec in STAGES if _flag(spec.option, default=True))
+
+
+def settings() -> dict:
+    """The three switches, as the settings surface and the status route see them."""
+    found = {"enabled": enabled()}
+    for spec in STAGES:
+        found[spec.id] = stage_enabled(spec.id)
+    return found
+
+
+def remember(enabled_value=None, stages=None) -> dict:
+    """Write the switches through to the host's options store, and save once.
+
+    One write for all three rather than one route per switch, because the three
+    are read together at the top of every turn and a browser that posted them
+    separately could be interrupted between two of them -- leaving a
+    configuration nobody chose, which the next reply would then be spoken with
+    (section 18.3).
+
+    Best-effort against the host and never fatal, and it returns what the store
+    says *afterwards* rather than what it was asked to write, so a surface
+    redraws from the truth. A host that refuses the write keeps the switches it
+    had and the pipeline keeps working at that setting.
+    """
+    wanted = {}
+    if enabled_value is not None:
+        wanted[OPT_ENABLED] = bool(enabled_value)
+    for spec in STAGES:
+        value = (stages or {}).get(spec.id)
+        if value is not None:
+            wanted[spec.option] = bool(value)
+    if wanted:
+        try:
+            from modules import shared
+
+            for name, value in wanted.items():
+                shared.opts.set(name, value)
+            shared.opts.save(shared.config_filename)
+        except Exception:
+            logger.debug("Model Chain: could not persist a Voice Pipeline switch",
+                         exc_info=True)
+    return settings()
+
+
+def _flag(name: str, default: bool = False) -> bool:
+    """One boolean option, read live, falling back to ``default`` on any doubt.
+
+    ``default`` differs by switch and the difference is the whole of section
+    4.1's recommended defaults. The master is False: a feature that turned
+    itself on across an upgrade would be a feature that changed how somebody's
+    WebUI sounds without being asked. The two stages are True: once the master
+    *is* on, the intended chain is the one that should already be ticked, so
+    turning the feature on is one gesture rather than three.
+
+    A host that cannot be read answers the default rather than raising, because
+    this is called on the path that decides how a reply is spoken.
+    """
+    try:
+        from modules import shared
+
+        value = getattr(shared.opts, name, None)
+    except Exception:
+        return default
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().casefold()
+        if text in ("true", "1", "yes", "on"):
+            return True
+        if text in ("false", "0", "no", "off"):
+            return False
+    return default
+
+
+# --------------------------------------------------------------------------- #
+# The manifest
+# --------------------------------------------------------------------------- #
+
+_manifest_cache = None
+
+
+def manifest(refresh: bool = False) -> dict:
+    """The checked-in trust root for everything the pipeline may fetch.
+
+    Cached, and the cache is this module's own rather than
+    :mod:`mc_voice_models`'. Two caches is one more than ideal and fewer than
+    the alternative: sharing one would mean a pipeline pin overlay clearing the
+    speech manifest, which is a coupling nothing wants and a test nobody would
+    think to write.
+    """
+    global _manifest_cache
+
+    if _manifest_cache is not None and not refresh:
+        return _manifest_cache
+    path = paths.pipeline_manifest_path()
+    try:
+        found = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise PipelineError(
+            f"The Voice Pipeline manifest could not be read ({exc.__class__.__name__}). "
+            f"This is a problem with the extension rather than with your installation."
+        ) from None
+    _manifest_cache = _read_manifest(found)
+    return _manifest_cache
+
+
+def _read_manifest(found) -> dict:
+    """Validate the manifest, and refuse the shapes section 20.3 names.
+
+    Every refusal here says the extension is broken rather than the
+    installation, because it is: this file is committed in this repository and a
+    user cannot edit it into any of these states by using the feature.
+    """
+    if not isinstance(found, dict):
+        raise PipelineError("The Voice Pipeline manifest is not an object.")
+    if int(found.get("schema") or 0) != SCHEMA:
+        raise PipelineError(
+            "The Voice Pipeline manifest is a newer schema than this build reads.")
+    runtime = found.get("runtime")
+    if not isinstance(runtime, dict):
+        raise PipelineError("The Voice Pipeline manifest names no runtime.")
+    if str(runtime.get("provider") or "") != "cpu":
+        raise PipelineError(
+            "The Voice Pipeline manifest names a provider other than the CPU. This "
+            "feature runs on the CPU only and will not take a graphics device from an "
+            "image being made.")
+    entries = found.get("stages")
+    if not isinstance(entries, list) or not entries:
+        raise PipelineError("The Voice Pipeline manifest names no stages.")
+
+    stages = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise PipelineError("The Voice Pipeline manifest has a stage that is not an "
+                                "object.")
+        identifier = str(entry.get("id") or "")
+        spec = stage(identifier)
+        if spec is None:
+            raise PipelineError(
+                f"The Voice Pipeline manifest names a stage {identifier!r} that this build "
+                f"does not have.")
+        if identifier in stages:
+            raise PipelineError(
+                f"The Voice Pipeline manifest names the stage {identifier!r} twice.")
+        if int(entry.get("order") or 0) != spec.order:
+            # The order is structural. A manifest that disagreed with the code
+            # about it would be a manifest that could reorder the chain from a
+            # file, which is exactly the thing I-VP-01 forbids from the UI.
+            raise PipelineError(
+                f"The Voice Pipeline manifest gives {identifier!r} an order this build "
+                f"does not agree with. Stage order is structural and is not configuration.")
+        stages[identifier] = _read_stage(spec, entry)
+
+    for spec in STAGES:
+        if spec.id not in stages:
+            raise PipelineError(
+                f"The Voice Pipeline manifest does not describe {spec.id!r}.")
+
+    platforms = []
+    seen = set()
+    for entry in (runtime.get("platforms") or ()):
+        if not isinstance(entry, dict):
+            raise PipelineError("The Voice Pipeline manifest has a runtime platform that "
+                                "is not an object.")
+        identifier = str(entry.get("id") or "")
+        if not identifier:
+            raise PipelineError("The Voice Pipeline manifest has a runtime platform with "
+                                "no id.")
+        if identifier in seen:
+            raise PipelineError(f"The Voice Pipeline manifest names the runtime platform "
+                                f"{identifier!r} twice.")
+        seen.add(identifier)
+        platforms.append({
+            "id": identifier,
+            "system": str(entry.get("system") or "").casefold(),
+            "machines": [str(name).casefold() for name in (entry.get("machines") or ())],
+            "python": str(entry.get("python") or ""),
+            # Read through the same validator the stages' artifacts go through,
+            # rather than trusted because they are the runtime's. A wheel is the
+            # one artifact here whose contents get *executed*, so it is the last
+            # place to relax a check (section 20.3).
+            "artifacts": [_read_artifact("the runtime closure", item)
+                          for item in (entry.get("artifacts") or ())],
+        })
+
+    return {
+        "schema": SCHEMA,
+        "version": int(found.get("version") or 0),
+        "pinned": bool(found.get("pinned")),
+        "notes": str(found.get("notes") or ""),
+        "runtime": {
+            "python": str(runtime.get("python") or ""),
+            "provider": "cpu",
+            "build": int(runtime.get("build") or 0),
+            "import_name": str(runtime.get("import_name") or ""),
+            "license": str(runtime.get("license") or ""),
+            "attribution": str(runtime.get("attribution") or ""),
+            "platforms": platforms,
+            "wanted": list(runtime.get("wanted") or ()),
+        },
+        "stages": stages,
+    }
+
+
+def _read_artifact(owner: str, item) -> dict:
+    """One artifact entry, validated. The shapes section 20.3 names, refused.
+
+    Shared by the runtime closure and by every stage, because the checks are the
+    same checks and a second copy is a second thing to forget to tighten.
+    """
+    if not isinstance(item, dict):
+        raise PipelineError(f"The Voice Pipeline manifest's {owner} has an artifact that "
+                            f"is not an object.")
+    local = str(item.get("local_name") or item.get("filename") or "")
+    url = str(item.get("url") or "")
+    if not local:
+        raise PipelineError(f"The Voice Pipeline manifest's {owner} has an artifact with "
+                            f"no name.")
+    if "/" in local or "\\" in local or local in (".", ".."):
+        # Path traversal in an artifact's local name, refused here rather than
+        # at the write. The name is joined to a directory this module chose;
+        # anything that could leave it is a manifest bug with a filesystem
+        # consequence.
+        raise PipelineError(f"The Voice Pipeline manifest's {owner} names a file that "
+                            f"would not stay in its own folder.")
+    if url and not url.startswith("https://"):
+        raise PipelineError(f"The Voice Pipeline manifest's {owner} names a file to fetch "
+                            f"over something other than HTTPS.")
+    digest = str(item.get("sha256") or "").casefold()
+    if digest and (len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)):
+        raise PipelineError(f"The Voice Pipeline manifest's {owner} names a hash that is "
+                            f"not a SHA-256.")
+    return {
+        "filename": str(item.get("filename") or local),
+        "local_name": local,
+        "url": url,
+        "bytes": int(item.get("bytes") or 0),
+        "sha256": digest,
+        # Whether this artifact is behind the publisher's access gate, and
+        # therefore whether the shared credential may be offered for it. A fact
+        # this repository commits to in a manifest, never one a response teaches
+        # us at download time (I-VP-25).
+        "authorized": bool(item.get("authorized")),
+    }
+
+
+def _read_stage(spec: StageSpec, entry: dict) -> dict:
+    """One stage entry, validated against the shape the worker will be handed."""
+    artifacts = entry.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise PipelineError(f"The Voice Pipeline manifest's {spec.id!r} names no artifacts "
+                            f"list.")
+    seen = set()
+    read = []
+    for item in artifacts:
+        found = _read_artifact(repr(spec.id), item)
+        if found["local_name"] in seen:
+            raise PipelineError(f"The Voice Pipeline manifest's {spec.id!r} names "
+                                f"{found['local_name']!r} twice.")
+        seen.add(found["local_name"])
+        read.append(found)
+
+    revision = str(entry.get("revision") or "")
+    if revision == "main":
+        # Section 13.4, said out loud where it can be enforced: a release whose
+        # model identity is a branch name is a release that means something
+        # different next week and cannot be reproduced from this repository.
+        raise PipelineError(
+            f"The Voice Pipeline manifest pins {spec.id!r} to 'main', which is not a "
+            f"release identity. It must name an immutable revision.")
+
+    contract = entry.get("contract")
+    if not isinstance(contract, dict):
+        raise PipelineError(f"The Voice Pipeline manifest's {spec.id!r} declares no "
+                            f"contract.")
+    return {
+        "id": spec.id,
+        "label": str(entry.get("label") or spec.label),
+        "order": spec.order,
+        "role": spec.role,
+        "output_rate_policy": str(entry.get("output_rate_policy")
+                                  or spec.output_rate_policy),
+        "summary": str(entry.get("summary") or spec.summary),
+        "license": str(entry.get("license") or ""),
+        "upstream": str(entry.get("upstream") or ""),
+        "repo": str(entry.get("repo") or ""),
+        "revision": revision,
+        "model_id": str(entry.get("model_id") or ""),
+        "attribution": str(entry.get("attribution") or ""),
+        "about_bytes": int(entry.get("about_bytes") or 0),
+        "artifacts": read,
+        "required_paths": [str(name) for name in (entry.get("required_paths") or ())],
+        "contract": dict(contract),
+    }
+
+
+def pinned() -> bool:
+    """Whether this build has a releasable manifest. False in this build.
+
+    Four things have to be true, and section 23 makes the fourth the blocking
+    one:
+
+        1  the manifest says it is pinned;
+        2  the runtime closure names a platform for this machine and every
+           wheel in it is sized and hashed -- the one artifact set here whose
+           contents get *executed*, so it is the last place to relax a check;
+        3  every stage names an immutable revision and at least one artifact,
+           each sized and hashed;
+        4  LavaSR's contract carries a MEASURED backend input rate, analysis
+           window and context window.
+
+    The fourth is the one that cannot be filled in by a machine with a network
+    connection alone. Upstream's README and upstream's code disagree about what
+    rate LavaSR interprets its input at; only running it settles that, and until
+    somebody has run it there is no honest number to put in a manifest. A build
+    that installed anyway would be a build that either resampled 24 kHz speech
+    to 16 kHz and played it back a third too slow, or did not resample it and
+    played it back half again too fast -- and would do so silently, because
+    nothing downstream of the model can tell a wrong clock from a strange voice.
+    """
+    try:
+        found = manifest()
+    except PipelineError:
+        return False
+    if not found["pinned"]:
+        return False
+    platforms = found["runtime"]["platforms"]
+    if not platforms:
+        return False
+    for entry in platforms:
+        # Every wheel, hashed and sized. This is the artifact set whose contents
+        # get *executed*, so an unpinned entry here is worse than an unpinned
+        # model: a model that arrives wrong makes bad audio, and a wheel that
+        # arrives wrong runs.
+        if not entry["artifacts"]:
+            return False
+        if any(not item["sha256"] or item["bytes"] <= 0 for item in entry["artifacts"]):
+            return False
+    for spec in STAGES:
+        entry = found["stages"][spec.id]
+        if not entry["revision"] or not entry["artifacts"]:
+            return False
+        if any(not item["sha256"] or item["bytes"] <= 0 for item in entry["artifacts"]):
+            return False
+    return _lava_contract_measured(found)
+
+
+def _lava_contract_measured(found: dict) -> bool:
+    """Whether Phase 0 has filled in the numbers LavaSR cannot be run without."""
+    contract = found["stages"]["lavasr"]["contract"]
+    return bool(contract.get("backend")
+                and int(contract.get("backend_input_rate") or 0) > 0
+                and int(contract.get("analysis_ms") or 0) > 0
+                and int(contract.get("context_ms") or 0) > 0)
+
+
+def unpinned_reason() -> str:
+    """Why :func:`pinned` said no, as a sentence somebody can act on."""
+    try:
+        found = manifest()
+    except PipelineError as exc:
+        return str(exc)
+    if not _lava_contract_measured(found):
+        return ("Not installable — the LavaSR rate and window contract has not been "
+                "measured yet, so this build will not download a model it cannot prove it "
+                "would play at the right speed.")
+    platforms = found["runtime"]["platforms"]
+    if not platforms or any(
+            not entry["artifacts"]
+            or any(not item["sha256"] or item["bytes"] <= 0 for item in entry["artifacts"])
+            for entry in platforms):
+        return ("Not installable — this build has not pinned a Voice Pipeline runtime "
+                "closure yet.")
+    for spec in STAGES:
+        entry = found["stages"][spec.id]
+        if not entry["revision"]:
+            return (f"Not installable — this build has not pinned a revision for "
+                    f"{entry['label']} yet.")
+        if not entry["artifacts"] or any(not item["sha256"]
+                                         for item in entry["artifacts"]):
+            return (f"Not installable — this build has not pinned {entry['label']}'s files "
+                    f"yet.")
+    if not found["pinned"]:
+        return "Not installable — this build's Voice Pipeline manifest is not marked pinned."
+    return ""
+
+
+# --------------------------------------------------------------------------- #
+# What is on this machine
+# --------------------------------------------------------------------------- #
+
+
+def supported_platform() -> bool:
+    """Whether the pinned closure covers this machine.
+
+    Answered from the manifest rather than from a hardcoded list, because the
+    ONNX runtime this feature wants publishes CPU wheels for Windows, Linux and
+    macOS and the reason to support fewer than that would be a measurement
+    nobody has taken yet. An unpinned manifest names no platforms and this
+    answers False, which is the same answer for the same reason as everything
+    else in this build.
+    """
+    import mc_voice_models as models
+
+    try:
+        found = manifest()
+    except PipelineError:
+        return False
+    system, machine, python = models.current_platform()
+    for entry in found["runtime"]["platforms"]:
+        if not isinstance(entry, dict):
+            continue
+        machines = tuple(str(name).casefold() for name in (entry.get("machines") or ()))
+        if (str(entry.get("system") or "").casefold() == system
+                and machine in machines
+                and str(entry.get("python") or "") == python):
+            return True
+    return False
+
+
+def runtime_closure_id() -> str:
+    """The freshness fingerprint of the enhancement runtime.
+
+    Derived from the pinned closure and never declared, in the shape
+    :attr:`mc_voice_models.RuntimePlatform.closure_id` established: the platform
+    id, then every artifact as ``local_name:sha256``, hashed and truncated.
+    Adding, removing, reordering or re-pinning one wheel makes every installed
+    runtime stale by arithmetic rather than by somebody remembering to bump a
+    number (I-VP-23, section 13.2).
+
+    One thing is hashed here that is not hashed there: the manifest's ``build``.
+    The wheels are what the runtime *is*, and the build number is how this
+    repository says it changed something about how they are assembled -- the
+    path layout, the import check -- which no artifact digest would move.
+    """
+    import mc_voice_models as models
+
+    try:
+        found = manifest()
+    except PipelineError:
+        return ""
+    system, machine, python = models.current_platform()
+    for entry in found["runtime"]["platforms"]:
+        if not isinstance(entry, dict):
+            continue
+        machines = tuple(str(name).casefold() for name in (entry.get("machines") or ()))
+        if not (str(entry.get("system") or "").casefold() == system
+                and machine in machines
+                and str(entry.get("python") or "") == python):
+            continue
+        lines = [str(entry.get("id") or "")]
+        for item in (entry.get("artifacts") or ()):
+            if not isinstance(item, dict):
+                continue
+            local = str(item.get("local_name") or item.get("filename") or "")
+            lines.append(f"{local}:{str(item.get('sha256') or '').casefold()}")
+        lines.append(f"build:{found['runtime']['build']}")
+        return hashlib.sha256("\n".join(lines).encode("ascii", "replace")).hexdigest()[:16]
+    return ""
+
+
+def stage_closure_id(stage_id: str) -> str:
+    """One stage's model identity: its revision and every artifact's digest.
+
+    Separate from the runtime's, because the two go stale for different reasons
+    and a user who needs to re-fetch one model should not be told to rebuild a
+    runtime (section 13.3).
+    """
+    try:
+        found = manifest()
+    except PipelineError:
+        return ""
+    entry = found["stages"].get(str(stage_id or ""))
+    if entry is None:
+        return ""
+    lines = [entry["id"], entry["repo"], entry["revision"]]
+    for item in entry["artifacts"]:
+        lines.append(f"{item['local_name']}:{item['sha256']}")
+    return hashlib.sha256("\n".join(lines).encode("ascii", "replace")).hexdigest()[:16]
+
+
+def _record(path: Path) -> dict:
+    """One installed record, or ``{}`` for anything that is not one.
+
+    Its presence and its match are what "installed" means. The files being on
+    disk is not, which is the rule :data:`mc_voice_paths.INSTALLED_FILENAME`
+    states and the reason a half-finished install reads as missing rather than
+    as broken.
+    """
+    try:
+        found = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+def runtime_python() -> "Path | None":
+    """The installed enhancement interpreter, or ``None``."""
+    root = paths.pipeline_runtime_root() / "env"
+    candidates = (root / "Scripts" / "python.exe", root / "bin" / "python3",
+                  root / "bin" / "python")
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def runtime_installed() -> dict:
+    return _record(paths.pipeline_runtime_manifest())
+
+
+def stage_installed(stage_id: str) -> dict:
+    try:
+        return _record(paths.pipeline_stage_manifest(str(stage_id or "")))
+    except ValueError:
+        return {}
+
+
+# --------------------------------------------------------------------------- #
+# Status
+# --------------------------------------------------------------------------- #
+
+INSTALL_STATES = ("not_installed", "installing", "installed", "stale", "corrupt", "error")
+RUNTIME_STATES = ("unavailable", "unloaded", "loading", "loaded", "busy", "stopping",
+                  "error")
+PIPELINE_STATES = ("disabled", "bypassed", "waiting_install", "warming", "ready",
+                   "processing", "error")
+"""Three vocabularies, kept apart on purpose (section 5.6).
+
+"Installed" is a fact about disk. "Loaded" is a fact about memory right now.
+"Ready" is a fact about whether the next reply will be enhanced. Collapsing any
+two of them produces the settings page this redesign exists to replace, where a
+row says "Installed" and somebody reasonably concludes their speech is being
+cleaned when the worker has not been started.
+"""
+
+
+@dataclass(frozen=True)
+class StageStatus:
+    id: str
+    label: str
+    order: int
+    install_state: str
+    message: str
+    enabled: bool
+    revision: str
+    closure_id: str
+    license: str
+    about_bytes: int
+
+
+@dataclass(frozen=True)
+class Status:
+    """Everything the settings surface and the status route draw, and no secret.
+
+    Frozen, and assembled by a function with no side effects: reading status
+    must never start a download or load a model, which is the rule
+    :func:`mc_voice_engines.installed` states and the reason a settings poll is
+    cheap enough to run on a timer.
+    """
+
+    supported: bool
+    pinned: bool
+    runtime_install_state: str
+    runtime_message: str
+    runtime_closure_id: str
+    stages: tuple
+    master_enabled: bool
+    message: str
+    download_bytes: int
+
+    @property
+    def runtime_ready(self) -> bool:
+        return self.runtime_install_state == "installed"
+
+    def stage(self, stage_id: str) -> "StageStatus | None":
+        for found in self.stages:
+            if found.id == stage_id:
+                return found
+        return None
+
+    @property
+    def ready(self) -> bool:
+        """Whether at least one selected stage could actually run right now."""
+        if not self.runtime_ready:
+            return False
+        return any(found.enabled and found.install_state == "installed"
+                   for found in self.stages)
+
+
+def status() -> Status:
+    """What is installed, what is fresh, and what the next turn would do.
+
+    A pure filesystem question. Nothing here starts a process, and nothing here
+    is allowed to raise: a settings page that could not be drawn because an
+    optional feature's manifest was unreadable would be a settings page nobody
+    could use to uninstall it.
+    """
+    try:
+        found = manifest()
+    except PipelineError as exc:
+        return Status(supported=False, pinned=False, runtime_install_state="error",
+                      runtime_message=str(exc), runtime_closure_id="", stages=(),
+                      master_enabled=enabled(), message=str(exc), download_bytes=0)
+
+    is_pinned = pinned()
+    supported = supported_platform()
+    wanted_closure = runtime_closure_id()
+    record = runtime_installed()
+
+    if not is_pinned:
+        runtime_state, runtime_message = "not_installed", unpinned_reason()
+    elif not supported:
+        runtime_state = "not_installed"
+        runtime_message = ("Not available — this build has no pinned Voice Pipeline "
+                           "runtime for this operating system and Python version.")
+    elif not record:
+        runtime_state, runtime_message = "not_installed", "Not installed."
+    elif str(record.get("closure") or "") != wanted_closure:
+        runtime_state = "stale"
+        runtime_message = ("Installed by an older build and needs installing again.")
+    elif runtime_python() is None:
+        runtime_state = "corrupt"
+        runtime_message = "Installed, but its interpreter is missing. Reinstall it."
+    else:
+        runtime_state, runtime_message = "installed", "Installed."
+
+    stages = []
+    for spec in STAGES:
+        entry = found["stages"][spec.id]
+        wanted = stage_closure_id(spec.id)
+        held = stage_installed(spec.id)
+        if not is_pinned:
+            state, message = "not_installed", "Not available in this build yet."
+        elif not held:
+            state, message = "not_installed", "Not installed."
+        elif str(held.get("closure") or "") != wanted:
+            state, message = "stale", "Installed by an older build and needs installing again."
+        else:
+            state, message = "installed", "Installed."
+        stages.append(StageStatus(
+            id=spec.id,
+            label=entry["label"],
+            order=spec.order,
+            install_state=state,
+            message=message,
+            enabled=stage_enabled(spec.id),
+            revision=str(held.get("revision") or entry["revision"]),
+            closure_id=wanted,
+            license=entry["license"],
+            about_bytes=entry["about_bytes"],
+        ))
+
+    total = sum(entry["about_bytes"] for entry in found["stages"].values())
+    return Status(
+        supported=supported,
+        pinned=is_pinned,
+        runtime_install_state=runtime_state,
+        runtime_message=runtime_message,
+        runtime_closure_id=wanted_closure,
+        stages=tuple(stages),
+        master_enabled=enabled(),
+        message=runtime_message if runtime_state != "installed" else "Installed.",
+        download_bytes=total,
+    )
+
+
+def pipeline_state(found: "Status | None" = None) -> str:
+    """Which of :data:`PIPELINE_STATES` describes the *next* turn.
+
+    Deliberately about the next turn rather than about this one. The turn in
+    flight is frozen onto a snapshot taken before its first sample (I-VP-06),
+    so "what would happen now" and "what is happening" are two different
+    questions and this is the first. The runtime module answers the second,
+    because it is the only thing that knows whether a worker is warm.
+    """
+    state = found if found is not None else status()
+    if not state.master_enabled:
+        return "disabled"
+    wanted = desired_stages()
+    if not wanted:
+        return "bypassed"
+    for stage_id in wanted:
+        held = state.stage(stage_id)
+        if held is None or held.install_state != "installed":
+            return "waiting_install"
+    if not state.runtime_ready:
+        return "waiting_install"
+    return "ready"
+
+
+# --------------------------------------------------------------------------- #
+# The turn snapshot
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """One turn's whole pipeline configuration, frozen before its first sample.
+
+    Frozen is the point (I-VP-06, I-VP-07). Somebody who turns LavaSR off while
+    a reply is being spoken has changed the *next* reply, not this one: the
+    output sample rate was advertised in this response's headers before the
+    first byte, and a stage that stopped running halfway would either change
+    that rate mid-stream or quietly emit a different signal at the same rate.
+    Both are worse than finishing the sentence the way it started.
+
+    ``output_rate`` is computed here rather than asked of the worker, because
+    the browser has to be told it before any audio exists (section 8.5). The
+    arithmetic is the stage chain's own: each stage in order says what rate
+    comes out of it given what went in.
+    """
+
+    enabled: bool
+    stage_ids: tuple
+    input_rate: int
+    output_rate: int
+    reason: str
+
+    @property
+    def active(self) -> bool:
+        """Whether any inference will happen for this turn at all."""
+        return bool(self.enabled and self.stage_ids)
+
+    @property
+    def path(self) -> tuple:
+        """The path preview, as names rather than as a rendered string."""
+        return tuple(stage(identifier).label for identifier in self.stage_ids
+                     if stage(identifier) is not None)
+
+    def describe(self, source: str = "") -> str:
+        """``PocketTTS -> DPDFNet -> LavaSR -> 48 kHz output``, from the truth.
+
+        Generated from this snapshot rather than from the settings, so it can
+        never claim a stage ran that was not installed: the snapshot is what
+        actually happens, and a stage the user ticked but never installed is not
+        in it (section 4.5).
+        """
+        parts = [source or "Speech"]
+        parts.extend(self.path)
+        if self.output_rate and self.output_rate != self.input_rate:
+            parts.append(f"{self.output_rate // 1000} kHz output")
+        else:
+            parts.append("Output")
+        return " → ".join(parts)
+
+
+def snapshot(input_rate: int, engine: str = "", found: "Status | None" = None) -> Snapshot:
+    """Freeze what this turn will do, given the rate its source speaks at.
+
+    Called once per turn, before the first sample crosses the boundary and
+    before the response's headers are written. Everything after it reads the
+    snapshot and nothing re-reads the switches.
+
+    A stage the user enabled but has not installed is *left out and said so*
+    rather than silently skipped (section 4.2): ``reason`` carries the sentence,
+    the surface shows it, and the turn is spoken with whatever else was ready.
+    The alternative -- refusing to speak at all because an optional polish is
+    missing -- fails the rule that this feature is never fatal to a reply.
+    """
+    rate = int(input_rate or 0)
+    state = found if found is not None else status()
+
+    if engine and engine not in SUPPORTED_ENGINES:
+        return Snapshot(enabled=False, stage_ids=(), input_rate=rate, output_rate=rate,
+                        reason="")
+    if not state.master_enabled:
+        return Snapshot(enabled=False, stage_ids=(), input_rate=rate, output_rate=rate,
+                        reason="")
+    if not state.runtime_ready:
+        return Snapshot(enabled=True, stage_ids=(), input_rate=rate, output_rate=rate,
+                        reason=state.runtime_message)
+
+    wanted, missing = [], []
+    for spec in STAGES:
+        held = state.stage(spec.id)
+        if held is None or not held.enabled:
+            continue
+        if held.install_state != "installed":
+            missing.append(held.label)
+            continue
+        wanted.append(spec)
+
+    rate_out = rate
+    for spec in wanted:
+        rate_out = spec.rate_after(rate_out)
+
+    reason = ""
+    if missing:
+        names = " and ".join(missing)
+        reason = (f"{names} {'is' if len(missing) == 1 else 'are'} switched on but not "
+                  f"installed, so {'it was' if len(missing) == 1 else 'they were'} left out "
+                  f"of this reply.")
+    elif not wanted:
+        reason = "Bypassed — no stages enabled."
+
+    return Snapshot(enabled=True, stage_ids=tuple(spec.id for spec in wanted),
+                    input_rate=rate, output_rate=rate_out, reason=reason)
+
+
+# --------------------------------------------------------------------------- #
+# Installing
+# --------------------------------------------------------------------------- #
+
+COMPONENTS = ("runtime",) + STAGE_IDS
+"""What :func:`install` will install, one at a time.
+
+The runtime and the two stages are separate because they go stale for separate
+reasons and because a user who needs one model re-fetched should not be told to
+rebuild an interpreter (section 13.3, 13.11).
+"""
+
+
+def install(component: str, on_status=None, on_progress=None) -> "Status":
+    """Fetch, verify, prove and promote one component. A transaction.
+
+    One component at a time -- the runtime, or one stage -- because the three go
+    stale for different reasons and somebody who needs a model re-fetched should
+    not be told to rebuild an interpreter.
+
+    Nothing outside a staging directory is touched until every declared byte has
+    arrived with the digest this repository committed to and the component has
+    been proved: for the runtime, that the staged interpreter starts and the
+    inference library imports; for a stage, that a second of synthetic speech
+    has been through the model at Pocket's real rate and come back the right
+    length. A failure anywhere leaves the machine exactly as it was (13.8).
+
+    That last check is the one this feature exists to be careful about. A
+    LavaSR backend that interprets 24 kHz samples as 16 kHz loads perfectly and
+    returns perfectly finite numbers; the only thing wrong with it is the
+    duration, and the only way to find that out is to measure it.
+    """
+    import mc_voice_models as models
+
+    wanted = str(component or "")
+    if wanted not in COMPONENTS:
+        raise PipelineError(f"There is no Voice Pipeline component called {wanted!r}.")
+    if not pinned():
+        raise PipelineError(unpinned_reason())
+    if not supported_platform():
+        raise PipelineError(status().runtime_message)
+
+    say = models._narrator(KIND, on_status)
+    tick = models._ticker(KIND, on_progress)
+    with models._claim(KIND, say, wanted):
+        if wanted == "runtime":
+            _install_runtime(say, tick)
+        else:
+            _install_stage(wanted, say, tick)
+    return status()
+
+
+def _platform_entry() -> dict:
+    import mc_voice_models as models
+
+    system, machine, python = models.current_platform()
+    for entry in manifest()["runtime"]["platforms"]:
+        if not isinstance(entry, dict):
+            continue
+        machines = tuple(str(name).casefold() for name in (entry.get("machines") or ()))
+        if (str(entry.get("system") or "").casefold() == system
+                and machine in machines and str(entry.get("python") or "") == python):
+            return entry
+    raise PipelineError("This build has no pinned Voice Pipeline runtime for this machine.")
+
+
+def _artifacts(entries) -> list:
+    """Manifest entries as :class:`mc_voice_models.Artifact` objects.
+
+    Built here rather than through :func:`mc_voice_models._read_artifact`,
+    because that reader serves the speech manifest's schema and does not read an
+    ``authorized`` key at all. The pipeline's model artifacts may be behind an
+    access gate, and whether one is is a fact this repository commits to in a
+    manifest rather than something a response teaches us at download time.
+    """
+    import mc_voice_models as models
+
+    return [models.Artifact(filename=item["filename"], local_name=item["local_name"],
+                            url=item["url"], size=item["bytes"] or None,
+                            sha256=item["sha256"] or None,
+                            authorized=bool(item.get("authorized")))
+            for item in entries]
+
+
+def _install_runtime(say, tick) -> None:
+    import mc_voice_models as models
+
+    entry = _platform_entry()
+    staging = paths.pipeline_staging_for("runtime", uuid.uuid4().hex[:8])
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        say("Checking what the publishers say these files are…")
+        artifacts = _artifacts(entry["artifacts"])
+        expectations = models._expectations(artifacts, say)
+        models._make_room(artifacts, staging, expectations)
+        digests = models._fetch_all(artifacts, staging, say, tick, 0.7, expectations)
+
+        say("Building the isolated enhancement runtime…")
+        chosen = models.RuntimePlatform(
+            identifier=str(entry.get("id") or ""),
+            system=str(entry.get("system") or "").casefold(),
+            machines=tuple(str(name).casefold() for name in (entry.get("machines") or ())),
+            python=str(entry.get("python") or ""),
+            artifacts=tuple(artifacts))
+        models._build_environment(staging, staging, chosen)
+        for item in artifacts:
+            # The wheels are inputs, not part of the installation. Left in the
+            # staging tree they would be promoted along with it and sit in the
+            # user's data directory forever, a second copy of a closure that is
+            # already unpacked beside them.
+            try:
+                (staging / item.local_name).unlink()
+            except OSError:
+                pass
+        tick(0.9)
+
+        say("Checking that the enhancement runtime starts…")
+        found = manifest()["runtime"]
+        _run_staged(_staged_python(staging),
+                    ["-c", f"import {found['import_name']}; print('ok')"],
+                    "the Voice Pipeline runtime")
+        models._write_json(staging / paths.INSTALLED_FILENAME, {
+            "schema": SCHEMA,
+            "closure": runtime_closure_id(),
+            "platform": chosen.identifier,
+            "python": chosen.python,
+            "provider": "cpu",
+            "build": found["build"],
+            "license": found["license"],
+            "artifacts": {name: digest for name, digest in digests.items()},
+        })
+        models._promote(staging, paths.pipeline_runtime_root())
+        tick(1.0)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    say("The Voice Pipeline runtime is installed.")
+    logger.info("Model Chain: the Voice Pipeline runtime is installed — closure %s",
+                runtime_closure_id())
+
+
+def _run_staged(interpreter: Path, arguments: list, what: str, timeout: float = 300):
+    """Run something in the staged runtime, with no credential and no network.
+
+    This feature's own rather than :func:`mc_voice_models._run_staged`, and the
+    difference is the whole reason it exists: that helper composes the *speech*
+    runtime's environment onto ``os.environ``, which leaves an inherited
+    ``HF_TOKEN`` in place. That is right for a Kokoro smoke test and wrong here
+    -- the process being started is the enhancement worker, and I-VP-21 says it
+    never sees a credential, at install time as much as at inference time.
+
+    It also *checks the exit code*, which the shared helper deliberately does
+    not: there it is one step of a longer smoke test that reads the output
+    afterwards, and here a non-zero exit is the answer.
+    """
+    import subprocess
+
+    environ = dict(os.environ)
+    for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"):
+        environ.pop(name, None)
+    environ.update(worker_environment())
+    try:
+        found = subprocess.run(  # noqa: S603 - a path this module built
+            [str(interpreter)] + [str(item) for item in arguments],
+            capture_output=True, text=True, env=environ, timeout=timeout,
+            cwd=str(paths.extension_root()))
+    except Exception as exc:
+        logger.warning("Model Chain: the Voice Pipeline could not run %s (%s)",
+                       what, exc.__class__.__name__)
+        raise PipelineError(f"The staged Voice Pipeline runtime could not be started "
+                            f"({exc.__class__.__name__}). Nothing was installed.") from None
+    if found.returncode != 0:
+        logger.warning("Model Chain: the Voice Pipeline's %s failed with exit code %s.\n"
+                       "  stderr: %s\n  stdout: %s", what, found.returncode,
+                       (found.stderr or "")[-1200:] or "(nothing)",
+                       (found.stdout or "")[-1200:] or "(nothing)")
+        raise PipelineError(f"{what} did not run on this machine. Nothing was installed.")
+    return found.stdout or ""
+
+
+def _staged_python(staging: Path) -> Path:
+    root = staging / "env"
+    for candidate in (root / "Scripts" / "python.exe", root / "bin" / "python3",
+                      root / "bin" / "python"):
+        if candidate.exists():
+            return candidate
+    raise PipelineError("The staged Voice Pipeline runtime has no interpreter in it. "
+                        "Nothing was installed.")
+
+
+def _install_stage(stage_id: str, say, tick) -> None:
+    import mc_voice_models as models
+
+    if runtime_python() is None:
+        raise PipelineError(
+            "The Voice Pipeline runtime is not installed yet, and a model that cannot be "
+            "run cannot be proved. Install the runtime first.")
+    entry = manifest()["stages"][stage_id]
+    staging = paths.pipeline_staging_for(stage_id, uuid.uuid4().hex[:8])
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        say(f"Checking what the publisher says {entry['label']}'s files are…")
+        artifacts = _artifacts(entry["artifacts"])
+        expectations = models._expectations(artifacts, say)
+        models._make_room(artifacts, staging, expectations)
+        digests = models._fetch_all(artifacts, staging, say, tick, 0.75, expectations)
+        for name in entry["required_paths"]:
+            if not (staging / name).exists():
+                raise PipelineError(
+                    f"{entry['label']} was downloaded but {name} is not in it. Nothing was "
+                    f"installed.")
+
+        say(f"Checking that {entry['label']} runs on this machine…")
+        _self_test(stage_id, staging)
+        tick(0.95)
+
+        models._write_json(staging / paths.INSTALLED_FILENAME, {
+            "schema": SCHEMA,
+            "closure": stage_closure_id(stage_id),
+            "id": stage_id,
+            "repo": entry["repo"],
+            "revision": entry["revision"],
+            "model_id": entry["model_id"],
+            "license": entry["license"],
+            "attribution": entry["attribution"],
+            "contract": entry["contract"],
+            "artifacts": dict(digests),
+        })
+        models._promote(staging, paths.pipeline_stage_root(stage_id))
+        tick(1.0)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    say(f"{entry['label']} is installed.")
+    logger.info("Model Chain: %s is installed — revision %s", entry["label"],
+                entry["revision"][:12])
+
+
+def _self_test(stage_id: str, staging: Path) -> dict:
+    """Run the staged model once, on the staged interpreter, before promoting it.
+
+    Needs no sound hardware and no network (section 13.10). What it proves is
+    narrow and load-bearing: the model loads from a local directory, it returns
+    finite numbers, and -- for LavaSR -- one second of 24 kHz audio comes back as
+    one second of 48 kHz audio. An installation that fails that last check is
+    refused after everything has already been downloaded, which is the right
+    place to fail: the alternative is a user discovering it as a voice that
+    speaks too slowly.
+    """
+    import mc_voice_models as models
+
+    config = dict(stage_config(stage_id))
+    config["intraop"] = INTRAOP_THREADS
+    config["interop"] = INTEROP_THREADS
+    interpreter = runtime_python()
+    if interpreter is None:
+        raise PipelineError("The Voice Pipeline runtime is not installed.")
+    report = _run_staged(
+        interpreter,
+        [str(paths.pipeline_worker_script()), "--selftest",
+         "--stage", f"{stage_id}={staging}",
+         "--config", json.dumps({stage_id: config, "test_rate": 24000})],
+        f"the Voice Pipeline's {stage_id} model")
+    # The last non-empty line of stdout, which is where the worker prints its
+    # one JSON object. Anything a library wrote before it is ignored rather than
+    # parsed, because a warning on stdout is not a reason to refuse an install.
+    lines = [row for row in report.splitlines() if row.strip()]
+    try:
+        found = json.loads(lines[-1]) if lines else {}
+    except ValueError:
+        raise PipelineError(f"The {stage_id} self-test did not answer with a result. "
+                            f"Nothing was installed.") from None
+    if not isinstance(found, dict):
+        raise PipelineError(f"The {stage_id} self-test answered with something this build "
+                            f"does not read. Nothing was installed.")
+    if not found.get("ok"):
+        raise PipelineError(
+            f"The {stage_id} self-test failed ({found.get('error') or 'no reason given'}). "
+            f"Nothing was installed.")
+    return found
+
+
+def uninstall(component: str) -> None:
+    """Remove one component's files, after making sure nothing has them open.
+
+    The runtime is refused while a stage still needs it, and every path is
+    checked to be inside this feature's own tree before anything is deleted:
+    an uninstaller that could reach another engine's runtime is an uninstaller
+    that can break a working voice (section 13.11).
+    """
+    import mc_voice_pipeline_runtime as runtime
+
+    wanted = str(component or "")
+    if wanted not in COMPONENTS:
+        raise PipelineError(f"There is no Voice Pipeline component called {wanted!r}.")
+    runtime.stop(f"{wanted} is being removed")
+    if wanted == "runtime":
+        found = status()
+        held = [stage.label for stage in found.stages
+                if stage.install_state == "installed"]
+        if held:
+            raise PipelineError(
+                f"{' and '.join(held)} still {'needs' if len(held) == 1 else 'need'} the "
+                f"Voice Pipeline runtime. Remove {'it' if len(held) == 1 else 'them'} "
+                f"first.")
+        target = paths.pipeline_runtime_root()
+    else:
+        target = paths.pipeline_stage_root(wanted)
+    if not paths.pipeline_inside(target):
+        raise PipelineError("That is not a Voice Pipeline folder, so nothing was removed.")
+    shutil.rmtree(target, ignore_errors=True)
+    logger.info("Model Chain: the Voice Pipeline's %s was removed", wanted)
+
+
+# --------------------------------------------------------------------------- #
+# Worker environment
+# --------------------------------------------------------------------------- #
+
+
+def worker_environment() -> dict:
+    """What the enhancement worker is started with, and what it is not.
+
+    The absences are the contract (I-VP-21, I-VP-26, section 13.7). There is no
+    ``HF_TOKEN``, no ``HUGGING_FACE_HUB_TOKEN``, no ``HUGGINGFACE_TOKEN`` and no
+    bearer header anywhere in this dictionary, and there is nothing that would
+    let a model library resolve a name over the network if one were passed. The
+    worker is handed verified local directories and could not fetch a missing
+    file if it wanted to.
+
+    The visible-device blanking is the same one every voice process gets: this
+    runs while an image may be generating, and an optional polish that took VRAM
+    from it would be an optional polish nobody would keep switched on.
+    """
+    return {
+        "CUDA_VISIBLE_DEVICES": "",
+        "HIP_VISIBLE_DEVICES": "",
+        "ROCR_VISIBLE_DEVICES": "",
+        "ONNXRUNTIME_FORCE_CPU": "1",
+        "OMP_NUM_THREADS": str(INTRAOP_THREADS),
+        "MKL_NUM_THREADS": str(INTRAOP_THREADS),
+        "OPENBLAS_NUM_THREADS": str(INTRAOP_THREADS),
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONUNBUFFERED": "1",
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "HF_HUB_DISABLE_TELEMETRY": "1",
+        "NO_PROXY": "*",
+    }
+
+
+def stage_paths() -> dict:
+    """The verified local directory for every installed stage, by id.
+
+    What the worker is told, and the only thing it is told about where a model
+    lives. The browser sends stage ids; this turns ids into paths from the
+    installed records; nothing anywhere turns a browser-supplied string into a
+    filesystem path (section 20.2).
+    """
+    found = {}
+    state = status()
+    for held in state.stages:
+        if held.install_state != "installed":
+            continue
+        try:
+            found[held.id] = str(paths.pipeline_stage_root(held.id))
+        except ValueError:
+            continue
+    return found
+
+
+def stage_config(stage_id: str) -> dict:
+    """The release contract the worker enforces for one stage.
+
+    Read out of the manifest rather than defaulted in the worker, because these
+    are the Phase-0 measurements and a default in the worker would be a number
+    somebody guessed surviving into a release nobody re-measured.
+    """
+    try:
+        found = manifest()
+    except PipelineError:
+        return {}
+    entry = found["stages"].get(str(stage_id or ""))
+    if entry is None:
+        return {}
+    contract = dict(entry["contract"])
+    contract["model_id"] = entry["model_id"]
+    contract["revision"] = entry["revision"]
+    return contract

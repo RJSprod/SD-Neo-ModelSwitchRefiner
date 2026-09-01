@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 
 import gradio as gr
 
@@ -924,6 +925,12 @@ def settings_html() -> str:
     parts = [f'<div class="mc-voice-settings" '
              f'data-mc-voice-key="{ui.escape(api.session_token())}" '
              f'data-mc-voice-engine-id="{ui.escape(active)}">',
+             # First on the page, and above every installer rather than beside
+             # one of them (section 5.2). There is one publisher and one token;
+             # somebody who has just been told a download needs an account
+             # should find the field without scrolling past three engines to a
+             # row that happens to own it.
+             credential_html(),
              engine_selector_html()]
 
     # The engine gets a row of its own with a button of its own. It used to be
@@ -958,7 +965,15 @@ def settings_html() -> str:
     parts.append(f'<div class="mc-voice-runtime">{ui.escape(found.summary)}</div>')
 
     parts.append(_tier_row(found))
-    parts.append(credential_html())
+    # The Voice Pipeline's switches, beside the engine's own output controls
+    # rather than inside an installer: they are heard rather than configured
+    # (section 4.1). Its *installation* is a component below, like everything
+    # else's.
+    parts.append(pipeline_html())
+    # The compact overview and its single detail host. What used to be a column
+    # of expanded installer blocks, one per engine, growing by one every time an
+    # engine arrived (section 5.1).
+    parts.append(components_html())
     # Before the engine's own panel, because cleaning a recording is not
     # speaking and has no opinion about which engine does it. It was inside the
     # engine branch once, which meant the row -- and the only way to install it
@@ -1546,6 +1561,200 @@ def cleanup_html() -> str:
         f'<div class="mc-voice-progress-bar" data-mc-voice-progress-bar="cleanup"></div>'
         f'</div>'
         f'</div>')
+
+
+def pipeline_html() -> str:
+    """The Voice Pipeline's operational control: a master, two stages, one path.
+
+    Beside the active engine's runtime and output controls rather than buried in
+    an installer, because "clean the speech" and "make it wider" are things
+    somebody decides while listening, not while installing (section 4.1).
+
+    The order is numbered and fixed, and there is nothing here that could change
+    it: no drag handle, no move-up button and no order to persist (I-VP-01). The
+    path line underneath is generated from the turn snapshot rather than from the
+    switches, so it can never claim a stage ran that is not installed -- an
+    enabled-but-missing stage is named as missing instead (section 4.2, 4.5).
+    """
+    import mc_voice_engines as engines
+    import mc_voice_pipeline as pipeline
+
+    try:
+        found = pipeline.status()
+        state = pipeline.pipeline_state(found)
+        active = engines.active()
+    except Exception:
+        logger.debug("Model Chain: could not describe the Voice Pipeline", exc_info=True)
+        return ('<div class="mc-voice-row" data-mc-voice-kind="pipeline">'
+                '<div class="mc-voice-head"><div class="mc-voice-heading">Voice Pipeline'
+                '</div><div class="mc-voice-status">The Voice Pipeline could not be '
+                'described. This is a problem with the extension rather than with your '
+                'installation.</div></div></div>')
+
+    supported = active in pipeline.SUPPORTED_ENGINES
+    snapshot = pipeline.snapshot(0, active if supported else "", found)
+    rows = []
+    for held in found.stages:
+        spec = pipeline.stage(held.id)
+        note = held.message if held.install_state != "installed" else ""
+        rows.append(
+            f'<label class="mc-voice-pipeline-stage" data-mc-voice-pipeline-stage='
+            f'"{ui.escape(held.id)}">'
+            f'<span class="mc-voice-pipeline-order">{held.order // 100}</span>'
+            f'<input type="checkbox" data-mc-voice-pipeline-toggle="{ui.escape(held.id)}"'
+            f'{" checked" if held.enabled else ""} />'
+            f'<span class="mc-voice-pipeline-name">{ui.escape(held.label)}</span>'
+            f'<span class="mc-voice-pipeline-what">'
+            f'{ui.escape(spec.summary if spec else "")}</span>'
+            f'<span class="mc-voice-pipeline-state" '
+            f'data-mc-voice-pipeline-state="{ui.escape(held.id)}">'
+            f'{ui.escape(note)}</span>'
+            f'</label>')
+
+    if not supported:
+        line = (f"Not used by {ui.escape(_engine_label(active))}. The Voice Pipeline "
+                f"polishes PocketTTS's output in this release.")
+    else:
+        line = ui.escape(snapshot.reason or snapshot.describe(_engine_label(active)))
+
+    return (
+        f'<div class="mc-voice-row" data-mc-voice-kind="pipeline" '
+        f'data-mc-voice-pipeline-state-name="{ui.escape(state)}">'
+        f'<div class="mc-voice-head">'
+        f'<div class="mc-voice-heading">Voice Pipeline</div>'
+        f'<div class="mc-voice-default">enhances generated speech before playback</div>'
+        f'<div class="mc-voice-status" data-mc-voice-status="pipeline">'
+        f'{ui.escape(found.runtime_message)}</div>'
+        f'<input type="checkbox" class="mc-voice-pipeline-master" '
+        f'data-mc-voice-pipeline-master aria-label="Voice Pipeline"'
+        f'{" checked" if found.master_enabled else ""} />'
+        f'</div>'
+        f'<div class="mc-voice-pipeline-stages">{"".join(rows)}</div>'
+        f'<p class="mc-voice-note" data-mc-voice-pipeline-path>{line}</p>'
+        f'<p class="mc-voice-note">Two optional models that run on this PC\u2019s '
+        f'processor, after the speech engine has finished with a reply and before it is '
+        f'played. They do not change the voice, the words or the speaking speed, and they '
+        f'load and unload with PocketTTS rather than on a timer of their own. Install them '
+        f'from Installation &amp; Components below.</p>'
+        f'</div>')
+
+
+def _engine_label(engine: str) -> str:
+    return {"pocket": "PocketTTS", "kokoro": "Kokoro", "sopro": "Sopro V2"}.get(
+        str(engine or ""), "Speech")
+
+
+def pipeline_runtime_detail() -> str:
+    """The enhancement runtime's own panel: a closure hash and two buttons.
+
+    Shown as a component rather than pretended to be an audio stage, because it
+    is neither: it is the interpreter and the inference library the two stages
+    run inside, and a user comparing "why is this stale" against a hash needs to
+    be able to see the hash (section 5.11).
+    """
+    import mc_voice_pipeline as pipeline
+    import mc_voice_pipeline_runtime as runtime
+
+    found = pipeline.status()
+    live = runtime.status()
+    return _component_shell(
+        "Voice Pipeline runtime",
+        "The isolated CPU runtime the enhancement stages run inside. Separate from "
+        "PocketTTS\u2019s own runtime on purpose: a pipeline update must not be able to "
+        "change the environment a working voice depends on.",
+        rows=[("Installation", found.runtime_install_state, found.runtime_message),
+              ("Runtime", live["runtime_state"],
+               "Loaded with PocketTTS and unloaded when PocketTTS unloads."),
+              ("Runtime closure", found.runtime_closure_id or "\u2014", ""),
+              ("Provider", "CPU only", "")],
+        component="runtime",
+        installable=found.pinned and found.supported,
+        installed=found.runtime_ready)
+
+
+def pipeline_stage_detail(stage_id: str) -> str:
+    """One stage's panel: what it does, what is pinned, and how it is loaded.
+
+    There is deliberately no Load button here. Residency is coupled to
+    PocketTTS's (I-VP-19), and a control that let somebody load a stage on its
+    own would be a control that contradicts the contract the rest of the feature
+    is built on. What the panel says instead is what actually happens: loaded
+    with PocketTTS, unloaded when PocketTTS unloads (section 5.5).
+    """
+    import mc_voice_pipeline as pipeline
+    import mc_voice_pipeline_runtime as runtime
+
+    spec = pipeline.stage(stage_id)
+    if spec is None:
+        return ""
+    found = pipeline.status()
+    held = found.stage(stage_id)
+    live = runtime.status()
+    try:
+        entry = pipeline.manifest()["stages"][stage_id]
+    except Exception:
+        entry = {}
+    purpose = {"dpdfnet": "Speech cleanup \u2014 noise and synthesis artefacts.",
+               "lavasr": "Speech bandwidth extension \u2014 48 kHz mono output."}
+    rows = [("Purpose", purpose.get(stage_id, spec.summary), ""),
+            ("Installation", held.install_state if held else "not_installed",
+             held.message if held else ""),
+            ("Runtime", "loaded" if stage_id in live["loaded_stages"] else "unloaded",
+             "Loaded with PocketTTS. Will unload when PocketTTS unloads."),
+            ("Pipeline", "enabled" if held and held.enabled else "disabled",
+             f"Stage {spec.order // 100} of 2, in a fixed order."),
+            ("Model source", entry.get("repo") or "\u2014",
+             (entry.get("revision") or "")[:12]),
+            ("Output", "48 kHz mono" if spec.output_rate_policy != "preserve"
+             else "the rate it was given", ""),
+            ("License", entry.get("license") or "\u2014", entry.get("attribution") or "")]
+    if stage_id == "lavasr":
+        # Named rather than left implicit, because it is the difference between
+        # this stage meaning "bandwidth" and meaning "bandwidth and cleanup",
+        # and a user comparing the two toggles needs each to mean one thing.
+        rows.append(("Internal denoise", "off",
+                     "Not selectable in this release. DPDFNet is the cleanup stage."))
+    return _component_shell(
+        spec.label, spec.summary, rows=rows, component=stage_id,
+        installable=found.pinned and found.supported,
+        installed=bool(held and held.install_state == "installed"))
+
+
+def _component_shell(title: str, blurb: str, rows, component: str,
+                     installable: bool, installed: bool, note: str = "") -> str:
+    """The shared header every component detail draws, and its install buttons.
+
+    Shared so that install state and runtime state are visually distinct in the
+    same way on every component (A-44): they are two rows with two vocabularies,
+    never one word doing both jobs.
+    """
+    drawn = "".join(
+        f'<div class="mc-voice-detail-row">'
+        f'<span class="mc-voice-detail-name">{ui.escape(str(name))}</span>'
+        f'<span class="mc-voice-detail-value">{ui.escape(str(value))}</span>'
+        f'<span class="mc-voice-detail-note">{ui.escape(str(note))}</span>'
+        f'</div>'
+        for name, value, note in rows)
+    buttons = ""
+    if component:
+        buttons = (
+            f'<div class="mc-voice-detail-actions">'
+            f'<button type="button" class="mc-voice-install" '
+            f'data-mc-voice-pipeline-install="{ui.escape(component)}"'
+            f'{"" if installable else " disabled"}>'
+            f'{"Reinstall" if installed else "Install"}</button>'
+            f'<div class="mc-voice-progress" '
+            f'data-mc-voice-progress="pipeline" hidden>'
+            f'<div class="mc-voice-progress-bar" '
+            f'data-mc-voice-progress-bar="pipeline"></div></div>'
+            f'</div>')
+    return (f'<div class="mc-voice-detail">'
+            f'<div class="mc-voice-heading">{ui.escape(title)}</div>'
+            f'<p class="mc-voice-note">{ui.escape(blurb)}</p>'
+            f'<div class="mc-voice-detail-rows">{drawn}</div>'
+            f'{buttons}'
+            + (f'<p class="mc-voice-note">{ui.escape(note)}</p>' if note else "")
+            + '</div>')
 
 
 def _sopro_engine_settings(settings: dict, found) -> str:
@@ -2416,6 +2625,363 @@ def _kokoro_voices_html() -> str:
 # unconditional for a panel that may never draw a voice control. They are the
 # ids in ``mc_voice_engines.SPECS``, and ``tests/test_voice_ui.py`` asserts that
 # every one of them still is.
+
+
+# --------------------------------------------------------------------------- #
+# The component registry
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class ComponentSpec:
+    """One row in the overview, and the one detail surface behind it.
+
+    A registry rather than another branch in :func:`settings_html`, because that
+    function had grown a special case per engine and a fourth kind of thing --
+    an enhancement stage, which is neither an engine nor a utility -- is where
+    that stops scaling (section 19).
+
+    Deliberately not the same object as :data:`mc_voice_pipeline.STAGES`. One
+    controls what runs and in what order; this controls what somebody sees. They
+    reference each other and a single object doing both would make a UI change
+    into a DSP change.
+    """
+
+    id: str
+    category: str
+    label: str
+    summary: str
+    status: object
+    detail: object
+
+
+ENGINE_RUNTIME_STATES = {
+    "loading": "loading", "stopping": "stopping", "unloaded": "unloaded",
+    "error": "error", "idle": "loaded", "preparing": "loading",
+    # Kokoro says which half of itself is working, because its worker does both
+    # speech and transcription; Pocket says speaking and draining, because its
+    # Stop is not free. All four are one word here: the row is answering "is it
+    # in memory", and it is.
+    "tts": "busy", "stt": "busy", "speaking": "busy", "draining": "busy",
+}
+"""An engine's own lifecycle words, in the overview's vocabulary.
+
+The two vocabularies are deliberately not the same one. An engine distinguishes
+speaking from draining because a Stop has to be reported differently on Pocket
+than on Kokoro; an overview row does not, and a row that read "draining" would
+be asking somebody to learn a word that means nothing to the question they were
+asking. Mapped rather than renamed at the source, because the engine's own word
+is load-bearing where it is used (section 5.6).
+"""
+
+
+def _tts_status(engine: str):
+    """One speech engine's overview row, from the engine's own lifecycle.
+
+    The runtime is asked only for a state it already keeps, never started: this
+    is drawn on a settings poll, and a status read that could load a model would
+    be a settings page that loads a model.
+    """
+
+    def read():
+        import mc_voice_engines as engines
+
+        try:
+            # Asked of the engine by name. ``installed()`` answers a *bool* for
+            # one engine rather than a mapping of all of them, which is exactly
+            # the kind of thing a row that guessed would get quietly wrong for
+            # every engine at once.
+            installed = bool(engines.installed(engine))
+        except Exception:
+            logger.debug("Model Chain: could not describe %s", engine, exc_info=True)
+            return {"install_state": "error", "runtime_state": "unavailable"}
+        state = "unloaded" if installed else "unavailable"
+        try:
+            found = engines.runtime(engine).engine()
+            state = ENGINE_RUNTIME_STATES.get(str(found.get("state") or ""), state)
+        except Exception:
+            # An engine whose runtime will not even import answers "unloaded"
+            # rather than raising, for the reason `capabilities()` does: a row
+            # that could not be drawn is worse than a row that says nothing.
+            logger.debug("Model Chain: %s's runtime did not report a state", engine,
+                         exc_info=True)
+        try:
+            selected = engines.active() == engine
+        except Exception:
+            selected = False
+        return {
+            "install_state": "installed" if installed else "not_installed",
+            "runtime_state": state,
+            "selected": selected,
+        }
+
+    return read
+
+
+def _pipeline_component_status(component: str):
+    def read():
+        import mc_voice_pipeline as pipeline
+        import mc_voice_pipeline_runtime as runtime
+
+        try:
+            found = pipeline.status()
+            live = runtime.status()
+        except Exception:
+            logger.debug("Model Chain: could not describe the Voice Pipeline's %s",
+                         component, exc_info=True)
+            return {"install_state": "error", "runtime_state": "unavailable"}
+        if component == "runtime":
+            return {"install_state": found.runtime_install_state,
+                    "runtime_state": live["runtime_state"]}
+        held = found.stage(component)
+        return {
+            "install_state": held.install_state if held else "not_installed",
+            "runtime_state": ("loaded" if component in live["loaded_stages"]
+                              else "unloaded"),
+            "pipeline_enabled": bool(held and held.enabled),
+        }
+
+    return read
+
+
+def _cleanup_detail() -> str:
+    """Recording cleanup's state, for the same reason the engines' is state only.
+
+    Its own row is already on this page with its own button; a second copy of
+    that markup would take the first one's selectors with it.
+    """
+    import mc_voice_cleanup as cleanup
+
+    state = dict(_cleanup_status())
+    try:
+        found = cleanup.status()
+        rows = [("Purpose", "Cleans a recording before it becomes a voice.", ""),
+                ("Installation", _state_label(state["install_state"]),
+                 found.runtime_message),
+                ("Runtime", _state_label(state["runtime_state"]),
+                 "Runs only while a recording is being cleaned."),
+                ("Download size", models._bytes_label(found.download_bytes), ""),
+                ("Model", cleanup.LABEL, found.model_message)]
+    except Exception:
+        logger.debug("Model Chain: could not describe recording cleanup", exc_info=True)
+        rows = [("Installation", _state_label(state["install_state"]), "")]
+    return _component_shell(
+        "Recording cleanup",
+        "Takes background noise out of a recording before it becomes a voice.",
+        rows=rows, component="", installable=False,
+        installed=state["install_state"] == "installed",
+        note="Its own row, with the button that installs it, is in the section above.")
+
+
+def _cleanup_status():
+    import mc_voice_cleanup as cleanup
+    import mc_voice_cleanup_runtime as runtime
+
+    try:
+        found = cleanup.status()
+        return {"install_state": "installed" if found.ready else "not_installed",
+                "runtime_state": "loaded" if runtime.running() else "unloaded"}
+    except Exception:
+        logger.debug("Model Chain: could not describe recording cleanup", exc_info=True)
+        return {"install_state": "error", "runtime_state": "unavailable"}
+
+
+def _engine_detail(engine: str, label: str, blurb: str):
+    """A speech engine's row in the overview, as state rather than as controls.
+
+    Deliberately not that engine's installer panel over again, and the reason is
+    structural rather than aesthetic. The active engine's panel is already on
+    this page -- rendered once, wired once, and found by ``holder.querySelector``
+    on a ``data-mc-voice-kind`` attribute. Mounting a second copy of the same
+    markup in the detail host would give every one of those selectors two
+    candidates and hand them the wrong one, and the copy itself would never be
+    wired at all because the guard on the first is already set. A second surface
+    that looks live and is not is worse than no second surface.
+
+    So this answers the question the overview is actually asking -- what is
+    installed, what is loaded, is it the selected one -- and says where the
+    controls are. The three Voice Pipeline components get full detail here
+    because this *is* their only home (section 5.4).
+    """
+
+    def draw():
+        import mc_voice_engines as engines
+
+        state = dict(_tts_status(engine)())
+        selected = bool(state.get("selected"))
+        rows = [("Purpose", blurb, ""),
+                ("Installation", _state_label(state.get("install_state") or ""), ""),
+                ("Runtime", _state_label(state.get("runtime_state") or ""), ""),
+                ("Selected", "yes" if selected else "no",
+                 "One engine speaks for the whole WebUI at a time.")]
+        try:
+            engines.spec(engine)
+        except Exception:
+            logger.debug("Model Chain: %s has no registry entry", engine, exc_info=True)
+        note = ("Its installer, voices and delivery controls are in the engine section "
+                "above." if selected else
+                "Choose it with the engine cards above to see its own settings.")
+        return _component_shell(label, blurb, rows=rows, component="", installable=False,
+                                installed=state.get("install_state") == "installed",
+                                note=note)
+
+    return draw
+
+
+COMPONENTS = (
+    ComponentSpec("tts-pocket", "tts", "PocketTTS",
+                  "Streaming speech with voice cloning.",
+                  _tts_status("pocket"),
+                  _engine_detail("pocket", "PocketTTS",
+                                 "Streaming speech with voice cloning.")),
+    ComponentSpec("tts-kokoro", "tts", "Kokoro",
+                  "The built-in speaker bank.",
+                  _tts_status("kokoro"),
+                  _engine_detail("kokoro", "Kokoro", "The built-in speaker bank.")),
+    ComponentSpec("tts-sopro", "tts", "Sopro V2",
+                  "Streaming speech from a short recording.",
+                  _tts_status("sopro"),
+                  _engine_detail("sopro", "Sopro V2",
+                                 "Streaming speech from a short recording.")),
+    ComponentSpec("voice-pipeline-runtime", "voice_pipeline", "Runtime",
+                  "The isolated CPU runtime the enhancement stages run inside.",
+                  _pipeline_component_status("runtime"), pipeline_runtime_detail),
+    ComponentSpec("voice-pipeline-dpdfnet", "voice_pipeline", "DPDFNet",
+                  "Clean noise and synthesis artifacts.",
+                  _pipeline_component_status("dpdfnet"),
+                  lambda: pipeline_stage_detail("dpdfnet")),
+    ComponentSpec("voice-pipeline-lavasr", "voice_pipeline", "LavaSR",
+                  "Restore speech bandwidth to 48 kHz.",
+                  _pipeline_component_status("lavasr"),
+                  lambda: pipeline_stage_detail("lavasr")),
+    ComponentSpec("recording-cleanup", "utility", "Recording cleanup",
+                  "Takes background noise out of a recording before it becomes a voice.",
+                  _cleanup_status, _cleanup_detail),
+)
+"""Every installable thing Voice Chat has, in the order the overview draws them.
+
+The two Voice Pipeline stages carry their pipeline order in their labels rather
+than in this tuple: this is a list of things to install, and the order they run
+in is :data:`mc_voice_pipeline.STAGES`.
+"""
+
+CATEGORIES = (("tts", "TTS Engines"), ("voice_pipeline", "Voice Pipeline"),
+              ("utility", "Voice Input / Utilities"))
+
+
+def component(identifier: str):
+    """One component by id, or ``None`` for a name this build does not have."""
+    wanted = str(identifier or "")
+    for spec in COMPONENTS:
+        if spec.id == wanted:
+            return spec
+    return None
+
+
+def component_rows() -> list:
+    """The overview's rows, as data. No markup and no secret.
+
+    Every entry is a status this build can answer without starting anything:
+    reading what is installed must never install, load or download, which is the
+    rule every engine adapter's ``status`` already holds.
+    """
+    found = []
+    for spec in COMPONENTS:
+        try:
+            state = dict(spec.status())
+        except Exception:
+            logger.debug("Model Chain: could not describe the component %s", spec.id,
+                         exc_info=True)
+            state = {"install_state": "error", "runtime_state": "unavailable"}
+        found.append({"id": spec.id, "category": spec.category, "label": spec.label,
+                      "summary": spec.summary, "detail_available": True, **state})
+    return found
+
+
+def components_html() -> str:
+    """The compact overview, and the one host its details are drawn into.
+
+    Several rows visible at once, which is the point: "what do I have installed"
+    and "what is one of them configured like" are two different questions, and
+    the page that answered the first by expanding all of them into a column
+    answered neither (section 5.3).
+
+    The detail host is empty here and filled by the browser from
+    ``/component``. Empty rather than pre-rendered with the first component,
+    because the initial markup of a settings row is built once at extension
+    import and served for the life of the process -- so anything drawn here
+    would be a snapshot from process start pretending to be live (section 5.8).
+    """
+    groups = []
+    rows = component_rows()
+    for category, title in CATEGORIES:
+        mine = [row for row in rows if row["category"] == category]
+        if not mine:
+            continue
+        drawn = "".join(
+            f'<button type="button" class="mc-voice-component" '
+            f'data-mc-voice-component="{ui.escape(row["id"])}">'
+            f'<span class="mc-voice-component-name">{ui.escape(row["label"])}</span>'
+            f'<span class="mc-voice-chip" data-mc-voice-install-state>'
+            f'{ui.escape(_state_label(row["install_state"]))}</span>'
+            f'<span class="mc-voice-chip" data-mc-voice-runtime-state>'
+            f'{ui.escape(_state_label(row["runtime_state"]))}</span>'
+            + (f'<span class="mc-voice-chip mc-voice-chip-on">Selected</span>'
+               if row.get("selected") else "")
+            + (f'<span class="mc-voice-chip mc-voice-chip-on">Enabled</span>'
+               if row.get("pipeline_enabled") else "")
+            + f'</button>'
+            for row in mine)
+        groups.append(f'<div class="mc-voice-component-group">'
+                      f'<div class="mc-voice-component-title">{ui.escape(title)}</div>'
+                      f'{drawn}</div>')
+    return (f'<div class="mc-voice-row" data-mc-voice-kind="components">'
+            f'<div class="mc-voice-head">'
+            f'<div class="mc-voice-heading">Installation &amp; Components</div>'
+            f'<div class="mc-voice-default">what is installed, and what is loaded</div>'
+            f'</div>'
+            f'<div class="mc-voice-components">{"".join(groups)}</div>'
+            f'<div class="mc-voice-component-detail" data-mc-voice-component-detail>'
+            f'<p class="mc-voice-note">Choose a component above to see its installation '
+            f'and settings.</p>'
+            f'</div>'
+            f'</div>')
+
+
+def _state_label(state: str) -> str:
+    """One state word, in the vocabulary the user reads rather than the code's.
+
+    Install and runtime states stay separate here as they do everywhere else
+    (section 5.6): "Installed" never means "Loaded", because the whole reason
+    this redesign exists is that somebody read one as the other.
+    """
+    return {
+        "not_installed": "Not installed", "installing": "Installing…",
+        "installed": "Installed", "stale": "Needs updating", "corrupt": "Damaged",
+        "error": "Error",
+        "unavailable": "\u2014", "unloaded": "Unloaded", "loading": "Loading…",
+        "loaded": "Loaded", "busy": "Busy", "stopping": "Stopping…",
+    }.get(str(state or ""), str(state or ""))
+
+
+def component_html(identifier: str) -> str:
+    """The full detail surface for exactly one component.
+
+    One, and only when asked for. An inactive engine's controls are absent from
+    the page rather than present and hidden, which is the existing rule this
+    surface is built to keep rather than to work around (section 5.4).
+    """
+    spec = component(identifier)
+    if spec is None:
+        return ""
+    try:
+        return spec.detail()
+    except Exception:
+        logger.debug("Model Chain: could not draw the component %s", identifier,
+                     exc_info=True)
+        return ('<div class="mc-voice-detail"><p class="mc-voice-note">That component '
+                'could not be described. This is a problem with the extension rather '
+                'than with your installation.</p></div>')
 
 
 def _panel(registry: dict, engine: str, what: str) -> str:

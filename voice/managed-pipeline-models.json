@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "version": 1,
+  "pinned": false,
+  "notes": "NOTHING HERE IS PINNED YET AND THE INSTALLER REFUSES TO RUN UNTIL IT IS. This manifest is the declared shape of the Voice Pipeline's trust root -- which repositories, which files, which runtime closure, and which of the Phase-0 measurements the release depends on -- written before Phase 0 was carried out rather than after it. Every 'revision' is empty, every 'sha256' is empty, every 'bytes' is 0, and the two Lava contract numbers that decide the feature's latency are null. mc_voice_pipeline.pinned() answers False while any of that is true, status() says so in a sentence, and install() refuses before it touches the network. That is deliberate and it is the whole of section 23's PHASE 0 - BLOCKING: an installer built around an unvalidated LavaSR rate contract is an installer that ships a 24 kHz clock interpreted as 16 kHz to somebody's speakers. Run tools/pin_pipeline_models.py on a machine that can reach huggingface.co and pypi.org to resolve the runtime closure and the model artifacts; run the Phase-0 sweep described in docs/19-voice-chat-pipeline.md to fill in lavasr.contract. The pinner refuses to write a manifest whose stage revisions are still 'main' -- section 13.4: 'main' is not an acceptable release identity.",
+  "runtime": {
+    "python": "3.11",
+    "provider": "cpu",
+    "build": 1,
+    "import_name": "onnxruntime",
+    "license": "MIT (ONNX Runtime); BSD-3-Clause (NumPy)",
+    "attribution": "ONNX Runtime by Microsoft. NumPy by the NumPy developers. Both from PyPI.",
+    "closure_notes": "The enhancement runtime is deliberately NOT PocketTTS's interpreter (section 14.6). Lifecycle coupling does not imply dependency coupling: Pocket's closure stays reproducible, the pipeline can later serve Kokoro and Sopro, and a pipeline update cannot mutate the environment a working voice depends on. The closure below is the ONNX path -- Path A of section 10.4 -- which is the one to validate first because it shares a runtime with DPDFNet and gives explicit thread control. If Phase 0 rejects it, section 14.5 says to use the official PyTorch/Vocos LavaSR in this same isolated runtime with a project-owned rate adapter, which is a different closure and a different 'build' number here, not a different design.",
+    "wanted": [
+      [
+        "onnxruntime",
+        "",
+        "the inference session for both stages"
+      ],
+      [
+        "numpy",
+        "",
+        "array handling at the adapter boundary"
+      ]
+    ],
+    "platforms": []
+  },
+  "stages": [
+    {
+      "id": "dpdfnet",
+      "label": "DPDFNet",
+      "order": 100,
+      "role": "denoise",
+      "output_rate_policy": "preserve",
+      "summary": "Cleans noise and synthesis artifacts out of generated speech, at whatever rate it is given.",
+      "license": "Apache-2.0",
+      "upstream": "https://github.com/ceva-ip/DPDFNet",
+      "repo": "Ceva-IP/DPDFNet",
+      "revision": "",
+      "model_id": "dpdfnet8_48khz_hr",
+      "attribution": "DPDFNet by Ceva. Model dpdfnet8_48khz_hr from the publisher's own repository.",
+      "about_bytes": 0,
+      "artifacts": [],
+      "required_paths": [],
+      "contract": {
+        "accepts_any_input_rate": true,
+        "output_rate": null,
+        "notes": "Upstream's StreamEnhancer is documented to adapt internally and return output at the CALLER's sample rate, which is why output_rate is null rather than 48000: the 48 kHz in the model name is the network's own working rate, not this stage's output contract (section 9.4). The stage is handed Pocket's real post-DSP rate -- 24000 Hz today -- and must give back the same number of samples at the same rate. Phase 0 records what it actually did here."
+      }
+    },
+    {
+      "id": "lavasr",
+      "label": "LavaSR",
+      "order": 200,
+      "role": "bandwidth_extension",
+      "output_rate_policy": "48000",
+      "summary": "Restores speech bandwidth and delivers 48 kHz.",
+      "license": "Apache-2.0",
+      "upstream": "https://github.com/ysharma3501/LavaSR",
+      "repo": "YatharthS/LavaSR",
+      "revision": "",
+      "model_id": "lavasr-v2",
+      "attribution": "LavaSR by Yatharth Sharma.",
+      "about_bytes": 0,
+      "artifacts": [],
+      "required_paths": [],
+      "contract": {
+        "backend": "",
+        "backend_input_rate": null,
+        "output_rate": 48000,
+        "analysis_ms": null,
+        "context_ms": null,
+        "denoise": false,
+        "notes": "THIS IS THE PHASE-0 BLOCKER (sections 2.4, 10.3, 14.3). Upstream's README advertises 8-48 kHz input and a 24->48 kHz evaluation. The reviewed upstream Python enhance() path performs a 16 kHz -> 48 kHz resample INSIDE its inference. Those are not the same contract and README text is not an executable one. backend_input_rate is the rate the selected backend actually interprets its tensors at, measured rather than read: the adapter resamples the real source rate to it deterministically and accounts for the sample count across the whole conversion. A null here means nobody has measured it, and the worker refuses to load this stage rather than guessing -- because guessing 16000 when the truth is 24000 plays speech at two-thirds speed and guessing the other way plays it half again too fast. analysis_ms and context_ms come out of the 250/500/750/1000 ms sweep in section 10.7: the SMALLEST window whose quality is acceptable, because Voice Chat spent PRs #124 and #126 taking latency out and this feature does not get to put it back by default. denoise stays false in v1 so each toggle has one meaning: DPDFNet is cleanup, LavaSR is bandwidth (section 2.5)."
+      }
+    }
+  ]
+}

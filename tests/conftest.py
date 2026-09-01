@@ -1239,6 +1239,10 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "pocket(**plan): how the fake PocketTTS worker should behave for this test.")
+    config.addinivalue_line(
+        "markers",
+        "pipeline(**plan): how the fake Voice Pipeline worker should behave for this "
+        "test.")
 
 
 @pytest.fixture
@@ -1824,6 +1828,195 @@ def fake_pocket_worker(tmp_path, monkeypatch, voice_root, pocket_installed, requ
 
     mc_voice_pocket_runtime.stop("test finished")
     mc_voice_pocket_runtime._failures.clear()
+
+
+FAKE_PIPELINE_WORKER = r"""
+'''A Voice Pipeline worker with its two models replaced by stand-ins.
+
+Deliberately NOT a second implementation of the protocol, which is what the
+other three fakes in this file are, and the difference is worth stating.
+
+Those three exist because their workers cannot run without a speech model, so
+the only thing a fake can honestly exercise is the wire. This worker's models
+are the *only* part of it that needs weights: the sample ledger, the rolling
+analysis window, the crossfade, the offset checking and the cancellation are all
+in the real file and all run here. So this fake substitutes exactly the two
+backend objects and runs everything else for real, which is how a test can
+assert that one second in comes back as one second out rather than that a fake
+said it did.
+
+The framing is still held to byte equality against the other four workers, in
+``tests/test_voice_pipeline.py``, where that agreement belongs.
+
+Steered by MC_FAKE_PIPELINE in the environment:
+
+    dpdf_latency_blocks   how many blocks DPDFNet lags by (default 1)
+    lava_rate             what the Lava stand-in pretends its backend works at
+    fail_on_load          refuse the load frame
+    fail_mid_turn         raise inside the Nth call to a stage
+    never_answers         read frames and reply to none of them
+    busy_marker           a file to touch when inference is in flight
+'''
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.environ["MC_PIPELINE_ROOT"])
+from pipeline_worker import worker  # noqa: E402
+
+PLAN = json.loads(os.environ.get("MC_FAKE_PIPELINE") or "{}")
+
+
+class StubDpdf:
+    '''Returns what it was given, a fixed number of blocks late.
+
+    Late on purpose: the real DPDFNet is about one model window behind, so a
+    stand-in that answered immediately would let a debt-accounting bug through.
+    '''
+
+    block_samples = 480
+
+    def __init__(self):
+        self.held = []
+        self.calls = 0
+
+    def reset(self, rate):
+        self.held = []
+        self.calls = 0
+
+    def enhance(self, samples):
+        self.calls += 1
+        _may_fail("dpdfnet", self.calls)
+        _mark_busy()
+        lag = int(PLAN.get("dpdf_latency_blocks", 1))
+        self.held.append(list(samples))
+        if len(self.held) <= lag:
+            return []
+        return self.held.pop(0)
+
+
+class StubLava:
+    '''Resamples what it was given up to 48 kHz and hands it back.
+
+    A perfect bandwidth extender, which is exactly what a clock test wants: any
+    difference between what went in and what comes out is the adapter's.
+    '''
+
+    def __init__(self, rate):
+        self.rate = int(rate)
+        self.up = worker.Resampler(self.rate, 48000)
+        self.calls = 0
+
+    def reset(self, rate):
+        self.calls = 0
+
+    def enhance(self, samples, rate):
+        self.calls += 1
+        _may_fail("lavasr", self.calls)
+        _mark_busy()
+        return self.up(samples)
+
+
+def _may_fail(stage, call):
+    plan = PLAN.get("fail_mid_turn") or {}
+    if plan.get("stage") == stage and int(plan.get("call") or 0) == call:
+        raise RuntimeError("a library failure with /a/path/in/it")
+
+
+def _mark_busy():
+    marker = PLAN.get("busy_marker")
+    if marker:
+        try:
+            with open(marker, "w", encoding="utf-8") as handle:
+                handle.write("busy")
+        except OSError:
+            pass
+
+
+def _backend(stage_id, root, config, numpy_module):
+    if PLAN.get("fail_on_load"):
+        raise worker.Refusal("this stand-in was told to refuse the load")
+    if stage_id == "dpdfnet":
+        return StubDpdf()
+    return StubLava(PLAN.get("lava_rate") or config.get("backend_input_rate") or 16000)
+
+
+worker._stage_backend = _backend
+
+if PLAN.get("never_answers"):
+    # Reads its input and replies to nothing, which is what a worker inside an
+    # inference that will not return looks like from the parent's side.
+    while sys.stdin.buffer.read(4096):
+        pass
+    raise SystemExit(0)
+
+raise SystemExit(worker.main())
+"""
+
+
+@pytest.fixture
+def fake_pipeline_worker(request, tmp_path, monkeypatch, voice_root):
+    """A running Voice Pipeline worker whose two models are stand-ins.
+
+    Installs the fake by pointing the path helper at it and by answering the
+    installation questions the runtime asks before it will start anything --
+    which is the whole of what an installation is to this runtime: an
+    interpreter, a worker script, and a directory per stage.
+    """
+    import mc_voice_paths
+    import mc_voice_pipeline
+    import mc_voice_pipeline_runtime
+
+    marker = request.node.get_closest_marker("pipeline")
+    plan = dict(marker.kwargs) if marker else {}
+
+    script = tmp_path / "fake_pipeline_worker.py"
+    script.write_text(FAKE_PIPELINE_WORKER, encoding="utf-8")
+    roots = {}
+    for stage in ("dpdfnet", "lavasr"):
+        where = voice_root / "pipeline" / "models" / stage
+        where.mkdir(parents=True, exist_ok=True)
+        roots[stage] = str(where)
+
+    monkeypatch.setattr(mc_voice_paths, "pipeline_worker_script", lambda: script)
+    monkeypatch.setattr(mc_voice_pipeline, "runtime_python", lambda: sys.executable)
+    monkeypatch.setattr(mc_voice_pipeline, "stage_paths", lambda: dict(roots))
+    monkeypatch.setattr(mc_voice_pipeline, "worker_environment",
+                        lambda: {"MC_FAKE_PIPELINE": json.dumps(plan),
+                                 "MC_PIPELINE_ROOT": str(EXTENSION_ROOT),
+                                 "PYTHONUNBUFFERED": "1"})
+    monkeypatch.setattr(mc_voice_pipeline, "stage_config", lambda stage: (
+        {"backend_input_rate": 16000, "analysis_ms": 250, "context_ms": 50,
+         "denoise": False} if stage == "lavasr" else {}))
+    monkeypatch.setattr(mc_voice_pipeline, "status", lambda: _pipeline_ready())
+
+    yield plan
+
+    mc_voice_pipeline_runtime.stop("test finished")
+    mc_voice_pipeline_runtime._failures.clear()
+
+
+def _pipeline_ready():
+    """A status that says everything is installed, without an installation.
+
+    Hand-written rather than a stub library's object, like every other double in
+    this suite. It answers only what the runtime and the surfaces actually read.
+    """
+    import mc_voice_pipeline
+
+    stages = tuple(
+        mc_voice_pipeline.StageStatus(
+            id=spec.id, label=spec.label, order=spec.order, install_state="installed",
+            message="Installed.", enabled=mc_voice_pipeline.stage_enabled(spec.id),
+            revision="0123456789abcdef",
+            closure_id="fedcba9876543210", license="Apache-2.0", about_bytes=1024)
+        for spec in mc_voice_pipeline.STAGES)
+    return mc_voice_pipeline.Status(
+        supported=True, pinned=True, runtime_install_state="installed",
+        runtime_message="Installed.", runtime_closure_id="0f0f0f0f0f0f0f0f",
+        stages=stages, master_enabled=mc_voice_pipeline.enabled(),
+        message="Installed.", download_bytes=2048)
 
 
 @pytest.fixture

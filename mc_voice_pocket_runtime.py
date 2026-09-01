@@ -76,6 +76,18 @@ logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
 
 
+PIPELINE_ENGINE = "pocket"
+"""Which engine this runtime is, as the Voice Pipeline spells it.
+
+A literal rather than an import of :data:`mc_voice_engines.POCKET`, for the
+reason every other cross-module reference in this file is deferred: this module
+is read on the path that starts a subprocess and the engine registry is read on
+the path that draws a settings page, and a module-level import between them is a
+cycle waiting for somebody to add one more edge. ``tests/test_voice_pocket.py``
+is where the two spellings are asserted to agree.
+"""
+
+
 class PocketRuntimeError(RuntimeError):
     """A Pocket request that could not be served. Never fatal to Conversation."""
 
@@ -551,7 +563,69 @@ def begin_turn(turn, voice_id: str = "", profile=None) -> int:
         _release_turn(turn)
         raise PocketRuntimeError("PocketTTS stopped before it could start speaking.") \
             from None
-    return _await_rate(turn)
+    return _open_pipeline(turn, _await_rate(turn))
+
+
+def _note_source_rate(turn, rate: int) -> None:
+    """The worker's own rate, recorded without overwriting an advertised one.
+
+    ``tts_ready`` arrives on this thread while the turn thread is still inside
+    :func:`begin_turn`, and :func:`_await_rate` deliberately answers from the
+    handshake when it has not landed yet. So the ordinary ordering is: the turn
+    is told 48000 by the pipeline, and *then* this frame arrives saying 24000.
+    Assigning it here would replace the rate already written into the response's
+    headers with the source's own, and the browser would decode a 48 kHz stream
+    at half speed (I-VP-07).
+
+    A turn with no pipeline is unchanged and takes the rate as it always did. A
+    turn with one keeps what its snapshot froze, and a source that turns out to
+    speak at a different rate than the snapshot was built for ends the turn
+    rather than being played at the wrong speed -- which is the same refusal
+    :meth:`mc_voice_pipeline_runtime.Handle.offer` makes for the same reason.
+    """
+    if rate <= 0:
+        return
+    snapshot = getattr(turn, "pipeline_snapshot", None)
+    if snapshot is None or not getattr(snapshot, "active", False):
+        turn.sample_rate = rate or turn.sample_rate
+        return
+    if int(getattr(snapshot, "input_rate", 0) or 0) != rate:
+        logger.warning("Model Chain: PocketTTS reported %d Hz for a turn the Voice "
+                       "Pipeline was configured at %d Hz, so it was not spoken",
+                       rate, int(getattr(snapshot, "input_rate", 0) or 0))
+        turn.audio_failed("Voice could not read that reply aloud.")
+
+
+def _open_pipeline(turn, rate: int) -> int:
+    """Freeze this turn's Voice Pipeline configuration, and answer its output rate.
+
+    Here rather than anywhere later because the answer becomes
+    ``X-Model-Chain-Voice-Rate`` on a response whose first byte has not been
+    written yet, and a rate that changed after that is a rate the browser
+    decoded the rest of the reply at (I-VP-07). With LavaSR in the graph this
+    returns 48000 where Pocket said 24000; with the pipeline off, or unavailable,
+    or bypassed, it returns exactly what Pocket said and this turn is the turn it
+    always was (I-VP-03).
+
+    Never fatal. Everything inside answers with the source's own rate when it
+    cannot answer with anything better, which is a reply spoken unenhanced
+    rather than a reply not spoken (section 15.1).
+    """
+    try:
+        import mc_voice_pipeline as pipeline
+        import mc_voice_pipeline_runtime as enhancement
+    except Exception:
+        return int(rate)
+    try:
+        snapshot = pipeline.snapshot(int(rate), PIPELINE_ENGINE)
+        turn.pipeline_snapshot = snapshot
+        if not snapshot.active:
+            return int(rate)
+        return enhancement.begin_turn(turn, int(rate), snapshot)
+    except Exception:
+        logger.debug("Model Chain: this reply is being spoken without the Voice Pipeline",
+                     exc_info=True)
+        return int(rate)
 
 
 def _await_lane(what: str, turn=None) -> None:
@@ -671,6 +745,11 @@ def interrupt_turn(turn) -> None:
     ``tts_done``, or the pipe ending. Never by a timer (I-PKT-13).
     """
     identifier = getattr(turn, "id", "")
+    # Before every branch below, including the early return. Stop means stop
+    # enhancing, whatever the engine's own state turns out to be -- and the
+    # early return is exactly the case where the pipeline is *still working*,
+    # because the source finished and the last analysis window has not.
+    _cancel_pipeline(turn)
     if getattr(turn, "synthesis_done", False):
         # The reply finished between the turn thread deciding to interrupt and
         # this call. Nothing is in the model, nothing more will arrive for this
@@ -741,6 +820,84 @@ def _finish_drain(identifier: str, header: dict = None) -> None:
         logger.debug("Model Chain: could not clear a PocketTTS drain state", exc_info=True)
     logger.info("Model Chain: PocketTTS finished its interrupted unit after %.1f s and is "
                 "ready again", max(0.0, time.monotonic() - float(record.get("since") or 0)))
+
+
+def _close_pipeline(turn) -> None:
+    """Let the pipeline finish, then close the browser's stream. In that order.
+
+    ``tts_done`` means Pocket has produced its last sample, which is not the
+    same event as the reply's last sample once something downstream holds
+    audio: LavaSR is one analysis window behind by construction, and closing
+    the stream on Pocket's word would drop the end of every enhanced reply.
+
+    With no pipeline on this turn the callback runs here, synchronously, on this
+    same reader thread -- which is the call this line has always been.
+    """
+    try:
+        import mc_voice_pipeline_runtime as enhancement
+
+        enhancement.finish_turn(turn, turn.audio_finished)
+    except Exception:
+        logger.debug("Model Chain: the Voice Pipeline could not finish a reply cleanly",
+                     exc_info=True)
+        try:
+            turn.audio_finished()
+        except Exception:
+            pass
+
+
+def _cancel_pipeline(turn) -> None:
+    """Throw away this turn's enhancement state. Returns at once, always.
+
+    Never waits for an inference. The browser is silent by the time this is
+    reached, and a model call that cannot be interrupted has its result
+    discarded when it returns rather than being allowed to keep a playback queue
+    alive (section 26.16).
+    """
+    try:
+        import mc_voice_pipeline_runtime as enhancement
+
+        enhancement.cancel_turn(turn)
+    except Exception:
+        logger.debug("Model Chain: could not cancel a Voice Pipeline turn", exc_info=True)
+
+
+def _warm_pipeline() -> None:
+    """Load the enhancement stages beside Pocket's own model, not after it.
+
+    The other half of I-VP-19's load direction. Called where Pocket's worker is
+    started so the two cold starts overlap: the enhancement sessions are read
+    while Pocket is reading its own weights, rather than in front of the first
+    sentence somebody is waiting to hear (section 12.2).
+
+    Never fatal, and never blocking on anything that could fail: a pipeline that
+    will not warm is discovered again at :func:`_open_pipeline`, through the path
+    that exists for it.
+    """
+    try:
+        import mc_voice_pipeline_runtime as enhancement
+
+        threading.Thread(target=enhancement.warm, args=(PIPELINE_ENGINE,),
+                         name="mc-pipeline-warm", daemon=True).start()
+    except Exception:
+        logger.debug("Model Chain: the Voice Pipeline could not be warmed", exc_info=True)
+
+
+def _unload_pipeline(reason: str) -> None:
+    """Pocket is going. The pipeline goes with it (I-VP-19, section 12.6).
+
+    Never the other way round and never on a timer of its own: enhancement
+    models resident with nothing to enhance are a quarter of a gigabyte somebody
+    did not ask to keep, and a pipeline that unloaded itself on an idle clock
+    would be cold again exactly when the next reply arrived.
+    """
+    try:
+        import mc_voice_pipeline_runtime as enhancement
+
+        enhancement.unload(reason)
+    except Exception:
+        logger.debug("Model Chain: the Voice Pipeline did not stop with PocketTTS",
+                     exc_info=True)
 
 
 def _release_turn(turn) -> None:
@@ -971,6 +1128,7 @@ def ensure_started() -> None:
                     "interrupt=%s, %s", _handshake.pocket_version, _handshake.quantization,
                     _handshake.sampler_steps, _handshake.sample_rate,
                     _handshake.interrupt_mode, _handshake.thread_policy)
+        _warm_pipeline()
 
 
 def _handshake_with(state) -> Handshake:
@@ -1175,9 +1333,19 @@ def _dispatch_turn(operation: str, header: dict, payload: bytes) -> None:
         return
 
     if operation == "tts_audio":
-        turn.offer_audio(payload, int(header.get("sample_rate") or 0))
+        # The Voice Pipeline's whole insertion point, and it is one attribute
+        # read when the pipeline is off (I-VP-03). Note where this sits: *after*
+        # the draining branch above, so a cancelled Pocket unit's frames are
+        # dropped before this line and can never wait for enhancement capacity
+        # (I-VP-18, section 16.2). And after the worker's own shaper, trim, seam
+        # and pause, because that is what these bytes already are (I-VP-04).
+        enhancing = getattr(turn, "pipeline", None)
+        if enhancing is None:
+            turn.offer_audio(payload, int(header.get("sample_rate") or 0))
+        else:
+            enhancing.offer(payload, int(header.get("sample_rate") or 0))
     elif operation == "tts_ready":
-        turn.sample_rate = int(header.get("sample_rate") or 0) or turn.sample_rate
+        _note_source_rate(turn, int(header.get("sample_rate") or 0))
         turn.streaming = str(header.get("streaming") or "") or turn.streaming
     elif operation == "tts_segment":
         note = getattr(turn, "note_segment", None)
@@ -1204,6 +1372,7 @@ def _dispatch_turn(operation: str, header: dict, payload: bytes) -> None:
         # moved yet, which is possible when the worker interrupted itself --
         # a fatal error inside a unit, say. Treat it as the parent's own
         # interruption so the lane bookkeeping stays true.
+        _cancel_pipeline(turn)
         with _state_lock:
             _turns.pop(identifier, None)
             _draining[identifier] = {"turn": turn, "since": time.monotonic()}
@@ -1212,9 +1381,18 @@ def _dispatch_turn(operation: str, header: dict, payload: bytes) -> None:
         if str(header.get("state") or "") == "complete":
             _finish_drain(identifier, header)
     elif operation == "tts_done":
-        turn.audio_finished()
+        # The lane is free the moment Pocket says so; the browser's stream is
+        # not closed until the pipeline has given back the window it was still
+        # holding. Two separate facts, and they used to be one line because
+        # nothing had ever held audio after the engine finished with it.
         _release_turn(turn)
+        _close_pipeline(turn)
     elif operation == "tts_error":
+        # The pipeline turn goes too. ``audio_failed`` cancels the VoiceTurn, so
+        # nothing more would be played -- but the enhancement handle would stay
+        # registered with a pump thread of its own, and the next reply would be
+        # told the stages cannot change because one is still speaking.
+        _cancel_pipeline(turn)
         turn.audio_failed(_readable(str(header.get("error") or "")))
         _release_turn(turn)
 
@@ -1241,12 +1419,17 @@ def _fail_everything(generation: int) -> None:
             pass
     for turn in speaking:
         try:
+            # The enhancement handle first: the source it was polishing has
+            # gone, and a pipeline turn left registered for a dead source is one
+            # nothing would ever close (section 12.8).
+            _cancel_pipeline(turn)
             turn.audio_failed("PocketTTS stopped while it was speaking.")
         except Exception:
             pass
     for turn in draining:
         try:
             if turn is not None:
+                _cancel_pipeline(turn)
                 turn.interrupted()
         except Exception:
             pass
@@ -1368,6 +1551,12 @@ def _discard(reason: str) -> None:
     not to answer promptly.
     """
     global _process, _reader, _handshake, _generation, _busy, _preparing
+
+    # First, and outside the state lock's protection of anything below: the
+    # enhancement worker is a child of this process too, and a group that
+    # reported itself unloaded while one of its children was still resident
+    # would be a group whose promise is not true (I-VP-19, section 12.6).
+    _unload_pipeline(reason)
 
     with _state_lock:
         started, _process, _reader, _handshake = _process, None, None, None

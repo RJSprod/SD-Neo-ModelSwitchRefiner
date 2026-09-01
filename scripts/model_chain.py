@@ -55,6 +55,8 @@ import mc_voice_sopro_runtime
 import mc_voice_pocket
 import mc_voice_pocket_profile
 import mc_voice_pocket_runtime
+import mc_voice_pipeline
+import mc_voice_pipeline_runtime
 import mc_voice_state
 import mc_voice_ui
 from modules import errors, images, processing, scripts, shared
@@ -635,6 +637,34 @@ _VOICE_OPTIONS.update({
         "and brings its own CPU runtime. Each engine keeps its own voices, default and "
         "per-character settings, so switching back restores what you had. Chosen with the "
         "cards in the row above rather than typed. Dictation is not part of this choice"
+    ),
+    mc_voice_pipeline.OPT_ENABLED: shared.OptionInfo(
+        False,
+        "Voice Pipeline",
+    ).info(
+        "off by default. On, generated speech is cleaned and its bandwidth restored "
+        "before it is played, by two optional models that install separately and run on "
+        "this PC's processor. It does not change the voice, the words or the speaking "
+        "speed — it polishes what the speech engine already produced. The stages below "
+        "run in a fixed order and only while PocketTTS is the selected engine"
+    ),
+    mc_voice_pipeline.OPT_DPDFNET: shared.OptionInfo(
+        True,
+        "Voice Pipeline: DPDFNet",
+    ).info(
+        "the first stage: takes noise and synthesis artefacts out of the generated "
+        "speech, at whatever rate the engine produced it. Ticked by default so that "
+        "turning the Voice Pipeline on gives you the intended chain in one gesture — the "
+        "master switch above is what decides whether any of it runs"
+    ),
+    mc_voice_pipeline.OPT_LAVASR: shared.OptionInfo(
+        True,
+        "Voice Pipeline: LavaSR",
+    ).info(
+        "the second stage: restores the speech bandwidth a small model cannot generate "
+        "and delivers 48 kHz. It runs after DPDFNet and never before it, because asking "
+        "it to rebuild the top of a signal that still has hiss in it is asking it to "
+        "rebuild the hiss. Ticked by default, like the stage above"
     ),
     mc_voice_state.OPT_AUTO_SEND: shared.OptionInfo(
         False,
@@ -3681,6 +3711,12 @@ def _on_script_unloaded():
             # not be trusted to have fired. A timer is a courtesy; this is the
             # requirement.
             ("the recording cleanup engine", mc_voice_cleanup_runtime.shutdown),
+            # The Voice Pipeline, which ordinarily goes when PocketTTS goes and
+            # is stopped here anyway. Its residency is coupled to an engine's;
+            # its containment is not coupled to anything, and a door that
+            # trusted the coupling would be a door that stays shut whenever the
+            # coupling is the thing that broke (I-VP-20).
+            ("the Voice Pipeline", mc_voice_pipeline_runtime.shutdown),
             # Separately owned, and stopped separately (section 82). A clone is
             # a long CPU job that has nothing to do with speech residency, and
             # its process tree must not outlive this one either.

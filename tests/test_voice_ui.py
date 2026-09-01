@@ -396,6 +396,7 @@ class TestTheSettingsSection:
         import mc_voice_engines
         import mc_voice_models
         import mc_voice_paths
+        import mc_voice_pipeline
         import mc_voice_profile
         import mc_voice_registry
         import mc_voice_sopro
@@ -421,6 +422,14 @@ class TestTheSettingsSection:
             mc_voice_sopro.OPT_CHUNK,
             "model_chain_voice_status",
             "model_chain_voice_voices",
+            # The Voice Pipeline's three: a master and one per stage, and
+            # deliberately no fourth. There is no order key here because there
+            # is no order to persist -- the chain's order is structural
+            # (I-VP-01), and a settings key for it is exactly the thing whose
+            # absence this list can prove.
+            mc_voice_pipeline.OPT_ENABLED,
+            mc_voice_pipeline.OPT_DPDFNET,
+            mc_voice_pipeline.OPT_LAVASR,
         } | set(mc_voice_sopro_profile.OPTIONS.values()) | {
             mc_voice_sopro_profile.OPT_LANGUAGE,
         }

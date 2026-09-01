@@ -219,6 +219,30 @@ class VoiceTurn:
 
         self.source_chars = 0
         self.sample_rate = 0
+        self.pipeline = None
+        """This turn's Voice Pipeline handle, or ``None`` for an unenhanced turn.
+
+        Held on the turn rather than looked up in a registry so that the engine
+        runtime's reader thread can decide where a block of PCM goes with one
+        attribute read and no import (I-VP-03). ``None`` is the ordinary case
+        and is what every turn on every engine had before the feature existed.
+        """
+        self.pipeline_metrics = None
+        """This turn's enhancement numbers, kept after its handle is let go.
+
+        The handle is released the moment the last sample is committed, which is
+        before anything asks a finished turn how it went. Without this, the only
+        turns that could report what the pipeline cost would be the ones it
+        failed on.
+        """
+        self.pipeline_snapshot = None
+        """What the pipeline was configured to do when this turn started.
+
+        Frozen before the first sample and never re-read, because the output
+        sample rate derived from it is already in the response's headers
+        (I-VP-06, I-VP-07). Somebody who changes a switch mid-reply has changed
+        the next reply.
+        """
         self.error = ""
         self.reason = ""
         self.source_done = False
@@ -815,8 +839,52 @@ class VoiceTurn:
             # Kokoro run. Absent for an engine that has no such thing, rather
             # than reported as zero -- which would read as speaker 0.
             "sid": self.sid if self.engine == "kokoro" else None,
+            # What the Voice Pipeline did to this turn, beside the source's own
+            # numbers rather than instead of them (I-VP-32). Named here like
+            # everything else: absent from a log until somebody added it on
+            # purpose. Every field is None on an unenhanced turn rather than
+            # zero, so a log comparing two turns cannot read "no pipeline" as
+            # "a pipeline that added no latency".
+            **self._pipeline_metrics(),
             **self._unit_metrics(),
         }
+
+    def _pipeline_metrics(self) -> dict:
+        """The enhancement layer's own numbers, or a row of absences.
+
+        Read off the handle while it exists and off the snapshot afterwards, so
+        a turn that ended normally still reports what it did: the handle is
+        released when the last sample is committed, and a metric that vanished
+        with it would be a metric only a failed turn ever had.
+        """
+        snapshot = self.pipeline_snapshot
+        handle = self.pipeline
+        found = {"pipeline_stages": None, "pipeline_output_rate": None,
+                 "pipeline_input_sample_count": None,
+                 "pipeline_output_sample_count": None,
+                 "pipeline_first_output_ms": None, "pipeline_ingress_peak_ms": None,
+                 "pipeline_backpressure_ms": None, "pipeline_compute_ms": None,
+                 # A real-time factor in thousandths, measured in the worker
+                 # rather than inferred from this side's timings: 700 means the
+                 # enhancement took 0.7 s per second of audio, and section 11.7
+                 # says a sustained number above 1000 is a performance failure
+                 # rather than something a buffer can absorb.
+                 "pipeline_rtf_milli": None}
+        if snapshot is None or not getattr(snapshot, "active", False):
+            return found
+        found["pipeline_stages"] = ",".join(snapshot.stage_ids)
+        found["pipeline_output_rate"] = snapshot.output_rate
+        try:
+            measured = self.pipeline_metrics
+            if measured is None and handle is not None:
+                measured = handle.metrics()
+            for name, value in (measured or {}).items():
+                if name in found:
+                    found[name] = value
+        except Exception:
+            logger.debug("Model Chain: a Voice Pipeline turn's numbers could not be read",
+                         exc_info=True)
+        return found
 
     def _unit_metrics(self) -> dict:
         """The first two synthesis units, flattened into named fields.

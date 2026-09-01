@@ -3263,6 +3263,55 @@ data is stored per model — so changing the model or the precision does not
 destroy the version that worked, and **Rebuild** makes a new one from the
 recording you already gave it.
 
+### The Voice Pipeline (optional): cleaning and widening what was spoken
+
+PocketTTS on a processor is a small model, and small models produce speech with
+a narrow top end and a faint synthesis texture underneath it. Two published
+models fix those two things, and this release can put them between the speech
+engine and your speakers:
+
+    PocketTTS → DPDFNet → LavaSR → 48 kHz → 1.0× playback
+
+**DPDFNet** takes noise and synthesis artefacts out. **LavaSR** restores the
+speech bandwidth a small model cannot generate and delivers 48 kHz. They are
+installed separately, switched on separately, and every combination works —
+neither, either alone, or both. The order is fixed and shown as *1* and *2*:
+cleaning a signal before asking a bandwidth model to rebuild its missing top is
+the way round that does not ask the second model to rebuild the first model's
+hiss.
+
+It is off until you turn it on, and turning it on is one switch — the two stages
+are already ticked underneath it. There is nothing else to configure. No window
+sizes, no thread counts, no crossfade curves; those are release decisions with
+measurements behind them rather than questions to put to somebody who wanted
+better-sounding speech.
+
+**It does not change how quickly a reply starts talking.** There is no server
+buffer in front of the browser's own, and there is deliberately no "wait until
+two seconds are ready": the pipeline adds the delay its own analysis window
+needs and the time the models take, and nothing else. What it does add is
+bounded backpressure — if enhancement cannot keep up on your machine, the
+speech engine is slowed down rather than a queue growing until something runs
+out of memory, and the diagnostics say so in a measured real-time factor rather
+than a guess.
+
+The models load with PocketTTS and unload with it. They are never resident with
+nothing to enhance, they never outlive the WebUI, and Stop is exactly as
+immediate as it was — a cancelled reply's enhancement state is thrown away and
+no tail of it is ever played after the silence.
+
+**This release cannot install them yet, and says so.** The two upstream
+projects disagree with themselves about one number that decides whether speech
+plays at the right speed: LavaSR's own documentation advertises 8–48 kHz input
+while the code path we reviewed resamples 16 kHz internally. Guess wrong in one
+direction and speech plays a third too slowly; guess wrong in the other and it
+plays half again too fast. Both load cleanly, both return perfectly ordinary
+numbers, and neither says anything is wrong. So the manifest ships unpinned, the
+installer refuses before it touches the network, and the row tells you why —
+rather than downloading a model whose clock nobody has measured. The measurement
+and the pinning are `docs/19-voice-chat-pipeline.md` and
+`tools/pin_pipeline_models.py`.
+
 ### From an Android phone
 
 This is the deployment the feature was designed for: the browser is on the
@@ -3681,6 +3730,12 @@ mc_voice_pocket_runtime.py  the Pocket worker process, and the drain that is its
 mc_voice_pocket_profile.py  Pocket's delivery, and the one control that is Pocket's
 pocket_worker/worker.py    the Pocket sidecar, in a Torch that is not Sopro's
 mc_voice_reference.py the shared reference decoder, so two engines cannot drift
+
+mc_voice_pipeline.py  the Voice Pipeline: two fixed stages, and the turn snapshot
+mc_voice_pipeline_runtime.py  the enhancement worker, its one queue and its five exits
+pipeline_worker/worker.py  the enhancement sidecar: the sample clock lives here
+voice/managed-pipeline-models.json  the pipeline trust root (data only, unpinned)
+tools/pin_pipeline_models.py  resolves and pins it after Phase 0 (maintainers only)
 voice/managed-pocket-models.json  the Pocket closure and its voices (data only)
 tools/pin_pocket_models.py  resolves that closure from PyPI (maintainers only)
 mc_creative_krea.py   Creative Mode: settings, roll history, one roll

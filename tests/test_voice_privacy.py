@@ -316,7 +316,8 @@ class TestNothingIsWrittenToDisk:
         for path in (list(root.glob("mc_voice_*.py"))
                      + [root / "voice_worker" / "worker.py",
                         root / "sopro_worker" / "worker.py",
-                        root / "pocket_worker" / "worker.py"]):
+                        root / "pocket_worker" / "worker.py",
+                        root / "pipeline_worker" / "worker.py"]):
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if isinstance(node, ast.Import):
                     assert all(a.name != "tempfile" for a in node.names), path.name
