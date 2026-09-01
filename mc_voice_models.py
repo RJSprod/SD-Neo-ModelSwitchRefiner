@@ -1223,6 +1223,28 @@ def _as_sha256(raw, prefixed: bool) -> str | None:
     return None
 
 
+def read_index_page(url: str, ceiling: int = 8 * 1024 * 1024) -> str:
+    """One package index page, as text. The only reason this lives here.
+
+    The Voice Pipeline needs to read a PEP 503 index to resolve the wheels it
+    cannot pin in advance, and invariant I-4 says this module is the only one
+    that may reach the network. So the transport is here and the parsing is
+    there, which is the right split anyway: this knows about sockets and
+    ceilings, ``mc_voice_wheelindex`` knows about wheel tags.
+
+    The ceiling matters. An index that answers with a gigabyte of HTML is a
+    reason to stop rather than a reason to allocate, and nothing downstream
+    would notice the difference until it had already been read.
+    """
+    import urllib.request
+
+    if not str(url or "").startswith("https://"):
+        raise VoiceError("A package index must be fetched over HTTPS.")
+    request = urllib.request.Request(url, headers={"Accept": "text/html"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return response.read(int(ceiling)).decode("utf-8", "replace")
+
+
 def _published_digest(headers: dict) -> str | None:
     """A SHA-256 the publisher actually stated, or ``None`` if it stated none.
 
