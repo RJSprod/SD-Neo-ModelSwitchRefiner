@@ -158,8 +158,19 @@ class TestTheImportGraph:
         # sidecar that could import a speech engine is a sidecar that could
         # start reasoning about where that engine's units were.
         for name in ("voice_worker", "sopro_worker", "pocket_worker", "sherpa_onnx",
-                     "sopro", "pocket_tts", "torch", "torchaudio"):
+                     "sopro", "pocket_tts"):
             assert name not in pipeline, name
+        # Torch and torchaudio used to be on that list, and are deliberately no
+        # longer. They were never the invariant -- they were evidence for it.
+        # While the enhancement closure was ONNX only, a torch import in this
+        # worker could only have come from Pocket's or Sopro's closure, so
+        # banning the name was a cheap way to catch the reach. The enhancement
+        # runtime now has a PyTorch flavour of its own that LavaSR upstream runs
+        # in, so the name proves nothing either way and the engines above are
+        # what the rule was always about. What still holds is that the import is
+        # inside a function, which the module-level test above enforces, and
+        # that this worker imports no engine of anybody else's.
+        assert "pipeline_worker" not in kokoro
         for others in (kokoro, sopro, pocket):
             assert "pipeline_worker" not in others
 

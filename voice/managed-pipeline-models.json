@@ -385,8 +385,8 @@
    "import_name": "torch",
    "license": "BSD-3-Clause (PyTorch, NumPy, SciPy, scikit-learn, joblib, sympy, mpmath, torchaudio, networkx); MIT (ONNX Runtime including its DirectML execution provider, einops, soxr, soundfile, tqdm, filelock, PyYAML); ISC (librosa); BSD-2-Clause (numba, llvmlite); Apache-2.0 (huggingface_hub, LavaSR)",
    "attribution": "Resolved from PyPI for CPython 3.13 on Windows x86-64 and hashed against the digests pypi.org publishes for each file. pip's own resolver could not be used for this closure the way it was for the ONNX one: --platform steers wheel-tag selection but does not set the marker environment, so a Linux machine resolving torch for Windows tries to satisfy the nvidia-* pins that torch gates behind platform_system == \"Linux\" and fails outright. The dependency graph was walked against PyPI's own metadata with a Windows/cp313 marker environment instead, which is the same information pip would have used had it been able to.",
-   "closure_notes": "THE PYTORCH FLAVOUR, AND IT CARRIES ONNX RUNTIME TOO -- deliberately, because that is what keeps this to ONE PROCESS. LavaSR upstream is a PyTorch model and DPDFNet is an ONNX one; running them in two runtimes would mean two workers, two job objects and two ways to leak a process that outlives the voice it belongs to. Carrying both wheel sets in one interpreter costs 126 MB over the ONNX closure and buys back every containment guarantee unchanged -- the same start and stop path, the same Windows job object, the same pdeathsig, the same coupling to PocketTTS's residency. A stage's backend chooses which interpreter the single contained worker runs, never how many workers there are.\n\nCPU ONLY, AND THAT IS NOT A DESIGN CHOICE. torch on PyPI for Windows is the CPU build; every CUDA dependency in its metadata is gated behind platform_system == \"Linux\", and the Windows CUDA wheels live on download.pytorch.org, which the machine that wrote this manifest could not reach. A CUDA closure is a second platform entry here, resolved and hashed the same way, from a machine that can reach that host. Until then a card cannot be offered for the torch backend, and the settings row says so rather than showing a control that would do nothing.",
-   "about_bytes": 263730707,
+   "closure_notes": "THE PYTORCH FLAVOUR, AND IT CARRIES ONNX RUNTIME TOO -- deliberately, because that is what keeps this to ONE PROCESS. LavaSR upstream is a PyTorch model and DPDFNet is an ONNX one; running them in two runtimes would mean two workers, two job objects and two ways to leak a process that outlives the voice it belongs to. Carrying both wheel sets in one interpreter costs 126 MB over the ONNX closure and buys back every containment guarantee unchanged -- the same start and stop path, the same Windows job object, the same pdeathsig, the same coupling to PocketTTS's residency. A stage's backend chooses which interpreter the single contained worker runs, never how many workers there are.\n\nCPU ONLY, AND THAT IS NOT A DESIGN CHOICE. torch on PyPI for Windows is the CPU build; every CUDA dependency in its metadata is gated behind platform_system == \"Linux\", and the Windows CUDA wheels live on download.pytorch.org, which the machine that wrote this manifest could not reach. A CUDA closure is a second platform entry here, resolved and hashed the same way, from a machine that can reach that host. Until then a card cannot be offered for the torch backend, and the settings row says so rather than showing a control that would do nothing.\n\nTHREE PACKAGES ARRIVE AS SOURCE, NOT WHEELS. LavaSR publishes no wheel, its vocos dependency is a fork pinned to a git branch, and encodec ships an sdist only -- and vocos imports encodec unconditionally, so all three are needed to import any of them. All three are pure Python, so installing them is lifting one named package directory onto the path: no build step runs and no setup.py is executed. Only the named directory is taken, because a GitHub tarball is a repository rather than a distribution and carries tests, training scripts and, in encodec's case, four megabytes of sample audio. encodec is pinned by digest here; the two GitHub tarballs are pinned to immutable commits but arrive against the digest codeload serves, because the machine that wrote this manifest cannot reach that host.",
+   "about_bytes": 268966744,
    "platforms": [
     {
      "id": "windows-x86_64-cp313",
@@ -398,6 +398,14 @@
      "python": "3.13",
      "accelerator": "cpu",
      "artifacts": [
+      {
+       "filename": "LavaSR-33ac04089251.tar.gz",
+       "local_name": "LavaSR-33ac04089251.tar.gz",
+       "url": "https://codeload.github.com/ysharma3501/LavaSR/tar.gz/33ac040892519c1bb4aed7eb32e79af51cc29e2a",
+       "source_package": "LavaSR",
+       "bytes": 0,
+       "sha256": ""
+      },
       {
        "filename": "anyio-4.14.2-py3-none-any.whl",
        "local_name": "anyio-4.14.2-py3-none-any.whl",
@@ -460,6 +468,14 @@
        "url": "https://files.pythonhosted.org/packages/2a/09/f8d8f8f31e4483c10a906437b4ce31bdf3d6d417b73fe33f1a8b59e34228/einops-0.8.2-py3-none-any.whl",
        "bytes": 65638,
        "sha256": "54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193"
+      },
+      {
+       "filename": "encodec-0.1.1.tar.gz",
+       "local_name": "encodec-0.1.1.tar.gz",
+       "url": "https://files.pythonhosted.org/packages/62/59/e47bbd0542d0e6f4ce9983d5eb458a01d4b42c81e5c410cb9e159b1061ae/encodec-0.1.1.tar.gz",
+       "source_package": "encodec",
+       "bytes": 3736037,
+       "sha256": "36dde98ccfe6c51a15576476cadfcb3b35a63507b8b8555abd69889a6fba6772"
       },
       {
        "filename": "filelock-3.32.5-py3-none-any.whl",
@@ -733,6 +749,14 @@
        "url": "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl",
        "bytes": 131087,
        "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897"
+      },
+      {
+       "filename": "vocos-451e522f7a11.tar.gz",
+       "local_name": "vocos-451e522f7a11.tar.gz",
+       "url": "https://codeload.github.com/langtech-bsc/vocos/tar.gz/451e522f7a11c3652c9522f63ea6780736d93de0",
+       "source_package": "vocos",
+       "bytes": 0,
+       "sha256": ""
       }
      ]
     },
@@ -747,20 +771,12 @@
      "accelerator": "cuda",
      "artifacts": [
       {
-       "local_name": "torch",
-       "resolve": {
-        "index": "https://download.pytorch.org/whl/cu128/torch/",
-        "package": "torch",
-        "version": ""
-       }
-      },
-      {
-       "local_name": "torchaudio",
-       "resolve": {
-        "index": "https://download.pytorch.org/whl/cu128/torchaudio/",
-        "package": "torchaudio",
-        "version": ""
-       }
+       "filename": "LavaSR-33ac04089251.tar.gz",
+       "local_name": "LavaSR-33ac04089251.tar.gz",
+       "url": "https://codeload.github.com/ysharma3501/LavaSR/tar.gz/33ac040892519c1bb4aed7eb32e79af51cc29e2a",
+       "source_package": "LavaSR",
+       "bytes": 0,
+       "sha256": ""
       },
       {
        "filename": "anyio-4.14.2-py3-none-any.whl",
@@ -824,6 +840,14 @@
        "url": "https://files.pythonhosted.org/packages/2a/09/f8d8f8f31e4483c10a906437b4ce31bdf3d6d417b73fe33f1a8b59e34228/einops-0.8.2-py3-none-any.whl",
        "bytes": 65638,
        "sha256": "54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193"
+      },
+      {
+       "filename": "encodec-0.1.1.tar.gz",
+       "local_name": "encodec-0.1.1.tar.gz",
+       "url": "https://files.pythonhosted.org/packages/62/59/e47bbd0542d0e6f4ce9983d5eb458a01d4b42c81e5c410cb9e159b1061ae/encodec-0.1.1.tar.gz",
+       "source_package": "encodec",
+       "bytes": 3736037,
+       "sha256": "36dde98ccfe6c51a15576476cadfcb3b35a63507b8b8555abd69889a6fba6772"
       },
       {
        "filename": "filelock-3.32.5-py3-none-any.whl",
@@ -1064,6 +1088,22 @@
        "sha256": "43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb"
       },
       {
+       "local_name": "torch",
+       "resolve": {
+        "index": "https://download.pytorch.org/whl/cu128/torch/",
+        "package": "torch",
+        "version": ""
+       }
+      },
+      {
+       "local_name": "torchaudio",
+       "resolve": {
+        "index": "https://download.pytorch.org/whl/cu128/torchaudio/",
+        "package": "torchaudio",
+        "version": ""
+       }
+      },
+      {
        "filename": "tqdm-4.70.0-py3-none-any.whl",
        "local_name": "tqdm-4.70.0-py3-none-any.whl",
        "url": "https://files.pythonhosted.org/packages/f9/1c/01bfd571a64e7f270e6bab5e33777debe0edc56759233ce84f27dec92d14/tqdm-4.70.0-py3-none-any.whl",
@@ -1083,6 +1123,14 @@
        "url": "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl",
        "bytes": 131087,
        "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897"
+      },
+      {
+       "filename": "vocos-451e522f7a11.tar.gz",
+       "local_name": "vocos-451e522f7a11.tar.gz",
+       "url": "https://codeload.github.com/langtech-bsc/vocos/tar.gz/451e522f7a11c3652c9522f63ea6780736d93de0",
+       "source_package": "vocos",
+       "bytes": 0,
+       "sha256": ""
       }
      ]
     }
