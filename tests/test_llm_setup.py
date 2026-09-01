@@ -681,3 +681,103 @@ class TestADisprovedCardIsNotRecordedAnyway:
         state = setup.record(server, setup.device_for_token("gpu:0"))
 
         assert state["gpu_device"] == "CUDA0"
+
+
+class TestEachCardGetsTheBuildItCanRun:
+    """CPU, a 3090 and a 5090 on one machine are all legitimate targets.
+
+    Section 14 already allows the families to coexist -- ``runtime_directory``
+    gives the second one its own directory precisely so a 5090 on CUDA 13 and a
+    3090 on CUDA 12 can both be installed. What was missing was anybody reading
+    that back when a device was recorded, so choosing a card beside the
+    processor's build wrote a pair that cannot start: llama.cpp refuses
+    ``--device CUDA0`` during argument parsing, before the model is opened, and
+    every reply on every model and every engine dies the same way.
+    """
+
+    CPU = ("Intel(R) Core(TM) Ultra 9 185H", None)
+    AMPERE = ("NVIDIA GeForce RTX 3090", 8.6)
+    BLACKWELL = ("NVIDIA GeForce RTX 5090", 12.0)
+
+    def _card(self, named, index=0):
+        from prompt_master.core.models import GpuInfo
+
+        name, compute = named
+        if compute is None:
+            return GpuInfo(-1, "", name, 0, 0, "", None)
+        return GpuInfo(index, f"GPU-{index}", name, 24576, 23304, "560.94", compute)
+
+    def _build(self, directory, family):
+        server = make_build(directory)
+        if family:
+            (directory / setup.RUNTIME_MARKER).write_text(family, encoding="utf-8")
+        return server.resolve()
+
+    def test_a_card_is_recorded_against_its_own_family(self, root):
+        """Both cards installed beside the processor's build; each finds its own."""
+        cpu = self._build(root / "runtime", "llama-runtime-cpu")
+        twelve = self._build(root / "runtime-llama-runtime-cuda12", "llama-runtime-cuda12")
+        thirteen = self._build(root / "runtime-llama-runtime-cuda13", "llama-runtime-cuda13")
+        paths = mc_llm_paths.app_paths()
+
+        assert setup._runtime_for_device(paths, cpu, self._card(self.AMPERE, 1)) == twelve
+        assert setup._runtime_for_device(paths, cpu, self._card(self.BLACKWELL)) == thirteen
+        # And the one it was handed, when that is already right.
+        assert setup._runtime_for_device(paths, twelve, self._card(self.AMPERE, 1)) == twelve
+
+    def test_the_processor_runs_on_whichever_build_is_there(self, root):
+        """``--device none`` is a CUDA build's business too.
+
+        Demanding a separate download to run on the processor would be a new
+        refusal where there was never a problem.
+        """
+        server = self._build(root / "runtime", "llama-runtime-cuda13")
+        paths = mc_llm_paths.app_paths()
+
+        assert setup._runtime_for_device(paths, server, self._card(self.CPU)) == server
+
+    def test_a_card_with_no_build_is_refused_with_the_button_to_press(self, root):
+        """Refused, not recorded. The message names the family and the remedy."""
+        server = self._build(root / "runtime", "llama-runtime-cpu")
+        paths = mc_llm_paths.app_paths()
+
+        with pytest.raises(setup.SetupError, match="llama-runtime-cuda12"):
+            setup._runtime_for_device(paths, server, self._card(self.AMPERE, 1))
+
+    def test_an_unmarked_build_is_left_exactly_alone(self, root):
+        """An install made before the marker existed is not a wrong family."""
+        server = self._build(root / "runtime", "")
+        paths = mc_llm_paths.app_paths()
+
+        assert setup._runtime_for_device(paths, server, self._card(self.AMPERE, 1)) == server
+
+    def test_recording_a_card_writes_its_family_and_its_build(self, root, a_card):
+        """End to end: the pair that reaches the state file agrees with itself."""
+        self._build(root / "runtime", "llama-runtime-cpu")
+        twelve = self._build(root / "runtime-llama-runtime-cuda12", "llama-runtime-cuda12")
+
+        state = setup.record(root / "runtime" / "llama-server",
+                             setup.device_for_token("gpu:0"))
+
+        assert state["runtime_id"] == "llama-runtime-cuda12"
+        assert Path(state["runtime"]).name == twelve.name
+        assert "cuda12" in str(state["runtime"]), state["runtime"]
+
+    def test_mixed_mode_needs_the_card_s_build_just_as_much(self, root, a_card):
+        """Mixed keeps the weights in system RAM and the card does the arithmetic.
+
+        So it is a CUDA placement with no resident layers, not a CPU one, and a
+        build that cannot see the card serves it no better than it serves a
+        full offload.
+        """
+        self._build(root / "runtime", "llama-runtime-cpu")
+        self._build(root / "runtime-llama-runtime-cuda12", "llama-runtime-cuda12")
+
+        state = setup.record(root / "runtime" / "llama-server",
+                             setup.device_for_token("mixed:0"))
+
+        assert state["mode"] == "mixed_aggressive"
+        assert state["gpu_layers"] == "0", "mixed must not become a full offload"
+        assert state["runtime_id"] == "llama-runtime-cuda12"
+        assert "cuda12" in str(state["runtime"]), state["runtime"]
+
