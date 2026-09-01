@@ -88,7 +88,18 @@ cannot run at once under the same name.
 
 SCHEMA = 1
 
-RUNTIME_PROVIDERS = ("cpu", "cpu+directml")
+RUNTIME_FLAVOURS = ("onnx", "torch")
+"""The closures this build knows how to install, newest capability last.
+
+``onnx`` is the light one: ONNX Runtime, librosa and their dependencies, which
+is everything DPDFNet needs. ``torch`` adds PyTorch for LavaSR upstream and
+keeps ONNX Runtime alongside it, so one worker still serves every enabled stage.
+
+Which one gets installed follows from what the enabled stages need rather than
+from a preference anybody sets, and :func:`required_flavour` is that derivation.
+"""
+
+RUNTIME_PROVIDERS = ("cpu", "cpu+directml", "cpu+directml+torch")
 """Which runtime closures this build knows how to execute on.
 
 Checked rather than assumed, and it used to be a check for the single string
@@ -575,32 +586,22 @@ def _read_manifest(found) -> dict:
             raise PipelineError(
                 f"The Voice Pipeline manifest does not describe {spec.id!r}.")
 
-    platforms = []
-    seen = set()
-    for entry in (runtime.get("platforms") or ()):
-        if not isinstance(entry, dict):
-            raise PipelineError("The Voice Pipeline manifest has a runtime platform that "
-                                "is not an object.")
-        identifier = str(entry.get("id") or "")
-        if not identifier:
-            raise PipelineError("The Voice Pipeline manifest has a runtime platform with "
-                                "no id.")
-        if identifier in seen:
-            raise PipelineError(f"The Voice Pipeline manifest names the runtime platform "
-                                f"{identifier!r} twice.")
-        seen.add(identifier)
-        platforms.append({
-            "id": identifier,
-            "system": str(entry.get("system") or "").casefold(),
-            "machines": [str(name).casefold() for name in (entry.get("machines") or ())],
-            "python": str(entry.get("python") or ""),
-            # Read through the same validator the stages' artifacts go through,
-            # rather than trusted because they are the runtime's. A wheel is the
-            # one artifact here whose contents get *executed*, so it is the last
-            # place to relax a check (section 20.3).
-            "artifacts": [_read_artifact("the runtime closure", item)
-                          for item in (entry.get("artifacts") or ())],
-        })
+    flavours = {}
+    for name, block in (("onnx", runtime),) + tuple(
+            (key, value) for key, value in sorted((found.get("runtimes") or {}).items())):
+        if name != "onnx":
+            if name not in RUNTIME_FLAVOURS:
+                raise PipelineError(
+                    f"The Voice Pipeline manifest names a runtime closure {name!r} that "
+                    f"this build does not know how to install.")
+            if not isinstance(block, dict):
+                raise PipelineError(f"The Voice Pipeline manifest's {name} runtime is not "
+                                    f"an object.")
+            if str(block.get("provider") or "") not in RUNTIME_PROVIDERS:
+                raise PipelineError(
+                    "The Voice Pipeline manifest names a runtime this build does not know "
+                    "how to execute on. Nothing was installed.")
+        flavours[name] = _read_runtime(name, block)
 
     return {
         "schema": SCHEMA,
@@ -620,10 +621,61 @@ def _read_manifest(found) -> dict:
             "license": str(runtime.get("license") or ""),
             "attribution": str(runtime.get("attribution") or ""),
             "about_bytes": int(runtime.get("about_bytes") or 0),
-            "platforms": platforms,
+            "platforms": flavours["onnx"]["platforms"],
             "wanted": list(runtime.get("wanted") or ()),
         },
+        # Every flavour under one key, the onnx one included, so code that asks
+        # for a flavour by name never has to know which of the two shapes the
+        # manifest happened to keep it in.
+        "runtimes": flavours,
         "stages": stages,
+    }
+
+
+def _read_runtime(name: str, block: dict) -> dict:
+    """One runtime closure, validated -- the platforms and their wheels.
+
+    Split out when the torch flavour arrived, so that a second closure is read
+    by the same code as the first rather than by a copy of it that could drift
+    into being more permissive. The wheels here are the artifacts whose contents
+    get *executed*; there is no flavour for which that is less true.
+    """
+    platforms = []
+    seen = set()
+    for entry in (block.get("platforms") or ()):
+        if not isinstance(entry, dict):
+            raise PipelineError(f"The Voice Pipeline manifest has a {name} runtime "
+                                f"platform that is not an object.")
+        identifier = str(entry.get("id") or "")
+        if not identifier:
+            raise PipelineError(f"The Voice Pipeline manifest has a {name} runtime "
+                                f"platform with no id.")
+        if identifier in seen:
+            raise PipelineError(f"The Voice Pipeline manifest names the {name} runtime "
+                                f"platform {identifier!r} twice.")
+        seen.add(identifier)
+        platforms.append({
+            "id": identifier,
+            "system": str(entry.get("system") or "").casefold(),
+            "machines": [str(name_).casefold() for name_ in (entry.get("machines") or ())],
+            "python": str(entry.get("python") or ""),
+            # Read through the same validator the stages' artifacts go through,
+            # rather than trusted because they are the runtime's. A wheel is the
+            # one artifact here whose contents get *executed*, so it is the last
+            # place to relax a check (section 20.3).
+            "artifacts": [_read_artifact(f"the {name} runtime closure", item)
+                          for item in (entry.get("artifacts") or ())],
+        })
+    return {
+        "python": str(block.get("python") or ""),
+        "provider": str(block.get("provider") or ""),
+        "build": int(block.get("build") or 0),
+        "import_name": str(block.get("import_name") or ""),
+        "license": str(block.get("license") or ""),
+        "attribution": str(block.get("attribution") or ""),
+        "about_bytes": int(block.get("about_bytes") or 0),
+        "platforms": platforms,
+        "wanted": list(block.get("wanted") or ()),
     }
 
 
@@ -737,18 +789,23 @@ def _immutable(revision: str) -> bool:
     return len(text) == 40 and all(c in "0123456789abcdef" for c in text.casefold())
 
 
-def runtime_installable() -> bool:
+def runtime_installable(flavour: str = "onnx") -> bool:
     """Whether this build has a runtime closure it could stand behind.
 
     Every wheel sized and hashed, for a platform this machine matches. This is
     the artifact set whose contents get *executed*, so it is the one place with
     no provisional path at all: an unpinned wheel is a wheel nobody reviewed.
+
+    Asked per flavour because the answer genuinely differs between them. The
+    torch closure is pinned for Windows and CPU only -- its CUDA wheels live on
+    a host the machine that wrote the manifest could not reach -- and a machine
+    this build has no torch closure for is not a machine with no runtime.
     """
     try:
         found = manifest()
     except PipelineError:
         return False
-    entry = _platform_entry_or_none(found)
+    entry = _platform_entry_or_none(found, flavour)
     if entry is None or not entry["artifacts"]:
         return False
     return all(item["sha256"] and item["bytes"] > 0 for item in entry["artifacts"])
@@ -820,11 +877,33 @@ def stage_unavailable_reason(stage_id: str) -> str:
     return ""
 
 
-def _platform_entry_or_none(found: dict):
+def runtime_entry(found: dict, flavour: str = "onnx") -> dict:
+    """One flavour's runtime block, whichever key the manifest keeps it under.
+
+    ``onnx`` stays at the top-level ``runtime`` key it has always had rather
+    than moving into ``runtimes`` beside its sibling. That asymmetry is on
+    purpose: a manifest written before the torch flavour existed is still a
+    valid manifest, and a schema change that invalidated one would have made
+    every installed runtime stale for a feature its owner never asked for.
+    """
+    import mc_voice_paths as paths
+
+    name = paths.pipeline_runtime_flavour(flavour)
+    entry = (found.get("runtimes") or {}).get(name)
+    if not isinstance(entry, dict):
+        raise PipelineError(f"This build has no {name} runtime closure.")
+    return entry
+
+
+def _platform_entry_or_none(found: dict, flavour: str = "onnx"):
     import mc_voice_models as models
 
+    try:
+        block = runtime_entry(found, flavour)
+    except PipelineError:
+        return None
     system, machine, python = models.current_platform()
-    for entry in found["runtime"]["platforms"]:
+    for entry in block["platforms"]:
         machines = tuple(str(name).casefold() for name in (entry.get("machines") or ()))
         if (str(entry.get("system") or "").casefold() == system
                 and machine in machines and str(entry.get("python") or "") == python):
@@ -945,7 +1024,7 @@ def supported_platform() -> bool:
     return _platform_entry_or_none(found) is not None
 
 
-def runtime_closure_id() -> str:
+def runtime_closure_id(flavour: str = "onnx") -> str:
     """The freshness fingerprint of the enhancement runtime.
 
     Derived from the pinned closure and never declared, in the shape
@@ -966,8 +1045,12 @@ def runtime_closure_id() -> str:
         found = manifest()
     except PipelineError:
         return ""
+    try:
+        block = runtime_entry(found, flavour)
+    except (PipelineError, ValueError):
+        return ""
     system, machine, python = models.current_platform()
-    for entry in found["runtime"]["platforms"]:
+    for entry in block["platforms"]:
         if not isinstance(entry, dict):
             continue
         machines = tuple(str(name).casefold() for name in (entry.get("machines") or ()))
@@ -975,13 +1058,21 @@ def runtime_closure_id() -> str:
                 and machine in machines
                 and str(entry.get("python") or "") == python):
             continue
-        lines = [str(entry.get("id") or "")]
+        # The flavour leads the fingerprint for every closure except the first
+        # one, whose line stays exactly what it was before a second existed.
+        # That asymmetry is worth the ugliness: prefixing onnx too would change
+        # every already-installed runtime's id and call it stale, which is a
+        # forced 138 MB reinstall to add a flavour its owner may never want.
+        # Nothing is lost by it -- each flavour keeps its installed record in
+        # its own directory, so the two ids are never compared with each other.
+        lines = [str(entry.get("id") or "") if flavour == "onnx"
+                 else f"{flavour}:{entry.get('id') or ''}"]
         for item in (entry.get("artifacts") or ()):
             if not isinstance(item, dict):
                 continue
             local = str(item.get("local_name") or item.get("filename") or "")
             lines.append(f"{local}:{str(item.get('sha256') or '').casefold()}")
-        lines.append(f"build:{found['runtime']['build']}")
+        lines.append(f"build:{block['build']}")
         return hashlib.sha256("\n".join(lines).encode("ascii", "replace")).hexdigest()[:16]
     return ""
 

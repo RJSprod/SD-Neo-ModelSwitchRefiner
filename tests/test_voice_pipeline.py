@@ -2688,3 +2688,91 @@ class TestTheEnhancementThreadBudgetIsATurnableDial:
                 opts=types.SimpleNamespace(data={pipeline.OPT_THREADS: held})))
             monkeypatch.setitem(sys.modules, "modules", fake)
             assert pipeline.threads() == expected, held
+
+
+class TestTheBuildCarriesTwoRuntimeClosures:
+    """One closure for ONNX, one that adds PyTorch, and never two processes.
+
+    LavaSR upstream is a PyTorch model and DPDFNet is an ONNX one. The
+    interesting property is not that a second closure exists -- it is that
+    adding it did not add a second thing to contain.
+    """
+
+    @staticmethod
+    def _windows(monkeypatch):
+        import mc_voice_models as models
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("windows", "amd64", "3.13"))
+
+    def test_both_closures_are_pinned_byte_for_byte(self, monkeypatch):
+        """No provisional path for a wheel, on either flavour.
+
+        A wheel's contents get executed. The stages may arrive against a digest
+        their publisher reports at install time; a runtime may not.
+        """
+        self._windows(monkeypatch)
+        found = pipeline.manifest()
+        for flavour in pipeline.RUNTIME_FLAVOURS:
+            entry = pipeline.runtime_entry(found, flavour)
+            artifacts = entry["platforms"][0]["artifacts"]
+            assert artifacts, flavour
+            for item in artifacts:
+                assert item["sha256"], f"{flavour}: {item['local_name']} is unhashed"
+                assert item["bytes"] > 0, f"{flavour}: {item['local_name']} is unsized"
+            assert pipeline.runtime_installable(flavour) is True, flavour
+
+    def test_the_torch_closure_carries_onnx_runtime_too(self, monkeypatch):
+        """The whole reason there is still only one worker process.
+
+        If the torch flavour shipped without ONNX Runtime, an installation with
+        both stages enabled would need a second interpreter to run DPDFNet --
+        and a second interpreter is a second job object, a second pdeathsig, and
+        a second way to leave something running after the voice it belongs to
+        has gone. Carrying both wheel sets costs 126 MB and removes that whole
+        category of bug, so this is a property worth a test rather than a
+        comment.
+        """
+        self._windows(monkeypatch)
+        found = pipeline.manifest()
+        names = [item["local_name"].split("-")[0].casefold().replace("_", "-")
+                 for item in pipeline.runtime_entry(found, "torch")["platforms"][0]["artifacts"]]
+        assert "onnxruntime-directml" in names
+        assert "torch" in names
+
+    def test_each_flavour_installs_into_its_own_directory(self):
+        onnx = paths.pipeline_runtime_root("onnx")
+        torch = paths.pipeline_runtime_root("torch")
+        assert onnx != torch
+        assert onnx.name == "runtime", "an already-installed runtime must stay found"
+        assert paths.pipeline_inside(torch), "the second closure is still the pipeline's"
+
+    def test_a_flavour_this_build_does_not_have_is_refused_not_guessed(self):
+        with pytest.raises(ValueError):
+            paths.pipeline_runtime_root("cuda")
+        assert pipeline.runtime_closure_id("cuda") == ""
+
+    def test_the_two_closures_have_different_identities(self, monkeypatch):
+        self._windows(monkeypatch)
+        assert (pipeline.runtime_closure_id("onnx")
+                != pipeline.runtime_closure_id("torch"))
+
+    def test_adding_a_flavour_did_not_make_installed_runtimes_stale(self, monkeypatch):
+        """A regression guard on a mistake I made and caught.
+
+        The fingerprint first led with the flavour name for every closure, which
+        changed the onnx id and would have told every existing installation to
+        re-download 138 MB to gain a flavour its owner may never enable. The
+        literal below is the id this build produced before the torch closure
+        existed; it is pinned here so that a future edit to the fingerprint has
+        to be a deliberate one.
+        """
+        self._windows(monkeypatch)
+        assert pipeline.runtime_closure_id("onnx") == "684ddbdb0fc928f4"
+
+    def test_an_unknown_closure_in_the_manifest_is_a_broken_build(self, monkeypatch):
+        """Refused before a download starts, like an unknown provider is."""
+        found = json.loads(paths.pipeline_manifest_path().read_text(encoding="utf-8"))
+        found["runtimes"]["cuda"] = dict(found["runtimes"]["torch"])
+        monkeypatch.setattr(pipeline, "_manifest_cache", None)
+        with pytest.raises(pipeline.PipelineError, match="does not know how to install"):
+            pipeline._read_manifest(found)
