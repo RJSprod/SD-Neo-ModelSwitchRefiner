@@ -842,6 +842,55 @@ def enumerates_a_device(executable) -> "bool | None":
     return answer
 
 
+def _runtime_for_device(paths, path: Path, chosen) -> Path:
+    """The llama.cpp build ``chosen`` can actually be selected on.
+
+    Section 14 already allows a machine to hold more than one family at once --
+    a 5090 wants the CUDA 13 build, a 3090 wants CUDA 12, and they cannot share
+    a directory, so :func:`runtime_directory` gives the second one its own.
+    What was missing is anybody *reading* that back: :func:`record` wrote down
+    whichever executable it was handed beside whichever card was chosen, and a
+    mismatched pair is not a slow language model, it is no language model.
+    llama.cpp refuses ``--device CUDA0`` during argument parsing, before the
+    model is opened, so every reply on every model and every engine dies the
+    same way until somebody edits the state file.
+
+    The rule is deliberately asymmetric, because the hardware is:
+
+    * **A card** needs its own family. A CUDA 12 build cannot drive a card the
+      manifest pins to CUDA 13, and neither can the processor's build.
+    * **The processor** needs nothing in particular. ``--device none`` is a
+      CUDA build's business as much as a CPU build's, and demanding a separate
+      download to run on the processor would be a new refusal where there was
+      never a problem.
+
+    An unmarked directory is left alone. That is an installation made before
+    the family marker existed, not a wrong one, and :func:`family_in` says so.
+    """
+    from prompt_master.inference.device_detection import runtime_component_id
+
+    if chosen.is_cpu:
+        return path
+    wanted = runtime_component_id(chosen)
+    holds = family_in(path.parent)
+    if not holds or holds == wanted:
+        return path
+
+    installed = runtime_families(paths.root)
+    server = installed.get(wanted)
+    if server is None:
+        raise SetupError(
+            f"{chosen.name} needs the {wanted} build of llama.cpp and this installation "
+            f"has {holds}. Press Download with {chosen.name} selected — it is fetched "
+            f"into a directory of its own, so the build you already have is kept and "
+            f"switching between them costs nothing after that."
+        )
+    found = Path(server).resolve()
+    logger.info("Model Chain: %s needs %s, so the runtime recorded for it is %s rather "
+                "than the %s build in %s", chosen.name, wanted, found, holds, path.parent)
+    return found
+
+
 def record(executable: str | Path, device=None, role: str = "") -> dict:
     """Write ``executable`` into the state file as this install's runtime.
 
@@ -882,6 +931,19 @@ def record(executable: str | Path, device=None, role: str = "") -> dict:
         raise SetupError(f"{path} could not be recorded relative to {paths.root}")
 
     chosen = device or configured_device() or preferred_device()
+    # The build that will actually be started has to be one this card can be
+    # selected on. Recording the pair without checking is what produced an
+    # installation that could not generate at all: the processor's build was in
+    # ``runtime/``, a card was chosen beside it, and every start after that
+    # handed ``--device CUDA0`` to a llama-server with no CUDA backend in it.
+    path = _runtime_for_device(paths, path, chosen)
+    try:
+        relative = paths.contained(paths.record(path))
+    except ValueError:
+        raise SetupError(
+            f"{path} is outside the LLM data directory ({paths.root})."
+        ) from None
+
     try:
         state = read_json(paths.state_file)
     except (OSError, ValueError):

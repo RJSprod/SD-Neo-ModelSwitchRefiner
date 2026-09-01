@@ -229,3 +229,114 @@ class TestTheReadinessLineDoesNotContradictItself:
             ["llama-server", "--device", "none", "--main-gpu", "0"])
 
         assert mc_llm_runtime._dropped_the_card is False
+
+
+class TestTheCardIsPinnedByNameNotBySlot:
+    """The two enumerations disagree, and the launcher was trusting the number.
+
+    The vendored launcher pins the server to one card and then always passes
+    ``--main-gpu 0``, which is the right shape: with a single visible card,
+    llama.cpp's ``CUDA0`` is unambiguously that card. What was wrong is the
+    value. ``gpu_index`` is nvidia-smi's number, ``CUDA_VISIBLE_DEVICES`` is
+    read in CUDA's order, this extension never sets ``CUDA_DEVICE_ORDER``, and
+    ``mc_memory.image_device_index`` documents the two disagreeing on real
+    hardware -- "card 0" naming a 5090 at one end and a 3090 at the other.
+
+    Getting it wrong is silent: the server starts and answers, on the other
+    card, while every VRAM decision is measured against the one it is not on.
+    """
+
+    UUID = "GPU-0f4c1c26-8c1d-4f4a-9a2b-77c3a1d5e9b0"
+
+    def _start(self, device="CUDA0"):
+        return ["llama-server", "--model", "m.gguf", "--device", device,
+                "--split-mode", "none", "--main-gpu", "0", "--ctx-size", "8192"]
+
+    def test_a_card_start_is_pinned_to_the_uuid(self):
+        import mc_llm_runtime
+
+        mc_llm_runtime._arm_visibility(self.UUID)
+        found = mc_llm_runtime.with_pinned_card(self._start(),
+                                                {"CUDA_VISIBLE_DEVICES": "0"})
+
+        assert found["CUDA_VISIBLE_DEVICES"] == self.UUID
+
+    def test_a_processor_start_keeps_its_empty_string(self):
+        """CPU placement sets it empty on purpose, and must stay that way."""
+        import mc_llm_runtime
+
+        mc_llm_runtime._arm_visibility(self.UUID)
+        found = mc_llm_runtime.with_pinned_card(self._start(device="none"),
+                                                {"CUDA_VISIBLE_DEVICES": ""})
+
+        assert found["CUDA_VISIBLE_DEVICES"] == ""
+
+    def test_a_start_whose_card_was_dropped_is_not_pinned(self):
+        """``without_gpu_selection`` has already decided this runs on the CPU."""
+        import mc_llm_runtime
+
+        mc_llm_runtime._arm_visibility(self.UUID)
+        dropped = ["llama-server", "--model", "m.gguf", "--ctx-size", "8192"]
+        found = mc_llm_runtime.with_pinned_card(dropped, {"CUDA_VISIBLE_DEVICES": "0"})
+
+        assert found["CUDA_VISIBLE_DEVICES"] == "0"
+
+    def test_a_state_file_with_no_uuid_changes_nothing(self):
+        """Older installations recorded an index alone. Left exactly as it was."""
+        import mc_llm_runtime
+
+        mc_llm_runtime._arm_visibility("")
+        found = mc_llm_runtime.with_pinned_card(self._start(),
+                                                {"CUDA_VISIBLE_DEVICES": "1"})
+
+        assert found["CUDA_VISIBLE_DEVICES"] == "1"
+
+    def test_something_that_is_not_a_server_start_is_untouched(self):
+        """A device probe spawned while a start is in flight passes through."""
+        import mc_llm_runtime
+
+        mc_llm_runtime._arm_visibility(self.UUID)
+        found = mc_llm_runtime.with_pinned_card(["llama-server", "--list-devices"],
+                                                {"CUDA_VISIBLE_DEVICES": "0"})
+
+        assert found["CUDA_VISIBLE_DEVICES"] == "0"
+
+    def test_the_pin_is_spent_once(self):
+        """A pin left armed would follow the next start onto a different card."""
+        import mc_llm_runtime
+
+        mc_llm_runtime._arm_visibility(self.UUID)
+        first = mc_llm_runtime.with_pinned_card(self._start(),
+                                                {"CUDA_VISIBLE_DEVICES": "0"})
+        second = mc_llm_runtime.with_pinned_card(self._start(),
+                                                 {"CUDA_VISIBLE_DEVICES": "0"})
+
+        assert first["CUDA_VISIBLE_DEVICES"] == self.UUID
+        assert second["CUDA_VISIBLE_DEVICES"] == "0", "the pin outlived its start"
+
+    def test_a_value_that_is_not_a_uuid_is_refused_before_it_is_armed(self):
+        """Guard: only nvidia-smi's own spelling reaches the environment."""
+        import mc_llm_runtime
+
+        for rubbish in ("0", "GPU-1", "; rm -rf /", "GPU-zzzzzzzz-1111-2222-3333-444444444444"):
+            mc_llm_runtime._arm_visibility(rubbish)
+            found = mc_llm_runtime.with_pinned_card(self._start(),
+                                                    {"CUDA_VISIBLE_DEVICES": "0"})
+            assert found["CUDA_VISIBLE_DEVICES"] == "0", rubbish
+
+    def test_a_start_that_carries_no_environment_still_spends_the_pin(self):
+        """The consumption cannot depend on there being something to change.
+
+        A pin left armed by a start that passed no environment of its own would
+        attach itself to the next server, which is the one failure this whole
+        mechanism exists to prevent.
+        """
+        import mc_llm_runtime
+
+        mc_llm_runtime._arm_visibility(self.UUID)
+        assert mc_llm_runtime.with_pinned_card(self._start(), None) is None
+
+        after = mc_llm_runtime.with_pinned_card(self._start(),
+                                                {"CUDA_VISIBLE_DEVICES": "0"})
+        assert after["CUDA_VISIBLE_DEVICES"] == "0", "the pin outlived its start"
+

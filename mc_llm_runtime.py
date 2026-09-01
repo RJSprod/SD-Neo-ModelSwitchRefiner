@@ -2635,6 +2635,90 @@ which is the whole reason the command is corrected at the boundary instead.
 """
 
 
+_pending_visibility: list[str] = []
+"""The UUID of the card the very next llama-server start belongs to.
+
+Module state of the same smallest kind as :data:`_pending_flags`, armed and
+consumed inside the runtime's own lock, microseconds apart, by the one method
+that starts a server.
+"""
+
+_UUID = re.compile(r"^GPU-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.I)
+"""nvidia-smi's own spelling of a card's identity, and what CUDA accepts."""
+
+
+def _arm_visibility(uuid: str) -> None:
+    """Name the card the next start is for, by the one identifier both agree on."""
+    del _pending_visibility[:]
+    text = str(uuid or "").strip()
+    if _UUID.match(text):
+        _pending_visibility.append(text)
+
+
+def with_pinned_card(command, environ):
+    """``environ``, with ``CUDA_VISIBLE_DEVICES`` naming a card rather than a slot.
+
+    The vendored launcher writes::
+
+        env["CUDA_VISIBLE_DEVICES"] = "" if device == "none" else str(gpu_index)
+
+    The shape of that is right -- pin the process to one card and llama.cpp's
+    ``CUDA0`` is unambiguously that card -- and the value is in the wrong
+    namespace. ``gpu_index`` is what *nvidia-smi* calls the card, and
+    ``CUDA_VISIBLE_DEVICES`` is read by the CUDA runtime in *its* order, which
+    is ``CUDA_DEVICE_ORDER`` and defaults to fastest-first. This extension
+    never sets that variable, so on any machine whose two enumerations disagree
+    the number means a different card at each end.
+
+    They do disagree on real hardware, and :func:`mc_memory.image_device_index`
+    was written for exactly this: from a user's log, the language model was
+    configured for physical card 0 named "NVIDIA GeForce RTX 5090" while the
+    image side's device 0 had 24 GB, which is a 3090. Both were "card 0" and
+    they were not the same card. The image side is translated through the UUID
+    already; this is the same translation on the language side, which was still
+    handing a bus-order number to a fastest-first reader.
+
+    Getting it wrong is quiet, which is what makes it worth a function. The
+    server starts, offloads, and answers -- on the other card -- while every
+    VRAM decision this module makes is measured against the one it thinks it
+    is on.
+
+    A UUID is what both namespaces agree on: ``nvidia-smi`` reports it,
+    ``GpuInfo`` carries it, the state file has recorded it beside the index all
+    along, and CUDA accepts it in place of an ordinal. So the pin becomes the
+    card's name for itself, and no ordering can misread it.
+
+    Left alone when there is nothing to say: a CPU placement (whose value is
+    the empty string and must stay it), a start whose card selection
+    :func:`without_gpu_selection` has just dropped, a state file too old to
+    carry a UUID, and anything that is not a llama-server start.
+    """
+    wanted = list(_pending_visibility)
+    del _pending_visibility[:]
+    argv = [str(part) for part in command or ()]
+    if not wanted or not isinstance(environ, dict):
+        return environ
+    if "--model" not in argv or "--ctx-size" not in argv:
+        return environ
+    try:
+        device = argv[argv.index("--device") + 1].strip().casefold()
+    except (ValueError, IndexError):
+        # No selection left on the line at all -- the card was dropped, and
+        # this start is on the processor whatever the state file wanted.
+        return environ
+    if device == CPU_DEVICE_TOKEN:
+        return environ
+    current = str(environ.get("CUDA_VISIBLE_DEVICES", ""))
+    if not current:
+        return environ
+    found = dict(environ)
+    found["CUDA_VISIBLE_DEVICES"] = wanted[0]
+    logger.info("Model Chain: llama-server is pinned to %s rather than to slot %s — "
+                "nvidia-smi numbers cards by bus order and CUDA by CUDA_DEVICE_ORDER, "
+                "so the slot is not the same card at both ends", wanted[0], current)
+    return found
+
+
 def _arm_flags(flags) -> None:
     del _pending_flags[:]
     _pending_flags.extend(str(flag) for flag in flags or ())
@@ -2773,8 +2857,15 @@ class _Launcher:
 
     @staticmethod
     def Popen(command, *args, **kwargs):  # noqa: N802 - subprocess's own spelling
-        started = subprocess.Popen(
-            with_extra_flags(without_gpu_selection(command)), *args, **kwargs)
+        corrected = with_extra_flags(without_gpu_selection(command))
+        # Called on every start, including one that passes no environment of
+        # its own, because the pin is consumed by the call: left armed it would
+        # follow the next server onto a card it does not belong to.
+        environ = with_pinned_card(corrected, kwargs.get("env"))
+        if "env" in kwargs:
+            kwargs = dict(kwargs)
+            kwargs["env"] = environ
+        started = subprocess.Popen(corrected, *args, **kwargs)
         # Every server, however it was started -- including the smoke tests and
         # anything a future path spawns through the vendored launcher. This is
         # the one place they all pass through, which is exactly why the command
@@ -4123,6 +4214,10 @@ class Runtime:
         # adds it for a resident placement, and an accelerator's flags are
         # filtered against what it already carries. See ``_launch_flags``.
         _arm_flags(_launch_flags(configuration, placement, plan))
+        # The card, by the name both enumerations agree on. See
+        # ``with_pinned_card``: the index recorded at setup is nvidia-smi's and
+        # the variable it is written into is read in CUDA's order.
+        _arm_visibility(getattr(configuration, "gpu_uuid", ""))
         try:
             process.start(executable, configuration.model, projector,
                           configuration.gpu_index, configuration.device, placement.context,
