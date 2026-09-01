@@ -5223,3 +5223,172 @@
     min-height: 1.2em;
     opacity: 0.85;
 }
+
+/* --------------------------------------------------------------------------
+   Voice Pipeline, and the component overview under it
+   --------------------------------------------------------------------------
+
+   The pipeline's stage rows are numbered and there is nothing here that could
+   move one. No drag affordance, no grab cursor, no handle: the chain's order
+   is structural, and a control that merely *looked* draggable would be a
+   promise the feature does not keep. */
+
+.mc-voice-pipeline-stages {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+    width: 100%;
+}
+
+.mc-voice-pipeline-stage {
+    align-items: center;
+    cursor: pointer;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5em 0.7em;
+    padding: 0.25em 0;
+}
+
+/* The stage's fixed position in the chain, as a number the eye can follow down
+   the column. Tabular figures so 1 and 2 occupy the same width and the names
+   beside them line up. */
+.mc-voice-pipeline-order {
+    color: var(--body-text-color-subdued, inherit);
+    flex: 0 0 1.4em;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+}
+
+.mc-voice-pipeline-name {
+    flex: 0 0 auto;
+    font-weight: 600;
+}
+
+.mc-voice-pipeline-what {
+    color: var(--body-text-color-subdued, inherit);
+    flex: 1 1 14em;
+    min-width: 0;
+}
+
+.mc-voice-pipeline-state {
+    color: var(--body-text-color-subdued, inherit);
+    flex: 0 1 auto;
+    font-size: 0.9em;
+    overflow-wrap: anywhere;
+}
+
+.mc-voice-pipeline-master {
+    flex: 0 0 auto;
+}
+
+/* The overview: several rows visible at once, which is the whole point of it.
+   A grid rather than a column of cards, because "what do I have" is a question
+   somebody answers by scanning rather than by scrolling. */
+.mc-voice-components {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7em;
+    width: 100%;
+}
+
+.mc-voice-component-title {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 0.9em;
+    font-weight: 600;
+    margin-bottom: 0.2em;
+}
+
+.mc-voice-component {
+    align-items: center;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-lg, 8px);
+    color: inherit;
+    cursor: pointer;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4em 0.7em;
+    padding: 0.3em 0.5em;
+    text-align: left;
+    width: 100%;
+}
+
+.mc-voice-component:hover {
+    border-color: var(--border-color-primary, currentColor);
+}
+
+.mc-voice-component-open {
+    background: var(--button-secondary-background-fill, transparent);
+    border-color: var(--border-color-primary, currentColor);
+}
+
+.mc-voice-component-name {
+    flex: 1 1 10em;
+    min-width: 0;
+}
+
+/* Two chips per row, always, and they are never the same word. The left one is
+   a fact about disk and the right one a fact about memory right now; reading
+   one as the other is the confusion this redesign exists to end. */
+.mc-voice-chip {
+    border: 1px solid var(--border-color-primary, currentColor);
+    border-radius: var(--radius-lg, 8px);
+    color: var(--body-text-color-subdued, inherit);
+    flex: 0 0 auto;
+    font-size: 0.85em;
+    padding: 0.05em 0.5em;
+    white-space: nowrap;
+}
+
+.mc-voice-chip-on {
+    color: var(--body-text-color, inherit);
+    font-weight: 600;
+}
+
+/* One host, one component. Emptied and refilled rather than added to, so an
+   inactive component's controls are absent from the document rather than
+   hidden in it. */
+.mc-voice-component-detail {
+    border-top: 1px solid var(--border-color-primary, currentColor);
+    margin-top: 0.6em;
+    padding-top: 0.6em;
+    width: 100%;
+}
+
+.mc-voice-detail-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25em;
+    margin: 0.5em 0;
+}
+
+.mc-voice-detail-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4em 0.8em;
+}
+
+.mc-voice-detail-name {
+    color: var(--body-text-color-subdued, inherit);
+    flex: 0 0 10em;
+}
+
+.mc-voice-detail-value {
+    flex: 0 1 auto;
+    overflow-wrap: anywhere;
+}
+
+.mc-voice-detail-note {
+    color: var(--body-text-color-subdued, inherit);
+    flex: 1 1 12em;
+    font-size: 0.9em;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.mc-voice-detail-actions {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5em 0.8em;
+}

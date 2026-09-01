@@ -245,7 +245,8 @@ class TestItStopsWhenItIsNotBeingUsed:
         body = source.split("def _on_script_unloaded()")[1].split("\ntry:")[0]
         for name in ("mc_voice_runtime.shutdown", "mc_voice_sopro_runtime.shutdown",
                      "mc_voice_pocket_runtime.shutdown",
-                     "mc_voice_cleanup_runtime.shutdown", "mc_voice_clone.shutdown"):
+                     "mc_voice_cleanup_runtime.shutdown",
+                     "mc_voice_pipeline_runtime.shutdown", "mc_voice_clone.shutdown"):
             assert name in body, name
         # And unconditionally: nothing in that table is reached through an
         # ``if``, so no engine's shutdown can be skipped because another's

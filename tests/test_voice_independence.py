@@ -37,16 +37,21 @@ model runtime. Voice may not import any of them at any depth."""
 WORKER = ROOT / "voice_worker" / "worker.py"
 SOPRO_WORKER = ROOT / "sopro_worker" / "worker.py"
 POCKET_WORKER = ROOT / "pocket_worker" / "worker.py"
+PIPELINE_WORKER = ROOT / "pipeline_worker" / "worker.py"
 
-WORKERS = (WORKER, SOPRO_WORKER, POCKET_WORKER)
-"""All three sidecars. Each is run by path under a *different* interpreter out
+WORKERS = (WORKER, SOPRO_WORKER, POCKET_WORKER, PIPELINE_WORKER)
+"""All four sidecars. Each is run by path under a *different* interpreter out
 of a *different* dependency closure, and none may import another's engine,
 another's file, or anything from this extension.
 
 Sopro's PyTorch and Pocket's are two closures rather than one, which looks like
 waste and is not: two engines pinned to a single Torch build would make either
 engine's upgrade the other engine's regression, and neither closure would ever
-be independently verifiable again."""
+be independently verifiable again.
+
+The Voice Pipeline's is a fourth for the same reason and one more: its lifetime
+is coupled to PocketTTS's and its dependencies deliberately are not, so an
+enhancement update cannot mutate the environment a working voice depends on."""
 
 
 def imported_names(path: Path) -> set[str]:
@@ -135,6 +140,7 @@ class TestTheImportGraph:
         kokoro = imported_names(WORKER)
         sopro = imported_names(SOPRO_WORKER)
         pocket = imported_names(POCKET_WORKER)
+        pipeline = imported_names(PIPELINE_WORKER)
         assert "sopro_worker" not in kokoro and "sopro" not in kokoro
         assert "pocket_worker" not in kokoro and "pocket_tts" not in kokoro
         assert "voice_worker" not in sopro and "sherpa_onnx" not in sopro
@@ -147,6 +153,15 @@ class TestTheImportGraph:
         # above holds them to. What matters here is that each imports its *own*
         # engine and nothing of anybody else's.
         assert "pocket_tts" not in sopro and "sopro" not in pocket
+        # The enhancement worker is downstream of all three and knows none of
+        # them. It is handed finalised PCM, a rate and a stage list, and a
+        # sidecar that could import a speech engine is a sidecar that could
+        # start reasoning about where that engine's units were.
+        for name in ("voice_worker", "sopro_worker", "pocket_worker", "sherpa_onnx",
+                     "sopro", "pocket_tts", "torch", "torchaudio"):
+            assert name not in pipeline, name
+        for others in (kokoro, sopro, pocket):
+            assert "pipeline_worker" not in others
 
     def test_only_the_model_manager_reaches_the_network(self):
         """One door out, and it is the one with the hashes behind it.

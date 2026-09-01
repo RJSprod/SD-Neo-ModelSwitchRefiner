@@ -316,7 +316,18 @@ class TestMetrics:
                               # accident (I-PKT-11, section 36).
                               "interrupt_mode", "interrupted", "stop_to_silence_ms",
                               "stop_to_ready_ms", "interrupted_unit_chars",
-                              "interrupted_unit_audio_ms", "discarded_chunks"}
+                              "interrupted_unit_audio_ms", "discarded_chunks",
+                              # What the Voice Pipeline did, beside the source's
+                              # own numbers rather than instead of them
+                              # (I-VP-32). Present on every turn and None on an
+                              # unenhanced one, so a log cannot read "no
+                              # pipeline" as "a pipeline that cost nothing".
+                              "pipeline_stages", "pipeline_output_rate",
+                              "pipeline_input_sample_count",
+                              "pipeline_output_sample_count",
+                              "pipeline_first_output_ms", "pipeline_ingress_peak_ms",
+                              "pipeline_backpressure_ms", "pipeline_compute_ms",
+                              "pipeline_rtf_milli"}
 
     def test_a_clone_is_categorised_without_naming_itself(self):
         turn = turns.create(voice_id="clone:1234", sid=53, speaker=Speaker())

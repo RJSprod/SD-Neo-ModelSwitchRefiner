@@ -125,6 +125,21 @@ SOPRO_PRODUCTION_FILENAME = "production.safetensors"
 SOPRO_PRODUCTION_META = "production.json"
 SOPRO_LAB_FILENAME = "lab-conditioning.safetensors"
 
+PIPELINE_DIRNAME = "pipeline"
+PIPELINE_WORKER_DIRNAME = "pipeline_worker"
+PIPELINE_MANIFEST_FILENAME = "managed-pipeline-models.json"
+PIPELINE_MODELS_DIRNAME = "models"
+"""The Voice Pipeline's own subtree, beside the three engines rather than
+inside PocketTTS's.
+
+Its lifetime follows Pocket's and its files do not. Installing and removing the
+enhancement stages is a decision about disk, which somebody makes once; loading
+and unloading them is a decision the Pocket residency group makes on every
+Load, and a stage installed under ``pocket/`` would be a stage that a PocketTTS
+reinstall deleted for reasons that have nothing to do with it (I-VP-19,
+section 13.11).
+"""
+
 POCKET_DIRNAME = "pocket"
 POCKET_WORKER_DIRNAME = "pocket_worker"
 POCKET_MANIFEST_FILENAME = "managed-pocket-models.json"
@@ -662,6 +677,88 @@ def sopro_inside(candidate) -> bool:
     """
     try:
         Path(candidate).resolve().relative_to(sopro_root())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# The Voice Pipeline
+# --------------------------------------------------------------------------- #
+
+
+def pipeline_root() -> Path:
+    """Everything the Voice Pipeline owns. Nothing else writes here.
+
+    A fourth tree beside Kokoro's, Sopro's, Pocket's and the cleanup engine's,
+    for the reason each of those is separate from the others: it carries its own
+    runtime closure, and an installer that could reach into a speech engine's
+    files is an installer that can break a working voice while adding an
+    optional polish to it.
+    """
+    return data_root() / PIPELINE_DIRNAME
+
+
+def pipeline_runtime_root() -> Path:
+    """The isolated interpreter and the enhancement closure unpacked beside it."""
+    return pipeline_root() / RUNTIME_DIRNAME
+
+
+def pipeline_runtime_manifest() -> Path:
+    return pipeline_runtime_root() / INSTALLED_FILENAME
+
+
+def pipeline_models_root() -> Path:
+    return pipeline_root() / PIPELINE_MODELS_DIRNAME
+
+
+def pipeline_stage_root(stage_id: str) -> Path:
+    """Where one stage's verified artifacts live, and what the worker is handed.
+
+    A directory per stage rather than one shared model folder, because the two
+    stages are installed and removed independently (I-VP-02): uninstalling
+    LavaSR must not have to reason about which files were DPDFNet's.
+    """
+    return _contained(pipeline_models_root(), _uuid(stage_id))
+
+
+def pipeline_stage_manifest(stage_id: str) -> Path:
+    return pipeline_stage_root(stage_id) / INSTALLED_FILENAME
+
+
+def pipeline_staging_root() -> Path:
+    return pipeline_root() / STAGING_DIRNAME
+
+
+def pipeline_staging_for(identifier: str, nonce: str) -> Path:
+    """One attempt's scratch directory, named for what it is installing.
+
+    The nonce is what keeps two attempts at the same stage from writing into one
+    directory. The per-kind install claim already refuses the second one, and
+    this is the belt to that pair of braces: a staging tree deleted by somebody
+    else's ``finally`` is a corrupted install with no error attached to it.
+    """
+    return _contained(pipeline_staging_root(), f"{_uuid(identifier)}-{_uuid(nonce)}")
+
+
+def pipeline_worker_script() -> Path:
+    return extension_root() / PIPELINE_WORKER_DIRNAME / "worker.py"
+
+
+def pipeline_manifest_path() -> Path:
+    """The checked-in trust root for everything the Voice Pipeline may fetch."""
+    return extension_root() / MANIFEST_DIRNAME / PIPELINE_MANIFEST_FILENAME
+
+
+def pipeline_inside(candidate) -> bool:
+    """Whether ``candidate`` is under the Voice Pipeline's own root.
+
+    The same question :func:`pocket_inside` answers for Pocket, asked here so
+    that the uninstall path can refuse to delete anything it does not own
+    (section 13.11: never delete another engine's runtime).
+    """
+    try:
+        Path(candidate).resolve().relative_to(pipeline_root())
     except (OSError, ValueError):
         return False
     return True
