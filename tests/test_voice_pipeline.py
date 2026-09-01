@@ -1815,3 +1815,53 @@ class TestTheWorkerAsAProcess:
                                                              fake_pipeline_worker):
         with pytest.raises(runtime.PipelineRuntimeError):
             runtime.ensure_started(("dpdfnet",))
+
+
+class TestTheLogSaysWhetherTheEnhancementRan:
+    """"Is DPDFNet actually on?" had no answer a user could reach.
+
+    The numbers were reported into the telemetry dictionary a browser posts and
+    nowhere else, so a settings toggle -- a statement of intent -- was the only
+    thing on screen, and a stage that was enabled but never ran looked exactly
+    like one that did.
+    """
+
+    def _lines(self, found, monkeypatch):
+        import mc_voice_api
+
+        said = []
+        monkeypatch.setattr(mc_voice_api.logger, "info",
+                            lambda message, *args: said.append(message % args))
+        mc_voice_api._log_pipeline(found)
+        return said
+
+    def test_a_turn_the_pipeline_ran_on_says_so_with_its_cost(self, monkeypatch):
+        said = self._lines({
+            "pipeline_stages": "DPDFNet", "pipeline_output_rate": 24000,
+            "pipeline_input_sample_count": 240000, "pipeline_output_sample_count": 240000,
+            "pipeline_first_output_ms": 45, "pipeline_compute_ms": 3100,
+            "pipeline_rtf_milli": 310, "pipeline_backpressure_ms": 0,
+        }, monkeypatch)
+
+        assert len(said) == 1, said
+        assert "DPDFNet" in said[0]
+        assert "RTF 0.31" in said[0]
+        assert "240000 samples in / 240000 out" in said[0]
+        assert "held back" not in said[0], "no backpressure happened, so none may be claimed"
+
+    def test_a_turn_the_pipeline_did_not_run_on_says_nothing(self, monkeypatch):
+        """Absence is the message. A line on every reply forever is not."""
+        assert self._lines({"pipeline_stages": None}, monkeypatch) == []
+        assert self._lines({}, monkeypatch) == []
+
+    def test_backpressure_is_named_because_it_is_the_failure(self, monkeypatch):
+        """A source held back is the enhancement failing to keep up (11.7)."""
+        said = self._lines({
+            "pipeline_stages": "DPDFNet", "pipeline_output_rate": 24000,
+            "pipeline_input_sample_count": 240000, "pipeline_output_sample_count": 240000,
+            "pipeline_first_output_ms": 45, "pipeline_compute_ms": 12000,
+            "pipeline_rtf_milli": 1200, "pipeline_backpressure_ms": 2400,
+        }, monkeypatch)
+
+        assert "RTF 1.20" in said[0]
+        assert "source held back 2400 ms" in said[0]
