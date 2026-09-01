@@ -2859,3 +2859,86 @@ class TestTheExportToolRefusesAnExportThatDoesNotMatch:
         tool = self._tool()
         with pytest.raises(tool.ExportError, match="not importable here"):
             tool.load_upstream("cpu")
+
+
+class TestChoosingACardChoosesADifferentClosure:
+    """One click on a GPU has to install a different runtime, not the same one.
+
+    The CPU and CUDA closures describe the same operating system and the same
+    Python; they differ only in which wheels they carry. If the accelerator were
+    a filter applied after the lookup rather than part of it, asking for CUDA on
+    a build without a CUDA entry would quietly install the CPU one -- which
+    succeeds, runs on the processor, and never mentions the card that was
+    picked. That is the failure this class exists to prevent.
+    """
+
+    @staticmethod
+    def _windows(monkeypatch):
+        import mc_voice_models as models
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("windows", "amd64", "3.13"))
+
+    def test_the_two_closures_are_different_installations(self, monkeypatch):
+        self._windows(monkeypatch)
+        cpu = pipeline.runtime_closure_id("torch", "cpu")
+        cuda = pipeline.runtime_closure_id("torch", "cuda")
+        assert cpu and cuda and cpu != cuda
+
+    def test_asking_for_a_card_this_build_cannot_serve_gets_nothing(self, monkeypatch):
+        """Not the CPU build as a consolation prize.
+
+        DPDFNet's closure reaches a card through DirectML and has no CUDA
+        variant at all, so this is a real case rather than a hypothetical one.
+        """
+        self._windows(monkeypatch)
+        assert pipeline.runtime_installable("onnx", "cuda") is False
+        assert pipeline.runtime_closure_id("onnx", "cuda") == ""
+        assert pipeline.runtime_installable("onnx", "cpu") is True
+
+    def test_the_cuda_closure_is_installable_but_says_it_is_not_pinned(self, monkeypatch):
+        """The whole security story of this path, in two booleans.
+
+        PyTorch's CUDA wheels are published only on a host the manifest-writing
+        machine cannot reach, so they are checked against the digest their
+        publisher states at install time rather than one this repository
+        reviewed. That is a weaker claim and it has to be sayable, not implied.
+        """
+        self._windows(monkeypatch)
+        assert pipeline.runtime_installable("torch", "cuda") is True
+        assert pipeline.runtime_pinned("torch", "cuda") is False
+        assert pipeline.runtime_pinned("torch", "cpu") is True, "the CPU one is pinned"
+
+    def test_only_the_two_wheels_that_cannot_be_pinned_are_resolved(self, monkeypatch):
+        """Everything else in the CUDA closure still comes hashed from PyPI.
+
+        A resolved artifact is the exception, and it stays the exception: if
+        this count grows, somebody has reached for the loose path to avoid
+        pinning something that could have been pinned.
+        """
+        self._windows(monkeypatch)
+        entry = pipeline._platform_entry_or_none(pipeline.manifest(), "torch", "cuda")
+        resolved = [item for item in entry["artifacts"] if item["resolve"]]
+        assert sorted(item["local_name"] for item in resolved) == ["torch", "torchaudio"]
+        assert len(entry["artifacts"]) - len(resolved) == 46
+
+    def test_a_manifest_that_both_pins_and_resolves_a_wheel_is_refused(self):
+        """One or the other. A pin overwritten by a publisher is not a pin."""
+        with pytest.raises(pipeline.PipelineError, match="One or the other"):
+            pipeline._read_artifact("the torch runtime closure", {
+                "local_name": "torch", "url": "https://example.test/torch.whl",
+                "sha256": "a" * 64, "bytes": 10,
+                "resolve": {"index": "https://download.pytorch.org/whl/cu128/torch/",
+                            "package": "torch"}})
+
+    def test_a_resolve_over_plain_http_is_refused_in_the_manifest(self):
+        with pytest.raises(pipeline.PipelineError, match="not HTTPS"):
+            pipeline._read_artifact("the torch runtime closure", {
+                "local_name": "torch",
+                "resolve": {"index": "http://download.pytorch.org/whl/", "package": "torch"}})
+
+    def test_an_accelerator_this_build_cannot_build_for_is_refused(self, monkeypatch):
+        found = json.loads(paths.pipeline_manifest_path().read_text(encoding="utf-8"))
+        found["runtimes"]["torch"]["platforms"][0]["accelerator"] = "rocm"
+        monkeypatch.setattr(pipeline, "_manifest_cache", None)
+        with pytest.raises(pipeline.PipelineError, match="does not know how to build for"):
+            pipeline._read_manifest(found)

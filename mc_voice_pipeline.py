@@ -654,11 +654,17 @@ def _read_runtime(name: str, block: dict) -> dict:
             raise PipelineError(f"The Voice Pipeline manifest names the {name} runtime "
                                 f"platform {identifier!r} twice.")
         seen.add(identifier)
+        accelerator = str(entry.get("accelerator") or "cpu").casefold()
+        if accelerator not in ("cpu", "cuda"):
+            raise PipelineError(
+                f"The Voice Pipeline manifest's {name} runtime names an accelerator "
+                f"({accelerator!r}) this build does not know how to build for.")
         platforms.append({
             "id": identifier,
             "system": str(entry.get("system") or "").casefold(),
             "machines": [str(name_).casefold() for name_ in (entry.get("machines") or ())],
             "python": str(entry.get("python") or ""),
+            "accelerator": accelerator,
             # Read through the same validator the stages' artifacts go through,
             # rather than trusted because they are the runtime's. A wheel is the
             # one artifact here whose contents get *executed*, so it is the last
@@ -707,12 +713,38 @@ def _read_artifact(owner: str, item) -> dict:
     if digest and (len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)):
         raise PipelineError(f"The Voice Pipeline manifest's {owner} names a hash that is "
                             f"not a SHA-256.")
+    resolve = item.get("resolve")
+    if resolve is not None:
+        # An artifact resolved from a publisher's index at install time. Only
+        # for wheels that cannot be pinned here at all -- PyTorch's CUDA builds
+        # live on a host the manifest-writing machine cannot reach -- and it is
+        # validated as strictly as a pinned one so that "resolved" never becomes
+        # the loose path somebody reaches for to avoid pinning.
+        if not isinstance(resolve, dict):
+            raise PipelineError(f"The Voice Pipeline manifest's {owner} has a resolve that "
+                                f"is not an object.")
+        base = str(resolve.get("index") or "")
+        package = str(resolve.get("package") or "")
+        if not base.startswith("https://"):
+            raise PipelineError(f"The Voice Pipeline manifest's {owner} names a package "
+                                f"index that is not HTTPS.")
+        if not package:
+            raise PipelineError(f"The Voice Pipeline manifest's {owner} has a resolve with "
+                                f"no package name.")
+        if url or digest:
+            raise PipelineError(
+                f"The Voice Pipeline manifest's {owner} both pins {package} and resolves "
+                f"it. One or the other: a pinned digest that is then overwritten by a "
+                f"publisher's is a pin nobody is checking.")
+        resolve = {"index": base, "package": package,
+                   "version": str(resolve.get("version") or "")}
     return {
         "filename": str(item.get("filename") or local),
         "local_name": local,
         "url": url,
         "bytes": int(item.get("bytes") or 0),
         "sha256": digest,
+        "resolve": resolve,
         # Whether this artifact is behind the publisher's access gate, and
         # therefore whether the shared credential may be offered for it. A fact
         # this repository commits to in a manifest, never one a response teaches
@@ -789,7 +821,7 @@ def _immutable(revision: str) -> bool:
     return len(text) == 40 and all(c in "0123456789abcdef" for c in text.casefold())
 
 
-def runtime_installable(flavour: str = "onnx") -> bool:
+def runtime_installable(flavour: str = "onnx", accelerator: str = "cpu") -> bool:
     """Whether this build has a runtime closure it could stand behind.
 
     Every wheel sized and hashed, for a platform this machine matches. This is
@@ -805,7 +837,33 @@ def runtime_installable(flavour: str = "onnx") -> bool:
         found = manifest()
     except PipelineError:
         return False
-    entry = _platform_entry_or_none(found, flavour)
+    entry = _platform_entry_or_none(found, flavour, accelerator)
+    if entry is None or not entry["artifacts"]:
+        return False
+    # A resolved artifact has no digest here by definition -- it gets one from
+    # the publisher's index at install time, and the download is checked against
+    # that. It is still installable; what it is not is *pinned*, which is a
+    # different question that :func:`runtime_pinned` answers separately so that
+    # a surface can say which of the two it is looking at.
+    return all(item["resolve"] or (item["sha256"] and item["bytes"] > 0)
+               for item in entry["artifacts"])
+
+
+def runtime_pinned(flavour: str = "onnx", accelerator: str = "cpu") -> bool:
+    """Whether every wheel in this closure is hashed in this repository.
+
+    Kept apart from :func:`runtime_installable` because the difference is the
+    whole security story of the CUDA path and it should be sayable in a
+    sentence on a settings panel rather than inferred. Pinned means checked
+    against a number this repository reviewed; not pinned means checked against
+    a number its publisher states today. Both refuse a corrupted download; only
+    the first refuses a publisher who changed their mind.
+    """
+    try:
+        found = manifest()
+    except PipelineError:
+        return False
+    entry = _platform_entry_or_none(found, flavour, accelerator)
     if entry is None or not entry["artifacts"]:
         return False
     return all(item["sha256"] and item["bytes"] > 0 for item in entry["artifacts"])
@@ -895,18 +953,31 @@ def runtime_entry(found: dict, flavour: str = "onnx") -> dict:
     return entry
 
 
-def _platform_entry_or_none(found: dict, flavour: str = "onnx"):
+def _platform_entry_or_none(found: dict, flavour: str = "onnx",
+                            accelerator: str = "cpu"):
+    """The closure for this machine, built for the accelerator that was asked for.
+
+    Two entries can describe the same operating system and Python and still be
+    different closures: the CUDA one differs from the CPU one only in which
+    wheels it carries. So the accelerator is part of the lookup rather than a
+    filter applied afterwards, and a machine that asks for CUDA and has no CUDA
+    entry gets nothing rather than quietly getting the CPU build -- which would
+    install successfully, run on the processor, and never mention the card the
+    user picked.
+    """
     import mc_voice_models as models
 
     try:
         block = runtime_entry(found, flavour)
     except PipelineError:
         return None
+    wanted = str(accelerator or "cpu").casefold()
     system, machine, python = models.current_platform()
     for entry in block["platforms"]:
         machines = tuple(str(name).casefold() for name in (entry.get("machines") or ()))
         if (str(entry.get("system") or "").casefold() == system
-                and machine in machines and str(entry.get("python") or "") == python):
+                and machine in machines and str(entry.get("python") or "") == python
+                and str(entry.get("accelerator") or "cpu").casefold() == wanted):
             return entry
     return None
 
@@ -1024,7 +1095,7 @@ def supported_platform() -> bool:
     return _platform_entry_or_none(found) is not None
 
 
-def runtime_closure_id(flavour: str = "onnx") -> str:
+def runtime_closure_id(flavour: str = "onnx", accelerator: str = "cpu") -> str:
     """The freshness fingerprint of the enhancement runtime.
 
     Derived from the pinned closure and never declared, in the shape
@@ -1050,13 +1121,15 @@ def runtime_closure_id(flavour: str = "onnx") -> str:
     except (PipelineError, ValueError):
         return ""
     system, machine, python = models.current_platform()
+    wanted = str(accelerator or "cpu").casefold()
     for entry in block["platforms"]:
         if not isinstance(entry, dict):
             continue
         machines = tuple(str(name).casefold() for name in (entry.get("machines") or ()))
         if not (str(entry.get("system") or "").casefold() == system
                 and machine in machines
-                and str(entry.get("python") or "") == python):
+                and str(entry.get("python") or "") == python
+                and str(entry.get("accelerator") or "cpu").casefold() == wanted):
             continue
         # The flavour leads the fingerprint for every closure except the first
         # one, whose line stays exactly what it was before a second existed.
@@ -1550,13 +1623,81 @@ def _span(tick, low: float, high: float):
     return scaled
 
 
-def _platform_entry() -> dict:
-    entry = _platform_entry_or_none(manifest())
+def _platform_entry(flavour: str = "onnx") -> dict:
+    entry = _platform_entry_or_none(manifest(), flavour)
     if entry is None:
         raise PipelineError(
             "This build has no pinned Voice Pipeline runtime for this operating system and "
             "Python version.")
     return entry
+
+
+def _resolve_artifacts(entry: dict, say) -> list:
+    """Turn any ``resolve`` entries into concrete, digested artifacts.
+
+    Most closures have none of these: every wheel is named and hashed in the
+    manifest, and this returns the list unchanged. The exception is the CUDA
+    closure, whose wheels are published only on a host the manifest-writing
+    machine cannot reach and so cannot be pinned in advance (I-VP-24).
+
+    For those, the publisher's own index is read here, on the machine that *can*
+    reach it, and the SHA-256 the publisher states is what the download is then
+    checked against -- the same shape the stage models already use, applied to a
+    closure. The weaker claim that makes is written into the installed record
+    rather than left implied: see ``mc_voice_wheelindex``.
+    """
+    import mc_voice_wheelindex as wheelindex
+
+    rows = list(entry["artifacts"])
+    pending = [item for item in rows if item.get("resolve")]
+    if not pending:
+        return rows
+
+    tags = wheelindex.platform_tags(
+        str(entry.get("python") or ""), str(entry.get("system") or ""),
+        (list(entry.get("machines") or ["amd64"]) or ["amd64"])[0])
+    say("Asking the publisher which files this machine needs…")
+    out = []
+    for item in rows:
+        wanted = item.get("resolve")
+        if not wanted:
+            out.append(item)
+            continue
+        package = str(wanted.get("package") or "")
+        base = str(wanted.get("index") or "")
+        if not base.startswith("https://"):
+            raise PipelineError(
+                f"The manifest points {package or 'a wheel'} at an index that is not "
+                f"HTTPS. Nothing was downloaded.")
+        try:
+            found = wheelindex.choose(_read_index(base), base, package,
+                                      str(wanted.get("version") or ""), tags)
+        except wheelindex.IndexError_ as exc:
+            raise PipelineError(str(exc)) from None
+        except OSError as exc:
+            raise PipelineError(
+                f"The publisher's index for {package} could not be read "
+                f"({exc.__class__.__name__}). Nothing was installed.") from None
+        logger.info("Model Chain: the Voice Pipeline resolved %s from the publisher's "
+                    "index — %s", package, found["filename"])
+        out.append({**item, "filename": found["filename"],
+                    "local_name": found["filename"], "url": found["url"],
+                    "sha256": found["sha256"], "bytes": 0})
+    return out
+
+
+def _read_index(url: str) -> str:
+    """Fetch one index page, through the one module allowed to reach the network.
+
+    Not with ``urllib`` here, which is invariant I-4: there is a single door out
+    of this feature and it is the one with the hashes behind it. A transport in
+    this module would be a second way for bytes to arrive with nothing checking
+    them, and the fact that these particular bytes are HTML rather than a wheel
+    is exactly the argument that would erode the rule.
+    """
+    import mc_voice_models as models
+
+    return models.read_index_page(url)
 
 
 def _artifacts(entries) -> list:
