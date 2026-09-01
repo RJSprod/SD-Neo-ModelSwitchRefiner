@@ -129,7 +129,7 @@ class Cancellation:
 _SENTINEL = object()
 
 
-def _streamed(work):
+def _streamed(work, when_done=None):
     """Run ``work(on_text)`` on a thread and yield the text it produces.
 
     ``work`` is handed the callback llama.cpp's client expects and must return
@@ -137,6 +137,24 @@ def _streamed(work):
     and finally ``(None, result)`` -- or raises whatever ``work`` raised, on
     the consumer's thread, so an error surfaces where it can be reported
     instead of dying silently in a worker.
+
+    ``when_done`` is called on the worker's thread the moment ``work`` returns,
+    however it returns, and it is the answer to a bug that survived two
+    attempts at it further up.
+
+    Everything else here gives the GPU back from generator code -- a
+    ``finally``, or a release placed ahead of the terminal event. Both only run
+    if somebody keeps pulling the generator, and Stop is exactly the moment
+    nobody does: Gradio cancels the handler, stops consuming, and the reply is
+    left suspended at a ``yield Event(CHUNK, ...)`` nothing will ever resume.
+    From a user's log, llama.cpp logged ``cancel task`` and released its slot,
+    this module logged no terminal event at all, and the next reply reported
+    the card held by a conversation that had finished 94 seconds earlier.
+
+    The worker thread has no such dependency. It runs to completion whoever is
+    or is not reading, and the moment ``work`` returns the model is done with
+    the card -- what is left is text cleanup and events, which need no GPU. So
+    the release hangs on the one thing that always happens.
     """
     pipe: queue.Queue = queue.Queue()
     outcome: dict = {}
@@ -147,6 +165,14 @@ def _streamed(work):
         except BaseException as exc:  # re-raised on the consumer's thread
             outcome["error"] = exc
         finally:
+            if when_done is not None:
+                # Guarded, because a failure here must not lose the sentinel
+                # and hang the reader on a queue nothing will ever fill.
+                try:
+                    when_done()
+                except Exception:
+                    logger.debug("Model Chain: could not give the GPU back from the "
+                                 "streaming worker", exc_info=True)
             pipe.put(_SENTINEL)
 
     worker = threading.Thread(target=run, name="model-chain-llm", daemon=True)
@@ -172,6 +198,14 @@ class _Gpu:
         self.label, self.cancel, self.role = label, cancel, role
         self._held = None
         self._workload = None
+        self._releasing = threading.Lock()
+        """Two threads give this card back now, and routinely both do.
+
+        The streaming worker releases the moment the model is done with it; the
+        generator's own ``finally`` releases again on the way out.
+        ``mc_broker.workload.__exit__`` is idempotent by design, but the
+        read-and-clear around it was not, so it is made so here rather than
+        left to the interpreter."""
 
     def _domain(self):
         """Where the server that will answer this request executes.
@@ -329,10 +363,11 @@ class _Gpu:
         the time the panel sees Stopped, Complete or an error, the GPU is
         already somebody else's to take.
         """
-        if self._workload is not None:
-            self._workload.__exit__(None, None, None)
-            self._workload = None
+        with self._releasing:
+            workload, self._workload = self._workload, None
             self._held = None
+        if workload is not None:
+            workload.__exit__(None, None, None)
 
 
 def _client(needs_vision: bool, reserve: int = 0, role: str = "", cancel=None):
@@ -486,7 +521,8 @@ def _prompt_studio(request, cancel: Cancellation):
         for chunk, result in _streamed(
                 lambda on_text: client.stream_chat(plan.messages, plan.max_tokens, request.seed,
                                                    on_text, cancel.event,
-                                                   temperature=temperature, top_p=top_p)):
+                                                   temperature=temperature, top_p=top_p),
+                when_done=gpu.release):
             if chunk is not None:
                 yield Event(CHUNK, chunk)
             else:
@@ -611,7 +647,8 @@ def _conversation(request: ChatRequest, cancel: Cancellation):
                 lambda on_text: client.stream_chat(request.messages, request.max_tokens,
                                                    request.seed, on_text, cancel.event,
                                                    temperature=request.temperature,
-                                                   top_p=request.top_p)):
+                                                   top_p=request.top_p),
+                when_done=gpu.release):
             if chunk is not None:
                 yield Event(CHUNK, chunk)
             else:
@@ -684,7 +721,8 @@ def _minimax(prompt: str, variant: str, image: str | None, seed: int,
                 lambda on_text: client.stream_chat(
                     enhancer.messages(prompt, variant=variant, image_caption=caption),
                     enhancer.max_tokens(variant), seed, on_text, cancel.event,
-                    temperature=enhancer.TEMPERATURE, top_p=enhancer.TOP_P)):
+                    temperature=enhancer.TEMPERATURE, top_p=enhancer.TOP_P),
+                when_done=gpu.release):
             if chunk is not None:
                 yield Event(CHUNK, chunk)
             else:
@@ -809,7 +847,8 @@ def _krea(prompt: str, references, seed: int, cancel: Cancellation, creativity=N
                 lambda on_text: client.stream_chat(
                     enhancer.messages(prompt, captions, direction), enhancer.MAX_TOKENS,
                     seed, on_text, cancel.event,
-                    temperature=profile.temperature, top_p=profile.top_p)):
+                    temperature=profile.temperature, top_p=profile.top_p),
+                when_done=gpu.release):
             if chunk is not None:
                 yield Event(CHUNK, chunk)
             else:
@@ -884,7 +923,8 @@ def _compose(source: str, scene: str, layout, ratio: str, seed: int,
                 lambda on_text: client.stream_chat(
                     composer.messages(source, scene, layout, ratio),
                     composer.MAX_TOKENS, seed, on_text, cancel.event,
-                    temperature=composer.TEMPERATURE, top_p=composer.TOP_P)):
+                    temperature=composer.TEMPERATURE, top_p=composer.TOP_P),
+                when_done=gpu.release):
             if chunk is not None:
                 yield Event(CHUNK, chunk)
             else:
