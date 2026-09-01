@@ -2225,7 +2225,7 @@ def _source_rate() -> int:
         return 0
 
 
-def pipeline_settings(enabled, stages) -> dict:
+def pipeline_settings(enabled, stages, threads=None) -> dict:
     """The three switches, written together, validated to booleans and known ids.
 
     No order field is accepted and there is nothing to accept one into: the
@@ -2245,7 +2245,18 @@ def pipeline_settings(enabled, stages) -> dict:
         wanted[str(name)] = value
     if enabled is not None and not isinstance(enabled, bool):
         raise Refused(400, "A Voice Pipeline switch is on or off.")
-    pipeline.remember(enabled, wanted)
+    if threads is not None:
+        # Refused rather than clamped, because a number silently changed on the
+        # way in is a control that does not do what its own label says.
+        try:
+            asked = int(threads)
+        except (TypeError, ValueError):
+            raise Refused(400, "The enhancement thread count is a whole number.") from None
+        if not 1 <= asked <= pipeline.MAX_INTRAOP_THREADS:
+            raise Refused(400, f"The enhancement thread count is between 1 and "
+                               f"{pipeline.MAX_INTRAOP_THREADS}.")
+        threads = asked
+    pipeline.remember(enabled, wanted, threads_value=threads)
     found = pipeline_payload()
     import mc_voice_turn as turns
 
@@ -3197,7 +3208,8 @@ def install(_demo=None, app=None) -> bool:
     pipeline_settings_route = _json_route(
         PIPELINE_SETTINGS_ROUTE,
         lambda payload: pipeline_settings(payload.get("enabled"),
-                                          payload.get("stages") or {}),
+                                          payload.get("stages") or {},
+                                          payload.get("threads")),
         "That Voice Pipeline switch could not be changed.")
     components_route = _json_route(
         COMPONENTS_ROUTE, lambda _payload: components_payload(),

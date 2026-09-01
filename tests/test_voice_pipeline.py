@@ -1918,3 +1918,71 @@ def mc_voice_api_unprepared(entry):
     import mc_voice_api
 
     return mc_voice_api.unprepared_reason(entry)
+
+
+class TestTheEnhancementThreadBudgetIsATurnableDial:
+    """A constant that a user's own measurement disproved.
+
+    Upstream builds DPDFNet's session with ``intra_op_num_threads = 1``, and
+    this feature's own default was two -- chosen so the stage would not crowd
+    the PocketTTS generation it runs beside. On a sixteen-thread machine that
+    measured a real-time factor of 2.38: the enhancement taking two and a half
+    seconds of compute per second of speech, holding the source back for 292 of
+    a 300-second reply and starving playback fourteen times. Politeness is not
+    a virtue in a stage that cannot keep up.
+    """
+
+    def test_the_default_is_unchanged_for_anybody_who_never_touches_it(self):
+        assert pipeline.threads() == pipeline.INTRAOP_THREADS
+
+    def test_settings_report_the_budget_and_its_ceiling(self):
+        found = pipeline.settings()
+
+        assert found["threads"] == pipeline.threads()
+        assert found["max_threads"] == pipeline.MAX_INTRAOP_THREADS
+
+    def test_the_budget_reaches_the_stage_that_needed_it(self):
+        """The whole point, asserted at both places that build the config.
+
+        ``_send_load`` hands it to the running worker and ``_self_test`` hands
+        it to the staged one; a budget that reached only the second would be a
+        setting that worked once, during an install.
+        """
+        import inspect
+
+        import mc_voice_pipeline_runtime as runtime
+
+        for source in (inspect.getsource(runtime._send_load),
+                       inspect.getsource(pipeline._self_test)):
+            assert "intraop" in source
+            assert "INTRAOP_THREADS" not in source, (
+                "the constant is still being sent instead of the setting")
+        assert 'config["intraop"] = threads()' in inspect.getsource(pipeline._self_test)
+
+    def test_a_number_outside_the_range_is_refused_not_clamped(self):
+        """A value silently changed on the way in is a control that lies."""
+        import mc_voice_api
+
+        for asked in (0, -4, pipeline.MAX_INTRAOP_THREADS + 1):
+            with pytest.raises(Exception) as caught:
+                mc_voice_api.pipeline_settings(None, {}, threads=asked)
+            assert "between 1 and" in str(caught.value), asked
+
+    def test_something_that_is_not_a_number_is_refused(self):
+        import mc_voice_api
+
+        with pytest.raises(Exception) as caught:
+            mc_voice_api.pipeline_settings(None, {}, threads="lots")
+        assert "whole number" in str(caught.value)
+
+    def test_the_reading_is_bounded_whatever_the_store_holds(self, monkeypatch):
+        """A store is not a validator. Anything in it has to be survivable."""
+        import sys
+        import types
+
+        for held, expected in ((0, 1), (-9, 1), (9999, pipeline.MAX_INTRAOP_THREADS),
+                               ("7", 7)):
+            fake = types.SimpleNamespace(shared=types.SimpleNamespace(
+                opts=types.SimpleNamespace(data={pipeline.OPT_THREADS: held})))
+            monkeypatch.setitem(sys.modules, "modules", fake)
+            assert pipeline.threads() == expected, held

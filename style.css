@@ -4281,6 +4281,20 @@
     margin-top: 0.5rem;
 }
 
+/* The enhancement's CPU budget, laid out like the stage rows above it so the
+   panel reads as one list rather than a list with a form stuck on the end. */
+.mc-voice-pipeline-threads {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 0.35rem;
+}
+
+.mc-voice-pipeline-threads input[type="number"] {
+    width: 4.5rem;
+}
+
 .mc-voice-component-status.mc-voice-failed {
     color: var(--error-text-color, var(--body-text-color, inherit));
     font-weight: 600;

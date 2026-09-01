@@ -1630,6 +1630,7 @@ def pipeline_html() -> str:
         f'{" checked" if found.master_enabled else ""} />'
         f'</div>'
         f'<div class="mc-voice-pipeline-stages">{"".join(rows)}</div>'
+        f'{_pipeline_threads_row(found)}'
         f'<p class="mc-voice-note" data-mc-voice-pipeline-path>{line}</p>'
         f'<p class="mc-voice-note">Two optional models that run on this PC\u2019s '
         f'processor, after the speech engine has finished with a reply and before it is '
@@ -1637,6 +1638,47 @@ def pipeline_html() -> str:
         f'load and unload with PocketTTS rather than on a timer of their own. Install them '
         f'from Installation &amp; Components below.</p>'
         f'</div>')
+
+
+def _pipeline_threads_row(found) -> str:
+    """The enhancement stage's CPU budget, as a control rather than a constant.
+
+    Here because a user's own measurement beat the reasoning behind the default.
+    Upstream builds DPDFNet's session with a single thread and this feature's
+    own default was two, chosen so as not to crowd the PocketTTS generation it
+    runs beside -- and on a sixteen-thread machine that measured a real-time
+    factor of 2.38, which is not politeness, it is a stage that cannot keep up
+    and starves playback.
+
+    The number is offered with the instrument that judges it: the log's
+    ``Voice pipeline ran`` line reports the measured factor for every reply, so
+    this is a dial turned against evidence rather than a guess. The note says
+    which way to read it, because "threads" on its own is a number without a
+    question attached to it.
+    """
+    import mc_voice_pipeline as pipeline
+
+    try:
+        current = pipeline.threads()
+        most = pipeline.MAX_INTRAOP_THREADS
+    except Exception:
+        logger.debug("Model Chain: could not read the Voice Pipeline thread budget",
+                     exc_info=True)
+        return ""
+    if not found.stages:
+        return ""
+    return (
+        f'<label class="mc-voice-pipeline-threads">'
+        f'<span class="mc-voice-pipeline-name">Enhancement threads</span>'
+        f'<input type="number" min="1" max="{most}" step="1" '
+        f'value="{int(current)}" data-mc-voice-pipeline-threads '
+        f'aria-label="Enhancement threads" />'
+        f'<span class="mc-voice-pipeline-what">Processor cores the enhancement may '
+        f'use. It runs beside the speech engine on the same cores, so more is not '
+        f'always faster \u2014 raise it while the log\u2019s "Voice pipeline ran" '
+        f'line reports a real-time factor above 1.0, and stop when it is comfortably '
+        f'below. Takes effect on the next reply.</span>'
+        f'</label>')
 
 
 def _engine_label(engine: str) -> str:

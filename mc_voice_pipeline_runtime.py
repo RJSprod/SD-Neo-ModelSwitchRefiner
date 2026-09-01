@@ -430,7 +430,7 @@ def _send_load(stages) -> None:
     config = {}
     for name in stages:
         found = dict(pipeline.stage_config(name))
-        found["intraop"] = pipeline.INTRAOP_THREADS
+        found["intraop"] = pipeline.threads()
         found["interop"] = pipeline.INTEROP_THREADS
         config[name] = found
     with _lock:
