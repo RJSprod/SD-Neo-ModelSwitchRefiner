@@ -864,9 +864,44 @@ def _log_turn(turn) -> None:
                     found["segment_2_callback_blocks"], found["segment_2_audio_ms"],
                     found["max_segment_index"], found["max_segment_ms"],
                     found["rtf"], found["first_audio_ms"])
+        _log_pipeline(found)
         _log_shortfall(turn, found)
     except Exception:
         logger.debug("Model Chain: could not record voice turn metrics", exc_info=True)
+
+
+def _log_pipeline(found: dict) -> None:
+    """Whether the enhancement layer ran on this reply, and what it cost.
+
+    Said in the log because until now it could not be told from anywhere. The
+    numbers existed -- ``VoiceTurn._pipeline_metrics`` has reported them since
+    the feature was written -- but only into the telemetry dictionary a browser
+    posts, so the question "is DPDFNet actually on?" had no answer a user could
+    reach. A settings toggle is a statement of intent; this is the record of
+    what happened.
+
+    Silent when the pipeline did not run at all, which is the ordinary case for
+    an installation that has never enabled it -- a line saying "no enhancement"
+    on every reply forever would be noise, and its absence already means that.
+    """
+    stages = found.get("pipeline_stages")
+    if not stages:
+        return
+    rtf = found.get("pipeline_rtf_milli")
+    logger.info(
+        "Model Chain: Voice pipeline ran — %s, %s Hz out, %s samples in / %s out, "
+        "first output %s ms, compute %s ms%s%s",
+        stages, found.get("pipeline_output_rate"),
+        found.get("pipeline_input_sample_count"),
+        found.get("pipeline_output_sample_count"),
+        found.get("pipeline_first_output_ms"), found.get("pipeline_compute_ms"),
+        "" if rtf is None else f", RTF {rtf / 1000:.2f}",
+        # Backpressure is the number that says the enhancement could not keep
+        # up: the bounded ingress filled and the source had to wait. Section
+        # 11.7 calls a sustained RTF above 1.0 a performance failure rather
+        # than something a buffer absorbs, and this is where that shows.
+        "" if not found.get("pipeline_backpressure_ms")
+        else f", source held back {found['pipeline_backpressure_ms']} ms")
 
 
 def _log_shortfall(turn, found: dict) -> None:

@@ -273,6 +273,18 @@ class _Gpu:
             self._workload.__exit__(None, None, None)
             self._workload = None
             running = mc_broker.active()
+            if not announced and time.monotonic() - started > WAIT_NOTICE_SECONDS:
+                # Logged as well as shown, and with the holder's age, because
+                # the two things this wait can mean look identical on screen: a
+                # machine that is genuinely busy, and a lease that outlived the
+                # run that took it. An age longer than any reply could plausibly
+                # take is the difference, and without it every report of
+                # "Waiting for a conversation reply…" costs a round of guessing.
+                logger.info(
+                    "Model Chain: %s is waiting for the GPU — held by %s for %.0f s",
+                    self.label,
+                    running.describe() if running else "nothing this module can see",
+                    0.0 if running is None else max(0.0, time.monotonic() - running.since))
             announced = yield from self._announce(
                 started, announced, running.label if running else "the GPU")
 
