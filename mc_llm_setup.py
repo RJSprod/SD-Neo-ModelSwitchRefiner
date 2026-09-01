@@ -40,7 +40,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -645,10 +647,17 @@ def devices(refresh: bool = False) -> list:
 
 
 def forget_devices() -> None:
-    """Drop the cached device list. For tests, and for a rescan."""
+    """Drop the cached device lists. For tests, and for a rescan.
+
+    Both of them: what the driver says the machine has, and what each
+    llama.cpp build says it can offload to. A rescan that answered the second
+    question out of a cache would be a rescan that cannot see the runtime
+    somebody just replaced in order to fix it.
+    """
     global _devices_cache
 
     _devices_cache = None
+    _enumerated.clear()
 
 
 def preferred_device():
@@ -759,6 +768,80 @@ def configured_device():
         return None
 
 
+_ANY_DEVICE = re.compile(r"\b(?:CUDA|GPU|ROCM|HIP|SYCL|VULKAN|METAL)\d+\b", re.I)
+"""One enumerated offload device in ``--list-devices`` output."""
+
+_DEVICE_LISTING = re.compile(r"available\s+devices", re.I)
+"""The heading llama.cpp prints before that list, empty or not.
+
+Required before an empty list is read as "there is no card". Output this does
+not recognise at all is not evidence of anything -- a future llama.cpp is
+allowed to word its listing differently, and the answer to that must be "I
+could not tell", never "you have no GPU".
+"""
+
+LIST_DEVICES_TIMEOUT = 30.0
+
+_enumerated: dict[tuple, "bool | None"] = {}
+"""``--list-devices`` answers, keyed by the build that gave them.
+
+Keyed on size and modification time as well as path, so that adopting or
+re-downloading a runtime -- which is exactly what somebody does to fix a build
+with no CUDA backend in it -- is not answered out of the old build's cache.
+"""
+
+
+def enumerates_a_device(executable) -> "bool | None":
+    """Whether this llama.cpp build can see any offload device at all.
+
+    Three answers, and the third is the one that matters::
+
+        True   it listed one
+        False  it printed its listing and the listing was empty
+        None   it could not be asked, or said something unrecognisable
+
+    ``None`` is not a negative and callers must not treat it as one. Refusing a
+    card because a probe failed to run would be a worse bug than the one this
+    exists to prevent.
+
+    Deliberately not the vendored :func:`list_llama_devices`. That one sets
+    ``CUDA_VISIBLE_DEVICES`` to a single physical index to learn what llama.cpp
+    calls that card, and it raises the same exception for "no devices" as for
+    "output I could not parse". This asks a different question -- what will the
+    server see when it starts -- so it inherits the environment unchanged, and
+    it separates those two cases because the right response to them is
+    opposite.
+    """
+    try:
+        stamp = Path(str(executable)).stat()
+        key = (str(executable), stamp.st_mtime_ns, stamp.st_size)
+    except OSError:
+        return None
+    if key in _enumerated:
+        return _enumerated[key]
+    try:
+        found = subprocess.run(  # noqa: S603 - the runtime this extension starts
+            [str(executable), "--list-devices"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=LIST_DEVICES_TIMEOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:
+        logger.debug("Model Chain: could not ask %s which devices it sees", executable,
+                     exc_info=True)
+        return None
+    if found.returncode != 0:
+        # It ran and refused. That is not an answer about devices.
+        return None
+    text = "\n".join((found.stdout or "", found.stderr or ""))
+    if _ANY_DEVICE.search(text):
+        answer = True
+    elif _DEVICE_LISTING.search(text):
+        answer = False
+    else:
+        return None
+    _enumerated[key] = answer
+    return answer
+
+
 def record(executable: str | Path, device=None, role: str = "") -> dict:
     """Write ``executable`` into the state file as this install's runtime.
 
@@ -810,6 +893,24 @@ def record(executable: str | Path, device=None, role: str = "") -> dict:
         try:
             token, token_name = list_llama_devices(path, chosen.physical_index)
         except Exception:
+            if enumerates_a_device(path) is False:
+                # The probe ran, exited cleanly, and said there is no CUDA
+                # device. That is an answer, not a failed question, and writing
+                # ``CUDA0`` over it produces a state file that cannot start:
+                # llama.cpp refuses the argument before it opens the model, so
+                # every reply on every model and every engine dies at
+                # ``invalid device: CUDA0`` until somebody edits the JSON. The
+                # recording is refused instead, which leaves the working
+                # placement in place and puts the cause in front of the person
+                # who can fix it.
+                raise SetupError(
+                    f"{path.name} cannot see {chosen.name}. It started and reported no "
+                    f"device to offload to, so recording that card would write a setting "
+                    f"this runtime refuses at startup. That is a runtime build with no "
+                    f"CUDA backend beside it, or a CUDA_VISIBLE_DEVICES in the "
+                    f"environment hiding the card — use Download to fetch the build for "
+                    f"this card, or choose the processor."
+                ) from None
             token, token_name = "CUDA0", chosen.name
             logger.warning("Model Chain: could not ask llama-server which devices it sees; "
                            "assuming CUDA0", exc_info=True)
