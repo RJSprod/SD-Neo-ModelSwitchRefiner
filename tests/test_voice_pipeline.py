@@ -2776,3 +2776,86 @@ class TestTheBuildCarriesTwoRuntimeClosures:
         monkeypatch.setattr(pipeline, "_manifest_cache", None)
         with pytest.raises(pipeline.PipelineError, match="does not know how to install"):
             pipeline._read_manifest(found)
+
+
+class TestTheExportToolRefusesAnExportThatDoesNotMatch:
+    """The verdict logic of tools/export_lavasr_onnx.py, exercised without torch.
+
+    The whole value of that tool is a refusal: it exists so an ONNX LavaSR is
+    only offered once it has been proved against the PyTorch model it came
+    from. That decision is a pure function of two arrays, and it should not be
+    the one part that is only ever exercised by a maintainer on a machine with
+    a 122 MB wheel and a Hugging Face token.
+    """
+
+    @staticmethod
+    def _tool():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "export_lavasr_onnx",
+            paths.extension_root() / "tools" / "export_lavasr_onnx.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_a_length_mismatch_is_refused_at_any_tolerance(self):
+        """The failure that matters most, and the one no tolerance may forgive.
+
+        Audio of the wrong length still sounds like speech. A graph that
+        resamples to the wrong rate, or pads, produces exactly this and nothing
+        about it is audible as an error -- it is audible as a slow talker.
+        """
+        tool = self._tool()
+        verdict = tool.compare([0.0] * 48000, [0.0] * 32000, tolerance=1e9)
+        assert verdict["ok"] is False
+        assert verdict["reason"] == "length"
+        assert "48000" in verdict["detail"] and "32000" in verdict["detail"]
+
+    def test_a_close_enough_export_passes_and_says_how_close(self):
+        tool = self._tool()
+        ref = [0.1, -0.2, 0.3, -0.4]
+        got = [0.1001, -0.2001, 0.3001, -0.4001]
+        verdict = tool.compare(ref, got, tolerance=1e-3)
+        assert verdict["ok"] is True
+        assert verdict["worst"] < 1e-3
+        assert verdict["samples"] == 4
+
+    def test_a_drift_past_the_tolerance_is_refused_and_located(self):
+        tool = self._tool()
+        ref = [0.0] * 10
+        got = [0.0] * 9 + [0.5]
+        verdict = tool.compare(ref, got, tolerance=1e-3)
+        assert verdict["ok"] is False
+        assert verdict["reason"] == "value"
+        assert "sample 9" in verdict["detail"]
+
+    def test_nan_is_refused_rather_than_compared(self):
+        """An exporter that drops a guard produces NaN, not a large number."""
+        tool = self._tool()
+        verdict = tool.compare([0.0, 0.0], [0.0, float("nan")], tolerance=1e9)
+        assert verdict["ok"] is False
+        assert verdict["reason"] == "not-finite"
+
+    def test_an_empty_reference_proves_nothing_and_is_refused(self):
+        tool = self._tool()
+        verdict = tool.compare([], [], tolerance=1e-3)
+        assert verdict["ok"] is False
+        assert verdict["reason"] == "empty"
+
+    def test_the_determinism_check_is_an_exact_comparison(self):
+        """Run twice, same bytes -- a zero tolerance, deliberately."""
+        tool = self._tool()
+        assert tool.compare([0.1, 0.2], [0.1, 0.2], 0.0)["ok"] is True
+        assert tool.compare([0.1, 0.2], [0.1, 0.2000001], 0.0)["ok"] is False
+
+    def test_the_proof_lengths_include_one_that_does_not_divide_evenly(self):
+        """A padding bug only shows at a length that is not whole windows."""
+        tool = self._tool()
+        assert any(n % 16000 for n in tool.PROOF_LENGTHS)
+        assert min(tool.PROOF_LENGTHS) < 16000, "one shorter than a second"
+
+    def test_the_tool_says_what_is_missing_rather_than_traceback(self):
+        """Run where upstream is absent, which is every machine in CI."""
+        tool = self._tool()
+        with pytest.raises(tool.ExportError, match="not importable here"):
+            tool.load_upstream("cpu")
