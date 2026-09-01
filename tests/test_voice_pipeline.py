@@ -1865,3 +1865,56 @@ class TestTheLogSaysWhetherTheEnhancementRan:
 
         assert "RTF 1.20" in said[0]
         assert "source held back 2400 ms" in said[0]
+
+
+class TestAStaleVoiceSaysWhatToDoAboutIt:
+    """A precision change makes every custom voice stale. That was said badly.
+
+    ``mc_voice_pocket._fingerprint`` puts precision in the key deliberately, so
+    switching to int8 leaves every clone without prepared data until it is
+    rebuilt. ``catalog()`` then hands the worker only the voices that do have
+    it, which makes a stale voice *absent* rather than unusable -- so asking for
+    one got "That voice is not one PocketTTS has been given", and the audition
+    route turned that into "That voice could not be played". Both true, neither
+    useful, and the panel had known and said the right thing all along.
+    """
+
+    def _reason(self, **entry):
+        import mc_voice_api
+
+        return mc_voice_api.unprepared_reason(entry)
+
+    def test_a_usable_voice_is_not_refused(self):
+        assert self._reason(compatible=True, display_name="Sasha") == ""
+        # An entry with no opinion is treated as usable, not as broken.
+        assert self._reason(display_name="Sasha") == ""
+        assert mc_voice_api_unprepared(None) == ""
+
+    def test_a_stale_clone_names_the_voice_the_cause_and_the_remedy(self):
+        found = self._reason(compatible=False, display_name="Sasha", has_source=True)
+
+        assert "Sasha" in found
+        assert "precision" in found
+        assert "Rebuild" in found
+        # The thing somebody fears most when a voice stops working.
+        assert "recording is still here" in found
+
+    def test_a_stale_clone_with_no_recording_says_so_instead(self):
+        """Rebuild cannot help without the recording, so it is not offered."""
+        found = self._reason(compatible=False, display_name="Koji", has_source=False)
+
+        assert "Koji" in found
+        assert "Rebuild" not in found
+        assert "made again" in found
+
+    def test_an_official_voice_is_reinstalled_rather_than_rebuilt(self):
+        found = self._reason(compatible=False, display_name="Ana", official=True)
+
+        assert "Install the official voices again" in found
+        assert "Rebuild" not in found
+
+
+def mc_voice_api_unprepared(entry):
+    import mc_voice_api
+
+    return mc_voice_api.unprepared_reason(entry)
