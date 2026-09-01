@@ -42,6 +42,7 @@ import mc_references
 import mc_styles
 import mc_voice_api
 import mc_voice_clone
+import mc_voice_device
 import mc_voice_engines
 import mc_voice_models
 import mc_voice_paths
@@ -665,6 +666,37 @@ _VOICE_OPTIONS.update({
         "and delivers 48 kHz. It runs after DPDFNet and never before it, because asking "
         "it to rebuild the top of a signal that still has hiss in it is asking it to "
         "rebuild the hiss. Ticked by default, like the stage above"
+    ),
+    mc_voice_pipeline.OPT_THREADS: shared.OptionInfo(
+        mc_voice_pipeline.INTRAOP_THREADS,
+        "Voice Pipeline: enhancement threads",
+        gr.Number,
+        {"precision": 0, "minimum": 1, "maximum": mc_voice_pipeline.MAX_INTRAOP_THREADS},
+    ).info(
+        "how many processor cores the enhancement stages may use. The default of two was "
+        "chosen not to crowd the speech engine sharing those cores, and on a machine with "
+        "many of them that default is what makes long replies break up: raise it while "
+        "the \"Voice pipeline ran\" line in model_chain.log reports a real-time factor "
+        "above 1.0, and stop when it is comfortably below. Takes effect on the next reply"
+    ),
+    mc_voice_device.OPT_DEVICE_DPDFNET: shared.OptionInfo(
+        mc_voice_device.CPU,
+        "Voice Pipeline: DPDFNet device",
+        gr.Textbox,
+    ).info(
+        "which device this stage runs on. Set from the Voice Chat panel rather than "
+        "typed here — the value is a card's identifier, not its name, because the number "
+        "a card is given depends on who is counting. Nothing gives a chosen card back "
+        "once the stage has loaded on it; a name this machine has no card for is ignored "
+        "and the stage runs on the processor"
+    ),
+    mc_voice_device.OPT_DEVICE_LAVASR: shared.OptionInfo(
+        mc_voice_device.CPU,
+        "Voice Pipeline: LavaSR device",
+        gr.Textbox,
+    ).info(
+        "which device this stage runs on. Set from the Voice Chat panel, like the stage "
+        "above"
     ),
     mc_voice_state.OPT_AUTO_SEND: shared.OptionInfo(
         False,

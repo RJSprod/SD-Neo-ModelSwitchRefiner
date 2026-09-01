@@ -4295,6 +4295,28 @@
     width: 4.5rem;
 }
 
+/* Where an enhancement stage runs, on its component panel. The same shape as
+   the thread budget above it because they answer the same kind of question --
+   how this stage is executed, not what it sounds like -- and a control that
+   looked different would read as a different kind of setting. The name and the
+   select sit on one line and the explanation wraps under them, which is what
+   the full-width third child does. */
+.mc-voice-pipeline-device {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 0.35rem;
+}
+
+.mc-voice-pipeline-device select {
+    max-width: 100%;
+}
+
+.mc-voice-pipeline-device .mc-voice-pipeline-what {
+    flex-basis: 100%;
+}
+
 .mc-voice-component-status.mc-voice-failed {
     color: var(--error-text-color, var(--body-text-color, inherit));
     font-weight: 600;

@@ -1100,11 +1100,14 @@ def _kokoro_panel() -> str:
             f"C:\\Users\\you\\Downloads\\voice-{kind}"))
         parts.append("</div>")
 
+    parts.append(_engine_device_note("tts-kokoro"))
     parts.append(
-        '<div class="mc-voice-note">Voice Chat runs on the CPU and never uses the graphics '
-        'card. It has no sign-in of its own and needs no account, API key or access token '
-        '— not for this WebUI, and not for the sites these files come from. After they are '
-        'installed it needs no Internet connection at all.</div>')
+        '<div class="mc-voice-note">Every speech engine runs on the CPU and never uses '
+        'the graphics card. The optional Voice Pipeline is the one part that can be moved '
+        'onto a card, and only if you choose to on its own panel. Voice Chat has no '
+        'sign-in of its own and needs no account, API key or access token — not for this '
+        'WebUI, and not for the sites these files come from. After they are installed it '
+        'needs no Internet connection at all.</div>')
     return "".join(parts)
 
 
@@ -1240,10 +1243,11 @@ def sopro_html() -> str:
         # It used to live in :func:`settings_html`, which meant that function
         # had to know which engine needed which sentence -- exactly the branch
         # :data:`_ENGINE_PANELS` exists to remove.
-        + '<div class="mc-voice-note">Voice Chat runs on the CPU and never uses the '
-          'graphics card. Sopro brings its own isolated PyTorch runtime, which is kept '
-          'separate from Forge\'s, from Kokoro\'s and from PocketTTS\'s. After it is '
-          'installed it needs no Internet connection at all.</div>')
+        + '<div class="mc-voice-note">Sopro runs on the CPU and never uses the graphics '
+          'card — the closure installed for it pins the CPU build of PyTorch, and the '
+          'engine settings above say what moving it would take. It brings that runtime '
+          'with it, kept separate from Forge\'s, from Kokoro\'s and from PocketTTS\'s. '
+          'After it is installed it needs no Internet connection at all.</div>')
 
 
 def pocket_html() -> str:
@@ -1373,12 +1377,13 @@ def pocket_html() -> str:
             title="Or install the voice-cloning weights from files you download yourself")
         + _pocket_engine_settings(settings, found)
         + '</div>'
-        + '<div class="mc-voice-note">Voice Chat runs on the CPU and never uses the '
-          'graphics card. PocketTTS brings its own isolated PyTorch runtime, kept separate '
-          'from Forge\'s, from Kokoro\'s and from Sopro\'s. Its official voices need no '
-          'account of any kind; only the voice-cloning weights are gated, and that gate is '
-          'accepted upstream rather than here. After everything is installed it needs no '
-          'Internet connection at all.</div>')
+        + '<div class="mc-voice-note">PocketTTS runs on the CPU and never uses the '
+          'graphics card — the closure installed for it pins the CPU build of PyTorch, and '
+          'the engine settings above say what moving it would take. It brings that runtime '
+          'with it, kept separate from Forge\'s, from Kokoro\'s and from Sopro\'s. Its '
+          'official voices need no account of any kind; only the voice-cloning weights are '
+          'gated, and that gate is accepted upstream rather than here. After everything is '
+          'installed it needs no Internet connection at all.</div>')
 
 
 def _pocket_button(found) -> str:
@@ -1501,6 +1506,9 @@ def _pocket_engine_settings(settings: dict, found) -> str:
           f'PocketTTS release exposes one, it becomes a tested setting here rather than a '
           f'box that has been accepting numbers all along.</p>'
           '</div>'
+        # Beside the thread note and for the same reason: this is where somebody
+        # comes looking for it, and an absence is not an answer.
+        + _engine_device_note("tts-pocket")
         + f'<p class="mc-voice-note">Build fingerprint '
           f'<code>{ui.escape(found.fingerprint or "not installed")}</code>.</p>'
         + '</details>')
@@ -1677,8 +1685,109 @@ def _pipeline_threads_row(found) -> str:
         f'use. It runs beside the speech engine on the same cores, so more is not '
         f'always faster \u2014 raise it while the log\u2019s "Voice pipeline ran" '
         f'line reports a real-time factor above 1.0, and stop when it is comfortably '
-        f'below. Takes effect on the next reply.</span>'
+        f'below. Takes effect on the next reply \u2014 a reply already being spoken '
+        f'finishes at the setting it started with.</span>'
         f'</label>')
+
+
+def _pipeline_device_row(stage_id: str) -> str:
+    """Where this stage runs, as a control. Nothing at all when there is a choice
+    of one.
+
+    A machine with no graphics card gets no dropdown rather than a dropdown with
+    the processor in it, because a select whose only option is the one already
+    in force is a control that cannot do anything -- and this panel already has
+    a row saying what the stage is doing.
+
+    The note under it is the honest half. The number handed to DirectML is the
+    card's nvidia-smi index and there is no API that would make it more than an
+    assumption, so the note says the numbering may not agree, names the log line
+    that reports where the stage actually landed, and says that the fix is to
+    choose the other entry. An assumption somebody can see and correct is a
+    different thing from a mapping presented as fact -- and this repository has
+    already shipped the other kind once, on the language model's own card
+    selection.
+    """
+    import mc_voice_pipeline as pipeline
+
+    try:
+        found = pipeline.devices_for(stage_id)
+    except Exception:
+        logger.debug("Model Chain: could not describe the devices for %s", stage_id,
+                     exc_info=True)
+        return ""
+    if not found.get("placeable"):
+        reason = str(found.get("reason") or "")
+        if not reason:
+            return ""
+        return (f'<div class="mc-voice-pipeline-device">'
+                f'<span class="mc-voice-pipeline-name">Runs on</span>'
+                f'<span class="mc-voice-pipeline-what">{ui.escape(reason)}</span>'
+                f'</div>')
+    offered = list(found.get("devices") or ())
+    if len(offered) < 2:
+        return ""
+    current = str(found.get("device") or "cpu")
+    options = "".join(
+        f'<option value="{ui.escape(str(item.get("token") or ""))}"'
+        f'{" selected" if str(item.get("token") or "") == current else ""}>'
+        f'{ui.escape(str(item.get("label") or item.get("token") or ""))}</option>'
+        for item in offered)
+    missing = ""
+    if current != "cpu" and not any(str(item.get("token") or "") == current
+                                    for item in offered):
+        # The stored card is not in the machine right now. Said rather than
+        # silently reselected, because the setting has *not* been changed and a
+        # panel showing the processor would be inviting somebody to lose a
+        # choice by touching the control.
+        missing = ('<span class="mc-voice-pipeline-what">The card this stage is set to '
+                   'is not in this machine at the moment, so it is running on the '
+                   'processor. The setting is unchanged and will take effect again when '
+                   'the card is back.</span>')
+    return (
+        f'<label class="mc-voice-pipeline-device">'
+        f'<span class="mc-voice-pipeline-name">Runs on</span>'
+        f'<select data-mc-voice-pipeline-device="{ui.escape(stage_id)}" '
+        f'aria-label="Where this stage runs">{options}</select>'
+        f'{missing}'
+        f'<span class="mc-voice-pipeline-what">Which device this stage runs on. A card '
+        f'chosen here keeps its place: nothing gives it back once the stage has loaded, '
+        f'and image generation and the language model size themselves against whatever '
+        f'VRAM is left \u2014 they read the card rather than their own bookkeeping, so a '
+        f'small tenant they cannot evict is one they simply work around. What it does '
+        f'not do is push anything out: if the card is already full when the stage tries '
+        f'to load, that reply is spoken unenhanced and the log says why. Graphics cards '
+        f'are numbered differently by different parts of Windows, so if '
+        f'the wrong one lights up, choose the other entry — the log’s '
+        f'"loaded {ui.escape(stage_id)} on" line says which provider actually answered. '
+        f'Takes effect on the next reply \u2014 a reply already being spoken finishes '
+        f'where it started.</span>'
+        f'</label>')
+
+
+def _engine_device_note(component: str) -> str:
+    """Why one engine stays on the processor, in the panel where somebody looks.
+
+    A note rather than a disabled dropdown. A control whose value the engine
+    ignores is a control that lies about what it did, and the honest answer here
+    is a sentence naming the wheel that would have to change -- which is also
+    the answer to the question actually being asked, "why can I move the
+    enhancement and not this".
+    """
+    try:
+        import mc_voice_device as devices
+
+        reason = devices.unplaceable_reason(component)
+    except Exception:
+        logger.debug("Model Chain: could not explain the device for %s", component,
+                     exc_info=True)
+        return ""
+    if not reason:
+        return ""
+    return ('<div class="mc-voice-field">'
+            '<label>Runs on</label>'
+            f'<p class="mc-voice-note">The processor. {ui.escape(reason)}</p>'
+            '</div>')
 
 
 def _engine_label(engine: str) -> str:
@@ -1794,16 +1903,25 @@ def pipeline_stage_detail(stage_id: str) -> str:
         spec.label, spec.summary, rows=rows, component=stage_id,
         installable=pipeline.stage_installable(stage_id),
         installed=bool(held and held.install_state == "installed"),
-        note=pipeline.stage_unavailable_reason(stage_id))
+        note=pipeline.stage_unavailable_reason(stage_id),
+        extra=_pipeline_device_row(stage_id))
 
 
 def _component_shell(title: str, blurb: str, rows, component: str,
-                     installable: bool, installed: bool, note: str = "") -> str:
+                     installable: bool, installed: bool, note: str = "",
+                     extra: str = "") -> str:
     """The shared header every component detail draws, and its install buttons.
 
     Shared so that install state and runtime state are visually distinct in the
     same way on every component (A-44): they are two rows with two vocabularies,
     never one word doing both jobs.
+
+    ``extra`` is markup rather than another row, and it has to be: every value
+    in ``rows`` is escaped, which is what keeps a manifest string from becoming
+    a tag, and a control belongs on the other side of that line. It is drawn
+    between the facts and the install buttons because that is what it is --
+    something to change about a component you have just read the state of, not
+    another thing to read.
     """
     drawn = "".join(
         f'<div class="mc-voice-detail-row">'
@@ -1830,6 +1948,7 @@ def _component_shell(title: str, blurb: str, rows, component: str,
             f'<div class="mc-voice-heading">{ui.escape(title)}</div>'
             f'<p class="mc-voice-note">{ui.escape(blurb)}</p>'
             f'<div class="mc-voice-detail-rows">{drawn}</div>'
+            f'{extra}'
             f'{buttons}'
             + (f'<p class="mc-voice-note">{ui.escape(note)}</p>' if note else "")
             + '</div>')
@@ -1946,7 +2065,8 @@ def _sopro_engine_settings(settings: dict, found) -> str:
           f'{settings["released_threads"]}, and the list stops at the number of cores this '
           f'machine reports. One coordinating thread either way.</p>'
         '</div>'
-        f'<p class="mc-voice-note">Build fingerprint '
+        + _engine_device_note("tts-sopro")
+        + f'<p class="mc-voice-note">Build fingerprint '
         f'<code>{ui.escape(found.fingerprint or "not installed")}</code>.</p>'
         + _sopro_validation()
         + '</details>')
@@ -2920,7 +3040,8 @@ def _cleanup_detail() -> str:
         "Takes background noise out of a recording before it becomes a voice.",
         rows=rows, component="", installable=False,
         installed=state["install_state"] == "installed",
-        note="Its own row, with the button that installs it, is in the section above.")
+        note="Its own row, with the button that installs it, is in the section above.",
+        extra=_engine_device_note("recording-cleanup"))
 
 
 def _cleanup_status():

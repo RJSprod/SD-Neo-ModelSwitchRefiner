@@ -265,7 +265,17 @@ class FakeOptions:
         self.data = {}
 
     def set(self, key, value):
+        """Write both places the host writes, because readers use both.
+
+        Upstream's ``Options.set`` goes through ``__setattr__``, which assigns
+        into ``self.data`` -- so a setting written through ``set`` is readable
+        afterwards through ``opts.data.get(name)`` as well as through the
+        attribute. A fake that only did the attribute half made every
+        ``opts.data`` reader answer its default no matter what had been stored,
+        which is a fake that cannot observe a write it just performed.
+        """
         setattr(self, key, value)
+        self.data[key] = value
 
     def save(self, *args, **kwargs):
         pass

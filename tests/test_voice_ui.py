@@ -400,6 +400,7 @@ class TestTheSettingsSection:
         import mc_voice_profile
         import mc_voice_registry
         import mc_voice_sopro
+        import mc_voice_device
         import mc_voice_sopro_profile
 
         known = set(mc_voice_state.OPTIONS) | set(mc_voice_models.OPTIONS.values()) | {
@@ -430,6 +431,14 @@ class TestTheSettingsSection:
             mc_voice_pipeline.OPT_ENABLED,
             mc_voice_pipeline.OPT_DPDFNET,
             mc_voice_pipeline.OPT_LAVASR,
+            # And its two execution settings, which are not switches: how many
+            # cores the enhancement may use, and which device each stage runs
+            # on. Both are read on the path that builds a session, and both were
+            # registered here so that ``opts.set`` writes them -- an option the
+            # host has never been told about is an option a write goes nowhere.
+            mc_voice_pipeline.OPT_THREADS,
+            mc_voice_device.OPT_DEVICE_DPDFNET,
+            mc_voice_device.OPT_DEVICE_LAVASR,
         } | set(mc_voice_sopro_profile.OPTIONS.values()) | {
             mc_voice_sopro_profile.OPT_LANGUAGE,
         }
