@@ -265,12 +265,25 @@ already present, so a route that is not in that tuple is a route a UI reload
 never gains.
 """
 
+PIPELINE_ROUTES = (PIPELINE_ROUTE, PIPELINE_SETTINGS_ROUTE, PIPELINE_INSTALL_ROUTE,
+                   COMPONENTS_ROUTE, COMPONENT_ROUTE)
+"""What the Voice Pipeline and the components overview added.
+
+Named here for the reason :data:`POCKET_ROUTES` is, and the reason is not
+decorative: ``install`` returns early when every path in :data:`ROUTES` is
+already registered, so a route missing from that tuple is one that survives a
+first boot and then vanishes on the next UI reload -- registered by the run that
+created the app and skipped by every run that only re-checked it. It is also the
+tuple the startup log enumerates, so an omission here is a log that lists the
+routes a user does not have and omits the ones they do.
+"""
+
 ROUTES = (STATUS_ROUTE, STT_ROUTE, TTS_ROUTE, INSTALL_ROUTE, MODELS_ROUTE, PROFILE_ROUTE,
           STREAM_ROUTE, CANCEL_ROUTE, TELEMETRY_ROUTE,
           RUNTIME_ROUTE, VOICES_ROUTE, VOICE_DEFAULT_ROUTE, VOICE_TEST_ROUTE,
           VOICE_RENAME_ROUTE, VOICE_DELETE_ROUTE, CLONING_INSTALL_ROUTE,
           CLONING_STATUS_ROUTE, CLONING_START_ROUTE,
-          CLONING_ABORT_ROUTE) + SOPRO_ROUTES + POCKET_ROUTES
+          CLONING_ABORT_ROUTE) + SOPRO_ROUTES + POCKET_ROUTES + PIPELINE_ROUTES
 
 TOKEN_HEADER = "x-model-chain-voice"
 
@@ -2177,9 +2190,16 @@ def components_payload() -> dict:
     install state and a runtime state. Never a token, never a filesystem path,
     never a worker's environment or command line.
     """
+    import mc_voice_pipeline as pipeline
     import mc_voice_ui as voice_ui
 
+    # The install progress travels with the rows, in the same shape
+    # ``pipeline_payload`` already publishes it. Without it the overview could
+    # repaint two state chips and nothing else, so an install that refused --
+    # for a reason the server had written down in full -- reached the browser as
+    # a button that re-enabled itself and no text anywhere.
     return {"ok": True, "components": voice_ui.component_rows(),
+            "progress": {pipeline.KIND: models.progress().get(pipeline.KIND) or {}},
             "categories": [{"id": key, "label": label}
                            for key, label in voice_ui.CATEGORIES]}
 

@@ -1209,9 +1209,66 @@ def install(component: str, on_status=None, on_progress=None) -> "Status":
     with models._claim(KIND, say, wanted):
         if wanted == "runtime":
             _install_runtime(say, tick)
+        elif runtime_python() is None:
+            # The runtime is not a second thing to install, it is the thing this
+            # stage is proved inside: ``_install_stage`` ends by running the
+            # model through a second of speech in the staged interpreter, and
+            # there is no interpreter to run it in. Refusing here used to be the
+            # answer, and it was the wrong shape -- it sent somebody who had
+            # pressed the only button their panel offered to go and find a
+            # different button, with the reason written to a log file they were
+            # not reading. Nobody wants a stage without the runtime under it, so
+            # the prerequisite is installed rather than described.
+            #
+            # Both halves are inside one claim, so this is still one install
+            # that either finishes or leaves the machine as it was, and the two
+            # progress spans below are what stops the bar from reaching the end
+            # twice.
+            if not supported_platform():
+                raise PipelineError(
+                    "This build has no pinned Voice Pipeline runtime for this operating "
+                    "system and Python version, and the enhancement stages cannot run "
+                    "without one.")
+            if not runtime_installable():
+                raise PipelineError(
+                    "This build has not pinned a Voice Pipeline runtime closure for this "
+                    "machine, and the enhancement stages cannot run without one.")
+            say("The Voice Pipeline runtime has to be installed first \u2014 doing that now\u2026")
+            _install_runtime(say, _span(tick, 0.0, RUNTIME_SHARE))
+            _install_stage(wanted, say, _span(tick, RUNTIME_SHARE, 1.0))
         else:
             _install_stage(wanted, say, tick)
     return status()
+
+
+RUNTIME_SHARE = 0.75
+"""How much of a stage install's progress bar the runtime gets when it is being
+installed underneath it.
+
+Not a half, because the two are not the same size: the runtime is a hundred and
+fourteen megabytes of wheels and an interpreter build, and the stage on top of
+it is a single ONNX file and a self-test. A bar that gave them equal halves
+would sit still for most of the first minute and then sprint."""
+
+
+def _span(tick, low: float, high: float):
+    """Report one component's own 0..1 progress inside a slice of the whole.
+
+    Written because ``_install_runtime`` and ``_install_stage`` each believe
+    they own the bar and each end by calling ``tick(1.0)``. Chaining them
+    without this would show a bar that filled, reset and filled again, which
+    reads as "it restarted" rather than "it is two thirds done".
+    """
+    width = high - low
+
+    def scaled(fraction) -> None:
+        try:
+            value = float(fraction)
+        except (TypeError, ValueError):
+            return
+        tick(low + width * max(0.0, min(1.0, value)))
+
+    return scaled
 
 
 def _platform_entry() -> dict:

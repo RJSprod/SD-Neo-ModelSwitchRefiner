@@ -3306,8 +3306,9 @@ DPDFNet's runtime is pinned byte for byte — thirty-two wheels resolved from Py
 for Windows on CPython 3.13, each checked against the digest PyPI publishes for
 it — and the speech path is upstream's own streaming enhancer, handed a model
 file this extension downloaded and verified rather than a name it could go
-looking for. Install the Voice Pipeline runtime first, then DPDFNet, both from
-Installation & Components.
+looking for. Open Installation & Components, pick DPDFNet and press Install: the
+runtime it runs inside is a prerequisite rather than a second decision, so it is
+installed first and the panel says so before you press anything.
 
 LavaSR is a different problem, and it is not the one it looked like. Its
 documentation advertises 8–48 kHz input; its code resamples 16 kHz to 48 kHz

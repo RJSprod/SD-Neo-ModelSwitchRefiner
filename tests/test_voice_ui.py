@@ -1116,3 +1116,86 @@ class TestACharactersDeliveryControlsAreTheEnginesOwn:
         source = Path("javascript/voice_chat.js").read_text(encoding="utf-8")
         assert '["speed", "pitch", "gain", "pause"].forEach' not in source
 
+
+class TestAFailedInstallSaysSoWhereItHappened:
+    """The refusal reaches the panel, not only the log.
+
+    The defect this covers: ``/pipeline/install`` answers ``{"ok": true}`` the
+    instant the thread starts, the real outcome lands in the progress map
+    minutes later, and the overview repainted two state chips and nothing else.
+    ``mc_voice_models._claim`` puts the reason there precisely so a surface can
+    draw it -- "the button went back to how it was" is not an answer to "what
+    happened".
+    """
+
+    def _progress(self, monkeypatch, entry):
+        import mc_voice_pipeline as pipeline
+
+        monkeypatch.setattr(mc_voice_models, "progress",
+                            lambda: {pipeline.KIND: entry})
+
+    def test_the_reason_is_drawn_on_the_component_it_belongs_to(self, monkeypatch):
+        self._progress(monkeypatch, {"running": False, "failed": True, "model": "dpdfnet",
+                                     "text": "DPDFNet did not run on this machine.",
+                                     "fraction": 0.0})
+        drawn = mc_voice_ui._pipeline_status_line("dpdfnet")
+        assert "did not run on this machine" in drawn
+        assert "hidden" not in drawn
+        assert "mc-voice-failed" in drawn
+
+    def test_another_components_failure_is_not_drawn_here(self, monkeypatch):
+        """One install runs at a time, so an unscoped line would blame the wrong thing."""
+        self._progress(monkeypatch, {"running": False, "failed": True, "model": "runtime",
+                                     "text": "The runtime could not be built.",
+                                     "fraction": 0.0})
+        drawn = mc_voice_ui._pipeline_status_line("dpdfnet")
+        assert "could not be built" not in drawn
+        assert "hidden" in drawn
+
+    def test_a_clean_install_leaves_no_line_behind(self, monkeypatch):
+        self._progress(monkeypatch, {"running": False, "failed": False, "model": "dpdfnet",
+                                     "text": "Installed.", "fraction": 1.0})
+        assert "hidden" in mc_voice_ui._pipeline_status_line("dpdfnet")
+
+    def test_what_it_is_doing_is_drawn_while_it_runs(self, monkeypatch):
+        self._progress(monkeypatch, {"running": True, "failed": False, "model": "dpdfnet",
+                                     "text": "Installing the runtime first\u2026",
+                                     "fraction": 0.1})
+        drawn = mc_voice_ui._pipeline_status_line("dpdfnet")
+        assert "Installing the runtime first" in drawn and "hidden" not in drawn
+
+    def test_the_markup_escapes_what_it_is_given(self, monkeypatch):
+        """A reason is an exception string, and this one is written into HTML."""
+        self._progress(monkeypatch, {"running": False, "failed": True, "model": "dpdfnet",
+                                     "text": "<script>alert(1)</script>", "fraction": 0.0})
+        drawn = mc_voice_ui._pipeline_status_line("dpdfnet")
+        assert "<script>" not in drawn and "&lt;script&gt;" in drawn
+
+    def test_a_running_install_says_so_in_the_row(self, monkeypatch):
+        """The state that existed, had a label, and was never once produced.
+
+        ``pipeline.status()`` is a filesystem read and cannot see an install in
+        flight, so every row said "Not installed" throughout one. The browser
+        stops polling as soon as no row is busy, so that single answer was also
+        the last one it asked for.
+        """
+        self._progress(monkeypatch, {"running": True, "failed": False,
+                                     "model": "dpdfnet", "text": "Working\u2026",
+                                     "fraction": 0.1})
+        rows = {row["id"]: row for row in mc_voice_ui.component_rows()}
+        assert rows["voice-pipeline-dpdfnet"]["install_state"] == "installing"
+        # Scoped, or the overview would report three installs where there is one.
+        assert rows["voice-pipeline-runtime"]["install_state"] != "installing"
+        assert rows["voice-pipeline-lavasr"]["install_state"] != "installing"
+
+    def test_an_idle_overview_reports_no_install(self, monkeypatch):
+        """Guard, so the test above is not passing on a row that always says it."""
+        monkeypatch.setattr(mc_voice_models, "progress", lambda: {})
+        rows = {row["id"]: row for row in mc_voice_ui.component_rows()}
+        assert rows["voice-pipeline-dpdfnet"]["install_state"] == "not_installed"
+
+    def test_a_stage_panel_names_the_runtime_it_needs(self):
+        """Said where the user is looking, before they press anything."""
+        drawn = mc_voice_ui.pipeline_stage_detail("dpdfnet")
+        assert "Requires" in drawn and "Voice Pipeline runtime" in drawn
+

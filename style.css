@@ -4274,6 +4274,18 @@
     font-weight: 600;
 }
 
+/* The same line inside a component's detail panel. A separate selector rather
+   than a second class on the element, because this one sits under the install
+   button instead of in a settings row and needs the space that gives it. */
+.mc-voice-component-status {
+    margin-top: 0.5rem;
+}
+
+.mc-voice-component-status.mc-voice-failed {
+    color: var(--error-text-color, var(--body-text-color, inherit));
+    font-weight: 600;
+}
+
 /* The Settings row's second way in: files somebody downloaded themselves. Shut
    by default, because it is the answer to a question most installations never
    ask -- and a <details> costs one line when closed, which is what the row can

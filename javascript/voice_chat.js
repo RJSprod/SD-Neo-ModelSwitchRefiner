@@ -3684,7 +3684,15 @@
                              "data-mc-voice-pipeline-install")},
                          holder).then(function (payload) {
                         if (!payload || !payload.ok) {
+                            // Said, not swallowed. This branch used to re-enable
+                            // the button and return, which turned a refusal the
+                            // server had spelled out into no feedback at all.
                             button.disabled = false;
+                            showComponentStatus(
+                                row, button.getAttribute(
+                                    "data-mc-voice-pipeline-install"),
+                                (payload && payload.error)
+                                    || "That component could not be installed.");
                             return;
                         }
                         pollComponents(holder, row, 800);
@@ -3745,6 +3753,7 @@
 
     function paintComponents(row, payload) {
         if (!row || !payload || !payload.ok) return;
+        paintComponentStatus(row, payload);
         (payload.components || []).forEach(function (item) {
             const button = row.querySelector(
                 '[data-mc-voice-component="' + item.id + '"]');
@@ -3762,6 +3771,37 @@
                     COMPONENT_STATE_WORDS[item.runtime_state] || item.runtime_state;
             }
         });
+    }
+
+    // What an install is doing, and what it said when it would not. The
+    // overview used to repaint two state chips and nothing else, so a refusal
+    // the server had written out in full -- and logged, with the host
+    // description under it -- arrived as a button that went back to how it was.
+    function showComponentStatus(row, component, text) {
+        const line = row.querySelector("[data-mc-voice-component-status]");
+        if (!line) return;
+        if (component
+            && line.getAttribute("data-mc-voice-component-status") !== component) return;
+        line.textContent = text || "";
+        line.hidden = !text;
+        if (line.classList) line.classList.toggle("mc-voice-failed", !!text);
+    }
+
+    function paintComponentStatus(row, payload) {
+        const progress = (payload && payload.progress) || {};
+        const found = progress.pipeline || {};
+        const line = row.querySelector("[data-mc-voice-component-status]");
+        if (!line) return;
+        // Scoped to the panel that is actually open. One pipeline install runs
+        // at a time, so an unscoped line would print the runtime's failure onto
+        // the stage's panel and read as though the stage were what broke.
+        const mine = line.getAttribute("data-mc-voice-component-status");
+        const text = (found.model === mine && found.text) ? String(found.text) : "";
+        const shown = (text && !(found.running === false && found.failed === false
+                                 && text === "Installed.")) ? text : "";
+        line.textContent = shown;
+        line.hidden = !shown;
+        if (line.classList) line.classList.toggle("mc-voice-failed", !!found.failed);
     }
 
     function wireSopro(holder) {

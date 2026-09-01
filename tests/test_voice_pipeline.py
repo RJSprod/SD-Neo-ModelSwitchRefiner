@@ -1346,6 +1346,121 @@ class TestTheManifestIsATrustRoot:
                 call("../../etc")
 
 
+class TestTheRoutesSurviveAReload:
+    """Every pipeline route is in the tuple the idempotency check reads.
+
+    ``mc_voice_api.install`` returns early when every path in ``ROUTES`` is
+    already registered. A route left out of that tuple is therefore registered
+    by the run that first builds the app and skipped by every run that only
+    re-checks it -- a feature that works until the WebUI reloads and then
+    404s -- and it is missing from the startup log line that enumerates what a
+    user has. ``POCKET_ROUTES`` says this in its own docstring; these five were
+    added without it.
+    """
+
+    def test_every_registered_pipeline_route_is_in_the_idempotency_tuple(self):
+        import mc_voice_api as api
+
+        for route in api.PIPELINE_ROUTES:
+            assert route in api.ROUTES, (
+                f"{route} would be registered once and never again after a reload")
+
+    def test_the_tuple_has_no_duplicates(self):
+        """Guard, so the test above cannot pass on a tuple that says everything."""
+        import mc_voice_api as api
+
+        assert len(api.ROUTES) == len(set(api.ROUTES))
+        assert set(api.PIPELINE_ROUTES) == {
+            api.PIPELINE_ROUTE, api.PIPELINE_SETTINGS_ROUTE, api.PIPELINE_INSTALL_ROUTE,
+            api.COMPONENTS_ROUTE, api.COMPONENT_ROUTE}
+
+
+class TestAStageInstallsTheRuntimeItNeeds:
+    """The prerequisite is installed, not described back to the user.
+
+    This is a regression class with a name on it. The first shipped version of
+    this feature refused a stage install with "The Voice Pipeline runtime is not
+    installed yet ... Install the runtime first", wrote that to the log, and
+    told the browser ``{"ok": true}``. A user pressed the only button their
+    panel offered, twice, and got two log lines they were not reading and a
+    button that went back to how it was.
+
+    Nobody wants a stage without the runtime under it -- the stage is *proved*
+    inside that interpreter and there is nothing to prove it in -- so wanting
+    one is not a state worth modelling.
+    """
+
+    def _stub(self, monkeypatch, runtime_present):
+        import mc_voice_models as models
+
+        done, said, bar = [], [], []
+        # The machine this stage was pinned for. Without it the platform gate
+        # answers first and these tests would pass on a refusal.
+        monkeypatch.setattr(models, "current_platform",
+                            lambda: ("windows", "amd64", "3.13"))
+        monkeypatch.setattr(pipeline, "runtime_python",
+                            lambda: ("python" if runtime_present else None))
+        monkeypatch.setattr(pipeline, "_install_runtime",
+                            lambda say, tick: (done.append("runtime"), tick(1.0)))
+        monkeypatch.setattr(pipeline, "_install_stage",
+                            lambda which, say, tick: (done.append(which), tick(1.0)))
+        monkeypatch.setattr(pipeline, "status", lambda: "status")
+        return done, said, bar
+
+    def test_installing_a_stage_installs_the_runtime_first(self, monkeypatch):
+        done, said, bar = self._stub(monkeypatch, runtime_present=False)
+        pipeline.install("dpdfnet", on_status=said.append, on_progress=bar.append)
+        assert done == ["runtime", "dpdfnet"], (
+            "a stage install must build the runtime it is proved inside before "
+            "trying to prove anything in it")
+        assert any("runtime" in text and "first" in text for text in said), said
+
+    def test_the_runtime_is_not_reinstalled_when_it_is_already_there(self, monkeypatch):
+        done, said, bar = self._stub(monkeypatch, runtime_present=True)
+        pipeline.install("dpdfnet", on_status=said.append, on_progress=bar.append)
+        assert done == ["dpdfnet"], (
+            "an installed runtime must not be rebuilt underneath every stage")
+
+    def test_the_bar_crosses_the_join_without_going_backwards(self, monkeypatch):
+        """Two components, one bar. Neither of them owns the whole of it.
+
+        Both installers end by calling ``tick(1.0)``, so chaining them without
+        scaling would fill the bar, reset it and fill it again -- which reads as
+        "it started over", not "it is three quarters done".
+        """
+        done, said, bar = self._stub(monkeypatch, runtime_present=False)
+        pipeline.install("dpdfnet", on_status=said.append, on_progress=bar.append)
+        assert bar == sorted(bar), f"the progress bar went backwards: {bar}"
+        assert bar[-1] == 1.0 and bar.count(1.0) == 1, bar
+        assert pipeline.RUNTIME_SHARE in bar, bar
+
+    def test_a_stage_this_machine_cannot_run_still_refuses(self, monkeypatch):
+        """Chaining is not a way around the platform gate.
+
+        The refusal names the runtime, because on a machine with no pinned
+        closure the stage is not the thing that is missing.
+        """
+        import mc_voice_models as models
+
+        done, said, bar = self._stub(monkeypatch, runtime_present=False)
+        monkeypatch.setattr(models, "current_platform", lambda: ("plan9", "vax", "3.13"))
+        with pytest.raises(pipeline.PipelineError, match="runtime"):
+            pipeline.install("dpdfnet")
+        assert done == [], "nothing may be installed once the platform is refused"
+
+    def test_the_span_helper_clamps_and_ignores_what_is_not_a_number(self):
+        """Guard assertions, so the two above prove something.
+
+        A ``_span`` that passed everything through unchanged would still satisfy
+        a monotonic-bar check made of well-behaved inputs.
+        """
+        seen = []
+        scaled = pipeline._span(seen.append, 0.25, 0.75)
+        for value in (0.0, 0.5, 1.0, 4.0, -3.0, "x", None):
+            scaled(value)
+        assert seen == [0.25, 0.5, 0.75, 0.75, 0.25], seen
+
+
 class TestNoCredentialAndNoNetworkInTheWorker:
     """A-15, A-16, and the absences that make them true."""
 
