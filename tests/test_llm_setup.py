@@ -781,3 +781,89 @@ class TestEachCardGetsTheBuildItCanRun:
         assert state["runtime_id"] == "llama-runtime-cuda12"
         assert "cuda12" in str(state["runtime"]), state["runtime"]
 
+
+class TestMixedMinimumIsOfferedBesideTheOthers:
+    """A fourth way to use a card, without disturbing the other three.
+
+    Mixed Minimum asks the opposite question from Aggressive -- not how much of
+    the model fits in what the image side leaves, but how little is enough to
+    keep real work on the card. For a mixture-of-experts backbone that is well
+    defined: the experts go to system RAM and everything else stays resident.
+    """
+
+    def test_a_card_is_now_offered_four_ways(self, root, a_card):
+        found = setup.devices()
+        tokens = [setup.device_token(device) for device in found]
+
+        assert "minimum:0" in tokens, tokens
+        # And the three that existed are untouched, which is the requirement.
+        assert "gpu:0" in tokens and "cpu:-1" in tokens
+        assert any(token.startswith("mixed_aggressive") for token in tokens), tokens
+        assert any(token.startswith("mixed_conservative") for token in tokens), tokens
+        assert tokens.count("minimum:0") == 1, "the card was offered it twice"
+
+    def test_it_is_never_offered_for_the_processor(self, root, monkeypatch):
+        """There is no card to keep a minimum on."""
+        monkeypatch.setattr("prompt_master.inference.device_detection.detect_gpus",
+                            lambda *args, **kwargs: [])
+        setup.forget_devices()
+
+        assert not any(setup.is_minimum_device(device) for device in setup.devices())
+
+    def test_the_token_resolves_to_a_minimum_card(self, root, a_card):
+        found = setup.device_for_token("minimum:0")
+
+        assert found is not None
+        assert setup.is_minimum_device(found)
+        assert not setup.is_minimum_device(setup.device_for_token("mixed_aggressive:0"))
+
+    def test_every_lifecycle_rule_still_sees_aggressive(self, root, a_card):
+        """The whole design, asserted rather than described.
+
+        ``prompt_master`` is byte-identical to its upstream, so PLACEMENT_MODES
+        cannot grow and ``normalise_mode`` answers "" to anything not in it. A
+        mode this repository invented would read as *no mode at all* to every
+        rule that asks -- residency, the broker's pool, eviction when the image
+        side wants the card. Inheriting keeps every one of them correct.
+        """
+        from prompt_master.core.models import (GpuInfo, MIXED_AGGRESSIVE_MODE,
+                                               normalise_mode)
+
+        found = setup.device_for_token("minimum:0")
+
+        assert isinstance(found, GpuInfo)
+        assert found.mode == MIXED_AGGRESSIVE_MODE
+        assert normalise_mode(found.mode) == MIXED_AGGRESSIVE_MODE
+        assert found.is_mixed and not found.is_conservative
+        assert found.weights_in_system_ram
+
+    def test_the_choice_survives_a_restart(self, root, a_card):
+        """Minimum and Aggressive share a mode, so this is the only thing that
+        tells a restart which one was chosen. Without it the card somebody asked
+        to keep nearly empty quietly fills up again."""
+        server = make_build(root / "runtime")
+
+        state = setup.record(server, setup.device_for_token("minimum:0"))
+
+        assert state["expert_minimum"] is True
+        assert state["mode"] == "mixed_aggressive"
+        assert setup.is_minimum_device(setup.configured_device())
+
+    def test_choosing_aggressive_clears_it_again(self, root, a_card):
+        """Switching back must not leave the marker behind."""
+        server = make_build(root / "runtime")
+        setup.record(server, setup.device_for_token("minimum:0"))
+
+        state = setup.record(server, setup.device_for_token("mixed_aggressive:0"))
+
+        assert state["expert_minimum"] is False
+        assert not setup.is_minimum_device(setup.configured_device())
+
+    def test_its_menu_line_says_what_it_does_and_what_it_needs(self, root, a_card):
+        line = setup.describe_device(setup.device_for_token("minimum:0"))
+
+        assert "Mixed Minimum" in line
+        assert "system RAM" in line
+        # The limitation belongs on the label, not in a surprise later.
+        assert "experts" in line.casefold()
+

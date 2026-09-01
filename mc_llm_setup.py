@@ -38,6 +38,7 @@ the second case works only as long as those system libraries stay installed.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import re
@@ -49,6 +50,7 @@ from pathlib import Path
 
 import mc_llm_files
 import mc_llm_paths
+from prompt_master.core.models import GpuInfo as _GpuInfo
 
 logger = logging.getLogger("model_chain")
 """Handler is attached once, in mc_memory."""
@@ -154,6 +156,18 @@ sentence about it, not a copy of ``/usr/bin``.
 # against the whole name, as a prefix, so llama.dll, libllama.so, libllama.dylib
 # and the sibling llama-cli all count.
 BUILD_MARKERS = ("llama", "ggml")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class MinimumGpu(_GpuInfo):
+    """A card chosen for Mixed Minimum. See :func:`minimum_device`."""
+
+    minimum: bool = True
+
+
+def is_minimum_device(device) -> bool:
+    """Whether ``device`` is a card chosen for Mixed Minimum."""
+    return bool(getattr(device, "minimum", False)) and not getattr(device, "is_cpu", True)
 
 
 class SetupError(RuntimeError):
@@ -642,8 +656,42 @@ def devices(refresh: bool = False) -> list:
             found = [GpuInfo(physical_index=-1, uuid="", name="CPU (system RAM)",
                              memory_total_mb=0, memory_free_mb=0, driver_version="")]
 
+    found = _with_minimum(found)
     _devices_cache = (time.monotonic(), list(found))
     return list(found)
+
+
+MINIMUM_PREFIX = "minimum"
+"""The token spelling for Mixed Minimum. Not a vendored mode, so not its own
+``PLACEMENT_MODES`` entry -- see :func:`minimum_device`."""
+
+
+def _with_minimum(found: list) -> list:
+    """``found``, with a Mixed Minimum entry after each card's Aggressive one.
+
+    Beside the others rather than replacing anything: Aggressive and
+    Conservative keep their meanings exactly, and a card is now offered four
+    ways instead of three.
+
+    Offered for every card rather than only where a mixture-of-experts backbone
+    is selected, because the device list is built before anybody has chosen a
+    model and a card may be pointed at several. A dense model in this mode is
+    reported at placement time, where the model is actually known, rather than
+    by an entry that appears and disappears from a menu.
+    """
+    output = []
+    for device in found:
+        output.append(device)
+        try:
+            if getattr(device, "is_mixed", False) and not getattr(device, "is_conservative",
+                                                                  False):
+                extra = minimum_device(device)
+                if extra is not None:
+                    output.append(extra)
+        except Exception:
+            logger.debug("Model Chain: could not offer Mixed Minimum for a device",
+                         exc_info=True)
+    return output
 
 
 def forget_devices() -> None:
@@ -691,6 +739,53 @@ system RAM only when nothing at all is spare. The vendored file is left alone,
 as ``prompt_master/VENDORED_FROM.txt`` requires.
 """
 
+MINIMUM_TRUTH = ("Mixed Minimum — only the machinery the card needs to compute stays in "
+                 "VRAM; every expert lives in system RAM. Mixture-of-experts models only")
+"""What Mixed Minimum does, and the one sentence a menu has to carry.
+
+The third way to use a card without giving it the model. Aggressive fills
+whatever the image side leaves and Conservative keeps the model out of VRAM
+entirely; this one asks the opposite question from Aggressive -- not "how much
+fits" but "how little is enough" -- and answers it with the smallest resident
+set that still does real work on the card.
+
+For a mixture-of-experts model that set is well defined: the experts are most of
+the weights and are read a few per token, so they go to system RAM
+(``--cpu-moe``) and everything else -- attention, embeddings, norms, the KV
+cache -- stays resident. For a dense model there is no such division, and the
+mode says so rather than inventing one.
+"""
+
+
+def minimum_device(gpu):
+    """The same card, chosen for Mixed Minimum instead of Aggressive.
+
+    A ``GpuInfo`` subclass rather than a fourth vendored mode, and the reason is
+    the whole design. ``prompt_master/`` is byte-identical to its upstream, so
+    ``PLACEMENT_MODES`` cannot grow and ``normalise_mode`` answers ``""`` to
+    anything not already in it -- a mode this repository invented would read as
+    no mode at all to every lifecycle rule that asks.
+
+    Inheriting solves that exactly. ``isinstance(device, GpuInfo)`` holds, and
+    ``mode`` is inherited and still answers ``mixed_aggressive``, so residency
+    accounting, the broker's pool, eviction when the image side wants the card,
+    and the shortfall ladder all treat this as Aggressive -- which is what it
+    is. The only difference is where the ladder *starts*: Aggressive starts from
+    every layer and shrinks, Minimum starts already shrunk.
+
+    That is also why the displacement rule needs no code of its own. An image
+    generation that needs the card evicts a Minimum placement by the same path
+    it evicts an Aggressive one, down through blocks and into system RAM,
+    because as far as that path can tell there is nothing else here.
+    """
+    from prompt_master.inference.device_detection import mixed_device
+
+    found = mixed_device(gpu)
+    if found is None or getattr(found, "is_cpu", False):
+        return None
+    return MinimumGpu(**{**dataclasses.asdict(found), "minimum": True})
+
+
 CONSERVATIVE_TRUTH = ("Mixed Conservative — no model layers in VRAM at all; weights and "
                       "cache stay in system RAM and the card only does arithmetic")
 """What Mixed Conservative does, and why it needs a line of its own.
@@ -715,6 +810,8 @@ def describe_device(device) -> str:
 
     try:
         name = getattr(device, "name", "GPU")
+        if is_minimum_device(device):
+            return f"{name} — {MINIMUM_TRUTH}"
         if getattr(device, "is_conservative", False):
             return f"{name} — {CONSERVATIVE_TRUTH}"
         if getattr(device, "is_mixed", False):
@@ -727,9 +824,16 @@ def describe_device(device) -> str:
 
 
 def device_token(device) -> str:
-    """A device's identity as one string — mode and index, not index alone."""
+    """A device's identity as one string — mode and index, not index alone.
+
+    Mixed Minimum needs a spelling of its own here even though it shares
+    Aggressive's ``mode``: the menu stores a token, and two entries that
+    stringify identically are two entries a dropdown cannot tell apart.
+    """
     from prompt_master.inference.device_detection import device_token as token
 
+    if is_minimum_device(device):
+        return f"{MINIMUM_PREFIX}:{int(device.physical_index)}"
     return token(device)
 
 
@@ -737,7 +841,18 @@ def device_for_token(value, offered=None):
     """The detected device ``value`` names, or None when nothing matches."""
     from prompt_master.inference.device_detection import device_for_token as resolve
 
-    return resolve(value, devices() if offered is None else offered)
+    found = devices() if offered is None else offered
+    text = str(value or "").strip().casefold()
+    if text.startswith(f"{MINIMUM_PREFIX}:"):
+        try:
+            wanted = int(text.split(":", 1)[1])
+        except (TypeError, ValueError):
+            return None
+        for device in found:
+            if is_minimum_device(device) and int(device.physical_index) == wanted:
+                return device
+        return None
+    return resolve(text, found)
 
 
 def configured_device():
@@ -748,8 +863,12 @@ def configured_device():
     "which llama-server", and answering "and put the weights back on the card"
     with it is how a mixed-mode install silently became a full offload.
     """
+    # Deliberately not importing ``device_for_token`` from the vendored module
+    # here: this module wraps it to understand Mixed Minimum's token, and a
+    # local import of the vendored one shadows that wrapper inside this
+    # function -- which reads a Minimum installation back as Aggressive.
     from prompt_master.core.config import read_json
-    from prompt_master.inference.device_detection import device_for_token, recorded_mode
+    from prompt_master.inference.device_detection import recorded_mode
 
     paths = mc_llm_paths.app_paths()
     try:
@@ -762,6 +881,16 @@ def configured_device():
 
     mode = recorded_mode(state.get("mode", ""), state.get("gpu_device", ""),
                          state.get("gpu_layers", ""))
+    # Recovered explicitly, because Minimum and Aggressive share a mode: without
+    # this a restart would read the state back as Aggressive and quietly fill
+    # the card somebody had asked to keep nearly empty.
+    if state.get("expert_minimum"):
+        try:
+            found = device_for_token(f"{MINIMUM_PREFIX}:{int(index)}", devices())
+        except (TypeError, ValueError):
+            found = None
+        if found is not None:
+            return found
     try:
         return device_for_token(f"{mode}:{int(index)}", devices())
     except (TypeError, ValueError):
@@ -988,6 +1117,11 @@ def record(executable: str | Path, device=None, role: str = "") -> dict:
         "gpu_device": token,
         "gpu_device_name": token_name,
         "gpu_layers": str(layers),
+        # Beside ``mode`` rather than inside it. The mode stays
+        # ``mixed_aggressive`` so every lifecycle rule keeps treating this as
+        # what it is -- see :func:`minimum_device` -- and this is the one bit
+        # that says where the placement ladder starts.
+        "expert_minimum": is_minimum_device(chosen),
     }
 
     import mc_llm_roles
